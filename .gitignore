@@ -1,0 +1,12 @@
+# build 目录(cmake + ninja 产生的东西,不该进版本控制)
+build/
+
+# 编辑器/IDE
+.vscode/
+.idea/
+*.swp
+
+# 常见暂存档
+*.o
+*.a
+*.so
