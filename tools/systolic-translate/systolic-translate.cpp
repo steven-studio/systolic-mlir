@@ -187,6 +187,13 @@ static LogicalResult emitFunction(func::FuncOp func, llvm::raw_ostream &os) {
     os << paramDecls[i];
   }
   os << ") {\n";
+  
+  // 自動為每個 rank-2 tensor 參數加上 ARRAY_PARTITION,
+  // 讓 HLS 能平行存取整個陣列(對應 systolic PE array 的平行展開需求)。
+  for (BlockArgument arg : func.getArguments()) {
+    os << "#pragma HLS ARRAY_PARTITION variable=" << em.names[arg]
+      << " complete dim=0\n";
+  }
 
   scf::ForOp outer;
   for (Operation &op : func.getBody().front().getOperations()) {
