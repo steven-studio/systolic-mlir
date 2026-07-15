@@ -1,44 +1,64 @@
 # systolic-mlir
 
-Systolic array 空間映射 dialect 的 out-of-tree MLIR 專案骨架。
-對應之前討論的階段 0-2:dialect 設計 + 手動 lowering(階段 2 MVP)。
+Systolic array 加速器的 MLIR 編譯器基礎設施。支援兩條互補的 lowering 路徑：
+一條把固定形狀的 `linalg.matmul` 編譯成新硬體(HLS C → bitstream),
+另一條把**任意形狀**的 `linalg.matmul`/`linalg.conv_2d_nhwc_hwcf` 編譯成
+呼叫**既有硬體**的 runtime offload 呼叫(自動 tiling + zero-padding)。
+
+已在 Digilent Arty A7-35T 上完成端到端硬體驗證:從 `.mlir` 原始碼直接
+編譯出執行檔,透過 UART 驅動真實 FPGA,算出正確結果。
+
+## 兩條 lowering 路徑
+
+|  | 硬體生成路徑 | Runtime offload 路徑 |
+|---|---|---|
+| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--conv2d-to-fpga` |
+| 輸入形狀限制 | 必須剛好等於 `rows x cols` 陣列大小 | 任意靜態形狀 |
+| 輸出 | `systolic` dialect → HLS C → bitstream | `llvm.call` 呼叫外部 C runtime |
+| 用途 | 設計新硬體 | 使用已存在的硬體 |
+| 是否依賴 systolic dialect | 是 | 否 |
+
+兩條路徑只透過硬體介面耦合:runtime offload 路徑不假設目標加速器是被
+本專案的硬體生成路徑產生的,只要求它暴露一個固定大小、支援累加的
+matmul 原語(目前是 UART)。
 
 ## 專案結構
 
 ```
 systolic-mlir/
-├── CMakeLists.txt              頂層 build 設定
 ├── include/Systolic/
 │   ├── SystolicDialect.td      dialect 本身的定義
 │   ├── SystolicOps.td          三個核心 op: pe_array / stream / mac
 │   ├── SystolicDialect.h       dialect 的 C++ header
 │   ├── SystolicOps.h           op 的 C++ header
-│   ├── Passes.h                lowering pass 的宣告
+│   ├── Passes.h                所有 pass 的宣告
 │   └── CMakeLists.txt          跑 TableGen 的規則
 ├── lib/Systolic/
-│   ├── IR/SystolicDialect.cpp  dialect/op 的實作 + pe_array 的 verifier
+│   ├── IR/SystolicDialect.cpp        dialect/op 的實作 + pe_array 的 verifier
 │   └── Transforms/
-│       └── ConvertMatmulToSystolic.cpp   階段 2 手動 lowering pass
-├── tools/systolic-opt/         命令列工具(跟 mlir-opt 用法一樣)
-└── test/Systolic/matmul.mlir   範例 IR(附 FileCheck)
+│       ├── ConvertMatmulToSystolic.cpp   硬體生成路徑:linalg.matmul → systolic dialect
+│       ├── ExpandPEArrayToMac.cpp        把 pe_array 展開成 3 層 scf.for + mac
+│       ├── TileMatmulForFpga.cpp         runtime offload:任意形狀 matmul → llvm.call
+│       └── Conv2DToFpga.cpp              runtime offload:conv2d(im2col)→ llvm.call
+├── tools/systolic-opt/          命令列工具(跟 mlir-opt 用法一樣)
+├── runtime/                     C runtime library(UART 協定、tiling、im2col)
+│   ├── fpga_matmul4x4.{c,h}          最底層:單次 4x4 matmul 的 UART 收送
+│   ├── fpga_matmul_tiled.{c,h}       任意 MxKxN → 4x4 tile 分解 + zero-padding
+│   ├── fpga_conv2d_im2col.{c,h}      conv2d → im2col → matmul(含 batch/stride/dilation)
+│   └── test_*.c, *.py                硬體驗證用測試程式與 shape sweep / ULP 分析腳本
+├── hls/
+│   ├── gemm_4x4/                4x4 陣列:MLIR 原始碼、HLS C、RTL、Vivado 專案(論文評測用)
+│   └── gemm_8x8/                8x8 陣列:保留供參考,DSP 需求超出 Arty A7-35T 容量
+└── test/Systolic/matmul.mlir    範例 IR(附 FileCheck)
 ```
 
-## 三個核心 op 在做什麼
-
-- **`systolic.pe_array<RxC> stationary(weight|input|output)`**——
-  把一段計算標記成映射到 R x C 的 PE 陣列,並宣告哪個 operand 固定不動。
-  這是整個 dialect 里唯一帶 verifier 的 op:檢查陣列大小是正數,以及
-  weight-stationary 時 weight 形狀要跟陣列大小對上。
-- **`systolic.stream direction(row|col) skew(N)`**——
-  表達資料沿 row 或 col 方向、以 skew 個 cycle 的相位差流進陣列
-  (systolic array 最大特征:資料像波一樣斜向傳播)。
-- **`systolic.mac`**——單一 PE 內部的 `acc = a*b + acc`,之後階段 3
-  接 HLS codegen 時,這個 op 會被展開成陣列大小份,變成實際的 HLS C
-  或 RTL。
+`hls/*/vivado/build/`、`*.dcp`、`*.bit`、`*.vcd`、Vitis HLS 的 `systolic_proj/`
+等合成產物與模擬波形檔已被 `.gitignore` 排除,可從對應的 `.tcl`/RTL 原始碼
+重新產生。
 
 ## Build 方式
 
-前提:你已經 build 好 LLVM/MLIR(用你 son-dialect 那份就可以,不用重 build)。
+前提:你已經 build 好 LLVM/MLIR 18(用你 son-dialect 那份就可以,不用重 build)。
 
 ```bash
 mkdir build && cd build
@@ -49,48 +69,82 @@ cmake -G Ninja .. \
 ninja systolic-opt
 ```
 
-## 跑一下看看
+## 用法範例
+
+### 硬體生成路徑:固定形狀 matmul → HLS C
 
 ```bash
 ./build/tools/systolic-opt/systolic-opt \
-  --convert-matmul-to-systolic="rows=8 cols=8" \
-  ../test/Systolic/matmul.mlir
+  --convert-matmul-to-systolic="rows=4 cols=4" \
+  --expand-pe-array-to-mac \
+  hls/gemm_4x4/matmul_4x4_only.mlir
 ```
 
-預期看到 8x8x8 的 `linalg.matmul` 被轉成:
+只有形狀剛好等於 `rows x cols` 的 matmul 才會被轉換;形狀不符的 matmul
+會被 pattern 拒絕,留給另一條路徑處理。
 
-```mlir
-%0 = systolic.stream %A direction(row) skew(1) : (tensor<8x8xf32>) -> tensor<8x8xf32>
-%1 = systolic.pe_array<8x8> stationary(weight) %B, %0, %C
-     : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>) -> tensor<8x8xf32>
+### Runtime offload 路徑:任意形狀 matmul → 驅動既有硬體
+
+```bash
+./build/tools/systolic-opt/systolic-opt \
+  --tile-matmul-for-fpga \
+  /tmp/test_tile_fpga.mlir
 ```
 
-而 16x16x16 的 matmul 應該完全不變(階段 2 MVP 刻意只處理形狀剛好對上
-陣列大小的情況,tiling 是階段 4 的事)。
+任意靜態形狀的 `linalg.matmul` 都會被轉成一個 `llvm.call
+@fpga_matmul_tiled_auto(M, K, N, A*, B*, C*)`,實際的 4x4 tile 分解與
+zero-padding 全部在執行期由 `runtime/fpga_matmul_tiled.c` 完成。要編譯
+成能實際驅動硬體的執行檔,需要走完整的 bufferization + LLVM lowering +
+`mlir-translate` + 連結 `runtime/` 的流程(細節見論文 Implementation
+章節的 Compilation Toolchain 小節)。
 
-## 關於 lit 測試
+### Runtime offload 路徑:conv2d → 重用同一顆 matmul 加速器
 
-`test/Systolic/matmul.mlir` 是用 `FileCheck` 語法寫的,但這個骨架**沒有**
-設定完整的 `lit` 測試基礎設施(那需要額外接 `llvm-lit` 的 site config)。
-現在你可以先手動跑上面的命令肉眼比對,等專案穩定一點再補 lit config。
+```bash
+./build/tools/systolic-opt/systolic-opt \
+  --conv2d-to-fpga \
+  /tmp/test_conv2d_fpga.mlir
+```
+
+`linalg.conv_2d_nhwc_hwcf` 會被轉成 `llvm.call
+@fpga_conv2d_im2col_general_auto(...)`,支援任意 batch size、不對稱
+stride、dilation,不需要新的硬體或 UART 協定——host 端用 im2col 展開後
+直接重用 `fpga_matmul_tiled_auto`。
+
+## 硬體驗證現況
+
+已在 Digilent Arty A7-35T(`xc7a35ticsg324-1L`)上完成：
+
+- 4x4 單精度浮點 systolic array,合成後 DSP48E1 用量 80/90(88.9%)
+- FSM-based UART controller,支援連續多輪 tile 呼叫不需外部 reset
+- 100MHz 原生時脈合成失敗時序(WNS -10.982ns),改用 `MMCME2_BASE` 分頻到
+  20MHz 後時序閉合(WNS +23ns)
+- 多種 matmul 形狀(含 zero-padding 邊界情況)端到端驗證:誤差在
+  7–30 ULP 範圍,已追溯到 HLS 浮點運算子精度設定,非 tiling 邏輯問題
+- conv2d 擴充(batch、不對稱 stride、dilation)端到端驗證通過
+
+完整數字與方法論見論文 Evaluation 章節。
 
 ## 已知:可能要調的地方
 
-這份骨架是照標準 out-of-tree MLIR dialect 的寫法(跟 `mlir/examples/standalone`
-同一個套路)寫的,但 MLIR 的 C++ API 在不同版本間常有小變動
-(例如 `applyPatternsAndFoldGreedily` 的參數順序、`EnumAttr` 的寫法在
-LLVM 18 前後有調整)。第一次 build 大概率會碰到一兩個跟你手上那份 LLVM
-commit 版本對不上的編譯錯誤——這是正常的,通常照錯誤訊息改一下 include
-路徑或函式簽名就能過,不代表設計有問題。
+MLIR 的 C++ API 在不同版本間常有小變動(例如 `bufferization::ToTensorOp`
+的 build 重載簽名、`--llvm-request-c-wrappers` 是獨立 pass 而非
+`--convert-func-to-llvm` 的 option、`memrefCopy` 需要額外連結
+`libmlir_c_runner_utils`)。新增 pass 或調整 lowering pipeline 時大概率
+會碰到一兩個跟你手上那份 LLVM commit 版本對不上的問題,照錯誤訊息或
+`mlir-opt --<pass> --help` 查對應簽名通常就能解決。
 
 ## 對應回階段路線圖
 
 - ✅ 階段 0:範圍鎖死成 GEMM + weight-stationary + 固定陣列大小
 - ✅ 階段 1:三個 op 的 TableGen 定義(`SystolicOps.td`)
 - ✅ 階段 2:手動 lowering pass(`ConvertMatmulToSystolic.cpp`),
-  只處理形狀剛好對上陣列大小的 8x8x8 matmul
-- ⬜ 階段 3:接 HLS C codegen(可以照你 dstogov/ir → C 的經驗遷移)
-- ⬜ 階段 4:自動映射(support tiling、多種 stationary 策略選擇)
-
-下一步建議先把這份骨架 build 起來、跑通 `test/Systolic/matmul.mlir`
-這個 demo,再決定要不要往階段 3(HLS codegen)推進。
+  只處理形狀剛好對上陣列大小的 matmul
+- ✅ 階段 3:HLS C codegen(`systolic-translate`)+ Vitis HLS/Vivado 合成 +
+  真實硬體燒錄驗證(4x4 陣列,Arty A7-35T)
+- ✅ 階段 4:任意形狀自動映射——`--tile-matmul-for-fpga`(4x4 tiling +
+  zero-padding)與 `--conv2d-to-fpga`(im2col,支援 batch/stride/dilation),
+  全部端到端硬體驗證通過
+- ⬜ 未來方向:UART 之外的高頻寬介面(AXI/PCIe)、tile size 自動搜尋、
+  更廣的 shape sweep、其他 `linalg` structured op(見論文 Limitations
+  and Future Work)
