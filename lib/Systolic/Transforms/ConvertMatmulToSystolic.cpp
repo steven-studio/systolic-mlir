@@ -118,4 +118,6 @@ std::unique_ptr<Pass> mlir::systolic::createConvertMatmulToSystolicPass() {
 void mlir::systolic::registerSystolicPasses() {
   PassRegistration<ConvertMatmulToSystolicPass>();
   registerExpandPEArrayToMacPass();
+  registerTileMatmulForFpgaPass();
+  registerConv2DToFpgaPass();
 }

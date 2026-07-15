@@ -17,6 +17,17 @@ std::unique_ptr<Pass> createExpandPEArrayToMacPass();
 // 各自 pass 的 registration function,由 registerSystolicPasses() 统一呼叫
 void registerExpandPEArrayToMacPass();
 
+// 阶段 4:把任意静态形状的 linalg.matmul lowering 成呼叫已烧录好的
+// 4x4 FPGA runtime(fpga_matmul_tiled_auto),不产生新硬件。
+std::unique_ptr<Pass> createTileMatmulForFpgaPass();
+void registerTileMatmulForFpgaPass();
+
+// 阶段 5:把 batch=1、静态形状的 linalg.conv_2d_nhwc_hwcf lowering
+// 成呼叫 im2col + 4x4 matmul runtime 的调用(fpga_conv2d_im2col_auto),
+// 复用同一颗矩阵乘法加速器,不需要新硬件。
+std::unique_ptr<Pass> createConv2DToFpgaPass();
+void registerConv2DToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

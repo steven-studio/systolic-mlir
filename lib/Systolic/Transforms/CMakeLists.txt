@@ -1,6 +1,8 @@
 add_mlir_dialect_library(MLIRSystolicTransforms
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp
+  TileMatmulForFpga.cpp
+  Conv2DToFpga.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic
@@ -14,6 +16,9 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   MLIRSCFDialect
   MLIRTensorDialect
   MLIRArithDialect
+  MLIRMemRefDialect
+  MLIRBufferizationDialect
+  MLIRLLVMDialect
   MLIRPass
   MLIRTransformUtils
 )
