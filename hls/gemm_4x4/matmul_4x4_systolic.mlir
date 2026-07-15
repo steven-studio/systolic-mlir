@@ -1,0 +1,24 @@
+module {
+  func.func @matmul_4x4x4(%arg0: tensor<4x4xf32>, %arg1: tensor<4x4xf32>, %arg2: tensor<4x4xf32>) -> tensor<4x4xf32> {
+    %c4 = arith.constant 4 : index
+    %c1 = arith.constant 1 : index
+    %c0 = arith.constant 0 : index
+    %0 = systolic.stream %arg0 direction(row) skew(1) : (tensor<4x4xf32>) -> tensor<4x4xf32>
+    %1 = scf.for %arg3 = %c0 to %c4 step %c1 iter_args(%arg4 = %arg2) -> (tensor<4x4xf32>) {
+      %2 = scf.for %arg5 = %c0 to %c4 step %c1 iter_args(%arg6 = %arg4) -> (tensor<4x4xf32>) {
+        %extracted = tensor.extract %arg6[%arg3, %arg5] : tensor<4x4xf32>
+        %3 = scf.for %arg7 = %c0 to %c4 step %c1 iter_args(%arg8 = %extracted) -> (f32) {
+          %extracted_0 = tensor.extract %0[%arg3, %arg7] : tensor<4x4xf32>
+          %extracted_1 = tensor.extract %arg1[%arg7, %arg5] : tensor<4x4xf32>
+          %acc_out, %a_out, %b_out = systolic.mac %extracted_0, %extracted_1, %arg8 : (f32, f32, f32) -> (f32, f32, f32)
+          scf.yield %acc_out : f32
+        }
+        %inserted = tensor.insert %3 into %arg6[%arg3, %arg5] : tensor<4x4xf32>
+        scf.yield %inserted : tensor<4x4xf32>
+      }
+      scf.yield %2 : tensor<4x4xf32>
+    }
+    return %1 : tensor<4x4xf32>
+  }
+}
+
