@@ -3,24 +3,26 @@
 Systolic array 加速器的 MLIR 編譯器基礎設施。支援兩條互補的 lowering 路徑：
 一條把固定形狀的 `linalg.matmul` 編譯成新硬體(HLS C → bitstream),
 另一條把**任意形狀**的 `linalg.matmul`/`linalg.vecmat`/`linalg.matvec`/
-`linalg.conv_2d_*`/`linalg.batch_matmul` 編譯成呼叫**既有硬體**的 runtime
-offload 呼叫(自動 tiling + zero-padding)。
+`linalg.conv_2d_*`/`linalg.batch_matmul`,以及 torch-mlir 為 `torch.dot`
+產生的 `linalg.generic` 內積模式,編譯成呼叫**既有硬體**的 runtime offload
+呼叫(自動 tiling + zero-padding)。
 
 已在 Digilent Arty A7-35T 上完成端到端硬體驗證:從 `.mlir` 原始碼直接
 編譯出執行檔,透過 UART 驅動真實 FPGA,算出正確結果,並且驗證過真實的
-`torch.nn.Conv2d`、`torch.nn.Linear` 與矩陣-向量乘法可以直接跑在這條路徑
-上,單頭與雙頭 attention 的核心矩陣乘法也可以無縫透過同一套機制 offload。
+`torch.nn.Conv2d`、`torch.nn.Linear`、矩陣-向量乘法與 `torch.dot` 可以
+直接跑在這條路徑上,單頭與雙頭 attention 的核心矩陣乘法也可以無縫透過
+同一套機制 offload。
 
 > **分支說明**:`main` 分支是投稿用的穩定版本(matmul + conv2d NHWC 兩條路徑),
 > 這個分支(`torch-mlir-integration`)額外包含 conv2d NCHW 支援、
-> `batch_matmul`/`vecmat`/`matvec` 支援、torch-mlir 相容性工具腳本,以及
-> attention 端到端驗證,尚未併回 `main`。
+> `batch_matmul`/`vecmat`/`matvec`/`torch.dot` 支援、torch-mlir 相容性
+> 工具腳本,以及 attention 端到端驗證,尚未併回 `main`。
 
 ## 兩條 lowering 路徑
 
 |  | 硬體生成路徑 | Runtime offload 路徑 |
 |---|---|---|
-| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--vecmat-to-fpga` / `--matvec-to-fpga` / `--conv2d-to-fpga` / `--conv2d-nchw-to-fpga` / `--batch-matmul-to-fpga` |
+| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--vecmat-to-fpga` / `--matvec-to-fpga` / `--dot-generic-to-fpga` / `--conv2d-to-fpga` / `--conv2d-nchw-to-fpga` / `--batch-matmul-to-fpga` |
 | 輸入形狀限制 | 必須剛好等於 `rows x cols` 陣列大小 | 任意靜態形狀 |
 | 輸出 | `systolic` dialect → HLS C → bitstream | `llvm.call` 呼叫外部 C runtime |
 | 用途 | 設計新硬體 | 使用已存在的硬體 |
@@ -49,6 +51,7 @@ systolic-mlir/
 │       ├── TileMatmulForFpga.cpp         runtime offload:任意形狀 matmul → llvm.call
 │       ├── VecmatToFpga.cpp              runtime offload:vecmat(向量×矩陣,rank-1 輸入)→ llvm.call
 │       ├── MatvecToFpga.cpp              runtime offload:matvec(矩陣×向量,rank-1 輸入)→ llvm.call
+│       ├── DotGenericToFpga.cpp          runtime offload:torch.dot 的 linalg.generic 內積模式(結構化匹配)→ llvm.call
 │       ├── Conv2DToFpga.cpp              runtime offload:conv2d NHWC(im2col)→ llvm.call
 │       ├── Conv2DNchwToFpga.cpp          runtime offload:conv2d NCHW(PyTorch 預設 layout)→ llvm.call
 │       └── BatchMatmulToFpga.cpp         runtime offload:batch_matmul → llvm.call
@@ -59,6 +62,7 @@ systolic-mlir/
 │   │                                  + fpga_batch_matmul_tiled_auto(batch 迴圈)
 │   │                                  + fpga_vecmat_tiled_auto(M=1 的退化 matmul)
 │   │                                  + fpga_matvec_tiled_auto(N=1 的退化 matmul)
+│   │                                  + fpga_dot_tiled_auto(M=N=1 的雙重退化 matmul)
 │   ├── fpga_conv2d_im2col.{c,h}      conv2d NHWC → im2col → matmul(含 batch/stride/dilation)
 │   │                                  + NCHW/FCHW 變體(kernel repack + 輸出 transpose)
 │   └── test_*.c, *.py                硬體驗證用測試程式與 shape sweep / ULP 分析腳本
@@ -151,6 +155,44 @@ zero-padding 全部在執行期由 `runtime/fpga_matmul_tiled.c` 完成。要編
 一個真實的 `A @ x` 模型可以完整走這條路徑,硬體輸出與 PyTorch 自己算出的
 結果逐位一致(diff = 0.000000)。
 
+### Runtime offload 路徑:torch.dot(向量內積)→ 結構化匹配 linalg.generic
+
+```bash
+./build/tools/systolic-opt/systolic-opt \
+  --dot-generic-to-fpga \
+  /tmp/test_dot_fpga.mlir
+```
+
+跟以上所有 pattern 不同,torch-mlir **不會**把 `torch.dot` 匯出成具名的
+`linalg.dot` op,而是拆成一對 `linalg.generic`——一個 elementwise 乘法,
+接一個 reduction-to-scalar 加總。`DotGenericToFpgaPattern` 因此不是靠
+op 型別匹配(`OpRewritePattern<linalg::DotOp>` 之類),而是結構化地驗證
+這對 `linalg.generic` 的精確形狀:`iterator_types`、region body 裡的
+算術運算(`arith.mulf`/`arith.addf`,用共用的 `hasSimpleBinaryBody` helper
+檢查)、reduction 輸入的來源是否確實是符合條件的 elementwise-multiply
+`linalg.generic`,以及累加器初值是否為 `linalg.fill` 產生的零常數。任何
+一項不符,pattern 一律拒絕匹配,不猜測——這個設計已經過驗證:對單頭/雙頭
+attention IR 裡的 softmax(reduce-max 用 `arith.maximumf`、reduce-sum 用
+`arith.addf`,跟 dot product 的 reduction body 相同,僅能靠「producer 是
+否為 elementwise multiply」這一項區分)跑過這個 pass,結果完全沒有被
+誤判轉換,softmax 原封不動保留。
+
+轉換後會產生 `llvm.call @fpga_dot_tiled_auto(K, x*, y*, result*)`,把
+兩個輸入向量當成 `1xK` 與 `Kx1` 矩陣,重用 `fpga_matmul_tiled_auto` 並
+同時設 `M=N=1`,是 `vecmat`/`matvec` 之後的雙重退化版本。已驗證過一個
+真實的 `torch.dot` 可以完整走這條路徑,硬體輸出與 PyTorch 自己算出的
+結果逐位一致(diff = 0.000000)。
+
+開發過程中這個 pattern 曾經卡在一個真正的循環定義 bug:初版實作把
+`reduceOp` **自己的結果**拿去 bufferize 成輸出 memref,但
+`rewriter.replaceOp()` 會把所有用到該結果的地方(包括這個 memref 建構
+op 本身)都改指向由這個 memref 算出的新 tensor,形成循環定義。這個
+bug 不會 crash,也不是貪婪 driver 重複觸發 pattern(用 `llvm::errs()`
+在每一步插旗確認過,`matchAndRewrite` 只被呼叫一次、完整跑完並回傳
+`success()`),而是卡在後續的 SSA use-list 維護階段。修法是改用
+reduction 真正的 `outs()` 操作數(已被 `linalg.fill` 歸零的那個值)去
+bufferize,跟其他所有 pattern 的寫法一致。
+
 ### Runtime offload 路徑:conv2d(NHWC)→ 重用同一顆 matmul 加速器
 
 ```bash
@@ -223,7 +265,8 @@ python3 scripts/fix_torch_mlir_syntax.py \
 ./scripts/compile_torch_mlir.sh \
     /tmp/torch_model_fixed.mlir \
     /tmp/torch_model \
-    --batch-matmul-to-fpga --conv2d-nchw-to-fpga --vecmat-to-fpga --matvec-to-fpga
+    --batch-matmul-to-fpga --conv2d-nchw-to-fpga --vecmat-to-fpga \
+    --matvec-to-fpga --dot-generic-to-fpga
 ```
 
 `compile_torch_mlir.sh` 的第三個以後參數會原封不動傳給 `systolic-opt`,
@@ -256,11 +299,16 @@ python3 scripts/fix_torch_mlir_syntax.py \
 - `matvec` 擴充:C 層 M=5、K=7(雙向非對齊)端到端驗證 5/5 PASS;對一個
   真實 `A @ x` 模型端到端驗證,硬體輸出與 PyTorch 參考輸出逐位一致
   (diff = 0.000000)
+- `torch.dot` 擴充(結構化 `linalg.generic` 匹配):C 層 K=9(非對齊)
+  端到端驗證 PASS;對一個真實 `torch.dot` 模型端到端驗證,硬體輸出與
+  PyTorch 參考輸出逐位一致(diff = 0.000000);另外針對性驗證此 pattern
+  不會誤判 attention IR 裡結構相似(reduction body 同為 `arith.addf`)
+  但語意不同的 softmax reduce-sum
 
-至此,runtime offload 架構已涵蓋 rank-1(vecmat、matvec)、rank-2/3
-(matmul、conv2d NHWC、batch_matmul)、rank-4(conv2d NCHW)四種 tensor
-rank、八個 `linalg` op,全部建立在同一個 `fpga_matmul_tiled_auto` 核心上,
-未曾修改過它或 `fpga_matmul4x4.c`。
+至此,runtime offload 架構已涵蓋 rank-0(dot 的純量輸出)、rank-1
+(vecmat、matvec)、rank-2/3(matmul、conv2d NHWC、batch_matmul)、rank-4
+(conv2d NCHW)五種 tensor rank、九個 `linalg` op/模式,全部建立在同一個
+`fpga_matmul_tiled_auto` 核心上,未曾修改過它或 `fpga_matmul4x4.c`。
 
 完整數字與方法論見論文 Evaluation 章節(僅涵蓋 `main` 分支上的 matmul 與
 conv2d NHWC 兩條路徑;這個分支上的其餘項目屬於探索性驗證,尚未納入正式
@@ -280,7 +328,7 @@ MLIR 的 C++ API 在不同版本間常有小變動(例如 `bufferization::ToTens
 
 - **`--convert-linalg-to-loops` 必須排在 `--convert-scf-to-cf` 之前**。
   如果 IR 裡含有 `linalg.fill`(例如 torch-mlir 匯出的 conv2d/softmax/
-  vecmat/matvec 都會用它把輸出 buffer 歸零),順序寫反會導致
+  vecmat/matvec/dot 都會用它把輸出 buffer 歸零),順序寫反會導致
   `linalg.fill` 展開出的 `scf.for` 迴圈永遠不會被 `--convert-scf-to-cf`
   處理到,最終在 `--convert-to-llvm`/`--reconcile-unrealized-casts` 階段
   留下無法消化的 `unrealized_conversion_cast`。手寫的 matmul/conv2d 測試
@@ -297,6 +345,13 @@ MLIR 的 C++ API 在不同版本間常有小變動(例如 `bufferization::ToTens
   `scripts/fix_torch_mlir_syntax.py` 處理,不要直接修改系統的 LLVM 版本
   ——torch-mlir 通常綁定持續滾動的 nightly commit,沒有一個「對齊了就
   一勞永逸」的版本,追版本是無底洞。
+- **在 `OpRewritePattern` 裡 bufferize 一個 op 的輸出 buffer 時,務必
+  用該 op 的 `outs()` 操作數,不要用 `op.getResult(...)` 本身。** 用
+  op 自己的結果去建構它的輸出 memref,會在 `rewriter.replaceOp()` 執行
+  後形成循環 SSA 定義(該 memref 依賴替換後的 tensor,而替換後的 tensor
+  又是從該 memref 算出來的),不會立即 crash 或觸發明顯的無限 pattern
+  重寫迴圈,而是在後續的 use-list 維護階段卡死,難以定位。`DotGenericToFpga.cpp`
+  的開發過程完整踩過這個坑,詳見上方 `--dot-generic-to-fpga` 小節。
 
 ## 對應回階段路線圖
 
@@ -316,12 +371,15 @@ MLIR 的 C++ API 在不同版本間常有小變動(例如 `bufferization::ToTens
   - `--vecmat-to-fpga` / `--matvec-to-fpga`:支援 `linalg.vecmat`/
     `linalg.matvec`(兩種退化的 rank-1 matmul,一個向量在左一個在右),
     已對真實 `torch.nn.Linear` 與 `A @ x` 模型端到端驗證
+  - `--dot-generic-to-fpga`:透過結構化匹配(而非型別匹配)支援
+    `torch.dot` 匯出的 `linalg.generic` 內積模式,已對真實 `torch.dot`
+    模型端到端驗證,並驗證過不會誤判 attention 的 softmax
   - `scripts/`:torch-mlir 相容性工具,封裝已知的語法差異修正與正確的
     lowering pass 順序
   - 單頭與雙頭 attention 端到端驗證,確認 `batch_matmul` 的抽象天然對應
     multi-head 的 head 維度,不需修改既有 pattern
 - ⬜ 未來方向:UART 之外的高頻寬介面(AXI/PCIe)、tile size 自動搜尋、
-  更廣的 shape sweep、`linalg.generic`(elementwise/normalization)、
-  `linalg.dot`(純向量內積,同樣是退化 matmul,尚未實作)、
+  更廣的 shape sweep、其他 `linalg.generic` 模式(elementwise/
+  normalization,即 LayerNorm/BatchNorm 這類刻意選擇不 offload 的運算)、
   `linalg.pooling_*` 支援、硬體生成路徑本身的 tiling、把此分支的內容
   正式併回 `main` 或整理成獨立論文(見論文 Limitations and Future Work)
