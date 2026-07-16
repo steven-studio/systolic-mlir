@@ -27,6 +27,15 @@ int fpga_batch_matmul_tiled_auto(int batch, int M, int K, int N,
 int fpga_vecmat_tiled_auto(int K, int N, const float *x, const float *A,
                             float *y);
 
+
+// Matrix-vector multiply: y[M] = A[M,K] @ x[K] (no accumulator input,
+// matching linalg.matvec's semantics). Implemented as an MxK @ Kx1
+// matmul via fpga_matmul_tiled_auto, reusing all existing tiling and
+// zero-padding logic with N=1 -- the mirror image of
+// fpga_vecmat_tiled_auto's M=1.
+int fpga_matvec_tiled_auto(int M, int K, const float *A, const float *x,
+                            float *y);
+
 #endif
 
 // 自動管理 UART 連線的版本:第一次呼叫時自動開啟 /dev/ttyUSB1,

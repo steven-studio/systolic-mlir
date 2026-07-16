@@ -43,6 +43,11 @@ void registerBatchMatmulToFpgaPass();
 std::unique_ptr<Pass> createVecmatToFpgaPass();
 void registerVecmatToFpgaPass();
 
+// 把 linalg.matvec lowering 成呼叫 fpga_matvec_tiled_auto,
+// 把輸入向量當成 N=1 的 matmul 派送到既有 4x4 加速器。
+std::unique_ptr<Pass> createMatvecToFpgaPass();
+void registerMatvecToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

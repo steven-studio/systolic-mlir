@@ -89,3 +89,11 @@ int fpga_vecmat_tiled_auto(int K, int N, const float *x, const float *A,
     // any other non-aligned dimension.
     return fpga_matmul_tiled_auto(1, K, N, x, A, y);
 }
+
+int fpga_matvec_tiled_auto(int M, int K, const float *A, const float *x,
+                            float *y) {
+    // Treat x as a Kx1 matrix; fpga_matmul_tiled_auto's zero-padding
+    // handles N=1 not being a multiple of 4 the same way it handles
+    // M=1 in fpga_vecmat_tiled_auto.
+    return fpga_matmul_tiled_auto(M, K, 1, A, x, y);
+}

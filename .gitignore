@@ -53,3 +53,6 @@ runtime/test_fpga_batch_matmul
 
 # Compiled vecmat test executable
 runtime/test_fpga_vecmat
+
+# Compiled matvec test executable
+runtime/test_fpga_matvec
