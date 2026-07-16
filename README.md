@@ -2,24 +2,25 @@
 
 Systolic array 加速器的 MLIR 編譯器基礎設施。支援兩條互補的 lowering 路徑：
 一條把固定形狀的 `linalg.matmul` 編譯成新硬體(HLS C → bitstream),
-另一條把**任意形狀**的 `linalg.matmul`/`linalg.conv_2d_*`/`linalg.batch_matmul`
-編譯成呼叫**既有硬體**的 runtime offload 呼叫(自動 tiling + zero-padding)。
+另一條把**任意形狀**的 `linalg.matmul`/`linalg.vecmat`/`linalg.conv_2d_*`/
+`linalg.batch_matmul` 編譯成呼叫**既有硬體**的 runtime offload 呼叫
+(自動 tiling + zero-padding)。
 
 已在 Digilent Arty A7-35T 上完成端到端硬體驗證:從 `.mlir` 原始碼直接
-編譯出執行檔,透過 UART 驅動真實 FPGA,算出正確結果,並且驗證過一個真實
-的 `torch.nn.Conv2d`(經由 torch-mlir 匯出)可以直接跑在這條路徑上,以及
-單頭與雙頭 attention 的核心矩陣乘法可以無縫透過同一套機制 offload。
+編譯出執行檔,透過 UART 驅動真實 FPGA,算出正確結果,並且驗證過真實的
+`torch.nn.Conv2d`、`torch.nn.Linear` 可以直接跑在這條路徑上,單頭與雙頭
+attention 的核心矩陣乘法也可以無縫透過同一套機制 offload。
 
 > **分支說明**:`main` 分支是投稿用的穩定版本(matmul + conv2d NHWC 兩條路徑),
 > 這個分支(`torch-mlir-integration`)額外包含 conv2d NCHW 支援、
-> `batch_matmul` 支援、torch-mlir 相容性工具腳本,以及 attention 端到端
-> 驗證,尚未併回 `main`。
+> `batch_matmul` 支援、`vecmat` 支援、torch-mlir 相容性工具腳本,以及
+> attention 端到端驗證,尚未併回 `main`。
 
 ## 兩條 lowering 路徑
 
 |  | 硬體生成路徑 | Runtime offload 路徑 |
 |---|---|---|
-| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--conv2d-to-fpga` / `--conv2d-nchw-to-fpga` / `--batch-matmul-to-fpga` |
+| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--vecmat-to-fpga` / `--conv2d-to-fpga` / `--conv2d-nchw-to-fpga` / `--batch-matmul-to-fpga` |
 | 輸入形狀限制 | 必須剛好等於 `rows x cols` 陣列大小 | 任意靜態形狀 |
 | 輸出 | `systolic` dialect → HLS C → bitstream | `llvm.call` 呼叫外部 C runtime |
 | 用途 | 設計新硬體 | 使用已存在的硬體 |
@@ -46,6 +47,7 @@ systolic-mlir/
 │       ├── ConvertMatmulToSystolic.cpp   硬體生成路徑:linalg.matmul → systolic dialect
 │       ├── ExpandPEArrayToMac.cpp        把 pe_array 展開成 3 層 scf.for + mac
 │       ├── TileMatmulForFpga.cpp         runtime offload:任意形狀 matmul → llvm.call
+│       ├── VecmatToFpga.cpp              runtime offload:vecmat(rank-1 輸入)→ llvm.call
 │       ├── Conv2DToFpga.cpp              runtime offload:conv2d NHWC(im2col)→ llvm.call
 │       ├── Conv2DNchwToFpga.cpp          runtime offload:conv2d NCHW(PyTorch 預設 layout)→ llvm.call
 │       └── BatchMatmulToFpga.cpp         runtime offload:batch_matmul → llvm.call
@@ -54,6 +56,7 @@ systolic-mlir/
 │   ├── fpga_matmul4x4.{c,h}          最底層:單次 4x4 matmul 的 UART 收送
 │   ├── fpga_matmul_tiled.{c,h}       任意 MxKxN → 4x4 tile 分解 + zero-padding
 │   │                                  + fpga_batch_matmul_tiled_auto(batch 迴圈)
+│   │                                  + fpga_vecmat_tiled_auto(M=1 的退化 matmul)
 │   ├── fpga_conv2d_im2col.{c,h}      conv2d NHWC → im2col → matmul(含 batch/stride/dilation)
 │   │                                  + NCHW/FCHW 變體(kernel repack + 輸出 transpose)
 │   └── test_*.c, *.py                硬體驗證用測試程式與 shape sweep / ULP 分析腳本
@@ -114,6 +117,22 @@ zero-padding 全部在執行期由 `runtime/fpga_matmul_tiled.c` 完成。要編
 成能實際驅動硬體的執行檔,需要走完整的 bufferization + LLVM lowering +
 `mlir-translate` + 連結 `runtime/` 的流程(細節見論文 Implementation
 章節的 Compilation Toolchain 小節,或直接用下方 `scripts/compile_torch_mlir.sh`)。
+
+### Runtime offload 路徑:vecmat(rank-1 輸入)→ 重用同一顆 matmul 加速器
+
+```bash
+./build/tools/systolic-opt/systolic-opt \
+  --vecmat-to-fpga \
+  /tmp/test_vecmat_fpga.mlir
+```
+
+`linalg.vecmat`(`y[N] = x[K] @ A[K,N]`,torch-mlir 對 `nn.Linear` 套用在
+不帶 batch 維度的 rank-1 輸入時會匯出這個 op,跟 rank-2 的
+`linalg.matmul`、rank-3 的 `linalg.batch_matmul` 都不一樣)會被轉成
+`llvm.call @fpga_vecmat_tiled_auto(K, N, x*, A*, y*)`,把輸入向量當成
+`1xK` 矩陣直接重用 `fpga_matmul_tiled_auto`,`M=1` 這個維度的 zero-padding
+不需要任何特殊處理。已驗證過一個真實的 `torch.nn.Linear` 可以完整走這條
+路徑,硬體輸出與 PyTorch 自己算出的結果逐位一致(diff = 0.000000)。
 
 ### Runtime offload 路徑:conv2d(NHWC)→ 重用同一顆 matmul 加速器
 
@@ -187,7 +206,7 @@ python3 scripts/fix_torch_mlir_syntax.py \
 ./scripts/compile_torch_mlir.sh \
     /tmp/torch_model_fixed.mlir \
     /tmp/torch_model \
-    --batch-matmul-to-fpga --conv2d-nchw-to-fpga
+    --batch-matmul-to-fpga --conv2d-nchw-to-fpga --vecmat-to-fpga
 ```
 
 `compile_torch_mlir.sh` 的第三個以後參數會原封不動傳給 `systolic-opt`,
@@ -214,6 +233,14 @@ python3 scripts/fix_torch_mlir_syntax.py \
 - attention 端到端驗證:單頭與雙頭 attention 的核心矩陣乘法(3 個線性
   投影 + `Q@K^T` + `attn@V`)透過 `--batch-matmul-to-fpga` 完全不需修改
   即可正確 offload,硬體輸出與 PyTorch 參考輸出逐位一致
+- `vecmat` 擴充:C 層 K=7、N=5(雙向非對齊)端到端驗證 5/5 PASS;對一個
+  真實 `torch.nn.Linear`(rank-1、無 batch 維度輸入)端到端驗證,硬體
+  輸出與 PyTorch 參考輸出逐位一致(diff = 0.000000)
+
+至此,runtime offload 架構已涵蓋 rank-1(vecmat)、rank-2/3(matmul、
+conv2d NHWC、batch_matmul)、rank-4(conv2d NCHW)四種 tensor rank,全部
+建立在同一個 `fpga_matmul_tiled_auto` 核心上,未曾修改過它或
+`fpga_matmul4x4.c`。
 
 完整數字與方法論見論文 Evaluation 章節(僅涵蓋 `main` 分支上的 matmul 與
 conv2d NHWC 兩條路徑;這個分支上的其餘項目屬於探索性驗證,尚未納入正式
@@ -266,11 +293,14 @@ MLIR 的 C++ API 在不同版本間常有小變動(例如 `bufferization::ToTens
   - `--conv2d-nchw-to-fpga`:支援 PyTorch 預設 NCHW/FCHW layout,已對真實
     `torch.nn.Conv2d` 端到端驗證
   - `--batch-matmul-to-fpga`:支援 `linalg.batch_matmul`
+  - `--vecmat-to-fpga`:支援 `linalg.vecmat`(rank-1 輸入),已對真實
+    `torch.nn.Linear` 端到端驗證
   - `scripts/`:torch-mlir 相容性工具,封裝已知的語法差異修正與正確的
     lowering pass 順序
   - 單頭與雙頭 attention 端到端驗證,確認 `batch_matmul` 的抽象天然對應
     multi-head 的 head 維度,不需修改既有 pattern
 - ⬜ 未來方向:UART 之外的高頻寬介面(AXI/PCIe)、tile size 自動搜尋、
-  更廣的 shape sweep、`linalg.generic`(elementwise/normalization)與
+  更廣的 shape sweep、`linalg.generic`(elementwise/normalization)、
+  `linalg.matvec`/`linalg.dot`(其他退化 matmul 形式)、
   `linalg.pooling_*` 支援、硬體生成路徑本身的 tiling、把此分支的內容
   正式併回 `main` 或整理成獨立論文(見論文 Limitations and Future Work)
