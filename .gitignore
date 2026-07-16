@@ -50,3 +50,6 @@ runtime/test_fpga_conv2d_nchw
 
 # Compiled batch_matmul test executable
 runtime/test_fpga_batch_matmul
+
+# Compiled vecmat test executable
+runtime/test_fpga_vecmat

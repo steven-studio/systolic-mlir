@@ -38,6 +38,11 @@ void registerConv2DNchwToFpgaPass();
 std::unique_ptr<Pass> createBatchMatmulToFpgaPass();
 void registerBatchMatmulToFpgaPass();
 
+// 把 linalg.vecmat lowering 成呼叫 fpga_vecmat_tiled_auto,
+// 把輸入向量當成 M=1 的 matmul 派送到既有 4x4 加速器。
+std::unique_ptr<Pass> createVecmatToFpgaPass();
+void registerVecmatToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

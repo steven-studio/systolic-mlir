@@ -122,4 +122,5 @@ void mlir::systolic::registerSystolicPasses() {
   registerConv2DToFpgaPass();
   registerConv2DNchwToFpgaPass();
   registerBatchMatmulToFpgaPass();
+  registerVecmatToFpgaPass();
 }
