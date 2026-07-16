@@ -28,6 +28,11 @@ void registerTileMatmulForFpgaPass();
 std::unique_ptr<Pass> createConv2DToFpgaPass();
 void registerConv2DToFpgaPass();
 
+// NCHW/FCHW 布局版本的 conv2d runtime offload(对应 PyTorch/torch-mlir
+// 默认 lowering 出来的布局),复用同一颗 4x4 matmul 加速器。
+std::unique_ptr<Pass> createConv2DNchwToFpgaPass();
+void registerConv2DNchwToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

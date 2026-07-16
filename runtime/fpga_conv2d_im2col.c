@@ -175,3 +175,95 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
     free(Xcol); free(Kmat); free(Ycol);
     return 0;
 }
+
+// NCHW/FCHW layout variant. The im2col matrix layout is the same
+// (Hout*Wout rows x Kh*Kw*Cin cols) but the source indexing into X
+// and Kernel differs: channel is the *outer* spatial dimension in
+// NCHW, not the innermost one as in NHWC.
+int fpga_conv2d_im2col_nchw_general_auto(int N, int Cin, int H, int W,
+                                          int Cout, int Kh, int Kw,
+                                          int strideH, int strideW,
+                                          int dilationH, int dilationW,
+                                          const float *X, const float *Kernel,
+                                          float *Y) {
+    int effKh = dilationH * (Kh - 1) + 1;
+    int effKw = dilationW * (Kw - 1) + 1;
+    int Hout = (H - effKh) / strideH + 1;
+    int Wout = (W - effKw) / strideW + 1;
+    if (Hout <= 0 || Wout <= 0) return -1;
+
+    int M = Hout * Wout;
+    int Kdim = Kh * Kw * Cin;
+    int Ncols = Cout;
+
+    float *Xcol = malloc((size_t)M * Kdim * sizeof(float));
+    // Kernel is (Cout, Cin, Kh, Kw) in NCHW/FCHW; the matmul we
+    // dispatch to needs (Kh*Kw*Cin) x Cout, i.e. the same logical
+    // reduction axis as the NHWC path but reshuffled from a
+    // different source layout, so unlike fpga_conv2d_im2col_general_auto
+    // this is not a flat memcpy -- we explicitly transpose/repack it.
+    float *Kmat = malloc((size_t)Kdim * Ncols * sizeof(float));
+    float *Ycol = malloc((size_t)M * Ncols * sizeof(float));
+    if (!Xcol || !Kmat || !Ycol) {
+        free(Xcol); free(Kmat); free(Ycol);
+        return -2;
+    }
+
+    // Repack Kernel[oc][c][ky][kx] (NCHW/FCHW source layout) into
+    // Kmat[(ky*Kw+kx)*Cin + c][oc] (row-major (Kh*Kw*Cin) x Cout).
+    for (int oc = 0; oc < Cout; oc++) {
+        for (int c = 0; c < Cin; c++) {
+            for (int ky = 0; ky < Kh; ky++) {
+                for (int kx = 0; kx < Kw; kx++) {
+                    int krow = (ky * Kw + kx) * Cin + c;
+                    size_t srcIdx = (((size_t)oc * Cin + c) * Kh + ky) * Kw + kx;
+                    Kmat[(size_t)krow * Ncols + oc] = Kernel[srcIdx];
+                }
+            }
+        }
+    }
+
+    for (int n = 0; n < N; n++) {
+        // X is (N, Cin, H, W): batch n's slice starts at n*Cin*H*W
+        const float *Xn = X + (size_t)n * Cin * H * W;
+        // Y is (N, Cout, Hout, Wout): batch n's slice starts here
+        float *Yn = Y + (size_t)n * Cout * Hout * Wout;
+
+        for (int oy = 0; oy < Hout; oy++) {
+            for (int ox = 0; ox < Wout; ox++) {
+                int row = oy * Wout + ox;
+                for (int ky = 0; ky < Kh; ky++) {
+                    for (int kx = 0; kx < Kw; kx++) {
+                        for (int c = 0; c < Cin; c++) {
+                            int iy = oy * strideH + ky * dilationH;
+                            int ix = ox * strideW + kx * dilationW;
+                            int col = (ky * Kw + kx) * Cin + c;
+                            // Xn[c][iy][ix] in NCHW layout
+                            Xcol[(size_t)row * Kdim + col] =
+                                Xn[((size_t)c * H + iy) * W + ix];
+                        }
+                    }
+                }
+            }
+        }
+
+        int rc = fpga_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        if (rc != 0) {
+            free(Xcol); free(Kmat); free(Ycol);
+            return rc;
+        }
+
+        // Ycol is (Hout*Wout) x Cout row-major; Yn needs to be
+        // (Cout, Hout, Wout), so this is a transpose on write-back,
+        // not a flat memcpy (unlike the NHWC path where the layouts
+        // happen to coincide).
+        for (int oc = 0; oc < Cout; oc++) {
+            for (int i = 0; i < M; i++) {
+                Yn[(size_t)oc * M + i] = Ycol[(size_t)i * Ncols + oc];
+            }
+        }
+    }
+
+    free(Xcol); free(Kmat); free(Ycol);
+    return 0;
+}

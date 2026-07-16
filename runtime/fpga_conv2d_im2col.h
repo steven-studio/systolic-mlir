@@ -32,4 +32,18 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
                                      const float *X, const float *Kernel,
                                      float *Y);
 
+
+// NCHW / FCHW layout variant (PyTorch's default layout via torch-mlir,
+// as opposed to the NHWC/HWCF variant above). X is (N, Cin, H, W),
+// Kernel is (Cout, Cin, Kh, Kw), Y is (N, Cout, Hout, Wout), all
+// row-major float32. Same im2col-via-matmul strategy as the NHWC
+// variant, only the unfold indexing differs to match the channel-
+// first layout.
+int fpga_conv2d_im2col_nchw_general_auto(int N, int Cin, int H, int W,
+                                          int Cout, int Kh, int Kw,
+                                          int strideH, int strideW,
+                                          int dilationH, int dilationW,
+                                          const float *X, const float *Kernel,
+                                          float *Y);
+
 #endif
