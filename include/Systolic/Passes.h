@@ -48,6 +48,12 @@ void registerVecmatToFpgaPass();
 std::unique_ptr<Pass> createMatvecToFpgaPass();
 void registerMatvecToFpgaPass();
 
+// 結構化匹配 torch-mlir 為 torch.dot 產生的 elementwise-mul +
+// reduction-to-scalar 這一對 linalg.generic,轉成呼叫 fpga_dot_tiled_auto。
+// 只匹配精確符合這個結構的 linalg.generic,其餘一律拒絕(例如 softmax)。
+std::unique_ptr<Pass> createDotGenericToFpgaPass();
+void registerDotGenericToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

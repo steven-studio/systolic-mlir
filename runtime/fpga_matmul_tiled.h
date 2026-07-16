@@ -36,6 +36,14 @@ int fpga_vecmat_tiled_auto(int K, int N, const float *x, const float *A,
 int fpga_matvec_tiled_auto(int M, int K, const float *A, const float *x,
                             float *y);
 
+
+// Dot product: result = x[K] . y[K] (scalar output). Implemented as a
+// 1xK @ Kx1 matmul via fpga_matmul_tiled_auto with M=N=1, doubly
+// degenerate relative to fpga_vecmat_tiled_auto (M=1) and
+// fpga_matvec_tiled_auto (N=1).
+int fpga_dot_tiled_auto(int K, const float *x, const float *y,
+                         float *result);
+
 #endif
 
 // 自動管理 UART 連線的版本:第一次呼叫時自動開啟 /dev/ttyUSB1,

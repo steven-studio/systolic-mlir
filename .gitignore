@@ -56,3 +56,6 @@ runtime/test_fpga_vecmat
 
 # Compiled matvec test executable
 runtime/test_fpga_matvec
+
+# Compiled dot test executable
+runtime/test_fpga_dot

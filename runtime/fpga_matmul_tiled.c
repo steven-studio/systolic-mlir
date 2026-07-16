@@ -97,3 +97,8 @@ int fpga_matvec_tiled_auto(int M, int K, const float *A, const float *x,
     // M=1 in fpga_vecmat_tiled_auto.
     return fpga_matmul_tiled_auto(M, K, 1, A, x, y);
 }
+
+int fpga_dot_tiled_auto(int K, const float *x, const float *y,
+                         float *result) {
+    return fpga_matmul_tiled_auto(1, K, 1, x, y, result);
+}

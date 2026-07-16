@@ -124,4 +124,5 @@ void mlir::systolic::registerSystolicPasses() {
   registerBatchMatmulToFpgaPass();
   registerVecmatToFpgaPass();
   registerMatvecToFpgaPass();
+  registerDotGenericToFpgaPass();
 }

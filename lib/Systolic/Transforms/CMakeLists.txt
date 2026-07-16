@@ -7,6 +7,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   BatchMatmulToFpga.cpp
   VecmatToFpga.cpp
   MatvecToFpga.cpp
+  DotGenericToFpga.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic
