@@ -33,6 +33,11 @@ void registerConv2DToFpgaPass();
 std::unique_ptr<Pass> createConv2DNchwToFpgaPass();
 void registerConv2DNchwToFpgaPass();
 
+// 把 linalg.batch_matmul lowering 成呼叫 fpga_batch_matmul_tiled_auto,
+// 依序把每個 batch 派送到既有 4x4 加速器,不需要新硬體。
+std::unique_ptr<Pass> createBatchMatmulToFpgaPass();
+void registerBatchMatmulToFpgaPass();
+
 // 在 systolic-opt 工具里注册这个 pass
 void registerSystolicPasses();
 

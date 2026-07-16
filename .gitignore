@@ -47,3 +47,6 @@ runtime/*.bin
 
 # Compiled NCHW conv2d test executable
 runtime/test_fpga_conv2d_nchw
+
+# Compiled batch_matmul test executable
+runtime/test_fpga_batch_matmul

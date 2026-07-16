@@ -4,6 +4,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   TileMatmulForFpga.cpp
   Conv2DToFpga.cpp
   Conv2DNchwToFpga.cpp
+  BatchMatmulToFpga.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic

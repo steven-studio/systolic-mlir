@@ -69,3 +69,15 @@ int fpga_matmul_tiled_auto(int M, int K, int N,
     if (g_fpga_fd < 0) return -3;  // 開啟失敗
     return fpga_matmul_tiled(g_fpga_fd, M, K, N, A, B, C);
 }
+
+int fpga_batch_matmul_tiled_auto(int batch, int M, int K, int N,
+                                  const float *A, const float *B, float *C) {
+    for (int b = 0; b < batch; b++) {
+        const float *Ab = A + (size_t)b * M * K;
+        const float *Bb = B + (size_t)b * K * N;
+        float *Cb = C + (size_t)b * M * N;
+        int rc = fpga_matmul_tiled_auto(M, K, N, Ab, Bb, Cb);
+        if (rc != 0) return rc;
+    }
+    return 0;
+}
