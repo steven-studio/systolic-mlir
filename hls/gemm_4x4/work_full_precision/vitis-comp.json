@@ -1,0 +1,9 @@
+{
+  "name": "work_full_precision",
+  "type": "HLS",
+  "configuration": {
+    "componentType": "HLS",
+    "configFiles": ["..\/hls_config_full_precision.cfg"],
+    "work_dir": "\/home\/steven-studio\/systolic-mlir\/hls\/gemm_4x4\/work_full_precision"
+  }
+}

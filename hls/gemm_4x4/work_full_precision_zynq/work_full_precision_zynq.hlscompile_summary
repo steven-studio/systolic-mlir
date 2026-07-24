@@ -1,0 +1,245 @@
+<ENTRY>
+{
+ "thisFile": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/work_full_precision_zynq.hlscompile_summary",
+ "connectId": "",
+ "serverToken": "",
+ "timestamp": "0"
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_CmdStep",
+ "dateTimestamp": "Thu Jul 23 00:48:16 2026",
+ "timestampMillis": "1784738896221",
+ "buildStep": {
+  "cmdId": "dc474175-cfa8-4de5-9f48-541fa2c8126e",
+  "name": "v++",
+  "logFile": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/logs/work_full_precision_zynq.steps.log",
+  "commandLine": "/home/steven-studio/tools/Xilinx/2026.1/Vitis/bin/unwrapped/lnx64.o/v++  -c --mode hls --config hls_config_full_precision_zynq.cfg --work_dir work_full_precision_zynq ",
+  "args": [
+   "-c",
+   "--mode",
+   "hls",
+   "--config",
+   "hls_config_full_precision_zynq.cfg",
+   "--work_dir",
+   "work_full_precision_zynq"
+  ],
+  "iniFiles": [
+   {
+    "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/hls_config_full_precision_zynq.cfg",
+    "content": "# hls_config_full_precision.cfg\n#\n# Vitis Unified IDE (2025.x / 2026.1) config-file flow, replacing the\n# classic `vitis_hls -f run_hls.tcl` script -- that classic flow no\n# longer exists as a standalone vitis_hls executable in this install\n# (confirmed: no vitis_hls binary under Vitis/bin/), so this uses the\n# new v++ --mode hls / vitis-run --mode hls command-line flow instead.\n#\n# Run from ~/systolic-mlir/hls/gemm_4x4/:\n#\n#   1. (optional) C simulation first, to sanity-check before synthesis:\n#      vitis-run --mode hls --csim --config hls_config_full_precision.cfg \\\n#          --work_dir work_full_precision\n#\n#   2. Synthesis (the step that actually applies the impl:fulldsp setting):\n#      v++ -c --mode hls --config hls_config_full_precision.cfg \\\n#          --work_dir work_full_precision\n#\n# This creates a NEW work_dir (work_full_precision/), separate from\n# whatever directory your original synthesis used, so the original\n# results are untouched for side-by-side comparison.\n#\n# IMPORTANT CAVEATS:\n#   - This command-line flow (v++ --mode hls, vitis-run --mode hls) is\n#     confirmed from AMD's UG1702/UG1399 documentation for the 2025.x\n#     Vitis Unified IDE, but I have not run it myself against your\n#     specific 2026.1 install -- if v++ or vitis-run reject any option\n#     below, run `v++ --mode hls -h` (or ask 蔡老師, since this tooling\n#     changed recently enough that even he may not have hit it yet) to\n#     get the exact accepted syntax for this build.\n#   - flow_target's exact value for \"export as Vivado IP\" (as opposed to\n#     a Vitis kernel .xo) may need adjusting -- try `vivado` first; if\n#     rejected, check the config file command reference for the exact\n#     accepted string in this version.\n\npart=xc7z020clg400-1\n\n[hls]\nsyn.file=./design.cpp\nsyn.top=matmul_4x4x4\nflow_target=vivado\nclock=10ns\nsyn.output.format=ip_catalog\n\n# The actual change under test: pin floating-point multiply and add to\n# \"Full Usage\" of DSP resources (impl:fulldsp), instead of letting the\n# tool choose (the default, impl:all, which is what your original\n# synthesis used and is the likely source of the 7-30 ULP baseline\n# error reported in Section eval-correctness).\nsyn.op=op:fmul impl:fulldsp\nsyn.op=op:fadd impl:fulldsp\n\ntb.file=./testbench.cpp\n"
+   }
+  ],
+  "cwd": "/home/steven-studio/systolic-mlir/hls/gemm_4x4"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Thu Jul 23 00:48:16 2026",
+ "timestampMillis": "1784738896222",
+ "status": {
+  "cmdId": "dc474175-cfa8-4de5-9f48-541fa2c8126e",
+  "state": "CS_RUNNING"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_FlowMetaData",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900491",
+ "buildSummary": {
+  "hardwarePlatform": "",
+  "hardwareDsa": "",
+  "platformDirectory": "",
+  "runtime": "",
+  "systemConfig": "",
+  "flow": "BF_COMPILE",
+  "target": "TT_HW",
+  "kernels": [
+   {
+    "base": {
+     "type": "KERNEL",
+     "name": "matmul_4x4x4",
+     "file": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/matmul_4x4x4.zip",
+     "reports": [],
+     "uuid": ""
+    },
+    "sources": [
+     "/home/steven-studio/systolic-mlir/hls/gemm_4x4/design.cpp"
+    ],
+    "psSources": [],
+    "cuNames": [],
+    "type": "HLS",
+    "frequency": 0,
+    "freqUnits": ""
+   }
+  ],
+  "toolVersion": "2026.1"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_SubCmdStep",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900492",
+ "buildStep": {
+  "cmdId": "45a1aa8d-bc8a-463f-84ee-f94a4b3c0394",
+  "name": "",
+  "logFile": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls/hls.log",
+  "commandLine": "",
+  "args": [],
+  "iniFiles": [],
+  "cwd": "/home/steven-studio/systolic-mlir/hls/gemm_4x4"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900492",
+ "status": {
+  "cmdId": "45a1aa8d-bc8a-463f-84ee-f94a4b3c0394",
+  "state": "CS_RUNNING"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900493",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls/hls_data.json",
+  "name": "",
+  "fileType": "JSON",
+  "reportType": "HLS_SYNTHESIS",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900493",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls/syn/report/csynth.rpt",
+  "name": "",
+  "fileType": "TEXT",
+  "reportType": "HLS_SYNTHESIS",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:20 2026",
+ "timestampMillis": "1784738900494",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls/syn/report/csynth.xml",
+  "name": "",
+  "fileType": "XML",
+  "reportType": "HLS_SYNTHESIS",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:40 2026",
+ "timestampMillis": "1784738920981",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls",
+  "name": "",
+  "fileType": "DIR",
+  "reportType": "HLS_DATAFLOW",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:40 2026",
+ "timestampMillis": "1784738920982",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls",
+  "name": "",
+  "fileType": "DIR",
+  "reportType": "HLS_FUNCTION_CALL_GRAPH",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:40 2026",
+ "timestampMillis": "1784738920982",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/hls",
+  "name": "",
+  "fileType": "DIR",
+  "reportType": "HLS_SCHEDULE",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Thu Jul 23 00:48:40 2026",
+ "timestampMillis": "1784738920982",
+ "status": {
+  "cmdId": "45a1aa8d-bc8a-463f-84ee-f94a4b3c0394",
+  "state": "CS_PASSED"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Thu Jul 23 00:48:57 2026",
+ "timestampMillis": "1784738937411",
+ "status": {
+  "cmdId": "dc474175-cfa8-4de5-9f48-541fa2c8126e",
+  "state": "CS_PASSED"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:57 2026",
+ "timestampMillis": "1784738937433",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/reports/v++_compile_work_full_precision_zynq_guidance.html",
+  "name": "",
+  "fileType": "HTML",
+  "reportType": "GLOBAL_RULECHECK_GUIDANCE",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Thu Jul 23 00:48:57 2026",
+ "timestampMillis": "1784738937433",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision_zynq/reports/.db/v++_compile_work_full_precision_zynq_guidance.pb3",
+  "name": "",
+  "fileType": "BINARY_PROTOBUF",
+  "reportType": "GLOBAL_RULECHECK_GUIDANCE",
+  "cmdId": ""
+ }
+}
+</ENTRY>

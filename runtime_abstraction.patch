@@ -1,0 +1,127 @@
+--- a/lib/Systolic/Transforms/TileMatmulForFpga.cpp
++++ b/lib/Systolic/Transforms/TileMatmulForFpga.cpp
+@@ -31,15 +31,25 @@
+ //       scf.for %ki = 0 to K_tiles
+ //         <fill 4x4 A-tile from %A, scf.if boundary-checked, zero-padded>
+ //         <fill 4x4 B-tile from %B, scf.if boundary-checked, zero-padded>
+-//         llvm.call @fpga_matmul4x4(%fd, %a_tile, %b_tile, %acc, %acc)
++//         llvm.call @systolic_dispatch_matmul4x4(%fd, %a_tile, %b_tile, %acc, %acc)
+ //       <writeback 4x4 accumulator into %C, scf.if boundary-checked>
+ //
+-// against a much thinner runtime primitive, fpga_matmul4x4, that performs
+-// exactly one 4x4x4 UART round trip and does no tiling of its own. The
+-// only remaining runtime-side responsibility is opening/caching the UART
+-// file descriptor (fpga_get_uart_fd) and the single-tile wire protocol
+-// itself (Section runtime) -- tiling, boundary handling, zero-padding,
+-// and inter-tile accumulation are now explicit, inspectable MLIR IR.
++// against a much thinner dispatch runtime primitive,
++// systolic_dispatch_matmul4x4, that performs exactly one 4x4x4 dispatch and
++// does no tiling of its own. Unlike the earlier revision's runtime API,
++// this call is named and typed independently of any specific transport:
++// the MLIR pass only ever declares and calls
++// systolic_dispatch_open/systolic_dispatch_matmul4x4, never
++// UART-specific symbols, so linking the same compiled object file against
++// a different implementation of those two symbols -- a UART backend, a
++// pure-software simulation backend, or (in principle) an AXI/PCIe backend
++// -- changes which transport a compiled matmul dispatches to without
++// touching a single line of generated IR (Section runtime-abstraction).
++// The only remaining runtime-side responsibility is opening/caching
++// whatever transport-specific handle systolic_dispatch_open returns and
++// implementing the single-tile dispatch itself -- tiling, boundary
++// handling, zero-padding, and inter-tile accumulation are now explicit,
++// inspectable MLIR IR, entirely independent of that choice.
+ // -----------------------------------------------------------------------
+ 
+ static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
+@@ -178,21 +188,29 @@
+     auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+     auto i32Ty = rewriter.getI32Type();
+ 
+-    // Declare (once per module) the two external runtime functions this
+-    // pattern now depends on -- both much thinner than the previous
+-    // fpga_matmul_tiled_auto, since tiling itself no longer lives here:
++    // Declare (once per module) the two external dispatch-runtime
++    // functions this pattern depends on. Both names are deliberately
++    // transport-neutral -- neither mentions UART -- so that linking the
++    // same compiled object file against a different implementation of
++    // these two symbols swaps the backend without touching this pass or
++    // any generated IR (Section runtime-abstraction):
+     //
+-    //   int fpga_get_uart_fd(void);
+-    //     Lazily opens (and caches) the UART connection, returning the
+-    //     fd or a negative value on failure. Shares the same cached fd
+-    //     as the conv2d im2col runtime path (Section conv2d), so both
+-    //     paths reuse a single open connection rather than each opening
+-    //     their own.
++    //   int systolic_dispatch_open(void);
++    //     Opens (and, on backends where that is meaningful, caches) a
++    //     connection to the target 4x4 accelerator, returning an
++    //     opaque handle (or a negative value on failure). What "opening
++    //     a connection" means is entirely up to the backend: a UART
++    //     backend opens a serial port; a simulation backend can return
++    //     an arbitrary placeholder value, since there is no real
++    //     transport to open.
+     //
+-    //   int fpga_matmul4x4(int fd, const float A[16], const float B[16],
+-    //                      const float C_init[16], float C_out[16]);
+-    //     Exactly one 4x4x4 UART round trip: C_out = A @ B + C_init.
+-    //     Performs no tiling, padding, or accumulation of its own.
++    //   int systolic_dispatch_matmul4x4(int handle, const float A[16],
++    //       const float B[16], const float C_init[16], float C_out[16]);
++    //     Exactly one 4x4x4 dispatch: C_out = A @ B + C_init. Performs
++    //     no tiling, padding, or accumulation of its own; how the
++    //     dispatch is actually carried out (a UART round trip, a
++    //     direct in-process computation, or anything else) is entirely
++    //     the backend's concern.
+     auto declareFn = [&](StringRef name, LLVM::LLVMFunctionType fnTy) {
+       auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name);
+       if (!fn) {
+@@ -204,27 +222,28 @@
+     };
+ 
+     auto getFdFnTy = LLVM::LLVMFunctionType::get(i32Ty, {}, false);
+-    auto getFdFn = declareFn("fpga_get_uart_fd", getFdFnTy);
++    auto getFdFn = declareFn("systolic_dispatch_open", getFdFnTy);
+ 
+     auto matmul4x4FnTy = LLVM::LLVMFunctionType::get(
+         i32Ty, {i32Ty, ptrTy, ptrTy, ptrTy, ptrTy}, false);
+-    auto matmul4x4Fn = declareFn("fpga_matmul4x4", matmul4x4FnTy);
++    auto matmul4x4Fn = declareFn("systolic_dispatch_matmul4x4", matmul4x4FnTy);
+ 
+     Value aMemref = tensorToMemref(rewriter, loc, a, aTy);
+     Value bMemref = tensorToMemref(rewriter, loc, b, bTy);
+     Value cMemref = tensorToMemref(rewriter, loc, c, cTy);
+ 
+-    // One fd for the whole matmul, fetched before the tile loops begin --
+-    // matches the previous runtime's behavior of caching a single
+-    // connection across every tile of one matmul invocation (and across
+-    // separate invocations), rather than reopening per tile.
++    // One handle for the whole matmul, fetched before the tile loops
++    // begin -- matches the previous runtime's behavior of caching a
++    // single connection across every tile of one matmul invocation (and
++    // across separate invocations), rather than reopening per tile.
+     auto fdCall = rewriter.create<LLVM::CallOp>(loc, getFdFn, ValueRange{});
+     Value fd = fdCall.getResult();
+ 
+     // Scratch 4x4 buffers, reused across every tile: A-tile, B-tile, and
+     // the reduction accumulator (which doubles as both C_init and C_out
+-    // for fpga_matmul4x4, since the UART protocol finishes reading its
+-    // inputs before writing its result -- see Section runtime).
++    // for systolic_dispatch_matmul4x4, since a well-behaved backend
++    // finishes reading its inputs before writing its result -- see
++    // Section runtime-abstraction).
+     auto tile4x4Ty = MemRefType::get({4, 4}, rewriter.getF32Type());
+     Value aTile = rewriter.create<memref::AllocaOp>(loc, tile4x4Ty);
+     Value bTile = rewriter.create<memref::AllocaOp>(loc, tile4x4Ty);
+@@ -321,8 +340,9 @@
+     return "Lower arbitrary-shape linalg.matmul into explicit MLIR tile "
+            "loops (scf.for) with boundary-checked (scf.if) 4x4 tiling, "
+            "zero-padding, and reduction accumulation, dispatching each "
+-           "tile to the FPGA runtime's single-tile primitive "
+-           "(fpga_matmul4x4)";
++           "tile through a transport-neutral dispatch-runtime call "
++           "(systolic_dispatch_matmul4x4), independent of the backend "
++           "linked to provide it";
+   }
+ 
+   void getDependentDialects(DialectRegistry &registry) const override {

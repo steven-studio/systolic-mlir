@@ -11,10 +11,10 @@
 
 int fpga_uart_open(const char *port) {
     int fd = open(port, O_RDWR | O_NOCTTY);
-    if (fd < 0) return -1;
+    if (fd < 0) { perror("fpga_uart_open: open"); return -1; }
 
     struct termios tty;
-    if (tcgetattr(fd, &tty) != 0) { close(fd); return -1; }
+    if (tcgetattr(fd, &tty) != 0) { perror("fpga_uart_open: tcgetattr"); close(fd); return -1; }
 
     cfsetospeed(&tty, B115200);
     cfsetispeed(&tty, B115200);
@@ -35,7 +35,7 @@ int fpga_uart_open(const char *port) {
     tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 50;  // 5 秒逾時 (單位 0.1s)
 
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) { close(fd); return -1; }
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) { perror("fpga_uart_open: tcsetattr"); close(fd); return -1; }
     tcflush(fd, TCIOFLUSH);
     return fd;
 }
@@ -108,5 +108,18 @@ int fpga_matmul4x4(int fd, const float A[16], const float B[16],
     }
 
     memcpy(C_out, rx, 64);
+
+    // Diagnostic: optional delay after each successful round trip, to test
+    // whether consecutive calls happening "too fast" (relative to the
+    // hardware/OS actually being ready for the next one) is the source of
+    // the intermittent corruption observed under repeated calls. Off by
+    // default (0 = no delay); set FPGA_MATMUL_DELAY_US=2000 for a 2ms delay.
+    static long delay_us = -1;
+    if (delay_us == -1) {
+        const char *env = getenv("FPGA_MATMUL_DELAY_US");
+        delay_us = env ? atol(env) : 0;
+    }
+    if (delay_us > 0) usleep((useconds_t)delay_us);
+
     return 0;
 }

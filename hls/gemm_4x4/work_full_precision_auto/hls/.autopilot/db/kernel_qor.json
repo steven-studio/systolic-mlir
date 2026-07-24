@@ -1,0 +1,511 @@
+{
+    "name": "matmul_4x4x4",
+    "type": "function",
+    "pipelined": "yes",
+    "dataflowed": "no",
+    "original_ti": 13,
+    "original_tl": 12,
+    "calculated_ti": -1,
+    "calculated_tl": -1,
+    "assume_ti": -1,
+    "assume_tl": -1,
+    "CIs": [
+        {
+            "ID": 0,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_3",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 1,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_31",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 2,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_32",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 3,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_33",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 4,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_34",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 5,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_35",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 6,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_36",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 7,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_37",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 8,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_38",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 9,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_39",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 10,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_310",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 11,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_311",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 12,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_312",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 13,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_313",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 14,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_314",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        },
+        {
+            "ID": 15,
+            "name": "matmul_4x4x4_Pipeline_VITIS_LOOP_10_315",
+            "type": "function",
+            "pipelined": "yes",
+            "dataflowed": "no",
+            "original_ti": 10,
+            "original_tl": 10,
+            "calculated_ti": -1,
+            "calculated_tl": -1,
+            "assume_ti": -1,
+            "assume_tl": -1,
+            "CIs": [],
+            "loops": [
+                {
+                    "name": "VITIS_LOOP_10_3",
+                    "type": "loop",
+                    "trip_count": 4,
+                    "pipelined": "yes",
+                    "dataflowed": "no",
+                    "original_ti": 4,
+                    "original_tl": 9,
+                    "calculated_ti": -1,
+                    "calculated_tl": -1,
+                    "assume_ti": -1,
+                    "assume_tl": -1,
+                    "CIs": [],
+                    "loops": []
+                }
+            ]
+        }
+    ],
+    "loops": []
+}

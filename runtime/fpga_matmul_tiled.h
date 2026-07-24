@@ -7,6 +7,13 @@
 int fpga_matmul_tiled(int fd, int M, int K, int N,
                        const float *A, const float *B, float *C);
 
+// 自動管理 UART 連線,回傳快取的 fd(第一次呼叫時開啟 /dev/ttyUSB1,
+// 之後重複使用,不重複開關)。失敗回傳負值。
+// 由 TileMatmulForFpgaPattern 產生的 MLIR tile loop 在迴圈開始前呼叫一次,
+// 拿到 fd 之後直接對每個 4x4 tile 呼叫 fpga_matmul4x4(fd, ...) --
+// 跟 fpga_matmul_tiled_auto 共用同一個快取的 fd,不會各自開一條連線。
+int fpga_get_uart_fd(void);
+
 #endif
 
 // 自動管理 UART 連線的版本:第一次呼叫時自動開啟 /dev/ttyUSB1,

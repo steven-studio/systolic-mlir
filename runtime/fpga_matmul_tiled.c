@@ -61,11 +61,20 @@ int fpga_matmul_tiled(int fd, int M, int K, int N,
 
 static int g_fpga_fd = -2;  // -2 = 尚未嘗試開啟
 
-int fpga_matmul_tiled_auto(int M, int K, int N,
-                            const float *A, const float *B, float *C) {
+int fpga_get_uart_fd(void) {
     if (g_fpga_fd == -2) {
         g_fpga_fd = fpga_uart_open("/dev/ttyUSB1");
     }
-    if (g_fpga_fd < 0) return -3;  // 開啟失敗
-    return fpga_matmul_tiled(g_fpga_fd, M, K, N, A, B, C);
+    return g_fpga_fd;  // 可能是負值(開啟失敗),呼叫端(MLIR 產生的 tile
+                        // loop 裡對 fpga_matmul4x4 的呼叫)目前沒有檢查
+                        // 這個回傳值 -- 跟既有的「runtime 呼叫的錯誤碼
+                        // 沒有回傳給 MLIR」這個已知限制一致,不是新引入
+                        // 的問題。
+}
+
+int fpga_matmul_tiled_auto(int M, int K, int N,
+                            const float *A, const float *B, float *C) {
+    int fd = fpga_get_uart_fd();
+    if (fd < 0) return -3;  // 開啟失敗
+    return fpga_matmul_tiled(fd, M, K, N, A, B, C);
 }

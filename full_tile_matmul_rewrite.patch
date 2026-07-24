@@ -1,0 +1,390 @@
+--- a/lib/Systolic/Transforms/TileMatmulForFpga.cpp
++++ b/lib/Systolic/Transforms/TileMatmulForFpga.cpp
+@@ -5,6 +5,7 @@
+ #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+ #include "mlir/Dialect/Linalg/IR/Linalg.h"
+ #include "mlir/Dialect/MemRef/IR/MemRef.h"
++#include "mlir/Dialect/SCF/IR/SCF.h"
+ #include "mlir/IR/PatternMatch.h"
+ #include "mlir/Pass/Pass.h"
+ #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+@@ -15,23 +16,30 @@
+ namespace {
+ 
+ // -----------------------------------------------------------------------
+-// 阶段 4:把「任意静态形状」的 linalg.matmul 转成一次呼叫已烧录好的
+-// 4x4 FPGA runtime (fpga_matmul_tiled_auto),而不是产生新硬件。
++// Revision: previously this pass lowered linalg.matmul to a SINGLE call
++// to fpga_matmul_tiled_auto(M, K, N, A, B, C), with all 4x4 tiling,
++// zero-padding, and reduction-tile accumulation implemented opaquely in
++// the C runtime (runtime/fpga_matmul_tiled.c). That left no tile loops,
++// boundary predicates, or accumulation structure visible in MLIR IR --
++// the compiler-side contribution was, in substance, a library call.
+ //
+-//   linalg.matmul ins(%A, %B) outs(%C) : tensor<MxKxf32>, tensor<KxNxf32>
+-//                                        -> tensor<MxNxf32>
+-// 转成:
+-//   %a_mem = bufferization.to_memref %A
+-//   %b_mem = bufferization.to_memref %B
+-//   %c_mem = bufferization.to_memref %C
+-//   %a_ptr = ... extract pointer, inttoptr ...
+-//   %b_ptr = ...
+-//   %c_ptr = ...
+-//   llvm.call @fpga_matmul_tiled_auto(%M, %K, %N, %a_ptr, %b_ptr, %c_ptr)
+-//   %result = bufferization.to_tensor %c_mem
++// This version instead generates the tiling explicitly as MLIR IR:
+ //
+-// 实际的 4x4 tiling / zero-padding / UART 累加逻辑全部在 C runtime
+-// (runtime/fpga_matmul_tiled.c) 里完成,这个 pass 只负责产生呼叫。
++//   scf.for %mi = 0 to M_tiles           (M_tiles = ceil(M/4), a compile-
++//     scf.for %ni = 0 to N_tiles          time constant since the matmul
++//       <zero-init 4x4 accumulator>       is static-shape)
++//       scf.for %ki = 0 to K_tiles
++//         <fill 4x4 A-tile from %A, scf.if boundary-checked, zero-padded>
++//         <fill 4x4 B-tile from %B, scf.if boundary-checked, zero-padded>
++//         llvm.call @fpga_matmul4x4(%fd, %a_tile, %b_tile, %acc, %acc)
++//       <writeback 4x4 accumulator into %C, scf.if boundary-checked>
++//
++// against a much thinner runtime primitive, fpga_matmul4x4, that performs
++// exactly one 4x4x4 UART round trip and does no tiling of its own. The
++// only remaining runtime-side responsibility is opening/caching the UART
++// file descriptor (fpga_get_uart_fd) and the single-tile wire protocol
++// itself (Section runtime) -- tiling, boundary handling, zero-padding,
++// and inter-tile accumulation are now explicit, inspectable MLIR IR.
+ // -----------------------------------------------------------------------
+ 
+ static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
+@@ -50,9 +58,99 @@
+   return rewriter.create<LLVM::IntToPtrOp>(loc, ptrTy, idxAsI64);
+ }
+ 
++static int64_t ceilDiv4(int64_t x) { return (x + 3) / 4; }
++
+ struct TileMatmulForFpgaPattern : public OpRewritePattern<linalg::MatmulOp> {
+   using OpRewritePattern::OpRewritePattern;
+ 
++  // Fills a 4x4 scratch memref (`dest`) from a 4x4 sub-block of `src`
++  // (an MxN-shaped memref, M/N given as compile-time constants) whose
++  // top-left corner is at dynamic (rowOffset, colOffset) -- typically
++  // rowOffset/colOffset = tileIndex * 4 for some scf.for induction
++  // variable `tileIndex`. Positions that fall outside [0,srcRows) x
++  // [0,srcCols) are zero-filled via an explicit scf.if boundary check,
++  // rather than being read out of bounds.
++  void emitBoundedTileFill(PatternRewriter &rewriter, Location loc,
++                            Value src, int64_t srcRows, int64_t srcCols,
++                            Value rowOffset, Value colOffset,
++                            Value dest) const {
++    auto f32Ty = rewriter.getF32Type();
++    Value zero = rewriter.create<arith::ConstantOp>(
++        loc, f32Ty, rewriter.getF32FloatAttr(0.0f));
++    Value cSrcRows =
++        rewriter.create<arith::ConstantIndexOp>(loc, srcRows);
++    Value cSrcCols =
++        rewriter.create<arith::ConstantIndexOp>(loc, srcCols);
++
++    for (int64_t r = 0; r < 4; ++r) {
++      Value cr = rewriter.create<arith::ConstantIndexOp>(loc, r);
++      Value ridx = rewriter.create<arith::AddIOp>(loc, rowOffset, cr);
++      // in-bounds row predicate: ridx < srcRows
++      Value rowOk = rewriter.create<arith::CmpIOp>(
++          loc, arith::CmpIPredicate::slt, ridx, cSrcRows);
++      for (int64_t c = 0; c < 4; ++c) {
++        Value cc = rewriter.create<arith::ConstantIndexOp>(loc, c);
++        Value cidx = rewriter.create<arith::AddIOp>(loc, colOffset, cc);
++        Value colOk = rewriter.create<arith::CmpIOp>(
++            loc, arith::CmpIPredicate::slt, cidx, cSrcCols);
++        Value inBounds = rewriter.create<arith::AndIOp>(loc, rowOk, colOk);
++
++        auto ifOp = rewriter.create<scf::IfOp>(loc, inBounds,
++                                                /*withElseRegion=*/true);
++        {
++          OpBuilder::InsertionGuard g(rewriter);
++          rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
++          Value loaded =
++              rewriter.create<memref::LoadOp>(loc, src, ValueRange{ridx, cidx});
++          rewriter.create<memref::StoreOp>(loc, loaded, dest,
++                                            ValueRange{cr, cc});
++        }
++        {
++          OpBuilder::InsertionGuard g(rewriter);
++          rewriter.setInsertionPointToStart(&ifOp.getElseRegion().front());
++          rewriter.create<memref::StoreOp>(loc, zero, dest, ValueRange{cr, cc});
++        }
++      }
++    }
++  }
++
++  // Writes the 4x4 scratch memref `src` back into an MxN-shaped `dest`
++  // memref at dynamic (rowOffset, colOffset), skipping positions that
++  // fall outside [0,dstRows) x [0,dstCols) via an scf.if boundary check
++  // (rather than writing past the true output shape).
++  void emitBoundedTileWriteback(PatternRewriter &rewriter, Location loc,
++                                 Value src, Value dest, int64_t dstRows,
++                                 int64_t dstCols, Value rowOffset,
++                                 Value colOffset) const {
++    Value cDstRows =
++        rewriter.create<arith::ConstantIndexOp>(loc, dstRows);
++    Value cDstCols =
++        rewriter.create<arith::ConstantIndexOp>(loc, dstCols);
++
++    for (int64_t r = 0; r < 4; ++r) {
++      Value cr = rewriter.create<arith::ConstantIndexOp>(loc, r);
++      Value ridx = rewriter.create<arith::AddIOp>(loc, rowOffset, cr);
++      Value rowOk = rewriter.create<arith::CmpIOp>(
++          loc, arith::CmpIPredicate::slt, ridx, cDstRows);
++      for (int64_t c = 0; c < 4; ++c) {
++        Value cc = rewriter.create<arith::ConstantIndexOp>(loc, c);
++        Value cidx = rewriter.create<arith::AddIOp>(loc, colOffset, cc);
++        Value colOk = rewriter.create<arith::CmpIOp>(
++            loc, arith::CmpIPredicate::slt, cidx, cDstCols);
++        Value inBounds = rewriter.create<arith::AndIOp>(loc, rowOk, colOk);
++
++        auto ifOp = rewriter.create<scf::IfOp>(loc, inBounds,
++                                                /*withElseRegion=*/false);
++        OpBuilder::InsertionGuard g(rewriter);
++        rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
++        Value val =
++            rewriter.create<memref::LoadOp>(loc, src, ValueRange{cr, cc});
++        rewriter.create<memref::StoreOp>(loc, val, dest,
++                                          ValueRange{ridx, cidx});
++      }
++    }
++  }
++
+   LogicalResult matchAndRewrite(linalg::MatmulOp op,
+                                  PatternRewriter &rewriter) const override {
+     Value a = op.getInputs()[0];  // [M, K]
+@@ -73,44 +171,140 @@
+     int64_t K = aTy.getShape()[1];
+     int64_t N = bTy.getShape()[1];
+ 
++    int64_t Mt = ceilDiv4(M), Kt = ceilDiv4(K), Nt = ceilDiv4(N);
++
+     Location loc = op.getLoc();
+     auto module = op->getParentOfType<ModuleOp>();
+-
+-    // 宣告外部 runtime 函式(如果还没宣告过)
+-    //   int fpga_matmul_tiled_auto(int M, int K, int N,
+-    //                               const float *A, const float *B, float *C);
+     auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+     auto i32Ty = rewriter.getI32Type();
+-    StringRef fnName = "fpga_matmul_tiled_auto";
+-    auto fnTy = LLVM::LLVMFunctionType::get(
+-        i32Ty, {i32Ty, i32Ty, i32Ty, ptrTy, ptrTy, ptrTy}, /*isVarArg=*/false);
+-
+-    auto fpgaFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(fnName);
+-    if (!fpgaFunc) {
+-      OpBuilder::InsertionGuard guard(rewriter);
+-      rewriter.setInsertionPointToStart(module.getBody());
+-      fpgaFunc =
+-          rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), fnName, fnTy);
+-    }
++
++    // Declare (once per module) the two external runtime functions this
++    // pattern now depends on -- both much thinner than the previous
++    // fpga_matmul_tiled_auto, since tiling itself no longer lives here:
++    //
++    //   int fpga_get_uart_fd(void);
++    //     Lazily opens (and caches) the UART connection, returning the
++    //     fd or a negative value on failure. Shares the same cached fd
++    //     as the conv2d im2col runtime path (Section conv2d), so both
++    //     paths reuse a single open connection rather than each opening
++    //     their own.
++    //
++    //   int fpga_matmul4x4(int fd, const float A[16], const float B[16],
++    //                      const float C_init[16], float C_out[16]);
++    //     Exactly one 4x4x4 UART round trip: C_out = A @ B + C_init.
++    //     Performs no tiling, padding, or accumulation of its own.
++    auto declareFn = [&](StringRef name, LLVM::LLVMFunctionType fnTy) {
++      auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name);
++      if (!fn) {
++        OpBuilder::InsertionGuard guard(rewriter);
++        rewriter.setInsertionPointToStart(module.getBody());
++        fn = rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fnTy);
++      }
++      return fn;
++    };
++
++    auto getFdFnTy = LLVM::LLVMFunctionType::get(i32Ty, {}, false);
++    auto getFdFn = declareFn("fpga_get_uart_fd", getFdFnTy);
++
++    auto matmul4x4FnTy = LLVM::LLVMFunctionType::get(
++        i32Ty, {i32Ty, ptrTy, ptrTy, ptrTy, ptrTy}, false);
++    auto matmul4x4Fn = declareFn("fpga_matmul4x4", matmul4x4FnTy);
+ 
+     Value aMemref = tensorToMemref(rewriter, loc, a, aTy);
+     Value bMemref = tensorToMemref(rewriter, loc, b, bTy);
+     Value cMemref = tensorToMemref(rewriter, loc, c, cTy);
+ 
+-    Value aPtr = memrefToLLVMPtr(rewriter, loc, aMemref);
+-    Value bPtr = memrefToLLVMPtr(rewriter, loc, bMemref);
+-    Value cPtr = memrefToLLVMPtr(rewriter, loc, cMemref);
+-
+-    Value mVal = rewriter.create<arith::ConstantIntOp>(loc, M, 32);
+-    Value kVal = rewriter.create<arith::ConstantIntOp>(loc, K, 32);
+-    Value nVal = rewriter.create<arith::ConstantIntOp>(loc, N, 32);
+-
+-    rewriter.create<LLVM::CallOp>(
+-        loc, fpgaFunc, ValueRange{mVal, kVal, nVal, aPtr, bPtr, cPtr});
+-
+-    // c_mem 已经被外部呼叫原地写入结果,转回 tensor 顶替原本的 matmul 结果
+-    // restrict=true: 这个 memref 是我们刚从 to_memref 拿到的新值,
+-    // 保证没有其他别名指向同一块内存,One-Shot Bufferize 分析需要这个保证
++    // One fd for the whole matmul, fetched before the tile loops begin --
++    // matches the previous runtime's behavior of caching a single
++    // connection across every tile of one matmul invocation (and across
++    // separate invocations), rather than reopening per tile.
++    auto fdCall = rewriter.create<LLVM::CallOp>(loc, getFdFn, ValueRange{});
++    Value fd = fdCall.getResult();
++
++    // Scratch 4x4 buffers, reused across every tile: A-tile, B-tile, and
++    // the reduction accumulator (which doubles as both C_init and C_out
++    // for fpga_matmul4x4, since the UART protocol finishes reading its
++    // inputs before writing its result -- see Section runtime).
++    auto tile4x4Ty = MemRefType::get({4, 4}, rewriter.getF32Type());
++    Value aTile = rewriter.create<memref::AllocaOp>(loc, tile4x4Ty);
++    Value bTile = rewriter.create<memref::AllocaOp>(loc, tile4x4Ty);
++    Value acc = rewriter.create<memref::AllocaOp>(loc, tile4x4Ty);
++
++    Value aTilePtr = memrefToLLVMPtr(rewriter, loc, aTile);
++    Value bTilePtr = memrefToLLVMPtr(rewriter, loc, bTile);
++    Value accPtr = memrefToLLVMPtr(rewriter, loc, acc);
++
++    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
++    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
++    Value c4 = rewriter.create<arith::ConstantIndexOp>(loc, 4);
++    Value cMt = rewriter.create<arith::ConstantIndexOp>(loc, Mt);
++    Value cNt = rewriter.create<arith::ConstantIndexOp>(loc, Nt);
++    Value cKt = rewriter.create<arith::ConstantIndexOp>(loc, Kt);
++    Value zeroF32 = rewriter.create<arith::ConstantOp>(
++        loc, rewriter.getF32Type(), rewriter.getF32FloatAttr(0.0f));
++
++    auto miLoop = rewriter.create<scf::ForOp>(loc, c0, cMt, c1);
++    {
++      OpBuilder::InsertionGuard g(rewriter);
++      rewriter.setInsertionPointToStart(miLoop.getBody());
++      Value mi = miLoop.getInductionVar();
++      Value rowOffsetA = rewriter.create<arith::MulIOp>(loc, mi, c4);
++
++      auto niLoop = rewriter.create<scf::ForOp>(loc, c0, cNt, c1);
++      {
++        OpBuilder::InsertionGuard g2(rewriter);
++        rewriter.setInsertionPointToStart(niLoop.getBody());
++        Value ni = niLoop.getInductionVar();
++        Value colOffsetB = rewriter.create<arith::MulIOp>(loc, ni, c4);
++
++        // Zero-init this output tile's accumulator before the K-tile
++        // reduction loop -- matches the previous runtime's
++        // memcpy(acc, zero16, ...) before its kt loop.
++        for (int64_t r = 0; r < 4; ++r) {
++          Value cr = rewriter.create<arith::ConstantIndexOp>(loc, r);
++          for (int64_t cc = 0; cc < 4; ++cc) {
++            Value ccIdx = rewriter.create<arith::ConstantIndexOp>(loc, cc);
++            rewriter.create<memref::StoreOp>(loc, zeroF32, acc,
++                                              ValueRange{cr, ccIdx});
++          }
++        }
++
++        auto kiLoop = rewriter.create<scf::ForOp>(loc, c0, cKt, c1);
++        {
++          OpBuilder::InsertionGuard g3(rewriter);
++          rewriter.setInsertionPointToStart(kiLoop.getBody());
++          Value ki = kiLoop.getInductionVar();
++          Value colOffsetA = rewriter.create<arith::MulIOp>(loc, ki, c4);
++          Value rowOffsetB = rewriter.create<arith::MulIOp>(loc, ki, c4);
++
++          // Fill this iteration's A-tile and B-tile, zero-padded at the
++          // boundary -- these are the explicit tile/boundary/padding
++          // semantics that were previously opaque inside the C runtime.
++          emitBoundedTileFill(rewriter, loc, aMemref, M, K, rowOffsetA,
++                               colOffsetA, aTile);
++          emitBoundedTileFill(rewriter, loc, bMemref, K, N, rowOffsetB,
++                               colOffsetB, bTile);
++
++          // acc = a_tile @ b_tile + acc, computed by one 4x4x4 hardware
++          // round trip; acc is reused as both C_init and C_out.
++          rewriter.create<LLVM::CallOp>(
++              loc, matmul4x4Fn,
++              ValueRange{fd, aTilePtr, bTilePtr, accPtr, accPtr});
++        }
++
++        // Reduction over K-tiles for this output tile is done; write the
++        // accumulator back into C, skipping positions past the true
++        // M x N output shape.
++        emitBoundedTileWriteback(rewriter, loc, acc, cMemref, M, N,
++                                  rowOffsetA, colOffsetB);
++      }
++    }
++
++    // c_mem has now been written in place by the tile loops above;
++    // convert back to a tensor to replace the original matmul result.
++    // restrict=true: this memref was only just materialized from a
++    // distinct tensor and has no other aliases, which One-Shot
++    // Bufferize's alias analysis requires to be told explicitly.
+     auto toTensorOp = rewriter.create<bufferization::ToTensorOp>(
+         loc, cTy, cMemref, /*restrict=*/true, /*writable=*/true);
+     rewriter.replaceOp(op, toTensorOp.getResult());
+@@ -124,14 +318,17 @@
+ 
+   StringRef getArgument() const final { return "tile-matmul-for-fpga"; }
+   StringRef getDescription() const final {
+-    return "Lower arbitrary-shape linalg.matmul into calls to the FPGA "
+-           "runtime (fpga_matmul_tiled_auto), tiled into 4x4 blocks";
++    return "Lower arbitrary-shape linalg.matmul into explicit MLIR tile "
++           "loops (scf.for) with boundary-checked (scf.if) 4x4 tiling, "
++           "zero-padding, and reduction accumulation, dispatching each "
++           "tile to the FPGA runtime's single-tile primitive "
++           "(fpga_matmul4x4)";
+   }
+ 
+   void getDependentDialects(DialectRegistry &registry) const override {
+     registry.insert<linalg::LinalgDialect, bufferization::BufferizationDialect,
+                      memref::MemRefDialect, LLVM::LLVMDialect,
+-                     arith::ArithDialect>();
++                     arith::ArithDialect, scf::SCFDialect>();
+   }
+ 
+   void runOnOperation() override {
+--- a/runtime/fpga_matmul_tiled.h
++++ b/runtime/fpga_matmul_tiled.h
+@@ -7,6 +7,13 @@
+ int fpga_matmul_tiled(int fd, int M, int K, int N,
+                        const float *A, const float *B, float *C);
+ 
++// 自動管理 UART 連線,回傳快取的 fd(第一次呼叫時開啟 /dev/ttyUSB1,
++// 之後重複使用,不重複開關)。失敗回傳負值。
++// 由 TileMatmulForFpgaPattern 產生的 MLIR tile loop 在迴圈開始前呼叫一次,
++// 拿到 fd 之後直接對每個 4x4 tile 呼叫 fpga_matmul4x4(fd, ...) --
++// 跟 fpga_matmul_tiled_auto 共用同一個快取的 fd,不會各自開一條連線。
++int fpga_get_uart_fd(void);
++
+ #endif
+ 
+ // 自動管理 UART 連線的版本:第一次呼叫時自動開啟 /dev/ttyUSB1,
+--- a/runtime/fpga_matmul_tiled.c
++++ b/runtime/fpga_matmul_tiled.c
+@@ -61,11 +61,20 @@
+ 
+ static int g_fpga_fd = -2;  // -2 = 尚未嘗試開啟
+ 
+-int fpga_matmul_tiled_auto(int M, int K, int N,
+-                            const float *A, const float *B, float *C) {
++int fpga_get_uart_fd(void) {
+     if (g_fpga_fd == -2) {
+         g_fpga_fd = fpga_uart_open("/dev/ttyUSB1");
+     }
+-    if (g_fpga_fd < 0) return -3;  // 開啟失敗
+-    return fpga_matmul_tiled(g_fpga_fd, M, K, N, A, B, C);
++    return g_fpga_fd;  // 可能是負值(開啟失敗),呼叫端(MLIR 產生的 tile
++                        // loop 裡對 fpga_matmul4x4 的呼叫)目前沒有檢查
++                        // 這個回傳值 -- 跟既有的「runtime 呼叫的錯誤碼
++                        // 沒有回傳給 MLIR」這個已知限制一致,不是新引入
++                        // 的問題。
++}
++
++int fpga_matmul_tiled_auto(int M, int K, int N,
++                            const float *A, const float *B, float *C) {
++    int fd = fpga_get_uart_fd();
++    if (fd < 0) return -3;  // 開啟失敗
++    return fpga_matmul_tiled(fd, M, K, N, A, B, C);
+ }

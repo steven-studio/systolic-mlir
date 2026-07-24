@@ -175,3 +175,79 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
     free(Xcol); free(Kmat); free(Ycol);
     return 0;
 }
+
+// Padded variant of fpga_conv2d_im2col_general_auto. Identical structure
+// and variable names throughout; the only change is:
+//   (1) Hout/Wout are computed against the PADDED spatial extent
+//       (H + padTop + padBottom), not H itself, and
+//   (2) the im2col unfold below subtracts padTop/padLeft from the
+//       unfolded (iy, ix) position and, if the result falls outside
+//       [0, H) x [0, W), writes zero into Xcol instead of reading X --
+//       exactly the same style of boundary zero-fill already used for
+//       tile decomposition in fpga_matmul_tiled (see that file's
+//       boundary handling), just indexed by pad offset instead of tile
+//       offset. X itself is never padded in memory: only the original,
+//       un-padded buffer is ever touched.
+int fpga_conv2d_im2col_padded_auto(int N, int H, int W, int Cin,
+                                    int Kh, int Kw, int Cout,
+                                    int strideH, int strideW,
+                                    int dilationH, int dilationW,
+                                    int padTop, int padBottom,
+                                    int padLeft, int padRight,
+                                    const float *X, const float *Kernel,
+                                    float *Y) {
+    int effKh = dilationH * (Kh - 1) + 1;
+    int effKw = dilationW * (Kw - 1) + 1;
+    int Hpadded = H + padTop + padBottom;
+    int Wpadded = W + padLeft + padRight;
+    int Hout = (Hpadded - effKh) / strideH + 1;
+    int Wout = (Wpadded - effKw) / strideW + 1;
+    if (Hout <= 0 || Wout <= 0) return -1;
+
+    int M = Hout * Wout;
+    int Kdim = Kh * Kw * Cin;
+    int Ncols = Cout;
+
+    float *Xcol = malloc((size_t)M * Kdim * sizeof(float));
+    float *Kmat = malloc((size_t)Kdim * Ncols * sizeof(float));
+    float *Ycol = malloc((size_t)M * Ncols * sizeof(float));
+    if (!Xcol || !Kmat || !Ycol) {
+        free(Xcol); free(Kmat); free(Ycol);
+        return -2;
+    }
+    memcpy(Kmat, Kernel, (size_t)Kdim * Ncols * sizeof(float));
+
+    for (int n = 0; n < N; n++) {
+        const float *Xn = X + (size_t)n * H * W * Cin;
+        float *Yn = Y + (size_t)n * Hout * Wout * Cout;
+
+        for (int oy = 0; oy < Hout; oy++) {
+            for (int ox = 0; ox < Wout; ox++) {
+                int row = oy * Wout + ox;
+                for (int ky = 0; ky < Kh; ky++) {
+                    for (int kx = 0; kx < Kw; kx++) {
+                        for (int c = 0; c < Cin; c++) {
+                            int iy = oy * strideH + ky * dilationH - padTop;
+                            int ix = ox * strideW + kx * dilationW - padLeft;
+                            int col = (ky * Kw + kx) * Cin + c;
+                            float v = 0.0f; // synthesized pad region
+                            if (iy >= 0 && iy < H && ix >= 0 && ix < W)
+                                v = Xn[((size_t)iy * W + ix) * Cin + c];
+                            Xcol[(size_t)row * Kdim + col] = v;
+                        }
+                    }
+                }
+            }
+        }
+
+        int rc = fpga_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        if (rc != 0) {
+            free(Xcol); free(Kmat); free(Ycol);
+            return rc;
+        }
+        memcpy(Yn, Ycol, (size_t)M * Ncols * sizeof(float));
+    }
+
+    free(Xcol); free(Kmat); free(Ycol);
+    return 0;
+}

@@ -1,0 +1,42 @@
+--- a/lib/Systolic/Transforms/TileMatmulForFpga.cpp
++++ b/lib/Systolic/Transforms/TileMatmulForFpga.cpp
+@@ -31,7 +31,7 @@
+ //       scf.for %ki = 0 to K_tiles
+ //         <fill 4x4 A-tile from %A, scf.if boundary-checked, zero-padded>
+ //         <fill 4x4 B-tile from %B, scf.if boundary-checked, zero-padded>
+-//         llvm.call @systolic_dispatch_matmul4x4(%fd, %a_tile, %b_tile, %acc, %acc)
++//         llvm.call @systolic_dispatch_matmul4x4(%handle, %a_tile, %b_tile, %acc, %acc)
+ //       <writeback 4x4 accumulator into %C, scf.if boundary-checked>
+ //
+ // against a much thinner dispatch runtime primitive,
+@@ -221,8 +221,8 @@
+       return fn;
+     };
+ 
+-    auto getFdFnTy = LLVM::LLVMFunctionType::get(i32Ty, {}, false);
+-    auto getFdFn = declareFn("systolic_dispatch_open", getFdFnTy);
++    auto openFnTy = LLVM::LLVMFunctionType::get(i32Ty, {}, false);
++    auto openFn = declareFn("systolic_dispatch_open", openFnTy);
+ 
+     auto matmul4x4FnTy = LLVM::LLVMFunctionType::get(
+         i32Ty, {i32Ty, ptrTy, ptrTy, ptrTy, ptrTy}, false);
+@@ -236,8 +236,8 @@
+     // begin -- matches the previous runtime's behavior of caching a
+     // single connection across every tile of one matmul invocation (and
+     // across separate invocations), rather than reopening per tile.
+-    auto fdCall = rewriter.create<LLVM::CallOp>(loc, getFdFn, ValueRange{});
+-    Value fd = fdCall.getResult();
++    auto openCall = rewriter.create<LLVM::CallOp>(loc, openFn, ValueRange{});
++    Value handle = openCall.getResult();
+ 
+     // Scratch 4x4 buffers, reused across every tile: A-tile, B-tile, and
+     // the reduction accumulator (which doubles as both C_init and C_out
+@@ -308,7 +308,7 @@
+           // round trip; acc is reused as both C_init and C_out.
+           rewriter.create<LLVM::CallOp>(
+               loc, matmul4x4Fn,
+-              ValueRange{fd, aTilePtr, bTilePtr, accPtr, accPtr});
++              ValueRange{handle, aTilePtr, bTilePtr, accPtr, accPtr});
+         }
+ 
+         // Reduction over K-tiles for this output tile is done; write the

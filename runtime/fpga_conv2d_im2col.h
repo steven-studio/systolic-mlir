@@ -32,4 +32,19 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
                                      const float *X, const float *Kernel,
                                      float *Y);
 
+// Padded variant: X is the ORIGINAL, un-padded (N, H, W, Cin) buffer --
+// it is never materialized as a padded tensor. padTop/padBottom/padLeft/
+// padRight give the zero-padding amounts on each side of the spatial
+// dims, matching a preceding `tensor.pad` op with constant, zero-valued,
+// spatial-only padding. Hout/Wout are computed against the padded extent
+// internally; the caller's Y buffer should be sized accordingly.
+int fpga_conv2d_im2col_padded_auto(int N, int H, int W, int Cin,
+                                    int Kh, int Kw, int Cout,
+                                    int strideH, int strideW,
+                                    int dilationH, int dilationW,
+                                    int padTop, int padBottom,
+                                    int padLeft, int padRight,
+                                    const float *X, const float *Kernel,
+                                    float *Y);
+
 #endif

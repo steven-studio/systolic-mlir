@@ -10,6 +10,11 @@ namespace systolic {
 // 目前只处理形状固定、且刚好等于 (rows x cols) 的 matmul(阶段 2 MVP)。
 std::unique_ptr<Pass> createConvertMatmulToSystolicPass();
 
+// 阶段 1:走过 systolic.device / systolic.matmul_tile / systolic.dma,
+// 用 CostModel.h 的封闭公式标注 est_cycles。
+std::unique_ptr<Pass> createSystolicCostAnalysisPass();
+void registerSystolicCostAnalysisPass();
+
 // 把 systolic.pe_array 展开成 rows x cols x K 的三层 scf.for 迴圈,
 // 内层是真正的 systolic.mac 调用——不再是黑盒。
 std::unique_ptr<Pass> createExpandPEArrayToMacPass();
