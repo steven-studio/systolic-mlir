@@ -167,7 +167,8 @@ def Systolic_MatmulTileOp : Systolic_Op<"matmul_tile"> {
     I64Attr:$n,
     I64Attr:$k,
     OptionalAttr<FlatSymbolRefAttr>:$device,
-    OptionalAttr<I64Attr>:$est_cycles
+    OptionalAttr<I64Attr>:$est_cycles,
+    OptionalAttr<I64Attr>:$start_cycle
   );
   let results = (outs AnyType:$result);
 
