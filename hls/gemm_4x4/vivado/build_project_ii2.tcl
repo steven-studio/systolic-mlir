@@ -1,4 +1,4 @@
-set proj_name "matmul_arty_4x4"
+set proj_name "matmul_arty_4x4_ii2"
 set part_name "xc7a35ticsg324-1L"
 
 create_project $proj_name ./build -part $part_name -force
@@ -10,9 +10,9 @@ add_files -norecurse {
     ../rtl/uart_tx.v
     ../rtl/clk_gen.v
 }
-add_files [glob ../work_hls_systolic/hls/impl/ip/hdl/verilog/*.v]
+add_files [glob ../work_hls_systolic_ii2/hls/impl/ip/hdl/verilog/*.v]
 
-import_ip [glob ../work_hls_systolic/hls/impl/ip/hdl/ip/*/*.xci]
+import_ip [glob ../work_hls_systolic_ii2/hls/impl/ip/hdl/ip/*/*.xci]
 generate_target all [get_ips]
 set_property GENERATE_SYNTH_CHECKPOINT true [get_files -all *.xci]
 synth_ip [get_ips]
