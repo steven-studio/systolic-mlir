@@ -1,5 +1,6 @@
 #include "fpga_matmul_tiled.h"
 #include "fpga_matmul4x4.h"
+#include "fpga_matmul4x4_reliable.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,7 +49,7 @@ int fpga_matmul_tiled(int fd, int M, int K, int N,
                 extract_tile(B, K, N, kt*4, jt*4, b_tile);
 
                 // acc = a_tile @ b_tile + acc  (硬體協定原生支援累加)
-                int rc = fpga_matmul4x4(fd, a_tile, b_tile, acc, out_tile);
+                int rc = fpga_matmul4x4_reliable(fd, a_tile, b_tile, acc, out_tile);
                 if (rc != 0) return rc;
                 memcpy(acc, out_tile, sizeof(acc));
             }

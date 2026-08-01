@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "fpga_conv2d_im2col.h"
+#include "fpga_matmul4x4_reliable.h"
 
 static float *read_floats(const char *path, size_t count) {
     FILE *f = fopen(path, "rb");
@@ -95,5 +96,6 @@ int main(int argc, char **argv) {
 
     write_floats(yPath, Y, yCount);
     free(X); free(K); free(Y);
+    if (getenv("FPGA_UART_STATS")) fpga_reliable_print_stats(stderr);
     return 0;
 }
