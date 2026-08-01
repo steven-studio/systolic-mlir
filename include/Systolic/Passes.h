@@ -77,6 +77,15 @@ void registerConv2DToFpgaPass();
 // Registration entry point (called once from systolic-opt's main)
 //===----------------------------------------------------------------------===//
 
+//===----------------------------------------------------------------------===//
+// Stage 6: Executable scheduling output
+//   - TileToFpga: 把已排程(帶 device 屬性)的 systolic.matmul_tile lowering
+//                 成 dispatch runtime 呼叫,device 映射為 device id。
+//===----------------------------------------------------------------------===//
+
+std::unique_ptr<Pass> createSystolicTileToFpgaPass();
+void registerSystolicTileToFpgaPass();
+
 void registerSystolicPasses();
 
 } // namespace systolic
