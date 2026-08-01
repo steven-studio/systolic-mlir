@@ -124,4 +124,5 @@ void mlir::systolic::registerSystolicPasses() {
   registerSystolicSelectDevicePass();
   registerSystolicTileMatmulPass();
   registerSystolicScheduleOverlapPass();
+  registerSystolicTileToFpgaPass();
 }

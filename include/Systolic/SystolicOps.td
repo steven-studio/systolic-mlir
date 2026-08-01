@@ -137,32 +137,15 @@ def Systolic_MacOp : Systolic_Op<"mac", [Pure]> {
 // systolic.matmul_tile -- one GEMM tile, optionally mapped to a device
 //===----------------------------------------------------------------------===//
 
-def Systolic_MatmulTileOp : Systolic_Op<"matmul_tile"> {
+def Systolic_MatmulTileOp : Systolic_Op<"matmul_tile",
+    [Pure, AllTypesMatch<["c_in", "result"]>]> {
   let summary = "One (M,K)x(K,N) GEMM tile, optionally assigned to a "
                 "systolic.device.";
-  let description = [{
-    `device` is left unset by the frontend and filled in by the
-    accelerator-selection pass (stage 1, not yet written). `est_cycles` is
-    left unset until the cost-analysis pass runs. Both are ordinary
-    optional attributes, so this op is valid IR at every stage of the
-    pipeline, not just the end.
-
-    Before selection:
-    ```mlir
-    %0 = systolic.matmul_tile(64, 64, 64) : tensor<64x64xf32>
-    ```
-    After selection + cost analysis:
-    ```mlir
-    %0 = systolic.matmul_tile(64, 64, 64) on @acc_8x8 {est_cycles = 4110 : i64}
-        : tensor<64x64xf32>
-    ```
-
-    NOTE: this first cut has no real tensor operands (it is a schedulable
-    task node, not yet wired to actual data) -- adding those is a
-    follow-up once the scheduling passes exist.
-  }];
 
   let arguments = (ins
+    AnyRankedTensor:$a,
+    AnyRankedTensor:$b,
+    AnyRankedTensor:$c_in,
     I64Attr:$m,
     I64Attr:$n,
     I64Attr:$k,
@@ -170,9 +153,13 @@ def Systolic_MatmulTileOp : Systolic_Op<"matmul_tile"> {
     OptionalAttr<I64Attr>:$est_cycles,
     OptionalAttr<I64Attr>:$start_cycle
   );
-  let results = (outs AnyType:$result);
+  let results = (outs AnyRankedTensor:$result);
+  let hasVerifier = 1;   // 檢查 a=m×k, b=k×n, c_in=m×n
 
-  let assemblyFormat = "`(` $m `,` $n `,` $k `)` (`on` $device^)? attr-dict `:` type($result)";
+  let assemblyFormat = [{
+    $a `,` $b `,` $c_in (`on` $device^)? attr-dict
+    `:` `(` type($a) `,` type($b) `,` type($c_in) `)` `->` type($result)
+  }];
 }
 
 //===----------------------------------------------------------------------===//

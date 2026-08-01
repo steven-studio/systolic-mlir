@@ -91,3 +91,33 @@ LogicalResult StreamOp::verify() {
 // MacOp::print()/parse()/verifyInvariantsImpl() 这些实际函式定义
 #define GET_OP_CLASSES
 #include "Systolic/SystolicOps.cpp.inc"
+
+//===----------------------------------------------------------------------===//
+// MatmulTileOp verifier
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult mlir::systolic::MatmulTileOp::verify() {
+  auto aTy = ::llvm::dyn_cast<::mlir::RankedTensorType>(getA().getType());
+  auto bTy = ::llvm::dyn_cast<::mlir::RankedTensorType>(getB().getType());
+  auto cTy = ::llvm::dyn_cast<::mlir::RankedTensorType>(getCIn().getType());
+  if (!aTy || !bTy || !cTy)
+    return emitOpError("operands must be ranked tensors");
+  if (aTy.getRank() != 2 || bTy.getRank() != 2 || cTy.getRank() != 2)
+    return emitOpError("operands must be rank-2 tensors");
+
+  const int64_t m = static_cast<int64_t>(getM());
+  const int64_t n = static_cast<int64_t>(getN());
+  const int64_t k = static_cast<int64_t>(getK());
+
+  if (aTy.getShape()[0] != m || aTy.getShape()[1] != k)
+    return emitOpError("operand 'a' shape does not match (m, k)");
+  if (bTy.getShape()[0] != k || bTy.getShape()[1] != n)
+    return emitOpError("operand 'b' shape does not match (k, n)");
+  if (cTy.getShape()[0] != m || cTy.getShape()[1] != n)
+    return emitOpError("operand 'c_in' shape does not match (m, n)");
+  if (aTy.getElementType() != bTy.getElementType() ||
+      aTy.getElementType() != cTy.getElementType())
+    return emitOpError("all operands must have the same element type");
+
+  return ::mlir::success();
+}
