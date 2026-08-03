@@ -211,3 +211,11 @@ torch-mlir 匯出的 conv2d 會用它把輸出 buffer 歸零),順序寫反會導
   更廣的 shape sweep、`linalg.generic`(elementwise/normalization)與
   `linalg.pooling_*` 支援、硬體生成路徑本身的 tiling(見論文 Limitations
   and Future Work)
+## Running the tests
+
+The system LLVM-18 packages do not ship `llvm-lit`, so install it separately
+and point CMake at it:
+
+    pip install lit
+    cmake -DLLVM_EXTERNAL_LIT=$(which lit) ..
+    ninja check-systolic
