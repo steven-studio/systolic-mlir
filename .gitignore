@@ -45,3 +45,4 @@ runtime/*.bin
 hls/**/*.pb
 hls/**/clockInfo.txt
 hls/**/*.cfg
+hls/gemm_4x4/sweep_runs/
