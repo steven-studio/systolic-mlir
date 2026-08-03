@@ -1,5 +1,5 @@
 #include "Systolic/SystolicCostAnalysisPass.h"
-#include "CostModel.h"
+#include "Systolic/CostModel.h"
 #include "Systolic/SystolicOps.h"
 
 #include "mlir/IR/Builders.h"

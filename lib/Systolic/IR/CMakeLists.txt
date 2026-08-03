@@ -1,7 +1,6 @@
 add_mlir_dialect_library(MLIRSystolic
   SystolicDialect.cpp
   SystolicOps.cpp
-  CostModel.cpp
   SystolicCostAnalysisPass.cpp
 
   ADDITIONAL_HEADER_DIRS

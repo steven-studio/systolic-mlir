@@ -8,7 +8,9 @@ namespace systolic {
 struct ArrayConfig {
   int64_t rows = 0;
   int64_t cols = 0;
-  int64_t depth = 1;
+  int64_t depth = 1;              // K-tile depth (HLS K_DIM)
+  int64_t initiationInterval = 1; // 校正值：cosim 實測 II
+  int64_t fixedOverhead = 6;      // 校正值：init/drain 迴圈 + 介面握手
   double clockHz = 0.0;
   double dmaBytesPerCycle = 0.0;
 };
