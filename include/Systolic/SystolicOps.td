@@ -98,10 +98,16 @@ def Systolic_StreamOp : Systolic_Op<"stream", [Pure]> {
   let summary = "把資料以 skew 排程送進 systolic array 的一路 stream";
   let arguments = (ins
     AnyType:$data,
-    Systolic_StreamDirectionAttr:$direction,
+    Systolic_StreamDirection:$direction,
     I64Attr:$skew
   );
   let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+      $data `direction` `(` $direction `)` `skew` `(` $skew `)` attr-dict
+      `:` functional-type(operands, results)
+    }];
+
   let hasVerifier = 1;
 }
 
@@ -117,9 +123,16 @@ def Systolic_PEArrayOp : Systolic_Op<"pe_array", [Pure]> {
     Optional<AnyType>:$acc_operand,
     I64Attr:$rows,
     I64Attr:$cols,
-    Systolic_StationaryKindAttr:$stationary
+    Systolic_StationaryKind:$stationary
   );
   let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+      `<` $rows `x` $cols `>` `stationary` `(` $stationary `)`
+      $stationary_operand `,` $moving_operand (`,` $acc_operand^)? attr-dict
+      `:` functional-type(operands, results)
+    }];
+
   let hasVerifier = 1;
 }
 

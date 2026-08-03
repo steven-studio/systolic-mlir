@@ -37,6 +37,9 @@ include_directories(${PROJECT_BINARY_DIR}/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # 靠近檔案開頭
+
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
+add_subdirectory(test)                                        # 在 add_subdirectory(tools) 之後
