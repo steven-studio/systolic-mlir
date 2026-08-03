@@ -100,6 +100,8 @@ def run_one(row, bin_path, keep_bins):
             str(Cout), str(sH), str(sW), str(dH), str(dW),
             str(pT), str(pB), str(pL), str(pR), "X.bin", "K.bin", "Y.bin"]
     result = subprocess.run(args, capture_output=True, text=True)
+    if os.environ.get("FPGA_UART_STATS") and result.stderr:
+        print("   ", result.stderr.strip())
     if result.returncode != 0:
         return None, result.stderr.strip() or "nonzero exit"
 
