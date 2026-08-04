@@ -10,9 +10,9 @@ add_files -norecurse {
     ../rtl/uart_tx.v
     ../rtl/clk_gen.v
 }
-add_files [glob ../systolic_proj/solution1/impl/ip/hdl/verilog/*.v]
+add_files [glob ../work_hls_systolic/hls/impl/ip/hdl/verilog/*.v]
 
-read_ip [glob ../systolic_proj/solution1/impl/ip/hdl/ip/*/*.xci]
+import_ip [glob ../work_hls_systolic/hls/impl/ip/hdl/ip/*/*.xci]
 generate_target all [get_ips]
 set_property GENERATE_SYNTH_CHECKPOINT true [get_files -all *.xci]
 synth_ip [get_ips]

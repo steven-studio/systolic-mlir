@@ -1,0 +1,395 @@
+
+
+================================================================
+== Synthesis Summary Report of 'matmul_4x4x4'
+================================================================
++ General Information: 
+    * Date:           Thu Jul 23 00:48:38 2026
+    * Version:        2026.1 (Build 6493734 on Jun 16 2026)
+    * Project:        work_full_precision_zynq
+    * Solution:       hls (Vivado IP Flow Target)
+    * Product family: zynq
+    * Target device:  xc7z020-clg400-1
+    
+
+* Performance & Resource Estimates: 
++--------------------------------------------+--------+---------------+----------+---------+------+----------+---------+---------+--------+------+----------+-----------+-------------+-----+
+|                   Modules                  |  Issue |               | Iteration|         | Trip |          |      Latency      |        |      |          |           |             |     |
+|                   & Loops                  |  Type  | Violation Type|  Latency | Interval| Count| Pipelined| (cycles)|   (ns)  |  Slack | BRAM |    DSP   |     FF    |     LUT     | URAM|
++--------------------------------------------+--------+---------------+----------+---------+------+----------+---------+---------+--------+------+----------+-----------+-------------+-----+
+|+ matmul_4x4x4                              |  Timing|              -|         -|       13|     -|        no|       12|  560.928|  -39.44|     -|  64 (29%)|  8979 (8%)|  13366 (25%)|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_3    |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_31   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_32   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_33   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_34   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_35   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_36   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_37   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_38   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_39   |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_310  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_311  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_312  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_313  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_314  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
+| + matmul_4x4x4_Pipeline_VITIS_LOOP_10_315  |  Timing|              -|         -|       10|     -|       yes|       10|  467.440|  -39.44|     -|    4 (1%)|  464 (~0%)|     834 (1%)|    -|
+|  o VITIS_LOOP_10_3                         |       -|              -|         6|        1|     4|       yes|        8|  373.952|    7.30|     -|         -|          -|            -|    -|
++--------------------------------------------+--------+---------------+----------+---------+------+----------+---------+---------+--------+------+----------+-----------+-------------+-----+
+    Name Prefix: '+' for module, 'o' for loop, '*' for dataflow
+
+
+================================================================
+== HW Interfaces
+================================================================
+* Other Ports
++------------+---------+-----------+----------+
+| Port       | Mode    | Direction | Bitwidth |
++------------+---------+-----------+----------+
+| arg0_0_0   | ap_none | in        | 32       |
+| arg0_0_1   | ap_none | in        | 32       |
+| arg0_0_2   | ap_none | in        | 32       |
+| arg0_0_3   | ap_none | in        | 32       |
+| arg0_1_0   | ap_none | in        | 32       |
+| arg0_1_1   | ap_none | in        | 32       |
+| arg0_1_2   | ap_none | in        | 32       |
+| arg0_1_3   | ap_none | in        | 32       |
+| arg0_2_0   | ap_none | in        | 32       |
+| arg0_2_1   | ap_none | in        | 32       |
+| arg0_2_2   | ap_none | in        | 32       |
+| arg0_2_3   | ap_none | in        | 32       |
+| arg0_3_0   | ap_none | in        | 32       |
+| arg0_3_1   | ap_none | in        | 32       |
+| arg0_3_2   | ap_none | in        | 32       |
+| arg0_3_3   | ap_none | in        | 32       |
+| arg1_0_0   | ap_none | in        | 32       |
+| arg1_0_1   | ap_none | in        | 32       |
+| arg1_0_2   | ap_none | in        | 32       |
+| arg1_0_3   | ap_none | in        | 32       |
+| arg1_1_0   | ap_none | in        | 32       |
+| arg1_1_1   | ap_none | in        | 32       |
+| arg1_1_2   | ap_none | in        | 32       |
+| arg1_1_3   | ap_none | in        | 32       |
+| arg1_2_0   | ap_none | in        | 32       |
+| arg1_2_1   | ap_none | in        | 32       |
+| arg1_2_2   | ap_none | in        | 32       |
+| arg1_2_3   | ap_none | in        | 32       |
+| arg1_3_0   | ap_none | in        | 32       |
+| arg1_3_1   | ap_none | in        | 32       |
+| arg1_3_2   | ap_none | in        | 32       |
+| arg1_3_3   | ap_none | in        | 32       |
+| arg2_0_0_i | ap_ovld | in        | 32       |
+| arg2_0_0_o | ap_ovld | out       | 32       |
+| arg2_0_1_i | ap_ovld | in        | 32       |
+| arg2_0_1_o | ap_ovld | out       | 32       |
+| arg2_0_2_i | ap_ovld | in        | 32       |
+| arg2_0_2_o | ap_ovld | out       | 32       |
+| arg2_0_3_i | ap_ovld | in        | 32       |
+| arg2_0_3_o | ap_ovld | out       | 32       |
+| arg2_1_0_i | ap_ovld | in        | 32       |
+| arg2_1_0_o | ap_ovld | out       | 32       |
+| arg2_1_1_i | ap_ovld | in        | 32       |
+| arg2_1_1_o | ap_ovld | out       | 32       |
+| arg2_1_2_i | ap_ovld | in        | 32       |
+| arg2_1_2_o | ap_ovld | out       | 32       |
+| arg2_1_3_i | ap_ovld | in        | 32       |
+| arg2_1_3_o | ap_ovld | out       | 32       |
+| arg2_2_0_i | ap_ovld | in        | 32       |
+| arg2_2_0_o | ap_ovld | out       | 32       |
+| arg2_2_1_i | ap_ovld | in        | 32       |
+| arg2_2_1_o | ap_ovld | out       | 32       |
+| arg2_2_2_i | ap_ovld | in        | 32       |
+| arg2_2_2_o | ap_ovld | out       | 32       |
+| arg2_2_3_i | ap_ovld | in        | 32       |
+| arg2_2_3_o | ap_ovld | out       | 32       |
+| arg2_3_0_i | ap_ovld | in        | 32       |
+| arg2_3_0_o | ap_ovld | out       | 32       |
+| arg2_3_1_i | ap_ovld | in        | 32       |
+| arg2_3_1_o | ap_ovld | out       | 32       |
+| arg2_3_2_i | ap_ovld | in        | 32       |
+| arg2_3_2_o | ap_ovld | out       | 32       |
+| arg2_3_3_i | ap_ovld | in        | 32       |
+| arg2_3_3_o | ap_ovld | out       | 32       |
++------------+---------+-----------+----------+
+
+* TOP LEVEL CONTROL
++-----------+------------+-----------------------------------+
+| Interface | Type       | Ports                             |
++-----------+------------+-----------------------------------+
+| ap_clk    | clock      | ap_clk                            |
+| ap_rst    | reset      | ap_rst                            |
+| ap_ctrl   | ap_ctrl_hs | ap_done ap_idle ap_ready ap_start |
++-----------+------------+-----------------------------------+
+
+
+================================================================
+== SW I/O Information
+================================================================
+* Top Function Arguments
++----------+-----------+----------+
+| Argument | Direction | Datatype |
++----------+-----------+----------+
+| arg0     | in        | float*   |
+| arg1     | in        | float*   |
+| arg2     | inout     | float*   |
++----------+-----------+----------+
+
+* SW-to-HW Mapping
++----------+-------------------+---------+
+| Argument | HW Interface      | HW Type |
++----------+-------------------+---------+
+| arg0     | arg0_0_0          | port    |
+| arg0     | arg0_0_1          | port    |
+| arg0     | arg0_0_2          | port    |
+| arg0     | arg0_0_3          | port    |
+| arg0     | arg0_1_0          | port    |
+| arg0     | arg0_1_1          | port    |
+| arg0     | arg0_1_2          | port    |
+| arg0     | arg0_1_3          | port    |
+| arg0     | arg0_2_0          | port    |
+| arg0     | arg0_2_1          | port    |
+| arg0     | arg0_2_2          | port    |
+| arg0     | arg0_2_3          | port    |
+| arg0     | arg0_3_0          | port    |
+| arg0     | arg0_3_1          | port    |
+| arg0     | arg0_3_2          | port    |
+| arg0     | arg0_3_3          | port    |
+| arg1     | arg1_0_0          | port    |
+| arg1     | arg1_0_1          | port    |
+| arg1     | arg1_0_2          | port    |
+| arg1     | arg1_0_3          | port    |
+| arg1     | arg1_1_0          | port    |
+| arg1     | arg1_1_1          | port    |
+| arg1     | arg1_1_2          | port    |
+| arg1     | arg1_1_3          | port    |
+| arg1     | arg1_2_0          | port    |
+| arg1     | arg1_2_1          | port    |
+| arg1     | arg1_2_2          | port    |
+| arg1     | arg1_2_3          | port    |
+| arg1     | arg1_3_0          | port    |
+| arg1     | arg1_3_1          | port    |
+| arg1     | arg1_3_2          | port    |
+| arg1     | arg1_3_3          | port    |
+| arg2     | arg2_0_0_i        | port    |
+| arg2     | arg2_0_0_o        | port    |
+| arg2     | arg2_0_0_o_ap_vld | port    |
+| arg2     | arg2_0_1_i        | port    |
+| arg2     | arg2_0_1_o        | port    |
+| arg2     | arg2_0_1_o_ap_vld | port    |
+| arg2     | arg2_0_2_i        | port    |
+| arg2     | arg2_0_2_o        | port    |
+| arg2     | arg2_0_2_o_ap_vld | port    |
+| arg2     | arg2_0_3_i        | port    |
+| arg2     | arg2_0_3_o        | port    |
+| arg2     | arg2_0_3_o_ap_vld | port    |
+| arg2     | arg2_1_0_i        | port    |
+| arg2     | arg2_1_0_o        | port    |
+| arg2     | arg2_1_0_o_ap_vld | port    |
+| arg2     | arg2_1_1_i        | port    |
+| arg2     | arg2_1_1_o        | port    |
+| arg2     | arg2_1_1_o_ap_vld | port    |
+| arg2     | arg2_1_2_i        | port    |
+| arg2     | arg2_1_2_o        | port    |
+| arg2     | arg2_1_2_o_ap_vld | port    |
+| arg2     | arg2_1_3_i        | port    |
+| arg2     | arg2_1_3_o        | port    |
+| arg2     | arg2_1_3_o_ap_vld | port    |
+| arg2     | arg2_2_0_i        | port    |
+| arg2     | arg2_2_0_o        | port    |
+| arg2     | arg2_2_0_o_ap_vld | port    |
+| arg2     | arg2_2_1_i        | port    |
+| arg2     | arg2_2_1_o        | port    |
+| arg2     | arg2_2_1_o_ap_vld | port    |
+| arg2     | arg2_2_2_i        | port    |
+| arg2     | arg2_2_2_o        | port    |
+| arg2     | arg2_2_2_o_ap_vld | port    |
+| arg2     | arg2_2_3_i        | port    |
+| arg2     | arg2_2_3_o        | port    |
+| arg2     | arg2_2_3_o_ap_vld | port    |
+| arg2     | arg2_3_0_i        | port    |
+| arg2     | arg2_3_0_o        | port    |
+| arg2     | arg2_3_0_o_ap_vld | port    |
+| arg2     | arg2_3_1_i        | port    |
+| arg2     | arg2_3_1_o        | port    |
+| arg2     | arg2_3_1_o_ap_vld | port    |
+| arg2     | arg2_3_2_i        | port    |
+| arg2     | arg2_3_2_o        | port    |
+| arg2     | arg2_3_2_o_ap_vld | port    |
+| arg2     | arg2_3_3_i        | port    |
+| arg2     | arg2_3_3_o        | port    |
+| arg2     | arg2_3_3_o_ap_vld | port    |
++----------+-------------------+---------+
+
+
+================================================================
+== Bind Op Report
+================================================================
++--------------------------------------------+-----+--------+-----------+-----------+--------------------------+---------+
+| Name                                       | DSP | Pragma | Variable  | Op        | Impl                     | Latency |
++--------------------------------------------+-----+--------+-----------+-----------+--------------------------+---------+
+| + matmul_4x4x4                             | 64  |        |           |           |                          |         |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_3   | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U3                 |     |        | tmp       | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U4                 |     |        | tmp_1     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U2       | 2   |        | mul       | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U1       | 2   |        | acc_3     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_31  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U20                |     |        | tmp_2     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U21                |     |        | tmp_3     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U19      | 2   |        | mul_s     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U18      | 2   |        | acc_6     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_32  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U34                |     |        | tmp_4     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U35                |     |        | tmp_5     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U33      | 2   |        | mul_4     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U32      | 2   |        | acc       | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_33  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U48                |     |        | tmp_6     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U49                |     |        | tmp_7     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U47      | 2   |        | mul_5     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U46      | 2   |        | acc_8     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_34  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U62                |     |        | tmp_8     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U63                |     |        | tmp_9     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U61      | 2   |        | mul_1     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U60      | 2   |        | acc_6     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_35  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U76                |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U77                |     |        | tmp_5     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U75      | 2   |        | mul_1_1   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U74      | 2   |        | acc_5     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_36  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U90                |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U91                |     |        | tmp_4     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U89      | 2   |        | mul_1_2   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U88      | 2   |        | acc_4     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_37  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U104               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U105               |     |        | tmp_3     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U103     | 2   |        | mul_1_3   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U102     | 2   |        | acc_3     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_38  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U118               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U119               |     |        | tmp_2     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U117     | 2   |        | mul_2     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U116     | 2   |        | acc_2     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_39  | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U132               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U133               |     |        | tmp_1     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U131     | 2   |        | mul_2_1   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U130     | 2   |        | acc_1     | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_310 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U146               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U147               |     |        | tmp_11    | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U145     | 2   |        | mul_2_2   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U144     | 2   |        | acc_14    | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_311 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U160               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U161               |     |        | tmp_10    | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U159     | 2   |        | mul_2_3   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U158     | 2   |        | acc_13    | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_312 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U174               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U175               |     |        | tmp_9     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U173     | 2   |        | mul_3     | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U172     | 2   |        | acc_12    | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_313 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U188               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U189               |     |        | tmp_8     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U187     | 2   |        | mul_3_1   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U186     | 2   |        | acc_11    | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_314 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U202               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U203               |     |        | tmp_7     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U201     | 2   |        | mul_3_2   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U200     | 2   |        | acc_10    | fadd      | fulldsp                  | 1       |
+|  + matmul_4x4x4_Pipeline_VITIS_LOOP_10_315 | 4   |        |           |           |                          |         |
+|    icmp_ln10_fu_150_p2                     |     |        | icmp_ln10 | seteq     | auto                     | 0       |
+|    add_ln10_fu_156_p2                      |     |        | add_ln10  | add       | fabric                   | 0       |
+|    sparsemux_9_2_32_1_1_U216               |     |        | tmp_s     | sparsemux | compactencoding_dontcare | 0       |
+|    sparsemux_9_2_32_1_1_U217               |     |        | tmp_6     | sparsemux | compactencoding_dontcare | 0       |
+|    fmul_32ns_32ns_32_4_full_dsp_1_U215     | 2   |        | mul_3_3   | fmul      | fulldsp                  | 3       |
+|    fadd_32ns_32ns_32_2_full_dsp_1_U214     | 2   |        | acc_9     | fadd      | fulldsp                  | 1       |
++--------------------------------------------+-----+--------+-----------+-----------+--------------------------+---------+
+
+
+================================================================
+== Storage Report
+================================================================
+  No bind storage info in design
+
+================================================================
+== Pragma Report
+================================================================
+* Ignored Pragmas
++-----------------+------------------------------+--------------------------------+-----------------+
+| Type            | Options                      | Location                       | Messages        |
++-----------------+------------------------------+--------------------------------+-----------------+
+| ARRAY_PARTITION | variable=arg0 complete dim=0 | in matmul_4x4x4 (design.cpp:2) | Not implemented |
+| ARRAY_PARTITION | variable=arg1 complete dim=0 | in matmul_4x4x4 (design.cpp:3) | Not implemented |
+| ARRAY_PARTITION | variable=arg2 complete dim=0 | in matmul_4x4x4 (design.cpp:4) | Not implemented |
++-----------------+------------------------------+--------------------------------+-----------------+
+
+* Implemented Pragmas
++--------+---------+--------------------------------+
+| Type   | Options | Location                       |
++--------+---------+--------------------------------+
+| UNROLL |         | in matmul_4x4x4 (design.cpp:6) |
+| UNROLL |         | in matmul_4x4x4 (design.cpp:8) |
++--------+---------+--------------------------------+
+
+* Valid Pragma Syntax
++----------+---------+---------------------------------+
+| Type     | Options | Location                        |
++----------+---------+---------------------------------+
+| UNROLL   |         | in matmul_4x4x4 (design.cpp:6)  |
+| UNROLL   |         | in matmul_4x4x4 (design.cpp:8)  |
+| PIPELINE | ii=1    | in matmul_4x4x4 (design.cpp:11) |
++----------+---------+---------------------------------+
+
+

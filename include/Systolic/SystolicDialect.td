@@ -1,30 +1,43 @@
-#ifndef SYSTOLIC_DIALECT_TD
-#define SYSTOLIC_DIALECT_TD
+//===- SystolicDialect.td - Systolic dialect definition --*- tablegen -*-===//
+//
+// Defines the `systolic` MLIR dialect: an IR for expressing GEMM tiles,
+// DMA transfers, and heterogeneous accelerator hardware descriptions for
+// SoCs built from multiple fixed-geometry systolic arrays.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef SYSTOLIC_DIALECT
+#define SYSTOLIC_DIALECT
 
 include "mlir/IR/OpBase.td"
 
-// -----------------------------------------------------------------------
-// Dialect 定义
-//
-// 命名空间 "systolic",ops 会写成 systolic.pe_array / systolic.stream / systolic.mac
-// -----------------------------------------------------------------------
 def Systolic_Dialect : Dialect {
   let name = "systolic";
-  let summary = "Spatial mapping dialect for systolic array accelerators";
+  let summary = "IR for scheduling GEMM tiles across heterogeneous, "
+                "fixed-geometry systolic array accelerators.";
   let description = [{
-    Systolic dialect 表达「空间映射决策」:哪些维度映射到 PE 阵列的
-    空间维度(row/col),哪些维度保留成时间维度(在同一个 PE 里 iterate),
-    以及 operand 的 stationary 策略(weight-stationary / output-stationary /
-    input-stationary)。
+    The `systolic` dialect models three things at compile time:
 
-    这一层刻意不表达时脉、register、FIFO 深度等电路细节——那些留给
-    下游的 HLS codegen 或 CIRCT 处理。
+    1. Hardware description -- one `systolic.device` op per accelerator
+       instance in the target SoC, carrying its fixed array geometry
+       (rows, cols, depth) and dataflow as IR attributes. These are data,
+       not compiled-in constants, so the same IR and passes retarget to a
+       different board just by changing these attributes.
+    2. Compute tiles -- `systolic.matmul_tile` ops representing one
+       (M, K) x (K, N) GEMM tile, optionally already assigned to a device.
+    3. Data movement -- `systolic.dma` ops representing scratchpad
+       transfers, kept separate from compute so a later scheduling pass
+       can decide whether to serialize or overlap them.
+
+    This dialect intentionally stays low-level and analysis-friendly: it
+    is the substrate that the cost model and scheduling passes (selection,
+    partitioning, overlap-aware parallel scheduling) operate over.
   }];
   let cppNamespace = "::mlir::systolic";
 }
 
-// 所有 Systolic op 的共同基础 class
+// Base class for all ops in this dialect.
 class Systolic_Op<string mnemonic, list<Trait> traits = []> :
     Op<Systolic_Dialect, mnemonic, traits>;
 
-#endif // SYSTOLIC_DIALECT_TD
+#endif // SYSTOLIC_DIALECT

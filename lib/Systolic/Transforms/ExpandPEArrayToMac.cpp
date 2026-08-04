@@ -29,6 +29,15 @@ struct ExpandPEArrayToMacPattern : public OpRewritePattern<PEArrayOp> {
     Value weight = op.getStationaryOperand(); // B: [K, N]
     Value moving = op.getMovingOperand();     // A: [M, K]
 
+    // The skew schedule that systolic.stream describes has no meaning once
+    // the array becomes plain scf loops: every MAC is explicit and ordered
+    // by the loop nest, not by arrival time. Read through to the original
+    // tensor so the stream op is left without users and DCE removes it.
+    // Leaving it would keep a systolic-level op alive in IR that is meant
+    // to be fully lowered.
+    if (auto stream = moving.getDefiningOp<StreamOp>())
+      moving = stream.getData();
+
     auto weightTy = cast<RankedTensorType>(weight.getType());
     auto movingTy = cast<RankedTensorType>(moving.getType());
     int64_t rows = movingTy.getShape()[0];

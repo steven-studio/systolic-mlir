@@ -1,0 +1,44 @@
+<xilinx:hls_fe_msgs>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="directive:1:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="directive" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaOptions="name=matmul_4x4x4" ARG_PragmaType="top" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:2:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaOptions="variable=arg0 complete dim=0" ARG_PragmaType="array_partition" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:3:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaOptions="variable=arg1 complete dim=0" ARG_PragmaType="array_partition" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:4:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaOptions="variable=arg2 complete dim=0" ARG_PragmaType="array_partition" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:6:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaType="unroll" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:8:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaType="unroll" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_DUMP" msg_id="207-6999" msg_severity="WARNING" msg_loc="design.cpp:11:1" msg_body="HLS pragma dump">
+        <args ARG_PragmaContext="hls" ARG_PragmaFunction="matmul_4x4x4" ARG_PragmaIsValid="1" ARG_PragmaOptions="II=1" ARG_PragmaType="pipeline" ClangWarningOption="dump-hls-pragmas"/>
+    </msg>
+    <msg msg_groups="PRAGMA_UNROLL" msg_id="214-186" msg_severity="INFO" msg_loc="design.cpp:1:0" msg_body="Unrolling loop 'VITIS_LOOP_5_1' (design.cpp:5:19) in function 'matmul_4x4x4' completely with a factor of 4">
+        <args Factor="4" LoopLoc="design.cpp:5:19" LoopName="VITIS_LOOP_5_1"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_ACK" msg_id="214-487" msg_severity="INFO" msg_loc="design.cpp:6:1" msg_body="unroll  false matmul_4x4x4 design.cpp:6:1">
+        <args PragmaFunction="matmul_4x4x4" PragmaIsAuto="false" PragmaSrcLoc="design.cpp:6:1" PragmaSrcLoc-DebugLoc="File design.cpp Line 6 Column 1" PragmaType="unroll"/>
+    </msg>
+    <msg msg_groups="PRAGMA_UNROLL" msg_id="214-186" msg_severity="INFO" msg_loc="design.cpp:1:0" msg_body="Unrolling loop 'VITIS_LOOP_7_2' (design.cpp:7:21) in function 'matmul_4x4x4' completely with a factor of 4">
+        <args Factor="4" LoopLoc="design.cpp:7:21" LoopName="VITIS_LOOP_7_2"/>
+    </msg>
+    <msg msg_groups="PRAGMA_VERBOSE_ACK" msg_id="214-487" msg_severity="INFO" msg_loc="design.cpp:8:1" msg_body="unroll  false matmul_4x4x4 design.cpp:8:1">
+        <args PragmaFunction="matmul_4x4x4" PragmaIsAuto="false" PragmaSrcLoc="design.cpp:8:1" PragmaSrcLoc-DebugLoc="File design.cpp Line 8 Column 1" PragmaType="unroll"/>
+    </msg>
+    <msg msg_groups="PRAGMA_MISC" msg_id="214-248" msg_severity="INFO" msg_loc="design.cpp:1:0" msg_body="Applying array_partition to 'arg0': Complete partitioning on dimension 1. Complete partitioning on dimension 2.">
+        <args Dim="islist 1 2" Mode="islist Complete Complete" UOName="arg0"/>
+    </msg>
+    <msg msg_groups="PRAGMA_MISC" msg_id="214-248" msg_severity="INFO" msg_loc="design.cpp:1:0" msg_body="Applying array_partition to 'arg1': Complete partitioning on dimension 1. Complete partitioning on dimension 2.">
+        <args Dim="islist 1 2" Mode="islist Complete Complete" UOName="arg1"/>
+    </msg>
+    <msg msg_groups="PRAGMA_MISC" msg_id="214-248" msg_severity="INFO" msg_loc="design.cpp:1:0" msg_body="Applying array_partition to 'arg2': Complete partitioning on dimension 1. Complete partitioning on dimension 2.">
+        <args Dim="islist 1 2" Mode="islist Complete Complete" UOName="arg2"/>
+    </msg>
+</xilinx:hls_fe_msgs>

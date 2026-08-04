@@ -1,0 +1,20 @@
+{
+  "0": {
+    "basicblocks": 33,
+    "calls": "",
+    "control_depth": 0,
+    "def_use_depth": 3,
+    "file": "design.cpp",
+    "fileloc": 1,
+    "instructions": 321,
+    "loads": {
+      "T": 144
+    },
+    "memory_accesses": 128,
+    "name": "matmul_4x4x4",
+    "stores": {
+      "T": 16
+    },
+    "total_instructions": 321
+  }
+}

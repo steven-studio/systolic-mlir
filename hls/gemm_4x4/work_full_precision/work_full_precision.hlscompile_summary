@@ -1,0 +1,87 @@
+<ENTRY>
+{
+ "thisFile": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision/work_full_precision.hlscompile_summary",
+ "connectId": "",
+ "serverToken": "",
+ "timestamp": "0"
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_CmdStep",
+ "dateTimestamp": "Wed Jul 22 20:52:22 2026",
+ "timestampMillis": "1784724742310",
+ "buildStep": {
+  "cmdId": "dc8bc700-6e4b-4814-82c3-986ed7b15add",
+  "name": "v++",
+  "logFile": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision/logs/work_full_precision.steps.log",
+  "commandLine": "/home/steven-studio/tools/Xilinx/2026.1/Vitis/bin/unwrapped/lnx64.o/v++  -c --mode hls --config hls_config_full_precision.cfg --work_dir work_full_precision ",
+  "args": [
+   "-c",
+   "--mode",
+   "hls",
+   "--config",
+   "hls_config_full_precision.cfg",
+   "--work_dir",
+   "work_full_precision"
+  ],
+  "iniFiles": [
+   {
+    "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/hls_config_full_precision.cfg",
+    "content": "# hls_config_full_precision.cfg\n#\n# Vitis Unified IDE (2025.x / 2026.1) config-file flow, replacing the\n# classic `vitis_hls -f run_hls.tcl` script -- that classic flow no\n# longer exists as a standalone vitis_hls executable in this install\n# (confirmed: no vitis_hls binary under Vitis/bin/), so this uses the\n# new v++ --mode hls / vitis-run --mode hls command-line flow instead.\n#\n# Run from ~/systolic-mlir/hls/gemm_4x4/:\n#\n#   1. (optional) C simulation first, to sanity-check before synthesis:\n#      vitis-run --mode hls --csim --config hls_config_full_precision.cfg \\\n#          --work_dir work_full_precision\n#\n#   2. Synthesis (the step that actually applies the impl:fulldsp setting):\n#      v++ -c --mode hls --config hls_config_full_precision.cfg \\\n#          --work_dir work_full_precision\n#\n# This creates a NEW work_dir (work_full_precision/), separate from\n# whatever directory your original synthesis used, so the original\n# results are untouched for side-by-side comparison.\n#\n# IMPORTANT CAVEATS:\n#   - This command-line flow (v++ --mode hls, vitis-run --mode hls) is\n#     confirmed from AMD's UG1702/UG1399 documentation for the 2025.x\n#     Vitis Unified IDE, but I have not run it myself against your\n#     specific 2026.1 install -- if v++ or vitis-run reject any option\n#     below, run `v++ --mode hls -h` (or ask 蔡老師, since this tooling\n#     changed recently enough that even he may not have hit it yet) to\n#     get the exact accepted syntax for this build.\n#   - flow_target's exact value for \"export as Vivado IP\" (as opposed to\n#     a Vitis kernel .xo) may need adjusting -- try `vivado` first; if\n#     rejected, check the config file command reference for the exact\n#     accepted string in this version.\n\npart=xc7a35ticsg324-1L\n\n[hls]\nsyn.file=./design.cpp\nsyn.top=matmul_4x4x4\nflow_target=vivado\nclock=10ns\nsyn.output.format=ip_catalog\n\n# The actual change under test: pin floating-point multiply and add to\n# \"Full Usage\" of DSP resources (impl:fulldsp), instead of letting the\n# tool choose (the default, impl:all, which is what your original\n# synthesis used and is the likely source of the 7-30 ULP baseline\n# error reported in Section eval-correctness).\nsyn.op=op:fmul impl:fulldsp\nsyn.op=op:fadd impl:fulldsp\n\ntb.file=./testbench.cpp\n"
+   }
+  ],
+  "cwd": "/home/steven-studio/systolic-mlir/hls/gemm_4x4"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Wed Jul 22 20:52:22 2026",
+ "timestampMillis": "1784724742310",
+ "status": {
+  "cmdId": "dc8bc700-6e4b-4814-82c3-986ed7b15add",
+  "state": "CS_RUNNING"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Status",
+ "dateTimestamp": "Wed Jul 22 20:52:41 2026",
+ "timestampMillis": "1784724761418",
+ "status": {
+  "cmdId": "dc8bc700-6e4b-4814-82c3-986ed7b15add",
+  "state": "CS_FAILED"
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Wed Jul 22 20:52:41 2026",
+ "timestampMillis": "1784724761492",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision/reports/v++_compile_work_full_precision_guidance.html",
+  "name": "",
+  "fileType": "HTML",
+  "reportType": "GLOBAL_RULECHECK_GUIDANCE",
+  "cmdId": ""
+ }
+}
+</ENTRY>
+<ENTRY>
+{
+ "type": "ET_Report",
+ "dateTimestamp": "Wed Jul 22 20:52:41 2026",
+ "timestampMillis": "1784724761493",
+ "report": {
+  "path": "/home/steven-studio/systolic-mlir/hls/gemm_4x4/work_full_precision/reports/.db/v++_compile_work_full_precision_guidance.pb3",
+  "name": "",
+  "fileType": "BINARY_PROTOBUF",
+  "reportType": "GLOBAL_RULECHECK_GUIDANCE",
+  "cmdId": ""
+ }
+}
+</ENTRY>

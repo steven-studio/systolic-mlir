@@ -4,7 +4,7 @@
 func.func @matmul_8x8x8(%A: tensor<8x8xf32>, %B: tensor<8x8xf32>, %C: tensor<8x8xf32>)
     -> tensor<8x8xf32> {
   // CHECK: %[[STREAM:.*]] = systolic.stream %{{.*}} direction(row) skew(1)
-  // CHECK: systolic.pe_array<8x8> stationary(weight) %{{.*}}, %[[STREAM]], %{{.*}}
+  // CHECK: systolic.pe_array<8 x 8> stationary(weight) %{{.*}}, %[[STREAM]], %{{.*}}
   %result = linalg.matmul ins(%A, %B : tensor<8x8xf32>, tensor<8x8xf32>)
                           outs(%C : tensor<8x8xf32>) -> tensor<8x8xf32>
   return %result : tensor<8x8xf32>

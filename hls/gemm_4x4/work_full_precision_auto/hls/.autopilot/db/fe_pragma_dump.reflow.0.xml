@@ -1,0 +1,8 @@
+<pragmas>
+<pragma file="design.cpp" line="6" pragmaType="unroll" parentfunction="matmul_4x4x4" factor="-1" skip_exit_check="0"/>
+<pragma file="design.cpp" line="8" pragmaType="unroll" parentfunction="matmul_4x4x4" factor="-1" skip_exit_check="0"/>
+<pragma file="design.cpp" line="11" pragmaType="pipeline" parentfunction="matmul_4x4x4" off="0" ii="1" rewind="0" style=""/>
+<pragma file="design.cpp" line="2" pragmaType="array_partition" parentfunction="matmul_4x4x4" dim="0" factor="0" mode="complete" dynamic="0" variable="arg0"/>
+<pragma file="design.cpp" line="3" pragmaType="array_partition" parentfunction="matmul_4x4x4" dim="0" factor="0" mode="complete" dynamic="0" variable="arg1"/>
+<pragma file="design.cpp" line="4" pragmaType="array_partition" parentfunction="matmul_4x4x4" dim="0" factor="0" mode="complete" dynamic="0" variable="arg2"/>
+</pragmas>

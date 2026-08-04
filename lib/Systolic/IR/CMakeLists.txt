@@ -1,5 +1,7 @@
 add_mlir_dialect_library(MLIRSystolic
   SystolicDialect.cpp
+  SystolicOps.cpp
+  SystolicCostAnalysisPass.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic
@@ -10,5 +12,8 @@ add_mlir_dialect_library(MLIRSystolic
 
   LINK_LIBS PUBLIC
   MLIRIR
+  MLIRPass
   MLIRSupport
+  MLIRDialect
+  MLIRFuncDialect
 )
