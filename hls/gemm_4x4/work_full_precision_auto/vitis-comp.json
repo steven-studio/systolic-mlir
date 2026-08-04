@@ -1,9 +1,0 @@
-{
-  "name": "work_full_precision_auto",
-  "type": "HLS",
-  "configuration": {
-    "componentType": "HLS",
-    "configFiles": ["..\/hls_config_full_precision_auto.cfg"],
-    "work_dir": "."
-  }
-}

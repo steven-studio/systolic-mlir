@@ -1,3 +1,0 @@
-relativeroot=/home/steven-studio/systolic-mlir/hls/gemm_4x4
-original_argv=-c --mode hls --config hls_config_full_precision_auto.cfg --work_dir work_full_precision_auto 
-

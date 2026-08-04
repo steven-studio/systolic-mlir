@@ -19,7 +19,7 @@ hls/**/systolic_proj*/
 hls/**/vivado/build*/
 .Xil/
 xsim.dir/
-*.log
+hls/**/*.log
 *.jou
 *.dcp
 *.bit
@@ -44,14 +44,28 @@ runtime/*.bin
 # vitis / vivado artifacts
 hls/**/*.pb
 hls/**/clockInfo.txt
-hls/**/*.cfg
 hls/gemm_4x4/sweep_runs/
 runtime/run_conv2d_shape
 runtime/bin/
 runtime/lib/*.o
 runtime/lib/*.a
 runtime/harness/*.bin
-runtime/logs/*.log
+runtime/logs/hls/**/*.log
 runtime/harness/*.bin
 runtime/harness/__pycache__/
 runtime/attic/__pycache__/
+
+# 編譯出來的工具（原始碼有進版控）
+tools/numeric/acc_error_probe
+tools/numeric/probe2
+hls/gemm_4x4/tb
+hls/gemm_4x4/tba
+
+# HLS/Vivado 打包與報告
+hls/**/*.zip
+hls/**/*.pb3
+hls/**/reports/
+hls/**/sweep_runs/
+
+# repo root 的 sweep_out 與 runtime/harness/sweep_out 重複
+/sweep_out/
