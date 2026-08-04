@@ -1,5 +1,6 @@
 #include "fpga_conv2d_im2col.h"
 #include "fpga_matmul_tiled.h"
+#include "fpga_ctx.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,12 +113,13 @@ int fpga_conv2d_im2col_auto(int H, int W, int Cin,
     return rc;
 }
 
-int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
-                                     int Kh, int Kw, int Cout,
-                                     int strideH, int strideW,
-                                     int dilationH, int dilationW,
-                                     const float *X, const float *Kernel,
-                                     float *Y) {
+int fpga_conv2d_im2col_general(int fd,
+                               int N, int H, int W, int Cin,
+                               int Kh, int Kw, int Cout,
+                               int strideH, int strideW,
+                               int dilationH, int dilationW,
+                               const float *X, const float *Kernel,
+                               float *Y) {
     int effKh = dilationH * (Kh - 1) + 1;
     int effKw = dilationW * (Kw - 1) + 1;
     int Hout = (H - effKh) / strideH + 1;
@@ -164,7 +166,7 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
             }
         }
 
-        int rc = fpga_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        int rc = fpga_matmul_tiled(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;
@@ -188,7 +190,9 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
 //       boundary handling), just indexed by pad offset instead of tile
 //       offset. X itself is never padded in memory: only the original,
 //       un-padded buffer is ever touched.
-int fpga_conv2d_im2col_padded_auto(int N, int H, int W, int Cin,
+int fpga_conv2d_im2col_padded(
+                                    int fd,
+                                    int N, int H, int W, int Cin,
                                     int Kh, int Kw, int Cout,
                                     int strideH, int strideW,
                                     int dilationH, int dilationW,
@@ -240,7 +244,7 @@ int fpga_conv2d_im2col_padded_auto(int N, int H, int W, int Cin,
             }
         }
 
-        int rc = fpga_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        int rc = fpga_matmul_tiled(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;

@@ -25,6 +25,14 @@ int fpga_conv2d_im2col_auto(int H, int W, int Cin,
 // channel-last float32. Hout/Wout account for dilation:
 //   Hout = (H - (dilationH*(Kh-1)+1)) / strideH + 1
 //   Wout = (W - (dilationW*(Kw-1)+1)) / strideW + 1
+int fpga_conv2d_im2col_general(int fd,
+                               int N, int H, int W, int Cin,
+                               int Kh, int Kw, int Cout,
+                               int strideH, int strideW,
+                               int dilationH, int dilationW,
+                               const float *X, const float *Kernel,
+                               float *Y);
+
 int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
                                      int Kh, int Kw, int Cout,
                                      int strideH, int strideW,
@@ -38,6 +46,16 @@ int fpga_conv2d_im2col_general_auto(int N, int H, int W, int Cin,
 // dims, matching a preceding `tensor.pad` op with constant, zero-valued,
 // spatial-only padding. Hout/Wout are computed against the padded extent
 // internally; the caller's Y buffer should be sized accordingly.
+int fpga_conv2d_im2col_padded(int fd,
+                                    int N, int H, int W, int Cin,
+                                    int Kh, int Kw, int Cout,
+                                    int strideH, int strideW,
+                                    int dilationH, int dilationW,
+                                    int padTop, int padBottom,
+                                    int padLeft, int padRight,
+                                    const float *X, const float *Kernel,
+                                    float *Y);
+
 int fpga_conv2d_im2col_padded_auto(int N, int H, int W, int Cin,
                                     int Kh, int Kw, int Cout,
                                     int strideH, int strideW,
