@@ -47,3 +47,8 @@ hls/**/clockInfo.txt
 hls/**/*.cfg
 hls/gemm_4x4/sweep_runs/
 runtime/run_conv2d_shape
+runtime/bin/
+runtime/lib/*.o
+runtime/lib/*.a
+runtime/harness/*.bin
+runtime/logs/*.log

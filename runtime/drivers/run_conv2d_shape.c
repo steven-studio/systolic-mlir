@@ -7,13 +7,14 @@
 // binary drives every row of the sweep CSV -- no recompilation per shape.
 //
 // Usage (18 numeric/path args after the program name):
-//   ./run_conv2d_shape N H W Cin Kh Kw Cout strideH strideW dilH dilW \
+//   ./run_conv2d_shape N H W Cin Kh Kw Cout strideH strideW dilH dilW
 //       padTop padBottom padLeft padRight X.bin K.bin Y.bin
 
 #include <stdio.h>
 #include <stdlib.h>
 #include "fpga_conv2d_im2col.h"
 #include "fpga_matmul4x4_reliable.h"
+#include "fpga_signal.h"
 
 static float *read_floats(const char *path, size_t count) {
     FILE *f = fopen(path, "rb");
@@ -36,6 +37,7 @@ static void write_floats(const char *path, const float *buf, size_t count) {
 }
 
 int main(int argc, char **argv) {
+    fpga_install_signal_handler();
     // argv[0] = program name, argv[1..15] = 15 numeric params,
     // argv[16..18] = X.bin, K.bin, Y.bin -> argc must be 19.
     if (argc != 19) {

@@ -35,7 +35,7 @@ import numpy as np
 from reference import reference_conv2d_f32
 from ulp import max_ulp_error
 
-RUN_CONV2D_BIN = "./run_conv2d_shape"
+RUN_CONV2D_BIN = "../bin/run_conv2d_shape"
 
 
 def deterministic_seed(name):

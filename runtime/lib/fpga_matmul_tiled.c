@@ -1,6 +1,7 @@
 #include "fpga_matmul_tiled.h"
 #include "fpga_matmul4x4.h"
 #include "fpga_matmul4x4_reliable.h"
+#include "fpga_signal.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,6 +45,7 @@ int fpga_matmul_tiled(int fd, int M, int K, int N,
             memcpy(acc, zero16, sizeof(acc));  // 這個輸出 tile 的累加起點
 
             for (int kt = 0; kt < K_tiles; kt++) {
+                if (fpga_stop_requested()) return -5;
                 float a_tile[16], b_tile[16], out_tile[16];
                 extract_tile(A, M, K, it*4, kt*4, a_tile);
                 extract_tile(B, K, N, kt*4, jt*4, b_tile);
