@@ -62,7 +62,7 @@ static long ulp_diff_f32(float a, float b) {
     return (long)(d < 0 ? -d : d);
 }
 
-static int max_ulp_idx(const float *C_out, const double *ref, long *max_ulp_out) {
+__attribute__((unused)) static int max_ulp_idx(const float *C_out, const double *ref, long *max_ulp_out) {
     int worst = -1;
     long worst_ulp = -1;
     for (int i = 0; i < 16; i++) {
