@@ -52,3 +52,6 @@ runtime/lib/*.o
 runtime/lib/*.a
 runtime/harness/*.bin
 runtime/logs/*.log
+runtime/harness/*.bin
+runtime/harness/__pycache__/
+runtime/attic/__pycache__/

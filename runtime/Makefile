@@ -9,7 +9,16 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra
 CPPFLAGS = -Ilib
 
-LIB_SRC = $(wildcard lib/*.c)
+# systolic_dispatch_sim.c and systolic_dispatch_uart.c define the same two
+# symbols (systolic_dispatch_open, systolic_dispatch_matmul4x4), so exactly
+# one goes into the archive. Putting both in makes the linker pick whichever
+# it reaches first, which is silent and order-dependent.
+#   uart -- talks to the board over /dev/ttyUSB1
+#   sim  -- host-side model, builds and runs with no board attached
+DISPATCH ?= uart
+
+LIB_SRC = $(filter-out lib/systolic_dispatch_%.c,$(wildcard lib/*.c)) \
+          lib/systolic_dispatch_$(DISPATCH).c
 LIB_OBJ = $(LIB_SRC:.c=.o)
 LIB     = lib/libfpgart.a
 
