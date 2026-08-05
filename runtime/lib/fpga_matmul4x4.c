@@ -9,15 +9,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int fpga_uart_open(const char *port) {
+static speed_t baud_const(int baud) {
+    // Only the rates the FPGA side can divide cleanly are listed. The UART
+    // modules run on a 20 MHz clock, so CLKS_PER_BIT = 20e6/baud must be an
+    // integer: 115200 gives 173 (+0.35%, fine), 1 M gives 20, 2 M gives 10.
+    switch (baud) {
+        case 9600:    return B9600;
+        case 115200:  return B115200;
+        case 230400:  return B230400;
+        case 460800:  return B460800;
+        case 500000:  return B500000;
+        case 921600:  return B921600;
+        case 1000000: return B1000000;
+        case 2000000: return B2000000;
+        default:      return B115200;
+    }
+}
+
+int fpga_uart_open_baud(const char *port, int baud) {
     int fd = open(port, O_RDWR | O_NOCTTY);
     if (fd < 0) { perror("fpga_uart_open: open"); return -1; }
 
     struct termios tty;
     if (tcgetattr(fd, &tty) != 0) { perror("fpga_uart_open: tcgetattr"); close(fd); return -1; }
 
-    cfsetospeed(&tty, B1000000);
-    cfsetispeed(&tty, B1000000);
+    speed_t sp = baud_const(baud);
+    cfsetospeed(&tty, sp);
+    cfsetispeed(&tty, sp);
     tty.c_cflag &= ~PARENB;
     tty.c_cflag &= ~CSTOPB;
     tty.c_cflag &= ~CSIZE;
@@ -38,6 +56,11 @@ int fpga_uart_open(const char *port) {
     if (tcsetattr(fd, TCSANOW, &tty) != 0) { perror("fpga_uart_open: tcsetattr"); close(fd); return -1; }
     tcflush(fd, TCIOFLUSH);
     return fd;
+}
+
+int fpga_uart_open(const char *port) {
+    // Historical entry point: the Arty bitstream is 115200.
+    return fpga_uart_open_baud(port, 115200);
 }
 
 void fpga_uart_close(int fd) {

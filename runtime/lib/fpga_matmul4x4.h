@@ -3,6 +3,7 @@
 
 // 開啟並設定 UART 連線,回傳 file descriptor,失敗回傳 -1
 int fpga_uart_open(const char *port);
+int fpga_uart_open_baud(const char *port, int baud);
 
 // 關閉連線
 void fpga_uart_close(int fd);

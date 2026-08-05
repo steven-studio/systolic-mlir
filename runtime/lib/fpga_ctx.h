@@ -45,6 +45,9 @@ fpga_ctx_t *fpga_ctx_default(void);
 void fpga_ctx_reset_default(void);
 
 int fpga_ctx_fd(const fpga_ctx_t *ctx);
+int fpga_ctx_dim(const fpga_ctx_t *ctx);
+int fpga_ctx_ndev(const fpga_ctx_t *ctx);
+int fpga_ctx_baud(const fpga_ctx_t *ctx);
 const char *fpga_ctx_port(const fpga_ctx_t *ctx);
 
 const fpga_reliable_stats_t *fpga_ctx_stats(const fpga_ctx_t *ctx);
