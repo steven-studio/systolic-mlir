@@ -69,3 +69,5 @@ hls/**/sweep_runs/
 
 # repo root 的 sweep_out 與 runtime/harness/sweep_out 重複
 /sweep_out/
+hls/multi_200t/vivado/build/
+hls/**/*.jou

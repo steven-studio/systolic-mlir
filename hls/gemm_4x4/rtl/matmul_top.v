@@ -27,12 +27,12 @@ module matmul_top (
     reg        tx_start;
     wire       tx_busy;
 
-    uart_rx #(.CLK_FREQ(20_000_000)) u_rx (
+    uart_rx #(.CLK_FREQ(20_000_000), .BAUD_RATE(1_000_000)) u_rx (
         .clk(clk), .rst(rst),
         .rx(uart_rx_pin),
         .data(rx_data), .valid(rx_valid)
     );
-    uart_tx #(.CLK_FREQ(20_000_000)) u_tx (
+    uart_tx #(.CLK_FREQ(20_000_000), .BAUD_RATE(1_000_000)) u_tx (
         .clk(clk), .rst(rst),
         .data(tx_data), .start(tx_start),
         .tx(uart_tx_pin), .busy(tx_busy)
