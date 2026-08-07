@@ -1,0 +1,23 @@
+{
+    "0": {
+        "name": "matmul_4x4x4",
+        "file": "design.cpp",
+        "fileloc": "42",
+        "instructions": "1809",
+        "total_instructions": "1809",
+        "calls": "",
+        "basicblocks": "5",
+        "memory_accesses": "386",
+        "control_depth": "2",
+        "def_use_depth": "1",
+        "loads": {
+            "L": "177"
+        },
+        "stores": {
+            "L": "322"
+        },
+        "loops": {
+            "L": "1"
+        }
+    }
+}

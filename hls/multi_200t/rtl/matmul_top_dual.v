@@ -43,7 +43,7 @@ module matmul_top_dual (
 
     reg  [7:0] tx_data;  reg  tx_start;  wire tx_busy;
 
-    uart_rx #(.CLK_FREQ(20_000_000)) u_rx (
+    uart_rx #(.CLK_FREQ(40_000_000)) u_rx (
 
         .clk(clk), .rst(rst), .rx(uart_rx_pin),
 
@@ -51,7 +51,7 @@ module matmul_top_dual (
 
     );
 
-    uart_tx #(.CLK_FREQ(20_000_000)) u_tx (
+    uart_tx #(.CLK_FREQ(40_000_000)) u_tx (
 
         .clk(clk), .rst(rst), .data(tx_data), .start(tx_start),
 

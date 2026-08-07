@@ -1,46 +1,65 @@
-/* systolic_dispatch_sim.c
+/* systolic_dispatch_sim_new.c -- host-CPU backend for systolic_dispatch_new.h.
  *
- * Pure-software simulation backend for the transport-neutral dispatch
- * runtime interface (systolic_dispatch_open / systolic_dispatch_matmul4x4
- * -- Section design-offload, Section runtime-abstraction). Implements
- * exactly the same 4x4x4 multiply-accumulate contract the physical
- * accelerator exposes over UART (C_out = A @ B + C_init, all three
- * matrices row-major float32), but computes it directly in-process:
- * no serial port, no FPGA, no hardware dependency of any kind.
+ * Exports the same two symbols as systolic_dispatch_uart_new.c and is
+ * mutually exclusive with it at link time. No serial port, no board.
  *
- * This file provides the SAME two external symbol names as
- * systolic_dispatch_uart.c. The two files are mutually exclusive at
- * link time -- linking one or the other into the same MLIR-compiled
- * object file is the only difference between a build that drives the
- * physical board and one that runs entirely on the host CPU, with zero
- * changes to the generated tile loops, the MLIR pass, or the compiled
- * .o file itself.
+ * The arithmetic here is not "a reasonable reference" -- it reproduces the
+ * array's accumulation order exactly: float32 accumulator seeded with
+ * C_init, k ascending. That ordering was measured against the hardware
+ * rather than assumed, and three plausible alternatives were ruled out. A
+ * reference that merely computed the same mathematical quantity in a
+ * different order would agree to a few ULP and disagree bit-for-bit, so
+ * every sim-vs-board comparison would need a tolerance -- and a tolerance
+ * would hide precisely the layout and ordering bugs this backend exists to
+ * catch before anyone touches a board.
  *
- * Build either backend by choosing which of these two .c files to link
- * against the same generated object file, e.g.:
- *   clang matmul.o systolic_dispatch_sim.c  -o matmul_sim
- *   clang matmul.o systolic_dispatch_uart.c fpga_matmul4x4.c \
- *       fpga_matmul_tiled.c -o matmul_uart
+ * BUILD NOTE: compile with -ffp-contract=off. Otherwise the compiler may
+ * fuse `acc + a*b` into an FMA, which carries more intermediate precision
+ * than the FPGA's separate fmul and fadd, and this backend stops matching
+ * hardware for a reason that has nothing to do with the code.
  */
 
-int systolic_dispatch_open(void) {
-    /* No real connection to open; return an arbitrary non-negative
-     * placeholder handle so callers that check for a negative "failed
-     * to open" value never see a false failure. */
+#include "systolic_dispatch_new.h"
+
+#include <stdio.h>
+
+int systolic_dispatch_open(void)
+{
+    /* Nothing to open. Return a non-negative placeholder so callers that
+     * test for a negative "failed to open" never see a false failure. */
     return 0;
 }
 
-int systolic_dispatch_matmul4x4(int handle, const float A[16], const float B[16],
-                                 const float C_init[16], float C_out[16]) {
+int systolic_dispatch_matmul(int handle, int K,
+                             const float *A, const float *B,
+                             const float *C_init, float *C_out)
+{
     (void)handle;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            float acc = C_init[i * 4 + j];
-            for (int k = 0; k < 4; k++) {
-                acc += A[i * 4 + k] * B[k * 4 + j];
-            }
-            C_out[i * 4 + j] = acc;
+
+    /* Same range check the UART path applies. Enforcing it here is the
+     * point of the sim backend: a pass that emits K=0 or K=65 should fail
+     * loudly on a laptop, not hang waiting for bytes the board is still
+     * expecting. */
+    if (K < 1 || K > SYS_DISPATCH_K_MAX) {
+        fprintf(stderr, "systolic(sim): K=%d out of range [1, %d]\n",
+                K, SYS_DISPATCH_K_MAX);
+        return -3;
+    }
+
+    for (int i = 0; i < SYS_DISPATCH_R; i++) {
+        for (int j = 0; j < SYS_DISPATCH_C; j++) {
+            /* Seeded with C_init, NOT zero -- see the header. C_out may
+             * alias C_init, so read the seed before any store to C_out.
+             * Reading it here rather than hoisting keeps that true even if
+             * the loop is later restructured. */
+            float acc = C_init[i * SYS_DISPATCH_C + j];
+
+            for (int k = 0; k < K; k++)
+                acc += A[i * K + k] * B[k * SYS_DISPATCH_C + j];
+
+            C_out[i * SYS_DISPATCH_C + j] = acc;
         }
     }
+
     return 0;
 }

@@ -1,4 +1,4 @@
-// UART 接收模組:100MHz clock, 115200 baud
+// UART 接收模組:100MHz clock, 2000000 baud
 module uart_rx #(
     parameter CLK_FREQ  = 100_000_000,
     parameter BAUD_RATE = 115200

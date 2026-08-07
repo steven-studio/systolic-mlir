@@ -1,12 +1,12 @@
 set proj_name "matmul_nexys_8x8_dual"
 set part_name "xc7a200tsbg484-1"
-set hls_ip "../work_8x8_float/hls/impl/ip"
+set hls_ip "../work_systolic/hls/impl/ip"
 
 create_project $proj_name ./build -part $part_name -force
 
 add_files -norecurse {
-    ../rtl/matmul_top_dual.v
-    ../rtl/matmul_iface.v
+    ../rtl/matmul_top_rk.v
+    ../rtl/matmul_iface_rk.v
     ../rtl/uart_rx.v
     ../rtl/uart_tx.v
     ../rtl/clk_gen.v
@@ -20,7 +20,7 @@ synth_ip [get_ips]
 
 add_files -fileset constrs_1 -norecurse nexys_video.xdc
 
-set_property top matmul_top_dual [current_fileset]
+set_property top matmul_top_rk [current_fileset]
 update_compile_order -fileset sources_1
 
 launch_runs synth_1 -jobs 4
