@@ -7,13 +7,15 @@ module systolic_pe #(
     input  logic              clk,
     input  logic              rst,
 
-    input  logic              valid_in,
+    input  logic              a_valid_in,
+    input  logic              b_valid_in,
     input  logic [3:0]        acc_sel,
 
     input  logic [DATA_W-1:0] a_in,
     input  logic [DATA_W-1:0] b_in,
 
-    output logic              valid_out,
+    output logic              a_valid_out,
+    output logic              b_valid_out,
     output logic [DATA_W-1:0] a_out,
     output logic [DATA_W-1:0] b_out,
 
@@ -27,30 +29,45 @@ module systolic_pe #(
      */
     logic [DATA_W-1:0] a_reg;
     logic [DATA_W-1:0] b_reg;
-    logic              valid_reg;
+
+    logic              a_valid_reg;
+    logic              b_valid_reg;
+
     logic [3:0]        sel_reg;
+    logic [3:0]        local_acc_sel;
+
+    wire pair_valid = a_valid_in && b_valid_in;
 
     always_ff @(posedge clk) begin
         if (rst) begin
             a_reg     <= '0;
             b_reg     <= '0;
-            valid_reg <= 1'b0;
+            a_valid_reg <= 1'b0;
+            b_valid_reg <= 1'b0;
             sel_reg   <= '0;
+            local_acc_sel <= '0;
         end
         else begin
-            valid_reg <= valid_in;
+            a_valid_reg <= a_valid_in;
+            b_valid_reg <= b_valid_in;
 
-            if (valid_in) begin
+            if (a_valid_in)
                 a_reg   <= a_in;
+
+            if (b_valid_in)
                 b_reg   <= b_in;
-                sel_reg <= acc_sel;
+
+            if (pair_valid) begin
+                sel_reg <= local_acc_sel;
+                local_acc_sel <= local_acc_sel + 1'b1;
             end
         end
     end
 
     assign a_out     = a_reg;
     assign b_out     = b_reg;
-    assign valid_out = valid_reg;
+    assign a_valid_out = a_valid_reg;
+    assign b_valid_out = b_valid_reg;
 
 
     /*
@@ -70,7 +87,7 @@ module systolic_pe #(
         .clk       (clk),
         .rst       (rst),
 
-        .valid_in  (valid_reg),
+        .valid_in  (a_valid_reg && b_valid_reg),
         .a         (a_reg),
         .b         (b_reg),
 
@@ -210,43 +227,45 @@ module systolic_pe #(
         end
     endgenerate
 
-`ifndef SYNTHESIS
+// `ifndef SYNTHESIS
 
-integer dbg_cycle = 0;
+// integer dbg_cycle = 0;
 
-always_ff @(posedge clk) begin
-    if (rst) begin
-        dbg_cycle <= 0;
-    end
-    else begin
+// always_ff @(posedge clk) begin
+//     if (rst) begin
+//         dbg_cycle <= 0;
+//     end
+//     else begin
 
-        $display(
-            "[CYCLE %0d] vin=%b sel_in=%0d | vreg=%b sel_reg=%0d | pvalid=%b psel=%0d product=%h | avalid=%b wbsel=%0d add=%h",
-            dbg_cycle,
-            valid_in,
-            acc_sel,
-            valid_reg,
-            sel_reg,
-            product_valid,
-            product_sel,
-            product,
-            add_valid,
-            writeback_sel,
-            add_result
-        );
+//         $display(
+//             "[CYCLE %0d] avin=%b bvin=%b sel_in=%0d | avreg=%b bvreg=%b sel_reg=%0d | pvalid=%b psel=%0d product=%h | addvalid=%b wbsel=%0d add=%h",
+//             dbg_cycle,
+//             a_valid_in,
+//             b_valid_in,
+//             acc_sel,
+//             a_valid_reg,
+//             b_valid_reg,
+//             sel_reg,
+//             product_valid,
+//             product_sel,
+//             product,
+//             add_valid,
+//             writeback_sel,
+//             add_result
+//         );
 
-        if (add_valid) begin
-            $display(
-                "    >>> WRITE bank[%0d] <= %h",
-                writeback_sel,
-                add_result
-            );
-        end
+//         if (add_valid) begin
+//             $display(
+//                 "    >>> WRITE bank[%0d] <= %h",
+//                 writeback_sel,
+//                 add_result
+//             );
+//         end
 
-        dbg_cycle <= dbg_cycle + 1;
-    end
-end
+//         dbg_cycle <= dbg_cycle + 1;
+//     end
+// end
 
-`endif
+// `endif
 
 endmodule

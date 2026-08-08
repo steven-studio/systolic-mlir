@@ -1,0 +1,12 @@
+# compile verilog/system verilog design source files
+sv xil_defaultlib  --include "../../../../../../../../../../tools/Xilinx/2026.1/2026.1/data/rsb/busdef" \
+"../../../../../fp_add.sv" \
+"../../../../../fp_mul.sv" \
+"../../../../../systolic_pe.sv" \
+"../../../../../tb_pe.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort
