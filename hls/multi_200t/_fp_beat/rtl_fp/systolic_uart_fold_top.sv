@@ -21,6 +21,26 @@ module systolic_uart_fold_top #(
     logic       tx_start;
     logic       tx_busy;
 
+    /*
+     * DEBUG:
+     * Once all 1024 input bytes have been received,
+     * send one 0xA1 marker through UART.
+     */
+    /*
+     * Hardware breadcrumb UART markers:
+     *
+     *   A1 = matrices_ready
+     *   A2 = entered ST_WAIT_RESULT
+     *   A3 = c_valid_out ctx0
+     *   A4 = c_valid_out ctx1
+     *   A5 = entered ST_SEND
+     */
+    logic [4:0] debug_pending;
+
+    logic       debug_tx_active;
+    logic [7:0] debug_tx_byte;
+    logic [4:0] debug_accept;
+
     uart_rx #(
         .CLK_HZ (CLK_HZ),
         .BAUD   (BAUD)
@@ -181,6 +201,7 @@ module systolic_uart_fold_top #(
 
         end
     end
+
 
 
     /*
@@ -475,6 +496,95 @@ module systolic_uart_fold_top #(
     end
 
 
+
+    /*
+     * ============================================================
+     * Hardware breadcrumb event capture
+     * ============================================================
+     *
+     * Sticky pending bits ensure short one-cycle events survive
+     * until UART becomes available.
+     *
+     * debug_pending[0] -> A1 matrices_ready
+     * debug_pending[1] -> A2 ST_WAIT_RESULT entry
+     * debug_pending[2] -> A3 ctx0 result
+     * debug_pending[3] -> A4 ctx1 result
+     * debug_pending[4] -> A5 ST_SEND entry
+     * ============================================================
+     */
+
+    logic state_was_wait_result;
+    logic state_was_send;
+
+    always_ff @(posedge clk) begin
+
+        if (rst) begin
+
+            debug_pending         <= 5'b0;
+            state_was_wait_result <= 1'b0;
+            state_was_send        <= 1'b0;
+
+        end
+        else begin
+
+            /*
+             * Clear markers explicitly accepted by the UART FSM.
+             */
+            debug_pending <=
+                debug_pending & ~debug_accept;
+
+
+            /*
+             * A1: all 1024 input bytes were received.
+             */
+            if (matrices_ready)
+                debug_pending[0] <= 1'b1;
+
+
+            /*
+             * A2: first cycle in ST_WAIT_RESULT.
+             */
+            if (
+                state == ST_WAIT_RESULT &&
+                !state_was_wait_result
+            )
+                debug_pending[1] <= 1'b1;
+
+
+            /*
+             * A3 / A4: array publishes the two result contexts.
+             */
+            if (c_valid_out) begin
+
+                if (c_ctx_out == 1'b0)
+                    debug_pending[2] <= 1'b1;
+                else
+                    debug_pending[3] <= 1'b1;
+
+            end
+
+
+            /*
+             * A5: first cycle in ST_SEND.
+             */
+            if (
+                state == ST_SEND &&
+                !state_was_send
+            )
+                debug_pending[4] <= 1'b1;
+
+
+            state_was_wait_result <=
+                (state == ST_WAIT_RESULT);
+
+            state_was_send <=
+                (state == ST_SEND);
+
+        end
+
+    end
+
+
     /*
      * ============================================================
      * UART TX
@@ -487,7 +597,7 @@ module systolic_uart_fold_top #(
      */
     logic [8:0]  tx_count;
     logic [31:0] tx_word;
-
+    logic tx_send_started;
 
     always_comb begin
 
@@ -515,21 +625,30 @@ module systolic_uart_fold_top #(
         end
 
 
-        case (tx_count[1:0])
+        if (debug_tx_active) begin
 
-            2'd0:
-                tx_byte = tx_word[7:0];
+            tx_byte = debug_tx_byte;
 
-            2'd1:
-                tx_byte = tx_word[15:8];
+        end
+        else begin
 
-            2'd2:
-                tx_byte = tx_word[23:16];
+            case (tx_count[1:0])
 
-            default:
-                tx_byte = tx_word[31:24];
+                2'd0:
+                    tx_byte = tx_word[7:0];
 
-        endcase
+                2'd1:
+                    tx_byte = tx_word[15:8];
+
+                2'd2:
+                    tx_byte = tx_word[23:16];
+
+                default:
+                    tx_byte = tx_word[31:24];
+
+            endcase
+
+        end
 
     end
 
@@ -552,27 +671,92 @@ module systolic_uart_fold_top #(
     always_ff @(posedge clk) begin
         if (rst) begin
 
-            tx_count    <= 9'd0;
-            tx_start    <= 1'b0;
-            tx_state    <= TX_IDLE;
-            tx_all_done <= 1'b0;
+            tx_count         <= 9'd0;
+            tx_start         <= 1'b0;
+            tx_state         <= TX_IDLE;
+            tx_all_done      <= 1'b0;
+            debug_tx_active <= 1'b0;
+            debug_tx_byte   <= 8'h00;
+            debug_accept    <= 5'b0;
+            tx_send_started <= 1'b0;
 
         end
         else begin
 
             tx_start    <= 1'b0;
             tx_all_done <= 1'b0;
+            debug_accept <= 5'b0;
 
             case (tx_state)
 
                 TX_IDLE: begin
 
-                    if (state == ST_SEND) begin
+                    /*
+                     * Breadcrumb markers have priority over the
+                     * normal 512-byte result stream.
+                     *
+                     * Lowest-number marker is sent first.
+                     */
+                    if (debug_pending[0]) begin
+
+                        debug_tx_active <= 1'b1;
+                        debug_tx_byte   <= 8'hA1;
+                        debug_accept[0] <= 1'b1;
+                        tx_state        <= TX_START;
+
+                    end
+                    else if (debug_pending[1]) begin
+
+                        debug_tx_active <= 1'b1;
+                        debug_tx_byte   <= 8'hA2;
+                        debug_accept[1] <= 1'b1;
+                        tx_state        <= TX_START;
+
+                    end
+                    else if (debug_pending[2]) begin
+
+                        debug_tx_active <= 1'b1;
+                        debug_tx_byte   <= 8'hA3;
+                        debug_accept[2] <= 1'b1;
+                        tx_state        <= TX_START;
+
+                    end
+                    else if (debug_pending[3]) begin
+
+                        debug_tx_active <= 1'b1;
+                        debug_tx_byte   <= 8'hA4;
+                        debug_accept[3] <= 1'b1;
+                        tx_state        <= TX_START;
+
+                    end
+                    else if (debug_pending[4]) begin
+
+                        debug_tx_active <= 1'b1;
+                        debug_tx_byte   <= 8'hA5;
+                        debug_accept[4] <= 1'b1;
+                        tx_state        <= TX_START;
+
+                    end
+                    else if (
+                        state == ST_SEND &&
+                        !tx_send_started
+                    ) begin
+
+                        debug_tx_active <= 1'b0;
+                        tx_send_started <= 1'b1;
 
                         tx_count <= 9'd0;
                         tx_state <= TX_START;
 
                     end
+
+
+                    /*
+                     * Rearm for the next transaction only after
+                     * the main FSM has actually left ST_SEND.
+                     */
+                    if (state != ST_SEND)
+                        tx_send_started <= 1'b0;
 
                 end
 
@@ -602,7 +786,19 @@ module systolic_uart_fold_top #(
 
                     if (!tx_busy) begin
 
-                        if (tx_count == 9'd511) begin
+                        /*
+                         * Debug transaction is exactly one byte.
+                         */
+                        if (debug_tx_active) begin
+
+                            /*
+                             * Debug transaction is exactly one byte.
+                             */
+                            debug_tx_active <= 1'b0;
+                            tx_state        <= TX_IDLE;
+
+                        end
+                        else if (tx_count == 9'd511) begin
 
                             tx_count    <= 9'd0;
                             tx_state    <= TX_IDLE;

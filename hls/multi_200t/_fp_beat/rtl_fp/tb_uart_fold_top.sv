@@ -60,68 +60,183 @@ module tb_uart_fold_top;
 
     integer r, c;
 
+    task automatic send_transaction;
+        begin
+
+            /*
+             * A0 = I
+             */
+            for (r = 0; r < 8; r = r + 1)
+                for (c = 0; c < 8; c = c + 1)
+                    send_fp32(
+                        (r == c) ? 1.0 : 0.0
+                    );
+
+            /*
+             * B0 = 1..64
+             */
+            for (r = 0; r < 8; r = r + 1)
+                for (c = 0; c < 8; c = c + 1)
+                    send_fp32(
+                        shortreal'(r*8+c+1)
+                    );
+
+            /*
+             * A1 = 2I
+             */
+            for (r = 0; r < 8; r = r + 1)
+                for (c = 0; c < 8; c = c + 1)
+                    send_fp32(
+                        (r == c) ? 2.0 : 0.0
+                    );
+
+            /*
+             * B1 = 1..64
+             */
+            for (r = 0; r < 8; r = r + 1)
+                for (c = 0; c < 8; c = c + 1)
+                    send_fp32(
+                        shortreal'(r*8+c+1)
+                    );
+
+        end
+    endtask
+
+
+    integer txn_done_count = 0;
+
+    always @(posedge clk) begin
+        if (!rst && dut.tx_all_done)
+            txn_done_count <= txn_done_count + 1;
+    end
+
+
     initial begin
 
-        $display("=== UART FOLD TOP TEST ===");
+        $display("=== UART FOLD TOP TWO-TRANSACTION TEST ===");
 
         repeat (20) @(posedge clk);
         rst = 0;
         repeat (20) @(posedge clk);
 
-        /*
-         * A0 = I
-         */
-        for (r = 0; r < 8; r = r + 1)
-            for (c = 0; c < 8; c = c + 1)
-                send_fp32(
-                    (r == c) ? 1.0 : 0.0
-                );
 
         /*
-         * B0 = 1..64
+         * ========================================================
+         * TRANSACTION 1
+         * ========================================================
          */
-        for (r = 0; r < 8; r = r + 1)
-            for (c = 0; c < 8; c = c + 1)
-                send_fp32(
-                    shortreal'(r*8+c+1)
-                );
+        $display("");
+        $display("===== TXN 1 START =====");
 
-        /*
-         * A1 = 2I
-         */
-        for (r = 0; r < 8; r = r + 1)
-            for (c = 0; c < 8; c = c + 1)
-                send_fp32(
-                    (r == c) ? 2.0 : 0.0
-                );
-
-        /*
-         * B1 = 1..64
-         */
-        for (r = 0; r < 8; r = r + 1)
-            for (c = 0; c < 8; c = c + 1)
-                send_fp32(
-                    shortreal'(r*8+c+1)
-                );
+        send_transaction();
 
         $display(
-            "UART input complete: rx_count=%0d",
+            "TXN1 UART input complete: rx_count=%0d",
             dut.rx_count
         );
 
-        repeat (50000) @(posedge clk);
+        /*
+         * Wait until the complete 512-byte result stream finishes.
+         */
+        wait (txn_done_count >= 1);
 
         $display(
-            "FINAL state=%0d c0_done=%b c1_done=%b tx_state=%0d tx_count=%0d",
+            "===== TXN 1 DONE state=%0d c0_done=%b c1_done=%b =====",
             dut.state,
             dut.c0_done,
-            dut.c1_done,
-            dut.tx_state,
-            dut.tx_count
+            dut.c1_done
         );
 
-        $finish;
+        /*
+         * Give the design a little idle space.
+         * DO NOT reset.
+         */
+        repeat (100) @(posedge clk);
+
+
+        /*
+         * ========================================================
+         * TRANSACTION 2
+         * ========================================================
+         */
+        $display("");
+        $display("===== TXN 2 START =====");
+
+        send_transaction();
+
+        $display(
+            "TXN2 UART input complete: rx_count=%0d",
+            dut.rx_count
+        );
+
+
+        /*
+         * Do NOT wait forever.
+         *
+         * This timeout lets us inspect the internal state if the
+         * second transaction reproduces the hardware hang.
+         */
+        fork
+
+            begin : WAIT_TXN2_DONE
+
+                wait (txn_done_count >= 2);
+
+                $display("");
+                $display("===== TXN 2 PASS =====");
+
+                $display(
+                    "FINAL state=%0d c0_done=%b c1_done=%b tx_state=%0d tx_count=%0d",
+                    dut.state,
+                    dut.c0_done,
+                    dut.c1_done,
+                    dut.tx_state,
+                    dut.tx_count
+                );
+
+                $finish;
+
+            end
+
+
+            begin : TXN2_TIMEOUT
+
+                repeat (100000) @(posedge clk);
+
+                $display("");
+                $display("===== TXN 2 TIMEOUT =====");
+
+                $display(
+                    "TOP state=%0d feed_t=%0d c0_done=%b c1_done=%b c_valid=%b ctx=%b",
+                    dut.state,
+                    dut.feed_t,
+                    dut.c0_done,
+                    dut.c1_done,
+                    dut.c_valid_out,
+                    dut.c_ctx_out
+                );
+
+                $display(
+                    "PE00 state=%0d transaction_seen=%b input_finished=%b outstanding_adds=%0d product_valid=%b add_valid=%b result_valid=%b",
+                    dut.u_array.ROW[0].COL[0].u_pe.state,
+                    dut.u_array.ROW[0].COL[0].u_pe.transaction_seen,
+                    dut.u_array.ROW[0].COL[0].u_pe.input_finished,
+                    dut.u_array.ROW[0].COL[0].u_pe.outstanding_adds,
+                    dut.u_array.ROW[0].COL[0].u_pe.product_valid,
+                    dut.u_array.ROW[0].COL[0].u_pe.add_valid,
+                    dut.u_array.ROW[0].COL[0].u_pe.result_valid
+                );
+
+                $finish;
+
+            end
+
+        join_any
+
+        disable fork;
+
     end
+
 
 
     /*
@@ -151,6 +266,65 @@ module tb_uart_fold_top;
                 dut.tx_byte
             );
 
+    end
+
+    always @(posedge clk) begin
+        if (!rst) begin
+
+            if (dut.matrices_ready)
+                $display(
+                    "DBG MATRICES_READY time=%0t",
+                    $time
+                );
+
+            if (dut.c_valid_out)
+                $display(
+                    "DBG C_VALID time=%0t ctx=%0d C00=%h",
+                    $time,
+                    dut.c_ctx_out,
+                    dut.c_out[0][0]
+                );
+
+            // if (dut.state == dut.ST_SEND)
+            //     $display(
+            //         "DBG ST_SEND time=%0t tx_state=%0d started=%0d",
+            //         $time,
+            //         dut.tx_state,
+            //         dut.tx_send_started
+            //     );
+
+            if (dut.tx_start)
+                $display(
+                    "DBG TX_START time=%0t count=%0d byte=%02h debug=%0d",
+                    $time,
+                    dut.tx_count,
+                    dut.tx_byte,
+                    dut.debug_tx_active
+                );
+
+            if (dut.tx_start && !dut.debug_tx_active)
+                $display(
+                    "RESULT_TX count=%0d byte=%02h time=%0t",
+                    dut.tx_count,
+                    dut.tx_byte,
+                    $time
+                );
+
+            if (dut.tx_all_done)
+                $display(
+                    "RESULT_TX_ALL_DONE time=%0t",
+                    $time
+                );
+
+            if (dut.state == 3'd3 && dut.tx_count == 9'd511)
+                $display(
+                    "RESULT_AT_511 tx_state=%0d busy=%0d time=%0t",
+                    dut.tx_state,
+                    dut.tx_busy,
+                    $time
+                );
+
+        end
     end
 
 endmodule
