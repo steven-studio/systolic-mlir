@@ -63,7 +63,7 @@ module tb_fold;
 
     integer fi, fj, bk, wd, i, j, errors;
     reg [7:0]  rb;
-    reg [31:0] got, want;
+    reg [31:0] got, want, cyc;
 
     // Same value functions as the generator -- kept as expressions so a
     // failing case shows which term is off.
@@ -123,10 +123,31 @@ module tb_fold;
                 end
               end
 
+
+        // trailing 4-byte hardware cycle count
+        recv_byte(rb); cyc[7:0]   = rb;
+        recv_byte(rb); cyc[15:8]  = rb;
+        recv_byte(rb); cyc[23:16] = rb;
+        recv_byte(rb); cyc[31:24] = rb;
+
+        $display("[tb] cycles = %0d for %0d fold(s), K=%0d  -> %0d per fold", cyc, MT*NT, KV, cyc / (MT*NT));
+        // Loose bounds only. The exact figure depends on the stub's
+        // latency, and pinning it here would make the test brittle
+        // without saying anything about the real array. What matters
+        // is the slope across runs, which is for the human to read.
+        if (cyc < MT*NT*KV) begin
+            $display("[tb] IMPLAUSIBLE -- fewer cycles than reduction steps");
+            errors = errors + 1;
+        end
+        if (cyc > MT*NT*(KV+200)) begin
+            $display("[tb] IMPLAUSIBLE -- far more cycles than one invocation per fold");
+            errors = errors + 1;
+        end
+
         if (errors == 0)
             $display("[tb] PASS -- %0d blocks, %0d elements, all exact", MT*NT, MT*NT*64);
         else
-            $display("[tb] FAIL -- %0d/%0d elements wrong", errors, MT*NT*64);
+            $display("[tb] FAIL -- %0d problem(s)", errors);
         $finish;
     end
 

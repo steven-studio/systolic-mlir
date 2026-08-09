@@ -218,7 +218,7 @@ def gen_tb(k, mt, nt):
     a("")
     a("    integer fi, fj, bk, wd, i, j, errors;")
     a("    reg [7:0]  rb;")
-    a("    reg [31:0] got, want;")
+    a("    reg [31:0] got, want, cyc;")
     a("")
     a("    // Same value functions as the generator -- kept as expressions so a")
     a("    // failing case shows which term is off.")
@@ -282,12 +282,35 @@ def gen_tb(k, mt, nt):
     a("                end")
     a("              end")
     a("")
+    a("")
+    a("        // trailing 4-byte hardware cycle count")
+    a("        recv_byte(rb); cyc[7:0]   = rb;")
+    a("        recv_byte(rb); cyc[15:8]  = rb;")
+    a("        recv_byte(rb); cyc[23:16] = rb;")
+    a("        recv_byte(rb); cyc[31:24] = rb;")
+    a("")
+    a("        $display(\"[tb] cycles = %0d for %0d fold(s), K=%0d"
+      "  -> %0d per fold\", cyc, MT*NT, KV, cyc / (MT*NT));")
+    a("        // Loose bounds only. The exact figure depends on the stub's")
+    a("        // latency, and pinning it here would make the test brittle")
+    a("        // without saying anything about the real array. What matters")
+    a("        // is the slope across runs, which is for the human to read.")
+    a("        if (cyc < MT*NT*KV) begin")
+    a("            $display(\"[tb] IMPLAUSIBLE -- fewer cycles than reduction"
+      " steps\");")
+    a("            errors = errors + 1;")
+    a("        end")
+    a("        if (cyc > MT*NT*(KV+200)) begin")
+    a("            $display(\"[tb] IMPLAUSIBLE -- far more cycles than one"
+      " invocation per fold\");")
+    a("            errors = errors + 1;")
+    a("        end")
+    a("")
     a("        if (errors == 0)")
     a("            $display(\"[tb] PASS -- %0d blocks, %0d elements, all"
       " exact\", MT*NT, MT*NT*64);")
     a("        else")
-    a("            $display(\"[tb] FAIL -- %0d/%0d elements wrong\","
-      " errors, MT*NT*64);")
+    a("            $display(\"[tb] FAIL -- %0d problem(s)\", errors);")
     a("        $finish;")
     a("    end")
     a("")
@@ -313,8 +336,8 @@ if __name__ == "__main__":
     nblk = mt * nt
     tx = 1 + 12 + mt * 8 * k * 4 + nt * 8 * k * 4 + nblk * 256
     print(f"wrote matmul_8x8x8_stub.v, tb_fold_new.v   (K={k}, Mt={mt}, Nt={nt})")
-    print(f"  {tx} bytes out, {nblk*256} back, "
-          f"~{(tx + nblk*256) * 10 * 0.5 / 1000:.1f} ms of simulated time")
+    print(f"  {tx} bytes out, {nblk*256 + 4} back, "
+          f"~{(tx + nblk*256 + 4) * 10 * 0.5 / 1000:.1f} ms of simulated time")
     print()
     print("  xvlog matmul_top_rk_fold_new.v matmul_iface_rk_fold.v \\")
     print("        uart_rx.v uart_tx.v clk_gen.v \\")

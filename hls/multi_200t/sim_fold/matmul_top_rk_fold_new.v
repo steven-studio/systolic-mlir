@@ -24,6 +24,28 @@
 //   [B:  for fj in 0..Nt-1, for bank in 0..7, words 0..K-1]   Nt*8*K*4 bytes
 //   [C_init: for fi, for fj: 256 bytes]                       Mt*Nt*256 bytes
 //   -> [C: for fi, for fj: 256 bytes]                         Mt*Nt*256 bytes
+//   -> [cycles, 4B little-endian]                             4 bytes
+//
+// MEASURING CYCLES
+//
+// The trailing word is a free-running count of clocks from the moment the
+// last C_init word lands to the moment the last fold reports ap_done. It is
+// the first cycle figure this project has taken from silicon rather than from
+// a synthesis report, and it exists because a single measurement cannot
+// distinguish a per-fold cost from a one-time one.
+//
+// Sweep it. At fixed K, run Mt/Nt = 1x1, 2x1, 2x2 and fit a line through
+// N_folds = 1, 2, 4. The intercept is the one-time cost; the *slope* is the
+// marginal cost of a fold, and that is the number worth reading:
+//
+//     slope ~= K + rows + cols - 2 + c0     folds are serialised (this design)
+//     slope ~= K                            folds are pipelined  (not built)
+//
+// At K=64 that is 92 against 64 -- far apart enough to read off three points
+// without trusting any constant in this file. Note that this controller does
+// NOT pipeline folds: each is a blocking ap_start..ap_done, and reaching the
+// second slope needs shadow accumulators inside the array, which is
+// deliberately untouched here.
 //
 // A's bank index within fold fi is row fi*8+i, so "for fi, for bank" is just
 // A in row-major order. B's bank j within fold fj is column fj*8+j, so B goes
@@ -147,6 +169,12 @@ module matmul_top_rk_fold (
     reg [FI_W-1:0]   tx_fi  = 0;        // 正在回傳哪一個 C 區塊
     reg [FJ_W-1:0]   tx_fj  = 0;
     reg [7:0]        tx_cnt = 0;        // 0..255
+    reg              tx_cyc = 0;        // 正在回傳結尾那 4 bytes 的計數值
+
+    // 硬體 cycle 計數器。不在關鍵路徑上 —— 只有一個 32-bit 加法器和兩個
+    // 比較,不參與任何位址或資料路徑。
+    reg [31:0]       cyc_cnt = 0;
+    reg              cyc_run = 0;
 
     assign led_done = done_led;
 
@@ -243,6 +271,23 @@ module matmul_top_rk_fold (
     wire tx_last  = (tx_fi  == mt_reg - 1'b1) && (tx_fj  == nt_reg - 1'b1);
     wire c_last   = (c_fi   == mt_reg - 1'b1) && (c_fj   == nt_reg - 1'b1);
 
+    // 計數窗:最後一個 C_init word 落地 -> 最後一個 fold 的 ap_done。
+    // 起點刻意選在運算元全部就位之後,所以量到的是純計算,不含 UART。
+    wire cyc_start = rx_c_last && c_last;
+    wire cyc_stop  = compute_done && run_last;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            cyc_cnt <= 0;  cyc_run <= 0;
+        end else if (cyc_start) begin
+            cyc_cnt <= 0;  cyc_run <= 1;
+        end else if (cyc_stop) begin
+            cyc_run <= 0;
+        end else if (cyc_run) begin
+            cyc_cnt <= cyc_cnt + 1'b1;
+        end
+    end
+
     // ---------------- FSM ----------------
     always @(posedge clk) begin
         if (rst) begin
@@ -252,6 +297,7 @@ module matmul_top_rk_fold (
             c_idx <= 0;       c_fi <= 0;        c_fj <= 0;
             run_fi <= 0;      run_fj <= 0;
             tx_fi <= 0;       tx_fj <= 0;       tx_cnt <= 0;
+            tx_cyc <= 0;
             k_reg <= 7'd8;    mt_reg <= 1;      nt_reg <= 1;
             ap_start0 <= 0;   ap_start1 <= 0;
             tx_start <= 0;    done_led <= 0;
@@ -268,7 +314,7 @@ module matmul_top_rk_fold (
                         fill_bank <= 0;  fill_word <= 0;  fill_fold <= 0;
                         c_idx     <= 0;  c_fi <= 0;       c_fj <= 0;
                         run_fi    <= 0;  run_fj <= 0;
-                        tx_fi     <= 0;  tx_fj <= 0;
+                        tx_fi     <= 0;  tx_fj <= 0;  tx_cyc <= 0;
                         state     <= S_RX;
                     end
                 end
@@ -439,7 +485,8 @@ module matmul_top_rk_fold (
                     if (!tx_busy) begin
                         // (n/4)*32 + (n%4)*8 == n*8 for all n; 展開式與單 fold
                         // 版等價,這裡取簡短形式。
-                        tx_data      <= tx_blk[tx_cnt*8 +: 8];
+                        tx_data      <= tx_cyc ? cyc_cnt[tx_cnt*8 +: 8]
+                                               : tx_blk[tx_cnt*8 +: 8];
                         tx_start     <= 1;
                         tx_busy_seen <= 0;
                         state        <= S_TXWAIT;
@@ -449,9 +496,18 @@ module matmul_top_rk_fold (
                 S_TXWAIT: begin
                     if (tx_busy) tx_busy_seen <= 1;
                     if (tx_busy_seen && !tx_busy) begin
-                        if (tx_cnt == 8'd255) begin
+                        // 結尾的 4-byte 計數值
+                        if (tx_cyc) begin
+                            if (tx_cnt == 8'd3) state <= S_DONE;
+                            else begin
+                                tx_cnt <= tx_cnt + 1'b1;
+                                state  <= S_TX;
+                            end
+                        end else if (tx_cnt == 8'd255) begin
                             if (tx_last) begin
-                                state <= S_DONE;
+                                tx_cyc <= 1;
+                                tx_cnt <= 0;
+                                state  <= S_TX;
                             end else begin
                                 if (tx_fj == nt_reg - 1'b1) begin
                                     tx_fj <= 0;
