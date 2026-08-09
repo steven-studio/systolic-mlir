@@ -7,4 +7,4 @@
 # Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
 #
 
-vivado -log systolic_uart_top.vdi -applog -m64 -product Vivado -messageDb vivado.pb -mode batch -source systolic_uart_top.tcl -notrace
+vivado -log systolic_uart_fold_top.vdi -applog -m64 -product Vivado -messageDb vivado.pb -mode batch -source systolic_uart_fold_top.tcl -notrace

@@ -47,16 +47,12 @@ module systolic_uart_fold_top #(
 
     /*
      * ============================================================
-     * Two independent 8x8 GEMMs
+     * Input matrices
      *
-     * UART input:
-     *
-     *   bytes    0..255  = A0
-     *   bytes  256..511  = B0
-     *   bytes  512..767  = A1
-     *   bytes  768..1023 = B1
-     *
-     * All FP32 little-endian.
+     * bytes    0..255  = A0
+     * bytes  256..511  = B0
+     * bytes  512..767  = A1
+     * bytes  768..1023 = B1
      * ============================================================
      */
     logic [31:0] A0 [0:7][0:7];
@@ -72,23 +68,18 @@ module systolic_uart_fold_top #(
     logic matrices_ready;
 
 
-    /*
-     * ============================================================
-     * RX
-     * ============================================================
-     */
     always_ff @(posedge clk) begin
         if (rst) begin
 
-            rx_count       <= 0;
-            byte_pos       <= 0;
-            word_buf       <= 0;
-            matrices_ready <= 0;
+            rx_count       <= 11'd0;
+            byte_pos       <= 2'd0;
+            word_buf       <= 32'd0;
+            matrices_ready <= 1'b0;
 
         end
         else begin
 
-            matrices_ready <= 0;
+            matrices_ready <= 1'b0;
 
             if (rx_valid) begin
 
@@ -112,8 +103,8 @@ module systolic_uart_fold_top #(
                          */
                         if (rx_count < 256) begin
 
-                            A0[(rx_count >> 5) & 7]
-                              [(rx_count >> 2) & 7]
+                            A0[rx_count[7:5]]
+                              [rx_count[4:2]]
                                 <= {
                                     rx_byte,
                                     word_buf[23:0]
@@ -126,7 +117,7 @@ module systolic_uart_fold_top #(
                          */
                         else if (rx_count < 512) begin
 
-                            B0[((rx_count - 256) >> 5) & 7]
+                            B0[(rx_count - 256) >> 5]
                               [((rx_count - 256) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -140,7 +131,7 @@ module systolic_uart_fold_top #(
                          */
                         else if (rx_count < 768) begin
 
-                            A1[((rx_count - 512) >> 5) & 7]
+                            A1[(rx_count - 512) >> 5]
                               [((rx_count - 512) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -154,7 +145,7 @@ module systolic_uart_fold_top #(
                          */
                         else begin
 
-                            B1[((rx_count - 768) >> 5) & 7]
+                            B1[(rx_count - 768) >> 5]
                               [((rx_count - 768) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -168,18 +159,15 @@ module systolic_uart_fold_top #(
                 endcase
 
 
-                if (byte_pos == 3)
-                    byte_pos <= 0;
+                if (byte_pos == 2'd3)
+                    byte_pos <= 2'd0;
                 else
                     byte_pos <= byte_pos + 1'b1;
 
 
-                /*
-                 * 1024 bytes total.
-                 */
-                if (rx_count == 1023) begin
+                if (rx_count == 11'd1023) begin
 
-                    rx_count       <= 0;
+                    rx_count       <= 11'd0;
                     matrices_ready <= 1'b1;
 
                 end
@@ -197,7 +185,7 @@ module systolic_uart_fold_top #(
 
     /*
      * ============================================================
-     * Fold-pipelined 8x8 array
+     * Fold-pipelined array interface
      * ============================================================
      */
     logic [31:0] a_in [0:7];
@@ -209,69 +197,135 @@ module systolic_uart_fold_top #(
     logic fold_ctx_in_a [0:7];
     logic fold_ctx_in_b [0:7];
 
-    logic [31:0]
-        dbg_acc_ctx0 [0:7][0:7][0:15];
-
-    logic [31:0]
-        dbg_acc_ctx1 [0:7][0:7][0:15];
+    logic        c_valid_out;
+    logic        c_ctx_out;
+    logic [31:0] c_out [0:7][0:7];
 
 
     systolic_array_8x8_fold u_array (
-        .clk              (clk),
-        .rst              (rst),
+        .clk           (clk),
+        .rst           (rst),
 
-        .a_in             (a_in),
-        .b_in             (b_in),
+        .a_in          (a_in),
+        .b_in          (b_in),
 
-        .a_valid_in       (a_valid_in),
-        .b_valid_in       (b_valid_in),
+        .a_valid_in    (a_valid_in),
+        .b_valid_in    (b_valid_in),
 
-        .fold_ctx_in_a    (fold_ctx_in_a),
-        .fold_ctx_in_b    (fold_ctx_in_b),
+        .fold_ctx_in_a (fold_ctx_in_a),
+        .fold_ctx_in_b (fold_ctx_in_b),
 
-        .dbg_acc_ctx0     (dbg_acc_ctx0),
-        .dbg_acc_ctx1     (dbg_acc_ctx1)
+        .c_valid_out   (c_valid_out),
+        .c_ctx_out     (c_ctx_out),
+        .c_out         (c_out)
     );
 
 
     /*
      * ============================================================
-     * Compute feeder
-     *
-     * Two folds:
-     *
-     *   fold 0: t = 0 .. 7
-     *   fold 1: t = 8 .. 15
-     *
-     * With systolic skew, the boundary feeder runs through
-     * t = 0 .. 22 so the final row/column injections occur.
-     *
-     * There is no bubble between fold 0 and fold 1 at PE[0][0].
+     * Store final results
      * ============================================================
      */
+    logic [31:0] C0 [0:7][0:7];
+    logic [31:0] C1 [0:7][0:7];
 
+    logic c0_done;
+    logic c1_done;
+
+    integer rr;
+    integer cc;
+
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+
+            c0_done <= 1'b0;
+            c1_done <= 1'b0;
+
+        end
+        else begin
+
+            /*
+             * New transaction starts.
+             */
+            if (matrices_ready) begin
+                c0_done <= 1'b0;
+                c1_done <= 1'b0;
+            end
+
+
+            /*
+             * Array itself tells us when a reduced C matrix
+             * is ready.
+             */
+            if (c_valid_out) begin
+
+                if (c_ctx_out == 1'b0) begin
+
+                    for (rr = 0; rr < 8; rr = rr + 1)
+                        for (cc = 0; cc < 8; cc = cc + 1)
+                            C0[rr][cc] <= c_out[rr][cc];
+
+                    c0_done <= 1'b1;
+
+                end
+                else begin
+
+                    for (rr = 0; rr < 8; rr = rr + 1)
+                        for (cc = 0; cc < 8; cc = cc + 1)
+                            C1[rr][cc] <= c_out[rr][cc];
+
+                    c1_done <= 1'b1;
+
+                end
+
+            end
+
+        end
+    end
+
+
+    /*
+     * ============================================================
+     * Main state machine
+     * ============================================================
+     */
     typedef enum logic [2:0] {
         ST_IDLE,
         ST_FEED,
-        ST_DRAIN,
+        ST_WAIT_RESULT,
         ST_SEND
     } state_t;
 
     state_t state;
 
     logic [5:0] feed_t;
-    logic [5:0] drain_count;
+    logic       tx_all_done;
 
 
+    /*
+     * ============================================================
+     * Feed two K=8 folds continuously
+     *
+     * global k:
+     *
+     *   0..7   -> ctx0
+     *   8..15  -> ctx1
+     *
+     * Last boundary injection:
+     *
+     *   15 + max skew(7) = 22
+     * ============================================================
+     */
     always_comb begin
 
         for (int i = 0; i < 8; i++) begin
 
-            a_in[i] = 32'd0;
-            b_in[i] = 32'd0;
+            a_in[i]          = 32'd0;
+            b_in[i]          = 32'd0;
 
-            a_valid_in[i] = 1'b0;
-            b_valid_in[i] = 1'b0;
+            a_valid_in[i]    = 1'b0;
+            b_valid_in[i]    = 1'b0;
 
             fold_ctx_in_a[i] = 1'b0;
             fold_ctx_in_b[i] = 1'b0;
@@ -282,28 +336,28 @@ module systolic_uart_fold_top #(
         if (state == ST_FEED) begin
 
             /*
-             * A-side skew.
+             * A-side skew
              */
             for (int r = 0; r < 8; r++) begin
 
-                integer gk;
-                integer fold_id;
-                integer k_idx;
+                integer gk_a;
+                integer fold_a;
+                integer k_a;
 
-                gk = feed_t - r;
+                gk_a = feed_t - r;
 
-                if ((gk >= 0) && (gk < 16)) begin
+                if ((gk_a >= 0) && (gk_a < 16)) begin
 
-                    fold_id = gk >> 3;
-                    k_idx   = gk & 7;
+                    fold_a = gk_a >> 3;
+                    k_a    = gk_a & 7;
 
-                    if (fold_id == 0)
-                        a_in[r] = A0[r][k_idx];
+                    if (fold_a == 0)
+                        a_in[r] = A0[r][k_a];
                     else
-                        a_in[r] = A1[r][k_idx];
+                        a_in[r] = A1[r][k_a];
 
-                    a_valid_in[r] = 1'b1;
-                    fold_ctx_in_a[r] = fold_id[0];
+                    a_valid_in[r]    = 1'b1;
+                    fold_ctx_in_a[r] = fold_a[0];
 
                 end
 
@@ -311,28 +365,28 @@ module systolic_uart_fold_top #(
 
 
             /*
-             * B-side skew.
+             * B-side skew
              */
             for (int c = 0; c < 8; c++) begin
 
-                integer gk;
-                integer fold_id;
-                integer k_idx;
+                integer gk_b;
+                integer fold_b;
+                integer k_b;
 
-                gk = feed_t - c;
+                gk_b = feed_t - c;
 
-                if ((gk >= 0) && (gk < 16)) begin
+                if ((gk_b >= 0) && (gk_b < 16)) begin
 
-                    fold_id = gk >> 3;
-                    k_idx   = gk & 7;
+                    fold_b = gk_b >> 3;
+                    k_b    = gk_b & 7;
 
-                    if (fold_id == 0)
-                        b_in[c] = B0[k_idx][c];
+                    if (fold_b == 0)
+                        b_in[c] = B0[k_b][c];
                     else
-                        b_in[c] = B1[k_idx][c];
+                        b_in[c] = B1[k_b][c];
 
-                    b_valid_in[c] = 1'b1;
-                    fold_ctx_in_b[c] = fold_id[0];
+                    b_valid_in[c]    = 1'b1;
+                    fold_ctx_in_b[c] = fold_b[0];
 
                 end
 
@@ -345,16 +399,14 @@ module systolic_uart_fold_top #(
 
     /*
      * ============================================================
-     * State progression
+     * Main state progression
      * ============================================================
      */
     always_ff @(posedge clk) begin
-
         if (rst) begin
 
-            state       <= ST_IDLE;
-            feed_t      <= 0;
-            drain_count <= 0;
+            state  <= ST_IDLE;
+            feed_t <= 6'd0;
 
         end
         else begin
@@ -363,11 +415,11 @@ module systolic_uart_fold_top #(
 
                 ST_IDLE: begin
 
+                    feed_t <= 6'd0;
+
                     if (matrices_ready) begin
-
-                        feed_t <= 0;
                         state  <= ST_FEED;
-
+                        feed_t <= 6'd0;
                     end
 
                 end
@@ -375,18 +427,9 @@ module systolic_uart_fold_top #(
 
                 ST_FEED: begin
 
-                    /*
-                     * Last useful boundary skew cycle:
-                     *
-                     * global_k max = 15
-                     * max skew     = 7
-                     *
-                     * => 22
-                     */
-                    if (feed_t == 22) begin
+                    if (feed_t == 6'd22) begin
 
-                        drain_count <= 0;
-                        state       <= ST_DRAIN;
+                        state <= ST_WAIT_RESULT;
 
                     end
                     else begin
@@ -398,46 +441,37 @@ module systolic_uart_fold_top #(
                 end
 
 
-                ST_DRAIN: begin
+                ST_WAIT_RESULT: begin
 
                     /*
-                     * Plenty of time for MUL(9) + ADD(12)
-                     * writebacks to complete before reading banks.
+                     * No hard-coded drain cycle count.
+                     *
+                     * Wait for the accelerator itself to report
+                     * that both reduced result contexts exist.
                      */
-                    if (drain_count == 40) begin
-
+                    if (c0_done && c1_done) begin
                         state <= ST_SEND;
-
-                    end
-                    else begin
-
-                        drain_count <= drain_count + 1'b1;
-
                     end
 
                 end
 
 
                 ST_SEND: begin
-                    /*
-                     * Return to IDLE after the final UART byte
-                     * has completely finished transmitting.
-                     */
-                    if (
-                        tx_state == TX_WAIT_DONE
-                        &&
-                        !tx_busy
-                        &&
-                        tx_count == 8191
-                    ) begin
+
+                    if (tx_all_done) begin
                         state <= ST_IDLE;
                     end
+
+                end
+
+
+                default: begin
+                    state <= ST_IDLE;
                 end
 
             endcase
 
         end
-
     end
 
 
@@ -445,64 +479,38 @@ module systolic_uart_fold_top #(
      * ============================================================
      * UART TX
      *
-     * Send raw accumulator banks:
+     * bytes   0..255 = C0
+     * bytes 256..511 = C1
      *
-     * ctx0 first:
-     *   8*8*16*4 = 4096 bytes
-     *
-     * ctx1 second:
-     *   4096 bytes
-     *
-     * total:
-     *   8192 bytes
-     *
-     * Host performs final 16-bank reduction.
+     * Total = 512 bytes
      * ============================================================
      */
-
-    logic [13:0] tx_count;
-
+    logic [8:0]  tx_count;
     logic [31:0] tx_word;
-
-    logic [5:0] tx_pe;
-    logic [3:0] tx_bank;
-
-    logic tx_ctx;
 
 
     always_comb begin
 
         /*
-        * tx_count layout:
-        *
-        * [12]   = context
-        * [11:9] = PE row
-        * [8:6]  = PE col
-        * [5:2]  = accumulator bank
-        * [1:0]  = byte within FP32 word
-        */
+         * tx_count layout inside each matrix:
+         *
+         * [7:5] = row
+         * [4:2] = col
+         * [1:0] = byte
+         */
 
-        tx_ctx  = tx_count[12];
-        tx_pe   = tx_count[11:6];
-        tx_bank = tx_count[5:2];
-
-
-        if (tx_ctx == 1'b0) begin
+        if (tx_count < 256) begin
 
             tx_word =
-                dbg_acc_ctx0
-                    [tx_count[11:9]]
-                    [tx_count[8:6]]
-                    [tx_count[5:2]];
+                C0[tx_count[7:5]]
+                  [tx_count[4:2]];
 
         end
         else begin
 
             tx_word =
-                dbg_acc_ctx1
-                    [tx_count[11:9]]
-                    [tx_count[8:6]]
-                    [tx_count[5:2]];
+                C1[(tx_count - 256) >> 5]
+                  [((tx_count - 256) >> 2) & 7];
 
         end
 
@@ -518,17 +526,19 @@ module systolic_uart_fold_top #(
             2'd2:
                 tx_byte = tx_word[23:16];
 
-            2'd3:
-                tx_byte = tx_word[31:24];
-
             default:
-                tx_byte = 8'h00;
+                tx_byte = tx_word[31:24];
 
         endcase
 
     end
 
 
+    /*
+     * ============================================================
+     * UART TX FSM
+     * ============================================================
+     */
     typedef enum logic [1:0] {
         TX_IDLE,
         TX_START,
@@ -540,17 +550,18 @@ module systolic_uart_fold_top #(
 
 
     always_ff @(posedge clk) begin
-
         if (rst) begin
 
-            tx_count <= 0;
-            tx_start <= 1'b0;
-            tx_state <= TX_IDLE;
+            tx_count    <= 9'd0;
+            tx_start    <= 1'b0;
+            tx_state    <= TX_IDLE;
+            tx_all_done <= 1'b0;
 
         end
         else begin
 
-            tx_start <= 1'b0;
+            tx_start    <= 1'b0;
+            tx_all_done <= 1'b0;
 
             case (tx_state)
 
@@ -558,7 +569,7 @@ module systolic_uart_fold_top #(
 
                     if (state == ST_SEND) begin
 
-                        tx_count <= 0;
+                        tx_count <= 9'd0;
                         tx_state <= TX_START;
 
                     end
@@ -580,8 +591,9 @@ module systolic_uart_fold_top #(
 
                 TX_WAIT_BUSY: begin
 
-                    if (tx_busy)
+                    if (tx_busy) begin
                         tx_state <= TX_WAIT_DONE;
+                    end
 
                 end
 
@@ -590,10 +602,11 @@ module systolic_uart_fold_top #(
 
                     if (!tx_busy) begin
 
-                        if (tx_count == 8191) begin
+                        if (tx_count == 9'd511) begin
 
-                            tx_count <= 0;
-                            tx_state <= TX_IDLE;
+                            tx_count    <= 9'd0;
+                            tx_state    <= TX_IDLE;
+                            tx_all_done <= 1'b1;
 
                         end
                         else begin
@@ -607,11 +620,14 @@ module systolic_uart_fold_top #(
 
                 end
 
+
+                default: begin
+                    tx_state <= TX_IDLE;
+                end
+
             endcase
 
         end
-
     end
-
 
 endmodule

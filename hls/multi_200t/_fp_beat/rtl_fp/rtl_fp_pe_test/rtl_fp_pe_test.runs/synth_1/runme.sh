@@ -37,4 +37,4 @@ EAStep()
      fi
 }
 
-EAStep vivado -log systolic_uart_top.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source systolic_uart_top.tcl
+EAStep vivado -log systolic_uart_fold_top.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source systolic_uart_fold_top.tcl

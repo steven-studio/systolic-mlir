@@ -1,14 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<GenRun Id="synth_1" LaunchPart="xc7a200tsbg484-1" LaunchTime="1786195111">
-  <File Type="VDS-TIMING-PB" Name="systolic_uart_top_timing_summary_synth.pb"/>
-  <File Type="VDS-TIMINGSUMMARY" Name="systolic_uart_top_timing_summary_synth.rpt"/>
-  <File Type="RDS-DCP" Name="systolic_uart_top.dcp"/>
-  <File Type="RDS-UTIL-PB" Name="systolic_uart_top_utilization_synth.pb"/>
-  <File Type="RDS-UTIL" Name="systolic_uart_top_utilization_synth.rpt"/>
-  <File Type="RDS-PROPCONSTRS" Name="systolic_uart_top_drc_synth.rpt"/>
-  <File Type="RDS-RDS" Name="systolic_uart_top.vds"/>
-  <File Type="REPORTS-TCL" Name="systolic_uart_top_reports.tcl"/>
-  <File Type="PA-TCL" Name="systolic_uart_top.tcl"/>
+<GenRun Id="synth_1" LaunchPart="xc7a200tsbg484-1" LaunchTime="1786214012">
+  <File Type="RDS-DCP" Name="systolic_uart_fold_top.dcp"/>
+  <File Type="RDS-RDS" Name="systolic_uart_fold_top.vds"/>
+  <File Type="RDS-UTIL" Name="systolic_uart_fold_top_utilization_synth.rpt"/>
+  <File Type="RDS-UTIL-PB" Name="systolic_uart_fold_top_utilization_synth.pb"/>
+  <File Type="PA-TCL" Name="systolic_uart_fold_top.tcl"/>
+  <File Type="REPORTS-TCL" Name="systolic_uart_fold_top_reports.tcl"/>
   <FileSet Name="sources" Type="DesignSrcs" RelSrcDir="$PSRCDIR/sources_1" RelGenDir="$PGENDIR/sources_1">
     <Filter Type="Srcs"/>
     <File Path="$PSRCDIR/sources_1/ip/floating_point_add_0/floating_point_add_0.xci">
@@ -39,28 +36,14 @@
         <Attr Name="UsedIn" Val="simulation"/>
       </FileInfo>
     </File>
-    <File Path="$PPRDIR/../fp_reduce8.sv">
+    <File Path="$PPRDIR/../systolic_array_8x8_fold.sv">
       <FileInfo>
         <Attr Name="UsedIn" Val="synthesis"/>
         <Attr Name="UsedIn" Val="implementation"/>
         <Attr Name="UsedIn" Val="simulation"/>
       </FileInfo>
     </File>
-    <File Path="$PPRDIR/../gemm_controller.sv">
-      <FileInfo>
-        <Attr Name="UsedIn" Val="synthesis"/>
-        <Attr Name="UsedIn" Val="implementation"/>
-        <Attr Name="UsedIn" Val="simulation"/>
-      </FileInfo>
-    </File>
-    <File Path="$PPRDIR/../systolic_array_8x8.sv">
-      <FileInfo>
-        <Attr Name="UsedIn" Val="synthesis"/>
-        <Attr Name="UsedIn" Val="implementation"/>
-        <Attr Name="UsedIn" Val="simulation"/>
-      </FileInfo>
-    </File>
-    <File Path="$PPRDIR/../systolic_pe.sv">
+    <File Path="$PPRDIR/../systolic_pe_fold.sv">
       <FileInfo>
         <Attr Name="UsedIn" Val="synthesis"/>
         <Attr Name="UsedIn" Val="implementation"/>
@@ -81,8 +64,48 @@
         <Attr Name="UsedIn" Val="simulation"/>
       </FileInfo>
     </File>
+    <File Path="$PPRDIR/../systolic_uart_fold_top.sv">
+      <FileInfo>
+        <Attr Name="UsedIn" Val="synthesis"/>
+        <Attr Name="UsedIn" Val="implementation"/>
+        <Attr Name="UsedIn" Val="simulation"/>
+      </FileInfo>
+    </File>
+    <File Path="$PPRDIR/../fp_reduce8.sv">
+      <FileInfo>
+        <Attr Name="AutoDisabled" Val="1"/>
+        <Attr Name="UsedIn" Val="synthesis"/>
+        <Attr Name="UsedIn" Val="implementation"/>
+        <Attr Name="UsedIn" Val="simulation"/>
+      </FileInfo>
+    </File>
+    <File Path="$PPRDIR/../gemm_controller.sv">
+      <FileInfo>
+        <Attr Name="AutoDisabled" Val="1"/>
+        <Attr Name="UsedIn" Val="synthesis"/>
+        <Attr Name="UsedIn" Val="implementation"/>
+        <Attr Name="UsedIn" Val="simulation"/>
+      </FileInfo>
+    </File>
+    <File Path="$PPRDIR/../systolic_array_8x8.sv">
+      <FileInfo>
+        <Attr Name="AutoDisabled" Val="1"/>
+        <Attr Name="UsedIn" Val="synthesis"/>
+        <Attr Name="UsedIn" Val="implementation"/>
+        <Attr Name="UsedIn" Val="simulation"/>
+      </FileInfo>
+    </File>
+    <File Path="$PPRDIR/../systolic_pe.sv">
+      <FileInfo>
+        <Attr Name="AutoDisabled" Val="1"/>
+        <Attr Name="UsedIn" Val="synthesis"/>
+        <Attr Name="UsedIn" Val="implementation"/>
+        <Attr Name="UsedIn" Val="simulation"/>
+      </FileInfo>
+    </File>
     <File Path="$PPRDIR/../systolic_uart_top.sv">
       <FileInfo>
+        <Attr Name="AutoDisabled" Val="1"/>
         <Attr Name="UsedIn" Val="synthesis"/>
         <Attr Name="UsedIn" Val="implementation"/>
         <Attr Name="UsedIn" Val="simulation"/>
@@ -98,7 +121,7 @@
     </File>
     <Config>
       <Option Name="DesignMode" Val="RTL"/>
-      <Option Name="TopModule" Val="systolic_uart_top"/>
+      <Option Name="TopModule" Val="systolic_uart_fold_top"/>
     </Config>
   </FileSet>
   <FileSet Name="constrs_in" Type="Constrs" RelSrcDir="$PSRCDIR/constrs_1" RelGenDir="$PGENDIR/constrs_1">

@@ -39,6 +39,6 @@ EAStep()
 
 # pre-commands:
 /bin/touch .init_design.begin.rst
-EAStep vivado -log systolic_uart_top.vdi -applog -m64 -product Vivado -messageDb vivado.pb -mode batch -source systolic_uart_top.tcl -notrace
+EAStep vivado -log systolic_uart_fold_top.vdi -applog -m64 -product Vivado -messageDb vivado.pb -mode batch -source systolic_uart_fold_top.tcl -notrace
 
 
