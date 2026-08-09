@@ -2,6 +2,14 @@ module systolic_pe_fold #(
     parameter int DATA_W      = 32,
     parameter int ACC_BANKS   = 16,
     parameter int MUL_LATENCY = 9,
+
+    /*
+     * Kept temporarily for source compatibility.
+     *
+     * IMPORTANT:
+     * This implementation does NOT use ADD_LATENCY for
+     * metadata alignment anymore.
+     */
     parameter int ADD_LATENCY = 12
 ) (
     input  logic              clk,
@@ -29,7 +37,22 @@ module systolic_pe_fold #(
 
     /*
      * ============================================================
-     * PE-to-PE pipeline register
+     * PE state
+     * ============================================================
+     */
+
+    typedef enum logic [1:0] {
+        PE_ACCUM,
+        PE_REDUCE_ISSUE,
+        PE_REDUCE_WAIT
+    } pe_state_t;
+
+    pe_state_t state;
+
+
+    /*
+     * ============================================================
+     * Stage 0: PE-to-PE pipeline registers
      * ============================================================
      */
 
@@ -45,79 +68,65 @@ module systolic_pe_fold #(
     logic [3:0] local_acc_sel [0:1];
 
     wire pair_valid =
-        a_valid_in && b_valid_in;
+        a_valid_in &&
+        b_valid_in;
 
     wire pipe_pair_valid =
-        a_valid_reg && b_valid_reg;
+        a_valid_reg &&
+        b_valid_reg;
 
-
-    /*
-     * ============================================================
-     * Local control
-     * ============================================================
-     */
-
-    typedef enum logic [1:0] {
-        PE_ACCUM,
-        PE_REDUCE_ISSUE,
-        PE_REDUCE_WAIT
-    } pe_state_t;
-
-    pe_state_t state;
-
-    logic clear_acc_banks;
-
-
-    /*
-     * ============================================================
-     * Stage 0
-     * ============================================================
-     */
 
     always_ff @(posedge clk) begin
 
         if (rst) begin
 
-            a_reg       <= '0;
-            b_reg       <= '0;
+            a_reg <=
+                '0;
 
-            a_valid_reg <= 1'b0;
-            b_valid_reg <= 1'b0;
+            b_reg <=
+                '0;
 
-            fold_ctx_reg <= 1'b0;
+            a_valid_reg <=
+                1'b0;
 
-            sel_reg <= '0;
+            b_valid_reg <=
+                1'b0;
 
-            local_acc_sel[0] <= '0;
-            local_acc_sel[1] <= '0;
+            fold_ctx_reg <=
+                1'b0;
+
+            sel_reg <=
+                '0;
+
+            local_acc_sel[0] <=
+                '0;
+
+            local_acc_sel[1] <=
+                '0;
 
         end
         else begin
 
-            a_valid_reg <= a_valid_in;
-            b_valid_reg <= b_valid_in;
+            a_valid_reg <=
+                a_valid_in;
+
+            b_valid_reg <=
+                b_valid_in;
+
 
             if (a_valid_in)
-                a_reg <= a_in;
+                a_reg <=
+                    a_in;
 
             if (b_valid_in)
-                b_reg <= b_in;
+                b_reg <=
+                    b_in;
 
 
-            /*
-             * A completed operation has consumed both local
-             * accumulator contexts. Prepare selectors for the
-             * next matrix transaction.
-             */
-            if (clear_acc_banks) begin
+            if (pair_valid) begin
 
-                local_acc_sel[0] <= '0;
-                local_acc_sel[1] <= '0;
-
-            end
-            else if (pair_valid) begin
-
-                fold_ctx_reg <= fold_ctx_in;
+                fold_ctx_reg <=
+                    fold_ctx_in;
 
                 sel_reg <=
                     local_acc_sel[fold_ctx_in];
@@ -175,13 +184,20 @@ module systolic_pe_fold #(
     /*
      * ============================================================
      * Multiplier metadata pipeline
+     *
+     * This remains latency-based because it belongs to the
+     * multiplier transaction itself and this alignment has already
+     * been verified by the PE tests.
      * ============================================================
      */
 
-    logic [3:0] mul_sel_pipe [0:MUL_LATENCY-1];
-    logic       mul_ctx_pipe [0:MUL_LATENCY-1];
+    logic [3:0]
+        mul_sel_pipe [0:MUL_LATENCY-1];
 
-    integer m;
+    logic
+        mul_ctx_pipe [0:MUL_LATENCY-1];
+
+    integer mp;
 
 
     always_ff @(posedge clk) begin
@@ -189,36 +205,44 @@ module systolic_pe_fold #(
         if (rst) begin
 
             for (
-                m = 0;
-                m < MUL_LATENCY;
-                m = m + 1
+                mp = 0;
+                mp < MUL_LATENCY;
+                mp = mp + 1
             ) begin
 
-                mul_sel_pipe[m] <= '0;
-                mul_ctx_pipe[m] <= 1'b0;
+                mul_sel_pipe[mp] <=
+                    '0;
+
+                mul_ctx_pipe[mp] <=
+                    1'b0;
 
             end
 
         end
         else begin
 
+            /*
+             * sel_reg / fold_ctx_reg belong to the same registered
+             * A/B pair entering fp_mul.
+             */
             mul_sel_pipe[0] <=
                 sel_reg;
 
             mul_ctx_pipe[0] <=
                 fold_ctx_reg;
 
+
             for (
-                m = 1;
-                m < MUL_LATENCY;
-                m = m + 1
+                mp = 1;
+                mp < MUL_LATENCY;
+                mp = mp + 1
             ) begin
 
-                mul_sel_pipe[m] <=
-                    mul_sel_pipe[m-1];
+                mul_sel_pipe[mp] <=
+                    mul_sel_pipe[mp-1];
 
-                mul_ctx_pipe[m] <=
-                    mul_ctx_pipe[m-1];
+                mul_ctx_pipe[mp] <=
+                    mul_ctx_pipe[mp-1];
 
             end
 
@@ -236,10 +260,7 @@ module systolic_pe_fold #(
 
     /*
      * ============================================================
-     * Local accumulator banks
-     *
-     * These are PRIVATE PE state.
-     * They are no longer exported to the array.
+     * Two accumulator contexts
      * ============================================================
      */
 
@@ -253,7 +274,9 @@ module systolic_pe_fold #(
     always_comb begin
 
         selected_acc =
-            acc_bank[product_ctx][product_sel];
+            acc_bank
+                [product_ctx]
+                [product_sel];
 
     end
 
@@ -261,19 +284,16 @@ module systolic_pe_fold #(
     /*
      * ============================================================
      * Local result reduction state
-     * ============================================================
      *
-     * After all MAC writebacks have drained, the same fp_add
-     * used for accumulation is reused to reduce:
-     *
-     *   acc_bank[ctx][0..15]
-     *
-     * into one scalar result.
+     * The same FP adder used by accumulation is reused after all
+     * MAC traffic has drained.
      * ============================================================
      */
 
-    logic       reduce_ctx;
-    logic [3:0] reduce_index;
+    logic reduce_ctx;
+
+    logic [3:0]
+        reduce_index;
 
     logic [DATA_W-1:0]
         reduce_running_sum;
@@ -285,20 +305,32 @@ module systolic_pe_fold #(
      * ============================================================
      */
 
-    logic              fp_add_valid_in;
-    logic [DATA_W-1:0] fp_add_a;
-    logic [DATA_W-1:0] fp_add_b;
+    logic
+        fp_add_valid_in;
 
-    logic [DATA_W-1:0] add_result;
-    logic              add_valid;
+    logic [DATA_W-1:0]
+        fp_add_a;
+
+    logic [DATA_W-1:0]
+        fp_add_b;
+
+    logic [DATA_W-1:0]
+        add_result;
+
+    logic
+        add_valid;
 
 
     always_comb begin
 
-        fp_add_valid_in = 1'b0;
+        fp_add_valid_in =
+            1'b0;
 
-        fp_add_a = '0;
-        fp_add_b = '0;
+        fp_add_a =
+            '0;
+
+        fp_add_b =
+            '0;
 
 
         /*
@@ -321,7 +353,8 @@ module systolic_pe_fold #(
         /*
          * Final local reduction.
          *
-         * Exactly one FP add is issued while in this state.
+         * Exactly one add request is issued while the FSM is in
+         * PE_REDUCE_ISSUE.
          */
         else if (state == PE_REDUCE_ISSUE) begin
 
@@ -332,7 +365,9 @@ module systolic_pe_fold #(
                 reduce_running_sum;
 
             fp_add_b =
-                acc_bank[reduce_ctx][reduce_index];
+                acc_bank
+                    [reduce_ctx]
+                    [reduce_index];
 
         end
 
@@ -355,110 +390,183 @@ module systolic_pe_fold #(
 
     /*
      * ============================================================
-     * Accumulation writeback metadata pipeline
+     * FP ADD transaction metadata FIFO
+     *
+     * Every request sent to fp_add pushes one metadata entry.
+     *
+     * Every add_valid pops exactly one metadata entry.
+     *
+     * This means the PE no longer needs to know or guess the
+     * floating-point ADD latency.
      * ============================================================
      */
 
-    logic [3:0]
-        add_sel_pipe [0:ADD_LATENCY-1];
+    localparam int ADD_META_DEPTH =
+        32;
+
+    localparam int ADD_META_PTR_W =
+        $clog2(ADD_META_DEPTH);
+
 
     logic
-        add_ctx_pipe [0:ADD_LATENCY-1];
+        add_meta_is_mac [0:ADD_META_DEPTH-1];
 
-    logic add_accum_tag_pipe [0:ADD_LATENCY-1];
+    logic [3:0]
+        add_meta_sel [0:ADD_META_DEPTH-1];
 
-    integer ap;
+    logic
+        add_meta_ctx [0:ADD_META_DEPTH-1];
+
+
+    logic [ADD_META_PTR_W-1:0]
+        add_meta_wr_ptr;
+
+    logic [ADD_META_PTR_W-1:0]
+        add_meta_rd_ptr;
+
+    logic [ADD_META_PTR_W:0]
+        add_meta_count;
+
+
+    /*
+     * The current read pointer identifies metadata belonging to
+     * the add_result currently returning when add_valid == 1.
+     *
+     * These signals are meaningless when add_valid == 0 and are
+     * therefore always consumed together with add_valid.
+     */
+    wire add_result_is_mac =
+        add_meta_is_mac[add_meta_rd_ptr];
+
+    wire [3:0] writeback_sel =
+        add_meta_sel[add_meta_rd_ptr];
+
+    wire writeback_ctx =
+        add_meta_ctx[add_meta_rd_ptr];
 
 
     always_ff @(posedge clk) begin
 
         if (rst) begin
 
-            for (
-                ap = 0;
-                ap < ADD_LATENCY;
-                ap = ap + 1
-            ) begin
+            add_meta_wr_ptr <=
+                '0;
 
-                add_sel_pipe[ap] <= '0;
-                add_ctx_pipe[ap] <= 1'b0;
+            add_meta_rd_ptr <=
+                '0;
 
-            end
+            add_meta_count <=
+                '0;
 
         end
         else begin
 
-            add_sel_pipe[0] <=
-                product_sel;
+            /*
+             * Push metadata for every operation actually issued
+             * into fp_add.
+             */
+            if (fp_add_valid_in) begin
 
-            add_ctx_pipe[0] <=
-                product_ctx;
+                add_meta_is_mac[add_meta_wr_ptr] <=
+                    (state == PE_ACCUM);
 
-            add_accum_tag_pipe[0] <=
-                (state == PE_ACCUM) &&
-                fp_add_valid_in;
+                /*
+                 * sel/ctx are relevant only for MAC operations.
+                 * For reduction entries they are don't-care.
+                 */
+                add_meta_sel[add_meta_wr_ptr] <=
+                    product_sel;
 
-            for (
-                ap = 1;
-                ap < ADD_LATENCY;
-                ap = ap + 1
-            ) begin
+                add_meta_ctx[add_meta_wr_ptr] <=
+                    product_ctx;
 
-                add_sel_pipe[ap] <=
-                    add_sel_pipe[ap-1];
-
-                add_ctx_pipe[ap] <=
-                    add_ctx_pipe[ap-1];
-
-                add_accum_tag_pipe[ap] <=
-                    add_accum_tag_pipe[ap-1];
+                add_meta_wr_ptr <=
+                    add_meta_wr_ptr + 1'b1;
 
             end
+
+
+            /*
+             * FP ADD preserves transaction ordering.
+             * Therefore each returned result consumes the oldest
+             * outstanding metadata entry.
+             */
+            if (add_valid) begin
+
+                add_meta_rd_ptr <=
+                    add_meta_rd_ptr + 1'b1;
+
+            end
+
+
+            /*
+             * FIFO occupancy.
+             */
+            case ({
+                fp_add_valid_in,
+                add_valid
+            })
+
+                2'b10:
+                    add_meta_count <=
+                        add_meta_count + 1'b1;
+
+                2'b01:
+                    add_meta_count <=
+                        add_meta_count - 1'b1;
+
+                default:
+                    add_meta_count <=
+                        add_meta_count;
+
+            endcase
 
         end
 
     end
 
-    wire add_result_is_accum =
-        add_accum_tag_pipe[ADD_LATENCY-2];
-
-    /*
-     * Keep the currently verified latency alignment.
-     */
-    wire [3:0] writeback_sel =
-        add_sel_pipe[ADD_LATENCY-3];
-
-    wire writeback_ctx =
-        add_ctx_pipe[ADD_LATENCY-3];
-
 
     /*
      * ============================================================
-     * Detect when the complete input transaction has drained
+     * Detect complete MAC transaction drain
      * ============================================================
      */
 
-    logic pipe_pair_valid_d;
-    logic transaction_seen;
-    logic input_finished;
+    logic
+        pipe_pair_valid_d;
+
+    logic
+        transaction_seen;
+
+    logic
+        input_finished;
 
     /*
-     * Number of products that have entered the FP ADD but have
-     * not yet returned.
+     * Number of MAC operations that entered fp_add but whose
+     * corresponding MAC result has not returned yet.
      */
-    logic [7:0] outstanding_adds;
+    logic [7:0]
+        outstanding_adds;
+
+    logic
+        clear_acc_banks;
 
 
     always_ff @(posedge clk) begin
 
         if (rst) begin
 
-            pipe_pair_valid_d <= 1'b0;
+            pipe_pair_valid_d <=
+                1'b0;
 
-            transaction_seen <= 1'b0;
-            input_finished   <= 1'b0;
+            transaction_seen <=
+                1'b0;
 
-            outstanding_adds <= '0;
+            input_finished <=
+                1'b0;
+
+            outstanding_adds <=
+                '0;
 
         end
         else if (state == PE_ACCUM) begin
@@ -469,21 +577,15 @@ module systolic_pe_fold #(
 
             if (pipe_pair_valid) begin
 
-                transaction_seen <= 1'b1;
-
-                /*
-                 * Beginning of a new transaction.
-                 */
-                if (result_valid)
-                    input_finished <= 1'b0;
+                transaction_seen <=
+                    1'b1;
 
             end
 
 
             /*
-             * The two folds are contiguous, therefore the falling
-             * edge after a transaction marks the end of injection
-             * into this PE.
+             * Falling edge of the local pair-valid stream marks
+             * completion of input injection into this PE.
              */
             if (
                 transaction_seen &&
@@ -491,17 +593,26 @@ module systolic_pe_fold #(
                 !pipe_pair_valid
             ) begin
 
-                input_finished <= 1'b1;
+                input_finished <=
+                    1'b1;
 
             end
 
 
             /*
-             * Track products waiting for FP ADD writeback.
+             * MAC accounting.
+             *
+             * Increment:
+             *   a multiplier result enters the ADD as a MAC.
+             *
+             * Decrement:
+             *   the FIFO tells us that this returned ADD result
+             *   belongs to a MAC transaction.
              */
             case ({
                 product_valid,
-                add_valid && add_result_is_accum
+                add_valid &&
+                add_result_is_mac
             })
 
                 2'b10:
@@ -522,18 +633,28 @@ module systolic_pe_fold #(
         else begin
 
             /*
-             * Not used during local reduction.
+             * MAC accounting is not used during local reduction.
              */
-            outstanding_adds <= '0;
+            outstanding_adds <=
+                '0;
 
         end
 
 
+        /*
+         * Completion of ctx1 reduction ends the current matrix
+         * transaction and prepares this PE for the next one.
+         */
         if (clear_acc_banks) begin
 
-            transaction_seen <= 1'b0;
-            input_finished   <= 1'b0;
-            outstanding_adds <= '0;
+            transaction_seen <=
+                1'b0;
+
+            input_finished <=
+                1'b0;
+
+            outstanding_adds <=
+                '0;
 
         end
 
@@ -566,7 +687,8 @@ module systolic_pe_fold #(
                     bank_i = bank_i + 1
                 ) begin
 
-                    acc_bank[ctx_i][bank_i] <= '0;
+                    acc_bank[ctx_i][bank_i] <=
+                        '0;
 
                 end
 
@@ -587,7 +709,8 @@ module systolic_pe_fold #(
                     bank_i = bank_i + 1
                 ) begin
 
-                    acc_bank[ctx_i][bank_i] <= '0;
+                    acc_bank[ctx_i][bank_i] <=
+                        '0;
 
                 end
 
@@ -595,7 +718,8 @@ module systolic_pe_fold #(
 
         end
         else if (
-            add_valid && add_result_is_accum
+            add_valid &&
+            add_result_is_mac
         ) begin
 
             acc_bank
@@ -610,7 +734,11 @@ module systolic_pe_fold #(
 
     /*
      * ============================================================
-     * Final-result FSM
+     * Final-result completion condition
+     * ============================================================
+     *
+     * clear_acc_banks is asserted exactly when the final ctx1
+     * reduction ADD returns.
      * ============================================================
      */
 
@@ -620,30 +748,19 @@ module systolic_pe_fold #(
             (
                 state == PE_REDUCE_WAIT &&
                 add_valid &&
+                !add_result_is_mac &&
                 reduce_ctx == 1'b1 &&
                 reduce_index == ACC_BANKS-1
             );
 
     end
 
-    always_ff @(posedge clk) begin
-        if (!rst &&
-            state == PE_ACCUM &&
-            add_valid &&
-            !product_valid &&
-            outstanding_adds == 0) begin
 
-            $display(
-                "OUTSTANDING UNDERFLOW time=%0t pair=%b finished=%b prod=%b add=%b",
-                $time,
-                pipe_pair_valid,
-                input_finished,
-                product_valid,
-                add_valid
-            );
-
-        end
-    end
+    /*
+     * ============================================================
+     * Final-result FSM
+     * ============================================================
+     */
 
     always_ff @(posedge clk) begin
 
@@ -674,27 +791,29 @@ module systolic_pe_fold #(
         else begin
 
             /*
-            * result_valid is a one-cycle pulse.
-            * It is asserted only when ctx1 reduction finishes.
-            */
-            result_valid <= 1'b0;
+             * result_valid is a one-cycle pulse.
+             */
+            result_valid <=
+                1'b0;
+
 
             case (state)
 
 
                 /*
-                 * ---------------------------------------------
-                 * Normal systolic accumulation.
-                 * ---------------------------------------------
+                 * ------------------------------------------------
+                 * Normal systolic accumulation
+                 * ------------------------------------------------
                  */
                 PE_ACCUM: begin
 
                     /*
-                     * Wait until:
+                     * Start final reduction only after:
                      *
-                     *  1. the input stream ended,
-                     *  2. multiplier has no new product,
-                     *  3. all accumulator ADDs have returned.
+                     *  1. local input injection ended,
+                     *  2. every MAC ADD returned,
+                     *  3. multiplier output is empty,
+                     *  4. ADD output is currently empty.
                      */
                     if (
                         input_finished &&
@@ -704,9 +823,10 @@ module systolic_pe_fold #(
                     ) begin
 
                         /*
-                         * Start ctx0 reduction.
+                         * Begin ctx0 reduction.
                          *
-                         * bank0 is the initial running value.
+                         * Bank 0 becomes the initial running sum,
+                         * so the first ADD consumes bank 1.
                          */
                         reduce_ctx <=
                             1'b0;
@@ -726,12 +846,19 @@ module systolic_pe_fold #(
 
 
                 /*
-                 * ---------------------------------------------
-                 * Issue one local reduction ADD.
-                 * ---------------------------------------------
+                 * ------------------------------------------------
+                 * Issue exactly one reduction ADD
+                 * ------------------------------------------------
                  */
                 PE_REDUCE_ISSUE: begin
 
+                    /*
+                     * fp_add_valid_in is combinationally asserted
+                     * while in this state.
+                     *
+                     * Move immediately to WAIT so exactly one
+                     * request is issued.
+                     */
                     state <=
                         PE_REDUCE_WAIT;
 
@@ -739,17 +866,24 @@ module systolic_pe_fold #(
 
 
                 /*
-                 * ---------------------------------------------
-                 * Wait for that ADD to return.
-                 * ---------------------------------------------
+                 * ------------------------------------------------
+                 * Wait for that reduction ADD result
+                 * ------------------------------------------------
                  */
                 PE_REDUCE_WAIT: begin
 
-                    if (add_valid) begin
+                    /*
+                     * Only consume ADD results whose FIFO metadata
+                     * says they belong to reduction.
+                     */
+                    if (
+                        add_valid &&
+                        !add_result_is_mac
+                    ) begin
 
 
                         /*
-                         * More banks remain in the current context.
+                         * More banks remain in this context.
                          */
                         if (
                             reduce_index !=
@@ -769,13 +903,13 @@ module systolic_pe_fold #(
 
 
                         /*
-                         * Current context is complete.
+                         * Current context reduction is complete.
                          */
                         else begin
 
 
                             /*
-                             * ctx0 finished.
+                             * ctx0 completed.
                              */
                             if (reduce_ctx == 1'b0) begin
 
@@ -783,7 +917,7 @@ module systolic_pe_fold #(
                                     add_result;
 
                                 /*
-                                 * Immediately begin ctx1.
+                                 * Immediately prepare ctx1.
                                  */
                                 reduce_ctx <=
                                     1'b1;
@@ -801,8 +935,10 @@ module systolic_pe_fold #(
 
 
                             /*
-                             * ctx1 finished: this PE now owns
-                             * two final scalar results.
+                             * ctx1 completed.
+                             *
+                             * Both scalar results owned by this PE
+                             * are now valid.
                              */
                             else begin
 
@@ -836,6 +972,5 @@ module systolic_pe_fold #(
         end
 
     end
-
 
 endmodule

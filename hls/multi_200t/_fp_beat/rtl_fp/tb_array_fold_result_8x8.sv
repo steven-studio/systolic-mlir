@@ -300,6 +300,14 @@ module tb_array_fold_result_8x8;
         @(negedge clk);
         rst = 1'b0;
 
+        /*
+        * Diagnostic only:
+        * allow FP IP internal pipelines to settle after reset.
+        */
+        repeat (30)
+            @(posedge clk);
+
+        @(negedge clk);
 
         $display("");
         $display("================================");
@@ -391,7 +399,7 @@ module tb_array_fold_result_8x8;
             dut.ROW[0].COL[1].u_pe.pipe_pair_valid_d,
             dut.ROW[0].COL[1].u_pe.product_valid,
             dut.ROW[0].COL[1].u_pe.add_valid,
-            dut.ROW[0].COL[1].u_pe.add_result_is_accum,
+            dut.ROW[0].COL[1].u_pe.add_result_is_mac,
             dut.ROW[0].COL[1].u_pe.reduce_ctx,
             dut.ROW[0].COL[1].u_pe.reduce_index,
             dut.ROW[0].COL[1].u_pe.result_valid
