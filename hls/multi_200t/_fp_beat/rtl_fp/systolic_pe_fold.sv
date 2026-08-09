@@ -183,79 +183,114 @@ module systolic_pe_fold #(
 
     /*
      * ============================================================
-     * Multiplier metadata pipeline
+     * FP MUL transaction metadata FIFO
      *
-     * This remains latency-based because it belongs to the
-     * multiplier transaction itself and this alignment has already
-     * been verified by the PE tests.
+     * Metadata is pushed for every transaction entering fp_mul
+     * and popped when the corresponding product_valid returns.
+     *
+     * This avoids depending on the implementation latency of the
+     * floating-point multiplier.
      * ============================================================
      */
 
+    localparam int MUL_META_DEPTH = 32;
+    localparam int MUL_META_PTR_W = $clog2(MUL_META_DEPTH);
+
     logic [3:0]
-        mul_sel_pipe [0:MUL_LATENCY-1];
+        mul_meta_sel [0:MUL_META_DEPTH-1];
 
     logic
-        mul_ctx_pipe [0:MUL_LATENCY-1];
+        mul_meta_ctx [0:MUL_META_DEPTH-1];
 
-    integer mp;
+    logic [MUL_META_PTR_W-1:0]
+        mul_meta_wr_ptr;
+
+    logic [MUL_META_PTR_W-1:0]
+        mul_meta_rd_ptr;
+
+    logic [MUL_META_PTR_W:0]
+        mul_meta_count;
+
+
+    /*
+     * Oldest outstanding multiplier transaction belongs to the
+     * product currently returned by fp_mul.
+     */
+    wire [3:0] product_sel =
+        mul_meta_sel[mul_meta_rd_ptr];
+
+    wire product_ctx =
+        mul_meta_ctx[mul_meta_rd_ptr];
 
 
     always_ff @(posedge clk) begin
 
         if (rst) begin
 
-            for (
-                mp = 0;
-                mp < MUL_LATENCY;
-                mp = mp + 1
-            ) begin
+            mul_meta_wr_ptr <=
+                '0;
 
-                mul_sel_pipe[mp] <=
-                    '0;
+            mul_meta_rd_ptr <=
+                '0;
 
-                mul_ctx_pipe[mp] <=
-                    1'b0;
-
-            end
+            mul_meta_count <=
+                '0;
 
         end
         else begin
 
             /*
-             * sel_reg / fold_ctx_reg belong to the same registered
-             * A/B pair entering fp_mul.
+             * Push metadata belonging to the exact A/B transaction
+             * entering fp_mul.
              */
-            mul_sel_pipe[0] <=
-                sel_reg;
+            if (pipe_pair_valid) begin
 
-            mul_ctx_pipe[0] <=
-                fold_ctx_reg;
+                mul_meta_sel[mul_meta_wr_ptr] <=
+                    sel_reg;
 
+                mul_meta_ctx[mul_meta_wr_ptr] <=
+                    fold_ctx_reg;
 
-            for (
-                mp = 1;
-                mp < MUL_LATENCY;
-                mp = mp + 1
-            ) begin
-
-                mul_sel_pipe[mp] <=
-                    mul_sel_pipe[mp-1];
-
-                mul_ctx_pipe[mp] <=
-                    mul_ctx_pipe[mp-1];
+                mul_meta_wr_ptr <=
+                    mul_meta_wr_ptr + 1'b1;
 
             end
+
+
+            /*
+             * fp_mul preserves transaction ordering.
+             * Pop the metadata corresponding to this product.
+             */
+            if (product_valid) begin
+
+                mul_meta_rd_ptr <=
+                    mul_meta_rd_ptr + 1'b1;
+
+            end
+
+
+            case ({
+                pipe_pair_valid,
+                product_valid
+            })
+
+                2'b10:
+                    mul_meta_count <=
+                        mul_meta_count + 1'b1;
+
+                2'b01:
+                    mul_meta_count <=
+                        mul_meta_count - 1'b1;
+
+                default:
+                    mul_meta_count <=
+                        mul_meta_count;
+
+            endcase
 
         end
 
     end
-
-
-    wire [3:0] product_sel =
-        mul_sel_pipe[MUL_LATENCY-1];
-
-    wire product_ctx =
-        mul_ctx_pipe[MUL_LATENCY-1];
 
 
     /*

@@ -235,7 +235,7 @@ module tb_array_fold_result_8x8;
     /*
      * Only observe the public array interface.
      */
-    always @(posedge clk) begin
+    always @(negedge clk) begin
 
         if (!rst && c_valid_out) begin
 
@@ -479,6 +479,63 @@ module tb_array_fold_result_8x8;
                 dut.ROW[0].COL[0].u_pe.reduce_index,
                 dut.ROW[0].COL[0].u_pe.result_valid
             );
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst && dut.pe_result_valid[0][0]) begin
+            #1;
+
+            $display(
+                "PE00_FINAL ctx0=%f ctx1=%f bits0=%h bits1=%h",
+                $bitstoshortreal(
+                    dut.pe_result_ctx0[0][0]
+                ),
+                $bitstoshortreal(
+                    dut.pe_result_ctx1[0][0]
+                ),
+                dut.pe_result_ctx0[0][0],
+                dut.pe_result_ctx1[0][0]
+            );
+        end
+    end
+
+    always @(negedge clk) begin
+        if (!rst &&
+            dut.ROW[0].COL[0].u_pe.pipe_pair_valid) begin
+
+            #1;
+
+            $display(
+                "PE00_IN a=%f b=%f fold_reg=%0d sel=%0d",
+                $bitstoshortreal(
+                    dut.ROW[0].COL[0].u_pe.a_reg
+                ),
+                $bitstoshortreal(
+                    dut.ROW[0].COL[0].u_pe.b_reg
+                ),
+                dut.ROW[0].COL[0].u_pe.fold_ctx_reg,
+                dut.ROW[0].COL[0].u_pe.sel_reg
+            );
+
+        end
+    end
+
+    always @(negedge clk) begin
+        if (!rst &&
+            dut.ROW[0].COL[0].u_pe.product_valid) begin
+
+            #1;
+
+            $display(
+                "PE00_PROD product=%f ctx=%0d sel=%0d",
+                $bitstoshortreal(
+                    dut.ROW[0].COL[0].u_pe.product
+                ),
+                dut.ROW[0].COL[0].u_pe.product_ctx,
+                dut.ROW[0].COL[0].u_pe.product_sel
+            );
+
         end
     end
 
