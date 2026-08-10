@@ -9,6 +9,8 @@ module systolic_uart_fold_top #(
     output logic uart_tx
 );
 
+    logic [7:0] k_dim;
+
     /*
      * ============================================================
      * UART
@@ -95,6 +97,7 @@ module systolic_uart_fold_top #(
             byte_pos       <= 2'd0;
             word_buf       <= 32'd0;
             matrices_ready <= 1'b0;
+            k_dim          <= 8'd16;
 
         end
         else begin
@@ -382,19 +385,24 @@ module systolic_uart_fold_top #(
 
 
     /*
-     * ============================================================
-     * Feed two K=8 folds continuously
-     *
-     * global k:
-     *
-     *   0..7   -> ctx0
-     *   8..15  -> ctx1
-     *
-     * Last boundary injection:
-     *
-     *   15 + max skew(7) = 22
-     * ============================================================
-     */
+    * Feed variable K dimension continuously.
+    *
+    * Fold context alternates every 8 K elements:
+    *
+    *   fold0 -> ctx0
+    *   fold1 -> ctx1
+    *   fold2 -> ctx0
+    *   fold3 -> ctx1
+    *   ...
+    *
+    * fold = global_k >> 3
+    * ctx  = fold[0]
+    *
+    * Last boundary injection:
+    *
+    *   (k_dim - 1) + max skew(7)
+    *   = k_dim + 6
+    */
     always_comb begin
 
         for (int i = 0; i < 8; i++) begin
@@ -424,7 +432,7 @@ module systolic_uart_fold_top #(
 
                 gk_a = feed_t - r;
 
-                if ((gk_a >= 0) && (gk_a < 16)) begin
+                if ((gk_a >= 0) && (gk_a < k_dim)) begin
 
                     fold_a = gk_a >> 3;
                     k_a    = gk_a & 7;
@@ -453,7 +461,7 @@ module systolic_uart_fold_top #(
 
                 gk_b = feed_t - c;
 
-                if ((gk_b >= 0) && (gk_b < 16)) begin
+                if ((gk_b >= 0) && (gk_b < k_dim)) begin
 
                     fold_b = gk_b >> 3;
                     k_b    = gk_b & 7;
@@ -505,7 +513,7 @@ module systolic_uart_fold_top #(
 
                 ST_FEED: begin
 
-                    if (feed_t == 6'd22) begin
+                    if (feed_t == k_dim + 6) begin
 
                         state <= ST_WAIT_RESULT;
 
