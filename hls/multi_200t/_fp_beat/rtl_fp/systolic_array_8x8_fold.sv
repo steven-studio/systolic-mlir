@@ -210,11 +210,23 @@ module systolic_array_8x8_fold #(
 
     logic all_results_valid;
     logic result_seen [0:7][0:7];
+    logic clear_result_seen;
 
     always_ff @(posedge clk) begin
 
         if (rst) begin
 
+            for (int rr = 0; rr < 8; rr = rr + 1)
+                for (int cc = 0; cc < 8; cc = cc + 1)
+                    result_seen[rr][cc] <= 1'b0;
+
+        end
+        else if (clear_result_seen) begin
+
+            /*
+             * Previous matrix transaction has been published.
+             * Rearm completion tracking for the next transaction.
+             */
             for (int rr = 0; rr < 8; rr = rr + 1)
                 for (int cc = 0; cc < 8; cc = cc + 1)
                     result_seen[rr][cc] <= 1'b0;
@@ -310,6 +322,9 @@ module systolic_array_8x8_fold #(
             out_state <=
                 OUT_WAIT_READY;
 
+            clear_result_seen <=
+                1'b0;
+
         end
         else begin
 
@@ -317,6 +332,9 @@ module systolic_array_8x8_fold #(
              * Default: valid is a one-cycle pulse.
              */
             c_valid_out <=
+                1'b0;
+
+            clear_result_seen <=
                 1'b0;
 
 
@@ -373,6 +391,14 @@ module systolic_array_8x8_fold #(
                         1'b1;
 
                     c_valid_out <=
+                        1'b1;
+
+                    /*
+                     * Both contexts have now been published.
+                     * Clear sticky PE completion state so the
+                     * controller can accept another transaction.
+                     */
+                    clear_result_seen <=
                         1'b1;
 
                     out_state <=

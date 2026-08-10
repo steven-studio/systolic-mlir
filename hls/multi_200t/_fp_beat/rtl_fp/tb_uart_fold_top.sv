@@ -327,4 +327,30 @@ module tb_uart_fold_top;
         end
     end
 
+
+    /*
+     * ============================================================
+     * Accelerator latency trace
+     * ============================================================
+     */
+    always @(posedge clk) begin
+
+        if (
+            !rst &&
+            dut.c_valid_out &&
+            dut.c_ctx_out == 1'b1
+        ) begin
+
+            $display(
+                "ACCEL_LATENCY cycles=%0d time_ns=%0d GOPS=%f",
+                dut.accel_cycles + 1,
+                (dut.accel_cycles + 1) * 10,
+                204.8 / (dut.accel_cycles + 1)
+            );
+
+        end
+
+    end
+
+
 endmodule

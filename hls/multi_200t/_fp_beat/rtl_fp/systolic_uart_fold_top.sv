@@ -222,6 +222,63 @@ module systolic_uart_fold_top #(
     logic        c_ctx_out;
     logic [31:0] c_out [0:7][0:7];
 
+    /*
+     * ============================================================
+     * Accelerator latency measurement
+     *
+     * Count from matrices_ready until ctx1 result is valid.
+     * ============================================================
+     */
+    logic [31:0] accel_cycles;
+    logic [31:0] last_accel_cycles;
+    logic        accel_counting;
+
+
+    always_ff @(posedge clk) begin
+
+        if (rst) begin
+
+            accel_cycles      <= 32'd0;
+            last_accel_cycles <= 32'd0;
+            accel_counting    <= 1'b0;
+
+        end
+        else begin
+
+            /*
+             * Complete 1024-byte request has arrived.
+             */
+            if (matrices_ready) begin
+
+                accel_cycles   <= 32'd0;
+                accel_counting <= 1'b1;
+
+            end
+            else if (accel_counting) begin
+
+                accel_cycles <= accel_cycles + 1'b1;
+
+            end
+
+            /*
+             * ctx1 is the final result context.
+             */
+            if (
+                accel_counting &&
+                c_valid_out &&
+                c_ctx_out == 1'b1
+            ) begin
+
+                last_accel_cycles <= accel_cycles + 1'b1;
+                accel_counting    <= 1'b0;
+
+            end
+
+        end
+
+    end
+
+
 
     systolic_array_8x8_fold u_array (
         .clk           (clk),
