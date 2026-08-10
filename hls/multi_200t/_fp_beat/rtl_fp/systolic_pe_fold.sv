@@ -49,6 +49,14 @@ module systolic_pe_fold #(
 
     pe_state_t state;
 
+    /*
+    * Accumulator-bank selector width.
+    *
+    * ACC_BANKS = 16 -> ACC_SEL_W = 4
+    * bank index = 0..15
+    */
+    localparam int ACC_SEL_W = $clog2(ACC_BANKS);
+
 
     /*
      * ============================================================
@@ -64,8 +72,8 @@ module systolic_pe_fold #(
 
     logic fold_ctx_reg;
 
-    logic [3:0] sel_reg;
-    logic [3:0] local_acc_sel [0:1];
+    logic [ACC_SEL_W-1:0] sel_reg;
+    logic [ACC_SEL_W-1:0] local_acc_sel [0:1];
 
     wire pair_valid =
         a_valid_in &&
@@ -131,9 +139,12 @@ module systolic_pe_fold #(
                 sel_reg <=
                     local_acc_sel[fold_ctx_in];
 
-                local_acc_sel[fold_ctx_in] <=
-                    local_acc_sel[fold_ctx_in] + 1'b1;
-
+                if (local_acc_sel[fold_ctx_in] == ACC_BANKS-1)
+                    local_acc_sel[fold_ctx_in] <= '0;
+                else
+                    local_acc_sel[fold_ctx_in] <=
+                        local_acc_sel[fold_ctx_in] + 1'b1;
+                        
             end
 
         end
@@ -196,7 +207,7 @@ module systolic_pe_fold #(
     localparam int MUL_META_DEPTH = 32;
     localparam int MUL_META_PTR_W = $clog2(MUL_META_DEPTH);
 
-    logic [3:0]
+    logic [ACC_SEL_W-1:0]
         mul_meta_sel [0:MUL_META_DEPTH-1];
 
     logic
@@ -216,7 +227,7 @@ module systolic_pe_fold #(
      * Oldest outstanding multiplier transaction belongs to the
      * product currently returned by fp_mul.
      */
-    wire [3:0] product_sel =
+    wire [ACC_SEL_W-1:0] product_sel =
         mul_meta_sel[mul_meta_rd_ptr];
 
     wire product_ctx =
@@ -327,7 +338,7 @@ module systolic_pe_fold #(
 
     logic reduce_ctx;
 
-    logic [3:0]
+    logic [ACC_SEL_W-1:0]
         reduce_index;
 
     logic [DATA_W-1:0]
@@ -446,7 +457,7 @@ module systolic_pe_fold #(
     logic
         add_meta_is_mac [0:ADD_META_DEPTH-1];
 
-    logic [3:0]
+    logic [ACC_SEL_W-1:0]
         add_meta_sel [0:ADD_META_DEPTH-1];
 
     logic
@@ -473,7 +484,7 @@ module systolic_pe_fold #(
     wire add_result_is_mac =
         add_meta_is_mac[add_meta_rd_ptr];
 
-    wire [3:0] writeback_sel =
+    wire [ACC_SEL_W-1:0] writeback_sel =
         add_meta_sel[add_meta_rd_ptr];
 
     wire writeback_ctx =
@@ -808,7 +819,7 @@ module systolic_pe_fold #(
                 1'b0;
 
             reduce_index <=
-                4'd1;
+                ACC_SEL_W'(1);
 
             reduce_running_sum <=
                 '0;
@@ -867,7 +878,7 @@ module systolic_pe_fold #(
                             1'b0;
 
                         reduce_index <=
-                            4'd1;
+                            ACC_SEL_W'(1);
 
                         reduce_running_sum <=
                             acc_bank[0][0];
@@ -958,7 +969,7 @@ module systolic_pe_fold #(
                                     1'b1;
 
                                 reduce_index <=
-                                    4'd1;
+                                    ACC_SEL_W'(1);
 
                                 reduce_running_sum <=
                                     acc_bank[1][0];
