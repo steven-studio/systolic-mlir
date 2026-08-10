@@ -352,5 +352,1094 @@ module tb_uart_fold_top;
 
     end
 
+    integer cycle_ctr = 0;
+
+    integer t0_start      = -1;
+    integer t1_feed_done  = -1;
+    integer t2_reduce     = -1;
+    integer t3_result     = -1;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            cycle_ctr     <= 0;
+            t0_start      <= -1;
+            t1_feed_done  <= -1;
+            t2_reduce     <= -1;
+            t3_result     <= -1;
+        end
+        else begin
+            cycle_ctr <= cycle_ctr + 1;
+
+            /*
+            * T0: complete input transaction received
+            */
+            if (dut.matrices_ready) begin
+                t0_start <= cycle_ctr;
+
+                $display(
+                    "LAT_T0 matrices_ready cycle=%0d",
+                    cycle_ctr
+                );
+            end
+
+            /*
+            * T1: top-level feed finished
+            */
+            if (
+                dut.state == dut.ST_FEED &&
+                dut.feed_t == 6'd22
+            ) begin
+                t1_feed_done <= cycle_ctr;
+
+                $display(
+                    "LAT_T1 feed_done cycle=%0d delta_from_T0=%0d",
+                    cycle_ctr,
+                    cycle_ctr - t0_start
+                );
+            end
+
+            /*
+            * T2:
+            * first observed PE enters reduction.
+            * Start with PE00 for debugging.
+            */
+            if (
+                dut.u_array.ROW[0].COL[0].u_pe.state ==
+                    dut.u_array.ROW[0].COL[0].u_pe.PE_REDUCE_ISSUE &&
+                t2_reduce < 0
+            ) begin
+                t2_reduce <= cycle_ctr;
+
+                $display(
+                    "LAT_T2 PE00_reduce_start cycle=%0d drain_cycles=%0d",
+                    cycle_ctr,
+                    cycle_ctr - t1_feed_done
+                );
+            end
+
+            /*
+            * T3: final ctx1 matrix becomes valid
+            */
+            if (
+                dut.c_valid_out &&
+                dut.c_ctx_out == 1'b1
+            ) begin
+                t3_result <= cycle_ctr;
+
+                $display(
+                    "LAT_T3 result_done cycle=%0d",
+                    cycle_ctr
+                );
+
+                $display(
+                    "LAT_BREAKDOWN total=%0d feed=%0d drain=%0d reduce_plus_collect=%0d",
+                    cycle_ctr - t0_start,
+                    t1_feed_done - t0_start,
+                    t2_reduce - t1_feed_done,
+                    cycle_ctr - t2_reduce
+                );
+
+                /*
+                * Rearm for transaction 2
+                */
+                t0_start      <= -1;
+                t1_feed_done  <= -1;
+                t2_reduce     <= -1;
+                t3_result     <= -1;
+            end
+        end
+    end
+
+
+    /*
+     * ============================================================
+     * PE_REDUCTION_TABLE
+     *
+     * Record reduction start/end cycle for all 64 PEs.
+     *
+     * start:
+     *   first cycle PE enters PE_REDUCE_ISSUE
+     *
+     * end:
+     *   cycle PE asserts result_valid after ctx1 reduction
+     * ============================================================
+     */
+
+    integer pe_red_start [0:7][0:7];
+    integer pe_red_end   [0:7][0:7];
+
+    integer pe_trace_cycle = 0;
+    integer pr;
+    integer pc;
+
+    initial begin
+        for (pr = 0; pr < 8; pr = pr + 1)
+            for (pc = 0; pc < 8; pc = pc + 1) begin
+                pe_red_start[pr][pc] = -1;
+                pe_red_end[pr][pc]   = -1;
+            end
+    end
+
+    always @(posedge clk) begin
+
+        if (rst) begin
+
+            pe_trace_cycle <= 0;
+
+            for (pr = 0; pr < 8; pr = pr + 1)
+                for (pc = 0; pc < 8; pc = pc + 1) begin
+                    pe_red_start[pr][pc] <= -1;
+                    pe_red_end[pr][pc]   <= -1;
+                end
+
+        end
+        else begin
+
+            pe_trace_cycle <= pe_trace_cycle + 1;
+
+            /*
+             * Explicitly trace all 64 generated PE instances.
+             */
+
+            if (
+                pe_red_start[0][0] < 0 &&
+                dut.u_array.ROW[0].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][0] < 0 &&
+                dut.u_array.ROW[0].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[0][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][1] < 0 &&
+                dut.u_array.ROW[0].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][1] < 0 &&
+                dut.u_array.ROW[0].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[0][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][2] < 0 &&
+                dut.u_array.ROW[0].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][2] < 0 &&
+                dut.u_array.ROW[0].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[0][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][3] < 0 &&
+                dut.u_array.ROW[0].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][3] < 0 &&
+                dut.u_array.ROW[0].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[0][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][4] < 0 &&
+                dut.u_array.ROW[0].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][4] < 0 &&
+                dut.u_array.ROW[0].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[0][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][5] < 0 &&
+                dut.u_array.ROW[0].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][5] < 0 &&
+                dut.u_array.ROW[0].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[0][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][6] < 0 &&
+                dut.u_array.ROW[0].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][6] < 0 &&
+                dut.u_array.ROW[0].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[0][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[0][7] < 0 &&
+                dut.u_array.ROW[0].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[0][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[0][7] < 0 &&
+                dut.u_array.ROW[0].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[0][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][0] < 0 &&
+                dut.u_array.ROW[1].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][0] < 0 &&
+                dut.u_array.ROW[1].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[1][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][1] < 0 &&
+                dut.u_array.ROW[1].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][1] < 0 &&
+                dut.u_array.ROW[1].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[1][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][2] < 0 &&
+                dut.u_array.ROW[1].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][2] < 0 &&
+                dut.u_array.ROW[1].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[1][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][3] < 0 &&
+                dut.u_array.ROW[1].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][3] < 0 &&
+                dut.u_array.ROW[1].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[1][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][4] < 0 &&
+                dut.u_array.ROW[1].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][4] < 0 &&
+                dut.u_array.ROW[1].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[1][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][5] < 0 &&
+                dut.u_array.ROW[1].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][5] < 0 &&
+                dut.u_array.ROW[1].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[1][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][6] < 0 &&
+                dut.u_array.ROW[1].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][6] < 0 &&
+                dut.u_array.ROW[1].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[1][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[1][7] < 0 &&
+                dut.u_array.ROW[1].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[1][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[1][7] < 0 &&
+                dut.u_array.ROW[1].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[1][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][0] < 0 &&
+                dut.u_array.ROW[2].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][0] < 0 &&
+                dut.u_array.ROW[2].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[2][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][1] < 0 &&
+                dut.u_array.ROW[2].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][1] < 0 &&
+                dut.u_array.ROW[2].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[2][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][2] < 0 &&
+                dut.u_array.ROW[2].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][2] < 0 &&
+                dut.u_array.ROW[2].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[2][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][3] < 0 &&
+                dut.u_array.ROW[2].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][3] < 0 &&
+                dut.u_array.ROW[2].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[2][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][4] < 0 &&
+                dut.u_array.ROW[2].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][4] < 0 &&
+                dut.u_array.ROW[2].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[2][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][5] < 0 &&
+                dut.u_array.ROW[2].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][5] < 0 &&
+                dut.u_array.ROW[2].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[2][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][6] < 0 &&
+                dut.u_array.ROW[2].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][6] < 0 &&
+                dut.u_array.ROW[2].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[2][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[2][7] < 0 &&
+                dut.u_array.ROW[2].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[2][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[2][7] < 0 &&
+                dut.u_array.ROW[2].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[2][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][0] < 0 &&
+                dut.u_array.ROW[3].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][0] < 0 &&
+                dut.u_array.ROW[3].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[3][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][1] < 0 &&
+                dut.u_array.ROW[3].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][1] < 0 &&
+                dut.u_array.ROW[3].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[3][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][2] < 0 &&
+                dut.u_array.ROW[3].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][2] < 0 &&
+                dut.u_array.ROW[3].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[3][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][3] < 0 &&
+                dut.u_array.ROW[3].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][3] < 0 &&
+                dut.u_array.ROW[3].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[3][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][4] < 0 &&
+                dut.u_array.ROW[3].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][4] < 0 &&
+                dut.u_array.ROW[3].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[3][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][5] < 0 &&
+                dut.u_array.ROW[3].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][5] < 0 &&
+                dut.u_array.ROW[3].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[3][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][6] < 0 &&
+                dut.u_array.ROW[3].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][6] < 0 &&
+                dut.u_array.ROW[3].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[3][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[3][7] < 0 &&
+                dut.u_array.ROW[3].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[3][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[3][7] < 0 &&
+                dut.u_array.ROW[3].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[3][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][0] < 0 &&
+                dut.u_array.ROW[4].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][0] < 0 &&
+                dut.u_array.ROW[4].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[4][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][1] < 0 &&
+                dut.u_array.ROW[4].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][1] < 0 &&
+                dut.u_array.ROW[4].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[4][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][2] < 0 &&
+                dut.u_array.ROW[4].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][2] < 0 &&
+                dut.u_array.ROW[4].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[4][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][3] < 0 &&
+                dut.u_array.ROW[4].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][3] < 0 &&
+                dut.u_array.ROW[4].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[4][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][4] < 0 &&
+                dut.u_array.ROW[4].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][4] < 0 &&
+                dut.u_array.ROW[4].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[4][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][5] < 0 &&
+                dut.u_array.ROW[4].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][5] < 0 &&
+                dut.u_array.ROW[4].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[4][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][6] < 0 &&
+                dut.u_array.ROW[4].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][6] < 0 &&
+                dut.u_array.ROW[4].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[4][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[4][7] < 0 &&
+                dut.u_array.ROW[4].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[4][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[4][7] < 0 &&
+                dut.u_array.ROW[4].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[4][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][0] < 0 &&
+                dut.u_array.ROW[5].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][0] < 0 &&
+                dut.u_array.ROW[5].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[5][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][1] < 0 &&
+                dut.u_array.ROW[5].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][1] < 0 &&
+                dut.u_array.ROW[5].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[5][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][2] < 0 &&
+                dut.u_array.ROW[5].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][2] < 0 &&
+                dut.u_array.ROW[5].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[5][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][3] < 0 &&
+                dut.u_array.ROW[5].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][3] < 0 &&
+                dut.u_array.ROW[5].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[5][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][4] < 0 &&
+                dut.u_array.ROW[5].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][4] < 0 &&
+                dut.u_array.ROW[5].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[5][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][5] < 0 &&
+                dut.u_array.ROW[5].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][5] < 0 &&
+                dut.u_array.ROW[5].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[5][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][6] < 0 &&
+                dut.u_array.ROW[5].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][6] < 0 &&
+                dut.u_array.ROW[5].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[5][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[5][7] < 0 &&
+                dut.u_array.ROW[5].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[5][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[5][7] < 0 &&
+                dut.u_array.ROW[5].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[5][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][0] < 0 &&
+                dut.u_array.ROW[6].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][0] < 0 &&
+                dut.u_array.ROW[6].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[6][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][1] < 0 &&
+                dut.u_array.ROW[6].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][1] < 0 &&
+                dut.u_array.ROW[6].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[6][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][2] < 0 &&
+                dut.u_array.ROW[6].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][2] < 0 &&
+                dut.u_array.ROW[6].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[6][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][3] < 0 &&
+                dut.u_array.ROW[6].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][3] < 0 &&
+                dut.u_array.ROW[6].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[6][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][4] < 0 &&
+                dut.u_array.ROW[6].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][4] < 0 &&
+                dut.u_array.ROW[6].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[6][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][5] < 0 &&
+                dut.u_array.ROW[6].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][5] < 0 &&
+                dut.u_array.ROW[6].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[6][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][6] < 0 &&
+                dut.u_array.ROW[6].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][6] < 0 &&
+                dut.u_array.ROW[6].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[6][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[6][7] < 0 &&
+                dut.u_array.ROW[6].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[6][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[6][7] < 0 &&
+                dut.u_array.ROW[6].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[6][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][0] < 0 &&
+                dut.u_array.ROW[7].COL[0].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][0] < 0 &&
+                dut.u_array.ROW[7].COL[0].u_pe.result_valid
+            ) begin
+                pe_red_end[7][0] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][1] < 0 &&
+                dut.u_array.ROW[7].COL[1].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][1] < 0 &&
+                dut.u_array.ROW[7].COL[1].u_pe.result_valid
+            ) begin
+                pe_red_end[7][1] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][2] < 0 &&
+                dut.u_array.ROW[7].COL[2].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][2] < 0 &&
+                dut.u_array.ROW[7].COL[2].u_pe.result_valid
+            ) begin
+                pe_red_end[7][2] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][3] < 0 &&
+                dut.u_array.ROW[7].COL[3].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][3] < 0 &&
+                dut.u_array.ROW[7].COL[3].u_pe.result_valid
+            ) begin
+                pe_red_end[7][3] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][4] < 0 &&
+                dut.u_array.ROW[7].COL[4].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][4] < 0 &&
+                dut.u_array.ROW[7].COL[4].u_pe.result_valid
+            ) begin
+                pe_red_end[7][4] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][5] < 0 &&
+                dut.u_array.ROW[7].COL[5].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][5] < 0 &&
+                dut.u_array.ROW[7].COL[5].u_pe.result_valid
+            ) begin
+                pe_red_end[7][5] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][6] < 0 &&
+                dut.u_array.ROW[7].COL[6].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][6] < 0 &&
+                dut.u_array.ROW[7].COL[6].u_pe.result_valid
+            ) begin
+                pe_red_end[7][6] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_start[7][7] < 0 &&
+                dut.u_array.ROW[7].COL[7].u_pe.state == 2'd1
+            ) begin
+                pe_red_start[7][7] <= pe_trace_cycle;
+            end
+
+            if (
+                pe_red_end[7][7] < 0 &&
+                dut.u_array.ROW[7].COL[7].u_pe.result_valid
+            ) begin
+                pe_red_end[7][7] <= pe_trace_cycle;
+            end
+
+            /*
+             * Final ctx1 matrix is published only after all PE results
+             * have been observed. Print the table here.
+             */
+            if (
+                dut.c_valid_out &&
+                dut.c_ctx_out == 1'b1
+            ) begin
+
+                $display("===== PE REDUCTION CYCLE TABLE =====");
+
+                for (pr = 0; pr < 8; pr = pr + 1) begin
+                    for (pc = 0; pc < 8; pc = pc + 1) begin
+
+                        $display(
+                            "PE[%0d][%0d] start=%0d end=%0d duration=%0d",
+                            pr,
+                            pc,
+                            pe_red_start[pr][pc],
+                            pe_red_end[pr][pc],
+                            pe_red_end[pr][pc] -
+                            pe_red_start[pr][pc]
+                        );
+
+                    end
+                end
+
+                $display("===== END PE REDUCTION TABLE =====");
+
+                /*
+                 * Rearm for the next transaction.
+                 */
+                for (pr = 0; pr < 8; pr = pr + 1)
+                    for (pc = 0; pc < 8; pc = pc + 1) begin
+                        pe_red_start[pr][pc] <= -1;
+                        pe_red_end[pr][pc]   <= -1;
+                    end
+
+            end
+
+        end
+
+    end
+
 
 endmodule
