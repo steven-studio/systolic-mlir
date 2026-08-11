@@ -77,11 +77,8 @@ module systolic_uart_fold_top #(
      * bytes  768..1023 = B1
      * ============================================================
      */
-    logic [31:0] A0 [0:7][0:7];
-    logic [31:0] B0 [0:7][0:7];
-
-    logic [31:0] A1 [0:7][0:7];
-    logic [31:0] B1 [0:7][0:7];
+    logic [31:0] A_buf [0:1][0:7][0:7];
+    logic [31:0] B_buf [0:1][0:7][0:7];
 
     logic [10:0] rx_count;
     logic [1:0]  byte_pos;
@@ -126,12 +123,13 @@ module systolic_uart_fold_top #(
                          */
                         if (rx_count < 256) begin
 
-                            A0[rx_count[7:5]]
-                              [rx_count[4:2]]
-                                <= {
-                                    rx_byte,
-                                    word_buf[23:0]
-                                };
+                            A_buf[0]
+                              [rx_count[7:5]]
+                                [rx_count[4:2]]
+                                  <= {
+                                      rx_byte,
+                                      word_buf[23:0]
+                                  };
 
                         end
 
@@ -140,7 +138,8 @@ module systolic_uart_fold_top #(
                          */
                         else if (rx_count < 512) begin
 
-                            B0[(rx_count - 256) >> 5]
+                            B_buf[0]
+                              [((rx_count - 256) >> 5)]
                               [((rx_count - 256) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -154,7 +153,8 @@ module systolic_uart_fold_top #(
                          */
                         else if (rx_count < 768) begin
 
-                            A1[(rx_count - 512) >> 5]
+                            A_buf[1]
+                              [((rx_count - 512) >> 5)]
                               [((rx_count - 512) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -168,7 +168,8 @@ module systolic_uart_fold_top #(
                          */
                         else begin
 
-                            B1[(rx_count - 768) >> 5]
+                            B_buf[1]
+                              [((rx_count - 768) >> 5)]
                               [((rx_count - 768) >> 2) & 7]
                                 <= {
                                     rx_byte,
@@ -437,10 +438,8 @@ module systolic_uart_fold_top #(
                     fold_a = gk_a >> 3;
                     k_a    = gk_a & 7;
 
-                    if (fold_a == 0)
-                        a_in[r] = A0[r][k_a];
-                    else
-                        a_in[r] = A1[r][k_a];
+                    a_in[r] =
+                        A_buf[fold_a[0]][r][k_a];
 
                     a_valid_in[r]    = 1'b1;
                     fold_ctx_in_a[r] = fold_a[0];
@@ -466,10 +465,8 @@ module systolic_uart_fold_top #(
                     fold_b = gk_b >> 3;
                     k_b    = gk_b & 7;
 
-                    if (fold_b == 0)
-                        b_in[c] = B0[k_b][c];
-                    else
-                        b_in[c] = B1[k_b][c];
+                    b_in[c] =
+                        B_buf[fold_b[0]][k_b][c];
 
                     b_valid_in[c]    = 1'b1;
                     fold_ctx_in_b[c] = fold_b[0];
