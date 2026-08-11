@@ -1,7 +1,0 @@
-# compile vhdl design source files
-vhdl xil_defaultlib  \
-"../../../../rtl_fp_pe_test.gen/sources_1/ip/floating_point_add_0/sim/floating_point_add_0.vhd" \
-"../../../../rtl_fp_pe_test.gen/sources_1/ip/floating_point_mul_0/sim/floating_point_mul_0.vhd" \
-
-# Do not sort compile order
-nosort
