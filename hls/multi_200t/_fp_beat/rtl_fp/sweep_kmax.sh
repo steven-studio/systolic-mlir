@@ -1,40 +1,44 @@
 #!/usr/bin/env bash
 # sweep_kmax.sh -- k_max design-space sweep for the 8x8 FP32 fold array.
 #
-#   ./sweep_kmax.sh --sim-only   # WORKS TODAY: cycles + correctness
+#   ./sweep_kmax.sh --sim-only   # cycles + correctness only, minutes
 #   ./sweep_kmax.sh --sim-only 16 32 64 128
-#   ./sweep_kmax.sh              # sim + synthesis (synthesis is gated, see below)
+#   ./sweep_kmax.sh              # sim + synthesis, all four points
 #
 # ---------------------------------------------------------------------------
 # STATUS
 #
-#   simulation  ENABLED   -- drives systolic_array_8x8_fold directly through
-#                            tb_array_fold_kmax.sv. The array has no K
-#                            parameter (K is just how long valid is held), so
-#                            this needs nothing from the top level and gives
-#                            real cycle counts at any K right now.
+#   simulation  drives systolic_array_8x8_fold directly through
+#               tb_array_fold_kmax.sv. The array has no K parameter -- K is
+#               just how long valid is held -- so this needs nothing from the
+#               top level and gives cycle counts at any K.
 #
-#   synthesis   GATED     -- systolic_uart_fold_top.sv is the fixed K=16
-#                            baseline and has no capacity parameter, so only
-#                            K_MAX=16 can be built. build_kmax.tcl refuses
-#                            anything else rather than silently synthesising
-#                            K=16 hardware and labelling it K_MAX=64.
+#   synthesis   builds systolic_uart_fold_top with -generic K_MAX=<K>.
+#               K_MAX is the synthesis-time hardware capacity: it sizes the
+#               operand buffers, the counter widths and the RX framing.
 #
-# An earlier revision passed a top-level NFOLD generic. That baked the fold
-# COUNT into the hardware; the fold count is a runtime scheduling quantity
-# derived from k_dim, not a synthesis parameter. NFOLD is gone and must not
-# come back under another name.
+# ABSTRACTION -- do not blur these:
 #
-# TODO(K_MAX): once the RTL exposes `parameter int K_MAX`, drop the guard in
-# build_kmax.tcl and the SYN_ALLOWED list below becomes "16 32 64 128".
+#   K_MAX   synthesis-time hardware capacity     <- the sweep axis
+#   k_dim   runtime workload reduction length    <- from software
+#   folds   k_dim / 8, derived at runtime        <- NOT a hardware quantity
+#
+# An earlier revision passed a top-level NFOLD generic, baking the fold COUNT
+# into the hardware. It is gone and must not come back under another name.
+# The operand buffers are indexed by absolute k, so no fold count appears in
+# the RTL at all.
+#
+# NOTE: test_uart_fold8x8.py sends exactly 1024 bytes, so it is a K_MAX=16
+# host test. RX framing is K_MAX*64 bytes; it needs updating to drive a
+# deeper build. TX is always 512 bytes regardless of K_MAX.
 # ---------------------------------------------------------------------------
 
 set -uo pipefail
 
 KMAX_LIST=(16 32 64 128)
 
-# K_MAX values the RTL can currently be built at. Extend after the refactor.
-SYN_ALLOWED=(16)
+# K_MAX values the RTL can be built at.
+SYN_ALLOWED=(16 32 64 128)
 
 DO_SIM=1
 DO_SYN=1
@@ -56,7 +60,7 @@ mkdir -p "$OUT/logs"
 echo "=============================================="
 echo " k_max sweep: ${KMAX_LIST[*]}"
 echo " sim=$DO_SIM  syn=$DO_SYN"
-echo " synthesis currently buildable at: ${SYN_ALLOWED[*]}"
+echo " synthesis K_MAX values: ${SYN_ALLOWED[*]}"
 echo "=============================================="
 
 need() {
@@ -132,8 +136,8 @@ if [ "$DO_SYN" = 1 ]; then
             [ "$K" = "$ok" ] && allowed=1
         done
         if [ "$allowed" = 0 ]; then
-            echo "  SKIPPED: the RTL has no K_MAX parameter yet, so K_MAX=$K"
-            echo "  cannot be built. Only ${SYN_ALLOWED[*]} is available."
+            echo "  SKIPPED: K_MAX=$K is not in SYN_ALLOWED (${SYN_ALLOWED[*]})."
+            echo "  The RTL requires K_MAX >= 16 and a multiple of 8."
             echo "  Cycle counts for K=$K are still available via --sim-only."
             continue
         fi

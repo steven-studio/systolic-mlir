@@ -4,6 +4,35 @@ module systolic_uart_fold_top #(
 
     /*
      * ============================================================
+     * K_MAX -- synthesis-time hardware capacity
+     * ============================================================
+     *
+     * The deepest reduction the on-chip operand buffers can hold.
+     * This is the ONLY hardware design-space knob here.
+     *
+     *   K_MAX   synthesis-time hardware capacity   <- this parameter
+     *   k_dim   runtime workload reduction length  <- from software
+     *   folds   k_dim / 8, derived at runtime      <- NOT hardware
+     *
+     * A fold COUNT is deliberately not a parameter. Folds are a
+     * scheduling quantity software derives from k_dim; baking one
+     * into the RTL was the mistake this replaced. Note that the
+     * operand buffers below are indexed by ABSOLUTE k, so the fold
+     * decomposition does not appear in storage at all -- it
+     * survives only as the accumulator-context bit, which is
+     * derived per beat at run time.
+     *
+     * K_MAX must be a multiple of 8 and at least 16.
+     *
+     * Everything scaling with K_MAX lives in this module: the 64
+     * PEs, both FP IP cores and the entire reduction path are
+     * K_MAX-invariant.
+     * ============================================================
+     */
+    parameter int K_MAX = 16,
+
+    /*
+     * ============================================================
      * DEBUG_MARKERS -- emit the 0xA1..0xA5 breadcrumb bytes
      * ============================================================
      *
@@ -38,7 +67,47 @@ module systolic_uart_fold_top #(
     output logic uart_tx
 );
 
-    logic [7:0] k_dim;
+    /*
+     * ============================================================
+     * Derived geometry -- all of it from K_MAX
+     * ============================================================
+     */
+
+    // Absolute-k index width: k runs 0 .. K_MAX-1.
+    localparam int K_W = $clog2(K_MAX);
+
+    // One transaction is K_MAX/8 (A,B) pairs, 256 bytes per matrix,
+    // so K_MAX * 64 bytes in total. At K_MAX=16 that is 1024.
+    localparam int RX_BYTES = K_MAX * 64;
+    localparam int RX_CNT_W = $clog2(RX_BYTES);      // == K_W + 6
+
+    // Last feed beat is (k_dim - 1) + max skew(7). Sized for the
+    // largest k_dim the hardware can be handed, i.e. K_MAX.
+    localparam int FEED_LAST = K_MAX + 6;
+    localparam int FEED_W    = $clog2(FEED_LAST + 1);
+
+    // TX is K_MAX-invariant: two accumulator contexts, 256 B each.
+    localparam int TX_BYTES = 512;
+
+`ifndef SYNTHESIS
+    initial begin
+        if (K_MAX < 16)
+            $fatal(1, "K_MAX must be >= 16 (got %0d)", K_MAX);
+        if ((K_MAX % 8) != 0)
+            $fatal(1, "K_MAX must be a multiple of 8 (got %0d)", K_MAX);
+    end
+`endif
+
+    /*
+     * Runtime reduction length.
+     *
+     * Held in a register because software will eventually write it
+     * (a UART header byte), which is what makes a workload K
+     * smaller than the hardware capacity expressible. Until that
+     * exists it is loaded with K_MAX at reset, so the design still
+     * behaves exactly as the fixed baseline did.
+     */
+    logic [FEED_W-1:0] k_dim;
 
     /*
      * ============================================================
@@ -100,18 +169,48 @@ module systolic_uart_fold_top #(
      * ============================================================
      * Input matrices
      *
-     * bytes    0..255  = A0
-     * bytes  256..511  = B0
-     * bytes  512..767  = A1
-     * bytes  768..1023 = B1
+     * Matrices arrive interleaved, 256 bytes each, one (A,B) pair
+     * per 8-deep k window:
+     *
+     *   A[k 0..7] B[k 0..7] A[k 8..15] B[k 8..15] ...
+     *
+     * At K_MAX = 16 this is byte-for-byte the original layout:
+     *
+     *   bytes    0..255  = A0
+     *   bytes  256..511  = B0
+     *   bytes  512..767  = A1
+     *   bytes  768..1023 = B1
+     *
+     * STORAGE IS INDEXED BY ABSOLUTE k, not by fold. A_buf is
+     * [row][k] and B_buf is [k][col], both k = 0..K_MAX-1, so the
+     * 8-deep windowing exists only in the wire format and the fold
+     * decomposition never appears in the buffers.
+     *
+     * The byte counter decomposes with no arithmetic:
+     *
+     *   rx_count[RX_CNT_W-1:8] = matrix index
+     *      matrix[0]           = 0 -> A, 1 -> B
+     *      matrix >> 1         = k window
+     *   rx_count[7:5]          = row
+     *   rx_count[4:2]          = col
+     *   rx_count[1:0]          = byte within word
+     *
+     * and absolute k is {window, col} for A, {window, row} for B,
+     * since each window is exactly 8 deep.
      * ============================================================
      */
-    logic [31:0] A_buf [0:1][0:7][0:7];
-    logic [31:0] B_buf [0:1][0:7][0:7];
+    logic [31:0] A_buf [0:7][0:K_MAX-1];
+    logic [31:0] B_buf [0:K_MAX-1][0:7];
 
-    logic [10:0] rx_count;
-    logic [1:0]  byte_pos;
-    logic [31:0] word_buf;
+    logic [RX_CNT_W-1:0] rx_count;
+    logic [1:0]          byte_pos;
+    logic [31:0]         word_buf;
+
+    wire [RX_CNT_W-9:0] rx_mat  = rx_count[RX_CNT_W-1:8];
+    wire                rx_is_b = rx_mat[0];
+    wire [K_W-4:0]      rx_win  = rx_mat[RX_CNT_W-9:1];
+    wire [2:0]          rx_row  = rx_count[7:5];
+    wire [2:0]          rx_col  = rx_count[4:2];
 
     logic matrices_ready;
 
@@ -119,11 +218,11 @@ module systolic_uart_fold_top #(
     always_ff @(posedge clk) begin
         if (rst) begin
 
-            rx_count       <= 11'd0;
+            rx_count       <= '0;
             byte_pos       <= 2'd0;
             word_buf       <= 32'd0;
             matrices_ready <= 1'b0;
-            k_dim          <= 8'd16;
+            k_dim          <= FEED_W'(K_MAX);
 
         end
         else begin
@@ -148,58 +247,25 @@ module systolic_uart_fold_top #(
                         word_buf[31:24] <= rx_byte;
 
                         /*
-                         * A0
+                         * Absolute k is {window, col} for A and
+                         * {window, row} for B -- each k window is
+                         * exactly 8 deep, so the concatenation is
+                         * window*8 + offset with no adder.
                          */
-                        if (rx_count < 256) begin
+                        if (rx_is_b) begin
 
-                            A_buf[0]
-                              [rx_count[7:5]]
-                                [rx_count[4:2]]
-                                  <= {
-                                      rx_byte,
-                                      word_buf[23:0]
-                                  };
-
-                        end
-
-                        /*
-                         * B0
-                         */
-                        else if (rx_count < 512) begin
-
-                            B_buf[0]
-                              [((rx_count - 256) >> 5)]
-                              [((rx_count - 256) >> 2) & 7]
+                            B_buf[{rx_win, rx_row}]
+                                 [rx_col]
                                 <= {
                                     rx_byte,
                                     word_buf[23:0]
                                 };
 
                         end
-
-                        /*
-                         * A1
-                         */
-                        else if (rx_count < 768) begin
-
-                            A_buf[1]
-                              [((rx_count - 512) >> 5)]
-                              [((rx_count - 512) >> 2) & 7]
-                                <= {
-                                    rx_byte,
-                                    word_buf[23:0]
-                                };
-
-                        end
-
-                        /*
-                         * B1
-                         */
                         else begin
 
-                            B_buf[1]
-                              [((rx_count - 768) >> 5)]
-                              [((rx_count - 768) >> 2) & 7]
+                            A_buf[rx_row]
+                                 [{rx_win, rx_col}]
                                 <= {
                                     rx_byte,
                                     word_buf[23:0]
@@ -218,9 +284,9 @@ module systolic_uart_fold_top #(
                     byte_pos <= byte_pos + 1'b1;
 
 
-                if (rx_count == 11'd1023) begin
+                if (rx_count == RX_CNT_W'(RX_BYTES - 1)) begin
 
-                    rx_count       <= 11'd0;
+                    rx_count       <= '0;
                     matrices_ready <= 1'b1;
 
                 end
@@ -410,8 +476,8 @@ module systolic_uart_fold_top #(
 
     state_t state;
 
-    logic [5:0] feed_t;
-    logic       tx_all_done;
+    logic [FEED_W-1:0] feed_t;
+    logic              tx_all_done;
 
 
     /*
@@ -458,17 +524,20 @@ module systolic_uart_fold_top #(
 
                 integer gk_a;
                 integer fold_a;
-                integer k_a;
 
-                gk_a = feed_t - r;
+                gk_a = int'(feed_t) - r;
 
-                if ((gk_a >= 0) && (gk_a < k_dim)) begin
+                if ((gk_a >= 0) && (gk_a < int'(k_dim))) begin
 
+                    /*
+                     * The fold number is derived here, at run time,
+                     * purely to pick the accumulator context. The
+                     * buffer is addressed by absolute k.
+                     */
                     fold_a = gk_a >> 3;
-                    k_a    = gk_a & 7;
 
                     a_in[r] =
-                        A_buf[fold_a[0]][r][k_a];
+                        A_buf[r][gk_a];
 
                     a_valid_in[r]    = 1'b1;
                     fold_ctx_in_a[r] = fold_a[0];
@@ -485,17 +554,15 @@ module systolic_uart_fold_top #(
 
                 integer gk_b;
                 integer fold_b;
-                integer k_b;
 
-                gk_b = feed_t - c;
+                gk_b = int'(feed_t) - c;
 
-                if ((gk_b >= 0) && (gk_b < k_dim)) begin
+                if ((gk_b >= 0) && (gk_b < int'(k_dim))) begin
 
                     fold_b = gk_b >> 3;
-                    k_b    = gk_b & 7;
 
                     b_in[c] =
-                        B_buf[fold_b[0]][k_b][c];
+                        B_buf[gk_b][c];
 
                     b_valid_in[c]    = 1'b1;
                     fold_ctx_in_b[c] = fold_b[0];
@@ -518,7 +585,7 @@ module systolic_uart_fold_top #(
         if (rst) begin
 
             state  <= ST_IDLE;
-            feed_t <= 6'd0;
+            feed_t <= '0;
 
         end
         else begin
@@ -527,11 +594,11 @@ module systolic_uart_fold_top #(
 
                 ST_IDLE: begin
 
-                    feed_t <= 6'd0;
+                    feed_t <= '0;
 
                     if (matrices_ready) begin
                         state  <= ST_FEED;
-                        feed_t <= 6'd0;
+                        feed_t <= '0;
                     end
 
                 end

@@ -10,38 +10,20 @@
 #   k_dim   runtime workload reduction length    <- supplied by software
 #   folds   k_dim / 8, derived at runtime        <- not a hardware quantity
 #
-# =====================================================================
-#  DISABLED -- waiting on the K_MAX parameter in the RTL
-# =====================================================================
-#
 # An earlier revision of this script drove a top-level `NFOLD` generic.
 # That was the wrong abstraction: it baked the fold COUNT into the
 # hardware, when the fold count is a scheduling quantity software derives
-# from k_dim. NFOLD has been removed from systolic_uart_fold_top.sv, and
-# this script must not reintroduce it under a different name.
+# from k_dim. Do not reintroduce it under a different name -- K_MAX is a
+# capacity, and the operand buffers are indexed by absolute k, so no fold
+# count appears in the RTL at all.
 #
-# systolic_uart_fold_top.sv currently has NO capacity parameter at all --
-# it is the fixed K=16 baseline, with two 8-deep operand-buffer slots and
-# a 1024-byte / 512-byte wire format.
+# RX framing scales with K_MAX (K_MAX * 64 bytes); TX does not (always
+# 512 bytes, two accumulator contexts). So the host must send more for a
+# deeper build, but always reads back the same two 8x8 matrices and adds
+# them itself.
 #
-# TODO(K_MAX): once the RTL exposes
-#
-#     parameter int K_MAX = 16
-#
-# and sizes A_buf/B_buf, rx_count, feed_t and the RX framing from it,
-# delete the guard below and uncomment the -generic line in synth_design.
-# Everything else in this file is already correct and reusable: the flow,
-# the report set, and the summary.csv writer that reads results back out
-# of Vivado's own APIs instead of scraping .rpt text.
-#
-# Until then the k_max sweep is simulation-only:
-#
-#     ./sweep_kmax.sh --sim-only
-#
-# which drives systolic_array_8x8_fold directly through
-# tb_array_fold_kmax.sv and needs no top-level parameter, because the
-# array has no notion of K -- K is only how long the feeder asserts valid.
-# =====================================================================
+# NOTE: test_uart_fold8x8.py sends exactly 1024 bytes and is therefore a
+# K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
     error "usage: -tclargs <K_MAX>   (16, 32, 64, 128)"
@@ -49,32 +31,12 @@ if {$argc < 1} {
 
 set KMAX [lindex $argv 0]
 
-if {$KMAX < 8 || ($KMAX % 8) != 0} {
-    error "K_MAX must be a positive multiple of 8 (got $KMAX)"
+# The RTL requires K_MAX >= 16 and a multiple of 8. It has an elaboration
+# assertion for both, but failing here is cheaper than failing in synth.
+if {$KMAX < 16 || ($KMAX % 8) != 0} {
+    error "K_MAX must be a multiple of 8 and at least 16 (got $KMAX)"
 }
 
-# ---------------------------------------------------------------------
-# Guard. Remove together with the -generic line below.
-# ---------------------------------------------------------------------
-# if {$KMAX != 16} {
-#     puts ""
-#     puts "======================================================="
-#     puts " build_kmax.tcl is DISABLED for K_MAX != 16."
-#     puts ""
-#     puts " systolic_uart_fold_top.sv has no K_MAX parameter yet,"
-#     puts " so this build would silently produce the fixed K=16"
-#     puts " baseline and label it K_MAX=$KMAX. A mislabelled row is"
-#     puts " worse than a missing one."
-#     puts ""
-#     puts " Requested : K_MAX = $KMAX"
-#     puts " RTL can do: K_MAX = 16 (hardwired)"
-#     puts ""
-#     puts " Do the K_MAX refactor first, then delete this guard."
-#     puts " For cycle counts today, use: ./sweep_kmax.sh --sim-only"
-#     puts "======================================================="
-#     puts ""
-#     error "K_MAX=$KMAX not buildable yet (see message above)"
-# }
 
 set PART        "xc7a200tsbg484-1"
 set TOP         "systolic_uart_fold_top"
@@ -112,9 +74,9 @@ read_xdc nexys_video_uart.xdc
 # some points but not others would put a constant-but-unequal offset into
 # the LUT column.
 #
-# TODO(K_MAX): add   -generic K_MAX=$KMAX   here.
 # ---------------------------------------------------------------------
 synth_design -top $TOP -part $PART \
+    -generic K_MAX=$KMAX \
     -generic DEBUG_MARKERS=0
 
 write_checkpoint -force $OUT/post_synth.dcp
