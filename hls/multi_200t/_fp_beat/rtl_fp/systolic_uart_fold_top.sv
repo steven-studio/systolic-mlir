@@ -1,6 +1,35 @@
 module systolic_uart_fold_top #(
     parameter int CLK_HZ = 100_000_000,
-    parameter int BAUD   = 115200
+    parameter int BAUD   = 115200,
+
+    /*
+     * ============================================================
+     * DEBUG_MARKERS -- emit the 0xA1..0xA5 breadcrumb bytes
+     * ============================================================
+     *
+     * The breadcrumb markers (see below) were unconditional, and
+     * they take priority over the result stream in TX_IDLE. That
+     * puts up to five extra bytes ahead of the 512 result bytes,
+     * so a host reading exactly 512 bytes -- which is what
+     * test_uart_fold8x8.py does -- receives
+     *
+     *     5 marker bytes + the first 507 result bytes
+     *
+     * and every float it decodes is shifted by five bytes.
+     *
+     * The markers are a bring-up aid, not part of the protocol, so
+     * they now default OFF and the wire format is exactly
+     *
+     *     RX 1024 bytes  ->  TX 512 bytes
+     *
+     * Set DEBUG_MARKERS = 1 to get them back for debugging, and
+     * remember that a host must then consume them explicitly.
+     *
+     * This parameter does not affect the datapath: no accumulator,
+     * feed, fold-context or reduction behaviour depends on it.
+     * ============================================================
+     */
+    parameter bit DEBUG_MARKERS = 1'b0
 ) (
     input  logic clk,
     input  logic rst,
@@ -758,8 +787,15 @@ module systolic_uart_fold_top #(
                      * normal 512-byte result stream.
                      *
                      * Lowest-number marker is sent first.
+                     *
+                     * Gated by DEBUG_MARKERS. When it is 0 these
+                     * five branches are constant-false, nothing
+                     * ever sets debug_tx_active, and the sticky
+                     * debug_pending bits become unread and are
+                     * trimmed -- so the TX stream is exactly the
+                     * 512 result bytes and nothing else.
                      */
-                    if (debug_pending[0]) begin
+                    if (DEBUG_MARKERS && debug_pending[0]) begin
 
                         debug_tx_active <= 1'b1;
                         debug_tx_byte   <= 8'hA1;
@@ -767,7 +803,7 @@ module systolic_uart_fold_top #(
                         tx_state        <= TX_START;
 
                     end
-                    else if (debug_pending[1]) begin
+                    else if (DEBUG_MARKERS && debug_pending[1]) begin
 
                         debug_tx_active <= 1'b1;
                         debug_tx_byte   <= 8'hA2;
@@ -775,7 +811,7 @@ module systolic_uart_fold_top #(
                         tx_state        <= TX_START;
 
                     end
-                    else if (debug_pending[2]) begin
+                    else if (DEBUG_MARKERS && debug_pending[2]) begin
 
                         debug_tx_active <= 1'b1;
                         debug_tx_byte   <= 8'hA3;
@@ -783,7 +819,7 @@ module systolic_uart_fold_top #(
                         tx_state        <= TX_START;
 
                     end
-                    else if (debug_pending[3]) begin
+                    else if (DEBUG_MARKERS && debug_pending[3]) begin
 
                         debug_tx_active <= 1'b1;
                         debug_tx_byte   <= 8'hA4;
@@ -791,7 +827,7 @@ module systolic_uart_fold_top #(
                         tx_state        <= TX_START;
 
                     end
-                    else if (debug_pending[4]) begin
+                    else if (DEBUG_MARKERS && debug_pending[4]) begin
 
                         debug_tx_active <= 1'b1;
                         debug_tx_byte   <= 8'hA5;
