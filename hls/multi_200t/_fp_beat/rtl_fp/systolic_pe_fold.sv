@@ -857,12 +857,39 @@ module systolic_pe_fold #(
                      * Start final reduction only after:
                      *
                      *  1. local input injection ended,
-                     *  2. every MAC ADD returned,
-                     *  3. multiplier output is empty,
-                     *  4. ADD output is currently empty.
+                     *  2. the multiplier holds no transaction,
+                     *  3. every MAC ADD returned,
+                     *  4. multiplier output is empty this cycle,
+                     *  5. ADD output is empty this cycle.
+                     *
+                     * Condition 2 was missing and is not redundant.
+                     * input_finished rises about 3 cycles after this
+                     * PE's last operand pair, but the first product
+                     * only leaves fp_mul after MUL_LATENCY, and
+                     * outstanding_adds does not increment until then.
+                     * For a short reduction the whole input stream can
+                     * therefore finish while every MAC is still inside
+                     * the multiplier, leaving conditions 1, 3, 4 and 5
+                     * all true with nothing computed yet: the reduction
+                     * would run over untouched accumulator banks and
+                     * clear_acc_banks would then discard the MAC
+                     * results as they arrived.
+                     *
+                     * This never showed while k_dim was fixed at K_MAX,
+                     * because a deep reduction always has the pipeline
+                     * full by the time injection ends. It appears as
+                     * soon as a remainder invocation is issued at its
+                     * true depth -- k_dim = 1 returned an all-zero
+                     * context.
+                     *
+                     * mul_meta_count already tracks exactly this: it
+                     * increments on every pair entering fp_mul and
+                     * decrements on every product leaving it. It was
+                     * maintained but never read.
                      */
                     if (
                         input_finished &&
+                        mul_meta_count == 0 &&
                         outstanding_adds == 0 &&
                         !product_valid &&
                         !add_valid

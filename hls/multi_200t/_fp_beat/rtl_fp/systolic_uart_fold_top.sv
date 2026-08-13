@@ -99,13 +99,22 @@ module systolic_uart_fold_top #(
 `endif
 
     /*
-     * Runtime reduction length.
+     * ============================================================
+     * k_dim -- runtime valid reduction length of this invocation
+     * ============================================================
      *
-     * Held in a register because software will eventually write it
-     * (a UART header byte), which is what makes a workload K
-     * smaller than the hardware capacity expressible. Until that
-     * exists it is loaded with K_MAX at reset, so the design still
-     * behaves exactly as the fixed baseline did.
+     * The feed-length register. K_MAX is what the buffers can hold;
+     * k_dim is how much of that this particular invocation actually
+     * reduces. The host writes it once per transaction through the
+     * request header below, so a workload K that is not a multiple
+     * of K_MAX can issue its remainder invocation at its true depth
+     * rather than padding up to capacity.
+     *
+     *   K_MAX = 64,  K = 100  ->  k_dim = 64, then k_dim = 36
+     *
+     * Reset value is K_MAX so a design that is reset and then driven
+     * by a host which never updates the header still behaves as the
+     * fixed-capacity baseline did.
      */
     logic [FEED_W-1:0] k_dim;
 
@@ -212,6 +221,47 @@ module systolic_uart_fold_top #(
     wire [2:0]          rx_row  = rx_count[7:5];
     wire [2:0]          rx_col  = rx_count[4:2];
 
+    /*
+     * ============================================================
+     * Request header
+     * ============================================================
+     *
+     * Every transaction is now
+     *
+     *   [ k_dim : 4 bytes, little-endian ] [ A/B payload ]
+     *
+     * so one request is HDR_BYTES + RX_BYTES bytes total.
+     *
+     * The header is a full 32-bit word on purpose: the byte
+     * assembler below already builds words out of four bytes, so a
+     * word-sized header needs no separate path and leaves the
+     * payload's word alignment untouched.
+     *
+     * The payload length does NOT shrink with k_dim. Operand
+     * storage and the RX framing are still sized by K_MAX, and
+     * positions at k >= k_dim are simply never read by the feeder.
+     * Making the transfer itself shorter is a separate change to
+     * the framing, deliberately not bundled here.
+     */
+    localparam int HDR_BYTES = 4;
+
+    logic hdr_done;
+
+    // The word currently being completed, LSB-first on the wire.
+    wire [31:0] rx_word = {rx_byte, word_buf[23:0]};
+
+    /*
+     * Out-of-range requests are clamped to K_MAX rather than
+     * honoured or flagged. There is no status channel to report an
+     * error on, and the two failure modes this prevents are worse
+     * than a clamp: k_dim = 0 would terminate the feed loop before
+     * injecting anything and hang the design waiting for results
+     * that cannot arrive, and k_dim > K_MAX would read operand
+     * positions the host never wrote.
+     */
+    wire [31:0] hdr_k     = rx_word;
+    wire        hdr_valid = (hdr_k != 32'd0) && (hdr_k <= 32'(K_MAX));
+
     logic matrices_ready;
 
 
@@ -222,6 +272,7 @@ module systolic_uart_fold_top #(
             byte_pos       <= 2'd0;
             word_buf       <= 32'd0;
             matrices_ready <= 1'b0;
+            hdr_done       <= 1'b0;
             k_dim          <= FEED_W'(K_MAX);
 
         end
@@ -247,12 +298,23 @@ module systolic_uart_fold_top #(
                         word_buf[31:24] <= rx_byte;
 
                         /*
+                         * The first complete word of a transaction
+                         * is the header, not operand data.
+                         */
+                        if (!hdr_done) begin
+
+                            k_dim <= hdr_valid ? FEED_W'(hdr_k)
+                                               : FEED_W'(K_MAX);
+
+                        end
+
+                        /*
                          * Absolute k is {window, col} for A and
                          * {window, row} for B -- each k window is
                          * exactly 8 deep, so the concatenation is
                          * window*8 + offset with no adder.
                          */
-                        if (rx_is_b) begin
+                        else if (rx_is_b) begin
 
                             B_buf[{rx_win, rx_row}]
                                  [rx_col]
@@ -284,9 +346,26 @@ module systolic_uart_fold_top #(
                     byte_pos <= byte_pos + 1'b1;
 
 
-                if (rx_count == RX_CNT_W'(RX_BYTES - 1)) begin
+                /*
+                 * Header bytes do not advance the payload counter,
+                 * so rx_count still addresses operand storage
+                 * exactly as before: the write at byte_pos == 3
+                 * sees rx_count = 4w+3 for payload word w.
+                 *
+                 * hdr_done is cleared at end of transaction, which
+                 * rearms the header for the next request -- every
+                 * invocation therefore carries its own k_dim.
+                 */
+                if (!hdr_done) begin
+
+                    if (byte_pos == 2'd3)
+                        hdr_done <= 1'b1;
+
+                end
+                else if (rx_count == RX_CNT_W'(RX_BYTES - 1)) begin
 
                     rx_count       <= '0;
+                    hdr_done       <= 1'b0;
                     matrices_ready <= 1'b1;
 
                 end

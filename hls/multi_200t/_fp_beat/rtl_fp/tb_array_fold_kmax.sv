@@ -102,10 +102,16 @@ module tb_array_fold_kmax;
     // -------------------------------------------------------------------
     // Capture both published contexts
     // -------------------------------------------------------------------
+    // ctx1_cycle is reset here rather than in the initial block: driving
+    // the same variable from both an initial and an always_ff is a
+    // multiple-driver error (VRFC 10-3818 / 10-2921), and while xsim
+    // happened to give the intended result, the behaviour is not defined
+    // by the standard.
     always_ff @(posedge clk) begin
         if (rst) begin
-            ctx0_seen <= 1'b0;
-            ctx1_seen <= 1'b0;
+            ctx0_seen  <= 1'b0;
+            ctx1_seen  <= 1'b0;
+            ctx1_cycle <= -1;
         end
         else if (c_valid_out) begin
             if (c_ctx_out == 1'b0) begin
@@ -187,7 +193,7 @@ module tb_array_fold_kmax;
         errors            = 0;
         first_valid_cycle = -1;
         last_valid_cycle  = -1;
-        ctx1_cycle        = -1;
+        // ctx1_cycle is reset inside the always_ff above -- see note there.
 
         if (K <= 0 || (K % 8) != 0) begin
             $display("FAIL: K must be a positive multiple of 8 (got %0d)", K);
