@@ -44,7 +44,7 @@ module systolic_pe_fold #(
     typedef enum logic [1:0] {
         PE_ACCUM,
         PE_REDUCE_ISSUE,
-        PE_REDUCE_WAIT
+        PE_REDUCE_DRAIN
     } pe_state_t;
 
     pe_state_t state;
@@ -338,11 +338,47 @@ module systolic_pe_fold #(
 
     logic reduce_ctx;
 
+    /*
+     * Tree reduction state.
+     *
+     * reduce_stride walks ACC_BANKS/2, ACC_BANKS/4, ... 1, then 0.
+     * Within one stride every add is independent, so they are
+     * issued back to back into the pipelined adder instead of
+     * one-at-a-time.
+     *
+     *   acc[ctx][i] <= acc[ctx][i] + acc[ctx][i + stride]
+     *
+     * The add count is unchanged (ACC_BANKS-1 per context); only
+     * the dependency chain between them is broken.
+     */
     logic [ACC_SEL_W-1:0]
-        reduce_index;
+        reduce_stride;
 
-    logic [DATA_W-1:0]
-        reduce_running_sum;
+    logic [ACC_SEL_W-1:0]
+        reduce_i;
+
+    /*
+     * Reduction adds issued into fp_add whose result has not yet
+     * returned. MAC uses outstanding_adds; the two never overlap
+     * because reduction only starts after MAC has fully drained.
+     */
+    logic [7:0]
+        reduce_outstanding;
+
+    /*
+     * High while PE_REDUCE_ISSUE still has an add to send this
+     * cycle. Also gates the metadata push.
+     */
+    wire reduce_issue_fire =
+        (state == PE_REDUCE_ISSUE);
+
+    /*
+     * Last issue of the current stride: second context, last index.
+     */
+    wire reduce_level_last =
+        reduce_issue_fire &&
+        (reduce_ctx == 1'b1) &&
+        (reduce_i == reduce_stride - 1'b1);
 
 
     /*
@@ -408,12 +444,14 @@ module systolic_pe_fold #(
                 1'b1;
 
             fp_add_a =
-                reduce_running_sum;
+                acc_bank
+                    [reduce_ctx]
+                    [reduce_i];
 
             fp_add_b =
                 acc_bank
                     [reduce_ctx]
-                    [reduce_index];
+                    [reduce_i + reduce_stride];
 
         end
 
@@ -520,11 +558,18 @@ module systolic_pe_fold #(
                  * sel/ctx are relevant only for MAC operations.
                  * For reduction entries they are don't-care.
                  */
+                /*
+                 * MAC writes back to the bank the product came
+                 * from; a reduction add writes back to the low
+                 * half of the pair it just consumed. Both use the
+                 * same FIFO, so neither path needs to know the
+                 * adder latency.
+                 */
                 add_meta_sel[add_meta_wr_ptr] <=
-                    product_sel;
+                    (state == PE_ACCUM) ? product_sel : reduce_i;
 
                 add_meta_ctx[add_meta_wr_ptr] <=
-                    product_ctx;
+                    (state == PE_ACCUM) ? product_ctx : reduce_ctx;
 
                 add_meta_wr_ptr <=
                     add_meta_wr_ptr + 1'b1;
@@ -763,11 +808,12 @@ module systolic_pe_fold #(
             end
 
         end
-        else if (
-            add_valid &&
-            add_result_is_mac
-        ) begin
+        else if (add_valid) begin
 
+            /*
+             * Writeback is now identical for MAC and reduction:
+             * the FIFO carries the destination for both.
+             */
             acc_bank
                 [writeback_ctx]
                 [writeback_sel]
@@ -792,11 +838,9 @@ module systolic_pe_fold #(
 
         clear_acc_banks =
             (
-                state == PE_REDUCE_WAIT &&
-                add_valid &&
-                !add_result_is_mac &&
-                reduce_ctx == 1'b1 &&
-                reduce_index == ACC_BANKS-1
+                state == PE_REDUCE_DRAIN &&
+                reduce_outstanding == 0 &&
+                reduce_stride == ACC_SEL_W'(1)
             );
 
     end
@@ -818,10 +862,13 @@ module systolic_pe_fold #(
             reduce_ctx <=
                 1'b0;
 
-            reduce_index <=
-                ACC_SEL_W'(1);
+            reduce_stride <=
+                '0;
 
-            reduce_running_sum <=
+            reduce_i <=
+                '0;
+
+            reduce_outstanding <=
                 '0;
 
             result_ctx0 <=
@@ -843,6 +890,40 @@ module systolic_pe_fold #(
                 1'b0;
 
 
+            /*
+             * ----------------------------------------------------
+             * Reduction-add accounting
+             *
+             * Increment when an add is issued from
+             * PE_REDUCE_ISSUE, decrement when the FIFO says the
+             * returning result belongs to a reduction.
+             *
+             * This is what lets a whole stride be issued back to
+             * back: the FSM waits on a count reaching zero rather
+             * than on one specific result.
+             * ----------------------------------------------------
+             */
+            case ({
+                reduce_issue_fire,
+                add_valid &&
+                !add_result_is_mac
+            })
+
+                2'b10:
+                    reduce_outstanding <=
+                        reduce_outstanding + 1'b1;
+
+                2'b01:
+                    reduce_outstanding <=
+                        reduce_outstanding - 1'b1;
+
+                default:
+                    reduce_outstanding <=
+                        reduce_outstanding;
+
+            endcase
+
+
             case (state)
 
 
@@ -862,30 +943,13 @@ module systolic_pe_fold #(
                      *  4. multiplier output is empty this cycle,
                      *  5. ADD output is empty this cycle.
                      *
-                     * Condition 2 was missing and is not redundant.
-                     * input_finished rises about 3 cycles after this
-                     * PE's last operand pair, but the first product
-                     * only leaves fp_mul after MUL_LATENCY, and
-                     * outstanding_adds does not increment until then.
-                     * For a short reduction the whole input stream can
-                     * therefore finish while every MAC is still inside
-                     * the multiplier, leaving conditions 1, 3, 4 and 5
-                     * all true with nothing computed yet: the reduction
-                     * would run over untouched accumulator banks and
-                     * clear_acc_banks would then discard the MAC
-                     * results as they arrived.
-                     *
-                     * This never showed while k_dim was fixed at K_MAX,
-                     * because a deep reduction always has the pipeline
-                     * full by the time injection ends. It appears as
-                     * soon as a remainder invocation is issued at its
-                     * true depth -- k_dim = 1 returned an all-zero
-                     * context.
-                     *
-                     * mul_meta_count already tracks exactly this: it
-                     * increments on every pair entering fp_mul and
-                     * decrements on every product leaving it. It was
-                     * maintained but never read.
+                     * Condition 2 is not redundant: input_finished
+                     * rises a few cycles after this PE's last
+                     * operand pair, but the first product only
+                     * leaves fp_mul after MUL_LATENCY, so a short
+                     * reduction can see conditions 1/3/4/5 all true
+                     * with nothing computed yet. mul_meta_count
+                     * tracks exactly that.
                      */
                     if (
                         input_finished &&
@@ -896,19 +960,17 @@ module systolic_pe_fold #(
                     ) begin
 
                         /*
-                         * Begin ctx0 reduction.
-                         *
-                         * Bank 0 becomes the initial running sum,
-                         * so the first ADD consumes bank 1.
+                         * Begin the widest stride of the tree.
+                         * ACC_BANKS=16 -> stride 8, 4, 2, 1.
                          */
+                        reduce_stride <=
+                            ACC_SEL_W'(ACC_BANKS / 2);
+
                         reduce_ctx <=
                             1'b0;
 
-                        reduce_index <=
-                            ACC_SEL_W'(1);
-
-                        reduce_running_sum <=
-                            acc_bank[0][0];
+                        reduce_i <=
+                            '0;
 
                         state <=
                             PE_REDUCE_ISSUE;
@@ -920,111 +982,95 @@ module systolic_pe_fold #(
 
                 /*
                  * ------------------------------------------------
-                 * Issue exactly one reduction ADD
+                 * Issue every add of the current stride, one per
+                 * cycle, without waiting for any of them.
+                 *
+                 * Order: ctx0 i=0..stride-1, then ctx1 i=0..stride-1.
+                 * That is 2*stride adds per level, all independent.
                  * ------------------------------------------------
                  */
                 PE_REDUCE_ISSUE: begin
 
-                    /*
-                     * fp_add_valid_in is combinationally asserted
-                     * while in this state.
-                     *
-                     * Move immediately to WAIT so exactly one
-                     * request is issued.
-                     */
-                    state <=
-                        PE_REDUCE_WAIT;
+                    if (reduce_i == reduce_stride - 1'b1) begin
+
+                        if (reduce_ctx == 1'b0) begin
+
+                            reduce_ctx <=
+                                1'b1;
+
+                            reduce_i <=
+                                '0;
+
+                        end
+                        else begin
+
+                            state <=
+                                PE_REDUCE_DRAIN;
+
+                        end
+
+                    end
+                    else begin
+
+                        reduce_i <=
+                            reduce_i + 1'b1;
+
+                    end
 
                 end
 
 
                 /*
                  * ------------------------------------------------
-                 * Wait for that reduction ADD result
+                 * Wait for the whole stride to land before reading
+                 * the banks again.
+                 *
+                 * This barrier is what makes the in-place update
+                 * safe: within one stride every index is read once
+                 * and written once, but the next stride reads
+                 * results this one produced.
                  * ------------------------------------------------
                  */
-                PE_REDUCE_WAIT: begin
+                PE_REDUCE_DRAIN: begin
 
-                    /*
-                     * Only consume ADD results whose FIFO metadata
-                     * says they belong to reduction.
-                     */
-                    if (
-                        add_valid &&
-                        !add_result_is_mac
-                    ) begin
+                    if (reduce_outstanding == 0) begin
 
+                        if (reduce_stride == ACC_SEL_W'(1)) begin
 
-                        /*
-                         * More banks remain in this context.
-                         */
-                        if (
-                            reduce_index !=
-                            ACC_BANKS-1
-                        ) begin
+                            /*
+                             * Tree complete. Bank 0 of each context
+                             * holds the sum of that context.
+                             *
+                             * clear_acc_banks is asserted combinationally
+                             * on this same cycle; both reads below take
+                             * the pre-clear values.
+                             */
+                            result_ctx0 <=
+                                acc_bank[0][0];
 
-                            reduce_running_sum <=
-                                add_result;
+                            result_ctx1 <=
+                                acc_bank[1][0];
 
-                            reduce_index <=
-                                reduce_index + 1'b1;
+                            result_valid <=
+                                1'b1;
+
+                            state <=
+                                PE_ACCUM;
+
+                        end
+                        else begin
+
+                            reduce_stride <=
+                                reduce_stride >> 1;
+
+                            reduce_ctx <=
+                                1'b0;
+
+                            reduce_i <=
+                                '0;
 
                             state <=
                                 PE_REDUCE_ISSUE;
-
-                        end
-
-
-                        /*
-                         * Current context reduction is complete.
-                         */
-                        else begin
-
-
-                            /*
-                             * ctx0 completed.
-                             */
-                            if (reduce_ctx == 1'b0) begin
-
-                                result_ctx0 <=
-                                    add_result;
-
-                                /*
-                                 * Immediately prepare ctx1.
-                                 */
-                                reduce_ctx <=
-                                    1'b1;
-
-                                reduce_index <=
-                                    ACC_SEL_W'(1);
-
-                                reduce_running_sum <=
-                                    acc_bank[1][0];
-
-                                state <=
-                                    PE_REDUCE_ISSUE;
-
-                            end
-
-
-                            /*
-                             * ctx1 completed.
-                             *
-                             * Both scalar results owned by this PE
-                             * are now valid.
-                             */
-                            else begin
-
-                                result_ctx1 <=
-                                    add_result;
-
-                                result_valid <=
-                                    1'b1;
-
-                                state <=
-                                    PE_ACCUM;
-
-                            end
 
                         end
 
