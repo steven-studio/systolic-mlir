@@ -137,3 +137,18 @@ hls/multi_200t/_fp_beat/rtl_fp/*.bit
 
 # Manual intermediate backups
 *.before_*
+
+# ============================================================
+# Vivado 本機產物（rtl_fp）
+# ============================================================
+hls/multi_200t/_fp_beat/rtl_fp/build_kmax/
+hls/multi_200t/_fp_beat/rtl_fp/rtl_fp_pe_test/
+hls/multi_200t/_fp_beat/rtl_fp/ip_local/
+hls/multi_200t/_fp_beat/rtl_fp/sweep_k_rtl8x8_out/
+
+# bitstream
+**/*.bit
+
+# 工作中的暫存副本
+hls/multi_200t/_fp_beat/rtl_fp/*.sv.tree
+hls/multi_200t/_fp_beat/rtl_fp/systolic_pe_fold_TREE.sv

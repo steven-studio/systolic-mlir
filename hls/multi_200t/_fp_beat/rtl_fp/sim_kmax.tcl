@@ -87,6 +87,7 @@ add_files -norecurse [list \
 add_files -fileset sim_1 -norecurse [list \
     tb_array_fold_kmax.sv \
     tb_uart_multi_invocation.sv \
+    tb_array_fold_fprandom.sv \
 ]
 
 set_property file_type SystemVerilog [get_files *.sv]
