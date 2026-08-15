@@ -13,7 +13,7 @@ module clk_gen (
         .CLKFBOUT_MULT_F(10.0),
         .CLKFBOUT_PHASE(0.0),
         .CLKIN1_PERIOD(10.0),       // 100MHz 輸入
-        .CLKOUT0_DIVIDE_F(25.0),    // 1000MHz / 50 = 20MHz
+        .CLKOUT0_DIVIDE_F(25.0),    // 1000 MHz / 25 = 40 MHz
         .CLKOUT0_DUTY_CYCLE(0.5),
         .CLKOUT0_PHASE(0.0),
         .DIVCLK_DIVIDE(1),

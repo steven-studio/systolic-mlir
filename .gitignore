@@ -160,3 +160,4 @@ ip_local/
 *.bak_*
 *.sv.tree
 hls/multi_200t/sweep_results.csv
+compile_commands.json
