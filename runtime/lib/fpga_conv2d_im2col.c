@@ -1,5 +1,6 @@
 #include "fpga_conv2d_im2col.h"
 #include "fpga_matmul_tiled.h"
+#include "fpga_tile.h"
 #include "fpga_ctx.h"
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +50,7 @@ int fpga_conv2d_im2col(int fd,
     memcpy(Kmat, Kernel, (size_t)Kdim * N * sizeof(float));
 
     // --- Ycol = Xcol @ Kmat, reusing the already-validated tiled runtime ---
-    int rc = fpga_matmul_tiled(fd, M, Kdim, N, Xcol, Kmat, Ycol);
+    int rc = fpga_tile_dispatch(fd, M, Kdim, N, Xcol, Kmat, Ycol);
 
     // --- Ycol (M x N) is already Y in (Hout*Wout, Cout) layout == Y flattened ---
     memcpy(Y, Ycol, (size_t)M * N * sizeof(float));
@@ -66,7 +67,7 @@ extern int fpga_matmul_tiled_auto(int M, int K, int N,
                                    const float *A, const float *B, float *C);
 
 // im2col + matmul, but routed through fpga_matmul_tiled_auto instead of
-// fpga_matmul_tiled(fd, ...) directly, so MLIR-generated call sites don't
+// fpga_tile_dispatch(fd, ...) directly, so MLIR-generated call sites don't
 // need to manage a UART file descriptor themselves.
 int fpga_conv2d_im2col_auto(int H, int W, int Cin,
                              int Kh, int Kw, int Cout,
@@ -166,7 +167,7 @@ int fpga_conv2d_im2col_general(int fd,
             }
         }
 
-        int rc = fpga_matmul_tiled(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        int rc = fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;
@@ -244,7 +245,7 @@ int fpga_conv2d_im2col_padded(
             }
         }
 
-        int rc = fpga_matmul_tiled(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        int rc = fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;

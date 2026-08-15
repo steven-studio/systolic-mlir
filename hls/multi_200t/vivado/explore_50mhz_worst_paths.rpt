@@ -1,0 +1,306 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Thu Aug  6 01:48:34 2026
+| Host         : steven-studio-System-Product-Name running 64-bit Ubuntu 24.04.3 LTS
+| Command      : report_timing -max_paths 3 -file explore_50mhz_worst_paths.rpt
+| Design       : matmul_top_dual
+| Device       : 7a200t-sbg484
+| Speed File   : -1  PRODUCTION 1.23 2018-06-13
+| Design State : Physopt postRoute
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Timing Report
+
+Slack (VIOLATED) :        -1.043ns  (required time - arrival time)
+  Source:                 u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[25]/C
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Destination:            u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[30]/D
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Path Group:             clk_kernel_explore
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            20.000ns  (clk_kernel_explore rise@20.000ns - clk_kernel_explore rise@0.000ns)
+  Data Path Delay:        20.842ns  (logic 11.722ns (56.241%)  route 9.120ns (43.759%))
+  Logic Levels:           14  (CARRY4=5 DSP48E1=2 LUT2=1 LUT4=1 LUT5=1 LUT6=4)
+  Clock Path Skew:        -0.044ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    6.496ns = ( 26.496 - 20.000 ) 
+    Source Clock Delay      (SCD):    6.876ns
+    Clock Pessimism Removal (CPR):    0.336ns
+  Clock Uncertainty:      0.094ns  ((TSJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Discrete Jitter          (DJ):    0.175ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_kernel_explore rise edge)
+                                                      0.000     0.000 r  <hidden>
+    R4                                                0.000     0.000 r  clk_pin100
+                         net (fo=0)                   0.000     0.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.475     1.475 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.233     2.708    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.088     2.796 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.808     4.605    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096     4.701 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.140     4.841    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.096     4.937 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.939     6.876    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/clk_out20
+    SLICE_X25Y217        FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[25]/C
+  -------------------------------------------------------------------    -------------------
+    SLICE_X25Y217        FDRE (Prop_fdre_C_Q)         0.456     7.332 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[25]/Q
+                         net (fo=6, routed)           0.798     8.130    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X27Y218        LUT2 (Prop_lut2_I1_O)        0.153     8.283 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.646     8.929    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X26Y218        CARRY4 (Prop_carry4_S[2]_CO[3])
+                                                      0.725     9.654 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000     9.654    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X26Y219        CARRY4 (Prop_carry4_CI_O[1])
+                                                      0.334     9.988 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=18, routed)          0.946    10.934    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X25Y220        LUT6 (Prop_lut6_I0_O)        0.303    11.237 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.853    12.090    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X1Y87          DSP48E1 (Prop_dsp48e1_INMODE[1]_PATTERNDETECT)
+                                                      5.849    17.939 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=56, routed)          1.234    19.173    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X20Y219        LUT5 (Prop_lut5_I3_O)        0.124    19.297 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    19.297    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X20Y219        CARRY4 (Prop_carry4_S[1]_CO[3])
+                                                      0.533    19.830 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=12, routed)          1.321    21.152    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X21Y223        LUT4 (Prop_lut4_I1_O)        0.124    21.276 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.560    21.836    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X22Y221        LUT6 (Prop_lut6_I1_O)        0.124    21.960 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    21.960    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X22Y221        CARRY4 (Prop_carry4_S[0]_CO[3])
+                                                      0.513    22.473 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    22.473    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X22Y222        CARRY4 (Prop_carry4_CI_O[2])
+                                                      0.239    22.712 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=3, routed)           0.759    23.471    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X1Y88          DSP48E1 (Prop_dsp48e1_C[33]_P[34])
+                                                      1.997    25.468 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.777    26.246    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X22Y224        LUT6 (Prop_lut6_I0_O)        0.124    26.370 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.833    27.203    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/dout[30]
+    SLICE_X29Y220        LUT6 (Prop_lut6_I3_O)        0.124    27.327 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1[30]_i_1__71/O
+                         net (fo=2, routed)           0.392    27.718    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/D[30]
+    SLICE_X29Y220        FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[30]/D
+  -------------------------------------------------------------------    -------------------
+
+                         (clock clk_kernel_explore rise edge)
+                                                     20.000    20.000 r  <hidden>
+    R4                                                0.000    20.000 r  clk_pin100
+                         net (fo=0)                   0.000    20.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.405    21.405 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.162    22.567    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.083    22.650 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.723    24.373    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.091    24.464 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.133    24.597    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.091    24.688 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.808    26.496    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/clk_out20
+    SLICE_X29Y220        FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[30]/C
+                         clock pessimism              0.336    26.832    <hidden>
+                         clock uncertainty           -0.094    26.738    <hidden>
+    SLICE_X29Y220        FDRE (Setup_fdre_C_D)       -0.062    26.676    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U53/din0_buf1_reg[30]
+  -------------------------------------------------------------------
+                         required time                         26.676    <hidden>
+                         arrival time                         -27.718    <hidden>
+  -------------------------------------------------------------------
+                         slack                                 -1.043    <hidden>
+
+Slack (VIOLATED) :        -1.041ns  (required time - arrival time)
+  Source:                 u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/din1_buf1_reg[24]/C
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Destination:            u_iface0/u_matmul/empty_61_fu_1124_reg[20]/D
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Path Group:             clk_kernel_explore
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            20.000ns  (clk_kernel_explore rise@20.000ns - clk_kernel_explore rise@0.000ns)
+  Data Path Delay:        20.844ns  (logic 11.869ns (56.941%)  route 8.975ns (43.059%))
+  Logic Levels:           14  (CARRY4=5 DSP48E1=2 LUT2=1 LUT4=1 LUT5=1 LUT6=4)
+  Clock Path Skew:        -0.035ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    6.418ns = ( 26.418 - 20.000 ) 
+    Source Clock Delay      (SCD):    6.790ns
+    Clock Pessimism Removal (CPR):    0.337ns
+  Clock Uncertainty:      0.094ns  ((TSJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Discrete Jitter          (DJ):    0.175ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_kernel_explore rise edge)
+                                                      0.000     0.000 r  <hidden>
+    R4                                                0.000     0.000 r  clk_pin100
+                         net (fo=0)                   0.000     0.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.475     1.475 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.233     2.708    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.088     2.796 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.808     4.605    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096     4.701 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.140     4.841    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.096     4.937 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.853     6.790    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/clk_out20
+    SLICE_X111Y87        FDRE                                         r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/din1_buf1_reg[24]/C
+  -------------------------------------------------------------------    -------------------
+    SLICE_X111Y87        FDRE (Prop_fdre_C_Q)         0.456     7.246 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/din1_buf1_reg[24]/Q
+                         net (fo=7, routed)           0.598     7.844    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X109Y87        LUT2 (Prop_lut2_I0_O)        0.150     7.994 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.602     8.596    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X108Y87        CARRY4 (Prop_carry4_S[1]_CO[3])
+                                                      0.865     9.461 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000     9.461    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X108Y88        CARRY4 (Prop_carry4_CI_O[1])
+                                                      0.323     9.784 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=18, routed)          0.654    10.438    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X107Y88        LUT6 (Prop_lut6_I0_O)        0.306    10.744 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.942    11.687    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X6Y34          DSP48E1 (Prop_dsp48e1_INMODE[1]_PATTERNDETECT)
+                                                      5.849    17.536 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=54, routed)          1.043    18.579    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X104Y87        LUT5 (Prop_lut5_I3_O)        0.124    18.703 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    18.703    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X104Y87        CARRY4 (Prop_carry4_S[1]_CO[3])
+                                                      0.533    19.236 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=12, routed)          1.623    20.859    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X125Y86        LUT4 (Prop_lut4_I1_O)        0.124    20.983 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.632    21.615    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X126Y87        LUT6 (Prop_lut6_I1_O)        0.124    21.739 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    21.739    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X126Y87        CARRY4 (Prop_carry4_S[1]_CO[3])
+                                                      0.550    22.289 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    22.289    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X126Y88        CARRY4 (Prop_carry4_CI_O[0])
+                                                      0.222    22.511 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=3, routed)           1.139    23.650    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X7Y35          DSP48E1 (Prop_dsp48e1_C[31]_P[22])
+                                                      1.995    25.645 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.763    26.408    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X140Y86        LUT6 (Prop_lut6_I0_O)        0.124    26.532 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.171    26.702    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/dout[20]
+    SLICE_X140Y86        LUT6 (Prop_lut6_I3_O)        0.124    26.826 r  u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12/din0_buf1[20]_i_1__112/O
+                         net (fo=2, routed)           0.808    27.634    u_iface0/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U12_n_11
+    SLICE_X135Y85        FDRE                                         r  u_iface0/u_matmul/empty_61_fu_1124_reg[20]/D
+  -------------------------------------------------------------------    -------------------
+
+                         (clock clk_kernel_explore rise edge)
+                                                     20.000    20.000 r  <hidden>
+    R4                                                0.000    20.000 r  clk_pin100
+                         net (fo=0)                   0.000    20.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.405    21.405 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.162    22.567    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.083    22.650 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.723    24.373    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.091    24.464 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.133    24.597    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.091    24.688 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.730    26.418    u_iface0/u_matmul/clk_out20
+    SLICE_X135Y85        FDRE                                         r  u_iface0/u_matmul/empty_61_fu_1124_reg[20]/C
+                         clock pessimism              0.337    26.755    <hidden>
+                         clock uncertainty           -0.094    26.661    <hidden>
+    SLICE_X135Y85        FDRE (Setup_fdre_C_D)       -0.067    26.594    u_iface0/u_matmul/empty_61_fu_1124_reg[20]
+  -------------------------------------------------------------------
+                         required time                         26.594    <hidden>
+                         arrival time                         -27.634    <hidden>
+  -------------------------------------------------------------------
+                         slack                                 -1.041    <hidden>
+
+Slack (VIOLATED) :        -1.039ns  (required time - arrival time)
+  Source:                 u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[23]/C
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Destination:            u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[27]/D
+                            (rising edge-triggered cell FDRE clocked by clk_kernel_explore  {rise@0.000ns fall@10.000ns period=20.000ns})
+  Path Group:             clk_kernel_explore
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            20.000ns  (clk_kernel_explore rise@20.000ns - clk_kernel_explore rise@0.000ns)
+  Data Path Delay:        20.879ns  (logic 12.593ns (60.315%)  route 8.286ns (39.685%))
+  Logic Levels:           11  (CARRY4=3 DSP48E1=2 LUT2=1 LUT5=1 LUT6=4)
+  Clock Path Skew:        -0.038ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    6.242ns = ( 26.242 - 20.000 ) 
+    Source Clock Delay      (SCD):    6.608ns
+    Clock Pessimism Removal (CPR):    0.327ns
+  Clock Uncertainty:      0.094ns  ((TSJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Discrete Jitter          (DJ):    0.175ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_kernel_explore rise edge)
+                                                      0.000     0.000 r  <hidden>
+    R4                                                0.000     0.000 r  clk_pin100
+                         net (fo=0)                   0.000     0.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.475     1.475 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.233     2.708    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.088     2.796 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.808     4.605    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096     4.701 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.140     4.841    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.096     4.937 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.671     6.608    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/clk_out20
+    SLICE_X106Y196       FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[23]/C
+  -------------------------------------------------------------------    -------------------
+    SLICE_X106Y196       FDRE (Prop_fdre_C_Q)         0.456     7.064 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[23]/Q
+                         net (fo=6, routed)           0.771     7.835    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X106Y193       LUT2 (Prop_lut2_I1_O)        0.118     7.953 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.576     8.529    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X104Y192       CARRY4 (Prop_carry4_S[0]_CO[3])
+                                                      0.839     9.368 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000     9.368    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X104Y193       CARRY4 (Prop_carry4_CI_O[1])
+                                                      0.323     9.691 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=18, routed)          1.128    10.819    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X103Y193       LUT6 (Prop_lut6_I0_O)        0.306    11.125 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.945    12.071    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X6Y76          DSP48E1 (Prop_dsp48e1_INMODE[1]_PATTERNDETECT)
+                                                      5.849    17.920 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=54, routed)          0.719    18.639    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X101Y191       LUT5 (Prop_lut5_I3_O)        0.124    18.763 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.000    18.763    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X101Y191       CARRY4 (Prop_carry4_S[1]_CO[3])
+                                                      0.550    19.313 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=12, routed)          1.353    20.666    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X101Y194       LUT6 (Prop_lut6_I1_O)        0.124    20.790 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           0.674    21.464    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    DSP48_X6Y77          DSP48E1 (Prop_dsp48e1_B[9]_P[31])
+                                                      3.656    25.120 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=1, routed)           1.040    26.160    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+    SLICE_X107Y196       LUT6 (Prop_lut6_I0_O)        0.124    26.284 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/matmul_4x4x4_fadd_32ns_32ns_32_2_full_dsp_1_ip_u/U0/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>/<hidden>
+                         net (fo=2, routed)           0.462    26.746    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/dout[27]
+    SLICE_X108Y197       LUT6 (Prop_lut6_I3_O)        0.124    26.870 r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1[27]_i_1__74/O
+                         net (fo=2, routed)           0.617    27.486    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/D[27]
+    SLICE_X108Y197       FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[27]/D
+  -------------------------------------------------------------------    -------------------
+
+                         (clock clk_kernel_explore rise edge)
+                                                     20.000    20.000 r  <hidden>
+    R4                                                0.000    20.000 r  clk_pin100
+                         net (fo=0)                   0.000    20.000    clk_pin100
+    R4                   IBUF (Prop_ibuf_I_O)         1.405    21.405 r  clk_pin100_IBUF_inst/O
+                         net (fo=1, routed)           1.162    22.567    u_clk_gen/clk_in100
+    MMCME2_ADV_X1Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                      0.083    22.650 r  u_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.723    24.373    u_clk_gen/clk_out20_unbuf
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.091    24.464 r  u_clk_gen/u_bufg_replica/O
+                         net (fo=3, routed)           0.133    24.597    u_clk_gen/clk_out20_repN
+    BUFGCTRL_X0Y0        BUFG (Prop_bufg_I_O)         0.091    24.688 r  u_clk_gen/u_bufg/O
+                         net (fo=60897, routed)       1.555    26.242    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/clk_out20
+    SLICE_X108Y197       FDRE                                         r  u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[27]/C
+                         clock pessimism              0.327    26.570    <hidden>
+                         clock uncertainty           -0.094    26.475    <hidden>
+    SLICE_X108Y197       FDRE (Setup_fdre_C_D)       -0.028    26.447    u_iface1/u_matmul/fadd_32ns_32ns_32_2_full_dsp_1_U42/din0_buf1_reg[27]
+  -------------------------------------------------------------------
+                         required time                         26.447    <hidden>
+                         arrival time                         -27.486    <hidden>
+  -------------------------------------------------------------------
+                         slack                                 -1.039    <hidden>
+
+
+
+

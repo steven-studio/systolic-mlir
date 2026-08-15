@@ -2,16 +2,28 @@
 
 #include "fpga_matmul4x4.h"        // fpga_uart_open / fpga_uart_close
 #include "fpga_matmul_tiled.h"     // fpga_matmul_tiled(fd, ...)
-#include "fpga_conv2d_im2col.h"    // fd-taking conv variants
+#include "fpga_conv2d_im2col.h"
+#include "fpga_tile.h"    // fd-taking conv variants
 
 #include <stdlib.h>
 #include <string.h>
+
+static int env_int(const char *name, int fallback) {
+    const char *v = getenv(name);
+    if (!v || !*v) return fallback;
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    return (end == v) ? fallback : (int)n;
+}
 
 #define DEFAULT_PORT "/dev/ttyUSB1"
 
 struct fpga_ctx {
     int  fd;
     char port[128];
+    int  baud;   // FPGA_UART_BAUD
+    int  dim;    // FPGA_DIM  -- array edge, 4 or 8
+    int  ndev;   // FPGA_NDEV -- arrays on the board; >1 adds a device byte
     // Owned here rather than in fpga_matmul4x4_reliable.c so two contexts
     // (a board and a simulator, say) do not share one set of counters.
     fpga_reliable_stats_t stats;
@@ -25,7 +37,8 @@ fpga_ctx_t *fpga_ctx_open(const char *port) {
         port = (env && *env) ? env : DEFAULT_PORT;
     }
 
-    int fd = fpga_uart_open(port);
+    int baud = env_int("FPGA_UART_BAUD", 115200);
+    int fd = fpga_uart_open_baud(port, baud);
     if (fd < 0)
         return NULL;
 
@@ -34,7 +47,10 @@ fpga_ctx_t *fpga_ctx_open(const char *port) {
         fpga_uart_close(fd);
         return NULL;
     }
-    ctx->fd = fd;
+    ctx->fd   = fd;
+    ctx->baud = baud;
+    ctx->dim  = env_int("FPGA_DIM", 4);
+    ctx->ndev = env_int("FPGA_NDEV", 1);
     // Truncation is fine: the string is only ever reported back to the user.
     strncpy(ctx->port, port, sizeof(ctx->port) - 1);
     return ctx;
@@ -64,6 +80,9 @@ void fpga_ctx_reset_default(void) {
 }
 
 int fpga_ctx_fd(const fpga_ctx_t *ctx) { return ctx ? ctx->fd : -1; }
+int fpga_ctx_dim(const fpga_ctx_t *ctx) { return ctx ? ctx->dim : 0; }
+int fpga_ctx_ndev(const fpga_ctx_t *ctx) { return ctx ? ctx->ndev : 0; }
+int fpga_ctx_baud(const fpga_ctx_t *ctx) { return ctx ? ctx->baud : 0; }
 const char *fpga_ctx_port(const fpga_ctx_t *ctx) { return ctx ? ctx->port : ""; }
 
 const fpga_reliable_stats_t *fpga_ctx_stats(const fpga_ctx_t *ctx) {
@@ -81,7 +100,10 @@ int fpga_ctx_matmul_tiled(fpga_ctx_t *ctx, int M, int K, int N,
                           const float *A, const float *B, float *C) {
     if (!ctx || ctx->fd < 0)
         return -3;
-    return fpga_matmul_tiled(ctx->fd, M, K, N, A, B, C);
+    // dim 4 且單陣列時走原本已驗證的路徑，其餘走 dim-generic 版本。
+    if (ctx->dim == 4 && ctx->ndev <= 1)
+        return fpga_matmul_tiled(ctx->fd, M, K, N, A, B, C);
+    return fpga_matmul_tiled_dim(ctx->fd, ctx->dim, ctx->ndev, M, K, N, A, B, C);
 }
 
 int fpga_ctx_conv2d_im2col_general(fpga_ctx_t *ctx,
