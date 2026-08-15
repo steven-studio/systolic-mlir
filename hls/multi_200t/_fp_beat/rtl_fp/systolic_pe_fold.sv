@@ -358,6 +358,20 @@ module systolic_pe_fold #(
         reduce_i;
 
     /*
+     * reduce_j is maintained to satisfy, at every point where the
+     * reduction path reads a bank:
+     *
+     *     reduce_j == reduce_i + reduce_stride
+     *
+     * Keeping it as state instead of recomputing it combinationally
+     * takes the 4-bit adder off the path that feeds the bank mux
+     * select. Cost is ACC_SEL_W flops per PE; cycle count is
+     * unchanged.
+     */
+    logic [ACC_SEL_W-1:0]
+        reduce_j;
+
+    /*
      * Reduction adds issued into fp_add whose result has not yet
      * returned. MAC uses outstanding_adds; the two never overlap
      * because reduction only starts after MAC has fully drained.
@@ -371,14 +385,6 @@ module systolic_pe_fold #(
      */
     wire reduce_issue_fire =
         (state == PE_REDUCE_ISSUE);
-
-    /*
-     * Last issue of the current stride: second context, last index.
-     */
-    wire reduce_level_last =
-        reduce_issue_fire &&
-        (reduce_ctx == 1'b1) &&
-        (reduce_i == reduce_stride - 1'b1);
 
 
     /*
@@ -451,11 +457,31 @@ module systolic_pe_fold #(
             fp_add_b =
                 acc_bank
                     [reduce_ctx]
-                    [reduce_i + reduce_stride];
+                    [reduce_j];
 
         end
 
     end
+
+
+`ifndef SYNTHESIS
+    /*
+     * reduce_j is redundant state. If it ever drifts from the value
+     * it stands in for, the reduction silently reads the wrong bank
+     * and the result is merely wrong rather than obviously broken.
+     * Check it every cycle a bank is actually read.
+     */
+    always_ff @(posedge clk) begin
+        if (!rst && state == PE_REDUCE_ISSUE) begin
+            if (reduce_j !== (reduce_i + reduce_stride)) begin
+                $error({"reduce_j desync: j=%0d i=%0d stride=%0d ",
+                        "expected=%0d"},
+                       reduce_j, reduce_i, reduce_stride,
+                       (reduce_i + reduce_stride));
+            end
+        end
+    end
+`endif
 
 
     fp_add u_fp_add (
@@ -868,6 +894,9 @@ module systolic_pe_fold #(
             reduce_i <=
                 '0;
 
+            reduce_j <=
+                '0;
+
             reduce_outstanding <=
                 '0;
 
@@ -972,6 +1001,9 @@ module systolic_pe_fold #(
                         reduce_i <=
                             '0;
 
+                        reduce_j <=
+                            ACC_SEL_W'(ACC_BANKS / 2);
+
                         state <=
                             PE_REDUCE_ISSUE;
 
@@ -1001,6 +1033,9 @@ module systolic_pe_fold #(
                             reduce_i <=
                                 '0;
 
+                            reduce_j <=
+                                reduce_stride;
+
                         end
                         else begin
 
@@ -1014,6 +1049,9 @@ module systolic_pe_fold #(
 
                         reduce_i <=
                             reduce_i + 1'b1;
+
+                        reduce_j <=
+                            reduce_j + 1'b1;
 
                     end
 
@@ -1068,6 +1106,9 @@ module systolic_pe_fold #(
 
                             reduce_i <=
                                 '0;
+
+                            reduce_j <=
+                                reduce_stride >> 1;
 
                             state <=
                                 PE_REDUCE_ISSUE;
