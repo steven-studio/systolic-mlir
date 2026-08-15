@@ -66,8 +66,8 @@ module {
     return %0 : tensor<8x8xf32>
   }
 
-  // Held out: never measured, in simulation or on the board. If the model
-  // is right this is 150.
+  // Predicted before measurement: 104 was fitted from k_dim = 16 and 64
+  // only, and this point was never in the fit. The board later reported 150.
   // CHECK-LABEL: func.func @fold_32
   // CHECK: systolic.matmul_tile
   // CHECK-SAME: est_cycles = 150
