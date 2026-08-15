@@ -57,7 +57,26 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     I64Attr:$depth,
     Systolic_DataflowKind:$dataflow,
     OptionalAttr<F64Attr>:$clock_hz,
-    OptionalAttr<F64Attr>:$dma_bytes_per_cycle
+    OptionalAttr<F64Attr>:$dma_bytes_per_cycle,
+
+    // Calibration constants, per microarchitecture rather than per array
+    // shape. The geometric term of the cost model is determined by rows,
+    // cols and depth; these two describe what the datapath adds on top of
+    // it -- pipeline latency of the arithmetic, the final reduction, and
+    // whatever the output handshake costs.
+    //
+    // They belong on the device rather than in the model because two
+    // accelerators of identical geometry can differ here by more than an
+    // order of magnitude. The HLS pipeline this model was first fitted to
+    // has fixed_overhead 6; the hand-written fold RTL measures 104. A
+    // single global constant cannot describe both, and using the wrong one
+    // makes device selection pick the wrong accelerator for the right
+    // reason.
+    //
+    // Absent means "use the ArrayConfig default", which keeps every
+    // existing device declaration behaving exactly as before.
+    OptionalAttr<I64Attr>:$initiation_interval,
+    OptionalAttr<I64Attr>:$fixed_overhead
   );
 
   let assemblyFormat = "$sym_name `rows` `=` $rows `cols` `=` $cols "

@@ -52,6 +52,13 @@ struct SystolicScheduleOverlapPass
         cfg.clockHz = clk.getValueAsDouble();
       if (FloatAttr bw = device.getDmaBytesPerCycleAttr())
         cfg.dmaBytesPerCycle = bw.getValueAsDouble();
+      // Calibration is a property of the microarchitecture, not of the
+      // array shape, so it travels on the device op. Leaving the attribute
+      // off keeps the ArrayConfig default.
+      if (IntegerAttr ii = device.getInitiationIntervalAttr())
+        cfg.initiationInterval = ii.getInt();
+      if (IntegerAttr fo = device.getFixedOverheadAttr())
+        cfg.fixedOverhead = fo.getInt();
       configs[device.getSymName()] = cfg;
     });
 
