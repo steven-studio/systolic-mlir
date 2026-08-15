@@ -12,7 +12,7 @@ Two distinct quantities, deliberately separate arguments:
 
 WIRE FORMAT
 -----------
-Request, HDR_BYTES + K_MAX*64 bytes:
+Request, MARK_BYTES + HDR_BYTES + K_MAX*64 + MARK_BYTES bytes:
 
     [ k_dim : 4 bytes little-endian ] [ A/B payload ]
 
@@ -73,6 +73,20 @@ except ImportError:
 
 
 HDR_BYTES = 4
+
+# Frame markers. Little-endian on the wire, matching the header's k_dim
+# and the RTL's sliding window, in which the first byte received ends up
+# in the low byte of the compared word.
+#
+# These exist because the transaction used to be a bare fixed-length
+# burst: with no delimiter, a host that sent the wrong number of bytes
+# left the receiver pointing into the middle of a frame and every later
+# request was split across two of them, until the board was reset by
+# hand. The receiver now hunts for FRAME_START and only acts on a frame
+# whose FRAME_END is where the length says it should be.
+FRAME_START = (0xA55AC33C).to_bytes(4, "little")
+FRAME_END = (0x5AA53CC3).to_bytes(4, "little")
+MARK_BYTES = 4
 TX_BYTES = 512
 
 
@@ -129,7 +143,7 @@ def main():
         sys.exit(f"--k must be in [1, {kmax}] (got {k})")
 
     rx_bytes = kmax * 64
-    req_bytes = HDR_BYTES + rx_bytes
+    req_bytes = MARK_BYTES + HDR_BYTES + rx_bytes + MARK_BYTES
 
     if a.ones:
         A = np.ones((8, kmax), dtype=np.float32)
@@ -148,7 +162,7 @@ def main():
             A[:, k:] = 1024.0
             B[k:, :] = 1024.0
 
-    request = build_request(k, A, B, kmax)
+    request = FRAME_START + build_request(k, A, B, kmax) + FRAME_END
     assert len(request) == req_bytes, (len(request), req_bytes)
 
     exp_c0, exp_c1 = expected_contexts(A, B, k)
@@ -158,7 +172,11 @@ def main():
     print(f"k_dim      : {k}   (this invocation)")
     print(f"tail       : {'zeros' if a.zero_tail else 'poisoned with 1024.0'}")
     print(f"port       : {a.port} @ {a.baud}")
-    print(f"request    : {req_bytes} bytes  ({HDR_BYTES} header + {rx_bytes} payload)")
+    print(
+        f"request    : {req_bytes} bytes  "
+        f"({MARK_BYTES} start + {HDR_BYTES} header + "
+        f"{rx_bytes} payload + {MARK_BYTES} end)"
+    )
     print(f"response   : {TX_BYTES} bytes expected")
     print()
 
@@ -179,6 +197,25 @@ def main():
                 rx.extend(chunk)
                 print(f"\rRX {len(rx)}/{TX_BYTES}", end="", flush=True)
         print()
+
+        # CYCLE_COUNTER=1 的 bitstream 會在 512 bytes 之後再送 4 bytes
+        # （小端序）。用短 timeout 試讀:沒有就是舊 bitstream，其餘檢查
+        # 完全不受影響。必須在 with 區塊內讀，離開後 ser 就關了。
+        _saved_to = ser.timeout
+        ser.timeout = 0.5
+        cyc_raw = ser.read(4)
+        ser.timeout = _saved_to
+
+    if len(cyc_raw) == 4:
+        cyc = int.from_bytes(cyc_raw, "little")
+        exp = k + 118
+        print(f"hardware cycles : {cyc}   (xsim 預期 k_dim + 118 = {exp})")
+        if cyc == exp:
+            print("                  與模擬完全一致")
+        else:
+            print(f"                  差 {cyc - exp:+d} 拍")
+    else:
+        print("hardware cycles : 未回報（此 bitstream 的 CYCLE_COUNTER 為 0）")
 
     if len(rx) != TX_BYTES:
         print(f"FAIL: expected {TX_BYTES} bytes, got {len(rx)}")
