@@ -7,7 +7,8 @@
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra
-CPPFLAGS = -Ilib
+# lib/ 依 bitstream 分子目錄,每個子目錄都是 include path。
+CPPFLAGS = $(addprefix -I,$(shell find lib -type d))
 
 # systolic_dispatch_sim.c and systolic_dispatch_uart.c define the same two
 # symbols (systolic_dispatch_open, systolic_dispatch_matmul), so exactly
@@ -17,16 +18,21 @@ CPPFLAGS = -Ilib
 #   sim  -- host-side model, builds and runs with no board attached
 DISPATCH ?= uart
 
-LIB_SRC = $(filter-out lib/systolic_dispatch_%.c,$(wildcard lib/*.c)) \
-          lib/systolic_dispatch_$(DISPATCH).c
+LIB_SRC = $(filter-out lib/dispatch/systolic_dispatch_%.c,$(shell find lib -name '*.c')) \
+          lib/dispatch/systolic_dispatch_$(DISPATCH).c
 LIB_OBJ = $(LIB_SRC:.c=.o)
 LIB     = lib/libfpgart.a
 
 BIN_DIR = bin
 # Was a hardcoded list, so a new driver silently did not get built. The
 # tests/ rule below already globbed; drivers/ now matches it.
-DRIVERS = $(patsubst drivers/%.c,$(BIN_DIR)/%,$(wildcard drivers/*.c))
-TESTS   = $(patsubst tests/%.c,$(BIN_DIR)/%,$(wildcard tests/*.c))
+# drivers/ 與 tests/ 一個子目錄配一顆 bitstream。執行檔仍然平放在 bin/
+# 且名稱不變,所以 harness/ 和文件裡的路徑都不用改 -- 只有原始碼搬了。
+DRIVER_SRC = $(wildcard drivers/*/*.c)
+TEST_SRC   = $(wildcard tests/*/*.c)
+DRIVERS = $(addprefix $(BIN_DIR)/,$(notdir $(DRIVER_SRC:.c=)))
+TESTS   = $(addprefix $(BIN_DIR)/,$(notdir $(TEST_SRC:.c=)))
+vpath %.c $(sort $(dir $(DRIVER_SRC) $(TEST_SRC)))
 
 .PHONY: all lib drivers tests clean check
 all: lib drivers tests
@@ -44,10 +50,7 @@ tests: $(TESTS)
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
-$(BIN_DIR)/%: drivers/%.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@
-
-$(BIN_DIR)/%: tests/%.c $(LIB) | $(BIN_DIR)
+$(BIN_DIR)/%: %.c $(LIB) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LIB) -o $@
 
 # The four configurations that were the original high-error suspects and are

@@ -161,3 +161,9 @@ ip_local/
 *.sv.tree
 hls/multi_200t/sweep_results.csv
 compile_commands.json
+runtime/bin/
+runtime/dtest_*
+runtime/hwtest
+runtime/packtest
+*.o
+*.a
