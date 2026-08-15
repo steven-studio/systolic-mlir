@@ -58,7 +58,26 @@ module systolic_uart_fold_top #(
      * feed, fold-context or reduction behaviour depends on it.
      * ============================================================
      */
-    parameter bit DEBUG_MARKERS = 1'b0
+    parameter bit DEBUG_MARKERS = 1'b0,
+
+    /*
+     * ============================================================
+     * CYCLE_COUNTER -- 附加 4 bytes 的硬體週期計數
+     * ============================================================
+     *
+     * 計數區間刻意與 tb_array_fold_kmax 的 total_cycles 定義一致：
+     * 第一個 feed beat 到 ctx1 published，兩端皆含。這樣「模擬預測
+     * 118，實機量到 118」才是逐一對應而非概略吻合。
+     *
+     * 四個 byte 接在 512 result bytes 之後（小端序，與協定中 K 的
+     * 慣例相同），不是插在前面 -- DEBUG_MARKERS 的教訓是前置位元組
+     * 會讓只讀 512 的 host 每個 float 都偏移。
+     *
+     * 預設關閉，wire format 維持 RX K_MAX*64 -> TX 512。
+     * 開啟時 host 必須改讀 516 bytes。
+     * ============================================================
+     */
+    parameter bit CYCLE_COUNTER = 1'b0
 ) (
     input  logic clk,
     input  logic rst,
@@ -88,6 +107,10 @@ module systolic_uart_fold_top #(
 
     // TX is K_MAX-invariant: two accumulator contexts, 256 B each.
     localparam int TX_BYTES = 512;
+
+    // 開啟 CYCLE_COUNTER 時附加 4 bytes 的計數值。
+    localparam int TX_TOTAL_BYTES = TX_BYTES + (CYCLE_COUNTER ? 4 : 0);
+    localparam int TX_LAST        = TX_TOTAL_BYTES - 1;
 
 `ifndef SYNTHESIS
     initial begin
@@ -208,8 +231,44 @@ module systolic_uart_fold_top #(
      * since each window is exactly 8 deep.
      * ============================================================
      */
-    logic [31:0] A_buf [0:7][0:K_MAX-1];
-    logic [31:0] B_buf [0:K_MAX-1][0:7];
+    /*
+     * Distributed RAM, not flip-flops. As registers these two arrays
+     * carry one write enable per 32-bit word, so the control-set count
+     * scales with K_MAX: 256 at K_MAX=16, 1024 at K_MAX=64. A slice
+     * holds only one control set, which made the K_MAX=64 build need
+     * 31839 slices out of 30575 available even though LUTs were at 80%
+     * and FFs at 55%.
+     *
+     * LUTRAM keeps the asynchronous read the feeder depends on -- it
+     * reads eight A rows and eight B columns combinationally in the
+     * same cycle, which BRAM cannot do without restructuring.
+     */
+    /*
+     * Held as sixteen small memories rather than one 2-D register
+     * array: eight for A indexed by row, eight for B indexed by
+     * column. The memories themselves are generated further down,
+     * after the RX control signals they depend on exist.
+     *
+     * As a 2-D array these cannot be inferred as RAM at all. The
+     * write address spans both dimensions, so there is no single
+     * write address for the tool to recognise and it falls back to
+     * flip-flops -- one write enable per 32-bit word. Control sets
+     * then scale with K_MAX (256 at K_MAX=16, 1024 at K_MAX=64), and
+     * since a slice holds exactly one control set the K_MAX=64 build
+     * needed 31839 slices out of 30575 while LUTs sat at 80% and
+     * flip-flops at 55%.
+     *
+     * Split per row and per column, each memory has one write address
+     * and one read address. The feeder reads row r at gk = feed_t - r
+     * and column c at gk = feed_t - c, so one read address per memory
+     * per cycle is all it ever needs and the read stays asynchronous:
+     * no extra feed latency, and the K+118 cycle formula is unchanged.
+     */
+    logic [K_W-1:0] a_raddr [0:7];
+    logic [K_W-1:0] b_raddr [0:7];
+
+    wire [31:0] a_rdata [0:7];
+    wire [31:0] b_rdata [0:7];
 
     logic [RX_CNT_W-1:0] rx_count;
     logic [1:0]          byte_pos;
@@ -265,8 +324,129 @@ module systolic_uart_fold_top #(
     logic matrices_ready;
 
 
+    /*
+     * ============================================================
+     * RX framing
+     * ============================================================
+     *
+     *   FRAME_START(4) | HDR(4) | PAYLOAD(RX_BYTES) | FRAME_END(4)
+     *
+     * The transaction used to be a bare fixed-length burst. With no
+     * delimiter there is no way to tell where one request ends and
+     * the next begins, so a host that sent the wrong number of bytes
+     * left the byte counters pointing into the middle of a frame and
+     * every later request was split across two of them. That state
+     * survived until the board was reset by hand.
+     *
+     * The obvious cheap alternative -- treat a gap between bytes as
+     * a boundary -- is not sound. One transaction takes 89 ms on the
+     * wire, and any host-side stall inside that window would split a
+     * VALID request. That trades "wrong length fails" for "correct
+     * length sometimes fails", which is worse: it makes correctness
+     * depend on the host's scheduler.
+     *
+     * sync_sr is a sliding window over the last four bytes, ordered
+     * to match the little-endian word convention used everywhere
+     * else on this interface. Matching on a sliding window is what
+     * makes HUNT self-synchronising: whatever offset the receiver is
+     * stuck at, it walks forward one byte at a time until the marker
+     * lines up. No rewind and no buffer are needed.
+     *
+     * A false START inside float payload is possible -- any byte
+     * value can occur -- but the END check then fails and the frame
+     * is discarded, so the receiver converges within one frame. The
+     * odds are 2^-32 per offset, about 2.4e-7 per frame, which is
+     * why byte stuffing (SLIP/COBS) is not worth its cost here.
+     * ============================================================
+     */
+    localparam logic [31:0] FRAME_START = 32'hA55A_C33C;
+    localparam logic [31:0] FRAME_END   = 32'h5AA5_3CC3;
+
+    typedef enum logic [1:0] {
+        RX_HUNT,
+        RX_BODY,
+        RX_TAIL
+    } rx_state_t;
+
+    rx_state_t rx_state;
+
+    logic [31:0] sync_sr;
+    logic [1:0]  tail_cnt;
+
+    /*
+     * Oldest of the four bytes ends up in bits [7:0], matching
+     * rx_word above, so a marker constant reads the same way a
+     * header word does.
+     */
+    wire [31:0] sync_next = {rx_byte, sync_sr[31:8]};
+
+
+    /*
+     * ============================================================
+     * Operand memories
+     * ============================================================
+     *
+     * One write port and one asynchronous read port each, which is
+     * the shape distributed RAM wants. Writes are decoded here rather
+     * than inside the RX state machine so that each memory sees a
+     * single write address.
+     * ============================================================
+     */
+    wire buf_wr =
+        rx_valid &&
+        (rx_state == RX_BODY) &&
+        (byte_pos == 2'd3) &&
+        hdr_done;
+
+    wire [31:0] buf_wdata = {rx_byte, word_buf[23:0]};
+
+    // Absolute k of the word being written. Each k window is exactly
+    // 8 deep, so the concatenation is window*8 + offset with no adder.
+    wire [K_W-1:0] a_waddr = {rx_win, rx_col};
+    wire [K_W-1:0] b_waddr = {rx_win, rx_row};
+
+    genvar gi;
+
+    generate
+
+        for (gi = 0; gi < 8; gi = gi + 1) begin : A_MEM
+
+            (* ram_style = "distributed" *)
+            logic [31:0] mem [0:K_MAX-1];
+
+            always_ff @(posedge clk) begin
+                if (buf_wr && !rx_is_b && rx_row == 3'(unsigned'(gi)))
+                    mem[a_waddr] <= buf_wdata;
+            end
+
+            assign a_rdata[gi] = mem[a_raddr[gi]];
+
+        end
+
+
+        for (gi = 0; gi < 8; gi = gi + 1) begin : B_MEM
+
+            (* ram_style = "distributed" *)
+            logic [31:0] mem [0:K_MAX-1];
+
+            always_ff @(posedge clk) begin
+                if (buf_wr && rx_is_b && rx_col == 3'(unsigned'(gi)))
+                    mem[b_waddr] <= buf_wdata;
+            end
+
+            assign b_rdata[gi] = mem[b_raddr[gi]];
+
+        end
+
+    endgenerate
+
+
     always_ff @(posedge clk) begin
         if (rst) begin
+
+            rx_state       <= RX_HUNT;
+            sync_sr        <= 32'd0;
+            tail_cnt       <= 2'd0;
 
             rx_count       <= '0;
             byte_pos       <= 2'd0;
@@ -282,98 +462,176 @@ module systolic_uart_fold_top #(
 
             if (rx_valid) begin
 
-                case (byte_pos)
+                /*
+                 * The sliding window advances on every byte, in
+                 * every state. HUNT needs it to find a marker at an
+                 * arbitrary offset; TAIL needs it to read the four
+                 * bytes it is checking.
+                 */
+                sync_sr <= sync_next;
 
-                    2'd0:
-                        word_buf[7:0] <= rx_byte;
+                case (rx_state)
 
-                    2'd1:
-                        word_buf[15:8] <= rx_byte;
+                /*
+                 * ----------------------------------------------------
+                 * Walk forward one byte at a time until the start
+                 * marker lines up. Everything before it is discarded,
+                 * which is what recovers from a truncated or oversized
+                 * previous transfer.
+                 * ----------------------------------------------------
+                 */
+                RX_HUNT: begin
 
-                    2'd2:
-                        word_buf[23:16] <= rx_byte;
+                    if (sync_next == FRAME_START) begin
 
-                    2'd3: begin
+                        rx_state <= RX_BODY;
 
-                        word_buf[31:24] <= rx_byte;
-
-                        /*
-                         * The first complete word of a transaction
-                         * is the header, not operand data.
-                         */
-                        if (!hdr_done) begin
-
-                            k_dim <= hdr_valid ? FEED_W'(hdr_k)
-                                               : FEED_W'(K_MAX);
-
-                        end
-
-                        /*
-                         * Absolute k is {window, col} for A and
-                         * {window, row} for B -- each k window is
-                         * exactly 8 deep, so the concatenation is
-                         * window*8 + offset with no adder.
-                         */
-                        else if (rx_is_b) begin
-
-                            B_buf[{rx_win, rx_row}]
-                                 [rx_col]
-                                <= {
-                                    rx_byte,
-                                    word_buf[23:0]
-                                };
-
-                        end
-                        else begin
-
-                            A_buf[rx_row]
-                                 [{rx_win, rx_col}]
-                                <= {
-                                    rx_byte,
-                                    word_buf[23:0]
-                                };
-
-                        end
+                        rx_count <= '0;
+                        byte_pos <= 2'd0;
+                        hdr_done <= 1'b0;
 
                     end
 
-                endcase
-
-
-                if (byte_pos == 2'd3)
-                    byte_pos <= 2'd0;
-                else
-                    byte_pos <= byte_pos + 1'b1;
+                end
 
 
                 /*
-                 * Header bytes do not advance the payload counter,
-                 * so rx_count still addresses operand storage
-                 * exactly as before: the write at byte_pos == 3
-                 * sees rx_count = 4w+3 for payload word w.
-                 *
-                 * hdr_done is cleared at end of transaction, which
-                 * rearms the header for the next request -- every
-                 * invocation therefore carries its own k_dim.
+                 * ----------------------------------------------------
+                 * Header word followed by the operand payload. This is
+                 * the original receive path, unchanged: the framing
+                 * states around it decide whether its results are
+                 * allowed to start a computation.
+                 * ----------------------------------------------------
                  */
-                if (!hdr_done) begin
+                RX_BODY: begin
+
+                    case (byte_pos)
+
+                        2'd0:
+                            word_buf[7:0] <= rx_byte;
+
+                        2'd1:
+                            word_buf[15:8] <= rx_byte;
+
+                        2'd2:
+                            word_buf[23:16] <= rx_byte;
+
+                        2'd3: begin
+
+                            word_buf[31:24] <= rx_byte;
+
+                            /*
+                             * The first complete word of a frame is
+                             * the header, not operand data.
+                             */
+                            if (!hdr_done) begin
+
+                                k_dim <= hdr_valid ? FEED_W'(hdr_k)
+                                                   : FEED_W'(K_MAX);
+
+                            end
+
+                            /*
+                             * The operand write itself happens in the
+                             * per-row and per-column memories above,
+                             * gated by buf_wr. Keeping it out of this
+                             * state machine is what gives each memory
+                             * a single write address, without which
+                             * the arrays cannot be inferred as RAM.
+                             *
+                             * Payload is written optimistically,
+                             * before the end marker has been seen. A
+                             * frame that turns out to be spurious
+                             * leaves stale operands behind, but they
+                             * are overwritten by the next accepted
+                             * frame before anything reads them --
+                             * which is why no 1036-byte holding
+                             * buffer is needed.
+                             */
+
+                        end
+
+                    endcase
+
 
                     if (byte_pos == 2'd3)
-                        hdr_done <= 1'b1;
+                        byte_pos <= 2'd0;
+                    else
+                        byte_pos <= byte_pos + 1'b1;
+
+
+                    /*
+                     * Header bytes do not advance the payload
+                     * counter, so rx_count still addresses operand
+                     * storage exactly as before: the write at
+                     * byte_pos == 3 sees rx_count = 4w+3 for
+                     * payload word w.
+                     */
+                    if (!hdr_done) begin
+
+                        if (byte_pos == 2'd3)
+                            hdr_done <= 1'b1;
+
+                    end
+                    else if (rx_count == RX_CNT_W'(RX_BYTES - 1)) begin
+
+                        rx_count <= '0;
+                        hdr_done <= 1'b0;
+                        tail_cnt <= 2'd0;
+
+                        /*
+                         * The payload is complete but not yet
+                         * trusted. matrices_ready is asserted in
+                         * RX_TAIL and only if the end marker
+                         * matches.
+                         */
+                        rx_state <= RX_TAIL;
+
+                    end
+                    else begin
+
+                        rx_count <= rx_count + 1'b1;
+
+                    end
 
                 end
-                else if (rx_count == RX_CNT_W'(RX_BYTES - 1)) begin
 
-                    rx_count       <= '0;
-                    hdr_done       <= 1'b0;
-                    matrices_ready <= 1'b1;
+
+                /*
+                 * ----------------------------------------------------
+                 * Four bytes of end marker. A match is the only thing
+                 * that starts a computation; a mismatch means the
+                 * start marker was spurious or the frame was mangled,
+                 * so the whole frame is dropped and the receiver goes
+                 * back to hunting.
+                 * ----------------------------------------------------
+                 */
+                RX_TAIL: begin
+
+                    if (tail_cnt == 2'd3) begin
+
+                        if (sync_next == FRAME_END)
+                            matrices_ready <= 1'b1;
+
+                        rx_state <= RX_HUNT;
+
+                    end
+                    else begin
+
+                        tail_cnt <= tail_cnt + 1'b1;
+
+                    end
 
                 end
-                else begin
 
-                    rx_count <= rx_count + 1'b1;
+
+                default: begin
+
+                    rx_state <= RX_HUNT;
 
                 end
+
+                endcase
 
             end
 
@@ -582,6 +840,9 @@ module systolic_uart_fold_top #(
 
         for (int i = 0; i < 8; i++) begin
 
+            a_raddr[i]       = '0;
+            b_raddr[i]       = '0;
+
             a_in[i]          = 32'd0;
             b_in[i]          = 32'd0;
 
@@ -615,8 +876,8 @@ module systolic_uart_fold_top #(
                      */
                     fold_a = gk_a >> 3;
 
-                    a_in[r] =
-                        A_buf[r][gk_a];
+                    a_raddr[r] = K_W'(unsigned'(gk_a));
+                    a_in[r]    = a_rdata[r];
 
                     a_valid_in[r]    = 1'b1;
                     fold_ctx_in_a[r] = fold_a[0];
@@ -640,8 +901,8 @@ module systolic_uart_fold_top #(
 
                     fold_b = gk_b >> 3;
 
-                    b_in[c] =
-                        B_buf[gk_b][c];
+                    b_raddr[c] = K_W'(unsigned'(gk_b));
+                    b_in[c]    = b_rdata[c];
 
                     b_valid_in[c]    = 1'b1;
                     fold_ctx_in_b[c] = fold_b[0];
@@ -652,6 +913,54 @@ module systolic_uart_fold_top #(
 
         end
 
+    end
+
+
+    /*
+     * ============================================================
+     * Transaction cycle counter
+     *
+     * 起點：ST_FEED 的第一拍（feed_t == 0）
+     * 終點：ctx1 published（c_valid_out && c_ctx_out）
+     *
+     * 兩端皆含，等同 tb 的 ctx1_cycle - first_valid_cycle + 1。
+     * cyc_latched 在終點鎖存，TX 期間不再變動。
+     * ============================================================
+     */
+    logic [31:0] cyc_count;
+    logic [31:0] cyc_latched;
+    logic        cyc_running;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+
+            cyc_count   <= '0;
+            cyc_latched <= '0;
+            cyc_running <= 1'b0;
+
+        end
+        else begin
+
+            if (state == ST_FEED && feed_t == '0 && !cyc_running) begin
+
+                cyc_running <= 1'b1;
+                cyc_count   <= 32'd1;
+
+            end
+            else if (cyc_running) begin
+
+                cyc_count <= cyc_count + 1'b1;
+
+                if (c_valid_out && c_ctx_out) begin
+
+                    cyc_running <= 1'b0;
+                    cyc_latched <= cyc_count + 1'b1;
+
+                end
+
+            end
+
+        end
     end
 
 
@@ -832,7 +1141,7 @@ module systolic_uart_fold_top #(
      * Total = 512 bytes
      * ============================================================
      */
-    logic [8:0]  tx_count;
+    logic [9:0]  tx_count;
     logic [31:0] tx_word;
     logic tx_send_started;
 
@@ -853,11 +1162,21 @@ module systolic_uart_fold_top #(
                   [tx_count[4:2]];
 
         end
-        else begin
+        else if (tx_count < 512) begin
 
             tx_word =
                 C1[(tx_count - 256) >> 5]
                   [((tx_count - 256) >> 2) & 7];
+
+        end
+        else begin
+
+            /*
+             * bytes 512..515 = cycle count, little-endian.
+             * tx_count[1:0] 的位元組選擇沿用下方 case，
+             * 512 是 4 的倍數所以對齊正確。
+             */
+            tx_word = cyc_latched;
 
         end
 
@@ -908,7 +1227,7 @@ module systolic_uart_fold_top #(
     always_ff @(posedge clk) begin
         if (rst) begin
 
-            tx_count         <= 9'd0;
+            tx_count         <= 10'd0;
             tx_start         <= 1'b0;
             tx_state         <= TX_IDLE;
             tx_all_done      <= 1'b0;
@@ -989,7 +1308,7 @@ module systolic_uart_fold_top #(
                         debug_tx_active <= 1'b0;
                         tx_send_started <= 1'b1;
 
-                        tx_count <= 9'd0;
+                        tx_count <= 10'd0;
                         tx_state <= TX_START;
 
                     end
@@ -1042,9 +1361,9 @@ module systolic_uart_fold_top #(
                             tx_state        <= TX_IDLE;
 
                         end
-                        else if (tx_count == 9'd511) begin
+                        else if (tx_count == TX_LAST[9:0]) begin
 
-                            tx_count    <= 9'd0;
+                            tx_count    <= 10'd0;
                             tx_state    <= TX_IDLE;
                             tx_all_done <= 1'b1;
 
