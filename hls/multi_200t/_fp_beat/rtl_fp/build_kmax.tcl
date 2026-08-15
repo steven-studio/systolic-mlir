@@ -77,7 +77,8 @@ read_xdc nexys_video_uart.xdc
 # ---------------------------------------------------------------------
 synth_design -top $TOP -part $PART \
     -generic K_MAX=$KMAX \
-    -generic DEBUG_MARKERS=0
+    -generic DEBUG_MARKERS=0 \
+    -generic CYCLE_COUNTER=1
 
 write_checkpoint -force $OUT/post_synth.dcp
 report_utilization    -file $OUT/reports/post_synth_utilization.rpt
