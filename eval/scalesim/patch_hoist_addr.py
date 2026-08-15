@@ -2,7 +2,7 @@
 """
 patch_hoist_addr.py -- 把 reduce 讀取位址的加法器移出組合路徑。
 
-    python3 patch_hoist_addr.py hls/multi_200t/_fp_beat/rtl_fp/systolic_pe_fold.sv
+    python3 patch_hoist_addr.py hls/multi_200t/fold_pipelined/rtl/systolic_pe_fold.sv
 
 做什麼
 ------

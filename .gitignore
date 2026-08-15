@@ -70,8 +70,8 @@ hls/**/reports/
 hls/**/sweep_runs/
 
 # multi_200t experiment build trees
-hls/multi_200t/_fp_beat/work_fp_beat/
-hls/multi_200t/_fp_beat/work_fp_beat_timing*/
+hls/multi_200t/fold_pipelined/workfold_pipelined/
+hls/multi_200t/fold_pipelined/workfold_pipelined_timing*/
 hls/multi_200t/work_systolic/
 
 # Vivado build tree
@@ -133,25 +133,25 @@ hls/gemm_4x4/tba
 hls/gemm_4x4_dual/vivado/build_dual/
 
 # Experimental bitstreams
-hls/multi_200t/_fp_beat/rtl_fp/*.bit
+hls/multi_200t/fold_pipelined/rtl/*.bit
 
 # Manual intermediate backups
 *.before_*
 
 # ============================================================
-# Vivado 本機產物（rtl_fp）
+# Vivado 本機產物（rtl）
 # ============================================================
-hls/multi_200t/_fp_beat/rtl_fp/build_kmax/
-hls/multi_200t/_fp_beat/rtl_fp/rtl_fp_pe_test/
-hls/multi_200t/_fp_beat/rtl_fp/ip_local/
-hls/multi_200t/_fp_beat/rtl_fp/sweep_k_rtl8x8_out/
+hls/multi_200t/fold_pipelined/rtl/build_kmax/
+hls/multi_200t/fold_pipelined/rtl/rtl_fp_pe_test/
+hls/multi_200t/fold_pipelined/rtl/ip_local/
+hls/multi_200t/fold_pipelined/rtl/sweep_k_rtl8x8_out/
 
 # bitstream
 **/*.bit
 
 # 工作中的暫存副本
-hls/multi_200t/_fp_beat/rtl_fp/*.sv.tree
-hls/multi_200t/_fp_beat/rtl_fp/systolic_pe_fold_TREE.sv
+hls/multi_200t/fold_pipelined/rtl/*.sv.tree
+hls/multi_200t/fold_pipelined/rtl/systolic_pe_fold_TREE.sv
 build_kmax/
 rtl_fp_pe_test/
 ip_local/

@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-RTL=hls/multi_200t/_fp_beat/rtl_fp
+RTL=hls/multi_200t/fold_pipelined/rtl
 
 say() { echo; echo "=== $* ==="; }
 

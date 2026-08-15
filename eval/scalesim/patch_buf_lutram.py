@@ -2,7 +2,7 @@
 """
 patch_buf_lutram.py -- 把 A_buf / B_buf 從暫存器陣列改成十六個小記憶體。
 
-    python3 patch_buf_lutram.py hls/multi_200t/_fp_beat/rtl_fp/systolic_uart_fold_top.sv
+    python3 patch_buf_lutram.py hls/multi_200t/fold_pipelined/rtl/systolic_uart_fold_top.sv
 
 問題
 ----

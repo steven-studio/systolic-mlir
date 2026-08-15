@@ -1,6 +1,6 @@
 <!-- 由 eval/scalesim/gen_design_readmes.py 產生。改內容請直接編輯本檔。 -->
 
-# rtl_fp — 手寫 8x8 fold 陣列
+# rtl — 手寫 8x8 fold 陣列
 
 | | |
 |---|---|

@@ -15,7 +15,7 @@
 |---|---|---|---|---|---|
 | `rtl/matmul_top_dual.v` | **2 x 4x4** | 根目錄 `design.h`（R=C=K=4）→ `matmul_4x4x4` | 640 (86.5%) | 40 MHz，UART 預設 baud | `fpga_tile.h`（帶 dev byte） |
 | `rtl/matmul_top_rk.v` | 1 x 8x8 runtime-K | `_rk/design.h` → `matmul_8x8x8` | 待確認 | 40 MHz，UART **2 Mbaud** | `fpga_matmul_rk_new.h` |
-| `_fp_beat/rtl_fp/systolic_uart_fold_top.sv` | 1 x 8x8 fold | **手寫 RTL，非 HLS** | 256 (34.6%) | 100 MHz | `fpga_matmul_fold.h` |
+| `fold_pipelined/rtl/systolic_uart_fold_top.sv` | 1 x 8x8 fold | **手寫 RTL，非 HLS** | 256 (34.6%) | 100 MHz | `fpga_matmul_fold.h` |
 
 `matmul_top_dual` 是唯一一顆真的放了兩個陣列、協定帶陣列選擇位元組的硬體。
 `select-device` 這個 pass 要的異質裝置，目前只有它是真的。

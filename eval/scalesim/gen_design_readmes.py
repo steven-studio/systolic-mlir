@@ -108,7 +108,7 @@ xc7a35t 只有 90 顆 DSP，而 HLS 的 FP MAC 約 5 顆 DSP，8x8 全展開需�
 |---|---|---|---|---|---|
 | `rtl/matmul_top_dual.v` | **2 x 4x4** | 根目錄 `design.h`（R=C=K=4）→ `matmul_4x4x4` | 640 (86.5%) | 40 MHz，UART 預設 baud | `fpga_tile.h`（帶 dev byte） |
 | `rtl/matmul_top_rk.v` | 1 x 8x8 runtime-K | `_rk/design.h` → `matmul_8x8x8` | 待確認 | 40 MHz，UART **2 Mbaud** | `fpga_matmul_rk_new.h` |
-| `_fp_beat/rtl_fp/systolic_uart_fold_top.sv` | 1 x 8x8 fold | **手寫 RTL，非 HLS** | 256 (34.6%) | 100 MHz | `fpga_matmul_fold.h` |
+| `fold_pipelined/rtl/systolic_uart_fold_top.sv` | 1 x 8x8 fold | **手寫 RTL，非 HLS** | 256 (34.6%) | 100 MHz | `fpga_matmul_fold.h` |
 
 `matmul_top_dual` 是唯一一顆真的放了兩個陣列、協定帶陣列選擇位元組的硬體。
 `select-device` 這個 pass 要的異質裝置，目前只有它是真的。
@@ -150,25 +150,25 @@ post-route 建置，未確認**，因為 `build_project.tcl` 現在跑不起來�
 `matmul_top_rk`。
 """,
 
-"hls/multi_200t/_fp_beat": """# _fp_beat — 8x8 fold,目前的主線
+"hls/multi_200t/fold_pipelined": """# fold_pipelined — 8x8 fold,目前的主線
 
 | | |
 |---|---|
 | 板子 | Nexys Video (`xc7a200tsbg484-1`)，100 MHz |
 | 形狀 | `design.h`: R=8 C=8 |
-| 實作 | **`rtl_fp/` 底下的手寫 SystemVerilog**，不是 HLS 產出 |
+| 實作 | **`rtl/` 底下的手寫 SystemVerilog**，不是 HLS 產出 |
 
-`design.cpp` / `design.h` 是這條線的 HLS 起點，但實際上板的是 `rtl_fp/`
-的手寫 RTL。兩者不要混淆：`rtl_fp/` 不依賴任何 HLS 產物，只用 Vivado 的
+`design.cpp` / `design.h` 是這條線的 HLS 起點，但實際上板的是 `rtl/`
+的手寫 RTL。兩者不要混淆：`rtl/` 不依賴任何 HLS 產物，只用 Vivado 的
 floating-point IP。
 
 `design_before_fadd_timing.cpp` 與 `design_before_rotating_acc.cpp` 是
 HLS 階段的歷史版本，保留作為設計演進的紀錄。
 
-詳見 `rtl_fp/README.md`。
+詳見 `rtl/README.md`。
 """,
 
-"hls/multi_200t/_fp_beat/rtl_fp": """# rtl_fp — 手寫 8x8 fold 陣列
+"hls/multi_200t/fold_pipelined/rtl": """# rtl — 手寫 8x8 fold 陣列
 
 | | |
 |---|---|

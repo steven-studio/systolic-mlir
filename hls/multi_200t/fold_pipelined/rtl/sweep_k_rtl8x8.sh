@@ -2,7 +2,7 @@
 # sweep_k_rtl8x8.sh -- 量 systolic_array_8x8_fold 在各 K 的 cycle 數,
 #                      產出給成本模型擬合用的乾淨資料表。
 #
-# 放置位置:hls/multi_200t/_fp_beat/rtl_fp/
+# 放置位置:hls/multi_200t/fold_pipelined/rtl/
 # (需要同目錄的 sim_kmax.tcl 與 tb_array_fold_kmax.sv)
 #
 #   ./sweep_k_rtl8x8.sh                     # 預設 8 16 24 32 48 64
@@ -56,7 +56,7 @@ fi
 
 for f in sim_kmax.tcl tb_array_fold_kmax.sv systolic_array_8x8_fold.sv; do
     if [ ! -f "$HERE/$f" ]; then
-        echo "ERROR: 找不到 $f。這支腳本必須放在 _fp_beat/rtl_fp/ 底下。" >&2
+        echo "ERROR: 找不到 $f。這支腳本必須放在 fold_pipelined/rtl/ 底下。" >&2
         exit 1
     fi
 done

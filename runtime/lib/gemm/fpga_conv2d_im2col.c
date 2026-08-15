@@ -2,6 +2,7 @@
 #include "fpga_matmul_tiled.h"
 #include "fpga_tile.h"
 #include "fpga_ctx.h"
+#include "fpga_matmul_tiled_rk.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -107,8 +108,13 @@ int fpga_conv2d_im2col_auto(int H, int W, int Cin,
     }
     memcpy(Kmat, Kernel, (size_t)Kdim * N * sizeof(float));
 
-    int rc = fpga_matmul_tiled_auto(M, Kdim, N, Xcol, Kmat, Ycol);
-
+    /* 預設仍走 4x4 -- 那條路徑承載 48/48,不動它。
+    * FPGA_USE_RK8=1 改走 8x8 runtime-K 陣列。 */
+    const char *rk8 = getenv("FPGA_USE_RK8");
+    int rc = (rk8 && *rk8 == '1')
+        ? fpga_matmul_tiled_rk_auto(M, Kdim, N, Xcol, Kmat, Ycol)
+        : fpga_matmul_tiled_auto(M, Kdim, N, Xcol, Kmat, Ycol);
+        
     memcpy(Y, Ycol, (size_t)M * N * sizeof(float));
     free(Xcol); free(Kmat); free(Ycol);
     return rc;

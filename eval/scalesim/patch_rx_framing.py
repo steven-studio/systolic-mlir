@@ -2,7 +2,7 @@
 """
 patch_rx_framing.py -- 用顯式的 START / END 標記重寫 RX framing。
 
-    python3 patch_rx_framing.py hls/multi_200t/_fp_beat/rtl_fp/systolic_uart_fold_top.sv
+    python3 patch_rx_framing.py hls/multi_200t/fold_pipelined/rtl/systolic_uart_fold_top.sv
 
 問題
 ----

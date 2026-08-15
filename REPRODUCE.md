@@ -26,7 +26,7 @@
 | 一顆 PE 的 1,318 LUT / 4 DSP | `/tmp/pe.tcl`（見 `eval/scalesim/`） | `/tmp/util_pe.rpt` |
 | 8x8+4x4 的 78.1% LUT | `eval/scalesim/dual.tcl` | `/tmp/util_dual.rpt` |
 
-工作目錄一律是 `hls/multi_200t/_fp_beat/rtl_fp/`，且需先
+工作目錄一律是 `hls/multi_200t/fold_pipelined/rtl/`，且需先
 `source ~/tools/Xilinx/2026.1/2026.1/Vivado/settings64.sh`。
 
 彙整見 `eval/scalesim/KMAX_SCALING.md`。

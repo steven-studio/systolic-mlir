@@ -1,5 +1,5 @@
 /* fpga_matmul_fold.h -- wire layer for the K_MAX-parameterised 8x8 FP32
- * fold array (hls/multi_200t/_fp_beat/rtl_fp/systolic_uart_fold_top.sv).
+ * fold array (hls/multi_200t/fold_pipelined/rtl/systolic_uart_fold_top.sv).
  *
  * This is a THIRD protocol, not a variant of the two already in runtime/.
  * None of them interoperate, and picking the wrong one fails as a read
