@@ -58,6 +58,7 @@ read_verilog -sv fp_mul.sv
 read_verilog -sv fp_add.sv
 read_verilog -sv fp_reduce16.sv
 read_verilog -sv systolic_pe_fold.sv
+read_verilog -sv systolic_array_fold.sv
 read_verilog -sv systolic_array_8x8_fold.sv
 read_verilog -sv systolic_uart_fold_top.sv
 

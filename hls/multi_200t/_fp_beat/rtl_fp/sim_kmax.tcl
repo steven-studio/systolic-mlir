@@ -78,6 +78,7 @@ add_files -norecurse [list \
     fp_mul.sv \
     fp_add.sv \
     systolic_pe_fold.sv \
+    systolic_array_fold.sv \
     systolic_array_8x8_fold.sv \
     systolic_uart_fold_top.sv \
 ]
