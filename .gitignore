@@ -152,3 +152,10 @@ hls/multi_200t/_fp_beat/rtl_fp/sweep_k_rtl8x8_out/
 # 工作中的暫存副本
 hls/multi_200t/_fp_beat/rtl_fp/*.sv.tree
 hls/multi_200t/_fp_beat/rtl_fp/systolic_pe_fold_TREE.sv
+build_kmax/
+rtl_fp_pe_test/
+ip_local/
+*.bit
+.Xil/
+*.bak_*
+*.sv.tree
