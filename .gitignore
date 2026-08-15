@@ -159,3 +159,4 @@ ip_local/
 .Xil/
 *.bak_*
 *.sv.tree
+hls/multi_200t/sweep_results.csv
