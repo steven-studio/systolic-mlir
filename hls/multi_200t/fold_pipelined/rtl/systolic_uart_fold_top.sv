@@ -168,6 +168,8 @@ module systolic_uart_fold_top #(
      *   A5 = entered ST_SEND
      */
     logic [4:0] debug_pending;
+    logic [4:0] debug_set;
+    logic [4:0] debug_pending_next;
 
     logic       debug_tx_active;
     logic [7:0] debug_tx_byte;
@@ -1062,6 +1064,52 @@ module systolic_uart_fold_top #(
     logic state_was_wait_result;
     logic state_was_send;
 
+    /*
+     * Collect all debug events combinationally, then update
+     * debug_pending with exactly one sequential assignment.
+     *
+     * This avoids overlapping nonblocking assignments to both the
+     * whole debug_pending vector and individual bit-selects.
+     */
+    always_comb begin
+
+        debug_set = 5'b0;
+
+        if (matrices_ready)
+            debug_set[0] = 1'b1;
+
+        if (
+            state == ST_WAIT_RESULT &&
+            !state_was_wait_result
+        )
+            debug_set[1] = 1'b1;
+
+        if (c_valid_out) begin
+
+            if (c_ctx_out == 1'b0)
+                debug_set[2] = 1'b1;
+            else
+                debug_set[3] = 1'b1;
+
+        end
+
+        if (
+            state == ST_SEND &&
+            !state_was_send
+        )
+            debug_set[4] = 1'b1;
+
+
+        /*
+         * Accepted UART breadcrumbs are cleared while newly
+         * observed events are ORed in during the same cycle.
+         */
+        debug_pending_next =
+            (debug_pending & ~debug_accept) | debug_set;
+
+    end
+
+
     always_ff @(posedge clk) begin
 
         if (rst) begin
@@ -1073,52 +1121,7 @@ module systolic_uart_fold_top #(
         end
         else begin
 
-            /*
-             * Clear markers explicitly accepted by the UART FSM.
-             */
-            debug_pending <=
-                debug_pending & ~debug_accept;
-
-
-            /*
-             * A1: all 1024 input bytes were received.
-             */
-            if (matrices_ready)
-                debug_pending[0] <= 1'b1;
-
-
-            /*
-             * A2: first cycle in ST_WAIT_RESULT.
-             */
-            if (
-                state == ST_WAIT_RESULT &&
-                !state_was_wait_result
-            )
-                debug_pending[1] <= 1'b1;
-
-
-            /*
-             * A3 / A4: array publishes the two result contexts.
-             */
-            if (c_valid_out) begin
-
-                if (c_ctx_out == 1'b0)
-                    debug_pending[2] <= 1'b1;
-                else
-                    debug_pending[3] <= 1'b1;
-
-            end
-
-
-            /*
-             * A5: first cycle in ST_SEND.
-             */
-            if (
-                state == ST_SEND &&
-                !state_was_send
-            )
-                debug_pending[4] <= 1'b1;
-
+            debug_pending <= debug_pending_next;
 
             state_was_wait_result <=
                 (state == ST_WAIT_RESULT);
