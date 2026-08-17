@@ -128,6 +128,27 @@ def run_one(row, bin_path, keep_bins):
     # Secondary metric only -- never used for pass/fail.
     Y_ref64 = reference_conv2d_fp64(X64, K64, sH, sW, dH, dW, pT, pB, pL, pR)
     fp64_ulp = max_ulp_error(Y_hw, Y_ref64)
+    if os.environ.get("DUMP_MISMATCH"):
+        import numpy as _np
+        _hw  = _np.asarray(Y_hw).ravel().astype(_np.float64)
+        _r32 = _np.asarray(Y_ref32).ravel().astype(_np.float64)
+        _r64 = _np.asarray(Y_ref64).ravel().astype(_np.float64)
+        _e_hw  = _np.abs(_hw  - _r64)
+        _e_r32 = _np.abs(_r32 - _r64)
+        _scale = _np.abs(_r64)
+        print(f"  輸出量級   : |ref64| 中位 {_np.median(_scale):.4g}  "
+              f"最小 {_scale.min():.4g}  最大 {_scale.max():.4g}")
+        print(f"  絕對誤差   : 硬體 max {_e_hw.max():.4g}  "
+              f"循序參考 max {_e_r32.max():.4g}")
+        print(f"  相對誤差   : 硬體 max {_np.max(_e_hw/_np.maximum(_scale,1e-30)):.4g}")
+        _w = int((_e_hw < _e_r32).sum()); _l = int((_e_hw > _e_r32).sum())
+        print(f"  對 fp64    : 硬體較準 {_w},循序參考較準 {_l},平手 {_hw.size-_w-_l}")
+        _idx = _np.argsort(-_e_hw)[:8]
+        print("  誤差最大的八個元素:")
+        for _i in _idx:
+            print(f"    [{_i:4d}] hw={_hw[_i]:14.7g}  ref64={_r64[_i]:14.7g}  "
+                  f"absdiff={_e_hw[_i]:10.4g}")
+
 
     return (err_ulp, n_diff, Y_hw.size, fp64_ulp), None
 
@@ -157,10 +178,10 @@ def main():
     n_pass = n_fail = 0
     for row in todo:
         out, error_msg = run_one(row, args.bin, args.keep_bins)
-        if error_msg is None and out[1] != 0:          # n_diff != 0
-            out2, error_msg2 = run_one(row, args.bin, args.keep_bins)
-            if error_msg2 is None and out2[1] == 0:
-                out, retried = out2, True        # 第二次過了 → 偶發
+        # 已移除 harness 層的重試。C 層的 fold_resync 針對「板子殘留半筆
+        # 交易」做了有物理依據的一次同步與重試;在這一層再盲目重跑一次,
+        # 只會把偶發失敗藏起來,而藏起來的偶發失敗不能寫進論文。
+        retried = False
         if error_msg is not None:
             row["result"] = f"ERROR ({error_msg})"
             n_fail += 1
