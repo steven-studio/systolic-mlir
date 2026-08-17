@@ -76,7 +76,17 @@ extern "C" {
  * bit is (k >> 3) & 1. */
 #define FOLD_WINDOW     8
 
-#define FOLD_HDR_BYTES  4
+#define FOLD_HDR_BYTES    4        /* k_dim,little-endian */
+#define FOLD_START_BYTES  4
+#define FOLD_END_BYTES    4
+
+/* 線上格式:FRAME_START(4) | HDR(4) | PAYLOAD(K_MAX*64) | FRAME_END(4)
+ *
+ * 兩個標記以 uint32 的 little-endian 寫出。RTL 的滑動視窗是
+ * sync_next = {rx_byte, sync_sr[31:8]},後收到的 byte 落在高位,因此
+ * 先送出的 byte 必須是字組的低位 -- 也就是 memcpy 的自然順序。 */
+#define FOLD_FRAME_START  0xA55AC33Cu
+#define FOLD_FRAME_END    0x5AA53CC3u
 #define FOLD_TX_BYTES   (2 * FOLD_R * FOLD_C * (int)sizeof(float))  /* 512 */
 
 /* Bytes on the wire for one request at this capacity. */
@@ -135,3 +145,5 @@ int fold_matmul_tiled_auto(int M, int K, int N,
 #endif
 
 #endif  /* FPGA_MATMUL_FOLD_H */
+
+long fold_last_cycles(void);

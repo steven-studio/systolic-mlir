@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <time.h>
 #include <stdio.h>
+#include <glob.h>
 #include <stdlib.h>
 
 static speed_t baud_const(int baud) {
@@ -26,9 +27,70 @@ static speed_t baud_const(int baud) {
     }
 }
 
+/* 依序嘗試候選埠,回傳第一個開得起來的。
+ *
+ * /dev/ttyUSB<N> 的編號由 OS 列舉時決定,重燒、換孔、接第二塊板都會變動,
+ * 因此不能寫死,也不該要求使用者每次以環境變數指定。優先順序:
+ *   1. FPGA_UART_PORT      -- 保留手動覆寫,平常不需要
+ *   2. 呼叫端指定的 port
+ *   3. /dev/serial/by-id/  -- udev 依 USB 序號建立,重新列舉也不會變
+ *   4. /dev/ttyUSB* / ttyACM*
+ * 全部失敗時列出試過哪些,以及當下實際存在哪些。 */
+static int uart_try_open(const char *p)
+{
+    if (!p || !*p)
+        return -1;
+    return open(p, O_RDWR | O_NOCTTY);
+}
+
+static int uart_open_any(const char *port)
+{
+    static const char *pats[] = {
+        "/dev/serial/by-id/*Digilent*",
+        "/dev/serial/by-id/*FTDI*",
+        "/dev/ttyUSB*",
+        "/dev/ttyACM*",
+    };
+    const char *env = getenv("FPGA_UART_PORT");
+    int fd;
+
+    if ((fd = uart_try_open(env))  >= 0) return fd;
+    if ((fd = uart_try_open(port)) >= 0) return fd;
+
+    for (size_t i = 0; i < sizeof(pats) / sizeof(pats[0]); i++) {
+        glob_t g;
+        if (glob(pats[i], 0, NULL, &g) == 0) {
+            for (size_t j = 0; j < g.gl_pathc; j++) {
+                fd = uart_try_open(g.gl_pathv[j]);
+                if (fd >= 0) { globfree(&g); return fd; }
+            }
+        }
+        globfree(&g);
+    }
+
+    fprintf(stderr,
+        "fpga_uart_open: 找不到可用的序列埠。\n"
+        "  FPGA_UART_PORT = %s,呼叫端指定 = %s\n"
+        "  另已嘗試 /dev/serial/by-id/、/dev/ttyUSB*、/dev/ttyACM*\n"
+        "  目前實際存在:",
+        env ? env : "(未設)", port ? port : "(無)");
+    {
+        glob_t g; int any = 0;
+        if (glob("/dev/ttyUSB*", 0, NULL, &g) == 0)
+            for (size_t j = 0; j < g.gl_pathc; j++) {
+                fprintf(stderr, " %s", g.gl_pathv[j]); any = 1;
+            }
+        globfree(&g);
+        if (!any)
+            fprintf(stderr, " (沒有 /dev/ttyUSB*,板子可能沒接或尚未燒錄)");
+        fprintf(stderr, "\n");
+    }
+    return -1;
+}
+
 int fpga_uart_open_baud(const char *port, int baud) {
-    int fd = open(port, O_RDWR | O_NOCTTY);
-    if (fd < 0) { perror("fpga_uart_open: open"); return -1; }
+    int fd = uart_open_any(port);
+    if (fd < 0) return -1;
 
     struct termios tty;
     if (tcgetattr(fd, &tty) != 0) { perror("fpga_uart_open: tcgetattr"); close(fd); return -1; }

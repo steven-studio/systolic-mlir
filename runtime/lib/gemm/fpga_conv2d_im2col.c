@@ -173,7 +173,16 @@ int fpga_conv2d_im2col_general(int fd,
             }
         }
 
-        int rc = fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        /* 與 fpga_conv2d_im2col_auto 同一組開關。general 與 padded 兩條
+         * 先前都漏了,於是 FPGA_USE_FOLD=1 時仍走 4x4 dispatch,拿 4x4 協定
+         * 去問 8x8 fold bitstream,讀取逾時回 -2。 */
+        const char *fold8 = getenv("FPGA_USE_FOLD");
+        const char *rk8   = getenv("FPGA_USE_RK8");
+        int rc = (fold8 && *fold8 == '1')
+               ? fold_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol)
+               : (rk8 && *rk8 == '1')
+               ? fpga_matmul_tiled_rk_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol)
+               : fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;
@@ -251,7 +260,16 @@ int fpga_conv2d_im2col_padded(
             }
         }
 
-        int rc = fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
+        /* 與 fpga_conv2d_im2col_auto 同一組開關。general 與 padded 兩條
+         * 先前都漏了,於是 FPGA_USE_FOLD=1 時仍走 4x4 dispatch,拿 4x4 協定
+         * 去問 8x8 fold bitstream,讀取逾時回 -2。 */
+        const char *fold8 = getenv("FPGA_USE_FOLD");
+        const char *rk8   = getenv("FPGA_USE_RK8");
+        int rc = (fold8 && *fold8 == '1')
+               ? fold_matmul_tiled_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol)
+               : (rk8 && *rk8 == '1')
+               ? fpga_matmul_tiled_rk_auto(M, Kdim, Ncols, Xcol, Kmat, Ycol)
+               : fpga_tile_dispatch(fd, M, Kdim, Ncols, Xcol, Kmat, Ycol);
         if (rc != 0) {
             free(Xcol); free(Kmat); free(Ycol);
             return rc;

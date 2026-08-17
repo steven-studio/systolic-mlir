@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
@@ -195,7 +196,8 @@ size_t fold_request_bytes(int k_max)
         return 0;
     /* Two matrices per window, 8x8 floats each, k_max/8 windows:
      *   (k_max / 8) * 2 * 64 * 4  =  k_max * 64 */
-    return (size_t)FOLD_HDR_BYTES + (size_t)k_max * 64u;
+    return (size_t)(FOLD_START_BYTES + FOLD_HDR_BYTES + FOLD_END_BYTES)
+         + (size_t)k_max * 64u;
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,6 +215,10 @@ int fold_pack_request(uint8_t *buf, int k_max, int k_dim,
         return -3;
 
     uint8_t *p = buf;
+
+    const uint32_t start_le = FOLD_FRAME_START;
+    memcpy(p, &start_le, sizeof(start_le));
+    p += sizeof(start_le);
 
     /* uint32_t on x86 is already little-endian, so the copy is the
      * encoding. Spelled as a memcpy of a sized type rather than four
@@ -255,12 +261,57 @@ int fold_pack_request(uint8_t *buf, int k_max, int k_dim,
         }
     }
 
+    const uint32_t end_le = FOLD_FRAME_END;
+    memcpy(p, &end_le, sizeof(end_le));
+    p += sizeof(end_le);
+
     return (int)(p - buf);
 }
 
 /* ------------------------------------------------------------------ */
 /* One invocation                                                     */
 /* ------------------------------------------------------------------ */
+
+static long g_last_cycles = -1;
+
+long fold_last_cycles(void) { return g_last_cycles; }
+
+/* 讓板子的接收狀態機回到 frame 邊界。
+ *
+ * 主機的 tcflush 只清得掉自己這端。前一筆交易若因長度不符而中斷,板子會停
+ * 在「還在等 payload」的狀態,把下一筆合法請求的開頭當成上一筆的尾巴吃掉,
+ * 於是重新連線後的第一筆必然被犧牲。
+ *
+ * FRAME_START 是 32'hA55A_C33C,四個位元組沒有一個是 0x00,因此任何含 0x00
+ * 的四位元組視窗都不可能構成 START。送出一整筆長度的 0x00:板子手上那半筆
+ * 被填滿 -> END 對不上 -> 整筆丟棄 -> 回到 HUNT;剩下的 0x00 被無害掃過。
+ * 板子本來就乾淨時同樣無害。兩種情況都收斂,且不依賴任何時間假設。 */
+static void fold_resync(int fd, int k_max)
+{
+    const size_t n = fold_request_bytes(k_max);
+    if (n == 0)
+        return;
+
+    uint8_t *pad = (uint8_t *)calloc(n, 1);
+    if (!pad)
+        return;
+    (void)write_full(fd, pad, n);
+    free(pad);
+
+    struct termios saved, tmp;
+    if (tcgetattr(fd, &saved) == 0) {
+        tmp = saved;
+        tmp.c_cc[VMIN]  = 0;
+        tmp.c_cc[VTIME] = 2;
+        if (tcsetattr(fd, TCSANOW, &tmp) == 0) {
+            uint8_t junk[64];
+            while (read(fd, junk, sizeof(junk)) > 0)
+                ;
+        }
+        tcsetattr(fd, TCSANOW, &saved);
+    }
+    tcflush(fd, TCIFLUSH);
+}
 
 int fold_invoke(int fd, int k_max, int k_dim,
                 const float *A, const float *B,
@@ -287,15 +338,39 @@ int fold_invoke(int fd, int k_max, int k_dim,
      * as this request's header. */
     tcflush(fd, TCIFLUSH);
 
-    if (write_full(fd, req, req_len) != 0) {
-        free(req);
-        return -1;
-    }
-    free(req);
+    g_last_cycles = -1;
 
     uint8_t rx[FOLD_TX_BYTES];
-    if (read_full(fd, rx, sizeof(rx)) != 0)
+    int io_ok = 0;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (write_full(fd, req, req_len) != 0) {
+            free(req);
+            return -1;
+        }
+        if (read_full(fd, rx, sizeof(rx)) == 0) {
+            io_ok = 1;
+            break;
+        }
+        /* 逾時幾乎都是「板子手上還握著半筆交易」:它在等一個永遠不會來的
+         * 位元組,連一個回覆都不會產生。同步後重試一次;第二次仍失敗,才
+         * 是真的失敗。 */
+        if (attempt == 0)
+            fold_resync(fd, k_max);
+    }
+
+    free(req);
+
+    if (!io_ok) {
+        fprintf(stderr,
+            "fold_invoke: 送出 %zu bytes (k_max=%d) 後等不到 %d bytes 回覆,"
+            "重新同步並重試一次仍失敗。\n"
+            "  最常見成因是主機與 bitstream 的 K_MAX 不一致 -- 板子若以其他"
+            " K_MAX 合成,長度不符會導致完全沒有回應。\n"
+            "  以 FOLD_K_MAX=<板子的值> 覆寫主機端設定。\n",
+            req_len, k_max, FOLD_TX_BYTES);
         return -2;
+    }
 
     /* The board sends exactly FOLD_TX_BYTES. Anything still pending means
      * this reply was not the one belonging to this request, so every
@@ -308,12 +383,22 @@ int fold_invoke(int fd, int k_max, int k_dim,
         if (tcgetattr(fd, &saved) == 0) {
             tmp = saved;
             tmp.c_cc[VMIN]  = 0;
-            tmp.c_cc[VTIME] = 0;
+            tmp.c_cc[VTIME] = 1;          /* 每次 read 最多等 0.1 s */
             if (tcsetattr(fd, TCSANOW, &tmp) == 0) {
                 uint8_t extra[8];
-                ssize_t n = read(fd, extra, sizeof(extra));
+                size_t got = 0;
+                for (int t = 0; t < 4 && got < sizeof(extra); t++) {
+                    ssize_t n = read(fd, extra + got, sizeof(extra) - got);
+                    if (n <= 0)
+                        break;
+                    got += (size_t)n;
+                }
                 tcsetattr(fd, TCSANOW, &saved);
-                if (n > 0) {
+                if (got == 4) {           /* CYCLE_COUNTER=1 的週期計數 */
+                    uint32_t cyc;
+                    memcpy(&cyc, extra, sizeof(cyc));
+                    g_last_cycles = (long)cyc;
+                } else if (got != 0) {    /* 回覆不屬於這次請求 */
                     tcflush(fd, TCIFLUSH);
                     return -4;
                 }
