@@ -139,6 +139,22 @@ module systolic_uart_fold_top #(
      * by a host which never updates the header still behaves as the
      * fixed-capacity baseline did.
      */
+    /* 組態後自動 reset。
+     *
+     * 7-series 的 FF 在 configuration 當下就會載入宣告初始值,所以
+     * por_sr 開機時是全 0,por_rst 會維持高電位 16 拍再放開 —— 等於
+     * 燒錄完成後硬體自己打了一次 reset。
+     *
+     * 在此之前,k_dim 只在外部 rst 時載入 K_MAX(見下方 reset 區塊),
+     * 因此不按 BTNC 就送請求會完全沒有回應,症狀與 bitstream 損壞
+     * 一模一樣。BTNC 現在退回「想手動重置時才按」。 */
+    logic [15:0] por_sr = '0;
+    wire         por_rst = ~por_sr[15];
+    always_ff @(posedge clk)
+        por_sr <= {por_sr[14:0], 1'b1};
+
+    wire rst_i = rst | por_rst;
+
     logic [FEED_W-1:0] k_dim;
 
     /*
@@ -180,7 +196,7 @@ module systolic_uart_fold_top #(
         .BAUD   (BAUD)
     ) u_uart_rx (
         .clk      (clk),
-        .rst      (rst),
+        .rst      (rst_i),
         .rx       (uart_rx),
         .data_out (rx_byte),
         .valid    (rx_valid)
@@ -191,7 +207,7 @@ module systolic_uart_fold_top #(
         .BAUD   (BAUD)
     ) u_uart_tx (
         .clk     (clk),
-        .rst     (rst),
+        .rst     (rst_i),
         .start   (tx_start),
         .data_in (tx_byte),
         .tx      (uart_tx),
@@ -444,7 +460,7 @@ module systolic_uart_fold_top #(
 
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_i) begin
 
             rx_state       <= RX_HUNT;
             sync_sr        <= 32'd0;
@@ -653,8 +669,8 @@ module systolic_uart_fold_top #(
     logic a_valid_in [0:7];
     logic b_valid_in [0:7];
 
-    logic fold_ctx_in_a [0:7];
-    logic fold_ctx_in_b [0:7];
+    logic accum_ctx_in_a [0:7];
+    logic accum_ctx_in_b [0:7];
 
     logic        c_valid_out;
     logic        c_ctx_out;
@@ -674,7 +690,7 @@ module systolic_uart_fold_top #(
 
     always_ff @(posedge clk) begin
 
-        if (rst) begin
+        if (rst_i) begin
 
             accel_cycles      <= 32'd0;
             last_accel_cycles <= 32'd0;
@@ -720,7 +736,7 @@ module systolic_uart_fold_top #(
 
     systolic_array_8x8_fold u_array (
         .clk           (clk),
-        .rst           (rst),
+        .rst           (rst_i),
 
         .a_in          (a_in),
         .b_in          (b_in),
@@ -728,8 +744,8 @@ module systolic_uart_fold_top #(
         .a_valid_in    (a_valid_in),
         .b_valid_in    (b_valid_in),
 
-        .fold_ctx_in_a (fold_ctx_in_a),
-        .fold_ctx_in_b (fold_ctx_in_b),
+        .accum_ctx_in_a (accum_ctx_in_a),
+        .accum_ctx_in_b (accum_ctx_in_b),
 
         .c_valid_out   (c_valid_out),
         .c_ctx_out     (c_ctx_out),
@@ -753,7 +769,7 @@ module systolic_uart_fold_top #(
 
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_i) begin
 
             c0_done <= 1'b0;
             c1_done <= 1'b0;
@@ -851,8 +867,8 @@ module systolic_uart_fold_top #(
             a_valid_in[i]    = 1'b0;
             b_valid_in[i]    = 1'b0;
 
-            fold_ctx_in_a[i] = 1'b0;
-            fold_ctx_in_b[i] = 1'b0;
+            accum_ctx_in_a[i] = 1'b0;
+            accum_ctx_in_b[i] = 1'b0;
 
         end
 
@@ -882,7 +898,7 @@ module systolic_uart_fold_top #(
                     a_in[r]    = a_rdata[r];
 
                     a_valid_in[r]    = 1'b1;
-                    fold_ctx_in_a[r] = fold_a[0];
+                    accum_ctx_in_a[r] = fold_a[0];
 
                 end
 
@@ -907,7 +923,7 @@ module systolic_uart_fold_top #(
                     b_in[c]    = b_rdata[c];
 
                     b_valid_in[c]    = 1'b1;
-                    fold_ctx_in_b[c] = fold_b[0];
+                    accum_ctx_in_b[c] = fold_b[0];
 
                 end
 
@@ -934,7 +950,7 @@ module systolic_uart_fold_top #(
     logic        cyc_running;
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_i) begin
 
             cyc_count   <= '0;
             cyc_latched <= '0;
@@ -972,7 +988,7 @@ module systolic_uart_fold_top #(
      * ============================================================
      */
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_i) begin
 
             state  <= ST_IDLE;
             feed_t <= '0;
@@ -1112,7 +1128,7 @@ module systolic_uart_fold_top #(
 
     always_ff @(posedge clk) begin
 
-        if (rst) begin
+        if (rst_i) begin
 
             debug_pending         <= 5'b0;
             state_was_wait_result <= 1'b0;
@@ -1228,7 +1244,7 @@ module systolic_uart_fold_top #(
 
 
     always_ff @(posedge clk) begin
-        if (rst) begin
+        if (rst_i) begin
 
             tx_count         <= 10'd0;
             tx_start         <= 1'b0;

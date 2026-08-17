@@ -27,8 +27,8 @@ module systolic_array_fold #(
     input  logic a_valid_in [0:N-1],
     input  logic b_valid_in [0:N-1],
 
-    input  logic fold_ctx_in_a [0:N-1],
-    input  logic fold_ctx_in_b [0:N-1],
+    input  logic accum_ctx_in_a [0:N-1],
+    input  logic accum_ctx_in_b [0:N-1],
 
     output logic              c_valid_out,
     output logic              c_ctx_out,
@@ -55,8 +55,8 @@ module systolic_array_fold #(
      * ============================================================
      */
 
-    logic fold_ctx_a_bus [0:N-1][0:N];
-    logic fold_ctx_b_bus [0:N][0:N-1];
+    logic accum_ctx_a_bus [0:N-1][0:N];
+    logic accum_ctx_b_bus [0:N][0:N-1];
 
 
     /*
@@ -98,8 +98,8 @@ module systolic_array_fold #(
             assign a_valid_bus[r][0] =
                 a_valid_in[r];
 
-            assign fold_ctx_a_bus[r][0] =
-                fold_ctx_in_a[r];
+            assign accum_ctx_a_bus[r][0] =
+                accum_ctx_in_a[r];
 
         end
 
@@ -112,8 +112,8 @@ module systolic_array_fold #(
             assign b_valid_bus[0][c] =
                 b_valid_in[c];
 
-            assign fold_ctx_b_bus[0][c] =
-                fold_ctx_in_b[c];
+            assign accum_ctx_b_bus[0][c] =
+                accum_ctx_in_b[c];
 
         end
 
@@ -139,10 +139,10 @@ module systolic_array_fold #(
                  * Current PE interface carries one fold context,
                  * therefore the A-side registered context is used.
                  */
-                logic pe_fold_ctx;
+                logic pe_accum_ctx;
 
-                assign pe_fold_ctx =
-                    fold_ctx_a_bus[r][c];
+                assign pe_accum_ctx =
+                    accum_ctx_a_bus[r][c];
 
 
                 systolic_pe_fold u_pe (
@@ -157,8 +157,8 @@ module systolic_array_fold #(
                         b_valid_bus[r][c]
                     ),
 
-                    .fold_ctx_in  (
-                        pe_fold_ctx
+                    .accum_ctx_in  (
+                        pe_accum_ctx
                     ),
 
                     .a_in         (
@@ -177,8 +177,8 @@ module systolic_array_fold #(
                         b_valid_bus[r+1][c]
                     ),
 
-                    .fold_ctx_out (
-                        fold_ctx_a_bus[r][c+1]
+                    .accum_ctx_out (
+                        accum_ctx_a_bus[r][c+1]
                     ),
 
                     .a_out        (
@@ -209,8 +209,8 @@ module systolic_array_fold #(
                  * Mirror the registered context downward so the
                  * B-side context follows the same systolic delay.
                  */
-                assign fold_ctx_b_bus[r+1][c] =
-                    fold_ctx_a_bus[r][c+1];
+                assign accum_ctx_b_bus[r+1][c] =
+                    accum_ctx_a_bus[r][c+1];
 
             end
 

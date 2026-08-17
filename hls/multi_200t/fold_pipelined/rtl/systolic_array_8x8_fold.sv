@@ -18,8 +18,8 @@ module systolic_array_8x8_fold #(
     input  logic a_valid_in [0:7],
     input  logic b_valid_in [0:7],
 
-    input  logic fold_ctx_in_a [0:7],
-    input  logic fold_ctx_in_b [0:7],
+    input  logic accum_ctx_in_a [0:7],
+    input  logic accum_ctx_in_b [0:7],
 
     output logic              c_valid_out,
     output logic              c_ctx_out,
@@ -36,8 +36,8 @@ module systolic_array_8x8_fold #(
         .b_in          (b_in),
         .a_valid_in    (a_valid_in),
         .b_valid_in    (b_valid_in),
-        .fold_ctx_in_a (fold_ctx_in_a),
-        .fold_ctx_in_b (fold_ctx_in_b),
+        .accum_ctx_in_a (accum_ctx_in_a),
+        .accum_ctx_in_b (accum_ctx_in_b),
         .c_valid_out   (c_valid_out),
         .c_ctx_out     (c_ctx_out),
         .c_out         (c_out)
