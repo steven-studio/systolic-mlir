@@ -73,7 +73,27 @@ module systolic_pe_fold #(
     logic fold_ctx_reg;
 
     logic [ACC_SEL_W-1:0] sel_reg;
+
+    /*
+     * Each accumulator context owns an independent round-robin
+     * bank pointer.
+     *
+     *   local_acc_sel[0] -> next bank for context 0
+     *   local_acc_sel[1] -> next bank for context 1
+     */
     logic [ACC_SEL_W-1:0] local_acc_sel [0:1];
+
+    /*
+     * Give semantic names to the dynamic array lookup.  The incoming
+     * fold context selects which independent bank pointer is used for
+     * this operand pair.
+     */
+
+    wire current_ctx =
+        fold_ctx_in;
+
+    wire [ACC_SEL_W-1:0] current_bank =
+        local_acc_sel[current_ctx];
 
     wire pair_valid =
         a_valid_in &&
@@ -133,18 +153,24 @@ module systolic_pe_fold #(
 
             if (pair_valid) begin
 
+                /*
+                 * Capture the context and the accumulator bank assigned
+                 * to this operand pair.  Each context advances its own
+                 * bank pointer independently.
+                 */
                 fold_ctx_reg <=
-                    fold_ctx_in;
+                    current_ctx;
 
                 sel_reg <=
-                    local_acc_sel[fold_ctx_in];
+                    current_bank;
 
-                if (local_acc_sel[fold_ctx_in] == ACC_BANKS-1)
-                    local_acc_sel[fold_ctx_in] <= '0;
+                if (current_bank == ACC_SEL_W'(ACC_BANKS - 1))
+                    local_acc_sel[current_ctx] <=
+                        '0;
                 else
-                    local_acc_sel[fold_ctx_in] <=
-                        local_acc_sel[fold_ctx_in] + 1'b1;
-                        
+                    local_acc_sel[current_ctx] <=
+                        current_bank + 1'b1;
+
             end
 
         end
