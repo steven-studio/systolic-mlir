@@ -429,30 +429,42 @@ module systolic_uart_fold_top #(
 
         for (gi = 0; gi < 8; gi = gi + 1) begin : A_MEM
 
-            (* ram_style = "distributed" *)
+            (* ram_style = "block" *)
             logic [31:0] mem [0:K_MAX-1];
+            logic [31:0] rdata_q;
 
             always_ff @(posedge clk) begin
                 if (buf_wr && !rx_is_b && rx_row == 3'(unsigned'(gi)))
                     mem[a_waddr] <= buf_wdata;
+
+                /* 同步讀:位址第 t 拍發出,資料第 t+1 拍有效。
+                 * BRAM 沒有非同步讀取埠 -- 這一拍就是 K+118 變 K+119
+                 * 的唯一來源,與 k_dim 無關。 */
+                rdata_q <= mem[a_raddr[gi]];
             end
 
-            assign a_rdata[gi] = mem[a_raddr[gi]];
+            assign a_rdata[gi] = rdata_q;
 
         end
 
 
         for (gi = 0; gi < 8; gi = gi + 1) begin : B_MEM
 
-            (* ram_style = "distributed" *)
+            (* ram_style = "block" *)
             logic [31:0] mem [0:K_MAX-1];
+            logic [31:0] rdata_q;
 
             always_ff @(posedge clk) begin
                 if (buf_wr && rx_is_b && rx_col == 3'(unsigned'(gi)))
                     mem[b_waddr] <= buf_wdata;
+
+                /* 同步讀:位址第 t 拍發出,資料第 t+1 拍有效。
+                 * BRAM 沒有非同步讀取埠 -- 這一拍就是 K+118 變 K+119
+                 * 的唯一來源,與 k_dim 無關。 */
+                rdata_q <= mem[b_raddr[gi]];
             end
 
-            assign b_rdata[gi] = mem[b_raddr[gi]];
+            assign b_rdata[gi] = rdata_q;
 
         end
 
@@ -854,6 +866,36 @@ module systolic_uart_fold_top #(
     *   (k_dim - 1) + max skew(7)
     *   = k_dim + 6
     */
+    /* 同步讀之後,valid 與 accumulator context 必須與資料一起延後一拍。
+     * 組合邏輯寫入 _c,經一級暫存後才驅動陣列 -- 位址路徑完全不變。
+     *
+     * 這一級是無條件更新的,因此 ST_FEED 最後一拍算出的 valid 會在下一拍
+     * (已進入 ST_WAIT_RESULT)送進陣列,剛好補上最後一筆運算元。FSM 不需
+     * 要任何改動。 */
+    logic a_valid_c     [0:7];
+    logic b_valid_c     [0:7];
+    logic accum_ctx_a_c [0:7];
+    logic accum_ctx_b_c [0:7];
+
+    always_ff @(posedge clk) begin
+        if (rst_i) begin
+            for (int i = 0; i < 8; i++) begin
+                a_valid_in[i]     <= 1'b0;
+                b_valid_in[i]     <= 1'b0;
+                accum_ctx_in_a[i] <= 1'b0;
+                accum_ctx_in_b[i] <= 1'b0;
+            end
+        end
+        else begin
+            for (int i = 0; i < 8; i++) begin
+                a_valid_in[i]     <= a_valid_c[i];
+                b_valid_in[i]     <= b_valid_c[i];
+                accum_ctx_in_a[i] <= accum_ctx_a_c[i];
+                accum_ctx_in_b[i] <= accum_ctx_b_c[i];
+            end
+        end
+    end
+
     always_comb begin
 
         for (int i = 0; i < 8; i++) begin
@@ -861,14 +903,17 @@ module systolic_uart_fold_top #(
             a_raddr[i]       = '0;
             b_raddr[i]       = '0;
 
-            a_in[i]          = 32'd0;
-            b_in[i]          = 32'd0;
+            /* 同步讀:a_rdata 此刻是「前一拍位址」讀回的資料,不可依
+             * 這一拍的邊界檢查清成 0,否則會抹掉仍然有效的上一筆。
+             * 改為恆傳遞,由延後一拍的 valid 決定採不採用。 */
+            a_in[i]          = a_rdata[i];
+            b_in[i]          = b_rdata[i];
 
-            a_valid_in[i]    = 1'b0;
-            b_valid_in[i]    = 1'b0;
+            a_valid_c[i]     = 1'b0;
+            b_valid_c[i]     = 1'b0;
 
-            accum_ctx_in_a[i] = 1'b0;
-            accum_ctx_in_b[i] = 1'b0;
+            accum_ctx_a_c[i] = 1'b0;
+            accum_ctx_b_c[i] = 1'b0;
 
         end
 
@@ -895,10 +940,9 @@ module systolic_uart_fold_top #(
                     fold_a = gk_a >> 3;
 
                     a_raddr[r] = K_W'(unsigned'(gk_a));
-                    a_in[r]    = a_rdata[r];
 
-                    a_valid_in[r]    = 1'b1;
-                    accum_ctx_in_a[r] = fold_a[0];
+                    a_valid_c[r]     = 1'b1;
+                    accum_ctx_a_c[r] = fold_a[0];
 
                 end
 
@@ -920,10 +964,9 @@ module systolic_uart_fold_top #(
                     fold_b = gk_b >> 3;
 
                     b_raddr[c] = K_W'(unsigned'(gk_b));
-                    b_in[c]    = b_rdata[c];
 
-                    b_valid_in[c]    = 1'b1;
-                    accum_ctx_in_b[c] = fold_b[0];
+                    b_valid_c[c]     = 1'b1;
+                    accum_ctx_b_c[c] = fold_b[0];
 
                 end
 
