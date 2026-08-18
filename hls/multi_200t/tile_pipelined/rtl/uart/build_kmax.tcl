@@ -52,7 +52,6 @@ puts "   K_MAX = $KMAX"
 puts "   out   = $OUT"
 puts "========================================"
 
-set_part $PART
 
 read_verilog -sv uart_rx.sv
 read_verilog -sv uart_tx.sv
@@ -62,13 +61,12 @@ read_verilog -sv fp_reduce16.sv
 read_verilog -sv systolic_pe_tile.sv
 read_verilog -sv systolic_array_tile.sv
 read_verilog -sv systolic_array_8x8_tile.sv
+read_verilog -sv systolic_tile_feeder.sv
 read_verilog -sv systolic_uart_tile_top.sv
 
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_add_0/floating_point_add_0.xci
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_mul_0/floating_point_mul_0.xci
 
-generate_target {synthesis} [get_ips]
-synth_ip [get_ips]
 
 read_xdc nexys_video_uart.xdc
 

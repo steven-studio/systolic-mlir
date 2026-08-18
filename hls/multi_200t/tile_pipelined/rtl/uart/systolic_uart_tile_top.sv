@@ -866,115 +866,32 @@ module systolic_uart_tile_top #(
     *   (k_dim - 1) + max skew(7)
     *   = k_dim + 6
     */
-    /* 同步讀之後,valid 與 accumulator context 必須與資料一起延後一拍。
-     * 組合邏輯寫入 _c,經一級暫存後才驅動陣列 -- 位址路徑完全不變。
-     *
-     * 這一級是無條件更新的,因此 ST_FEED 最後一拍算出的 valid 會在下一拍
-     * (已進入 ST_WAIT_RESULT)送進陣列,剛好補上最後一筆運算元。FSM 不需
-     * 要任何改動。 */
-    logic a_valid_c     [0:7];
-    logic b_valid_c     [0:7];
-    logic accum_ctx_a_c [0:7];
-    logic accum_ctx_b_c [0:7];
+    systolic_tile_feeder #(
+        .K_W    (K_W),
+        .FEED_W ($bits(feed_t)),
+        .KDIM_W ($bits(k_dim))
+    ) u_feeder (
+        .clk            (clk),
+        .rst            (rst_i),
+        .enable         (state == ST_FEED),
 
-    always_ff @(posedge clk) begin
-        if (rst_i) begin
-            for (int i = 0; i < 8; i++) begin
-                a_valid_in[i]     <= 1'b0;
-                b_valid_in[i]     <= 1'b0;
-                accum_ctx_in_a[i] <= 1'b0;
-                accum_ctx_in_b[i] <= 1'b0;
-            end
-        end
-        else begin
-            for (int i = 0; i < 8; i++) begin
-                a_valid_in[i]     <= a_valid_c[i];
-                b_valid_in[i]     <= b_valid_c[i];
-                accum_ctx_in_a[i] <= accum_ctx_a_c[i];
-                accum_ctx_in_b[i] <= accum_ctx_b_c[i];
-            end
-        end
-    end
+        .feed_t         (feed_t),
+        .k_dim          (k_dim),
 
-    always_comb begin
+        .a_rdata        (a_rdata),
+        .b_rdata        (b_rdata),
 
-        for (int i = 0; i < 8; i++) begin
+        .a_raddr        (a_raddr),
+        .b_raddr        (b_raddr),
 
-            a_raddr[i]       = '0;
-            b_raddr[i]       = '0;
+        .a_in           (a_in),
+        .b_in           (b_in),
 
-            /* 同步讀:a_rdata 此刻是「前一拍位址」讀回的資料,不可依
-             * 這一拍的邊界檢查清成 0,否則會抹掉仍然有效的上一筆。
-             * 改為恆傳遞,由延後一拍的 valid 決定採不採用。 */
-            a_in[i]          = a_rdata[i];
-            b_in[i]          = b_rdata[i];
-
-            a_valid_c[i]     = 1'b0;
-            b_valid_c[i]     = 1'b0;
-
-            accum_ctx_a_c[i] = 1'b0;
-            accum_ctx_b_c[i] = 1'b0;
-
-        end
-
-
-        if (state == ST_FEED) begin
-
-            /*
-             * A-side skew
-             */
-            for (int r = 0; r < 8; r++) begin
-
-                integer gk_a;
-                integer fold_a;
-
-                gk_a = int'(feed_t) - r;
-
-                if ((gk_a >= 0) && (gk_a < int'(k_dim))) begin
-
-                    /*
-                     * The fold number is derived here, at run time,
-                     * purely to pick the accumulator context. The
-                     * buffer is addressed by absolute k.
-                     */
-                    fold_a = gk_a >> 3;
-
-                    a_raddr[r] = K_W'(unsigned'(gk_a));
-
-                    a_valid_c[r]     = 1'b1;
-                    accum_ctx_a_c[r] = fold_a[0];
-
-                end
-
-            end
-
-
-            /*
-             * B-side skew
-             */
-            for (int c = 0; c < 8; c++) begin
-
-                integer gk_b;
-                integer fold_b;
-
-                gk_b = int'(feed_t) - c;
-
-                if ((gk_b >= 0) && (gk_b < int'(k_dim))) begin
-
-                    fold_b = gk_b >> 3;
-
-                    b_raddr[c] = K_W'(unsigned'(gk_b));
-
-                    b_valid_c[c]     = 1'b1;
-                    accum_ctx_b_c[c] = fold_b[0];
-
-                end
-
-            end
-
-        end
-
-    end
+        .a_valid_in     (a_valid_in),
+        .b_valid_in     (b_valid_in),
+        .accum_ctx_in_a (accum_ctx_in_a),
+        .accum_ctx_in_b (accum_ctx_in_b)
+    );
 
 
     /*
