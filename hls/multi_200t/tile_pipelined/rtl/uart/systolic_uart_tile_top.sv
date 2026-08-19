@@ -250,22 +250,11 @@ module systolic_uart_tile_top #(
      * ============================================================
      */
     /*
-     * Distributed RAM, not flip-flops. As registers these two arrays
-     * carry one write enable per 32-bit word, so the control-set count
-     * scales with K_MAX: 256 at K_MAX=16, 1024 at K_MAX=64. A slice
-     * holds only one control set, which made the K_MAX=64 build need
-     * 31839 slices out of 30575 available even though LUTs were at 80%
-     * and FFs at 55%.
-     *
-     * LUTRAM keeps the asynchronous read the feeder depends on -- it
-     * reads eight A rows and eight B columns combinationally in the
-     * same cycle, which BRAM cannot do without restructuring.
-     */
-    /*
      * Held as sixteen small memories rather than one 2-D register
      * array: eight for A indexed by row, eight for B indexed by
-     * column. The memories themselves are generated further down,
-     * after the RX control signals they depend on exist.
+     * column. Both groups are now instances of
+     * systolic_operand_buffer, further down -- after the RX control
+     * signals they depend on exist.
      *
      * As a 2-D array these cannot be inferred as RAM at all. The
      * write address spans both dimensions, so there is no single
@@ -279,8 +268,13 @@ module systolic_uart_tile_top #(
      * Split per row and per column, each memory has one write address
      * and one read address. The feeder reads row r at gk = feed_t - r
      * and column c at gk = feed_t - c, so one read address per memory
-     * per cycle is all it ever needs and the read stays asynchronous:
-     * no extra feed latency, and the K+118 cycle formula is unchanged.
+     * per cycle is all it ever needs.
+     *
+     * The read is SYNCHRONOUS: block RAM has no asynchronous read
+     * port, so the address issued on beat t returns data on t+1. The
+     * feeder already delays valid and accumulator context by that one
+     * cycle to match; it is the sole reason the cost is K+119 rather
+     * than K+118, and it does not depend on k_dim.
      */
     logic [K_W-1:0] a_raddr [0:7];
     logic [K_W-1:0] b_raddr [0:7];
@@ -404,10 +398,21 @@ module systolic_uart_tile_top #(
      * Operand memories
      * ============================================================
      *
-     * One write port and one asynchronous read port each, which is
-     * the shape distributed RAM wants. Writes are decoded here rather
-     * than inside the RX state machine so that each memory sees a
-     * single write address.
+     * One write port and one synchronous read port each, which is the
+     * shape block RAM wants. Writes are decoded here rather than
+     * inside the RX state machine so that each memory sees a single
+     * write address.
+     *
+     * A and B are the same hardware; the ONLY difference is which RX
+     * field selects the bank and which forms the address, and that
+     * swap is exactly the A/B transpose:
+     *
+     *     A:  bank = rx_row,  addr = {rx_win, rx_col}
+     *     B:  bank = rx_col,  addr = {rx_win, rx_row}
+     *
+     * Written as two instances of one module the transpose is visible
+     * on the port map. Written as two generate loops it could only be
+     * found by diffing them line by line.
      * ============================================================
      */
     wire buf_wr =
@@ -423,52 +428,38 @@ module systolic_uart_tile_top #(
     wire [K_W-1:0] a_waddr = {rx_win, rx_col};
     wire [K_W-1:0] b_waddr = {rx_win, rx_row};
 
-    genvar gi;
+    /* K_W 必須明確傳下去。漏傳時模組會用自己的 $clog2(K_MAX) 預設,
+     * 與這裡相同,所以即使漏傳也不會錯位 —— 但寫出來才看得見契約。 */
+    systolic_operand_buffer #(
+        .K_MAX (K_MAX),
+        .K_W   (K_W)
+    ) u_a_buf (
+        .clk   (clk),
 
-    generate
+        .wr    (buf_wr && !rx_is_b),
+        .wsel  (rx_row),
+        .waddr (a_waddr),
+        .wdata (buf_wdata),
 
-        for (gi = 0; gi < 8; gi = gi + 1) begin : A_MEM
-
-            (* ram_style = "block" *)
-            logic [31:0] mem [0:K_MAX-1];
-            logic [31:0] rdata_q;
-
-            always_ff @(posedge clk) begin
-                if (buf_wr && !rx_is_b && rx_row == 3'(unsigned'(gi)))
-                    mem[a_waddr] <= buf_wdata;
-
-                /* 同步讀:位址第 t 拍發出,資料第 t+1 拍有效。
-                 * BRAM 沒有非同步讀取埠 -- 這一拍就是 K+118 變 K+119
-                 * 的唯一來源,與 k_dim 無關。 */
-                rdata_q <= mem[a_raddr[gi]];
-            end
-
-            assign a_rdata[gi] = rdata_q;
-
-        end
+        .raddr (a_raddr),
+        .rdata (a_rdata)
+    );
 
 
-        for (gi = 0; gi < 8; gi = gi + 1) begin : B_MEM
+    systolic_operand_buffer #(
+        .K_MAX (K_MAX),
+        .K_W   (K_W)
+    ) u_b_buf (
+        .clk   (clk),
 
-            (* ram_style = "block" *)
-            logic [31:0] mem [0:K_MAX-1];
-            logic [31:0] rdata_q;
+        .wr    (buf_wr && rx_is_b),
+        .wsel  (rx_col),
+        .waddr (b_waddr),
+        .wdata (buf_wdata),
 
-            always_ff @(posedge clk) begin
-                if (buf_wr && rx_is_b && rx_col == 3'(unsigned'(gi)))
-                    mem[b_waddr] <= buf_wdata;
-
-                /* 同步讀:位址第 t 拍發出,資料第 t+1 拍有效。
-                 * BRAM 沒有非同步讀取埠 -- 這一拍就是 K+118 變 K+119
-                 * 的唯一來源,與 k_dim 無關。 */
-                rdata_q <= mem[b_raddr[gi]];
-            end
-
-            assign b_rdata[gi] = rdata_q;
-
-        end
-
-    endgenerate
+        .raddr (b_raddr),
+        .rdata (b_rdata)
+    );
 
 
     always_ff @(posedge clk) begin

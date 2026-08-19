@@ -42,6 +42,21 @@ module tb_uart_multi_invocation;
     localparam time BIT_PERIOD  = CLK_PERIOD * CLKS_PER_BIT;
 
     localparam int HDR_BYTES = 4;
+
+    /*
+     * RX framing. The DUT powers up in RX_HUNT and only leaves it when
+     * the sliding four-byte window matches FRAME_START, so a request
+     * without markers is never accepted and matrices_ready never fires.
+     * This bench used to send bare header+payload, which meant it could
+     * only ever reach the watchdog -- a hang that looks exactly like the
+     * board symptom but is caused by the bench, not the design.
+     *
+     * Little-endian on the wire, matching the header's k_dim and
+     * test_uart_kmax.py.
+     */
+    localparam logic [31:0] FRAME_START = 32'hA55A_C33C;
+    localparam logic [31:0] FRAME_END   = 32'h5AA5_3CC3;
+
     localparam int ROWS = 8, COLS = 8;
     localparam int FILL_DRAIN = ROWS + COLS - 2;   // 14
 
@@ -100,6 +115,15 @@ module tb_uart_multi_invocation;
         end
     endtask
 
+    task automatic send_word_le(input logic [31:0] w);
+        begin
+            send_uart_byte(w[7:0]);
+            send_uart_byte(w[15:8]);
+            send_uart_byte(w[23:16]);
+            send_uart_byte(w[31:24]);
+        end
+    endtask
+
     task automatic send_fp32(input shortreal x);
         logic [31:0] w;
         begin
@@ -118,11 +142,10 @@ module tb_uart_multi_invocation;
         int w, r, c, lk;
         logic [31:0] hdr;
         begin
+            send_word_le(FRAME_START);
+
             hdr = k_dim;
-            send_uart_byte(hdr[7:0]);
-            send_uart_byte(hdr[15:8]);
-            send_uart_byte(hdr[23:16]);
-            send_uart_byte(hdr[31:24]);
+            send_word_le(hdr);
 
             for (w = 0; w < K_MAX / 8; w++) begin
                 // A window: [row][local k]
@@ -138,6 +161,8 @@ module tb_uart_multi_invocation;
                         send_fp32(lk < k_dim ? b_val(base_k + lk, c) : POISON);
                     end
             end
+
+            send_word_le(FRAME_END);
         end
     endtask
 
@@ -284,10 +309,72 @@ module tb_uart_multi_invocation;
         $finish;
     end
 
+    /*
+     * ===================================================================
+     * Watchdog with a stage diagnosis
+     * ===================================================================
+     *
+     * A bare TIMEOUT says the design stopped but not where, which is the
+     * same blindness as the board's silent RX 0/512. Everything the
+     * breadcrumb bytes would have told us is directly visible here, so
+     * the watchdog reports the furthest stage reached and the state each
+     * FSM is parked in.
+     *
+     * The PE completion count is the important one. ST_WAIT_RESULT waits
+     * for all 64 PEs, so "0 of 64" means the valid stream never reached
+     * the array at all, while "63 of 64" means one PE is stuck -- two
+     * completely different bugs behind one identical symptom.
+     */
+    logic saw_ready, saw_feed, saw_wait, saw_send, saw_c0, saw_c1;
+
+    initial begin
+        saw_ready = 0; saw_feed = 0; saw_wait = 0;
+        saw_send  = 0; saw_c0   = 0; saw_c1   = 0;
+    end
+
+    always_ff @(posedge clk) begin
+        if (dut.matrices_ready)          saw_ready <= 1'b1;
+        if (dut.state == 3'd1)           saw_feed  <= 1'b1;
+        if (dut.state == 3'd2)           saw_wait  <= 1'b1;
+        if (dut.state == 3'd3)           saw_send  <= 1'b1;
+        if (dut.c0_done)                 saw_c0    <= 1'b1;
+        if (dut.c1_done)                 saw_c1    <= 1'b1;
+    end
+
+    function automatic int pes_done();
+        int n = 0;
+        for (int r = 0; r < 8; r++)
+            for (int c = 0; c < 8; c++)
+                if (dut.u_array.u_arr.result_seen[r][c]) n++;
+        return n;
+    endfunction
+
     initial begin
         #500_000_000;
-        $display("TIMEOUT -- K_MAX=%0d K=%0d", K_MAX, K);
-        $fatal(1);
+
+        $display("");
+        $display("==============================================");
+        $display(" TIMEOUT -- K_MAX=%0d K=%0d", K_MAX, K);
+        $display("==============================================");
+        $display(" 走到哪一級:");
+        $display("   matrices_ready   : %s", saw_ready ? "yes" : "NO  <-- RX framing 沒收到完整 frame");
+        $display("   ST_FEED          : %s", saw_feed  ? "yes" : "NO");
+        $display("   ST_WAIT_RESULT   : %s", saw_wait  ? "yes" : "NO");
+        $display("   c0_done          : %s", saw_c0    ? "yes" : "NO");
+        $display("   c1_done          : %s", saw_c1    ? "yes" : "NO");
+        $display("   ST_SEND          : %s", saw_send  ? "yes" : "NO");
+        $display("");
+        $display(" 停在哪:");
+        $display("   rx_state=%0d rx_count=%0d hdr_done=%0b k_dim=%0d",
+                 dut.rx_state, dut.rx_count, dut.hdr_done, dut.k_dim);
+        $display("   state=%0d feed_t=%0d tx_state=%0d",
+                 dut.state, dut.feed_t, dut.tx_state);
+        $display("   PE 完成數 = %0d / 64   all_results_valid=%0b out_state=%0d",
+                 pes_done(), dut.u_array.u_arr.all_results_valid,
+                 dut.u_array.u_arr.out_state);
+        $display("==============================================");
+
+        $fatal(1, "watchdog");
     end
 
 endmodule

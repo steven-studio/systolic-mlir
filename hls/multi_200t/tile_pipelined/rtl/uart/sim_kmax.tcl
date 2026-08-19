@@ -85,9 +85,17 @@ add_files -norecurse [list \
     systolic_operand_buffer.sv \
 ]
 
-# Both benches go into the simulation fileset so a syntax error in either
-# is caught here rather than the next time someone switches top.
-add_files -fileset sim_1 -norecurse [list tb_uart_multi_invocation.sv]
+# Every bench goes into the simulation fileset so a syntax error in any of
+# them is caught here rather than the next time someone switches top.
+#
+#   tb_uart_multi_invocation -- full system over UART, needs the FP IP
+#   tb_feeder_buffer         -- feeder+buffer contract, no IP, seconds
+#   tb_operand_buffer_equiv  -- refactor equivalence, no IP, seconds
+add_files -fileset sim_1 -norecurse [list \
+    tb_uart_multi_invocation.sv \
+    tb_feeder_buffer.sv \
+    tb_operand_buffer_equiv.sv \
+]
 
 set_property file_type SystemVerilog [get_files *.sv]
 

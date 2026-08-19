@@ -4,7 +4,10 @@
  * 所以 xvlog/xelab/xsim 直接跑,幾秒鐘一次迭代。
  *
  * 驗的是契約本身,不是舊程式碼:灌入已知資料後,第 r 列在
- * gk = feed_t - r 界內時,必須交出 mem[r][gk],且 valid 與資料同拍。 */
+ * gk = feed_t - r 界內時,必須交出 mem[r][gk],且 valid 與資料同拍。
+ *
+ * 重構是否保行為由 tb_operand_buffer_equiv 負責 —— 契約測試答不了
+ * 那個問題,因為契約寫錯時它會跟著一起通過。兩個都要跑。 */
 module tb_feeder_buffer;
 
     localparam int K_MAX  = 32;
@@ -30,19 +33,6 @@ module tb_feeder_buffer;
     wire  [31:0]    a_rdata [0:7];
     wire  [31:0]    b_rdata [0:7];
 
-    wire [8*K_W-1:0] a_raddr_flat, b_raddr_flat;
-    wire [8*32-1:0]  a_rdata_flat, b_rdata_flat;
-
-    genvar gp;
-    generate
-        for (gp = 0; gp < 8; gp = gp + 1) begin : PACK
-            assign a_raddr_flat[gp*K_W +: K_W] = a_raddr[gp];
-            assign b_raddr_flat[gp*K_W +: K_W] = b_raddr[gp];
-            assign a_rdata[gp] = a_rdata_flat[gp*32 +: 32];
-            assign b_rdata[gp] = b_rdata_flat[gp*32 +: 32];
-        end
-    endgenerate
-
     logic [31:0] a_in [0:7];
     logic [31:0] b_in [0:7];
     logic a_valid [0:7];
@@ -52,11 +42,11 @@ module tb_feeder_buffer;
 
     systolic_operand_buffer #(.K_MAX(K_MAX), .K_W(K_W)) u_buf_a (
         .clk(clk), .wr(wr), .wsel(wsel), .waddr(waddr), .wdata(wdata),
-        .raddr_flat(a_raddr_flat), .rdata_flat(a_rdata_flat));
+        .raddr(a_raddr), .rdata(a_rdata));
 
     systolic_operand_buffer #(.K_MAX(K_MAX), .K_W(K_W)) u_buf_b (
         .clk(clk), .wr(1'b0), .wsel('0), .waddr('0), .wdata('0),
-        .raddr_flat(b_raddr_flat), .rdata_flat(b_rdata_flat));
+        .raddr(b_raddr), .rdata(b_rdata));
 
     systolic_tile_feeder #(.K_W(K_W), .FEED_W(FEED_W), .KDIM_W(KDIM_W)) u_feeder (
         .clk(clk), .rst(rst), .enable(enable),
@@ -113,6 +103,13 @@ module tb_feeder_buffer;
             @(negedge clk);
         end
         enable = 0;
+
+        /* 防 vacuous pass:valid 若從未出現,checked==0、errors==0
+         * 也會印 PASS。零次檢查本身就是 FAIL。 */
+        if (checked == 0) begin
+            $display("FAIL 前置條件:checked == 0,從未觀察到任何 valid 資料");
+            errors++;
+        end
 
         $display("checked = %0d", checked);
         if (errors == 0) $display("PASS: feeder + buffer 契約正確");
