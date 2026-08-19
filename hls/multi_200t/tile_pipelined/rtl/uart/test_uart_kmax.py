@@ -198,6 +198,27 @@ def main():
                 print(f"\rRX {len(rx)}/{TX_BYTES}", end="", flush=True)
         print()
 
+        # DEBUG_MARKERS=1 的 bitstream 會在結果流前面多出最多 5 個
+        # breadcrumb bytes（A1..A5）。不剝掉的話每個 float 都位移,
+        # 512 個結果 byte 全部變成垃圾 -- 第一個值會是 0xA4A3A2A1
+        # 解出來的 -3.5e-17,印成 "-0."。剝掉幾個就補讀幾個,
+        # 對齊之後其餘檢查照舊;乾淨 bitstream 完全不受影響。
+        markers = []
+        while rx and rx[0] in (0xA1, 0xA2, 0xA3, 0xA4, 0xA5):
+            markers.append(rx.pop(0))
+        if markers:
+            names = {0xA1: "frame 已接受", 0xA2: "進入 WAIT_RESULT",
+                     0xA3: "ctx0 出爐",   0xA4: "ctx1 出爐",
+                     0xA5: "進入 SEND"}
+            print("breadcrumbs :", " ".join(f"0x{b:02X}({names[b]})"
+                                            for b in markers))
+            print("              (DEBUG_MARKERS=1 bitstream;已剝除並補讀對齊)")
+            deadline = time.time() + 5
+            while len(rx) < TX_BYTES and time.time() < deadline:
+                chunk = ser.read(TX_BYTES - len(rx))
+                if chunk:
+                    rx.extend(chunk)
+
         # CYCLE_COUNTER=1 的 bitstream 會在 512 bytes 之後再送 4 bytes
         # （小端序）。用短 timeout 試讀:沒有就是舊 bitstream，其餘檢查
         # 完全不受影響。必須在 with 區塊內讀，離開後 ser 就關了。
@@ -208,8 +229,14 @@ def main():
 
     if len(cyc_raw) == 4:
         cyc = int.from_bytes(cyc_raw, "little")
-        exp = k + 118
-        print(f"hardware cycles : {cyc}   (xsim 預期 k_dim + 118 = {exp})")
+        # 運算元緩衝改用 block RAM 之後是同步讀:位址在第 t 拍發出，
+        # 資料第 t+1 拍才有效，feeder 也把 valid 與 accumulator context
+        # 一起延後一拍。那一拍就是 118 變 119 的唯一來源，與 k_dim 無關。
+        #
+        # 119 不是推算的：tb_uart_multi_invocation 在 K_MAX=16 / k_dim=16
+        # 用真實 Xilinx 浮點 IP 量到 135 = 16 + 119，且結果 bit-exact。
+        exp = k + 119
+        print(f"hardware cycles : {cyc}   (xsim 實測 k_dim + 119 = {exp})")
         if cyc == exp:
             print("                  與模擬完全一致")
         else:
@@ -220,8 +247,16 @@ def main():
     if len(rx) != TX_BYTES:
         print(f"FAIL: expected {TX_BYTES} bytes, got {len(rx)}")
         if len(rx) and rx[0] in (0xA1, 0xA2, 0xA3, 0xA4, 0xA5):
-            print(f"      first byte is 0x{rx[0]:02X}, a breadcrumb marker --")
-            print("      this bitstream was built with DEBUG_MARKERS=1.")
+            lead = []
+            for b in rx:
+                if b in (0xA1, 0xA2, 0xA3, 0xA4, 0xA5):
+                    lead.append(f"0x{b:02X}")
+                else:
+                    break
+            print(f"      leading breadcrumbs: {' '.join(lead)}  (DEBUG_MARKERS=1)")
+            print("      A1=frame 已被接受  A2=進入 WAIT_RESULT  A3=ctx0 出爐")
+            print("      A4=ctx1 出爐      A5=進入 SEND")
+            print("      斷在哪個 marker 之後,就是卡在那一級。")
         if not rx:
             print("      nothing came back. Two usual causes:")
             print("      1. no reset after programming -- k_dim loads K_MAX on")

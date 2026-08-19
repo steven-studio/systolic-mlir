@@ -26,10 +26,19 @@
 # K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
-    error "usage: -tclargs <K_MAX>   (16, 32, 64, 128)"
+    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\]   (16, 32, 64, 128)"
 }
 
 set KMAX [lindex $argv 0]
+
+# 第二個參數 = DEBUG_MARKERS(預設 0)。開啟時輸出到 k<K>_dbg,
+# 不覆蓋乾淨版;燒錄用 program_kmax.tcl -tclargs <K>_dbg。
+# 板上判讀:host 收到的前幾個 byte 是 A1..A5 breadcrumb,
+#   什麼都沒有       -> RX framing 從未接受 frame
+#   只有 A1          -> 卡在 ST_FEED
+#   A1 A2            -> 卡在 ST_WAIT_RESULT(PE 沒全部完成)
+#   A1 A2 A3 A4 (A5) -> 結果有了,卡在 TX/ST_SEND
+set DBG [expr {$argc >= 2 ? [lindex $argv 1] : 0}]
 
 # The RTL requires K_MAX >= 16 and a multiple of 8. It has an elaboration
 # assertion for both, but failing here is cheaper than failing in synth.
@@ -41,10 +50,17 @@ if {$KMAX < 16 || ($KMAX % 8) != 0} {
 set PART        "xc7a200tsbg484-1"
 set TOP         "systolic_uart_tile_top"
 set CLK_PERIOD  10.000
-set OUT         "build_kmax/k${KMAX}"
+set OUT         [expr {$DBG ? "build_kmax/k${KMAX}_dbg" : "build_kmax/k${KMAX}"}]
+set BITTAG      [expr {$DBG ? "${KMAX}_dbg" : $KMAX}]
 
 file mkdir $OUT
 file mkdir $OUT/reports
+
+# 陳舊 bitstream 是個陷阱:本腳本在時序未收斂時「跳過」write_bitstream,
+# 而 program_kmax.tcl 只檢查路徑上有沒有檔案 -- 上一輪留下的舊 .bit 會被
+# 原封不動燒進板子,症狀跟新設計壞掉一模一樣。開跑先刪,跑完後路徑上
+# 若還有 .bit,就只可能是這一輪產生的。
+file delete -force $OUT/${TOP}_k${BITTAG}.bit
 
 puts "========================================"
 puts " k_max sweep point"
@@ -82,7 +98,7 @@ read_xdc nexys_video_uart.xdc
 # ---------------------------------------------------------------------
 synth_design -top $TOP -part $PART \
     -generic K_MAX=$KMAX \
-    -generic DEBUG_MARKERS=0 \
+    -generic DEBUG_MARKERS=$DBG \
     -generic CYCLE_COUNTER=1
 
 write_checkpoint -force $OUT/post_synth.dcp
@@ -151,8 +167,9 @@ puts "========================================"
 # A bitstream is only meaningful if timing closed. Writing one regardless
 # would invite programming a board with a design that fails setup.
 if {$TIMING_OK} {
-    write_bitstream -force $OUT/${TOP}_k${KMAX}.bit
-    puts " bitstream: $OUT/${TOP}_k${KMAX}.bit"
+    write_bitstream -force $OUT/${TOP}_k${BITTAG}.bit
+    puts " bitstream: $OUT/${TOP}_k${BITTAG}.bit"
+    puts " program:   vivado -mode batch -source program_kmax.tcl -tclargs $BITTAG"
 } else {
     puts " bitstream SKIPPED (timing not met)"
 }
