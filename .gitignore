@@ -167,3 +167,9 @@ runtime/hwtest
 runtime/packtest
 *.o
 *.a
+xvlog.log
+xvlog.pb
+xsim.dir/
+*.jou
+*.wdb
+sweep*.out
