@@ -26,7 +26,7 @@
 # K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
-    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\]   (16, 32, 64, 128)"
+    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\]"
 }
 
 set KMAX [lindex $argv 0]
@@ -40,6 +40,16 @@ set KMAX [lindex $argv 0]
 #   A1 A2 A3 A4 (A5) -> 結果有了,卡在 TX/ST_SEND
 set DBG [expr {$argc >= 2 ? [lindex $argv 1] : 0}]
 
+# 第三個參數 = place_design directive(預設 Default;可用 Explore、
+# ExtraTimingOpt、ExtraNetDelay_high 等)。
+#
+# 用途:同一個組態、換一個 placement,再擲一次硬幣。Vivado 是決定性
+# 的 -- 同腳本重跑產出同一顆 bit,所以「同一顆 bit 每次燒都死」只
+# 證明那顆 placement 壞,不證明組態壞。要分辨「參數導致失敗」與
+# 「這次 placement 剛好踩雷」,唯一的方法是同組態多做幾個獨立
+# placement。輸出目錄與 bit 名會帶 directive 後綴,不互相覆蓋。
+set PDIR [expr {$argc >= 3 ? [lindex $argv 2] : "Default"}]
+
 # The RTL requires K_MAX >= 16 and a multiple of 8. It has an elaboration
 # assertion for both, but failing here is cheaper than failing in synth.
 if {$KMAX < 16 || ($KMAX % 8) != 0} {
@@ -50,8 +60,10 @@ if {$KMAX < 16 || ($KMAX % 8) != 0} {
 set PART        "xc7a200tsbg484-1"
 set TOP         "systolic_uart_tile_top"
 set CLK_PERIOD  10.000
-set OUT         [expr {$DBG ? "build_kmax/k${KMAX}_dbg" : "build_kmax/k${KMAX}"}]
-set BITTAG      [expr {$DBG ? "${KMAX}_dbg" : $KMAX}]
+set BITTAG $KMAX
+if {$DBG} { append BITTAG "_dbg" }
+if {$PDIR ne "Default"} { append BITTAG "_[string tolower $PDIR]" }
+set OUT "build_kmax/k${BITTAG}"
 
 file mkdir $OUT
 file mkdir $OUT/reports
@@ -101,12 +113,26 @@ synth_design -top $TOP -part $PART \
     -generic DEBUG_MARKERS=$DBG \
     -generic CYCLE_COUNTER=1
 
+# ---------------------------------------------------------------------
+# Hold 餘裕強化(2026-08-19 板上實驗結論)
+#
+# 同一份 clean 組態:Default placement 上板死(RX 0/512)、Explore
+# placement 上板全對(bit-exact)、dbg placement 也活 -- 失敗只跟
+# placement 相關,跟 RTL/組態無關。死掉那顆的 WHS 只有 0.02ns 級,
+# 而 STA 的前提本身有瑕疵(FP IP 鎖在 xc7vx485t、OOC 時脈 100ns)。
+# 這裡強制 implementation 多留 0.15ns 的 hold 餘裕:報表上的 WHS
+# 已內含這份悲觀,summary 的 timing_met 閘門因此等於要求真實餘裕
+# >= 0.15ns。從此不靠 placement 抽籤。
+# (必須放在 synth_design 之後 -- 之前 design 未開、get_clocks 是空的。)
+# ---------------------------------------------------------------------
+set_clock_uncertainty -hold 0.150 [get_clocks]
+
 write_checkpoint -force $OUT/post_synth.dcp
 report_utilization    -file $OUT/reports/post_synth_utilization.rpt
 report_timing_summary -file $OUT/reports/post_synth_timing.rpt
 
 opt_design
-place_design
+place_design -directive $PDIR
 write_checkpoint -force $OUT/post_place.dcp
 report_timing_summary -file $OUT/reports/post_place_timing.rpt
 
