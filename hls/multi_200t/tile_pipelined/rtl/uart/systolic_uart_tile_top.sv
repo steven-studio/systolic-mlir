@@ -187,8 +187,8 @@ module systolic_uart_tile_top #(
     logic [4:0] debug_set;
     logic [4:0] debug_pending_next;
 
-    logic       debug_tx_active;
-    logic [7:0] debug_tx_byte;
+    /* debug_tx_active / debug_tx_byte 已隨 TX 重構移入
+     * systolic_tx_source;debug_accept 由該模組驅動。 */
     logic [4:0] debug_accept;
 
     uart_rx #(
@@ -1103,260 +1103,67 @@ module systolic_uart_tile_top #(
 
     /*
      * ============================================================
-     * UART TX
+     * UART TX -- streaming 化(feat/tx-streaming)
      *
-     * bytes   0..255 = C0
-     * bytes 256..511 = C1
+     * 舊版在這裡有一座四狀態 FSM,把三件事縫在一起:與 uart_tx 的
+     * start/busy 握手、C0/C1/cycle-counter 的位址走訪、breadcrumb
+     * 的優先權仲裁。現在沿縫切開:
      *
-     * Total = 512 bytes
+     *   systolic_tx_source   內容:位址走訪 + marker 仲裁 + rearm
+     *   uart_tx_streamer     協定:valid/ready -> start/busy
+     *
+     * byte 序列與舊 FSM 完全相同(tb_tx_equiv 以逐字複製的舊邏輯
+     * 為 golden,逐 byte 比對證明);wire format 不變:
+     *
+     *   bytes   0..255 = C0
+     *   bytes 256..511 = C1
+     *   (+4 bytes cycle counter,見 CYCLE_COUNTER)
+     *
+     * breadcrumb 的「捕捉」(debug_pending,上方)留在 top,因為它
+     * 觀察的是 top 層事件;「送出」(仲裁 + 序列化)在 source 裡,
+     * debug_accept 由 source 回灌給上方的 pending 更新式。
+     *
+     * 這個邊界是為 double buffer 預留的:屆時只改 source(哪個
+     * context 好了就先排水哪個),streamer 與 uart_tx 不動。
      * ============================================================
      */
-    logic [9:0]  tx_count;
-    logic [31:0] tx_word;
-    logic tx_send_started;
-
-    always_comb begin
-
-        /*
-         * tx_count layout inside each matrix:
-         *
-         * [7:5] = row
-         * [4:2] = col
-         * [1:0] = byte
-         */
-
-        if (tx_count < 256) begin
-
-            tx_word =
-                C0[tx_count[7:5]]
-                  [tx_count[4:2]];
-
-        end
-        else if (tx_count < 512) begin
-
-            tx_word =
-                C1[(tx_count - 256) >> 5]
-                  [((tx_count - 256) >> 2) & 7];
-
-        end
-        else begin
-
-            /*
-             * bytes 512..515 = cycle count, little-endian.
-             * tx_count[1:0] 的位元組選擇沿用下方 case，
-             * 512 是 4 的倍數所以對齊正確。
-             */
-            tx_word = cyc_latched;
-
-        end
-
-
-        if (debug_tx_active) begin
-
-            tx_byte = debug_tx_byte;
-
-        end
-        else begin
-
-            case (tx_count[1:0])
-
-                2'd0:
-                    tx_byte = tx_word[7:0];
-
-                2'd1:
-                    tx_byte = tx_word[15:8];
-
-                2'd2:
-                    tx_byte = tx_word[23:16];
-
-                default:
-                    tx_byte = tx_word[31:24];
-
-            endcase
-
-        end
-
-    end
-
-
-    /*
-     * ============================================================
-     * UART TX FSM
-     * ============================================================
-     */
-    typedef enum logic [1:0] {
-        TX_IDLE,
-        TX_START,
-        TX_WAIT_BUSY,
-        TX_WAIT_DONE
-    } tx_state_t;
-
-    tx_state_t tx_state;
-
-
-    always_ff @(posedge clk) begin
-        if (rst_i) begin
-
-            tx_count         <= 10'd0;
-            tx_start         <= 1'b0;
-            tx_state         <= TX_IDLE;
-            tx_all_done      <= 1'b0;
-            debug_tx_active <= 1'b0;
-            debug_tx_byte   <= 8'h00;
-            debug_accept    <= 5'b0;
-            tx_send_started <= 1'b0;
-
-        end
-        else begin
-
-            tx_start    <= 1'b0;
-            tx_all_done <= 1'b0;
-            debug_accept <= 5'b0;
-
-            case (tx_state)
-
-                TX_IDLE: begin
-
-                    /*
-                     * Breadcrumb markers have priority over the
-                     * normal 512-byte result stream.
-                     *
-                     * Lowest-number marker is sent first.
-                     *
-                     * Gated by DEBUG_MARKERS. When it is 0 these
-                     * five branches are constant-false, nothing
-                     * ever sets debug_tx_active, and the sticky
-                     * debug_pending bits become unread and are
-                     * trimmed -- so the TX stream is exactly the
-                     * 512 result bytes and nothing else.
-                     */
-                    if (DEBUG_MARKERS && debug_pending[0]) begin
-
-                        debug_tx_active <= 1'b1;
-                        debug_tx_byte   <= 8'hA1;
-                        debug_accept[0] <= 1'b1;
-                        tx_state        <= TX_START;
-
-                    end
-                    else if (DEBUG_MARKERS && debug_pending[1]) begin
-
-                        debug_tx_active <= 1'b1;
-                        debug_tx_byte   <= 8'hA2;
-                        debug_accept[1] <= 1'b1;
-                        tx_state        <= TX_START;
-
-                    end
-                    else if (DEBUG_MARKERS && debug_pending[2]) begin
-
-                        debug_tx_active <= 1'b1;
-                        debug_tx_byte   <= 8'hA3;
-                        debug_accept[2] <= 1'b1;
-                        tx_state        <= TX_START;
-
-                    end
-                    else if (DEBUG_MARKERS && debug_pending[3]) begin
-
-                        debug_tx_active <= 1'b1;
-                        debug_tx_byte   <= 8'hA4;
-                        debug_accept[3] <= 1'b1;
-                        tx_state        <= TX_START;
-
-                    end
-                    else if (DEBUG_MARKERS && debug_pending[4]) begin
-
-                        debug_tx_active <= 1'b1;
-                        debug_tx_byte   <= 8'hA5;
-                        debug_accept[4] <= 1'b1;
-                        tx_state        <= TX_START;
-
-                    end
-                    else if (
-                        state == ST_SEND &&
-                        !tx_send_started
-                    ) begin
-
-                        debug_tx_active <= 1'b0;
-                        tx_send_started <= 1'b1;
-
-                        tx_count <= 10'd0;
-                        tx_state <= TX_START;
-
-                    end
-
-
-                    /*
-                     * Rearm for the next transaction only after
-                     * the main FSM has actually left ST_SEND.
-                     */
-                    if (state != ST_SEND)
-                        tx_send_started <= 1'b0;
-
-                end
-
-
-                TX_START: begin
-
-                    if (!tx_busy) begin
-
-                        tx_start <= 1'b1;
-                        tx_state <= TX_WAIT_BUSY;
-
-                    end
-
-                end
-
-
-                TX_WAIT_BUSY: begin
-
-                    if (tx_busy) begin
-                        tx_state <= TX_WAIT_DONE;
-                    end
-
-                end
-
-
-                TX_WAIT_DONE: begin
-
-                    if (!tx_busy) begin
-
-                        /*
-                         * Debug transaction is exactly one byte.
-                         */
-                        if (debug_tx_active) begin
-
-                            /*
-                             * Debug transaction is exactly one byte.
-                             */
-                            debug_tx_active <= 1'b0;
-                            tx_state        <= TX_IDLE;
-
-                        end
-                        else if (tx_count == TX_LAST[9:0]) begin
-
-                            tx_count    <= 10'd0;
-                            tx_state    <= TX_IDLE;
-                            tx_all_done <= 1'b1;
-
-                        end
-                        else begin
-
-                            tx_count <= tx_count + 1'b1;
-                            tx_state <= TX_START;
-
-                        end
-
-                    end
-
-                end
-
-
-                default: begin
-                    tx_state <= TX_IDLE;
-                end
-
-            endcase
-
-        end
-    end
+    logic       tx_m_valid;
+    logic [7:0] tx_m_data;
+    logic       tx_m_ready;
+
+    systolic_tx_source #(
+        .DEBUG_MARKERS (DEBUG_MARKERS),
+        .CYCLE_COUNTER (CYCLE_COUNTER)
+    ) u_tx_source (
+        .clk           (clk),
+        .rst           (rst_i),
+
+        .send_go       (state == ST_SEND),
+        .all_done      (tx_all_done),
+
+        .debug_pending (debug_pending),
+        .debug_accept  (debug_accept),
+
+        .C0            (C0),
+        .C1            (C1),
+        .cyc_latched   (cyc_latched),
+
+        .m_valid       (tx_m_valid),
+        .m_data        (tx_m_data),
+        .m_ready       (tx_m_ready)
+    );
+
+    uart_tx_streamer u_tx_streamer (
+        .clk      (clk),
+        .rst      (rst_i),
+
+        .s_valid  (tx_m_valid),
+        .s_data   (tx_m_data),
+        .s_ready  (tx_m_ready),
+
+        .tx_start (tx_start),
+        .tx_data  (tx_byte),
+        .tx_busy  (tx_busy)
+    );
 
 endmodule

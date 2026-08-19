@@ -91,6 +91,8 @@ read_verilog -sv systolic_array_tile.sv
 read_verilog -sv systolic_array_8x8_tile.sv
 read_verilog -sv systolic_tile_feeder.sv
 read_verilog -sv systolic_operand_buffer.sv
+read_verilog -sv systolic_tx_source.sv
+read_verilog -sv uart_tx_streamer.sv
 read_verilog -sv systolic_uart_tile_top.sv
 
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_add_0/floating_point_add_0.xci
