@@ -107,14 +107,22 @@ for K in "${KS[@]}"; do
     fi
     sleep 2   # 板子 configuration 後喘口氣再打 serial
 
-    # ---- 3. 板上實測 ----------------------------------------------
+    # ---- 3. 板上實測(重試一次) ------------------------------------
+    # 單次失敗不算數:request 中一個 byte 毛刺會讓整個 frame 被 END
+    # 檢查丟棄,症狀 RX 0(k16_n4 2026-08-20 16:39 實例:單次失敗後
+    # 13/13 全過)。重試仍失敗才記 FAIL,確定性失敗不受影響。
+    # PASS(retry) 會如實寫進 CSV,毛刺發生率留有紀錄。
     TESTLOG="$LOGDIR/test_k${TAG}.log"
-    python3 test_uart_kmax.py --kmax "$K" --n "$NARR" > "$TESTLOG" 2>&1
-    if grep -q "^PASS:" "$TESTLOG"; then
-        BOARD=PASS
-    else
-        BOARD=FAIL
-    fi
+    BOARD=FAIL
+    for attempt in 1 2; do
+        python3 test_uart_kmax.py --kmax "$K" --n "$NARR" > "$TESTLOG" 2>&1
+        if grep -q "^PASS:" "$TESTLOG"; then
+            BOARD=PASS
+            [ "$attempt" -eq 2 ] && BOARD="PASS_retry"
+            break
+        fi
+        sleep 3
+    done
     echo " board test: $BOARD  (log: $TESTLOG)"
 
     echo "$ROW" | \
