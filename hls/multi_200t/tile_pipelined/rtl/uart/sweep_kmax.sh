@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # sweep_kmax.sh -- 一次跑完整個 K_MAX sweep:每一點 build -> 燒錄 -> 板上實測。
 #
-#   ./sweep_kmax.sh              # 預設 16 32 64 128 256
-#   ./sweep_kmax.sh 16 32        # 只跑指定的點
+#   ./sweep_kmax.sh              # N=8,預設 16 32 64 128 256
+#   ./sweep_kmax.sh 16 32        # N=8,只跑指定的點
+#   ./sweep_kmax.sh -n 4 16 32   # 4x4 陣列的 sweep
 #
 # 每一點的流程:
 #   1. build_kmax.tcl -tclargs K            (Default placement)
@@ -20,6 +21,13 @@
 #   tail -f sweep.out
 
 set -u
+
+NARR=8
+if [ "${1:-}" = "-n" ]; then
+    NARR="$2"; shift 2
+fi
+NSUF=""
+[ "$NARR" != 8 ] && NSUF="_n${NARR}"
 
 KS=(16 32 64 128 256)
 [ $# -gt 0 ] && KS=("$@")
@@ -45,7 +53,10 @@ if ! command -v vivado >/dev/null; then
     exit 1
 fi
 
-echo "k_max,directive,lut,ff,bram,dsp,wns_ns,whs_ns,fmax_mhz,timing_met,board_test" > "$RESULTS"
+# 彙整檔改為 append:已存在就不重寫表頭,單點補跑不再蓋掉舊數據。
+if [ ! -f "$RESULTS" ]; then
+    echo "n,k_max,directive,lut,ff,bram,dsp,wns_ns,whs_ns,fmax_mhz,timing_met,board_test" > "$RESULTS"
+fi
 
 # 總表用:每點一行的人類可讀摘要
 declare -a SUMMARY=()
@@ -53,30 +64,30 @@ declare -a SUMMARY=()
 for K in "${KS[@]}"; do
     echo ""
     echo "======================================================"
-    echo " K_MAX = $K    ($(date '+%H:%M:%S'))"
+    echo " N = $NARR   K_MAX = $K    ($(date '+%H:%M:%S'))"
     echo "======================================================"
 
     # ---- 1. build(Default;失敗自動 fallback 到 Explore) ----------
-    TAG="$K"
+    TAG="${K}${NSUF}"
     DIRECTIVE="Default"
     BIT="build_kmax/k${TAG}/${TOP}_k${TAG}.bit"
 
-    vivado -mode batch -source build_kmax.tcl -tclargs "$K" \
-        > "$LOGDIR/build_k${K}_default.log" 2>&1
+    vivado -mode batch -source build_kmax.tcl -tclargs "$K" 0 Default "$NARR" \
+        > "$LOGDIR/build_k${K}${NSUF}_default.log" 2>&1
     if [ ! -f "$BIT" ]; then
         echo " Default placement timing 未收斂,改用 Explore 重試..."
-        TAG="${K}_explore"
+        TAG="${K}_explore${NSUF}"
         DIRECTIVE="Explore"
         BIT="build_kmax/k${TAG}/${TOP}_k${TAG}.bit"
-        vivado -mode batch -source build_kmax.tcl -tclargs "$K" 0 Explore \
-            > "$LOGDIR/build_k${K}_explore.log" 2>&1
+        vivado -mode batch -source build_kmax.tcl -tclargs "$K" 0 Explore "$NARR" \
+            > "$LOGDIR/build_k${K}${NSUF}_explore.log" 2>&1
     fi
 
     if [ ! -f "$BIT" ]; then
         echo " BUILD FAIL: Default 與 Explore 都沒收斂,跳過這一點"
-        echo " log: $LOGDIR/build_k${K}_default.log / _explore.log"
-        echo "$K,none,NA,NA,NA,NA,NA,NA,NA,0,BUILD_FAIL" >> "$RESULTS"
-        SUMMARY+=("K=$K  BUILD_FAIL(兩個 directive 都沒收斂)")
+        echo " log: $LOGDIR/build_k${K}${NSUF}_default.log / _explore.log"
+        echo "$NARR,$K,none,NA,NA,NA,NA,NA,NA,NA,0,BUILD_FAIL" >> "$RESULTS"
+        SUMMARY+=("N=$NARR K=$K  BUILD_FAIL(兩個 directive 都沒收斂)")
         continue
     fi
 
@@ -89,16 +100,16 @@ for K in "${KS[@]}"; do
             > "$LOGDIR/program_k${TAG}.log" 2>&1; then
         echo " PROGRAM FAIL,跳過這一點(log: $LOGDIR/program_k${TAG}.log)"
         echo "$ROW" | \
-            awk -F, -v d="$DIRECTIVE" 'BEGIN{OFS=","}{print $1,d,$2,$3,$4,$5,$6,$7,$8,$9,"PROGRAM_FAIL"}' \
+            awk -F, -v n="$NARR" -v d="$DIRECTIVE" 'BEGIN{OFS=","}{print n,$1,d,$2,$3,$4,$5,$6,$7,$8,$9,"PROGRAM_FAIL"}' \
             >> "$RESULTS"
-        SUMMARY+=("K=$K  PROGRAM_FAIL")
+        SUMMARY+=("N=$NARR K=$K  PROGRAM_FAIL")
         continue
     fi
     sleep 2   # 板子 configuration 後喘口氣再打 serial
 
     # ---- 3. 板上實測 ----------------------------------------------
     TESTLOG="$LOGDIR/test_k${TAG}.log"
-    python3 test_uart_kmax.py --kmax "$K" > "$TESTLOG" 2>&1
+    python3 test_uart_kmax.py --kmax "$K" --n "$NARR" > "$TESTLOG" 2>&1
     if grep -q "^PASS:" "$TESTLOG"; then
         BOARD=PASS
     else
@@ -107,9 +118,9 @@ for K in "${KS[@]}"; do
     echo " board test: $BOARD  (log: $TESTLOG)"
 
     echo "$ROW" | \
-        awk -F, -v d="$DIRECTIVE" -v b="$BOARD" 'BEGIN{OFS=","}{print $1,d,$2,$3,$4,$5,$6,$7,$8,$9,b}' \
+        awk -F, -v n="$NARR" -v d="$DIRECTIVE" -v b="$BOARD" 'BEGIN{OFS=","}{print n,$1,d,$2,$3,$4,$5,$6,$7,$8,$9,b}' \
         >> "$RESULTS"
-    SUMMARY+=("K=$K  $DIRECTIVE  board=$BOARD")
+    SUMMARY+=("N=$NARR K=$K  $DIRECTIVE  board=$BOARD")
 done
 
 echo ""

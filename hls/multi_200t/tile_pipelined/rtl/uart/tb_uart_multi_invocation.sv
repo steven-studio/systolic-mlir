@@ -325,27 +325,35 @@ module tb_uart_multi_invocation;
      * the array at all, while "63 of 64" means one PE is stuck -- two
      * completely different bugs behind one identical symptom.
      */
+    /* 清除走 rst,不走 initial。initial 加 always_ff 同時寫同一個變數,
+     * xelab 會報 VRFC 10-3818 / 10-2921「invalid combination of procedural
+     * drivers」—— 診斷用的旗標本身變成不可靠,正好毀掉它的用途。 */
     logic saw_ready, saw_feed, saw_wait, saw_send, saw_c0, saw_c1;
 
-    initial begin
-        saw_ready = 0; saw_feed = 0; saw_wait = 0;
-        saw_send  = 0; saw_c0   = 0; saw_c1   = 0;
-    end
-
     always_ff @(posedge clk) begin
-        if (dut.matrices_ready)          saw_ready <= 1'b1;
-        if (dut.state == 3'd1)           saw_feed  <= 1'b1;
-        if (dut.state == 3'd2)           saw_wait  <= 1'b1;
-        if (dut.state == 3'd3)           saw_send  <= 1'b1;
-        if (dut.c0_done)                 saw_c0    <= 1'b1;
-        if (dut.c1_done)                 saw_c1    <= 1'b1;
+        if (rst) begin
+            saw_ready <= 1'b0;
+            saw_feed  <= 1'b0;
+            saw_wait  <= 1'b0;
+            saw_send  <= 1'b0;
+            saw_c0    <= 1'b0;
+            saw_c1    <= 1'b0;
+        end
+        else begin
+            if (dut.matrices_ready)      saw_ready <= 1'b1;
+            if (dut.state == 3'd1)       saw_feed  <= 1'b1;
+            if (dut.state == 3'd2)       saw_wait  <= 1'b1;
+            if (dut.state == 3'd3)       saw_send  <= 1'b1;
+            if (dut.c0_done)             saw_c0    <= 1'b1;
+            if (dut.c1_done)             saw_c1    <= 1'b1;
+        end
     end
 
     function automatic int pes_done();
         int n = 0;
         for (int r = 0; r < 8; r++)
             for (int c = 0; c < 8; c++)
-                if (dut.u_array.u_arr.result_seen[r][c]) n++;
+                if (dut.u_array.result_seen[r][c]) n++;
         return n;
     endfunction
 
@@ -370,8 +378,8 @@ module tb_uart_multi_invocation;
         $display("   state=%0d feed_t=%0d tx_state=%0d",
                  dut.state, dut.feed_t, dut.tx_state);
         $display("   PE 完成數 = %0d / 64   all_results_valid=%0b out_state=%0d",
-                 pes_done(), dut.u_array.u_arr.all_results_valid,
-                 dut.u_array.u_arr.out_state);
+                 pes_done(), dut.u_array.all_results_valid,
+                 dut.u_array.out_state);
         $display("==============================================");
 
         $fatal(1, "watchdog");

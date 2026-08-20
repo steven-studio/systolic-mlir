@@ -24,7 +24,11 @@
  */
 module systolic_tx_source #(
     parameter bit DEBUG_MARKERS = 1'b0,
-    parameter bit CYCLE_COUNTER = 1'b0
+    parameter bit CYCLE_COUNTER = 1'b0,
+
+    /* 陣列邊長。TX 總量 = 兩個 context 各 N*N words = 8*N*N bytes。
+     * N 必須是 2 的冪(位元切片依賴對齊)。 */
+    parameter int N = 8
 )(
     input  logic        clk,
     input  logic        rst,
@@ -38,8 +42,8 @@ module systolic_tx_source #(
     output logic [4:0]  debug_accept,
 
     // 內容
-    input  logic [31:0] C0 [0:7][0:7],
-    input  logic [31:0] C1 [0:7][0:7],
+    input  logic [31:0] C0 [0:N-1][0:N-1],
+    input  logic [31:0] C1 [0:N-1][0:N-1],
     input  logic [31:0] cyc_latched,
 
     // byte stream 出口
@@ -48,9 +52,12 @@ module systolic_tx_source #(
     input  logic        m_ready
 );
 
-    localparam int TX_BYTES       = 512;
+    localparam int LANE_W         = $clog2(N);
+    localparam int MAT_BYTES      = 4 * N * N;      // 一個 context 的 C
+    localparam int TX_BYTES       = 2 * MAT_BYTES;  // N=8: 512
     localparam int TX_TOTAL_BYTES = TX_BYTES + (CYCLE_COUNTER ? 4 : 0);
     localparam int TX_LAST        = TX_TOTAL_BYTES - 1;
+    localparam int CNT_W          = $clog2(TX_TOTAL_BYTES);
 
     typedef enum logic [1:0] {
         SRC_IDLE,
@@ -61,7 +68,7 @@ module systolic_tx_source #(
 
     src_t src;
 
-    logic [9:0] cnt;
+    logic [CNT_W-1:0] cnt;
     logic [7:0] mark_byte;
     logic       send_started;
 
@@ -74,11 +81,16 @@ module systolic_tx_source #(
      */
     logic [31:0] word;
 
+    /* 走訪順序與 N=8 版逐字同構:
+     *   [1:0]                      = byte lane
+     *   [2 +: LANE_W]              = col
+     *   [2+LANE_W +: LANE_W]       = row
+     * MAT_BYTES 是 2 的冪,C1 段的減法等價於忽略高位。 */
     always_comb begin
-        if (cnt < 10'd256)
-            word = C0[cnt[7:5]][cnt[4:2]];
-        else if (cnt < 10'd512)
-            word = C1[(cnt - 10'd256) >> 5][((cnt - 10'd256) >> 2) & 7];
+        if (cnt < MAT_BYTES)   // 整數域比較,避免 CNT_W 截斷
+            word = C0[cnt[2+LANE_W +: LANE_W]][cnt[2 +: LANE_W]];
+        else if (cnt < TX_BYTES)
+            word = C1[cnt[2+LANE_W +: LANE_W]][cnt[2 +: LANE_W]];
         else
             word = cyc_latched;
     end
@@ -163,7 +175,7 @@ module systolic_tx_source #(
 
                 SRC_DATA: begin
                     if (m_ready) begin
-                        if (cnt == TX_LAST[9:0]) begin
+                        if (cnt == TX_LAST) begin
                             cnt <= '0;
                             src <= SRC_DRAIN;
                         end

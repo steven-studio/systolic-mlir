@@ -29,6 +29,23 @@ module systolic_uart_tile_top #(
      * K_MAX-invariant.
      * ============================================================
      */
+    /*
+     * ============================================================
+     * N -- 陣列邊長(N x N 個 PE)
+     * ============================================================
+     *
+     * 幾何參數,與 K_MAX(容量)正交。隨 N 縮放的東西:
+     *   operand buffer 的 bank 數、feeder 的 skew 上限(N-1)、
+     *   wire format 的 lane 數(每個 k 有 N+N 個 word)、
+     *   TX 總量(2 * N*N * 4 bytes)。
+     * 不隨 N 變的東西:fold 深度(ctx 每 8 個 k 切換)是協定常數,
+     * k_dim 仍須為 8 的倍數;cycle counter、breadcrumb、UART 協定。
+     *
+     * N 必須是 2 的冪(位元切片依賴對齊),且 N*N*4 顆 DSP 要放得下
+     * (xc7a200t 有 740:N=8 用 256,N=4 用 64,N=16 的 1024 放不下)。
+     */
+    parameter int N = 8,
+
     parameter int K_MAX = 16,
 
     /*
@@ -95,18 +112,24 @@ module systolic_uart_tile_top #(
     // Absolute-k index width: k runs 0 .. K_MAX-1.
     localparam int K_W = $clog2(K_MAX);
 
-    // One transaction is K_MAX/8 (A,B) pairs, 256 bytes per matrix,
-    // so K_MAX * 64 bytes in total. At K_MAX=16 that is 1024.
-    localparam int RX_BYTES = K_MAX * 64;
-    localparam int RX_CNT_W = $clog2(RX_BYTES);      // == K_W + 6
+    // Lane index width, and bytes per matrix chunk (one k-window of
+    // one matrix): 8-deep window * N lanes * 4 bytes = 32*N.
+    localparam int LANE_W  = $clog2(N);
+    localparam int CHUNK_W = 5 + LANE_W;             // $clog2(32*N)
 
-    // Last feed beat is (k_dim - 1) + max skew(7). Sized for the
+    // One transaction is K_MAX/8 (A,B) chunk pairs, 32*N bytes per
+    // chunk, so K_MAX * 8 * N bytes in total. At N=8, K_MAX=16: 1024.
+    localparam int RX_BYTES = K_MAX * 8 * N;
+    localparam int RX_CNT_W = $clog2(RX_BYTES);      // == K_W + 3 + LANE_W
+
+    // Last feed beat is (k_dim - 1) + max skew(N-1). Sized for the
     // largest k_dim the hardware can be handed, i.e. K_MAX.
-    localparam int FEED_LAST = K_MAX + 6;
+    localparam int FEED_LAST = K_MAX + N - 2;
     localparam int FEED_W    = $clog2(FEED_LAST + 1);
 
-    // TX is K_MAX-invariant: two accumulator contexts, 256 B each.
-    localparam int TX_BYTES = 512;
+    // TX is K_MAX-invariant: two accumulator contexts, 4*N*N B each.
+    // (由 systolic_tx_source 自行推導;此處僅供文件與總量計算。)
+    localparam int TX_BYTES = 8 * N * N;
 
     // 開啟 CYCLE_COUNTER 時附加 4 bytes 的計數值。
     localparam int TX_TOTAL_BYTES = TX_BYTES + (CYCLE_COUNTER ? 4 : 0);
@@ -118,6 +141,8 @@ module systolic_uart_tile_top #(
             $fatal(1, "K_MAX must be >= 16 (got %0d)", K_MAX);
         if ((K_MAX % 8) != 0)
             $fatal(1, "K_MAX must be a multiple of 8 (got %0d)", K_MAX);
+        if (N < 2 || (N & (N - 1)) != 0)
+            $fatal(1, "N must be a power of two >= 2 (got %0d)", N);
     end
 `endif
 
@@ -276,21 +301,31 @@ module systolic_uart_tile_top #(
      * cycle to match; it is the sole reason the cost is K+119 rather
      * than K+118, and it does not depend on k_dim.
      */
-    logic [K_W-1:0] a_raddr [0:7];
-    logic [K_W-1:0] b_raddr [0:7];
+    logic [K_W-1:0] a_raddr [0:N-1];
+    logic [K_W-1:0] b_raddr [0:N-1];
 
-    wire [31:0] a_rdata [0:7];
-    wire [31:0] b_rdata [0:7];
+    wire [31:0] a_rdata [0:N-1];
+    wire [31:0] b_rdata [0:N-1];
 
     logic [RX_CNT_W-1:0] rx_count;
     logic [1:0]          byte_pos;
     logic [31:0]         word_buf;
 
-    wire [RX_CNT_W-9:0] rx_mat  = rx_count[RX_CNT_W-1:8];
-    wire                rx_is_b = rx_mat[0];
-    wire [K_W-4:0]      rx_win  = rx_mat[RX_CNT_W-9:1];
-    wire [2:0]          rx_row  = rx_count[7:5];
-    wire [2:0]          rx_col  = rx_count[4:2];
+    /*
+     * Chunk layouts inherited from the row-major matrices:
+     *   A chunk = A[row][k]:  word = lane*8 + koff  -> {lane, koff}
+     *   B chunk = B[k][col]:  word = koff*N + lane  -> {koff, lane}
+     * 在 N=8 時 lane 與 koff 同寬,四個欄位退化成 rx_row/rx_col
+     * 兩個 -- 舊版就是這樣寫的。N != 8 時它們必須分開命名。
+     */
+    wire [RX_CNT_W-CHUNK_W-1:0] rx_mat  = rx_count[RX_CNT_W-1:CHUNK_W];
+    wire                        rx_is_b = rx_mat[0];
+    wire [K_W-4:0]              rx_win  = rx_mat[RX_CNT_W-CHUNK_W-1:1];
+
+    wire [LANE_W-1:0] a_lane = rx_count[CHUNK_W-1:5];         // N=8: [7:5]
+    wire [2:0]        a_koff = rx_count[4:2];
+    wire [2:0]        b_koff = rx_count[CHUNK_W-1:CHUNK_W-3]; // N=8: [7:5]
+    wire [LANE_W-1:0] b_lane = rx_count[LANE_W+1:2];          // N=8: [4:2]
 
     /*
      * ============================================================
@@ -407,8 +442,8 @@ module systolic_uart_tile_top #(
      * field selects the bank and which forms the address, and that
      * swap is exactly the A/B transpose:
      *
-     *     A:  bank = rx_row,  addr = {rx_win, rx_col}
-     *     B:  bank = rx_col,  addr = {rx_win, rx_row}
+     *     A:  bank = a_lane,  addr = {rx_win, a_koff}
+     *     B:  bank = b_lane,  addr = {rx_win, b_koff}
      *
      * Written as two instances of one module the transpose is visible
      * on the port map. Written as two generate loops it could only be
@@ -425,19 +460,20 @@ module systolic_uart_tile_top #(
 
     // Absolute k of the word being written. Each k window is exactly
     // 8 deep, so the concatenation is window*8 + offset with no adder.
-    wire [K_W-1:0] a_waddr = {rx_win, rx_col};
-    wire [K_W-1:0] b_waddr = {rx_win, rx_row};
+    wire [K_W-1:0] a_waddr = {rx_win, a_koff};
+    wire [K_W-1:0] b_waddr = {rx_win, b_koff};
 
     /* K_W 必須明確傳下去。漏傳時模組會用自己的 $clog2(K_MAX) 預設,
      * 與這裡相同,所以即使漏傳也不會錯位 —— 但寫出來才看得見契約。 */
     systolic_operand_buffer #(
-        .K_MAX (K_MAX),
-        .K_W   (K_W)
+        .K_MAX   (K_MAX),
+        .K_W     (K_W),
+        .N_BANKS (N)
     ) u_a_buf (
         .clk   (clk),
 
         .wr    (buf_wr && !rx_is_b),
-        .wsel  (rx_row),
+        .wsel  (a_lane),
         .waddr (a_waddr),
         .wdata (buf_wdata),
 
@@ -447,13 +483,14 @@ module systolic_uart_tile_top #(
 
 
     systolic_operand_buffer #(
-        .K_MAX (K_MAX),
-        .K_W   (K_W)
+        .K_MAX   (K_MAX),
+        .K_W     (K_W),
+        .N_BANKS (N)
     ) u_b_buf (
         .clk   (clk),
 
         .wr    (buf_wr && rx_is_b),
-        .wsel  (rx_col),
+        .wsel  (b_lane),
         .waddr (b_waddr),
         .wdata (buf_wdata),
 
@@ -666,18 +703,18 @@ module systolic_uart_tile_top #(
      * Fold-pipelined array interface
      * ============================================================
      */
-    logic [31:0] a_in [0:7];
-    logic [31:0] b_in [0:7];
+    logic [31:0] a_in [0:N-1];
+    logic [31:0] b_in [0:N-1];
 
-    logic a_valid_in [0:7];
-    logic b_valid_in [0:7];
+    logic a_valid_in [0:N-1];
+    logic b_valid_in [0:N-1];
 
-    logic accum_ctx_in_a [0:7];
-    logic accum_ctx_in_b [0:7];
+    logic accum_ctx_in_a [0:N-1];
+    logic accum_ctx_in_b [0:N-1];
 
     logic        c_valid_out;
     logic        c_ctx_out;
-    logic [31:0] c_out [0:7][0:7];
+    logic [31:0] c_out [0:N-1][0:N-1];
 
     /*
      * ============================================================
@@ -737,7 +774,13 @@ module systolic_uart_tile_top #(
 
 
 
-    systolic_array_8x8_tile u_array (
+    /* 直接實例化參數化的 array_tile。舊的 systolic_array_8x8_tile
+     * 薄包裝已不再使用(tb 中的階層路徑 u_array.u_arr.* 需改為
+     * u_array.*)。 */
+    systolic_array_tile #(
+        .N      (N),
+        .DATA_W (32)
+    ) u_array (
         .clk           (clk),
         .rst           (rst_i),
 
@@ -761,8 +804,8 @@ module systolic_uart_tile_top #(
      * Store final results
      * ============================================================
      */
-    logic [31:0] C0 [0:7][0:7];
-    logic [31:0] C1 [0:7][0:7];
+    logic [31:0] C0 [0:N-1][0:N-1];
+    logic [31:0] C1 [0:N-1][0:N-1];
 
     logic c0_done;
     logic c1_done;
@@ -797,8 +840,8 @@ module systolic_uart_tile_top #(
 
                 if (c_ctx_out == 1'b0) begin
 
-                    for (rr = 0; rr < 8; rr = rr + 1)
-                        for (cc = 0; cc < 8; cc = cc + 1)
+                    for (rr = 0; rr < N; rr = rr + 1)
+                        for (cc = 0; cc < N; cc = cc + 1)
                             C0[rr][cc] <= c_out[rr][cc];
 
                     c0_done <= 1'b1;
@@ -806,8 +849,8 @@ module systolic_uart_tile_top #(
                 end
                 else begin
 
-                    for (rr = 0; rr < 8; rr = rr + 1)
-                        for (cc = 0; cc < 8; cc = cc + 1)
+                    for (rr = 0; rr < N; rr = rr + 1)
+                        for (cc = 0; cc < N; cc = cc + 1)
                             C1[rr][cc] <= c_out[rr][cc];
 
                     c1_done <= 1'b1;
@@ -854,10 +897,11 @@ module systolic_uart_tile_top #(
     *
     * Last boundary injection:
     *
-    *   (k_dim - 1) + max skew(7)
-    *   = k_dim + 6
+    *   (k_dim - 1) + max skew(N-1)
+    *   = k_dim + N - 2
     */
     systolic_tile_feeder #(
+        .N      (N),
         .K_W    (K_W),
         .FEED_W ($bits(feed_t)),
         .KDIM_W ($bits(k_dim))
@@ -963,7 +1007,7 @@ module systolic_uart_tile_top #(
 
                 ST_FEED: begin
 
-                    if (feed_t == k_dim + 6) begin
+                    if (feed_t == k_dim + FEED_W'(N - 2)) begin
 
                         state <= ST_WAIT_RESULT;
 
@@ -1133,7 +1177,8 @@ module systolic_uart_tile_top #(
 
     systolic_tx_source #(
         .DEBUG_MARKERS (DEBUG_MARKERS),
-        .CYCLE_COUNTER (CYCLE_COUNTER)
+        .CYCLE_COUNTER (CYCLE_COUNTER),
+        .N             (N)
     ) u_tx_source (
         .clk           (clk),
         .rst           (rst_i),
