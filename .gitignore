@@ -173,3 +173,5 @@ xsim.dir/
 *.jou
 *.wdb
 sweep*.out
+xelab.log
+xelab.pb
