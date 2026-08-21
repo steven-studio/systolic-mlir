@@ -2,7 +2,7 @@
 
 /*
  * ============================================================
- * systolic_operand_buffer -- 八 bank 的運算元緩衝
+ * golden_operand_buffer -- 八 bank 的運算元緩衝
  * ============================================================
  *
  * 自 systolic_uart_tile_top 原樣抽出。原本 A 側與 B 側是兩段
@@ -30,48 +30,41 @@
  * 會講話。
  * ============================================================
  */
-module systolic_operand_buffer #(
+module golden_operand_buffer #(
     parameter int K_MAX = 256,
 
     /* 預設由 K_MAX 導出,呼叫端漏傳也不會兩者脫鉤。
      * 舊版預設寫死 9,而 $clog2(256) 是 8 —— 那個預設本身就是錯的。 */
-    parameter int K_W   = $clog2(K_MAX),
-
-    /* Bank 數 = 陣列邊長 N(每列/每行一個 bank)。這是幾何參數,
-     * 與位址寬度 K_W 無關 -- 上面那段「曾寫成 K_W-1」的事故正是
-     * 把兩者混為一談的後果。預設 8,既有 8x8 呼叫端不需改動。
-     * 注意:fold 深度(8-deep k window)是協定常數,不隨 N_BANKS 變。 */
-    parameter int N_BANKS = 8,
-    parameter int SEL_W   = $clog2(N_BANKS)
+    parameter int K_W   = $clog2(K_MAX)
 )(
     input  wire clk,
 
-    input  wire             wr,      // 寫入脈衝(A/B 判別已在呼叫端折入)
-    input  wire [SEL_W-1:0] wsel,    // 寫哪一個 bank
-    input  wire [K_W-1:0]   waddr,
-    input  wire [31:0]      wdata,
+    input  wire           wr,      // 寫入脈衝(A/B 判別已在呼叫端折入)
+    input  wire [2:0]     wsel,    // 寫哪一個 bank
+    input  wire [K_W-1:0] waddr,
+    input  wire [31:0]    wdata,
 
-    input  wire  [K_W-1:0] raddr [0:N_BANKS-1],
-    output wire  [31:0]    rdata [0:N_BANKS-1]
+    input  wire  [K_W-1:0] raddr [0:7],
+    output wire  [31:0]    rdata [0:7]
 );
 
     genvar gi;
 
     generate
 
-        /* Bank 數是幾何常數 N_BANKS:陣列一邊有 N 列 / N 行,與位址
-         * 寬度無關。這裡曾經寫成 K_W-1,只在 K_W == 9 時碰巧等於 8;
+        /* Bank 數是幾何常數 8:陣列一邊有 8 列 / 8 行,與位址寬度
+         * 無關。這裡曾經寫成 K_W-1,只在 K_W == 9 時碰巧等於 8;
          * 頂層傳進來的是 $clog2(K_MAX),K_MAX=256 得 8、K_MAX=16 得 4,
          * 於是只生出 7 個或 3 個 bank。缺的 bank 其 rdata 未驅動,
          * 合成後接地,對應的列/行永遠讀回 0。 */
-        for (gi = 0; gi < N_BANKS; gi = gi + 1) begin : BANK
+        for (gi = 0; gi < 8; gi = gi + 1) begin : BANK
 
             (* ram_style = "block" *)
             logic [31:0] mem [0:K_MAX-1];
             logic [31:0] rdata_q;
 
             always_ff @(posedge clk) begin
-                if (wr && wsel == SEL_W'(unsigned'(gi)))
+                if (wr && wsel == 3'(unsigned'(gi)))
                     mem[waddr] <= wdata;
 
                 /* 同步讀:位址第 t 拍發出,資料第 t+1 拍有效。

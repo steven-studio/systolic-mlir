@@ -38,9 +38,33 @@ if {![file exists $BIT]} {
     error "missing bitstream: $BIT"
 }
 
+# 燒錄前把 bitstream 的身分講清楚:多舊、當時時序有沒有收斂。
+# 「燒了一顆舊的/壞的 .bit」與「新設計壞掉」在板上無法區分,
+# 只能在這裡擋。
+set SUM "build_kmax/k${KMAX}/summary.csv"
+if {[file exists $SUM]} {
+    set fh [open $SUM r]; set lines [split [read $fh] "\n"]; close $fh
+    set row [lindex $lines 1]
+    if {[llength [split $row ","]] >= 9} {
+        set tmet [lindex [split $row ","] 8]
+        set wns  [lindex [split $row ","] 5]
+        if {$tmet != 1} {
+            error "summary.csv 記錄此 K_MAX 時序未收斂 (WNS=$wns)。路徑上的 .bit 是更早一輪的殘留,拒絕燒錄。重跑 build_kmax.tcl。"
+        }
+        puts " summary : WNS=$wns ns, timing_met=$tmet"
+    }
+}
+
+set age_s [expr {[clock seconds] - [file mtime $BIT]}]
 puts "========================================"
 puts " Programming K_MAX = $KMAX"
 puts "   $BIT"
+puts "   built [clock format [file mtime $BIT] -format {%Y-%m-%d %H:%M:%S}]  ([expr {$age_s / 60}] 分鐘前)"
+if {$age_s > 6*3600} {
+    puts ""
+    puts " *** 警告:這顆 bitstream 超過 6 小時。確定是這次建出來的?"
+    puts " *** build_kmax.tcl 在時序未收斂時不會覆寫 .bit。"
+}
 puts "========================================"
 
 open_hw_manager
@@ -74,14 +98,19 @@ refresh_hw_device $dev
 
 puts "========================================"
 puts " PROGRAMMED K_MAX = $KMAX"
-puts ""
-puts " Wire format for this build:"
-puts "   RX  [expr {$KMAX * 64}] bytes   (A,B interleaved, [expr {$KMAX / 8}] windows of 8)"
-puts "   TX  512 bytes    (C_ctx0 then C_ctx1; host adds them)"
-puts ""
-puts " NOW PRESS BTNC (reset) before sending anything."
-puts ""
-puts " Then:  python3 test_uart_kmax.py --kmax $KMAX"
+if {[string is integer -strict $KMAX]} {
+    puts ""
+    puts " Wire format for this build:"
+    puts "   RX  [expr {$KMAX * 64}] bytes   (A,B interleaved, [expr {$KMAX / 8}] windows of 8)"
+    puts "   TX  512 bytes    (C_ctx0 then C_ctx1; host adds them)"
+    puts ""
+    puts " Then:  python3 test_uart_kmax.py --kmax $KMAX"
+} else {
+    # 非數字的 KMAX(echo、16_dbg 等)是診斷 bitstream。
+    puts ""
+    puts " Diagnostic bitstream. echo: picocom -b 115200 <port>,"
+    puts " 'U' 每 ~1.3 s 一次,打 a 回 A。"
+}
 puts "========================================"
 
 close_hw_manager

@@ -26,7 +26,7 @@
 # K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
-    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\]"
+    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\] \[N\]"
 }
 
 set KMAX [lindex $argv 0]
@@ -50,6 +50,10 @@ set DBG [expr {$argc >= 2 ? [lindex $argv 1] : 0}]
 # placement。輸出目錄與 bit 名會帶 directive 後綴,不互相覆蓋。
 set PDIR [expr {$argc >= 3 ? [lindex $argv 2] : "Default"}]
 
+# 第四個參數 = 陣列邊長 N(預設 8)。N=4 輸出到 k<K>_n4,與 8x8 的
+# 產物互不覆蓋。N 必須是 2 的冪(RTL elaboration 會再驗一次)。
+set NARR [expr {$argc >= 4 ? [lindex $argv 3] : 8}]
+
 # The RTL requires K_MAX >= 16 and a multiple of 8. It has an elaboration
 # assertion for both, but failing here is cheaper than failing in synth.
 if {$KMAX < 16 || ($KMAX % 8) != 0} {
@@ -63,6 +67,7 @@ set CLK_PERIOD  10.000
 set BITTAG $KMAX
 if {$DBG} { append BITTAG "_dbg" }
 if {$PDIR ne "Default"} { append BITTAG "_[string tolower $PDIR]" }
+if {$NARR != 8} { append BITTAG "_n$NARR" }
 set OUT "build_kmax/k${BITTAG}"
 
 file mkdir $OUT
@@ -77,6 +82,7 @@ file delete -force $OUT/${TOP}_k${BITTAG}.bit
 puts "========================================"
 puts " k_max sweep point"
 puts "   K_MAX = $KMAX"
+puts "   N     = $NARR"
 puts "   out   = $OUT"
 puts "========================================"
 
@@ -112,6 +118,7 @@ read_xdc nexys_video_uart.xdc
 # ---------------------------------------------------------------------
 synth_design -top $TOP -part $PART \
     -generic K_MAX=$KMAX \
+    -generic N=$NARR \
     -generic DEBUG_MARKERS=$DBG \
     -generic CYCLE_COUNTER=1
 

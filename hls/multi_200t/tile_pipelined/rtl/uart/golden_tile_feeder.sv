@@ -2,7 +2,7 @@
 
 /*
  * ============================================================
- * systolic_tile_feeder
+ * golden_tile_feeder
  * ============================================================
  *
  * 自 systolic_uart_tile_top 原樣抽出的餵料邏輯。演算法、時序、
@@ -23,15 +23,10 @@
  * 位址由絕對 k 決定,fold 編號只用來挑 accumulator context ——
  * 這個分工是 fold 設計的核心,搬移過程中未更動。
  *
- * Last boundary injection: (k_dim - 1) + max skew(N-1) = k_dim + N - 2
+ * Last boundary injection: (k_dim - 1) + max skew(7) = k_dim + 6
  * ============================================================
  */
-module systolic_tile_feeder #(
-    /* 陣列邊長。skew 上限 = N-1,運算元埠各 N 路。
-     * fold 深度(ctx 每 8 個 k 切換一次)是協定常數,與 N 無關 --
-     * 見 systolic_array_tile 的註解:context 在邊界已算好才進來。 */
-    parameter int N      = 8,
-
+module golden_tile_feeder #(
     parameter int K_W    = 9,
     parameter int FEED_W = 16,
     parameter int KDIM_W = 32
@@ -43,19 +38,19 @@ module systolic_tile_feeder #(
     input  wire [FEED_W-1:0] feed_t,
     input  wire [KDIM_W-1:0] k_dim,
 
-    input  wire [31:0] a_rdata [0:N-1],
-    input  wire [31:0] b_rdata [0:N-1],
+    input  wire [31:0] a_rdata [0:7],
+    input  wire [31:0] b_rdata [0:7],
 
-    output logic [K_W-1:0] a_raddr [0:N-1],
-    output logic [K_W-1:0] b_raddr [0:N-1],
+    output logic [K_W-1:0] a_raddr [0:7],
+    output logic [K_W-1:0] b_raddr [0:7],
 
-    output logic [31:0] a_in [0:N-1],
-    output logic [31:0] b_in [0:N-1],
+    output logic [31:0] a_in [0:7],
+    output logic [31:0] b_in [0:7],
 
-    output logic a_valid_in     [0:N-1],
-    output logic b_valid_in     [0:N-1],
-    output logic accum_ctx_in_a [0:N-1],
-    output logic accum_ctx_in_b [0:N-1]
+    output logic a_valid_in     [0:7],
+    output logic b_valid_in     [0:7],
+    output logic accum_ctx_in_a [0:7],
+    output logic accum_ctx_in_b [0:7]
 );
 
     /* 同步讀之後,valid 與 accumulator context 必須與資料一起延後一拍。
@@ -63,14 +58,14 @@ module systolic_tile_feeder #(
      *
      * 這一級是無條件更新的,因此 enable 最後一拍算出的 valid 會在下一拍
      * 送進陣列,剛好補上最後一筆運算元。呼叫端的 FSM 不需要任何改動。 */
-    logic a_valid_c     [0:N-1];
-    logic b_valid_c     [0:N-1];
-    logic accum_ctx_a_c [0:N-1];
-    logic accum_ctx_b_c [0:N-1];
+    logic a_valid_c     [0:7];
+    logic b_valid_c     [0:7];
+    logic accum_ctx_a_c [0:7];
+    logic accum_ctx_b_c [0:7];
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            for (int i = 0; i < N; i++) begin
+            for (int i = 0; i < 8; i++) begin
                 a_valid_in[i]     <= 1'b0;
                 b_valid_in[i]     <= 1'b0;
                 accum_ctx_in_a[i] <= 1'b0;
@@ -78,7 +73,7 @@ module systolic_tile_feeder #(
             end
         end
         else begin
-            for (int i = 0; i < N; i++) begin
+            for (int i = 0; i < 8; i++) begin
                 a_valid_in[i]     <= a_valid_c[i];
                 b_valid_in[i]     <= b_valid_c[i];
                 accum_ctx_in_a[i] <= accum_ctx_a_c[i];
@@ -89,7 +84,7 @@ module systolic_tile_feeder #(
 
     always_comb begin
 
-        for (int i = 0; i < N; i++) begin
+        for (int i = 0; i < 8; i++) begin
 
             a_raddr[i]       = '0;
             b_raddr[i]       = '0;
@@ -114,7 +109,7 @@ module systolic_tile_feeder #(
             /*
              * A-side skew
              */
-            for (int r = 0; r < N; r++) begin
+            for (int r = 0; r < 8; r++) begin
 
                 integer gk_a;
                 integer fold_a;
@@ -143,7 +138,7 @@ module systolic_tile_feeder #(
             /*
              * B-side skew
              */
-            for (int c = 0; c < N; c++) begin
+            for (int c = 0; c < 8; c++) begin
 
                 integer gk_b;
                 integer fold_b;
