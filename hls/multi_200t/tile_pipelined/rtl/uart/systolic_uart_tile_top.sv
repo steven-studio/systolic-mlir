@@ -24,7 +24,7 @@ module systolic_uart_tile_top #(
      *
      * K_MAX must be a multiple of 8 and at least 16.
      *
-     * Everything scaling with K_MAX lives in this module: the 64
+     * Everything scaling with K_MAX lives in this module: the N*N
      * PEs, both FP IP cores and the entire reduction path are
      * K_MAX-invariant.
      * ============================================================
@@ -55,18 +55,19 @@ module systolic_uart_tile_top #(
      *
      * The breadcrumb markers (see below) were unconditional, and
      * they take priority over the result stream in TX_IDLE. That
-     * puts up to five extra bytes ahead of the 512 result bytes,
-     * so a host reading exactly 512 bytes -- which is what
-     * test_uart_fold8x8.py does -- receives
+     * puts up to five extra bytes ahead of the 8*N*N result bytes,
+     * so a host reading exactly that many -- which is what
+     * test_uart_kmax.py does -- receives
      *
-     *     5 marker bytes + the first 507 result bytes
+     *     5 marker bytes + the first (8*N*N - 5) result bytes
      *
      * and every float it decodes is shifted by five bytes.
      *
      * The markers are a bring-up aid, not part of the protocol, so
      * they now default OFF and the wire format is exactly
      *
-     *     RX 1024 bytes  ->  TX 512 bytes
+     *     RX K_MAX*8*N bytes  ->  TX 8*N*N bytes
+     *     (N=8, K_MAX=16 的實例:RX 1024 -> TX 512)
      *
      * Set DEBUG_MARKERS = 1 to get them back for debugging, and
      * remember that a host must then consume them explicitly.
@@ -86,12 +87,12 @@ module systolic_uart_tile_top #(
      * 第一個 feed beat 到 ctx1 published，兩端皆含。這樣「模擬預測
      * 118，實機量到 118」才是逐一對應而非概略吻合。
      *
-     * 四個 byte 接在 512 result bytes 之後（小端序，與協定中 K 的
+     * 四個 byte 接在 8*N*N 個 result bytes 之後（小端序，與協定中 K 的
      * 慣例相同），不是插在前面 -- DEBUG_MARKERS 的教訓是前置位元組
      * 會讓只讀 512 的 host 每個 float 都偏移。
      *
-     * 預設關閉，wire format 維持 RX K_MAX*64 -> TX 512。
-     * 開啟時 host 必須改讀 516 bytes。
+     * 預設關閉，wire format 維持 RX K_MAX*8*N -> TX 8*N*N。
+     * 開啟時 host 必須多讀 4 bytes（N=8 時 512 -> 516）。
      * ============================================================
      */
     parameter bit CYCLE_COUNTER = 1'b0
@@ -209,7 +210,7 @@ module systolic_uart_tile_top #(
 
     /*
      * DEBUG:
-     * Once all 1024 input bytes have been received,
+     * Once the whole RX_BYTES payload has been received,
      * send one 0xA1 marker through UART.
      */
     /*
@@ -257,17 +258,21 @@ module systolic_uart_tile_top #(
      * ============================================================
      * Input matrices
      *
-     * Matrices arrive interleaved, 256 bytes each, one (A,B) pair
-     * per 8-deep k window:
+     * Matrices arrive interleaved, 32*N bytes per chunk, one (A,B)
+     * pair per 8-deep k window:
      *
      *   A[k 0..7] B[k 0..7] A[k 8..15] B[k 8..15] ...
      *
-     * At K_MAX = 16 this is byte-for-byte the original layout:
+     * At N = 8, K_MAX = 16 this is byte-for-byte the original layout
+     * (chunk = 256 B):
      *
      *   bytes    0..255  = A0
      *   bytes  256..511  = B0
      *   bytes  512..767  = A1
      *   bytes  768..1023 = B1
+     *
+     * 以下的位元切片以 N=8 為例;一般情形見下方 a_lane/a_koff/
+     * b_koff/b_lane 四個 wire 的定義,它們才是權威。
      *
      * STORAGE IS INDEXED BY ABSOLUTE k, not by fold. A_buf is
      * [row][k] and B_buf is [k][col], both k = 0..K_MAX-1, so the
@@ -276,20 +281,20 @@ module systolic_uart_tile_top #(
      *
      * The byte counter decomposes with no arithmetic:
      *
-     *   rx_count[RX_CNT_W-1:8] = matrix index
-     *      matrix[0]           = 0 -> A, 1 -> B
-     *      matrix >> 1         = k window
-     *   rx_count[7:5]          = row
-     *   rx_count[4:2]          = col
-     *   rx_count[1:0]          = byte within word
+     *   rx_count[RX_CNT_W-1:CHUNK_W] = matrix index
+     *      matrix[0]                 = 0 -> A, 1 -> B
+     *      matrix >> 1               = k window
+     *   rx_count[7:5]                = row      (N=8)
+     *   rx_count[4:2]                = col      (N=8)
+     *   rx_count[1:0]                = byte within word
      *
      * and absolute k is {window, col} for A, {window, row} for B,
      * since each window is exactly 8 deep.
      * ============================================================
      */
     /*
-     * Held as sixteen small memories rather than one 2-D register
-     * array: eight for A indexed by row, eight for B indexed by
+     * Held as 2*N small memories rather than one 2-D register
+     * array: N for A indexed by row, N for B indexed by
      * column. Both groups are now instances of
      * systolic_operand_buffer, further down -- after the RX control
      * signals they depend on exist.
@@ -311,8 +316,9 @@ module systolic_uart_tile_top #(
      * The read is SYNCHRONOUS: block RAM has no asynchronous read
      * port, so the address issued on beat t returns data on t+1. The
      * feeder already delays valid and accumulator context by that one
-     * cycle to match; it is the sole reason the cost is K+119 rather
-     * than K+118, and it does not depend on k_dim.
+     * cycle to match; it is the sole reason the cost is
+     * k + 2(N-1) + 105 rather than one cycle less, and it does not
+     * depend on k_dim. (N=8 -> k+119, N=4 -> k+111,兩點皆實測。)
      */
     logic [K_W-1:0] a_raddr [0:N-1];
     logic [K_W-1:0] b_raddr [0:N-1];
@@ -731,59 +737,28 @@ module systolic_uart_tile_top #(
 
     /*
      * ============================================================
-     * Accelerator latency measurement
+     * 已移除:第二個週期計數器 (accel_cycles / last_accel_cycles)
+     * ============================================================
      *
-     * Count from matrices_ready until ctx1 result is valid.
+     * 這裡原本有一組從 matrices_ready 數到 ctx1 的計數器,與下方
+     * cyc_count / cyc_latched 平行存在。它從來沒有讀者 --
+     * last_accel_cycles 不進 TX、不出埠、不被任何 tb 引用,所以
+     * 綜合一直把它整塊剝掉,資源數字裡沒有它。
+     *
+     * 刪掉的理由不是省資源,是它定義了「一筆交易」的第二種、起點
+     * 不同的說法:
+     *
+     *   accel_cycles  起點 matrices_ready  (含 RX 尾端到 FEED 的空檔)
+     *   cyc_count     起點 feed_t == 0     (與 tb 的 total_cycles 一致)
+     *
+     * 論文 3.2 的殘差 0(1072/600/364/246)與 3.5 的 k+119 / k+111
+     * 全部來自 cyc_latched。留著另一個起點不同的計數器,只會讓讀者
+     * 無法確定那些數字是哪一個量的。
+     *
+     * 唯一的計數來源是 cyc_latched,見下方 "Transaction cycle
+     * counter"。
      * ============================================================
      */
-    logic [31:0] accel_cycles;
-    logic [31:0] last_accel_cycles;
-    logic        accel_counting;
-
-
-    always_ff @(posedge clk) begin
-
-        if (rst_i) begin
-
-            accel_cycles      <= 32'd0;
-            last_accel_cycles <= 32'd0;
-            accel_counting    <= 1'b0;
-
-        end
-        else begin
-
-            /*
-             * Complete 1024-byte request has arrived.
-             */
-            if (matrices_ready) begin
-
-                accel_cycles   <= 32'd0;
-                accel_counting <= 1'b1;
-
-            end
-            else if (accel_counting) begin
-
-                accel_cycles <= accel_cycles + 1'b1;
-
-            end
-
-            /*
-             * ctx1 is the final result context.
-             */
-            if (
-                accel_counting &&
-                c_valid_out &&
-                c_ctx_out == 1'b1
-            ) begin
-
-                last_accel_cycles <= accel_cycles + 1'b1;
-                accel_counting    <= 1'b0;
-
-            end
-
-        end
-
-    end
 
 
 
@@ -881,11 +856,22 @@ module systolic_uart_tile_top #(
      * Main state machine
      * ============================================================
      */
+    /* 數值顯式寫出。這組編碼被 systolic_status.sv 以 localparam
+     * 複製了一份(S_IDLE/S_FEED/S_WAIT/S_SEND)用於 LED one-hot
+     * 解碼,兩邊必須一致。
+     *
+     * 隱含編碼的危險在於:在中間插入一個狀態會讓後面所有值往後移
+     * 一格,RTL 完全正常、綜合不報錯、板子照跑 -- 只有 LED 開始
+     * 說謊。那比沒有 LED 更糟,因為觀測工具背叛了觀測者。
+     *
+     * 改動這組數值時,systolic_status.sv 要一起改。該模組有一個
+     * $error 防呆會在 state > S_SEND 時吵出來,但編碼「位移」而非
+     * 「越界」時它抓不到 -- 所以最終仍然靠這段註解。 */
     typedef enum logic [2:0] {
-        ST_IDLE,
-        ST_FEED,
-        ST_WAIT_RESULT,
-        ST_SEND
+        ST_IDLE        = 3'd0,
+        ST_FEED        = 3'd1,
+        ST_WAIT_RESULT = 3'd2,
+        ST_SEND        = 3'd3
     } state_t;
 
     state_t state;
@@ -1172,8 +1158,9 @@ module systolic_uart_tile_top #(
      * byte 序列與舊 FSM 完全相同(tb_tx_equiv 以逐字複製的舊邏輯
      * 為 golden,逐 byte 比對證明);wire format 不變:
      *
-     *   bytes   0..255 = C0
-     *   bytes 256..511 = C1
+     *   前 4*N*N bytes = C0
+     *   後 4*N*N bytes = C1
+     *   (N=8:0..255 = C0,256..511 = C1)
      *   (+4 bytes cycle counter,見 CYCLE_COUNTER)
      *
      * breadcrumb 的「捕捉」(debug_pending,上方)留在 top,因為它
