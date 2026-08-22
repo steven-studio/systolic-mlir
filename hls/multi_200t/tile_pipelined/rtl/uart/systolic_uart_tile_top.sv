@@ -100,7 +100,20 @@ module systolic_uart_tile_top #(
     input  logic rst,
 
     input  logic uart_rx,
-    output logic uart_tx
+    output logic uart_tx,
+
+    /*
+     * 板上狀態顯示。由 systolic_status 驅動 -- 那個模組只讀訊號、
+     * 不寫回設計的任何一條線,所以這兩組埠的加入對既有行為的影響
+     * 在結構上為零。
+     *
+     *   led    板上 LD0..LD7
+     *   jb_led 外接 Pmod JB pin 4 / pin 10(裝在看得見的地方)
+     *
+     * 配置與判讀見 systolic_status.sv 的檔頭。
+     */
+    output logic [7:0] led,
+    output logic [1:0] jb_led
 );
 
     /*
@@ -1209,6 +1222,35 @@ module systolic_uart_tile_top #(
         .tx_start (tx_start),
         .tx_data  (tx_byte),
         .tx_busy  (tx_busy)
+    );
+
+
+    /*
+     * ============================================================
+     * 板上狀態顯示
+     * ============================================================
+     *
+     * 純觀測:所有連接都是這個模組的 input,它不驅動設計裡的任何
+     * 訊號。這是刻意的紀律 -- 觀測工具不該有能力改變被觀測的對象。
+     *
+     * 與 DEBUG_MARKERS 的分工:
+     *   DEBUG_MARKERS  一次性、經 UART、會改 wire format 與 placement
+     *   LED            連續、獨立通道、協定與時序都不受影響
+     * 兩者可以並存;日常用 LED,需要精確的事件順序時才開 markers。
+     * ============================================================
+     */
+    systolic_status u_status (
+        .clk            (clk),
+        .rst            (rst_i),
+
+        .frame_accepted (matrices_ready),
+        .rx_active      (rx_state != RX_HUNT),
+        .state          (state),
+        .c0_done        (c0_done),
+        .c1_done        (c1_done),
+
+        .led            (led),
+        .jb_led         (jb_led)
     );
 
 endmodule

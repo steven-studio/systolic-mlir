@@ -97,6 +97,7 @@ read_verilog -sv systolic_array_tile.sv
 read_verilog -sv systolic_array_8x8_tile.sv
 read_verilog -sv systolic_tile_feeder.sv
 read_verilog -sv systolic_operand_buffer.sv
+read_verilog -sv systolic_status.sv
 read_verilog -sv systolic_tx_source.sv
 read_verilog -sv uart_tx_streamer.sv
 read_verilog -sv systolic_uart_tile_top.sv
