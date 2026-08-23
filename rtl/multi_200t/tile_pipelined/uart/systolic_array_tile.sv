@@ -1,18 +1,48 @@
+/*
+ * ============================================================
+ * systolic_array_tile -- N x N 的 PE 陣列
+ * ============================================================
+ *
+ * a 從左邊推進去,b 從上面推進去,在 N x N 個 PE 裡交會相乘累加。
+ * 每一格都算完之後,把整片 N x N 的結果發佈出去。
+ *
+ *        b_in[0] b_in[1] ...
+ *           │       │
+ *           ▼       ▼
+ * a_in[0]─►PE(0,0)─►PE(0,1)─► ...
+ *           │       │
+ *           ▼       ▼
+ * a_in[1]─►PE(1,0)─►PE(1,1)─► ...
+ *           │       │
+ *           ▼       ▼
+ *
+ *
+ * 這一版拿掉了什麼
+ * ----------------
+ *   兩組 accum_ctx 輸入埠、c_ctx_out 輸出埠
+ *   兩條 ctx 匯流排與每個 PE 的 ctx 接線
+ *   第二份結果矩陣、輸出選擇的 always_comb
+ *   四個輸出狀態變兩個
+ *
+ * 對外唯一的協定改變:一次交易發佈一片矩陣,不是兩片。
+ * TX 因此從 8*N*N bytes 變成 4*N*N bytes。
+ *
+ *
+ * 編譯器抓不到的一件事
+ * --------------------
+ * 舊 PE 的 result_valid 持續拉高到下一次交易;
+ * 新 PE 的 acc_valid_out 是一拍脈衝。
+ *
+ * 這是語意改變,不是接線改變。下面 (A)(B) 兩段是它的後果。
+ * ============================================================
+ */
+
 module systolic_array_tile #(
     /*
-     * Array edge length. The array is square: N rows by N columns,
-     * N*N processing elements.
+     * 陣列邊長。陣列是正方形:N 列 x N 行,共 N*N 個 PE。
      *
-     * This used to be the literal 8, duplicated into a second file
-     * for the 4x4 case. That copy stopped compiling somewhere around
-     * the time the PE gained result_ctx0/result_ctx1 -- it was still
-     * connecting dbg_acc_ctx0/dbg_acc_ctx1, ports the PE no longer
-     * has. Two files that must be edited together will eventually
-     * not be, so there is now one.
-     *
-     * Nothing here depends on the fold decomposition. The fold
-     * context arrives at the boundary already computed, so N is
-     * independent of the 8-deep k window the host uses.
+     * host 送幾個 k、怎麼切,對這個檔案完全不可見 —— 它只看到
+     * 運算元一拍一拍流進來,以及每個 PE 說「我算完了」。
      */
     parameter int N = 8,
 
@@ -21,24 +51,25 @@ module systolic_array_tile #(
     input  logic clk,
     input  logic rst,
 
+    /* 左邊界(a)與上邊界(b)的運算元 */
     input  logic [DATA_W-1:0] a_in [0:N-1],
     input  logic [DATA_W-1:0] b_in [0:N-1],
 
     input  logic a_valid_in [0:N-1],
     input  logic b_valid_in [0:N-1],
 
-    input  logic accum_ctx_in_a [0:N-1],
-    input  logic accum_ctx_in_b [0:N-1],
-
+    /* 整片結果。c_valid_out 是一拍脈衝 */
     output logic              c_valid_out,
-    output logic              c_ctx_out,
     output logic [DATA_W-1:0] c_out [0:N-1][0:N-1]
 );
 
 
     /*
      * ============================================================
-     * Systolic operand buses
+     * 運算元匯流排
+     *
+     * a 往右走,所以行的索引多一格(0..N);b 往下走,列多一格。
+     * 多出來的那一格是陣列右邊 / 下面的出口,沒有人接。
      * ============================================================
      */
 
@@ -49,171 +80,61 @@ module systolic_array_tile #(
     logic b_valid_bus [0:N][0:N-1];
 
 
-    /*
-     * ============================================================
-     * Fold-context buses
-     * ============================================================
-     */
+    /* 每個 PE 的最終結果。一格一個純量,沒有 context。 */
+    logic [DATA_W-1:0] pe_acc       [0:N-1][0:N-1];
+    logic              pe_acc_valid [0:N-1][0:N-1];
 
-    logic accum_ctx_a_bus [0:N-1][0:N];
-    logic accum_ctx_b_bus [0:N][0:N-1];
-
-
-    /*
-     * ============================================================
-     * Final scalar result from every PE
-     *
-     * Each PE owns its accumulator implementation internally.
-     * The array only sees one scalar result per fold/context.
-     * ============================================================
-     */
-
-    logic [DATA_W-1:0]
-        pe_result_ctx0 [0:N-1][0:N-1];
-
-    logic [DATA_W-1:0]
-        pe_result_ctx1 [0:N-1][0:N-1];
-
-    logic
-        pe_result_valid [0:N-1][0:N-1];
 
 
     genvar r;
     genvar c;
 
 
-    /*
-     * ============================================================
-     * Array boundaries
-     * ============================================================
-     */
+    /* ---------- 邊界:輸入接到第 0 行 / 第 0 列 ---------- */
 
     generate
 
         for (r = 0; r < N; r = r + 1) begin : INIT_A
-
-            assign a_bus[r][0] =
-                a_in[r];
-
-            assign a_valid_bus[r][0] =
-                a_valid_in[r];
-
-            assign accum_ctx_a_bus[r][0] =
-                accum_ctx_in_a[r];
-
+            assign a_bus[r][0]       = a_in[r];
+            assign a_valid_bus[r][0] = a_valid_in[r];
         end
 
-
         for (c = 0; c < N; c = c + 1) begin : INIT_B
-
-            assign b_bus[0][c] =
-                b_in[c];
-
-            assign b_valid_bus[0][c] =
-                b_valid_in[c];
-
-            assign accum_ctx_b_bus[0][c] =
-                accum_ctx_in_b[c];
-
+            assign b_bus[0][c]       = b_in[c];
+            assign b_valid_bus[0][c] = b_valid_in[c];
         end
 
     endgenerate
 
 
-    /*
-     * ============================================================
-     * N x N systolic array
-     * ============================================================
-     */
+    /* ---------- N x N 陣列本體 ---------- */
 
     generate
 
         for (r = 0; r < N; r = r + 1) begin : ROW
-
             for (c = 0; c < N; c = c + 1) begin : COL
 
-                /*
-                 * Matching A/B operands are expected to carry the
-                 * same fold context when they meet at this PE.
-                 *
-                 * Current PE interface carries one fold context,
-                 * therefore the A-side registered context is used.
-                 */
-                logic pe_accum_ctx;
+                systolic_pe_tile #(
+                    .DATA_W (DATA_W)
+                ) u_pe (
+                    .clk           (clk),
+                    .rst           (rst),
 
-                assign pe_accum_ctx =
-                    accum_ctx_a_bus[r][c];
+                    .a_valid_in    (a_valid_bus[r][c]),
+                    .b_valid_in    (b_valid_bus[r][c]),
+                    .a_in          (a_bus[r][c]),
+                    .b_in          (b_bus[r][c]),
 
+                    .a_valid_out   (a_valid_bus[r][c+1]),
+                    .b_valid_out   (b_valid_bus[r+1][c]),
+                    .a_out         (a_bus[r][c+1]),
+                    .b_out         (b_bus[r+1][c]),
 
-                systolic_pe_tile u_pe (
-                    .clk          (clk),
-                    .rst          (rst),
-
-                    .a_valid_in   (
-                        a_valid_bus[r][c]
-                    ),
-
-                    .b_valid_in   (
-                        b_valid_bus[r][c]
-                    ),
-
-                    .accum_ctx_in  (
-                        pe_accum_ctx
-                    ),
-
-                    .a_in         (
-                        a_bus[r][c]
-                    ),
-
-                    .b_in         (
-                        b_bus[r][c]
-                    ),
-
-                    .a_valid_out  (
-                        a_valid_bus[r][c+1]
-                    ),
-
-                    .b_valid_out  (
-                        b_valid_bus[r+1][c]
-                    ),
-
-                    .accum_ctx_out (
-                        accum_ctx_a_bus[r][c+1]
-                    ),
-
-                    .a_out        (
-                        a_bus[r][c+1]
-                    ),
-
-                    .b_out        (
-                        b_bus[r+1][c]
-                    ),
-
-                    .result_ctx0  (
-                        pe_result_ctx0[r][c]
-                    ),
-
-                    .result_ctx1  (
-                        pe_result_ctx1[r][c]
-                    ),
-
-                    .result_valid (
-                        pe_result_valid[r][c]
-                    )
+                    .acc_valid_out (pe_acc_valid[r][c]),
+                    .acc_out       (pe_acc[r][c])
                 );
 
-
-                /*
-                 * Current PE has one fold-context output.
-                 *
-                 * Mirror the registered context downward so the
-                 * B-side context follows the same systolic delay.
-                 */
-                assign accum_ctx_b_bus[r+1][c] =
-                    accum_ctx_a_bus[r][c+1];
-
             end
-
         end
 
     endgenerate
@@ -221,242 +142,122 @@ module systolic_array_tile #(
 
     /*
      * ============================================================
-     * Wait until every PE has finalized its result
+     * (A) 逐格的「已抵達」旗標
+     *
+     * acc_valid_out 是一拍脈衝,一定要鎖存 —— 錯過那一拍就再也
+     * 讀不到了。舊版 result_valid 持續拉高,那時候這個旗標只是
+     * 方便,現在它是必要的。
+     *
+     * 優先權:脈衝 > 清除。
+     *   脈衝只有一拍,錯過就沒了;清除隨時可以再做。
+     *   如果清除贏,而某個 PE 剛好同拍完成,那一格的結果會
+     *   靜靜地掉,而且不會有任何錯誤訊息。
      * ============================================================
      */
 
-    logic all_results_valid;
-    logic result_seen [0:N-1][0:N-1];
-    logic clear_result_seen;
+    logic acc_arrived [0:N-1][0:N-1];
+    logic clear_arrived;
 
     always_ff @(posedge clk) begin
-
-        if (rst) begin
-
-            for (int rr = 0; rr < N; rr = rr + 1)
-                for (int cc = 0; cc < N; cc = cc + 1)
-                    result_seen[rr][cc] <= 1'b0;
-
+        for (int rr = 0; rr < N; rr = rr + 1) begin
+            for (int cc = 0; cc < N; cc = cc + 1) begin
+                if (rst)                       acc_arrived[rr][cc] <= 1'b0;
+                else if (pe_acc_valid[rr][cc]) acc_arrived[rr][cc] <= 1'b1;
+                else if (clear_arrived)        acc_arrived[rr][cc] <= 1'b0;
+            end
         end
-        else if (clear_result_seen) begin
-
-            /*
-             * Previous matrix transaction has been published.
-             * Rearm completion tracking for the next transaction.
-             */
-            for (int rr = 0; rr < N; rr = rr + 1)
-                for (int cc = 0; cc < N; cc = cc + 1)
-                    result_seen[rr][cc] <= 1'b0;
-
-        end
-        else begin
-
-            for (int rr = 0; rr < N; rr = rr + 1)
-                for (int cc = 0; cc < N; cc = cc + 1)
-                    if (pe_result_valid[rr][cc])
-                        result_seen[rr][cc] <= 1'b1;
-
-        end
-
     end
 
+
+    /* 每一格都到齊了嗎 */
+    logic all_arrived;
+
     always_comb begin
-
-        all_results_valid = 1'b1;
-
+        all_arrived = 1'b1;
         for (int rr = 0; rr < N; rr = rr + 1)
             for (int cc = 0; cc < N; cc = cc + 1)
-                all_results_valid =
-                    all_results_valid &&
-                    result_seen[rr][cc];
-
+                all_arrived = all_arrived && acc_arrived[rr][cc];
     end
 
 
     /*
      * ============================================================
-     * Output matrix selection
+     * 結果矩陣
      *
-     * c_ctx_out = 0 -> PE context 0 results
-     * c_ctx_out = 1 -> PE context 1 results
+     * 直接接 PE 的 acc_out,不另外抄一份暫存器。
+     *
+     * PE 的 acc_out 只在它自己的 PE_DONE 那一拍更新,之後一直
+     * 抱著 —— 也就是 PE 已經鎖存過了。陣列再抄一份是重複付錢
+     * (N*N*DATA_W 個 FF,N=8 時 2048 個)。
+     *
+     * 這是一條跨模組的約定,編譯器不檢查,所以 tb_array_pulse
+     * 有一項專門驗它:脈衝過後晾著,c_out 不能變。
+     *
+     * 交易進行中 c_out 會隨各格陸續完成而逐格變動(每個 PE 完成
+     * 的時間差了 r+c 拍)。只有 c_valid_out 拉高那一拍,整片才
+     * 保證是對的。
      * ============================================================
      */
 
-    always_comb begin
-
-        for (int rr = 0; rr < N; rr = rr + 1) begin
-
-            for (int cc = 0; cc < N; cc = cc + 1) begin
-
-                if (c_ctx_out == 1'b0)
-                    c_out[rr][cc] =
-                        pe_result_ctx0[rr][cc];
-                else
-                    c_out[rr][cc] =
-                        pe_result_ctx1[rr][cc];
-
+    generate
+        for (r = 0; r < N; r = r + 1) begin : OUT_ROW
+            for (c = 0; c < N; c = c + 1) begin : OUT_COL
+                assign c_out[r][c] = pe_acc[r][c];
             end
-
         end
-
-    end
+    endgenerate
 
 
     /*
      * ============================================================
-     * Result output controller
+     * 輸出控制器
      *
-     * Once every PE has both results:
+     *   OUT_WAIT         還有格子沒到齊
+     *   OUT_CAN_PUBLISH  全部到齊了,可以發
      *
-     *   cycle N   -> ctx0 valid
-     *   cycle N+1 -> ctx1 valid
+     * 名字是「可以發」而不是「發」:在這個狀態裡 c_valid_out 還是 0,
+     * 脈衝要下一拍才出現。這跟 PE 裡 acc_valid_out <= (state == PE_DONE)
+     * 是同一個寫法 —— 狀態是條件,脈衝是它的下一拍。
      *
-     * Then wait until PE result_valid drops before accepting
-     * another matrix transaction.
+     * 這兩個狀態之間沒有任何重疊:每一格到齊之前不發佈,發佈的
+     * 同一拍把旗標清空,下一次交易從頭來過。整個模組沒有一處是
+     * 兩件事同時在跑的。
      * ============================================================
      */
 
-    typedef enum logic [1:0] {
-        OUT_WAIT_READY,
-        OUT_CTX0,
-        OUT_CTX1,
-        OUT_WAIT_CLEAR
+
+    typedef enum logic [0:0] {
+        OUT_WAIT,
+        OUT_CAN_PUBLISH
     } out_state_t;
 
     out_state_t out_state;
 
 
+    /*
+     * (B) 清除訊號必須是組合邏輯,不能是暫存的。
+     *
+     * 寫成暫存的話清除會晚一拍生效。那一拍裡 all_arrived 還是 1,
+     * 而狀態已經回到 OUT_WAIT —— 同一組結果會被發佈兩次。
+     */
+    assign clear_arrived = (out_state == OUT_CAN_PUBLISH);
+
+
     always_ff @(posedge clk) begin
 
         if (rst) begin
-
-            c_valid_out <=
-                1'b0;
-
-            c_ctx_out <=
-                1'b0;
-
-            out_state <=
-                OUT_WAIT_READY;
-
-            clear_result_seen <=
-                1'b0;
-
+            c_valid_out <= 1'b0;
+            out_state   <= OUT_WAIT;
         end
         else begin
 
-            /*
-             * Default: valid is a one-cycle pulse.
-             */
-            c_valid_out <=
-                1'b0;
-
-            clear_result_seen <=
-                1'b0;
-
+            /* 一拍脈衝,出現在「可以發」的下一拍 */
+            c_valid_out <= (out_state == OUT_CAN_PUBLISH);
 
             case (out_state)
-
-
-                /*
-                 * ---------------------------------------------
-                 * Wait for all N*N PE results.
-                 * ---------------------------------------------
-                 */
-                OUT_WAIT_READY: begin
-
-                    if (all_results_valid) begin
-
-                        c_ctx_out <=
-                            1'b0;
-
-                        out_state <=
-                            OUT_CTX0;
-
-                    end
-
-                end
-
-
-                /*
-                 * ---------------------------------------------
-                 * Publish context 0 matrix.
-                 * ---------------------------------------------
-                 */
-                OUT_CTX0: begin
-
-                    c_ctx_out <=
-                        1'b0;
-
-                    c_valid_out <=
-                        1'b1;
-
-                    out_state <=
-                        OUT_CTX1;
-
-                end
-
-
-                /*
-                 * ---------------------------------------------
-                 * Publish context 1 matrix.
-                 * ---------------------------------------------
-                 */
-                OUT_CTX1: begin
-
-                    c_ctx_out <=
-                        1'b1;
-
-                    c_valid_out <=
-                        1'b1;
-
-                    /*
-                     * Both contexts have now been published.
-                     * Clear sticky PE completion state so the
-                     * controller can accept another transaction.
-                     */
-                    clear_result_seen <=
-                        1'b1;
-
-                    out_state <=
-                        OUT_WAIT_CLEAR;
-
-                end
-
-
-                /*
-                 * ---------------------------------------------
-                 * result_valid inside each PE remains asserted
-                 * until the next input transaction begins.
-                 *
-                 * Do not emit the same matrices repeatedly.
-                 * ---------------------------------------------
-                 */
-                OUT_WAIT_CLEAR: begin
-
-                    if (!all_results_valid) begin
-
-                        c_ctx_out <=
-                            1'b0;
-
-                        out_state <=
-                            OUT_WAIT_READY;
-
-                    end
-
-                end
-
-
-                default: begin
-
-                    c_ctx_out <=
-                        1'b0;
-
-                    out_state <=
-                        OUT_WAIT_READY;
-
-                end
-
+                OUT_WAIT:        if (all_arrived) out_state <= OUT_CAN_PUBLISH;
+                OUT_CAN_PUBLISH:                  out_state <= OUT_WAIT;
+                default:                          out_state <= OUT_WAIT;
             endcase
 
         end

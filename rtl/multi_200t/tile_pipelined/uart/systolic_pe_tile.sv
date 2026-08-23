@@ -5,72 +5,80 @@
  *
  * 它做什麼
  * --------
- * 這個 PE 每拍最多收到一組運算元 (a, b)。它把 a*b 加進一個
- * 累加器,並且把 a、b 原封不動往下一個 PE 傳(各延遲一拍)。
- *
- * 收完一整串之後,把累加結果吐出來:acc_out + acc_valid_out。
+ * 每拍最多收到一組運算元 (a, b)。把 a*b 加進累加器,並且把 a、b
+ * 原封不動往下一個 PE 傳(各延遲一拍)。收完一整串之後,把累加
+ * 結果連同它的身分吐出來。
  *
  *   a_in ──┬──► [暫存一拍] ──► a_out ──► 右邊的 PE
  *          │
- *          ├──► fp_mul ──► fp_add ──► acc_bank[]
- *          │
+ *          ├──► fp_mul ──► fp_add(累加)──► acc_bank[set][]
+ *          │                                      │
+ *          │                fp_add(歸約)◄─────────┘
  *   b_in ──┴──► [暫存一拍] ──► b_out ──► 下面的 PE
  *
  *
  * 為什麼需要很多個 accumulator bank
  * ---------------------------------
- * fp_add 是管線化的,一個加法要 12 拍才出結果。
+ * fp_add 是管線化的,一個加法要 12 拍才出結果。只有一個累加器的話
+ * 每 12 拍才能吃一個乘積。16 個 bank 輪流放,同一個 bank 被再次
+ * 使用的間隔是 16 拍,大於 12 —— 所以每拍都能吃一個。
  *
- * 如果只有一個累加器:
- *   第 t 拍   acc = acc + p0     ← 結果在 t+12 才有
- *   第 t+1 拍 acc = acc + p1     ← 但 acc 還沒更新,必須等
- *   → 每 12 拍才能吃一個乘積
- *
- * 如果有 16 個 bank,乘積依序輪流放:
- *   第 t 拍    bank0  += p0
- *   第 t+1 拍  bank1  += p1      ← 不同的暫存器,不用等
- *   ...
- *   第 t+16 拍 bank0  += p16     ← 回到 bank0,而 t 那筆在 t+12 已完成
- *   → 每 1 拍吃一個乘積
- *
- * 關鍵數字:同一個 bank 被再次使用的間隔 = ACC_BANKS = 16,
- * 必須大於加法器延遲 12。這是「結構上不可能衝突」,不是
- * 「偵測到衝突就擋下來」—— 所以不需要任何互鎖電路。
+ * 這是「結構上不可能衝突」,不是「偵測到衝突就擋下來」。
+ * 沒有任何互鎖電路。
  *
  *
- * 最後怎麼把 16 個 bank 併成一個數
- * --------------------------------
- * 樹狀,就地相加,每次距離減半:
+ * 為什麼有兩組 bank(乒乓)
+ * -------------------------
+ * 舊版只有一組。歸約要把 16 格併成 1 格,樹狀四層、層間要等加法器
+ * 排空,總共約 63 拍:
  *
- *   stride=8 : bank[0..7]  += bank[8..15]
- *   stride=4 : bank[0..3]  += bank[4..7]
- *   stride=2 : bank[0..1]  += bank[2..3]
- *   stride=1 : bank[0]     += bank[1]
- *   → 答案在 bank[0]
+ *   (8+12) + (4+12) + (2+12) + (1+12) = 63
  *
- * 同一層裡的加法互不相干,可以一拍發一個、不必等。
- * 但下一層要讀上一層寫回去的值,所以層與層之間必須等乾淨。
+ * 這 63 拍裡那 16 格正在被讀、被寫、被合併。下一個 tile 的乘積
+ * 如果掉進來,會加進一個正在歸約的格子 —— 答案就錯了,而且不會
+ * 有任何錯誤訊息。所以舊版的上層必須等歸約做完才能餵下一個 tile。
  *
- * ============================================================
- * 本檔目前的進度
+ * 兩組 bank 之後:一組在累加、另一組在歸約,兩者讀寫的是不同的
+ * 暫存器,互不相干。上層的 ST_FEED 就可以跟 ST_WAIT_RESULT 重疊。
  *
- *   [完成] 輸入級與 pass-through
- *   [完成] fp_mul / fp_add 實例化
- *   [進行] TODO 1  bank 計數器 —— 讀取端已完成,寫回端與
- *                  busy 計數器未完成
- *   [待做] TODO 2  加法器輸入 mux
- *   [待做] TODO 3  寫回 bank 與歸零
- *   [待做] TODO 4  排空判準
- *   [待做] TODO 5  歸約 FSM
- *   [待做] TODO 6  輸出脈衝
  *
- * 每個 TODO 都寫了:要做什麼、要滿足什麼性質、怎麼檢查。
- * 一次做一個,做完就能編譯、能跑、能 commit。
+ * 為什麼還要第二顆加法器
+ * ----------------------
+ * 因為衝突有兩種,乒乓只解決了其中一種:
  *
- * 測試:tb_pe_counters.sv + fp_model.sv
- *   verilator --binary -Wno-fatal --top-module tb_pe_counters \
- *       tb_pe_counters.sv fp_model.sv systolic_pe_tile.sv -o tbrun
- *   ./obj_dir/tbrun
+ *   資料衝突 —— 歸約要讀「已經定案」的格子。乒乓解決了:
+ *                兩邊碰的根本不是同一組暫存器。
+ *
+ *   資源衝突 —— 累加全速時加法器佔用率是 100%(每拍一個乘積,
+ *                每個乘積一次加法),沒有空的發射槽留給歸約。
+ *                這個乒乓解決不了。
+ *
+ * 所以兩條路徑各給一顆加法器。它們永遠不會爭,因為它們根本不是
+ * 同一個單元 —— 一樣是結構上消除,不是靠仲裁。
+ *
+ *
+ * 剩下的那一段沒有被消除
+ * ----------------------
+ * PE 是靠「輸入停了而且管線排空了」來判斷一次交易結束的,那需要
+ * 大約 MUL_LATENCY + ADD_LATENCY = 21 拍的靜默。所以兩個 tile
+ * 之間仍然需要這段間隔,上層不能背靠背地餵。
+ *
+ * 尾巴從 21 + 63 = 84 拍縮到 21 拍。
+ *
+ * ⚠ 這 21 拍沒有任何硬體防線。上層若餵太早,PE 會把兩個 tile 當成
+ *   同一次交易加在一起,而且不會有任何錯誤訊息 —— 症狀是結果偏大,
+ *   不是掛掉。這條約束只存在於這段註解和 tb_pe_overlap 裡。
+ *
+ *   要讓硬體自己認得邊界,就得給每筆交易一個標籤,用「標籤變了」
+ *   而不是「排空」當判準。那是下一步,不在這個檔案裡。
+ *
+ *
+ * 測試
+ * ----
+ *   verilator --binary -Wall -Wno-fatal --top-module tb_pe_counters \
+ *       tb/fp_model.sv systolic_pe_tile.sv tb/tb_pe_counters.sv -o tbrun
+ *   verilator --binary -Wall -Wno-fatal --top-module tb_pe_reduce \
+ *       tb/fp_model.sv systolic_pe_tile.sv tb/tb_pe_reduce.sv -o tbrun
  * ============================================================
  */
 module systolic_pe_tile #(
@@ -78,11 +86,9 @@ module systolic_pe_tile #(
     parameter int ACC_BANKS = 16,
 
     /*
-     * 這兩個參數新設計用不到 —— PE 不再靠「延遲幾拍」推算資料
-     * 屬於哪個 bank,而是用計數器重播同一個序列(見 TODO 1)。
-     *
-     * tb 把 fp_model 的 LAT 改成 3/5 仍然通過,就是這件事的證明。
-     * 全部寫完、確認沒有任何一處引用之後刪掉。
+     * 這兩個參數邏輯上用不到 —— PE 不靠「延遲幾拍」推算資料屬於
+     * 哪個 bank,而是用計數器重播同一個序列。tb 把 fp_model 的 LAT
+     * 改成 3/5 或 17/23 仍然通過,就是這件事的證明。
      */
     parameter int MUL_LATENCY = 9,
     parameter int ADD_LATENCY = 12
@@ -107,14 +113,12 @@ module systolic_pe_tile #(
     output logic [DATA_W-1:0] acc_out
 );
 
-    /*
-     * bank 編號要幾個位元。ACC_BANKS=16 → 4 個位元 → 編號 0..15
-     */
+    /* bank 編號要幾個位元。ACC_BANKS=16 → 4 個位元 → 編號 0..15 */
     localparam int ACC_SEL_W = $clog2(ACC_BANKS);
 
 
     /* ============================================================
-     * 1. 輸入級與 pass-through  [已完成]
+     * 1. 輸入級與 pass-through
      * ============================================================
      *
      * a 和 b 各自暫存一拍,然後送給下一個 PE。這一拍的延遲就是
@@ -125,8 +129,6 @@ module systolic_pe_tile #(
     logic              a_valid_reg, b_valid_reg;
 
     /* 這一拍「暫存級」有完整的一組運算元 —— 這組要餵給乘法器。
-     *
-     * 輸入端的 pair_valid 已經刪掉:新設計裡沒有任何邏輯需要它。
      * 所有判斷都發生在暫存級之後,因為那才是真正進到乘法器的東西。 */
     wire pipe_pair_valid = a_valid_reg && b_valid_reg;
 
@@ -154,13 +156,13 @@ module systolic_pe_tile #(
 
 
     /* ============================================================
-     * 2. 乘法器  [已完成]
+     * 2. 乘法器
      * ============================================================
      *
      * 丟一組 (a, b) 進去,過幾拍之後 product_valid 拉高、product
-     * 就是答案。幾拍?不知道,也不需要知道 —— 見 [TODO 1]。
+     * 就是答案。幾拍?不知道,也不需要知道。
      *
-     * fp_mul 保證「保序」:先丟進去的先出來,而且一進一出。
+     * fp_mul 保證保序:先丟進去的先出來,而且一進一出。
      */
 
     logic [DATA_W-1:0] product;
@@ -178,337 +180,219 @@ module systolic_pe_tile #(
 
 
     /* ============================================================
-     * [TODO 1] bank 編號與 busy 計數器   ── 進行中
+     * 3. 兩組 accumulator bank
      * ============================================================
      *
-     * 問題:乘積從 fp_mul 出來的時候,它該加進哪個 bank?
+     *   acc_set   現在正在累加的是哪一組
+     *   red_set   現在正在歸約的是哪一組
      *
-     * 舊版開一個 FIFO,發射時把 bank 編號存進去、出來時讀出來。
-     * 那是對的,但沒必要:bank 是「依序」指派的,而 fp_mul 保序,
-     * 所以出來的順序也是同一個序列。
-     *
-     *   發射端  0, 1, 2, ..., 15, 0, 1, ...
-     *   出來端  0, 1, 2, ..., 15, 0, 1, ...   ← 同一個序列
-     *
-     * 一個計數器就能重現它,不需要記錄任何東西。
-     *
-     * 這個簡化以「移除 ctx」為前提。有兩個 accumulator context 的
-     * 時候,單一計數器分不出回來的乘積屬於哪一個 context,那才是
-     * 舊版非用 FIFO 不可的原因。
-     *
-     * ------------------------------------------------------------
-     * 已決定:不要 issue_bank
-     *
-     * 發射端的 bank 編號沒有任何邏輯會用到 —— 乘法器不需要知道
-     * 資料要加去哪裡。只有讀取端與寫回端需要。
-     *
-     * ------------------------------------------------------------
-     * 已完成:product_bank(讀取端)
-     *
-     * 在 product_valid 上前進。乘積出來的那一拍,它就是這個乘積
-     * 該加進去的 bank 編號。
-     *
-     * 4 位元的計數器數到 15 再 +1 自然回捲到 0,不需要 if。
-     * 前提是 ACC_BANKS 是 2 的冪 —— 目前沒有任何機制擋住有人傳
-     * 12 進來,值得補一個 initial 斷言。
-     *
-     * ------------------------------------------------------------
-     * 還沒完成 (a):寫回端的計數器
-     *
-     * 讀取和寫回不在同一拍。乘積 P0 在第 t 拍出來、讀 acc_bank[0]、
-     * 丟進加法器;結果要到 t+12 才回來,那時 product_bank 已經
-     * 前進 12 次,指到 12 而不是 0。
-     *
-     * 所以寫回需要自己的計數器,在 add_valid 上前進。fp_add 一樣
-     * 保序,所以它重播的是同一個序列,只是整體晚了一個加法器延遲。
-     *
-     *   ⚠ 陷阱:add_valid 在「歸約期間」也會拉高(見 TODO 5)。
-     *     如果不擋,寫回計數器會多前進 ACC_BANKS-1 次,下一次
-     *     交易就整個錯位 —— 而症狀是「第一次對、第二次開始錯」。
-     *     等 TODO 5 有了 state 之後,要加上只在累加期間前進的條件。
-     *
-     * ------------------------------------------------------------
-     * 還沒完成 (b):兩個 busy 計數器
-     *
-     * TODO 4 判斷管線排空要用:
-     *
-     *   mul_busy   pipe_pair_valid 時 +1,product_valid 時 -1
-     *   add_busy   fp_add_valid_in 時 +1,add_valid     時 -1
-     *
-     * 同一拍一進一出就維持不變。8 位元足夠 —— 管線裡不可能同時
-     * 有超過幾十個交易。
-     *
-     * ------------------------------------------------------------
-     * 檢查方式:tb_pe_counters
-     *
-     * tb 自己養一份 expect_bank、用同樣的規則前進,兩邊獨立算出
-     * 同一個序列才算數。目前 305 項檢查通過;把 fp_model 的 LAT
-     * 從 9/12 改成 3/5 仍然通過 —— 那證明這裡沒有把延遲寫死。
-     * ============================================================
+     * 這兩個永遠不相等 —— 歸約做的是累加剛剛離開的那一組,而累加
+     * 在交棒的同一拍翻到另一組。所以兩條寫回路徑不可能撞在同一格。
      */
 
-    /* 讀取端:乘積出來那一拍,它屬於哪一格 */
-    logic [ACC_SEL_W-1:0] product_bank;
+    logic [DATA_W-1:0] acc_bank [0:1][0:ACC_BANKS-1];
+    logic              acc_set;
+    logic              red_set;
 
-    /* 寫回端:累加的加法結果回來時,要寫回哪一格。
-     * 與 product_bank 相差一個加法器延遲,所以必須是獨立的計數器。
-     * 只在 PE_ACCUM 前進 —— 歸約期間的 add_valid 不屬於它。 */
+
+    /* ============================================================
+     * 4. 累加路徑
+     * ============================================================
+     *
+     * product_bank   讀取端:乘積出來那一拍,它屬於哪一格
+     * accum_wb_bank  寫回端:與 product_bank 相差一個加法器延遲
+     *
+     * 為什麼要兩個計數器而不是一個:乘積 P0 在第 t 拍出來、讀
+     * acc_bank[0]、丟進加法器;結果要到 t+12 才回來,那時
+     * product_bank 已經前進 12 次,指到 12 而不是 0。
+     *
+     * 為什麼不用 FIFO:bank 是依序指派的,而兩顆 IP 都保序,所以
+     * 在輸出事件上遞增的計數器會重播出一模一樣的序列。有 ctx 的
+     * 時候兩串序列會交錯,counter 重播不出來,那才是舊版非用 FIFO
+     * 不可的原因。ctx 拿掉之後 FIFO 就退化成 counter。
+     *
+     * 兩個計數器都在交棒那一拍歸零。交棒的條件包含「加法器排空」,
+     * 所以歸零的時候沒有任何寫回還在飛,不會錯位。
+     */
+
+    logic [ACC_SEL_W-1:0] product_bank;
     logic [ACC_SEL_W-1:0] accum_wb_bank;
 
-    /* 兩個管線裡各還有幾筆沒回來 */
-    logic [7:0] mul_busy;
-    logic [7:0] add_busy;
+    logic [7:0] mul_busy;         // 乘法器裡還有幾筆沒回來
+    logic [7:0] accum_add_busy;   // 累加加法器裡還有幾筆沒回來
+    logic [7:0] reduce_add_busy;  // 歸約加法器裡還有幾筆沒回來
 
-    always_ff @(posedge clk) begin
-        if (rst || clear_all) begin
-            product_bank  <= '0;
-            accum_wb_bank <= '0;
-        end
-        else begin
-            if (product_valid)
-                product_bank <= product_bank + 1'b1;
+    logic [DATA_W-1:0] accum_add_result;
+    logic              accum_add_valid;
 
-            if (add_valid && state == PE_ACCUM)
-                accum_wb_bank <= accum_wb_bank + 1'b1;
-        end
-    end
-
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            mul_busy <= '0;
-            add_busy <= '0;
-        end
-        else begin
-            /* 同一拍一進一出就維持不變,所以只寫兩個單邊條件 */
-            if (pipe_pair_valid && !product_valid)      mul_busy <= mul_busy + 1'b1;
-            else if (!pipe_pair_valid && product_valid) mul_busy <= mul_busy - 1'b1;
-
-            if (fp_add_valid_in && !add_valid)      add_busy <= add_busy + 1'b1;
-            else if (!fp_add_valid_in && add_valid) add_busy <= add_busy - 1'b1;
-        end
-    end
-
-
-    /* ============================================================
-     * 3. 累加器  [宣告完成,寫入邏輯見 TODO 3]
-     * ============================================================
-     */
-
-    logic [DATA_W-1:0] acc_bank [0:ACC_BANKS-1];
-
-    /* ============================================================
-     * PE 狀態
-     * ============================================================
-     *
-     *        ┌──────────────────────────────────────┐
-     *        ▼                                      │
-     *   PE_IDLE ──第一組運算元進來──► PE_ACCUM       │
-     *                                    │           │
-     *                       管線排空                 │
-     *                                    ▼           │
-     *                                PE_REDUCE       │
-     *                                    │           │
-     *                          stride 走完 1         │
-     *                                    ▼           │
-     *                                 PE_DONE ───────┘
-     *
-     * PE_IDLE    還沒開始。等第一次 pipe_pair_valid
-     * PE_ACCUM   累加中。乘積經 fp_add 寫進 acc_bank
-     * PE_REDUCE  歸約中。樹狀相加,層間等管線空
-     * PE_DONE    結果出爐。送出 acc_valid_out 脈衝,清乾淨所有 bank
-     *
-     * 這個 enum 不用寫死數值 —— state 不出這個模組,沒有第二份
-     * 定義會漂移。(頂層那個 FSM 要寫死,是因為 systolic_status.sv
-     * 複製了一份編碼去解 LED。)
-     */
-
-    typedef enum logic [1:0] {
-        PE_IDLE,
-        PE_ACCUM,
-        PE_REDUCE,
-        PE_DONE
-    } pe_state_t;
-
-    pe_state_t state;
-
-
-    /* ============================================================
-     * [TODO 2] 加法器的兩個輸入要接什麼
-     * ============================================================
-     *
-     * fp_add 被兩件事共用:
-     *
-     *   累加期間:  a = acc_bank[product_bank]   b = product
-     *              什麼時候發?product_valid 的時候
-     *
-     *   歸約期間:  a = acc_bank[reduce_i]       b = acc_bank[reduce_i + stride]
-     *              什麼時候發?還有加法沒發完的時候(見 TODO 5)
-     *
-     * 兩者不會同時發生 —— 歸約只在累加完全結束之後才開始。
-     *
-     * 目前先綁死成不發,讓檔案可以編譯。
-     *
-     * 檢查方式:[TODO 3] 一起驗。
-     */
-
-    logic              fp_add_valid_in;
-    logic [DATA_W-1:0] fp_add_a, fp_add_b;
-
-    always_comb begin
-        if (state == PE_REDUCE) begin
-            /* 歸約:距離 stride 的兩格相加,寫回低位那格 */
-            fp_add_valid_in = (reduce_todo != 0);
-            fp_add_a        = acc_bank[reduce_i];
-            fp_add_b        = acc_bank[reduce_i + reduce_stride];
-        end
-        else begin
-            /* 累加:乘積回來就發。
-             * PE_IDLE / PE_DONE 時 product_valid 恆為 0,所以這個
-             * 分支也涵蓋那兩個狀態,不需要額外的 case。 */
-            fp_add_valid_in = product_valid;
-            fp_add_a        = acc_bank[product_bank];
-            fp_add_b        = product;
-        end
-    end
-
-
-    /* ============================================================
-     * 4. 加法器  [已完成]
-     * ============================================================
-     *
-     * 跟 fp_mul 一樣:保序、一進一出、延遲不需要知道。
-     */
-
-    logic [DATA_W-1:0] add_result;
-    logic              add_valid;
-
-    fp_add u_fp_add (
+    fp_add u_fp_add_accum (
         .clk       (clk),
         .rst       (rst),
-        .valid_in  (fp_add_valid_in),
-        .a         (fp_add_a),
-        .b         (fp_add_b),
-        .valid_out (add_valid),
-        .result    (add_result)
+        .valid_in  (product_valid),
+        .a         (acc_bank[acc_set][product_bank]),
+        .b         (product),
+        .valid_out (accum_add_valid),
+        .result    (accum_add_result)
     );
 
 
     /* ============================================================
-     * [TODO 3] 寫回 accumulator bank
+     * 5. 歸約路徑
      * ============================================================
      *
-     * add_valid 拉高的那一拍,add_result 就是答案,要寫進某個 bank:
+     * 樹狀,就地相加,每次距離減半:
      *
-     *   累加期間 → 寫回「寫回端計數器」(TODO 1 (a),尚未建立)
-     *              也就是那個乘積原本所屬的 bank
-     *   歸約期間 → 寫回這一層正在算的那個低位索引
+     *   stride=8 : bank[0..7]  += bank[8..15]
+     *   stride=4 : bank[0..3]  += bank[4..7]
+     *   stride=2 : bank[0..1]  += bank[2..3]
+     *   stride=1 : bank[0]     += bank[1]
+     *   → 答案在 bank[0]
      *
-     * 另外還需要一個「全部歸零」的路徑:一次交易結束、結果送出
-     * 之後,所有 bank 要清成 0,下一次交易才不會累加到舊資料。
+     * 同一層裡的加法互不相干,可以一拍發一個、不必等。
+     * 但下一層要讀上一層寫回去的值,所以層與層之間必須等乾淨 ——
+     * 那個「等」不是一個狀態,是「沒事做而且管線空了」這個條件。
      *
-     * 檢查方式:
-     *   餵 16 組小整數(例如 a 全是 1、b 依序 1..16),讓它跑完
-     *   累加,然後在 tb 裡用階層路徑讀 dut.acc_bank[i],應該看到
-     *   bank[i] == 第 i 個乘積。全部加起來 = 136。
+     * reduce_i 與 reduce_wb_i 又是一對讀寫索引,跟累加那一對是
+     * 同一個模式:發射索引一路往前跑,回寫索引落後一個加法器延遲。
+     * 同一個模式在這個檔案裡出現兩次,看懂一次就看懂全部。
      */
 
-    /* 交易結束那一拍把所有 bank 清成 0 */
-    wire clear_all = (state == PE_DONE);
-
-    always_ff @(posedge clk) begin
-        if (rst || clear_all) begin
-            /* 清零優先於單格寫入:否則交易結束那一拍若剛好有一個
-             * add_valid,那一格會留下髒資料給下一次交易。 */
-            for (int i = 0; i < ACC_BANKS; i++)
-                acc_bank[i] <= '0;
-        end
-        else if (add_valid) begin
-            /* 兩個階段共用同一條寫回路徑,差別只在索引 */
-            acc_bank[(state == PE_REDUCE) ? reduce_wb_i : accum_wb_bank]
-                <= add_result;
-        end
-    end
-
-
-    /* ============================================================
-     * [TODO 4] 什麼時候算「輸入結束、管線排空」
-     * ============================================================
-     *
-     * 歸約不能太早開始 —— 還有乘積在管線裡飛的話,它們會加到
-     * 已經被歸約過的 bank 上,答案就錯了。
-     *
-     * 要滿足三件事才算乾淨:
-     *
-     *   1. 輸入真的結束了
-     *      → pipe_pair_valid 從 1 變 0 的那一刻(而且之前至少
-     *        有過一次 1,否則重置後就會誤判)
-     *
-     *   2. 乘法器裡沒有東西      → mul_busy == 0
-     *   3. 加法器裡沒有東西      → add_busy == 0
-     *
-     * 注意第 2 條不能省。輸入結束的當下,第一個乘積可能都還沒
-     * 從 fp_mul 出來(k 很短的時候),這時 add_busy 也是 0,
-     * 看起來很乾淨,其實什麼都還沒算。
-     *
-     * 檢查方式:
-     *   在 tb 裡對這個「乾淨」訊號設一個斷言:它拉高的那一拍,
-     *   mul_busy 和 add_busy 必須都是 0,而且整個交易只能拉高一次。
-     */
-
-    /* 判準寫在 FSM 的 PE_ACCUM 分支裡:
-     *
-     *     !pipe_pair_valid && mul_busy == 0 && add_busy == 0
-     *
-     * 有了 PE_IDLE 之後就不需要 transaction_seen —— 狀態本身就是
-     * 「這次交易已經開始過」這個旗標。
-     */
-
-
-    /* ============================================================
-     * [TODO 5] 歸約:樹狀,就地,一個狀態
-     * ============================================================
-     *
-     * 狀態機只有兩個狀態:
-     *
-     *   PE_ACCUM   累加中。[TODO 4] 的條件成立就跳到 PE_REDUCE
-     *   PE_REDUCE  歸約中。做完跳回 PE_ACCUM
-     *
-     * PE_REDUCE 裡面只有一個 if-else:
-     *
-     *   if (這一層還有加法沒發出去) begin
-     *       發一個,推進索引
-     *   end
-     *   else if (add_busy == 0) begin        ← 這就是「層間的等」
-     *       if (stride == 1)  完成,輸出結果
-     *       else              stride 減半,重新裝填這一層的加法數
-     *   end
-     *
-     * 「等」不是一個狀態,是「沒事做而且管線空了」。
-     *
-     * 需要的狀態變數:
-     *   reduce_stride   8 → 4 → 2 → 1
-     *   reduce_i        這一層發到第幾個(0 .. stride-1)
-     *   reduce_todo     這一層還剩幾個沒發(裝填時 = stride)
-     *
-     * 提示:stride 減半的時候,新的一層有 stride>>1 個加法。
-     *       用非阻塞賦值的話,reduce_todo <= reduce_stride >> 1
-     *       和 reduce_stride <= reduce_stride >> 1 可以並排寫,
-     *       兩邊讀到的都是舊的 reduce_stride。
-     *
-     * 檢查方式:
-     *   接續 [TODO 3] 的刺激,跑完歸約之後 dut.acc_bank[0]
-     *   應該等於 136(bit-exact,因為都是小整數)。
-     */
-
-    /* 樹狀歸約的狀態變數 */
     logic [ACC_SEL_W-1:0] reduce_stride;   // 8 -> 4 -> 2 -> 1
     logic [ACC_SEL_W-1:0] reduce_i;        // 這一層「發射」到第幾個
     logic [ACC_SEL_W-1:0] reduce_wb_i;     // 這一層「寫回」到第幾個
     logic [ACC_SEL_W-1:0] reduce_todo;     // 這一層還剩幾個沒發
 
+    typedef enum logic [1:0] {
+        RED_IDLE,   // 沒事做,等交棒
+        RED_RUN,    // 歸約中
+        RED_DONE    // 結果出爐,送脈衝、清這一組
+    } red_state_t;
+
+    red_state_t red_state;
+
+    wire reduce_issue = (red_state == RED_RUN) && (reduce_todo != 0);
+
+    logic [DATA_W-1:0] reduce_add_result;
+    logic              reduce_add_valid;
+
+    fp_add u_fp_add_reduce (
+        .clk       (clk),
+        .rst       (rst),
+        .valid_in  (reduce_issue),
+        .a         (acc_bank[red_set][reduce_i]),
+        .b         (acc_bank[red_set][reduce_i + reduce_stride]),
+        .valid_out (reduce_add_valid),
+        .result    (reduce_add_result)
+    );
+
+
+    /* ============================================================
+     * 6. 三個 busy 計數器
+     * ============================================================
+     *
+     * 同一拍一進一出就維持不變,所以只寫兩個單邊條件。
+     * 8 位元足夠 —— 管線裡不可能同時有超過幾十筆。
+     */
+
     always_ff @(posedge clk) begin
         if (rst) begin
-            state         <= PE_IDLE;
+            mul_busy        <= '0;
+            accum_add_busy  <= '0;
+            reduce_add_busy <= '0;
+        end
+        else begin
+            if (pipe_pair_valid && !product_valid)      mul_busy <= mul_busy + 1'b1;
+            else if (!pipe_pair_valid && product_valid) mul_busy <= mul_busy - 1'b1;
+
+            if (product_valid && !accum_add_valid)      accum_add_busy <= accum_add_busy + 1'b1;
+            else if (!product_valid && accum_add_valid) accum_add_busy <= accum_add_busy - 1'b1;
+
+            if (reduce_issue && !reduce_add_valid)      reduce_add_busy <= reduce_add_busy + 1'b1;
+            else if (!reduce_issue && reduce_add_valid) reduce_add_busy <= reduce_add_busy - 1'b1;
+        end
+    end
+
+
+    /* ============================================================
+     * 7. 累加狀態機與交棒
+     * ============================================================
+     *
+     *   ACC_IDLE  等第一組運算元進到乘法器
+     *   ACC_RUN   累加中
+     *
+     * 交棒(acc_handoff)要同時滿足四件事:
+     *
+     *   1. 輸入停了            !pipe_pair_valid
+     *   2. 乘法器裡沒東西       mul_busy == 0
+     *   3. 累加加法器裡沒東西   accum_add_busy == 0
+     *   4. 另一組已經歸約完     red_state == RED_IDLE
+     *
+     * 第 2 條不能省:輸入結束的當下,第一個乘積可能都還沒從 fp_mul
+     * 出來(k 很短的時候),這時 accum_add_busy 也是 0,看起來很乾淨,
+     * 其實什麼都還沒算。
+     *
+     * 第 4 條是這個設計剩下的唯一序列化。它只有在「歸約比下一次
+     * 累加還慢」的時候才會咬人 —— 也就是 k 小於約 63 的時候。
+     * k 大的時候歸約早就做完了,這一條永遠成立。
+     */
+
+    typedef enum logic [0:0] {
+        ACC_IDLE,
+        ACC_RUN
+    } acc_state_t;
+
+    acc_state_t acc_state;
+
+    wire acc_handoff = (acc_state == ACC_RUN)
+                    && !pipe_pair_valid
+                    && (mul_busy == 0)
+                    && (accum_add_busy == 0)
+                    && (red_state == RED_IDLE);
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            acc_state <= ACC_IDLE;
+            acc_set   <= 1'b0;
+        end
+        else begin
+            case (acc_state)
+                ACC_IDLE:
+                    if (pipe_pair_valid) acc_state <= ACC_RUN;
+
+                ACC_RUN:
+                    if (acc_handoff) begin
+                        acc_state <= ACC_IDLE;
+                        /* 翻到另一組。舊的那一組交給歸約 —— 下面的
+                         * red_state 在同一拍把 red_set 記成舊的 acc_set,
+                         * 非阻塞賦值,所以它讀到的是翻之前的值。 */
+                        acc_set   <= ~acc_set;
+                    end
+
+                default: acc_state <= ACC_IDLE;
+            endcase
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst || acc_handoff) begin
+            product_bank  <= '0;
+            accum_wb_bank <= '0;
+        end
+        else begin
+            if (product_valid)   product_bank  <= product_bank  + 1'b1;
+            if (accum_add_valid) accum_wb_bank <= accum_wb_bank + 1'b1;
+        end
+    end
+
+
+    /* ============================================================
+     * 8. 歸約狀態機
+     * ============================================================ */
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            red_state     <= RED_IDLE;
+            red_set       <= 1'b0;
             reduce_stride <= '0;
             reduce_i      <= '0;
             reduce_wb_i   <= '0;
@@ -516,48 +400,34 @@ module systolic_pe_tile #(
         end
         else begin
 
-            /* 歸約的寫回索引:與 reduce_i 是一對,差一個加法器延遲。
-             * 每一層重新從 0 開始 —— 換層的條件是 add_busy == 0,
-             * 表示上一層的寫回都已經落地,所以歸零是安全的。 */
-            if (state == PE_REDUCE && add_valid)
+            /* 歸約的寫回索引。放在 case 之前,換層時 case 裡的歸零
+             * 會蓋過它 —— 同一個 always 區塊裡後面的賦值贏。 */
+            if (red_state == RED_RUN && reduce_add_valid)
                 reduce_wb_i <= reduce_wb_i + 1'b1;
 
-            case (state)
+            case (red_state)
 
-                /* 等第一組運算元進到乘法器 */
-                PE_IDLE: begin
-                    if (pipe_pair_valid)
-                        state <= PE_ACCUM;
-                end
-
-                /* 輸入停了、而且兩個管線都空了
-                 * → 所有 bank 的值已經定案,可以開始歸約。
-                 *
-                 * 這裡假設運算元串流是連續的:中間若有超過乘法器
-                 * 深度的空檔,mul_busy 會歸零而誤觸。feeder 目前
-                 * 連續餵 k,成立;哪天加了 back-pressure 要重看。 */
-                PE_ACCUM: begin
-                    if (!pipe_pair_valid && mul_busy == 0 && add_busy == 0) begin
+                RED_IDLE:
+                    if (acc_handoff) begin
+                        red_set       <= acc_set;      // 累加剛離開的那一組
                         reduce_stride <= ACC_SEL_W'(ACC_BANKS / 2);
                         reduce_todo   <= ACC_SEL_W'(ACC_BANKS / 2);
                         reduce_i      <= '0;
                         reduce_wb_i   <= '0;
-                        state         <= PE_REDUCE;
+                        red_state     <= RED_RUN;
                     end
-                end
 
-                PE_REDUCE: begin
+                RED_RUN: begin
                     if (reduce_todo != 0) begin
-                        /* 有事做:這一拍發一個加法,推進發射索引。
-                         * 實際的發射由 fp_add_valid_in 負責。 */
+                        /* 有事做:這一拍發一個加法,推進發射索引 */
                         reduce_todo <= reduce_todo - 1'b1;
                         reduce_i    <= reduce_i    + 1'b1;
                     end
-                    else if (add_busy == 0) begin
+                    else if (reduce_add_busy == 0) begin
                         /* 沒事做 + 管線空了 = 這一層全部落地。
                          * 這就是層間的 barrier —— 一個條件,不是一個狀態。 */
                         if (reduce_stride == ACC_SEL_W'(1)) begin
-                            state <= PE_DONE;
+                            red_state <= RED_DONE;
                         end
                         else begin
                             reduce_stride <= reduce_stride >> 1;
@@ -568,12 +438,9 @@ module systolic_pe_tile #(
                     end
                 end
 
-                /* 送出脈衝、清乾淨,一拍就走 */
-                PE_DONE: begin
-                    state <= PE_IDLE;
-                end
+                RED_DONE: red_state <= RED_IDLE;   // 一拍就走
 
-                default: state <= PE_IDLE;
+                default: red_state <= RED_IDLE;
 
             endcase
         end
@@ -581,19 +448,43 @@ module systolic_pe_tile #(
 
 
     /* ============================================================
-     * [TODO 6] 輸出
+     * 9. 寫回與清空
      * ============================================================
      *
-     * 歸約完成的那一拍:
-     *   acc_out       <= acc_bank[0]
-     *   acc_valid_out <= 1'b1     ← 只有這一拍,下一拍要自己回 0
+     * 兩條寫回路徑各走各的,因為 acc_set 與 red_set 永遠不相等。
      *
-     * 同時把所有 bank 清成 0(見 [TODO 3] 的歸零路徑),並且把
-     * [TODO 4] 的「輸入結束」旗標也清掉,準備接下一次交易。
+     * 清空放在最後:同一個 always 區塊裡後面的賦值贏,所以歸約
+     * 結束那一拍即使還有寫回,清空也會蓋過去 —— 那正是要的行為。
+     * 一拍清完 16 格,for 在 always_ff 裡是展開不是迴圈。
+     */
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            for (int s = 0; s < 2; s++)
+                for (int i = 0; i < ACC_BANKS; i++)
+                    acc_bank[s][i] <= '0;
+        end
+        else begin
+            if (accum_add_valid)
+                acc_bank[acc_set][accum_wb_bank] <= accum_add_result;
+
+            if (reduce_add_valid)
+                acc_bank[red_set][reduce_wb_i] <= reduce_add_result;
+
+            if (red_state == RED_DONE)
+                for (int i = 0; i < ACC_BANKS; i++)
+                    acc_bank[red_set][i] <= '0;
+        end
+    end
+
+
+    /* ============================================================
+     * 10. 輸出
+     * ============================================================
      *
-     * 檢查方式:
-     *   連續跑兩次交易,第二次的結果必須正確 —— 如果沒清乾淨,
-     *   第二次會等於兩次的和。
+     * 脈衝出現在 RED_DONE 的下一拍。同一拍清空也在清 acc_bank,
+     * 但兩邊都是非阻塞賦值,右手邊取的是這一拍開始時的值 ——
+     * 所以讀得到答案。
      */
 
     always_ff @(posedge clk) begin
@@ -602,13 +493,10 @@ module systolic_pe_tile #(
             acc_out       <= '0;
         end
         else begin
-            /* 一拍脈衝,與 acc_out 同時出現在 PE_DONE 的下一拍 */
-            acc_valid_out <= (state == PE_DONE);
+            acc_valid_out <= (red_state == RED_DONE);
 
-            /* 同一拍 clear_all 也在清 bank,但兩邊都是非阻塞賦值,
-             * 右手邊取的是這一拍開始時的值 —— 所以讀得到答案。 */
-            if (state == PE_DONE)
-                acc_out <= acc_bank[0];
+            if (red_state == RED_DONE)
+                acc_out <= acc_bank[red_set][0];
         end
     end
 
