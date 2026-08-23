@@ -203,7 +203,7 @@ module systolic_pe_tile #(
      * 資料要加去哪裡。只有讀取端與寫回端需要。
      *
      * ------------------------------------------------------------
-     * 已完成:bank_counter(讀取端)
+     * 已完成:product_bank(讀取端)
      *
      * 在 product_valid 上前進。乘積出來的那一拍,它就是這個乘積
      * 該加進去的 bank 編號。
@@ -247,14 +247,14 @@ module systolic_pe_tile #(
      * ============================================================
      */
 
-    reg [ACC_SEL_W-1:0] bank_counter;
+    reg [ACC_SEL_W-1:0] product_bank;
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            bank_counter <= '0;
+            product_bank <= '0;
         end
         else if (product_valid) begin
-            bank_counter <= bank_counter + 1;
+            product_bank <= product_bank + 1;
         end
     end
 
@@ -266,6 +266,36 @@ module systolic_pe_tile #(
 
     logic [DATA_W-1:0] acc_bank [0:ACC_BANKS-1];
 
+    /* ============================================================
+     * PE 狀態
+     * ============================================================
+     *
+     *        ┌──────────────────────────────────────┐
+     *        ▼                                      │
+     *   PE_IDLE ──第一組運算元進來──► PE_ACCUM       │
+     *                                    │           │
+     *                       管線排空(TODO 4)         │
+     *                                    ▼           │
+     *                                PE_REDUCE       │
+     *                                    │           │
+     *                          stride 走完 1         │
+     *                                    ▼           │
+     *                                 PE_DONE ───────┘
+     *
+     * PE_IDLE    還沒開始。等第一次 pipe_pair_valid
+     * PE_ACCUM   累加中。乘積經 fp_add 寫進 acc_bank
+     * PE_REDUCE  歸約中。樹狀相加,層間等管線空
+     * PE_DONE    結果出爐。送出 acc_valid_out 脈衝,清乾淨所有 bank
+     */
+
+    typedef enum logic [1:0] {
+        PE_IDLE,
+        PE_ACCUM,
+        PE_REDUCE,
+        PE_DONE
+    } pe_state_t;
+
+    pe_state_t state;
 
     /* ============================================================
      * [TODO 2] 加法器的兩個輸入要接什麼
@@ -290,7 +320,7 @@ module systolic_pe_tile #(
     logic [DATA_W-1:0] fp_add_a, fp_add_b;
 
     // ↓↓↓ [TODO 2] 完成後刪掉這三行,改成 always_comb ↓↓↓
-    assign fp_add_valid_in = 1'b0;
+    assign fp_add_valid_in = ;
     assign fp_add_a        = '0;
     assign fp_add_b        = '0;
 
@@ -402,10 +432,69 @@ module systolic_pe_tile #(
      *   應該等於 136(bit-exact,因為都是小整數)。
      */
 
-    logic [ACC_SEL_W-1:0] reduce_stride;
+    /* 樹狀歸約的三個狀態變數 */
+    logic [ACC_SEL_W-1:0] reduce_stride;   // 8 → 4 → 2 → 1
+    logic [ACC_SEL_W-1:0] reduce_i;        // 這一層發到第幾個
+    logic [ACC_SEL_W-1:0] reduce_todo;     // 這一層還剩幾個沒發
 
     // 在這裡實作 [TODO 5]
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            state          <= PE_IDLE;
+            reduce_stride  <= '0;
+            reduce_i         <= '0;
+            reduce_todo      <= '0;
+        end
+        else begin
+            case (state)
+                /* 等第一組運算元進到乘法器 */
+                PE_IDLE: begin
+                    if (pipe_pair_valid)
+                        state <= PE_ACCUM;
+                end
 
+                /* 輸入停了、而且兩個管線都空了
+                 * → 所有 bank 的值已經定案,可以開始歸約 */
+                PE_ACCUM: begin
+                    if (!pipe_pair_valid && mul_busy == 0 && add_busy == 0) begin
+                        reduce_stride <= ACC_SEL_W'(ACC_BANKS / 2);   // 8
+                        reduce_todo   <= ACC_SEL_W'(ACC_BANKS / 2);   // 這一層 8 個加法
+                        reduce_i      <= '0;
+                        state         <= PE_REDUCE;
+                    end
+                end
+
+                PE_REDUCE: begin
+                    if (reduce_todo != 0) begin
+                        /* 有事做:這一拍發一個加法,推進索引。
+                         * 實際的發射由 fp_add_valid_in 負責(TODO 2)。 */
+                        reduce_todo <= reduce_todo - 1'b1;
+                        reduce_i    <= reduce_i    + 1'b1;
+                    end
+                    else if (add_busy == 0) begin
+                        /* 沒事做 + 管線空了 = 這一層全部落地。
+                         * 這就是層間的 barrier —— 它是一個條件,不是一個狀態。 */
+                        if (reduce_stride == ACC_SEL_W'(1)) begin
+                            state <= PE_DONE;
+                        end
+                        else begin
+                            reduce_stride <= reduce_stride >> 1;
+                            reduce_todo   <= reduce_stride >> 1;  // 讀到的是舊的 stride
+                            reduce_i      <= '0;
+                        end
+                    end
+                end
+
+                /* 送出脈衝、清乾淨(TODO 3 / TODO 6),一拍就走 */
+                PE_DONE: begin
+                    state <= PE_IDLE;
+                end
+
+                default: state <= PE_IDLE;
+
+            endcase
+        end
+    end
 
     /* ============================================================
      * [TODO 6] 輸出
