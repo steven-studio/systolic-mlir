@@ -45,7 +45,7 @@
  * upper-level feeder. This PE only receives accum_ctx_in.
  * ============================================================
  */
-module systolic_pe_tile #(
+module golden_pe_tile #(
     parameter int DATA_W      = 32,
     parameter int ACC_BANKS   = 16,
     parameter int MUL_LATENCY = 9,
