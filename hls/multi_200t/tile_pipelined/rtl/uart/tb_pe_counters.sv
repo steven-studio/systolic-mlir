@@ -91,9 +91,12 @@ module tb_pe_counters;
         if (!rst) begin
             chk(a_out == a_exp && a_valid_out == av_exp, "a pass-through");
             chk(b_out == b_exp && b_valid_out == bv_exp, "b pass-through");
-            chk(dut.bank_counter == expect_bank,
-                $sformatf("bank_counter=%0d 期望 %0d",
-                          dut.bank_counter, expect_bank));
+            chk(dut.add_busy <= 8'd64, "add_busy 不該爆掉");
+            chk(!(dut.mul_busy == 0 && dut.product_valid),
+                "乘法器空的時候不該吐出東西");
+            chk(dut.product_bank == expect_bank,
+                $sformatf("product_bank=%0d 期望 %0d",
+                          dut.product_bank, expect_bank));
         end
     end
 
@@ -114,8 +117,8 @@ module tb_pe_counters;
             @(negedge clk);
             a_valid_in = 1'b1;
             b_valid_in = 1'b1;
-            a_in       = $shortrealtobits(shortreal'(1.0));
-            b_in       = $shortrealtobits(shortreal'(i + 1));
+            a_in       = 32'd1;
+            b_in       = 32'(i + 1);
         end
 
         @(negedge clk);
@@ -127,9 +130,9 @@ module tb_pe_counters;
 
         $display("");
         $display("乘積數    : %0d  (期望 40)", products_seen);
-        $display("bank 終值 : %0d  (期望 %0d)", dut.bank_counter, 40 % ACC_BANKS);
+        $display("product_bank 終值 : %0d  (期望 %0d)", dut.product_bank, 40 % ACC_BANKS);
         chk(products_seen == 40, "fp_mul 一進一出:40 進 40 出");
-        chk(dut.bank_counter == SEL_W'(40 % ACC_BANKS), "bank 終值");
+        chk(dut.product_bank == SEL_W'(40 % ACC_BANKS), "product_bank 終值");
 
         $display("");
         if (errors == 0)

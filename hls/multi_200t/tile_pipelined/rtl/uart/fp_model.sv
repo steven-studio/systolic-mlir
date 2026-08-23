@@ -1,27 +1,33 @@
 /*
  * fp_mul / fp_add 的行為模型 —— 只給模擬用,不進合成。
  *
- * 為什麼需要它:真的 fp_mul/fp_add 包的是 Xilinx IP,要跑 xsim
- * 才有。單元測試想在 Verilator 裡三秒跑完,就需要一個行為一樣
- * 的替身。
+ * 為什麼需要它
+ * ------------
+ * 真的 fp_mul / fp_add 包的是 Xilinx IP,要跑 xsim 才有。單元測試
+ * 想在 Verilator 裡三秒跑完,就需要一個行為一樣的替身。
  *
  * 它保證三件事,跟真的 IP 一樣:
  *   1. 保序:先進去的先出來
  *   2. 一進一出:每個 valid_in 恰好產生一個 valid_out
  *   3. 固定延遲 LAT 拍
  *
- * 算術用 IEEE-754 單精度($bitstoshortreal / $shortrealtobits),
- * 與硬體同格式。
+ * 為什麼算術是整數而不是浮點
+ * --------------------------
+ * 因為 PE 對算術是不可知的 —— 它只決定「哪個乘積加到哪一格、
+ * 什麼時候發、什麼時候寫回」。加法器裡面是浮點還是整數,對這些
+ * 控制決策沒有任何影響。
  *
- * Verilator 會警告 shortreal 被提升成 real(雙精度)。那不影響
- * 正確性:兩個 float32 相乘或相加,精確結果所需的位數都在 double
- * 的 53 位以內,所以「double 算完再捨入到 float32」與「直接用
- * float32 算」結果相同,沒有雙重捨入誤差。下面的 lint_off 只是
- * 讓警告不要蓋掉真正的問題。
+ * 用整數換到兩件事:
+ *   - 結果完全精確,測試可以要求逐位元相同,不必談 ulp
+ *   - 不依賴 Verilator 的 shortreal 支援(它會把 shortreal 提升成
+ *     double,使 $bitstoshortreal / $shortrealtobits 的位元語意
+ *     失效,乘積會變成 0 —— 這個坑踩過一次了)
  *
- * LAT 是參數,所以你可以用 LAT=3 跑快一點、LAT=12 跑真實值 ——
- * 兩種都要通過。通過了就證明你的 PE 沒有把延遲寫死在邏輯裡,
- * 那正是這次重寫要達成的性質之一。
+ * 浮點的數值行為在別的地方驗:板上的 bit-exact 比對,以及既有的
+ * conv2d ulp 掃描。這支測試負責的是控制路徑。
+ *
+ * LAT 是參數。用 LAT=3/5 跑一次、LAT=9/12 再跑一次,兩種都要通過。
+ * 通過了就證明 PE 沒有把延遲寫死在邏輯裡。
  */
 
 module fp_mul #(parameter int LAT = 9) (
@@ -45,11 +51,7 @@ module fp_mul #(parameter int LAT = 9) (
         end
         else begin
             v_pipe[0] <= valid_in;
-            /* verilator lint_off SHORTREAL */
-            /* verilator lint_off WIDTH */
-            d_pipe[0] <= $shortrealtobits($bitstoshortreal(a) * $bitstoshortreal(b));
-            /* verilator lint_on WIDTH */
-            /* verilator lint_on SHORTREAL */
+            d_pipe[0] <= $signed(a) * $signed(b);
             for (int i = 1; i < LAT; i++) begin
                 v_pipe[i] <= v_pipe[i-1];
                 d_pipe[i] <= d_pipe[i-1];
@@ -83,11 +85,7 @@ module fp_add #(parameter int LAT = 12) (
         end
         else begin
             v_pipe[0] <= valid_in;
-            /* verilator lint_off SHORTREAL */
-            /* verilator lint_off WIDTH */
-            d_pipe[0] <= $shortrealtobits($bitstoshortreal(a) + $bitstoshortreal(b));
-            /* verilator lint_on WIDTH */
-            /* verilator lint_on SHORTREAL */
+            d_pipe[0] <= $signed(a) + $signed(b);
             for (int i = 1; i < LAT; i++) begin
                 v_pipe[i] <= v_pipe[i-1];
                 d_pipe[i] <= d_pipe[i-1];
