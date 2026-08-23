@@ -77,18 +77,24 @@ add_files -norecurse [list \
     uart_tx.sv \
     fp_mul.sv \
     fp_add.sv \
-    systolic_pe_fold.sv \
-    systolic_array_fold.sv \
-    systolic_array_8x8_fold.sv \
-    systolic_uart_fold_top.sv \
+    systolic_pe_tile.sv \
+    systolic_array_tile.sv \
+    systolic_array_8x8_tile.sv \
+    systolic_uart_tile_top.sv \
+    systolic_tile_feeder.sv \
+    systolic_operand_buffer.sv \
 ]
 
-# Both benches go into the simulation fileset so a syntax error in either
-# is caught here rather than the next time someone switches top.
+# Every bench goes into the simulation fileset so a syntax error in any of
+# them is caught here rather than the next time someone switches top.
+#
+#   tb_uart_multi_invocation -- full system over UART, needs the FP IP
+#   tb_feeder_buffer         -- feeder+buffer contract, no IP, seconds
+#   tb_operand_buffer_equiv  -- refactor equivalence, no IP, seconds
 add_files -fileset sim_1 -norecurse [list \
-    tb_array_fold_kmax.sv \
     tb_uart_multi_invocation.sv \
-    tb_array_fold_fprandom.sv \
+    tb_feeder_buffer.sv \
+    tb_operand_buffer_equiv.sv \
 ]
 
 set_property file_type SystemVerilog [get_files *.sv]

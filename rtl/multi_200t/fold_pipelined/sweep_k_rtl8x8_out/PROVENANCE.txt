@@ -1,9 +1,0 @@
-generated:    2026-08-14T02:53:39Z
-host:         steven-studio-System-Product-Name
-git_commit:   d0ee454febcabcd24d7ef76928db00671930bac2
-git_dirty:    YES -- working tree 有未提交的修改
-vivado:       vivado v2026.1 (64-bit)
-xci_dir:      /home/steven-studio/work/systolic-mlir/hls/multi_200t/fold_pipelined/rtl/rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip
-dut:          systolic_array_8x8_fold
-testbench:    tb_array_fold_kmax.sv
-k_values:     8 16 24 32 48 64
