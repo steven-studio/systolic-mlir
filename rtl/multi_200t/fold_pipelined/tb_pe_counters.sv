@@ -14,7 +14,7 @@
  *
  * 跑法:
  *   verilator --binary -Wno-fatal --top-module tb_pe_counters \
- *       tb_pe_counters.sv fp_model.sv ../systolic_pe_tile.sv \
+ *       tb_pe_counters.sv fp_model.sv ../systolic_pe.sv \
  *       -o tb && ./obj_dir/tb
  */
 module tb_pe_counters;
@@ -34,7 +34,7 @@ module tb_pe_counters;
     logic        acc_valid_out;
     logic [31:0] acc_out;
 
-    systolic_pe_tile #(.ACC_BANKS(ACC_BANKS)) dut (
+    systolic_pe #(.ACC_BANKS(ACC_BANKS)) dut (
         .clk(clk), .rst(rst),
         .a_valid_in(a_valid_in), .b_valid_in(b_valid_in),
         .a_in(a_in), .b_in(b_in),

@@ -92,7 +92,7 @@ read_verilog -sv uart_tx.sv
 read_verilog -sv fp_mul.sv
 read_verilog -sv fp_add.sv
 read_verilog -sv fp_reduce16.sv
-read_verilog -sv systolic_pe.sv
+read_verilog -sv systolic_pe_bram.sv
 read_verilog -sv systolic_array.sv
 read_verilog -sv systolic_array_8x8.sv
 read_verilog -sv systolic_array_4x4.sv

@@ -24,7 +24,7 @@
  */
 module tb_pe_overlap;
 
-    parameter int GAP = 21;      // 兩個 tile 之間空幾拍(21 是實測的最小值)
+    parameter int GAP = 22;      // 兩個 tile 之間空幾拍(21 是實測的最小值)
 
     logic clk = 0;
     always #5 clk = ~clk;
@@ -37,7 +37,7 @@ module tb_pe_overlap;
     logic        accv;
     logic [31:0] acco;
 
-    systolic_pe_tile dut (
+    systolic_pe dut (
         .clk(clk), .rst(rst),
         .a_valid_in(av), .b_valid_in(bv), .a_in(a), .b_in(b),
         .a_valid_out(avo), .b_valid_out(bvo), .a_out(ao), .b_out(bo),

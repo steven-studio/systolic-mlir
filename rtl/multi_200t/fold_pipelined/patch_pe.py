@@ -1,7 +1,7 @@
 from pathlib import Path
 import shutil
 
-src = Path("systolic_pe_tile.sv")
+src = Path("systolic_pe.sv")
 dst = Path("systolic_pe_bram.sv")
 
 shutil.copy2(src, dst)
