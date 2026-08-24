@@ -1,4 +1,4 @@
-module systolic_uart_tile_top #(
+module systolic_uart_top #(
     parameter int CLK_HZ = 100_000_000,
     parameter int BAUD   = 115200,
 
@@ -38,7 +38,7 @@ module systolic_uart_tile_top #(
      *   operand buffer 的 bank 數、feeder 的 skew 上限(N-1)、
      *   wire format 的 lane 數(每個 k 有 N+N 個 word)、
      *   TX 總量(2 * N*N * 4 bytes)。
-     * 不隨 N 變的東西:fold 深度(ctx 每 8 個 k 切換)是協定常數,
+     * 不隨 N 變的東西:(ctx 已移除;fold 深度不再是協定的一部分)
      * k_dim 仍須為 8 的倍數;cycle counter、breadcrumb、UART 協定。
      *
      * N 必須是 2 的冪(位元切片依賴對齊),且 N*N*4 顆 DSP 要放得下
@@ -84,7 +84,7 @@ module systolic_uart_tile_top #(
      * ============================================================
      *
      * 計數區間刻意與 tb_array_fold_kmax 的 total_cycles 定義一致：
-     * 第一個 feed beat 到 ctx1 published，兩端皆含。這樣「模擬預測
+     * 第一個 feed beat 到結果發佈，兩端皆含。這樣「模擬預測
      * 118，實機量到 118」才是逐一對應而非概略吻合。
      *
      * 四個 byte 接在 8*N*N 個 result bytes 之後（小端序，與協定中 K 的
@@ -728,11 +728,7 @@ module systolic_uart_tile_top #(
     logic a_valid_in [0:N-1];
     logic b_valid_in [0:N-1];
 
-    logic accum_ctx_in_a [0:N-1];
-    logic accum_ctx_in_b [0:N-1];
-
     logic        c_valid_out;
-    logic        c_ctx_out;
     logic [31:0] c_out [0:N-1][0:N-1];
 
     /*
@@ -740,7 +736,7 @@ module systolic_uart_tile_top #(
      * 已移除:第二個週期計數器 (accel_cycles / last_accel_cycles)
      * ============================================================
      *
-     * 這裡原本有一組從 matrices_ready 數到 ctx1 的計數器,與下方
+     * 這裡原本有一組從 matrices_ready 數到結果發佈的計數器,與下方
      * cyc_count / cyc_latched 平行存在。它從來沒有讀者 --
      * last_accel_cycles 不進 TX、不出埠、不被任何 tb 引用,所以
      * 綜合一直把它整塊剝掉,資源數字裡沒有它。
@@ -765,7 +761,7 @@ module systolic_uart_tile_top #(
     /* 直接實例化參數化的 array_tile。舊的 systolic_array_8x8_tile
      * 薄包裝已不再使用(tb 中的階層路徑 u_array.u_arr.* 需改為
      * u_array.*)。 */
-    systolic_array_tile #(
+    systolic_array #(
         .N      (N),
         .DATA_W (32)
     ) u_array (
@@ -778,11 +774,7 @@ module systolic_uart_tile_top #(
         .a_valid_in    (a_valid_in),
         .b_valid_in    (b_valid_in),
 
-        .accum_ctx_in_a (accum_ctx_in_a),
-        .accum_ctx_in_b (accum_ctx_in_b),
-
         .c_valid_out   (c_valid_out),
-        .c_ctx_out     (c_ctx_out),
         .c_out         (c_out)
     );
 
@@ -792,11 +784,9 @@ module systolic_uart_tile_top #(
      * Store final results
      * ============================================================
      */
-    logic [31:0] C0 [0:N-1][0:N-1];
-    logic [31:0] C1 [0:N-1][0:N-1];
+    logic [31:0] C [0:N-1][0:N-1];
 
-    logic c0_done;
-    logic c1_done;
+    logic c_done;
 
     integer rr;
     integer cc;
@@ -805,8 +795,7 @@ module systolic_uart_tile_top #(
     always_ff @(posedge clk) begin
         if (rst_i) begin
 
-            c0_done <= 1'b0;
-            c1_done <= 1'b0;
+            c_done <= 1'b0;
 
         end
         else begin
@@ -814,10 +803,8 @@ module systolic_uart_tile_top #(
             /*
              * New transaction starts.
              */
-            if (matrices_ready) begin
-                c0_done <= 1'b0;
-                c1_done <= 1'b0;
-            end
+            if (matrices_ready)
+                c_done <= 1'b0;
 
 
             /*
@@ -826,24 +813,11 @@ module systolic_uart_tile_top #(
              */
             if (c_valid_out) begin
 
-                if (c_ctx_out == 1'b0) begin
+                for (rr = 0; rr < N; rr = rr + 1)
+                    for (cc = 0; cc < N; cc = cc + 1)
+                        C[rr][cc] <= c_out[rr][cc];
 
-                    for (rr = 0; rr < N; rr = rr + 1)
-                        for (cc = 0; cc < N; cc = cc + 1)
-                            C0[rr][cc] <= c_out[rr][cc];
-
-                    c0_done <= 1'b1;
-
-                end
-                else begin
-
-                    for (rr = 0; rr < N; rr = rr + 1)
-                        for (cc = 0; cc < N; cc = cc + 1)
-                            C1[rr][cc] <= c_out[rr][cc];
-
-                    c1_done <= 1'b1;
-
-                end
+                c_done <= 1'b1;
 
             end
 
@@ -883,16 +857,9 @@ module systolic_uart_tile_top #(
     /*
     * Feed variable K dimension continuously.
     *
-    * Fold context alternates every 8 K elements:
-    *
-    *   fold0 -> ctx0
-    *   fold1 -> ctx1
-    *   fold2 -> ctx0
-    *   fold3 -> ctx1
-    *   ...
-    *
-    * fold = global_k >> 3
-    * ctx  = fold[0]
+    * 舊版這裡有一段 fold -> ctx 的說明(fold = k >> 3,ctx = fold[0])。
+    * accumulator context 已經移除,fold 編號沒有任何讀者,整段連同
+    * feeder 裡的計算一起消失。位址一律用絕對 k。
     *
     * Last boundary injection:
     *
@@ -922,9 +889,7 @@ module systolic_uart_tile_top #(
         .b_in           (b_in),
 
         .a_valid_in     (a_valid_in),
-        .b_valid_in     (b_valid_in),
-        .accum_ctx_in_a (accum_ctx_in_a),
-        .accum_ctx_in_b (accum_ctx_in_b)
+        .b_valid_in     (b_valid_in)
     );
 
 
@@ -933,10 +898,14 @@ module systolic_uart_tile_top #(
      * Transaction cycle counter
      *
      * 起點：ST_FEED 的第一拍（feed_t == 0）
-     * 終點：ctx1 published（c_valid_out && c_ctx_out）
+     * 終點：結果發佈（c_valid_out）
      *
-     * 兩端皆含，等同 tb 的 ctx1_cycle - first_valid_cycle + 1。
-     * cyc_latched 在終點鎖存，TX 期間不再變動。
+     * ⚠ 終點的定義變了。舊版是「ctx1 published」,也就是連發兩拍的
+     *   第二拍;現在只發一片,終點提前一拍。H(N) = 2(N-1) + 105 裡的
+     *   常數因此必定改變 —— 這一行就是它改變的具體出處。
+     *   重掃之後要重新擬合,不要沿用 105。
+     *
+     * 兩端皆含。cyc_latched 在終點鎖存,TX 期間不再變動。
      * ============================================================
      */
     logic [31:0] cyc_count;
@@ -963,7 +932,7 @@ module systolic_uart_tile_top #(
 
                 cyc_count <= cyc_count + 1'b1;
 
-                if (c_valid_out && c_ctx_out) begin
+                if (c_valid_out) begin
 
                     cyc_running <= 1'b0;
                     cyc_latched <= cyc_count + 1'b1;
@@ -1026,9 +995,9 @@ module systolic_uart_tile_top #(
                      * No hard-coded drain cycle count.
                      *
                      * Wait for the accelerator itself to report
-                     * that both reduced result contexts exist.
+                     * that the reduced result matrix exists.
                      */
-                    if (c0_done && c1_done) begin
+                    if (c_done) begin
                         state <= ST_SEND;
                     end
 
@@ -1065,8 +1034,8 @@ module systolic_uart_tile_top #(
      *
      * debug_pending[0] -> A1 matrices_ready
      * debug_pending[1] -> A2 ST_WAIT_RESULT entry
-     * debug_pending[2] -> A3 ctx0 result
-     * debug_pending[3] -> A4 ctx1 result
+     * debug_pending[2] -> A3 result published
+     * debug_pending[3] -> A4 (已停用:舊版的 ctx1 result)
      * debug_pending[4] -> A5 ST_SEND entry
      * ============================================================
      */
@@ -1094,14 +1063,11 @@ module systolic_uart_tile_top #(
         )
             debug_set[1] = 1'b1;
 
-        if (c_valid_out) begin
-
-            if (c_ctx_out == 1'b0)
-                debug_set[2] = 1'b1;
-            else
-                debug_set[3] = 1'b1;
-
-        end
+        /* 只剩一片結果,所以只點 A3。A4 保留在向量裡但永遠不會被
+         * 設起來 —— 保持 5 個位元,是為了不動 systolic_status 那份
+         * 複製的編碼。 */
+        if (c_valid_out)
+            debug_set[2] = 1'b1;
 
         if (
             state == ST_SEND &&
@@ -1189,8 +1155,7 @@ module systolic_uart_tile_top #(
         .debug_pending (debug_pending),
         .debug_accept  (debug_accept),
 
-        .C0            (C0),
-        .C1            (C1),
+        .C             (C),
         .cyc_latched   (cyc_latched),
 
         .m_valid       (tx_m_valid),
@@ -1233,8 +1198,7 @@ module systolic_uart_tile_top #(
         .frame_accepted (matrices_ready),
         .rx_active      (rx_state != RX_HUNT),
         .state          (state),
-        .c0_done        (c0_done),
-        .c1_done        (c1_done),
+        .c_done         (c_done),
 
         .led            (led),
         .jb_led         (jb_led)

@@ -80,9 +80,19 @@ module tb_pe_counters;
             expect_bank   <= '0;
             products_seen <= 0;
         end
-        else if (dut.product_valid) begin
-            expect_bank   <= expect_bank + 1'b1;
-            products_seen <= products_seen + 1;
+        else begin
+            /* 交棒那一拍計數器歸零 —— 下一個 tile 從 bank0 開始。
+             *
+             * 這裡讀 DUT 的 acc_handoff 是讀一個「事件」,不是讀被
+             * 檢查的那個「值」。跟下面讀 product_valid 是同一件事:
+             * 序列仍然由這裡獨立算,只是節拍對齊。 */
+            if (dut.acc_handoff) begin
+                expect_bank <= '0;
+            end
+            else if (dut.product_valid) begin
+                expect_bank   <= expect_bank + 1'b1;
+                products_seen <= products_seen + 1;
+            end
         end
     end
 
@@ -91,7 +101,8 @@ module tb_pe_counters;
         if (!rst) begin
             chk(a_out == a_exp && a_valid_out == av_exp, "a pass-through");
             chk(b_out == b_exp && b_valid_out == bv_exp, "b pass-through");
-            chk(dut.add_busy <= 8'd64, "add_busy 不該爆掉");
+            chk(dut.accum_add_busy  <= 8'd64, "accum_add_busy 不該爆掉");
+            chk(dut.reduce_add_busy <= 8'd64, "reduce_add_busy 不該爆掉");
             chk(!(dut.mul_busy == 0 && dut.product_valid),
                 "乘法器空的時候不該吐出東西");
             chk(dut.product_bank == expect_bank,
@@ -130,9 +141,12 @@ module tb_pe_counters;
 
         $display("");
         $display("乘積數    : %0d  (期望 40)", products_seen);
-        $display("product_bank 終值 : %0d  (期望 %0d)", dut.product_bank, 40 % ACC_BANKS);
+        /* 交棒之後計數器已經歸零,所以終值是 0 而不是 40 % 16。
+         * 乒乓之前的舊行為是「歸約做完才歸零」,那時看到的是 8。 */
+        $display("product_bank 終值 : %0d  (期望 0,交棒後已歸零)", dut.product_bank);
         chk(products_seen == 40, "fp_mul 一進一出:40 進 40 出");
-        chk(dut.product_bank == SEL_W'(40 % ACC_BANKS), "product_bank 終值");
+        chk(dut.product_bank == SEL_W'(0), "product_bank 交棒後歸零");
+        chk(dut.acc_state == 1'b0, "交棒後回到 ACC_IDLE");
 
         $display("");
         if (errors == 0)

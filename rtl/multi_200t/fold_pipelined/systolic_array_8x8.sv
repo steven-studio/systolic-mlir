@@ -1,5 +1,5 @@
 /*
- * systolic_array_8x8_tile -- N 綁死成 8 的 systolic_array_tile。
+ * systolic_array_8x8 -- N 綁死成 8 的 systolic_array_tile。
  *
  * 這個模組只做一件事:把 N 綁成 8,讓還沒參數化的上層可以直接接。
  * 它本身沒有任何邏輯。
@@ -8,7 +8,7 @@
  * 這個檔案可能已經不需要存在了
  *
  * 它原本的理由寫在舊註解裡:「保留這個模組名是為了讓
- * systolic_uart_fold_top 不必更動」。那個理由現在失效了 ——
+ * systolic_uart_top 不必更動」。那個理由現在失效了 ——
  * 上層正在為了移除 ctx 而重寫,本來就要動。
  *
  * 舊註解還寫著「週期 k_dim+118」。實測與雙錨定的模型是
@@ -16,11 +16,11 @@
  * 留著會誤導,所以不留。
  *
  * 刪掉之前先確認沒有人在用:
- *   grep -rn "systolic_array_8x8_tile" --include=*.sv --include=*.tcl .
+ *   grep -rn "systolic_array_8x8" --include=*.sv --include=*.tcl .
  * 只剩這個檔案自己的話,就可以刪。
  * ---------------------------------------------------------------
  */
-module systolic_array_8x8_tile #(
+module systolic_array_8x8 #(
     parameter int DATA_W  = 32,
 
     /* 只是往下傳。這一層看不到 index —— 身分是陣列內部
@@ -43,7 +43,7 @@ module systolic_array_8x8_tile #(
     output logic [DATA_W-1:0] c_out [0:7][0:7]
 );
 
-    systolic_array_tile #(
+    systolic_array #(
         .N       (8),
         .DATA_W  (DATA_W),
         .INDEX_W (INDEX_W)

@@ -1,7 +1,7 @@
 /*
  * systolic_tx_source -- 一筆交易的 byte 流產生器。
  *
- * 擁有舊 top TX 區塊的全部「內容」邏輯:結果位址走訪(C0 -> C1 ->
+ * 擁有舊 top TX 區塊的全部「內容」邏輯:結果位址走訪(C ->
  * cycle counter)、byte lane 選擇、breadcrumb marker 的優先權仲裁、
  * tx_send_started 的 rearm 語意。「協定」(怎麼把 byte 塞進 UART)
  * 完全不在這裡 -- 交給 uart_tx_streamer。
@@ -26,7 +26,9 @@ module systolic_tx_source #(
     parameter bit DEBUG_MARKERS = 1'b0,
     parameter bit CYCLE_COUNTER = 1'b0,
 
-    /* 陣列邊長。TX 總量 = 兩個 context 各 N*N words = 8*N*N bytes。
+    /* 陣列邊長。TX 總量 = 一片 N*N words = 4*N*N bytes。
+     * ctx 移除前是兩片 8*N*N —— 那兩個 context 從來沒有在時間上
+     * 重疊過,所以整組拿掉,回應長度砍半。
      * N 必須是 2 的冪(位元切片依賴對齊)。 */
     parameter int N = 8
 )(
@@ -42,8 +44,7 @@ module systolic_tx_source #(
     output logic [4:0]  debug_accept,
 
     // 內容
-    input  logic [31:0] C0 [0:N-1][0:N-1],
-    input  logic [31:0] C1 [0:N-1][0:N-1],
+    input  logic [31:0] C [0:N-1][0:N-1],
     input  logic [31:0] cyc_latched,
 
     // byte stream 出口
@@ -53,8 +54,7 @@ module systolic_tx_source #(
 );
 
     localparam int LANE_W         = $clog2(N);
-    localparam int MAT_BYTES      = 4 * N * N;      // 一個 context 的 C
-    localparam int TX_BYTES       = 2 * MAT_BYTES;  // N=8: 512
+    localparam int TX_BYTES       = 4 * N * N;      // N=8: 256
     localparam int TX_TOTAL_BYTES = TX_BYTES + (CYCLE_COUNTER ? 4 : 0);
     localparam int TX_LAST        = TX_TOTAL_BYTES - 1;
     localparam int CNT_W          = $clog2(TX_TOTAL_BYTES);
@@ -73,10 +73,9 @@ module systolic_tx_source #(
     logic       send_started;
 
     /*
-     * 結果 word 選擇 -- 逐字搬自舊 top:
-     *   0..255 = C0([7:5]=row [4:2]=col [1:0]=byte)
-     *   256..511 = C1(同 layout,索引扣 256)
-     *   512..515 = cycle counter(little-endian;512 是 4 的倍數,
+     * 結果 word 選擇:
+     *   0..255   = C([7:5]=row [4:2]=col [1:0]=byte)
+     *   256..259 = cycle counter(little-endian;256 是 4 的倍數,
      *              byte lane 對齊)
      */
     logic [31:0] word;
@@ -84,13 +83,10 @@ module systolic_tx_source #(
     /* 走訪順序與 N=8 版逐字同構:
      *   [1:0]                      = byte lane
      *   [2 +: LANE_W]              = col
-     *   [2+LANE_W +: LANE_W]       = row
-     * MAT_BYTES 是 2 的冪,C1 段的減法等價於忽略高位。 */
+     *   [2+LANE_W +: LANE_W]       = row  */
     always_comb begin
-        if (cnt < MAT_BYTES)   // 整數域比較,避免 CNT_W 截斷
-            word = C0[cnt[2+LANE_W +: LANE_W]][cnt[2 +: LANE_W]];
-        else if (cnt < TX_BYTES)
-            word = C1[cnt[2+LANE_W +: LANE_W]][cnt[2 +: LANE_W]];
+        if (cnt < TX_BYTES)    // 整數域比較,避免 CNT_W 截斷
+            word = C[cnt[2+LANE_W +: LANE_W]][cnt[2 +: LANE_W]];
         else
             word = cyc_latched;
     end

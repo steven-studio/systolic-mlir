@@ -1,6 +1,6 @@
 /*
  * ============================================================
- * systolic_pe_tile -- 一個處理單元 (PE)
+ * systolic_pe -- 一個處理單元 (PE)
  * ============================================================
  *
  * 它做什麼
@@ -81,7 +81,7 @@
  *       tb/fp_model.sv systolic_pe_tile.sv tb/tb_pe_reduce.sv -o tbrun
  * ============================================================
  */
-module systolic_pe_tile #(
+module systolic_pe #(
     parameter int DATA_W    = 32,
     parameter int ACC_BANKS = 16,
 

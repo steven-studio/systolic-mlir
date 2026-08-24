@@ -34,8 +34,11 @@
  *   led[3]  ST_FEED       |  主 FSM one-hot。刻意不用二進位編碼 --
  *   led[4]  ST_WAIT_RESULT|  凌晨兩點盯著板子時,「哪顆亮就是卡在哪一級」
  *   led[5]  ST_SEND      /   不需要在腦袋裡解碼。
- *   led[6]  c0_done               對應 breadcrumb A3
- *   led[7]  c1_done               對應 breadcrumb A4
+ *   led[6]  c_done                對應 breadcrumb A3
+ *   led[7]  恆為 0                 舊版是 c1_done(ctx1 結果),
+ *                                  ctx 移除後只剩一片結果。留著這顆
+ *                                  燈不點,是為了不動 LED 的位置對應
+ *                                  —— 板上貼的標籤還在。
  *
  * 之後 double-buffer 上線時再加一個埠與一顆燈顯示 slot 佔用
  * (死鎖時直接看得到誰在等誰)。現在不預留未使用的埠 -- 空接的
@@ -63,8 +66,7 @@ module systolic_status #(
     input  logic       frame_accepted,  // 一拍脈衝 (matrices_ready)
     input  logic       rx_active,       // RX framing 不在 HUNT
     input  logic [2:0] state,           // 主 FSM
-    input  logic       c0_done,
-    input  logic       c1_done,
+    input  logic       c_done,
 
     // --- 輸出 ---
     output logic [7:0] led,             // 板上 LD0..LD7
@@ -137,8 +139,8 @@ module systolic_status #(
             led[4] <= (state == S_WAIT);
             led[5] <= (state == S_SEND);
 
-            led[6] <= c0_done;
-            led[7] <= c1_done;
+            led[6] <= c_done;
+            led[7] <= 1'b0;
 
             jb_led[0] <= beat_cnt[BLINK_LOG2];
             jb_led[1] <= (state != S_IDLE);

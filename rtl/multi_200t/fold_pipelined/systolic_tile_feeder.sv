@@ -5,7 +5,7 @@
  * systolic_tile_feeder
  * ============================================================
  *
- * 自 systolic_uart_tile_top 原樣抽出的餵料邏輯。演算法、時序、
+ * 自 systolic_uart_top 原樣抽出的餵料邏輯。演算法、時序、
  * 訊號語意一律未改;唯一的差別是原本的
  *
  *     if (state == ST_FEED)
@@ -20,16 +20,17 @@
  * *_raddr。運算元緩衝是 block RAM(同步讀),資料下一拍才回來,
  * 所以 valid 與 accumulator context 也一併延後一拍才驅動陣列。
  *
- * 位址由絕對 k 決定,fold 編號只用來挑 accumulator context ——
- * 這個分工是 fold 設計的核心,搬移過程中未更動。
+ * 位址由絕對 k 決定。
+ *
+ * 舊版這裡還算了一個 fold 編號(gk >> 3),用途只有一個:挑
+ * accumulator context。ctx 移除之後那個編號沒有任何讀者,所以
+ * 整段跟著消失 —— 位址路徑一個字都沒改,因為它本來就只看絕對 k。
  *
  * Last boundary injection: (k_dim - 1) + max skew(N-1) = k_dim + N - 2
  * ============================================================
  */
 module systolic_tile_feeder #(
-    /* 陣列邊長。skew 上限 = N-1,運算元埠各 N 路。
-     * fold 深度(ctx 每 8 個 k 切換一次)是協定常數,與 N 無關 --
-     * 見 systolic_array_tile 的註解:context 在邊界已算好才進來。 */
+    /* 陣列邊長。skew 上限 = N-1,運算元埠各 N 路。 */
     parameter int N      = 8,
 
     parameter int K_W    = 9,
@@ -52,37 +53,29 @@ module systolic_tile_feeder #(
     output logic [31:0] a_in [0:N-1],
     output logic [31:0] b_in [0:N-1],
 
-    output logic a_valid_in     [0:N-1],
-    output logic b_valid_in     [0:N-1],
-    output logic accum_ctx_in_a [0:N-1],
-    output logic accum_ctx_in_b [0:N-1]
+    output logic a_valid_in [0:N-1],
+    output logic b_valid_in [0:N-1]
 );
 
-    /* 同步讀之後,valid 與 accumulator context 必須與資料一起延後一拍。
+    /* 同步讀之後,valid 必須與資料一起延後一拍。
      * 組合邏輯寫入 _c,經一級暫存後才驅動陣列 -- 位址路徑完全不變。
      *
      * 這一級是無條件更新的,因此 enable 最後一拍算出的 valid 會在下一拍
      * 送進陣列,剛好補上最後一筆運算元。呼叫端的 FSM 不需要任何改動。 */
-    logic a_valid_c     [0:N-1];
-    logic b_valid_c     [0:N-1];
-    logic accum_ctx_a_c [0:N-1];
-    logic accum_ctx_b_c [0:N-1];
+    logic a_valid_c [0:N-1];
+    logic b_valid_c [0:N-1];
 
     always_ff @(posedge clk) begin
         if (rst) begin
             for (int i = 0; i < N; i++) begin
-                a_valid_in[i]     <= 1'b0;
-                b_valid_in[i]     <= 1'b0;
-                accum_ctx_in_a[i] <= 1'b0;
-                accum_ctx_in_b[i] <= 1'b0;
+                a_valid_in[i] <= 1'b0;
+                b_valid_in[i] <= 1'b0;
             end
         end
         else begin
             for (int i = 0; i < N; i++) begin
-                a_valid_in[i]     <= a_valid_c[i];
-                b_valid_in[i]     <= b_valid_c[i];
-                accum_ctx_in_a[i] <= accum_ctx_a_c[i];
-                accum_ctx_in_b[i] <= accum_ctx_b_c[i];
+                a_valid_in[i] <= a_valid_c[i];
+                b_valid_in[i] <= b_valid_c[i];
             end
         end
     end
@@ -103,9 +96,6 @@ module systolic_tile_feeder #(
             a_valid_c[i]     = 1'b0;
             b_valid_c[i]     = 1'b0;
 
-            accum_ctx_a_c[i] = 1'b0;
-            accum_ctx_b_c[i] = 1'b0;
-
         end
 
 
@@ -117,24 +107,12 @@ module systolic_tile_feeder #(
             for (int r = 0; r < N; r++) begin
 
                 integer gk_a;
-                integer fold_a;
 
                 gk_a = int'(feed_t) - r;
 
                 if ((gk_a >= 0) && (gk_a < int'(k_dim))) begin
-
-                    /*
-                     * The fold number is derived here, at run time,
-                     * purely to pick the accumulator context. The
-                     * buffer is addressed by absolute k.
-                     */
-                    fold_a = gk_a >> 3;
-
-                    a_raddr[r] = K_W'(unsigned'(gk_a));
-
-                    a_valid_c[r]     = 1'b1;
-                    accum_ctx_a_c[r] = fold_a[0];
-
+                    a_raddr[r]   = K_W'(unsigned'(gk_a));
+                    a_valid_c[r] = 1'b1;
                 end
 
             end
@@ -146,19 +124,12 @@ module systolic_tile_feeder #(
             for (int c = 0; c < N; c++) begin
 
                 integer gk_b;
-                integer fold_b;
 
                 gk_b = int'(feed_t) - c;
 
                 if ((gk_b >= 0) && (gk_b < int'(k_dim))) begin
-
-                    fold_b = gk_b >> 3;
-
-                    b_raddr[c] = K_W'(unsigned'(gk_b));
-
-                    b_valid_c[c]     = 1'b1;
-                    accum_ctx_b_c[c] = fold_b[0];
-
+                    b_raddr[c]   = K_W'(unsigned'(gk_b));
+                    b_valid_c[c] = 1'b1;
                 end
 
             end

@@ -1,6 +1,6 @@
 /*
  * ============================================================
- * systolic_array_tile -- N x N 的 PE 陣列
+ * systolic_array -- N x N 的 PE 陣列
  * ============================================================
  *
  * a 從左邊推進去,b 從上面推進去,在 N x N 個 PE 裡交會相乘累加。
@@ -37,7 +37,7 @@
  * ============================================================
  */
 
-module systolic_array_tile #(
+module systolic_array #(
     /*
      * 陣列邊長。陣列是正方形:N 列 x N 行,共 N*N 個 PE。
      *
@@ -114,7 +114,7 @@ module systolic_array_tile #(
         for (r = 0; r < N; r = r + 1) begin : ROW
             for (c = 0; c < N; c = c + 1) begin : COL
 
-                systolic_pe_tile #(
+                systolic_pe #(
                     .DATA_W (DATA_W)
                 ) u_pe (
                     .clk           (clk),
