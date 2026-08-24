@@ -62,7 +62,7 @@ if {$KMAX < 16 || ($KMAX % 8) != 0} {
 
 
 set PART        "xc7a200tsbg484-1"
-set TOP         "systolic_uart_tile_top"
+set TOP         "systolic_uart_top"
 set CLK_PERIOD  10.000
 set BITTAG $KMAX
 if {$DBG} { append BITTAG "_dbg" }
@@ -92,15 +92,16 @@ read_verilog -sv uart_tx.sv
 read_verilog -sv fp_mul.sv
 read_verilog -sv fp_add.sv
 read_verilog -sv fp_reduce16.sv
-read_verilog -sv systolic_pe_tile.sv
-read_verilog -sv systolic_array_tile.sv
-read_verilog -sv systolic_array_8x8_tile.sv
+read_verilog -sv systolic_pe.sv
+read_verilog -sv systolic_array.sv
+read_verilog -sv systolic_array_8x8.sv
+read_verilog -sv systolic_array_4x4.sv
 read_verilog -sv systolic_tile_feeder.sv
 read_verilog -sv systolic_operand_buffer.sv
 read_verilog -sv systolic_status.sv
 read_verilog -sv systolic_tx_source.sv
 read_verilog -sv uart_tx_streamer.sv
-read_verilog -sv systolic_uart_tile_top.sv
+read_verilog -sv systolic_uart_top.sv
 
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_add_0/floating_point_add_0.xci
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_mul_0/floating_point_mul_0.xci
@@ -112,7 +113,7 @@ read_xdc nexys_video_uart.xdc
 # Synthesis
 #
 # DEBUG_MARKERS stays 0 for every sweep point. The breadcrumb bytes
-# desynchronise a host reading exactly 512 bytes, and enabling them for
+# desynchronise a host reading exactly 4*N*N bytes, and enabling them for
 # some points but not others would put a constant-but-unequal offset into
 # the LUT column.
 #

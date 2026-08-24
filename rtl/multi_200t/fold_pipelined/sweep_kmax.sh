@@ -32,7 +32,7 @@ NSUF=""
 KS=(16 32 64 128 256)
 [ $# -gt 0 ] && KS=("$@")
 
-TOP=systolic_uart_tile_top
+TOP=systolic_uart_top
 LOGDIR=build_kmax/sweep_logs
 RESULTS=build_kmax/sweep_results.csv
 mkdir -p "$LOGDIR"

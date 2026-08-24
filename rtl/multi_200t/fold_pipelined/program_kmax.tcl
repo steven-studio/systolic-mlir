@@ -20,7 +20,10 @@ if {$argc < 1} {
 set KMAX   [lindex $argv 0]
 set TGLOB  [expr {$argc >= 2 ? [lindex $argv 1] : "*210276C08FC0B*"}]
 
-set BIT "build_kmax/k${KMAX}/systolic_uart_tile_top_k${KMAX}.bit"
+# ⚠ TOP 改名之後,舊的 bitstream(systolic_uart_tile_top_k*.bit)
+#   這條路徑找不到。要燒 cgo-base 那一版就得用舊名字,或直接
+#   git checkout 那個 tag 的腳本。
+set BIT "build_kmax/k${KMAX}/systolic_uart_top_k${KMAX}.bit"
 
 if {![file exists $BIT]} {
     puts ""

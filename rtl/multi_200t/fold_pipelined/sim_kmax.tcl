@@ -77,14 +77,22 @@ add_files -norecurse [list \
     uart_tx.sv \
     fp_mul.sv \
     fp_add.sv \
-    systolic_pe_tile.sv \
-    systolic_array_tile.sv \
-    systolic_array_8x8_tile.sv \
-    systolic_uart_tile_top.sv \
+    systolic_pe.sv \
+    systolic_array.sv \
+    systolic_array_8x8.sv \
+    systolic_array_4x4.sv \
+    systolic_uart_top.sv \
     systolic_tile_feeder.sv \
     systolic_operand_buffer.sv \
 ]
 
+# ⚠ ctx 移除之後,下面這幾支還沒跟上,現在編不過:
+#     tb_uart_multi_invocation / tb_nparam_equiv / tb_tx_equiv
+#     tb_feeder_buffer(依賴 golden_tile_feeder,那支也還有 ctx)
+#   在它們修好之前這個腳本會在 xvlog 就失敗。PE 與陣列那一層
+#   已經有 tb_pe_counters / tb_pe_reduce / tb_pe_overlap /
+#   tb_array_pulse 在 verilator 下守著。
+#
 # Every bench goes into the simulation fileset so a syntax error in any of
 # them is caught here rather than the next time someone switches top.
 #
