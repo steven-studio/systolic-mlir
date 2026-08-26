@@ -1,6 +1,9 @@
 # build_kmax.tcl -- one synthesis+implementation run at a given K_MAX.
 #
-#   vivado -mode batch -source build_kmax.tcl -tclargs <K_MAX>
+#   vivado -mode batch -source uart/build_kmax.tcl -tclargs <K_MAX>
+#
+# Paths inside this script are resolved relative to the script's own
+# location (fold_pipelined/uart/), so it can be invoked from any cwd.
 #
 # K_MAX is the SYNTHESIS-TIME HARDWARE CAPACITY: the deepest reduction the
 # on-chip operand buffers can hold. It is not the workload's K, and it is
@@ -60,15 +63,31 @@ if {$KMAX < 16 || ($KMAX % 8) != 0} {
     error "K_MAX must be a multiple of 8 and at least 16 (got $KMAX)"
 }
 
+# ---------------------------------------------------------------------
+# Layout (fold_pipelined/):
+#   core/    PE, array, feeder, operand buffer, status, tx source, fp wrappers
+#   ip/fp32/<ip_name>/<ip_name>.xci   Xilinx floating-point IP, one dir each
+#   uart/    UART transport: rx/tx, top, xdc, this script, program_kmax.tcl
+#   build_kmax/  outputs (ignored by git)
+# ---------------------------------------------------------------------
+set HERE [file normalize [file dirname [info script]]]   ;# .../fold_pipelined/uart
+set ROOT [file normalize [file join $HERE ..]]           ;# .../fold_pipelined
 
 set PART        "xc7a200tsbg484-1"
 set TOP         "systolic_uart_top"
 set CLK_PERIOD  10.000
+
+# in-memory project 的預設 part 是 xc7vx485t。不在 read_ip 之前把它設成
+# 板子的 part,IP 會因「project part 與 IP 客製 part 不符」被 lock,之後
+# generate_target 什麼都生不出來。舊註解裡「FP IP 鎖在 xc7vx485t」就是
+# 這件事的誤診:鎖的是專案預設值,不是 IP。
+create_project -in_memory -part $PART
+
 set BITTAG $KMAX
 if {$DBG} { append BITTAG "_dbg" }
 if {$PDIR ne "Default"} { append BITTAG "_[string tolower $PDIR]" }
 if {$NARR != 8} { append BITTAG "_n$NARR" }
-set OUT "build_kmax/k${BITTAG}"
+set OUT "$ROOT/build_kmax/k${BITTAG}"
 
 file mkdir $OUT
 file mkdir $OUT/reports
@@ -83,31 +102,69 @@ puts "========================================"
 puts " k_max sweep point"
 puts "   K_MAX = $KMAX"
 puts "   N     = $NARR"
+puts "   root  = $ROOT"
 puts "   out   = $OUT"
 puts "========================================"
 
 
-read_verilog -sv uart_rx.sv
-read_verilog -sv uart_tx.sv
-read_verilog -sv fp_mul.sv
-read_verilog -sv fp_add.sv
-read_verilog -sv fp_reduce16.sv
-read_verilog -sv systolic_pe_bram.sv
-read_verilog -sv systolic_array.sv
-read_verilog -sv systolic_array_8x8.sv
-read_verilog -sv systolic_array_4x4.sv
-read_verilog -sv systolic_tile_feeder.sv
-read_verilog -sv systolic_operand_buffer.sv
-read_verilog -sv systolic_status.sv
-read_verilog -sv systolic_tx_source.sv
-read_verilog -sv uart_tx_streamer.sv
-read_verilog -sv systolic_uart_top.sv
+# ---------------------------------------------------------------------
+# IP FIRST. synth_ip runs an out-of-context synth_design in this same
+# session and leaves the current fileset pointing at the IP; anything
+# read_xdc'd after it lands on the IP's constraint set instead of the
+# design's, and the main synth then has no clocks. So: generate and
+# synthesise the IP before a single RTL or XDC file is read.
+# ---------------------------------------------------------------------
+set IP_DIR [file join $ROOT ip fp32]
+foreach xci {floating_point_add_0 floating_point_mul_0} {
+    set p [file join $IP_DIR $xci ${xci}.xci]
+    if {![file exists $p]} { set p [file join $IP_DIR ${xci}.xci] }
+    if {![file exists $p]} { error "missing IP: $xci under $IP_DIR" }
+    read_ip $p
+}
 
-read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_add_0/floating_point_add_0.xci
-read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_mul_0/floating_point_mul_0.xci
+set ips [get_ips]
+foreach ip $ips {
+    if {[get_property IS_LOCKED $ip]} {
+        report_ip_status
+        error "IP $ip is locked -- see report_ip_status above (part mismatch? shared output dir?)"
+    }
+}
+# .xci 搬離原專案後生成產物不會跟著來,在這裡重生成;已是最新時
+# Vivado 會跳過,所以每次跑都無害。產物落在 .xci 旁邊的目錄裡。
+generate_target all $ips
+synth_ip $ips        ;# OOC 合成,跟舊流程一致
 
 
-read_xdc nexys_video_uart.xdc
+# ---------------------------------------------------------------------
+# RTL sources. Order is irrelevant to synth_design but is kept
+# bottom-up for readability: transport primitives, fp wrappers, PE,
+# array, buffers/feeder, side blocks, top.
+# ---------------------------------------------------------------------
+set RTL_FILES {
+    uart/uart_rx.sv
+    uart/uart_tx.sv
+    core/fp_mul.sv
+    core/fp_add.sv
+    core/fp_reduce16.sv
+    core/systolic_pe_bram.sv
+    core/systolic_array.sv
+    core/tile_feeder.sv
+    core/operand_buffer.sv
+    core/status.sv
+    core/tx_source.sv
+    uart/uart_tx_streamer.sv
+    uart/systolic_uart_top.sv
+}
+foreach f $RTL_FILES {
+    set p [file join $ROOT $f]
+    if {![file exists $p]} { error "missing RTL source: $p" }
+    read_verilog -sv $p
+}
+
+# Constraints, read last so they attach to the design fileset.
+set XDC [file join $HERE nexys_video_uart.xdc]
+if {![file exists $XDC]} { error "missing XDC: $XDC" }
+read_xdc $XDC
 
 # ---------------------------------------------------------------------
 # Synthesis
@@ -124,13 +181,18 @@ synth_design -top $TOP -part $PART \
     -generic DEBUG_MARKERS=$DBG \
     -generic CYCLE_COUNTER=1
 
+# Fail loudly if the XDC did not take: every later step assumes a clock.
+if {[llength [get_clocks -quiet]] == 0} {
+    error "no clocks after synth_design: create_clock in $XDC did not apply"
+}
+
 # ---------------------------------------------------------------------
 # Hold 餘裕強化(2026-08-19 板上實驗結論)
 #
 # 同一份 clean 組態:Default placement 上板死(RX 0/512)、Explore
 # placement 上板全對(bit-exact)、dbg placement 也活 -- 失敗只跟
 # placement 相關,跟 RTL/組態無關。死掉那顆的 WHS 只有 0.02ns 級,
-# 而 STA 的前提本身有瑕疵(FP IP 鎖在 xc7vx485t、OOC 時脈 100ns)。
+# 而 STA 的前提本身有瑕疵(OOC 時脈 100ns)。
 # 這裡強制 implementation 多留 0.15ns 的 hold 餘裕:報表上的 WHS
 # 已內含這份悲觀,summary 的 timing_met 閘門因此等於要求真實餘裕
 # >= 0.15ns。從此不靠 placement 抽籤。
@@ -206,7 +268,7 @@ puts "========================================"
 if {$TIMING_OK} {
     write_bitstream -force $OUT/${TOP}_k${BITTAG}.bit
     puts " bitstream: $OUT/${TOP}_k${BITTAG}.bit"
-    puts " program:   vivado -mode batch -source program_kmax.tcl -tclargs $BITTAG"
+    puts " program:   vivado -mode batch -source $HERE/program_kmax.tcl -tclargs $BITTAG"
 } else {
     puts " bitstream SKIPPED (timing not met)"
 }
