@@ -175,3 +175,5 @@ xsim.dir/
 sweep*.out
 xelab.log
 xelab.pb
+obj_dir/
+clockInfo.txt
