@@ -1,0 +1,2 @@
+k_max,directive,lut,ff,bram,dsp,wns_ns,whs_ns,fmax_mhz,timing_met,board_test
+2048,Default,83671,113467,32,256,0.324,0.004,103.35,1,PASS

@@ -1,6 +1,6 @@
 /*
  * ============================================================
- * systolic_pe -- 一個處理單元 (PE)
+ * systolic_pe_bram -- 一個處理單元 (PE)
  * ============================================================
  *
  * 它做什麼
@@ -81,6 +81,49 @@
  *       tb/fp_model.sv systolic_pe_tile.sv tb/tb_pe_reduce.sv -o tbrun
  * ============================================================
  */
+
+/*
+ * ============================================================
+ * pe_acc_bram -- 單讀、單寫同步 Block RAM
+ * ============================================================
+ *
+ * read:
+ *   第 N 拍給 raddr
+ *   第 N+1 拍 rdata 有效
+ *
+ * write:
+ *   we=1 時在 clock edge 寫入
+ *
+ * 沒有 reset memory content，避免破壞 BRAM inference。
+ */
+module pe_acc_bram #(
+    parameter int DATA_W = 32,
+    parameter int DEPTH  = 16,
+    parameter int ADDR_W = $clog2(DEPTH)
+) (
+    input  logic                  clk,
+
+    input  logic [ADDR_W-1:0]     raddr,
+    output logic [DATA_W-1:0]     rdata,
+
+    input  logic                  we,
+    input  logic [ADDR_W-1:0]     waddr,
+    input  logic [DATA_W-1:0]     wdata
+);
+
+    (* ram_style = "block" *)
+    logic [DATA_W-1:0] mem [0:DEPTH-1];
+
+    always_ff @(posedge clk) begin
+        rdata <= mem[raddr];
+
+        if (we)
+            mem[waddr] <= wdata;
+    end
+
+endmodule
+
+
 module systolic_pe #(
     parameter int DATA_W    = 32,
     parameter int ACC_BANKS = 16,
@@ -190,9 +233,97 @@ module systolic_pe #(
      * 在交棒的同一拍翻到另一組。所以兩條寫回路徑不可能撞在同一格。
      */
 
-    logic [DATA_W-1:0] acc_bank [0:1][0:ACC_BANKS-1];
-    logic              acc_set;
-    logic              red_set;
+    /*
+     * 兩個 ping-pong set，每個 set 有兩份 mirror BRAM。
+     *
+     * copy0 / copy1 永遠寫入相同資料。
+     * reduction 時：
+     *
+     *   copy0 -> bank[i]
+     *   copy1 -> bank[i + stride]
+     *
+     * 因此每一顆實體 memory 只需要 1R + 1W。
+     */
+
+    logic [ACC_SEL_W-1:0] set0_c0_raddr;
+    logic [ACC_SEL_W-1:0] set0_c1_raddr;
+    logic [ACC_SEL_W-1:0] set1_c0_raddr;
+    logic [ACC_SEL_W-1:0] set1_c1_raddr;
+
+    logic [DATA_W-1:0] set0_c0_rdata;
+    logic [DATA_W-1:0] set0_c1_rdata;
+    logic [DATA_W-1:0] set1_c0_rdata;
+    logic [DATA_W-1:0] set1_c1_rdata;
+
+    logic                 set0_we;
+    logic                 set1_we;
+
+    logic [ACC_SEL_W-1:0] set0_waddr;
+    logic [ACC_SEL_W-1:0] set1_waddr;
+
+    logic [DATA_W-1:0] set0_wdata;
+    logic [DATA_W-1:0] set1_wdata;
+
+    /*
+     * BRAM 本身不清零。
+     * valid=0 代表 logical value = 0。
+     */
+    logic acc_bank_valid [0:1][0:ACC_BANKS-1];
+
+    logic acc_set;
+    logic red_set;
+
+
+    /*
+     * 四顆明確的實體 memory。
+     */
+    pe_acc_bram #(
+        .DATA_W (DATA_W),
+        .DEPTH  (ACC_BANKS)
+    ) u_acc_set0_copy0 (
+        .clk   (clk),
+        .raddr (set0_c0_raddr),
+        .rdata (set0_c0_rdata),
+        .we    (set0_we),
+        .waddr (set0_waddr),
+        .wdata (set0_wdata)
+    );
+
+    pe_acc_bram #(
+        .DATA_W (DATA_W),
+        .DEPTH  (ACC_BANKS)
+    ) u_acc_set0_copy1 (
+        .clk   (clk),
+        .raddr (set0_c1_raddr),
+        .rdata (set0_c1_rdata),
+        .we    (set0_we),
+        .waddr (set0_waddr),
+        .wdata (set0_wdata)
+    );
+
+    pe_acc_bram #(
+        .DATA_W (DATA_W),
+        .DEPTH  (ACC_BANKS)
+    ) u_acc_set1_copy0 (
+        .clk   (clk),
+        .raddr (set1_c0_raddr),
+        .rdata (set1_c0_rdata),
+        .we    (set1_we),
+        .waddr (set1_waddr),
+        .wdata (set1_wdata)
+    );
+
+    pe_acc_bram #(
+        .DATA_W (DATA_W),
+        .DEPTH  (ACC_BANKS)
+    ) u_acc_set1_copy1 (
+        .clk   (clk),
+        .raddr (set1_c1_raddr),
+        .rdata (set1_c1_rdata),
+        .we    (set1_we),
+        .waddr (set1_waddr),
+        .wdata (set1_wdata)
+    );
 
 
     /* ============================================================
@@ -225,12 +356,77 @@ module systolic_pe #(
     logic [DATA_W-1:0] accum_add_result;
     logic              accum_add_valid;
 
+    /*
+     * BRAM synchronous read stage.
+     *
+     * product_valid 那一拍送出 read address，
+     * 下一拍 accum_ram_data 才拿到舊 accumulator。
+     * 因此 product 也必須延遲一拍保持對齊。
+     */
+    logic [DATA_W-1:0] accum_ram_data;
+    logic [DATA_W-1:0] accum_product_d;
+    logic              accum_read_valid;
+    logic              accum_old_valid;
+
+    /*
+     * BRAM read stage
+     *
+     * 第 N 拍:
+     *   product_bank -> BRAM address
+     *   product      -> accum_product_d
+     *
+     * 第 N+1 拍:
+     *   accum_ram_data 與 accum_product_d 對齊，
+     *   再一起送進 fp_add。
+     */
+    /*
+     * 真正的 BRAM read 在 pe_acc_bram 裡完成。
+     * 這裡只 pipeline 與 read request 對應的 product / valid。
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            accum_product_d  <= '0;
+            accum_read_valid <= 1'b0;
+            accum_old_valid  <= 1'b0;
+        end
+        else begin
+            accum_read_valid <= product_valid;
+
+            if (product_valid) begin
+                accum_product_d <= product;
+
+                if (acc_set == 1'b0)
+                    accum_old_valid <= acc_bank_valid[0][product_bank];
+                else
+                    accum_old_valid <= acc_bank_valid[1][product_bank];
+            end
+        end
+    end
+
+    /*
+     * acc_set 在整個 accumulation 尚未 drain 前不會改變，
+     * 所以可以直接選該 set 的 BRAM output。
+     */
+    always_comb begin
+        if (acc_set == 1'b0)
+            accum_ram_data = set0_c0_rdata;
+        else
+            accum_ram_data = set1_c0_rdata;
+    end
+
+    /*
+     * BRAM 裡可能還留著上一個 tile 的舊值。
+     * valid=0 時，在邏輯上視為 0。
+     */
+    wire [DATA_W-1:0] accum_old_value =
+        accum_old_valid ? accum_ram_data : '0;
+
     fp_add u_fp_add_accum (
         .clk       (clk),
         .rst       (rst),
-        .valid_in  (product_valid),
-        .a         (acc_bank[acc_set][product_bank]),
-        .b         (product),
+        .valid_in  (accum_read_valid),
+        .a         (accum_old_value),
+        .b         (accum_product_d),
         .valid_out (accum_add_valid),
         .result    (accum_add_result)
     );
@@ -275,15 +471,184 @@ module systolic_pe #(
     logic [DATA_W-1:0] reduce_add_result;
     logic              reduce_add_valid;
 
+    /*
+     * reduction 最後一層 stride=1 的結果，
+     * 就是這個 PE 的最終 accumulator。
+     */
+    logic [DATA_W-1:0] final_reduce_result;
+
+    /*
+     * Reduction BRAM read stage.
+     *
+     * reduction 每次需要兩個 operand:
+     *
+     *   bank[i]
+     *   bank[i + stride]
+     *
+     * 所以兩份 mirror BRAM 各提供一個同步 read。
+     */
+    logic [DATA_W-1:0] reduce_a_data;
+    logic [DATA_W-1:0] reduce_b_data;
+
+    logic              reduce_read_valid;
+    logic              reduce_a_old_valid;
+    logic              reduce_b_old_valid;
+
+    /*
+     * Reduction BRAM synchronous read.
+     *
+     * 第 N 拍送出兩個 address。
+     * 第 N+1 拍資料才送進 fp_add。
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            reduce_read_valid  <= 1'b0;
+            reduce_a_old_valid <= 1'b0;
+            reduce_b_old_valid <= 1'b0;
+        end
+        else begin
+            reduce_read_valid <= reduce_issue;
+
+            if (reduce_issue) begin
+                if (red_set == 1'b0) begin
+                    reduce_a_old_valid <=
+                        acc_bank_valid[0][reduce_i];
+
+                    reduce_b_old_valid <=
+                        acc_bank_valid[0][reduce_i + reduce_stride];
+                end
+                else begin
+                    reduce_a_old_valid <=
+                        acc_bank_valid[1][reduce_i];
+
+                    reduce_b_old_valid <=
+                        acc_bank_valid[1][reduce_i + reduce_stride];
+                end
+            end
+        end
+    end
+
+    /*
+     * red_set 在一整次 reduction 中保持固定。
+     */
+    always_comb begin
+        if (red_set == 1'b0) begin
+            reduce_a_data = set0_c0_rdata;
+            reduce_b_data = set0_c1_rdata;
+        end
+        else begin
+            reduce_a_data = set1_c0_rdata;
+            reduce_b_data = set1_c1_rdata;
+        end
+    end
+
+    /*
+     * valid=0 的 bank 在邏輯上視為 0。
+     */
+    wire [DATA_W-1:0] reduce_a_value =
+        reduce_a_old_valid ? reduce_a_data : '0;
+
+    wire [DATA_W-1:0] reduce_b_value =
+        reduce_b_old_valid ? reduce_b_data : '0;
+
     fp_add u_fp_add_reduce (
         .clk       (clk),
         .rst       (rst),
-        .valid_in  (reduce_issue),
-        .a         (acc_bank[red_set][reduce_i]),
-        .b         (acc_bank[red_set][reduce_i + reduce_stride]),
+        .valid_in  (reduce_read_valid),
+        .a         (reduce_a_value),
+        .b         (reduce_b_value),
         .valid_out (reduce_add_valid),
         .result    (reduce_add_result)
     );
+
+
+
+    /*
+     * ============================================================
+     * BRAM port control
+     * ============================================================
+     *
+     * acc_set 與 red_set 指向不同 set，所以 accumulation read 與
+     * reduction read 即使同拍發生，也不會爭同一顆實體 RAM。
+     */
+    always_comb begin
+
+        /*
+         * Read address defaults.
+         */
+        set0_c0_raddr = '0;
+        set0_c1_raddr = '0;
+        set1_c0_raddr = '0;
+        set1_c1_raddr = '0;
+
+        /*
+         * Accumulation 只需要 copy0。
+         */
+        if (product_valid) begin
+            if (acc_set == 1'b0)
+                set0_c0_raddr = product_bank;
+            else
+                set1_c0_raddr = product_bank;
+        end
+
+        /*
+         * Reduction 同時讀 copy0/copy1。
+         */
+        if (reduce_issue) begin
+            if (red_set == 1'b0) begin
+                set0_c0_raddr = reduce_i;
+                set0_c1_raddr = reduce_i + reduce_stride;
+            end
+            else begin
+                set1_c0_raddr = reduce_i;
+                set1_c1_raddr = reduce_i + reduce_stride;
+            end
+        end
+    end
+
+
+    /*
+     * 每個 set 只有一個 logical writeback port。
+     *
+     * accumulation 與 reduction 不會同時寫同一個 set，
+     * 因為 acc_set != red_set。
+     */
+    always_comb begin
+        set0_we    = 1'b0;
+        set1_we    = 1'b0;
+
+        set0_waddr = '0;
+        set1_waddr = '0;
+
+        set0_wdata = '0;
+        set1_wdata = '0;
+
+        if (accum_add_valid) begin
+            if (acc_set == 1'b0) begin
+                set0_we    = 1'b1;
+                set0_waddr = accum_wb_bank;
+                set0_wdata = accum_add_result;
+            end
+            else begin
+                set1_we    = 1'b1;
+                set1_waddr = accum_wb_bank;
+                set1_wdata = accum_add_result;
+            end
+        end
+
+        if (reduce_add_valid) begin
+            if (red_set == 1'b0) begin
+                set0_we    = 1'b1;
+                set0_waddr = reduce_wb_i;
+                set0_wdata = reduce_add_result;
+            end
+            else begin
+                set1_we    = 1'b1;
+                set1_waddr = reduce_wb_i;
+                set1_wdata = reduce_add_result;
+            end
+        end
+    end
 
 
     /* ============================================================
@@ -304,11 +669,21 @@ module systolic_pe #(
             if (pipe_pair_valid && !product_valid)      mul_busy <= mul_busy + 1'b1;
             else if (!pipe_pair_valid && product_valid) mul_busy <= mul_busy - 1'b1;
 
-            if (product_valid && !accum_add_valid)      accum_add_busy <= accum_add_busy + 1'b1;
-            else if (!product_valid && accum_add_valid) accum_add_busy <= accum_add_busy - 1'b1;
+            /*
+             * BRAM 多了一個 read stage。
+             * 所以真正進 fp_add 的事件已經不是 product_valid /
+             * reduce_issue，而是晚一拍的 accum_read_valid /
+             * reduce_read_valid。
+             */
+            if (accum_read_valid && !accum_add_valid)
+                accum_add_busy <= accum_add_busy + 1'b1;
+            else if (!accum_read_valid && accum_add_valid)
+                accum_add_busy <= accum_add_busy - 1'b1;
 
-            if (reduce_issue && !reduce_add_valid)      reduce_add_busy <= reduce_add_busy + 1'b1;
-            else if (!reduce_issue && reduce_add_valid) reduce_add_busy <= reduce_add_busy - 1'b1;
+            if (reduce_read_valid && !reduce_add_valid)
+                reduce_add_busy <= reduce_add_busy + 1'b1;
+            else if (!reduce_read_valid && reduce_add_valid)
+                reduce_add_busy <= reduce_add_busy - 1'b1;
         end
     end
 
@@ -343,8 +718,15 @@ module systolic_pe #(
 
     acc_state_t acc_state;
 
+    /*
+     * BRAM read 又多了一個 pipeline stage。
+     * 因此除了 multiplier / adder 排空之外，
+     * product -> BRAM -> fp_add 之間也不能還有資料。
+     */
     wire acc_handoff = (acc_state == ACC_RUN)
                     && !pipe_pair_valid
+                    && !product_valid
+                    && !accum_read_valid
                     && (mul_busy == 0)
                     && (accum_add_busy == 0)
                     && (red_state == RED_IDLE);
@@ -423,7 +805,8 @@ module systolic_pe #(
                         reduce_todo <= reduce_todo - 1'b1;
                         reduce_i    <= reduce_i    + 1'b1;
                     end
-                    else if (reduce_add_busy == 0) begin
+                    else if ((reduce_add_busy == 0) &&
+                             !reduce_read_valid) begin
                         /* 沒事做 + 管線空了 = 這一層全部落地。
                          * 這就是層間的 barrier —— 一個條件,不是一個狀態。 */
                         if (reduce_stride == ACC_SEL_W'(1)) begin
@@ -460,20 +843,34 @@ module systolic_pe #(
 
     always_ff @(posedge clk) begin
         if (rst) begin
+            /*
+             * 不 reset BRAM data。
+             * 只清 valid bits。
+             */
             for (int s = 0; s < 2; s++)
                 for (int i = 0; i < ACC_BANKS; i++)
-                    acc_bank[s][i] <= '0;
+                    acc_bank_valid[s][i] <= 1'b0;
         end
         else begin
+
+            /*
+             * RAM write 本身由上面的 BRAM write port 完成。
+             * 這裡只維護 logical valid bits。
+             */
             if (accum_add_valid)
-                acc_bank[acc_set][accum_wb_bank] <= accum_add_result;
+                acc_bank_valid[acc_set][accum_wb_bank] <= 1'b1;
 
             if (reduce_add_valid)
-                acc_bank[red_set][reduce_wb_i] <= reduce_add_result;
+                acc_bank_valid[red_set][reduce_wb_i] <= 1'b1;
 
-            if (red_state == RED_DONE)
+            /*
+             * tile 結束後不真的清 BRAM，
+             * 只把這一組 bank 標成 invalid。
+             */
+            if (red_state == RED_DONE) begin
                 for (int i = 0; i < ACC_BANKS; i++)
-                    acc_bank[red_set][i] <= '0;
+                    acc_bank_valid[red_set][i] <= 1'b0;
+            end
         end
     end
 
@@ -487,6 +884,23 @@ module systolic_pe #(
      * 所以讀得到答案。
      */
 
+    /*
+     * stride=1 時只有最後一個 reduction:
+     *
+     * bank[0] + bank[1]
+     *
+     * 它的 fp_add 結果就是整個 PE 的答案。
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            final_reduce_result <= '0;
+        end
+        else if (reduce_add_valid &&
+                 reduce_stride == ACC_SEL_W'(1)) begin
+            final_reduce_result <= reduce_add_result;
+        end
+    end
+
     always_ff @(posedge clk) begin
         if (rst) begin
             acc_valid_out <= 1'b0;
@@ -496,7 +910,7 @@ module systolic_pe #(
             acc_valid_out <= (red_state == RED_DONE);
 
             if (red_state == RED_DONE)
-                acc_out <= acc_bank[red_set][0];
+                acc_out <= final_reduce_result;
         end
     end
 

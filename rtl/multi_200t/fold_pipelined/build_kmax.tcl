@@ -26,10 +26,33 @@
 # K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
-    error "usage: -tclargs <K_MAX>   (16, 32, 64, 128)"
+    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\] \[N\]"
 }
 
 set KMAX [lindex $argv 0]
+
+# 第二個參數 = DEBUG_MARKERS(預設 0)。開啟時輸出到 k<K>_dbg,
+# 不覆蓋乾淨版;燒錄用 program_kmax.tcl -tclargs <K>_dbg。
+# 板上判讀:host 收到的前幾個 byte 是 A1..A5 breadcrumb,
+#   什麼都沒有       -> RX framing 從未接受 frame
+#   只有 A1          -> 卡在 ST_FEED
+#   A1 A2            -> 卡在 ST_WAIT_RESULT(PE 沒全部完成)
+#   A1 A2 A3 A4 (A5) -> 結果有了,卡在 TX/ST_SEND
+set DBG [expr {$argc >= 2 ? [lindex $argv 1] : 0}]
+
+# 第三個參數 = place_design directive(預設 Default;可用 Explore、
+# ExtraTimingOpt、ExtraNetDelay_high 等)。
+#
+# 用途:同一個組態、換一個 placement,再擲一次硬幣。Vivado 是決定性
+# 的 -- 同腳本重跑產出同一顆 bit,所以「同一顆 bit 每次燒都死」只
+# 證明那顆 placement 壞,不證明組態壞。要分辨「參數導致失敗」與
+# 「這次 placement 剛好踩雷」,唯一的方法是同組態多做幾個獨立
+# placement。輸出目錄與 bit 名會帶 directive 後綴,不互相覆蓋。
+set PDIR [expr {$argc >= 3 ? [lindex $argv 2] : "Default"}]
+
+# 第四個參數 = 陣列邊長 N(預設 8)。N=4 輸出到 k<K>_n4,與 8x8 的
+# 產物互不覆蓋。N 必須是 2 的冪(RTL elaboration 會再驗一次)。
+set NARR [expr {$argc >= 4 ? [lindex $argv 3] : 8}]
 
 # The RTL requires K_MAX >= 16 and a multiple of 8. It has an elaboration
 # assertion for both, but failing here is cheaper than failing in synth.
@@ -39,31 +62,50 @@ if {$KMAX < 16 || ($KMAX % 8) != 0} {
 
 
 set PART        "xc7a200tsbg484-1"
-set TOP         "systolic_uart_fold_top"
+set TOP         "systolic_uart_top"
 set CLK_PERIOD  10.000
-set OUT         "build_kmax/k${KMAX}"
+set BITTAG $KMAX
+if {$DBG} { append BITTAG "_dbg" }
+if {$PDIR ne "Default"} { append BITTAG "_[string tolower $PDIR]" }
+if {$NARR != 8} { append BITTAG "_n$NARR" }
+set OUT "build_kmax/k${BITTAG}"
 
 file mkdir $OUT
 file mkdir $OUT/reports
 
+# 陳舊 bitstream 是個陷阱:本腳本在時序未收斂時「跳過」write_bitstream,
+# 而 program_kmax.tcl 只檢查路徑上有沒有檔案 -- 上一輪留下的舊 .bit 會被
+# 原封不動燒進板子,症狀跟新設計壞掉一模一樣。開跑先刪,跑完後路徑上
+# 若還有 .bit,就只可能是這一輪產生的。
+file delete -force $OUT/${TOP}_k${BITTAG}.bit
+
 puts "========================================"
 puts " k_max sweep point"
 puts "   K_MAX = $KMAX"
+puts "   N     = $NARR"
 puts "   out   = $OUT"
 puts "========================================"
+
 
 read_verilog -sv uart_rx.sv
 read_verilog -sv uart_tx.sv
 read_verilog -sv fp_mul.sv
 read_verilog -sv fp_add.sv
 read_verilog -sv fp_reduce16.sv
-read_verilog -sv systolic_pe_fold.sv
-read_verilog -sv systolic_array_fold.sv
-read_verilog -sv systolic_array_8x8_fold.sv
-read_verilog -sv systolic_uart_fold_top.sv
+read_verilog -sv systolic_pe_bram.sv
+read_verilog -sv systolic_array.sv
+read_verilog -sv systolic_array_8x8.sv
+read_verilog -sv systolic_array_4x4.sv
+read_verilog -sv systolic_tile_feeder.sv
+read_verilog -sv systolic_operand_buffer.sv
+read_verilog -sv systolic_status.sv
+read_verilog -sv systolic_tx_source.sv
+read_verilog -sv uart_tx_streamer.sv
+read_verilog -sv systolic_uart_top.sv
 
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_add_0/floating_point_add_0.xci
 read_ip rtl_fp_pe_test/rtl_fp_pe_test.srcs/sources_1/ip/floating_point_mul_0/floating_point_mul_0.xci
+
 
 read_xdc nexys_video_uart.xdc
 
@@ -71,22 +113,37 @@ read_xdc nexys_video_uart.xdc
 # Synthesis
 #
 # DEBUG_MARKERS stays 0 for every sweep point. The breadcrumb bytes
-# desynchronise a host reading exactly 512 bytes, and enabling them for
+# desynchronise a host reading exactly 4*N*N bytes, and enabling them for
 # some points but not others would put a constant-but-unequal offset into
 # the LUT column.
 #
 # ---------------------------------------------------------------------
 synth_design -top $TOP -part $PART \
     -generic K_MAX=$KMAX \
-    -generic DEBUG_MARKERS=0 \
+    -generic N=$NARR \
+    -generic DEBUG_MARKERS=$DBG \
     -generic CYCLE_COUNTER=1
+
+# ---------------------------------------------------------------------
+# Hold 餘裕強化(2026-08-19 板上實驗結論)
+#
+# 同一份 clean 組態:Default placement 上板死(RX 0/512)、Explore
+# placement 上板全對(bit-exact)、dbg placement 也活 -- 失敗只跟
+# placement 相關,跟 RTL/組態無關。死掉那顆的 WHS 只有 0.02ns 級,
+# 而 STA 的前提本身有瑕疵(FP IP 鎖在 xc7vx485t、OOC 時脈 100ns)。
+# 這裡強制 implementation 多留 0.15ns 的 hold 餘裕:報表上的 WHS
+# 已內含這份悲觀,summary 的 timing_met 閘門因此等於要求真實餘裕
+# >= 0.15ns。從此不靠 placement 抽籤。
+# (必須放在 synth_design 之後 -- 之前 design 未開、get_clocks 是空的。)
+# ---------------------------------------------------------------------
+set_clock_uncertainty -hold 0.150 [get_clocks]
 
 write_checkpoint -force $OUT/post_synth.dcp
 report_utilization    -file $OUT/reports/post_synth_utilization.rpt
 report_timing_summary -file $OUT/reports/post_synth_timing.rpt
 
 opt_design
-place_design
+place_design -directive $PDIR
 write_checkpoint -force $OUT/post_place.dcp
 report_timing_summary -file $OUT/reports/post_place_timing.rpt
 
@@ -147,8 +204,9 @@ puts "========================================"
 # A bitstream is only meaningful if timing closed. Writing one regardless
 # would invite programming a board with a design that fails setup.
 if {$TIMING_OK} {
-    write_bitstream -force $OUT/${TOP}_k${KMAX}.bit
-    puts " bitstream: $OUT/${TOP}_k${KMAX}.bit"
+    write_bitstream -force $OUT/${TOP}_k${BITTAG}.bit
+    puts " bitstream: $OUT/${TOP}_k${BITTAG}.bit"
+    puts " program:   vivado -mode batch -source program_kmax.tcl -tclargs $BITTAG"
 } else {
     puts " bitstream SKIPPED (timing not met)"
 }

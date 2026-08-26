@@ -77,18 +77,32 @@ add_files -norecurse [list \
     uart_tx.sv \
     fp_mul.sv \
     fp_add.sv \
-    systolic_pe_fold.sv \
-    systolic_array_fold.sv \
-    systolic_array_8x8_fold.sv \
-    systolic_uart_fold_top.sv \
+    systolic_pe.sv \
+    systolic_array.sv \
+    systolic_array_8x8.sv \
+    systolic_array_4x4.sv \
+    systolic_uart_top.sv \
+    systolic_tile_feeder.sv \
+    systolic_operand_buffer.sv \
 ]
 
-# Both benches go into the simulation fileset so a syntax error in either
-# is caught here rather than the next time someone switches top.
+# ⚠ ctx 移除之後,下面這幾支還沒跟上,現在編不過:
+#     tb_uart_multi_invocation / tb_nparam_equiv / tb_tx_equiv
+#     tb_feeder_buffer(依賴 golden_tile_feeder,那支也還有 ctx)
+#   在它們修好之前這個腳本會在 xvlog 就失敗。PE 與陣列那一層
+#   已經有 tb_pe_counters / tb_pe_reduce / tb_pe_overlap /
+#   tb_array_pulse 在 verilator 下守著。
+#
+# Every bench goes into the simulation fileset so a syntax error in any of
+# them is caught here rather than the next time someone switches top.
+#
+#   tb_uart_multi_invocation -- full system over UART, needs the FP IP
+#   tb_feeder_buffer         -- feeder+buffer contract, no IP, seconds
+#   tb_operand_buffer_equiv  -- refactor equivalence, no IP, seconds
 add_files -fileset sim_1 -norecurse [list \
-    tb_array_fold_kmax.sv \
     tb_uart_multi_invocation.sv \
-    tb_array_fold_fprandom.sv \
+    tb_feeder_buffer.sv \
+    tb_operand_buffer_equiv.sv \
 ]
 
 set_property file_type SystemVerilog [get_files *.sv]
