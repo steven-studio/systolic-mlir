@@ -1,10 +1,4 @@
 # ============================================================
-# Build system
-# ============================================================
-
-build/
-
-# ============================================================
 # Editor / IDE
 # ============================================================
 
@@ -13,14 +7,12 @@ build/
 *.swp
 
 # ============================================================
-# Temporary / backup files
+# Compiled objects and libraries
 # ============================================================
 
 *.o
 *.a
 *.so
-*.bak
-*.backup.*
 
 # ============================================================
 # Python
@@ -29,19 +21,59 @@ build/
 **/__pycache__/
 
 # ============================================================
-# Simulation artifacts
+# Generic build output
+# ============================================================
+
+build/
+compile_commands.json
+
+# ============================================================
+# Scratch / backups / work-in-progress copies
+# ============================================================
+
+*.bak
+*.bak_*
+*.backup.*
+*.before_*
+*.sv.tree
+
+# ============================================================
+# Simulation — waveforms and run directories
 # ============================================================
 
 *.vcd
 *.vvp
 *.wdb
+obj_dir/
 xsim.dir/
 **/xsim.dir/
 
 # ============================================================
-# Vivado / Vitis generated artifacts
+# Simulation — xvlog / xelab logs
 # ============================================================
 
+xvlog.log
+xvlog.pb
+xelab.log
+xelab.pb
+
+# ============================================================
+# Vivado / Vitis — logs, journals, checkpoints
+# ============================================================
+
+*.jou
+*.log
+*.pb
+*.pb3
+*.str
+*.dcp
+clockInfo.txt
+
+# ============================================================
+# Vivado / Vitis — project trees
+# ============================================================
+
+.Xil/
 **/.Xil/
 **/*.cache/
 **/*.gen/
@@ -49,73 +81,76 @@ xsim.dir/
 **/*.sim/
 **/*.hw/
 **/*.ip_user_files/
-
-*.jou
-*.pb
-*.pb3
-*.log
-*.dcp
-
-# Generated Vivado projects
 **/*.xpr
 **/*.lpr
 
 # ============================================================
-# Vitis HLS generated build directories
+# Bitstreams
+# ============================================================
+
+*.bit
+**/*.bit
+hls/multi_200t/fold_pipelined/rtl/*.bit
+
+# ============================================================
+# Vitis HLS — build trees and packaging
 # ============================================================
 
 hls/**/work_*/
 hls/**/systolic_proj*/
 hls/**/reports/
 hls/**/sweep_runs/
-
-# multi_200t experiment build trees
-hls/multi_200t/fold_pipelined/workfold_pipelined/
-hls/multi_200t/fold_pipelined/workfold_pipelined_timing*/
-hls/multi_200t/work_systolic/
-
-# Vivado build tree
-hls/multi_200t/vivado/build/
-
-# ============================================================
-# Generated HLS packaging / reports
-# ============================================================
-
 hls/**/*.zip
 hls/**/clockInfo.txt
+hls/multi_200t/work_systolic/
+hls/multi_200t/fold_pipelined/workfold_pipelined/
+hls/multi_200t/fold_pipelined/workfold_pipelined_timing*/
 
 # ============================================================
-# Runtime generated binaries / libraries
+# Vivado — local build trees
 # ============================================================
 
+build_kmax/
+ip_local/
+rtl_fp_pe_test/
+hls/multi_200t/vivado/build/
+hls/gemm_4x4_dual/vivado/build_dual/
+hls/multi_200t/fold_pipelined/rtl/build_kmax/
+hls/multi_200t/fold_pipelined/rtl/ip_local/
+hls/multi_200t/fold_pipelined/rtl/rtl_fp_pe_test/
+hls/multi_200t/fold_pipelined/rtl/sweep_k_rtl8x8_out/
+hls/multi_200t/fold_pipelined/rtl/*.sv.tree
+hls/multi_200t/fold_pipelined/rtl/systolic_pe_fold_TREE.sv
+
+# ============================================================
+# Runtime — generated binaries
+# ============================================================
+
+runtime/bin/
+runtime/dtest_*
+runtime/hwtest
+runtime/packtest
+runtime/run_shape
+runtime/run_conv2d_shape
 runtime/test_fpga_conv2d
 runtime/test_fpga_conv2d_auto
 runtime/test_fpga_conv2d_general
 runtime/test_fpga_matmul4x4
 runtime/test_fpga_matmul_tiled
-runtime/run_shape
-runtime/run_conv2d_shape
-
-runtime/bin/
 runtime/lib/*.o
 runtime/lib/*.a
 
 # ============================================================
-# Runtime generated test vectors / dumps
+# Runtime — test vectors, dumps, logs
 # ============================================================
 
 runtime/*.bin
 runtime/*.bin*.pb
 runtime/harness/*.bin
-
-# ============================================================
-# Runtime / harness logs
-# ============================================================
-
 runtime/logs/hls/**/*.log
 
 # ============================================================
-# Generated local tools
+# Local tools
 # ============================================================
 
 tools/numeric/acc_error_probe
@@ -124,56 +159,9 @@ hls/gemm_4x4/tb
 hls/gemm_4x4/tba
 
 # ============================================================
-# Sweep outputs
+# Sweep / experiment outputs
 # ============================================================
 
 /sweep_out/
-
-# Local FPGA build trees
-hls/gemm_4x4_dual/vivado/build_dual/
-
-# Experimental bitstreams
-hls/multi_200t/fold_pipelined/rtl/*.bit
-
-# Manual intermediate backups
-*.before_*
-
-# ============================================================
-# Vivado 本機產物（rtl）
-# ============================================================
-hls/multi_200t/fold_pipelined/rtl/build_kmax/
-hls/multi_200t/fold_pipelined/rtl/rtl_fp_pe_test/
-hls/multi_200t/fold_pipelined/rtl/ip_local/
-hls/multi_200t/fold_pipelined/rtl/sweep_k_rtl8x8_out/
-
-# bitstream
-**/*.bit
-
-# 工作中的暫存副本
-hls/multi_200t/fold_pipelined/rtl/*.sv.tree
-hls/multi_200t/fold_pipelined/rtl/systolic_pe_fold_TREE.sv
-build_kmax/
-rtl_fp_pe_test/
-ip_local/
-*.bit
-.Xil/
-*.bak_*
-*.sv.tree
-hls/multi_200t/sweep_results.csv
-compile_commands.json
-runtime/bin/
-runtime/dtest_*
-runtime/hwtest
-runtime/packtest
-*.o
-*.a
-xvlog.log
-xvlog.pb
-xsim.dir/
-*.jou
-*.wdb
 sweep*.out
-xelab.log
-xelab.pb
-obj_dir/
-clockInfo.txt
+hls/multi_200t/sweep_results.csv
