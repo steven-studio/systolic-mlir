@@ -112,6 +112,7 @@ hls/multi_200t/fold_pipelined/workfold_pipelined_timing*/
 
 build_kmax/
 ip_local/
+ooc_reports/
 rtl_fp_pe_test/
 hls/multi_200t/vivado/build/
 hls/gemm_4x4_dual/vivado/build_dual/
