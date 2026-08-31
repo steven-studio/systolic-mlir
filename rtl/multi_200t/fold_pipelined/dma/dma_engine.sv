@@ -83,12 +83,20 @@ module dma_engine #(
                    S_ISSUE = 2'd1,
                    S_DRAIN = 2'd2;
 
+  // Every counter here is incremental.  Recomputing a wide value each cycle
+  // inside the issue loop -- outstanding = issue_cnt - ret_cnt, or
+  // app_addr = base + issue_cnt*BYTES -- puts an adder and a comparator on the
+  // path that decides app_en, which feeds cmd_accepted, which updates the very
+  // counters being read.  That loop missed 200 MHz by 65 ps out of context.
+  localparam integer CRED_W = $clog2(MAX_OUTSTANDING + 1);
+
   logic [1:0]            state;
-  logic [APP_ADDR_W-1:0] base_addr;
-  logic [BEAT_W-1:0]     beats;
   logic [7:0]            tag;
-  logic [BEAT_W-1:0]     issue_cnt;     // commands accepted by the controller
-  logic [BEAT_W-1:0]     ret_cnt;       // beats returned
+  logic [APP_ADDR_W-1:0] addr_r;        // next command address, incremental
+  logic [BEAT_W-1:0]     issue_left;    // commands still to issue
+  logic [BEAT_W-1:0]     ret_left;      // beats still to return
+  logic [BEAT_W-1:0]     ret_idx;       // destination beat index
+  logic [CRED_W-1:0]     credit;        // issue credits: MAX_OUTSTANDING .. 0
 
   assign desc_ready = (state == S_IDLE) && init_calib_complete;
 
@@ -96,58 +104,65 @@ module dma_engine #(
   wire cmd_accepted = app_en && app_rdy;
 
   // ---- issue side --------------------------------------------------------
-  // Outstanding = accepted commands whose data has not yet come back.
-  wire [BEAT_W:0] outstanding = {1'b0, issue_cnt} - {1'b0, ret_cnt};
-  wire            may_issue   = !dst_almost_full &&
-                                (outstanding < MAX_OUTSTANDING);
+  // credit != 0 is a zero-compare on a small registered counter, and the
+  // address is a register, so the app_en loop is one LUT deep.
+  wire may_issue = !dst_almost_full && (credit != '0);
 
   always_comb begin
     app_en   = (state == S_ISSUE) && may_issue;
     app_cmd  = CMD_READ;
-    app_addr = base_addr + (APP_ADDR_W'(issue_cnt) * BYTES_PER_BEAT);
+    app_addr = addr_r;
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state      <= S_IDLE;
-      base_addr  <= '0;
-      beats      <= '0;
       tag        <= '0;
-      issue_cnt  <= '0;
-      ret_cnt    <= '0;
+      addr_r     <= '0;
+      issue_left <= '0;
+      ret_left   <= '0;
+      ret_idx    <= '0;
+      credit     <= CRED_W'(MAX_OUTSTANDING);
       done_valid <= 1'b0;
       done_tag   <= '0;
     end else begin
       done_valid <= 1'b0;
 
-      // Return collection runs in every state: beats can arrive while later
+      // Credit: spent when a command is accepted, returned when its beat comes
+      // back.  Both events can happen in the same cycle, and then it is a wash.
+      if (cmd_accepted && !app_rd_data_valid)      credit <= credit - 1'b1;
+      else if (!cmd_accepted && app_rd_data_valid) credit <= credit + 1'b1;
+
+      // Return collection runs in every state: beats arrive while later
       // commands are still being issued, and after the last one is accepted.
-      if (app_rd_data_valid && (state != S_IDLE))
-        ret_cnt <= ret_cnt + 1'b1;
+      if (app_rd_data_valid && (state != S_IDLE)) begin
+        ret_idx  <= ret_idx  + 1'b1;
+        ret_left <= ret_left - 1'b1;
+      end
 
       case (state)
         S_IDLE: begin
           if (desc_valid && desc_ready && (desc_beats != 0)) begin
-            base_addr <= desc_addr;
-            beats     <= desc_beats;
-            tag       <= desc_tag;
-            issue_cnt <= '0;
-            ret_cnt   <= '0;
-            state     <= S_ISSUE;
+            tag        <= desc_tag;
+            addr_r     <= desc_addr;
+            issue_left <= desc_beats;
+            ret_left   <= desc_beats;
+            ret_idx    <= '0;
+            credit     <= CRED_W'(MAX_OUTSTANDING);
+            state      <= S_ISSUE;
           end
         end
 
         S_ISSUE: begin
           if (cmd_accepted) begin
-            issue_cnt <= issue_cnt + 1'b1;
-            if (issue_cnt + 1'b1 == beats) state <= S_DRAIN;
+            addr_r     <= addr_r + APP_ADDR_W'(BYTES_PER_BEAT);
+            issue_left <= issue_left - 1'b1;
+            if (issue_left == 1) state <= S_DRAIN;
           end
         end
 
         S_DRAIN: begin
-          // ret_cnt is incremented above; compare against the incremented value
-          // so that the final beat completes the descriptor in its own cycle.
-          if (app_rd_data_valid && (ret_cnt + 1'b1 == beats)) begin
+          if (app_rd_data_valid && (ret_left == 1)) begin
             done_valid <= 1'b1;
             done_tag   <= tag;
             state      <= S_IDLE;
@@ -162,7 +177,7 @@ module dma_engine #(
   // ---- destination write stream -----------------------------------------
   always_comb begin
     dst_wr_en   = app_rd_data_valid && (state != S_IDLE);
-    dst_wr_beat = ret_cnt;
+    dst_wr_beat = ret_idx;
     dst_wr_data = app_rd_data;
     dst_wr_tag  = tag;
   end

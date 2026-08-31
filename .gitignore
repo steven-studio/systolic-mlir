@@ -164,4 +164,4 @@ hls/gemm_4x4/tba
 
 /sweep_out/
 sweep*.out
-hls/multi_200t/sweep_results.csv
+hls/multi_200t/sweep_results.csvooc_reports/
