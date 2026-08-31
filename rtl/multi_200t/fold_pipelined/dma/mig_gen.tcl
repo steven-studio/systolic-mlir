@@ -14,6 +14,16 @@
 #      ddr3_bw_probe ever goes near the board:
 #        vivado -mode batch -source mig_gen.tcl -tclargs example
 #
+#   4. synthesise, implement and write the bitstream (~20-40 min, unattended):
+#        vivado -mode batch -source mig_gen.tcl -tclargs build
+#
+#   5. program the board over JTAG (needs the board powered and plugged into
+#      THIS machine):
+#        vivado -mode batch -source mig_gen.tcl -tclargs program
+#
+#   open_example_project only writes project files.  Nothing reaches the FPGA
+#   until step 5, so no LED can light before then.
+#
 # UNTESTED -- there is no Vivado where this was written.  Read it, run it a
 # step at a time.  Step 1 is read-only, so it costs nothing to try.
 #
@@ -52,7 +62,7 @@ set BOARD_REPO $::env(HOME)/work/vivado/vivado-boards/new/board_files
 
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set REPO_IP    $SCRIPT_DIR/ip/ddr3
-set MIG_PRJ    $REPO_IP/nexys_video_mig.prj
+set MIG_PRJ    $REPO_IP/nexys_video_mig_axi128.prj
 
 set MODE [lindex $argv 0]
 if {$MODE eq ""} { set MODE discover }
@@ -222,10 +232,96 @@ proc example {proj_dir proj_name ip_name} {
 }
 
 # -----------------------------------------------------------------------------
+proc ex_proj {proj_dir} {
+    set hits [glob -nocomplain $proj_dir/example/*/*.xpr]
+    if {[llength $hits] == 0} {
+        error "no example project under $proj_dir/example  (run 'example' first)"
+    }
+    return [lindex $hits 0]
+}
+
+proc build {proj_dir jobs} {
+    set xpr [ex_proj $proj_dir]
+    puts "example project: $xpr"
+    open_project $xpr
+
+    launch_runs impl_1 -to_step write_bitstream -jobs $jobs
+    wait_on_run impl_1
+
+    if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
+        puts "\nimpl_1 did not finish: [get_property STATUS [get_runs impl_1]]"
+        error "build failed -- read the run log under [get_property DIRECTORY [get_runs impl_1]]"
+    }
+
+    set dir [get_property DIRECTORY [get_runs impl_1]]
+    set bits [glob -nocomplain $dir/*.bit]
+    puts "\n=== bitstream ================================================="
+    foreach b $bits { puts "  $b" }
+    set wns [get_property STATS.WNS [get_runs impl_1]]
+    puts "  impl WNS = $wns ns"
+    puts "\n  next:  vivado -mode batch -source mig_gen.tcl -tclargs program"
+    close_project
+}
+
+proc program {proj_dir} {
+    set xpr [ex_proj $proj_dir]
+    open_project $xpr
+    set dir  [get_property DIRECTORY [get_runs impl_1]]
+    set bits [glob -nocomplain $dir/*.bit]
+    if {[llength $bits] == 0} {
+        error "no .bit in $dir  (run 'build' first)"
+    }
+    set bit [lindex $bits 0]
+    puts "bitstream: $bit"
+
+    open_hw_manager
+    if {[catch {connect_hw_server} msg]} {
+        puts "\ncannot reach hw_server: $msg"
+        error "is the board powered on and plugged into THIS machine?"
+    }
+    set targets [get_hw_targets -quiet]
+    if {[llength $targets] == 0} {
+        puts "\nNO JTAG TARGET FOUND.  Check, in this order:"
+        puts "  1. board powered on (the PROG LED near the barrel jack)"
+        puts "  2. microUSB in the PROG port, and into THIS machine --"
+        puts "     you are on a remote box over ssh, so a board plugged into"
+        puts "     your laptop is invisible here"
+        puts "  3. cable drivers installed:"
+        puts "     sudo <Vivado>/data/xicom/cable_drivers/lin64/install_script/\\"
+        puts "          install_drivers/install_drivers"
+        puts "  4. lsusb | grep -i -e digilent -e futurelec"
+        error "no hardware target"
+    }
+    open_hw_target [lindex $targets 0]
+
+    set dev ""
+    foreach d [get_hw_devices] {
+        if {[string match -nocase *xc7a200t* $d]} { set dev $d }
+    }
+    if {$dev eq ""} { set dev [lindex [get_hw_devices] 0] }
+    current_hw_device $dev
+    puts "device: $dev"
+
+    set_property PROGRAM.FILE $bit $dev
+    program_hw_devices $dev
+    refresh_hw_device $dev
+
+    puts "\n=== programmed ================================================"
+    puts "  Now LOOK AT THE BOARD.  The MIG example design drives its status"
+    puts "  onto the LEDs; init_calib_complete is the one that matters."
+    puts "  Lit  -> DDR3 calibrated, the memory is alive.  Gate passed."
+    puts "  Dark -> calibration failed.  That is the 9/3 stop condition."
+    close_hw_manager
+    close_project
+}
+
+# -----------------------------------------------------------------------------
 switch -- $MODE {
     discover { discover $PART $BOARD_REPO $MIG_PRJ $ARRAY_MHZ }
     gen      { gen $PART $PROJ_DIR $PROJ_NAME $IP_NAME $REPO_IP $MIG_PRJ \
                    $BOARD_REPO $BOARD_PART $ARRAY_MHZ }
     example  { example $PROJ_DIR $PROJ_NAME $IP_NAME }
-    default  { error "unknown mode '$MODE' (discover | gen | example)" }
+    build    { build $PROJ_DIR 8 }
+    program  { program $PROJ_DIR }
+    default  { error "unknown mode '$MODE' (discover | gen | example | build | program)" }
 }
