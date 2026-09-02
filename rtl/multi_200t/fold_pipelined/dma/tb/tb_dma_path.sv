@@ -36,7 +36,15 @@
 
 module tb_dma_path #(
   parameter int N     = 8,
-  parameter int K_MAX = 64
+  parameter int K_MAX = 64,
+  // Which seed pattern to move.  0 = word index (step 3a).  1 = fp32 of the
+  // integers 1..MODULUS (step 3b), because the index pattern is denormal as
+  // fp32 and would make every product zero once the array is attached.  Run
+  // BOTH: the transport must not care what the bits mean, and a decode bug that
+  // happens to be invisible under one value distribution is exactly the kind of
+  // thing a second distribution catches.
+  parameter int SEED_MODE = 0,
+  parameter int MODULUS   = 127
 );
 
   localparam int DW       = 128;
@@ -53,6 +61,31 @@ module tb_dma_path #(
 
   logic clk = 0, rst_n = 0;
   always #5 clk = ~clk;
+
+  // ---- the seed value of payload word i ----------------------------------
+  // Written deliberately UNLIKE the RTL: dma_seed_writer priority-encodes on
+  // individual bits, this compares magnitudes.  Two spellings of the same
+  // arithmetic disagree if either is wrong, where a copy would agree with a bug.
+  function automatic logic [31:0] seed_val(input int i);
+    int v, e;
+    logic [31:0] sh;
+    begin
+      if (SEED_MODE == 0) begin
+        seed_val = 32'(i);
+      end else begin
+        v = (i % MODULUS) + 1;
+        if      (v >= 64) e = 6;
+        else if (v >= 32) e = 5;
+        else if (v >= 16) e = 4;
+        else if (v >=  8) e = 3;
+        else if (v >=  4) e = 2;
+        else if (v >=  2) e = 1;
+        else              e = 0;
+        sh       = 32'(v) << (23 - e);
+        seed_val = {1'b0, 8'(127 + e), sh[22:0]};
+      end
+    end
+  endfunction
 
   int errors = 0;
   task fail(input string m);
@@ -75,7 +108,7 @@ module tb_dma_path #(
     int i;
     begin
       wipe();
-      for (i = 0; i < RX_WORDS; i++)  dram[(base_byte/4) + i] = i;
+      for (i = 0; i < RX_WORDS; i++)  dram[(base_byte/4) + i] = seed_val(i);
     end
   endtask
 
@@ -104,10 +137,10 @@ module tb_dma_path #(
           b_lane = (rx_count >> 2) & (N - 1);
           wrd    = rx_count >> 2;
           if (is_b) begin
-            gold_b[b_lane][(win << 3) | b_koff] = 32'(wrd);
+            gold_b[b_lane][(win << 3) | b_koff] = seed_val(wrd);
             seen_b[b_lane][(win << 3) | b_koff] = 1;
           end else begin
-            gold_a[a_lane][(win << 3) | a_koff] = 32'(wrd);
+            gold_a[a_lane][(win << 3) | a_koff] = seed_val(wrd);
             seen_a[a_lane][(win << 3) | a_koff] = 1;
           end
         end
@@ -227,7 +260,8 @@ module tb_dma_path #(
 
   dma_seed_writer #(
     .AXI_DATA_W(DW), .AXI_ADDR_W(AW), .AXI_ID_W(2),
-    .BURST_LEN(BL), .TOTAL_BEATS(N_BEATS)
+    .BURST_LEN(BL), .TOTAL_BEATS(N_BEATS),
+    .SEED_MODE(SEED_MODE), .MODULUS(MODULUS)
   ) u_seed (
     .clk(clk), .rst_n(rst_n),
     .start(seed_start), .base_addr(seed_base),
@@ -339,8 +373,9 @@ module tb_dma_path #(
     while (!seed_done) @(posedge clk);
     if (seed_err_align) fail("seed writer refused an aligned base");
     for (int i = 0; i < RX_WORDS; i++)
-      if (dram[i] !== 32'(i)) begin
-        fail($sformatf("seeded DRAM word %0d = %0d, expected %0d", i, dram[i], i));
+      if (dram[i] !== seed_val(i)) begin
+        fail($sformatf("seeded DRAM word %0d = 0x%08h, expected 0x%08h",
+                       i, dram[i], seed_val(i)));
         i = RX_WORDS;
       end
     desc_addr  = AW'('h00000);
