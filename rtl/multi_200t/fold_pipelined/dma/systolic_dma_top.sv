@@ -3,6 +3,7 @@
 //
 //   DDR3 -> MIG -> dma_engine -> dma_operand_writer -> operand buffers
 //        -> tile feeder -> systolic array -> C -> checksum
+//        -> dma_result_reader -> dma_writeback_engine -> MIG -> DDR3
 //
 // systolic_uart_top.sv IS NOT TOUCHED BY THIS.  It is not instantiated, not
 // patched, not parameterised -- it stays byte-identical, so the 48-configuration
@@ -71,6 +72,11 @@
 //   led[6] any error latched
 //   led[7] heartbeat, ui_clk
 //
+//   The write-back status does not get an LED -- all eight are spoken for and
+//   renumbering them would invalidate every photograph of a previous run.  It
+//   is probe_in4[7] over JTAG, and a write-back fault raises led[6] like any
+//   other fault.
+//
 // Read the numbers over JTAG with dma_top_build.tcl -tclargs read.
 // -----------------------------------------------------------------------------
 
@@ -88,7 +94,13 @@ module systolic_dma_top #(
   parameter logic [31:0] EXPECT_WR_CHK = 32'h3F88_0780,   // "EXPECT_CHK"
   parameter logic [31:0] EXPECT_C_CHK  = 32'hC74B_2660,   // "C checksum"
 
-  parameter integer BASE_ADDR = 0
+  parameter integer BASE_ADDR = 0,
+
+  // Where the result tile lands.  One page clear of the operand image, which
+  // is RX_BYTES = K_MAX*8*N long (1 KiB at K_MAX = 16): far enough that an
+  // address-arithmetic error in either direction shows up as a wrong checksum
+  // rather than as one image quietly overwriting the other.
+  parameter integer WB_BASE_ADDR = BASE_ADDR + 4096
 ) (
   input  wire        sys_clk_pin,     // R4, 100 MHz
   input  wire        cpu_resetn,      // G4, active low
@@ -164,13 +176,70 @@ module systolic_dma_top #(
   // check is going to mean anything.
   wire rst_i = ~ui_rst_n;
 
-  // ---- AXI write channel: the seeder --------------------------------------
+  // ---- AXI write channel: two masters, one at a time ----------------------
+  // The seeder writes the operand image in P_SEED; the write-back engine writes
+  // the result tile in P_WB.  They are never alive at the same time -- the
+  // seeder's done pulses only after its last write response, and P_WB is four
+  // phases later -- so this is an ownership switch at a phase boundary, not an
+  // arbiter.  There is no round-robin, no priority, and nothing to starve.
+  //
+  // The premise is checked rather than asserted.  err_w_owner latches if the
+  // master that does not own the channel ever raises awvalid or wvalid, and it
+  // feeds any_err like every other fault.  An ownership scheme whose premise
+  // lives only in a comment is one more silent mode of the kind this design
+  // keeps running into.
   wire [1:0]   awid;   wire [28:0] awaddr;  wire [7:0] awlen;
   wire [2:0]   awsize; wire [1:0]  awburst; wire [0:0] awlock;
   wire [3:0]   awcache; wire [2:0] awprot;  wire [3:0] awqos;
   wire         awvalid, awready;
   wire [127:0] wdata_axi; wire [15:0] wstrb; wire wlast, wvalid, wready;
   wire [1:0]   bid, bresp; wire bvalid, bready;
+
+  // seeder side
+  wire [1:0]   sd_awid;    wire [28:0] sd_awaddr;  wire [7:0] sd_awlen;
+  wire [2:0]   sd_awsize;  wire [1:0]  sd_awburst; wire [0:0] sd_awlock;
+  wire [3:0]   sd_awcache; wire [2:0]  sd_awprot;  wire [3:0] sd_awqos;
+  wire         sd_awvalid; wire        sd_awready;
+  wire [127:0] sd_wdata;   wire [15:0] sd_wstrb;
+  wire         sd_wlast, sd_wvalid, sd_wready;
+  wire         sd_bvalid, sd_bready;
+
+  // write-back side
+  wire [1:0]   wb_awid;    wire [28:0] wb_awaddr;  wire [7:0] wb_awlen;
+  wire [2:0]   wb_awsize;  wire [1:0]  wb_awburst; wire [0:0] wb_awlock;
+  wire [3:0]   wb_awcache; wire [2:0]  wb_awprot;  wire [3:0] wb_awqos;
+  wire         wb_awvalid; wire        wb_awready;
+  wire [127:0] wb_wdata;   wire [15:0] wb_wstrb;
+  wire         wb_wlast, wb_wvalid, wb_wready;
+  wire         wb_bvalid, wb_bready;
+
+  logic        wb_owns_w;
+
+  assign awid       = wb_owns_w ? wb_awid    : sd_awid;
+  assign awaddr     = wb_owns_w ? wb_awaddr  : sd_awaddr;
+  assign awlen      = wb_owns_w ? wb_awlen   : sd_awlen;
+  assign awsize     = wb_owns_w ? wb_awsize  : sd_awsize;
+  assign awburst    = wb_owns_w ? wb_awburst : sd_awburst;
+  assign awlock     = wb_owns_w ? wb_awlock  : sd_awlock;
+  assign awcache    = wb_owns_w ? wb_awcache : sd_awcache;
+  assign awprot     = wb_owns_w ? wb_awprot  : sd_awprot;
+  assign awqos      = wb_owns_w ? wb_awqos   : sd_awqos;
+  assign awvalid    = wb_owns_w ? wb_awvalid : sd_awvalid;
+  assign sd_awready = !wb_owns_w && awready;
+  assign wb_awready =  wb_owns_w && awready;
+
+  assign wdata_axi  = wb_owns_w ? wb_wdata   : sd_wdata;
+  assign wstrb      = wb_owns_w ? wb_wstrb   : sd_wstrb;
+  assign wlast      = wb_owns_w ? wb_wlast   : sd_wlast;
+  assign wvalid     = wb_owns_w ? wb_wvalid  : sd_wvalid;
+  assign sd_wready  = !wb_owns_w && wready;
+  assign wb_wready  =  wb_owns_w && wready;
+
+  // bid and bresp fan out to both; only the owner's bvalid is raised, so only
+  // the owner can retire a response or latch a slave error from one.
+  assign bready     = wb_owns_w ? wb_bready  : sd_bready;
+  assign sd_bvalid  = !wb_owns_w && bvalid;
+  assign wb_bvalid  =  wb_owns_w && bvalid;
 
   // ---- AXI read channel: the engine ---------------------------------------
   wire [1:0]   arid;   wire [28:0] araddr;  wire [7:0] arlen;
@@ -188,9 +257,10 @@ module systolic_dma_top #(
   //   P_GO     one pulse to start the fold
   //   P_FOLD   wait for the array
   //   P_SCAN   read C back, one entry per cycle
+  //   P_WB     push the same C out to DRAM through the write-back engine
   // =========================================================================
-  typedef enum logic [2:0] {
-    P_CALIB, P_SEED, P_READ, P_GO, P_FOLD, P_SCAN, P_DONE
+  typedef enum logic [3:0] {
+    P_CALIB, P_SEED, P_READ, P_GO, P_FOLD, P_SCAN, P_WB, P_DONE
   } phase_t;
   phase_t phase;
 
@@ -207,6 +277,14 @@ module systolic_dma_top #(
   logic          fold_start;          // the pulse that replaces matrices_ready
   logic          c_done;              // declared here, driven by the copied block
 
+  // ---- write-back control -------------------------------------------------
+  logic          wb_desc_valid;
+  wire           wb_desc_ready, wb_done;
+  wire           wb_err_align, wb_err_resp;
+  logic          wb_desc_started, wb_done_sticky;
+  logic          err_w_owner;
+  localparam integer WB_BEATS = (N * N) / (AXI_DATA_W / 32);
+
   // P_READ ends when the last word has LANDED, not when the last beat has been
   // received.  dma_operand_writer takes four cycles to unpack a 128-bit beat
   // into the single 32-bit buffer write port, so read_done leads the final
@@ -222,15 +300,17 @@ module systolic_dma_top #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
-      phase      <= P_CALIB;
-      seed_start <= 1'b0;
-      desc_valid <= 1'b0;
-      fold_start <= 1'b0;
-      scan_c     <= '0;
+      phase         <= P_CALIB;
+      seed_start    <= 1'b0;
+      desc_valid    <= 1'b0;
+      fold_start    <= 1'b0;
+      wb_desc_valid <= 1'b0;
+      scan_c        <= '0;
     end else begin
-      seed_start <= 1'b0;
-      desc_valid <= 1'b0;
-      fold_start <= 1'b0;
+      seed_start    <= 1'b0;
+      desc_valid    <= 1'b0;
+      fold_start    <= 1'b0;
+      wb_desc_valid <= 1'b0;
       case (phase)
         P_CALIB: if (init_calib_complete) begin
                    seed_start <= 1'b1;
@@ -249,8 +329,15 @@ module systolic_dma_top #(
                    scan_c <= '0;
                    phase  <= P_SCAN;
                  end
-        P_SCAN:  if (scan_c_last) phase <= P_DONE;
+        P_SCAN:  if (scan_c_last) phase <= P_WB;
                  else             scan_c <= scan_c + 1'b1;
+        // The tile goes to memory only after chk_c has been taken off the
+        // register file, so a write-back fault can never be mistaken for a
+        // compute fault: by the time anything is written, led[5] has settled.
+        P_WB:    begin
+                   if (!wb_desc_started) wb_desc_valid <= 1'b1;
+                   if (wb_done)          phase <= P_DONE;
+                 end
         default: ;
       endcase
     end
@@ -264,14 +351,36 @@ module systolic_dma_top #(
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n)                           wb_desc_started <= 1'b0;
+    else if (wb_desc_valid && wb_desc_ready) wb_desc_started <= 1'b1;
+  end
+
+  // Ownership is registered from the phase, so it is already settled one cycle
+  // before the engine can raise awvalid: the descriptor it needs is itself a
+  // registered pulse, and the engine issues no address in the cycle it accepts
+  // one.  Ownership is never handed back -- there is nothing after P_WB.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n)          wb_owns_w <= 1'b0;
+    else if (phase == P_WB) wb_owns_w <= 1'b1;
+  end
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) err_w_owner <= 1'b0;
+    else if (wb_owns_w ? (sd_awvalid || sd_wvalid)
+                       : (wb_awvalid || wb_wvalid)) err_w_owner <= 1'b1;
+  end
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       seed_done_sticky <= 1'b0;
       read_done_sticky <= 1'b0;
       fold_done_sticky <= 1'b0;
+      wb_done_sticky   <= 1'b0;
     end else begin
       if (seed_done) seed_done_sticky <= 1'b1;
       if (read_done) read_done_sticky <= 1'b1;
       if (c_done)    fold_done_sticky <= 1'b1;
+      if (wb_done)   wb_done_sticky   <= 1'b1;
     end
   end
 
@@ -285,14 +394,15 @@ module systolic_dma_top #(
     .start (seed_start), .base_addr (AXI_ADDR_W'(BASE_ADDR)),
     .busy (seed_busy), .done (seed_done),
     .err_align (seed_err_align), .err_resp (seed_err_resp),
-    .m_axi_awid (awid), .m_axi_awaddr (awaddr), .m_axi_awlen (awlen),
-    .m_axi_awsize (awsize), .m_axi_awburst (awburst), .m_axi_awlock (awlock),
-    .m_axi_awcache (awcache), .m_axi_awprot (awprot), .m_axi_awqos (awqos),
-    .m_axi_awvalid (awvalid), .m_axi_awready (awready),
-    .m_axi_wdata (wdata_axi), .m_axi_wstrb (wstrb), .m_axi_wlast (wlast),
-    .m_axi_wvalid (wvalid), .m_axi_wready (wready),
-    .m_axi_bid (bid), .m_axi_bresp (bresp), .m_axi_bvalid (bvalid),
-    .m_axi_bready (bready)
+    .m_axi_awid (sd_awid), .m_axi_awaddr (sd_awaddr), .m_axi_awlen (sd_awlen),
+    .m_axi_awsize (sd_awsize), .m_axi_awburst (sd_awburst),
+    .m_axi_awlock (sd_awlock), .m_axi_awcache (sd_awcache),
+    .m_axi_awprot (sd_awprot), .m_axi_awqos (sd_awqos),
+    .m_axi_awvalid (sd_awvalid), .m_axi_awready (sd_awready),
+    .m_axi_wdata (sd_wdata), .m_axi_wstrb (sd_wstrb), .m_axi_wlast (sd_wlast),
+    .m_axi_wvalid (sd_wvalid), .m_axi_wready (sd_wready),
+    .m_axi_bid (bid), .m_axi_bresp (bresp), .m_axi_bvalid (sd_bvalid),
+    .m_axi_bready (sd_bready)
   );
 
   // ---- read engine --------------------------------------------------------
@@ -587,6 +697,79 @@ module systolic_dma_top #(
   // End of the copied core.
   // =========================================================================
 
+  // ---- write-back: C -> DRAM ----------------------------------------------
+  // Three modules, in the order the data moves.
+  //
+  //   dma_result_reader     walks C in the byte order systolic_tx_source uses
+  //                         and hands out 128-bit beats.  Proven byte-identical
+  //                         to the real serial source at N = 4, 8 and 16.
+  //   dma_cdc_fifo          both clocks tied to ui_clk.
+  //   dma_writeback_engine  AXI4 write master, one descriptor.
+  //
+  // WHY A FIFO IN A SINGLE-CLOCK DESIGN
+  //   Not for the crossing -- there is none here.  The engine's src_ready is
+  //   (state == S_W) && m_axi_wready, so wiring the reader straight to it would
+  //   make wvalid depend combinationally on wready, which AXI forbids and which
+  //   forms a loop against any slave that derives wready from wvalid.  The FIFO
+  //   breaks that path with a registered empty flag, and it is the exact wiring
+  //   tb_dma_writeback_path proves -- at two different clocks, which is the
+  //   harder case, so equal clocks is covered a fortiori.  A dedicated skid
+  //   buffer would be smaller and would need its own bench; this one is already
+  //   verified and already meets timing.
+  wire                  rdr_wr_en, rdr_wfull;
+  wire [AXI_DATA_W-1:0] rdr_wr_data;
+  wire                  wb_src_rempty, wb_src_ready;
+  wire [AXI_DATA_W-1:0] wb_src_data;
+  wire                  wb_src_valid = ~wb_src_rempty;
+
+  // A level, not a pulse: the reader rearms on start falling, exactly as
+  // systolic_tx_source does, and start falls when the phase leaves P_WB.
+  wire wb_rd_start = (phase == P_WB);
+
+  dma_result_reader #(
+    .N (N), .AXI_DATA_W (AXI_DATA_W)
+  ) u_rdr (
+    .clk (ui_clk), .rst (rst_i),
+    .start (wb_rd_start), .done (),
+    .C (C),
+    .wr_en (rdr_wr_en), .wr_data (rdr_wr_data), .wfull (rdr_wfull)
+  );
+
+  dma_cdc_fifo #(
+    .DW (AXI_DATA_W), .AW (5), .AF_MARGIN (8)
+  ) u_wb_fifo (
+    .wclk (ui_clk), .wrst_n (ui_rst_n),
+    .wr_en (rdr_wr_en), .wr_data (rdr_wr_data),
+    .wfull (rdr_wfull), .walmost_full (),
+    .rclk (ui_clk), .rrst_n (ui_rst_n),
+    .rd_en (wb_src_valid & wb_src_ready), .rd_data (wb_src_data),
+    .rempty (wb_src_rempty)
+  );
+
+  dma_writeback_engine #(
+    .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
+    .BEAT_W (16), .BURST_LEN (16), .MAX_OUTSTANDING (4)
+  ) u_wb (
+    .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
+    .desc_valid (wb_desc_valid), .desc_ready (wb_desc_ready),
+    .desc_addr (AXI_ADDR_W'(WB_BASE_ADDR)), .desc_beats (16'(WB_BEATS)),
+    .desc_tag (8'h3C),
+    .done_valid (wb_done), .done_tag (),
+    .m_axi_awid (wb_awid), .m_axi_awaddr (wb_awaddr), .m_axi_awlen (wb_awlen),
+    .m_axi_awsize (wb_awsize), .m_axi_awburst (wb_awburst),
+    .m_axi_awlock (wb_awlock), .m_axi_awcache (wb_awcache),
+    .m_axi_awprot (wb_awprot), .m_axi_awqos (wb_awqos),
+    .m_axi_awvalid (wb_awvalid), .m_axi_awready (wb_awready),
+    .m_axi_wdata (wb_wdata), .m_axi_wstrb (wb_wstrb), .m_axi_wlast (wb_wlast),
+    .m_axi_wvalid (wb_wvalid), .m_axi_wready (wb_wready),
+    .m_axi_bid (bid), .m_axi_bresp (bresp), .m_axi_bvalid (wb_bvalid),
+    .m_axi_bready (wb_bready),
+    .src_valid (wb_src_valid), .src_data (wb_src_data), .src_ready (wb_src_ready),
+    .busy_cycles (), .aw_stall_cycles (), .w_stall_cycles (),
+    .src_starve_cycles (),
+    .err_align (wb_err_align), .err_resp (wb_err_resp), .stat_clear (1'b0)
+  );
+
   // ---- checksum 2: the result matrix --------------------------------------
   // One entry per cycle, not sixty-four in one.  3a's first bitstream missed
   // timing by 1.011 ns doing sixteen 32-bit adds in a cycle, and every failing
@@ -629,7 +812,8 @@ module systolic_dma_top #(
   wire wr_match = read_done_sticky && (chk_wr == EXPECT_WR_CHK);
   wire c_match  = (phase == P_DONE)  && (chk_c  == EXPECT_C_CHK);
   wire any_err  = seed_err_align | seed_err_resp
-                | eng_err_align  | eng_err_resp | wr_err_range;
+                | eng_err_align  | eng_err_resp | wr_err_range
+                | wb_err_align   | wb_err_resp  | err_w_owner;
 
   // ---- MIG ----------------------------------------------------------------
   mig_7series_0 u_mig_7series_0 (
@@ -681,7 +865,7 @@ module systolic_dma_top #(
     .probe_in1 (chk_c),
     .probe_in2 (cyc_latched),
     .probe_in3 (words_written),
-    .probe_in4 ({ 1'b0, any_err, c_match, wr_match,
+    .probe_in4 ({ wb_done_sticky, any_err, c_match, wr_match,
                   fold_done_sticky, read_done_sticky, seed_done_sticky,
                   init_calib_complete })
   );

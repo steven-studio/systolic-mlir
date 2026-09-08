@@ -58,6 +58,12 @@ set EXPECT_WR_CHK 3f880780
 set EXPECT_C_CHK  c74b2660
 set EXPECT_CYC    125          ;# = K_DIM + 2(N-1) + H, H = 95, measured
 
+# Where the result tile is written back.  One page clear of the operand image,
+# which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16), so that an address error
+# in either direction shows up as a wrong image rather than as one quietly
+# overwriting the other.
+set WB_BASE       4096
+
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../fold_pipelined
 
@@ -84,6 +90,9 @@ set SRC [list \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
     $SCRIPT_DIR/dma_operand_writer.sv \
+    $SCRIPT_DIR/dma_result_reader.sv \
+    $SCRIPT_DIR/dma_writeback_engine.sv \
+    $SCRIPT_DIR/dma_cdc_fifo.sv \
     $ROOT/core/fp_mul.sv \
     $ROOT/core/fp_add.sv \
     $ROOT/core/fp_reduce16.sv \
@@ -207,6 +216,7 @@ proc build_body {} {
     # itself, so those are not generics here -- they are structural.
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
+        WB_BASE_ADDR=$WB_BASE \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
 
@@ -286,6 +296,11 @@ proc program {} {
     puts "    led\[5\]  chk_c  MATCHES        <-- THE GATE"
     puts "    led\[6\]  any error latched"
     puts "    led\[7\]  heartbeat, ui_clk"
+    puts ""
+    puts "  The write-back has no LED -- all eight are spoken for, and"
+    puts "  renumbering them would invalidate every photograph of a previous"
+    puts "  run.  It is in the JTAG flag word; a write-back fault raises"
+    puts "  led\[6\] like any other fault."
     puts ""
     puts "  Then:"
     puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read"
@@ -397,6 +412,7 @@ proc read_vio {} {
     set wm    [pval $all_probes BINARY wr_match]
     set cm    [pval $all_probes BINARY c_match]
     set er    [pval $all_probes BINARY any_err]
+    set wb    [pval $all_probes BINARY wb_done_sticky]
 
     if {$wchk eq "" || $cyc eq ""} {
         puts "\nA probe lookup came back EMPTY.  Read the list above: those are"
@@ -414,6 +430,11 @@ proc read_vio {} {
     puts "  seed written        = $sd"
     puts "  descriptor complete = $rd"
     puts "  fold complete       = $fd"
+    puts "  write-back complete = $wb     result tile at 0x[format %x $WB_BASE]"
+    puts "    (that the writes were ACCEPTED and every response returned.  That"
+    puts "     the right bytes are in memory is proved in simulation by"
+    puts "     tb/run_top_sim.sh; reading the image back on the board is the"
+    puts "     next step and is not in this bitstream.)"
     puts "  words written       = $wrds     (expect $want_words = K_MAX*2*N)"
     puts ""
     set cyc_ok [expr {$cyc ne "" && $cyc == $EXPECT_CYC}]
