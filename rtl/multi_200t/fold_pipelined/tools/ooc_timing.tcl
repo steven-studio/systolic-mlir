@@ -6,8 +6,13 @@
 # Lives in tools/ and resolves every path from its own location, like
 # build_kmax.tcl, so it can be run from any working directory.
 #
-# Answers one question: do dma_engine and the write side of dma_cdc_fifo close
-# at the MIG user-interface clock (200 MHz for a 4:1 ratio on 16-bit DDR3)?
+# Answers one question: do the DMA-side modules close at the MIG user-interface
+# clock?  That clock is NOT a guess: nexys_video_mig_axi128.prj sets
+# TimePeriod = 2500 ps (a 400 MHz memory clock, DDR3-800) and PHYRatio = 4:1,
+# so ui_clk = 400/4 = 100 MHz.  It is the same 100 MHz the bandwidth probe
+# counted cycles on (3.627 words per cycle).  An earlier version of this file
+# constrained 5 ns on the assumption of a 200 MHz ui_clk; that period was never
+# the requirement, and reading a failure at it as a blocker cost real time.
 # Nothing here needs MIG, the board, or the array -- it is pure logic timing,
 # so it can be run before any of the remaining modules exist.
 #
@@ -29,7 +34,7 @@ set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file dirname $SCRIPT_DIR]
 
 set PART      xc7a200tsbg484-1
-set UI_PERIOD 5.000    ;# 200 MHz, MIG ui_clk
+set UI_PERIOD 10.000   ;# 100 MHz MIG ui_clk -- TimePeriod 2500 ps / PHYRatio 4:1
 set AR_PERIOD 10.000   ;# 100 MHz, array clock
 set RUN_IMPL  1        ;# 0 = synthesis only (fast), 1 = also place and route
 set OUTDIR    $ROOT/ooc_reports
