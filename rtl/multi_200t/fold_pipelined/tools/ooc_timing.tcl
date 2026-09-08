@@ -105,4 +105,25 @@ if {[file exists $ROOT/core/operand_throttle.sv]} {
         $OUTDIR $RUN_IMPL $PART
 }
 
+# 4. the write engine: same clock and the same issue loop as the read engine,
+#    so it should land in the same place.  If it does not, the difference is
+#    the W-side beat counter and wlast, which are the only new logic.
+check_module dma_writeback_engine \
+    [list $ROOT/dma/dma_writeback_engine.sv] \
+    [list [list ui_clk clk $UI_PERIOD]] \
+    {} \
+    $OUTDIR $RUN_IMPL $PART
+
+# 5. the result reader, on the ARRAY clock.  Read its number with care: C is an
+#    unpacked array port, so out of context it flattens to 32*N*N input pins
+#    (2048 at N=8) with no input delay, and the path that actually matters --
+#    the N*N-to-4-word mux into wr_data -- is measured from those pins.  In
+#    context those pins are the array's output registers.  Treat a comfortable
+#    positive number here as "the mux is not the problem" and nothing more.
+check_module dma_result_reader \
+    [list $ROOT/dma/dma_result_reader.sv] \
+    [list [list ar_clk clk $AR_PERIOD]] \
+    {} \
+    $OUTDIR $RUN_IMPL $PART
+
 puts "\nReports in $OUTDIR"
