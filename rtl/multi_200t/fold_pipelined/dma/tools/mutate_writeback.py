@@ -82,6 +82,12 @@ def run_once(src_text, burst_len, workdir):
          f"-Ptb_dma_writeback_engine.BURST_LEN={burst_len}", TB, mut],
         capture_output=True, text=True)
     if c.returncode:
+        # Surfacing the compiler's own message here matters: a silent
+        # COMPILE-FAIL on the baseline looks identical to a broken script,
+        # and the difference is usually one unsupported construct.
+        print("--- iverilog failed ---")
+        print((c.stderr or c.stdout).strip()[:4000])
+        print("-----------------------")
         return "COMPILE-FAIL"
     try:
         r = subprocess.run([("vvp"), exe], capture_output=True, text=True, timeout=300)
