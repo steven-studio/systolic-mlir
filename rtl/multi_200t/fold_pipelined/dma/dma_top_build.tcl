@@ -141,6 +141,7 @@ proc build {} {
 proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
     global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
+    global WB_BASE
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -347,6 +348,7 @@ proc pick_device {} {
 # -----------------------------------------------------------------------------
 proc read_vio {} {
     global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC KMAX NARR KDIM
+    global WB_BASE
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
