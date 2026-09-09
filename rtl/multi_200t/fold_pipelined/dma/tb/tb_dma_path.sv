@@ -23,7 +23,8 @@
 //
 // BUILD (from dma/):
 //   iverilog -g2012 -o path.out tb/tb_dma_path.sv \
-//            dma_engine.sv dma_operand_writer.sv ../core/operand_buffer.sv
+//            dma_engine.sv dma_operand_writer.sv dma_seed_writer.sv \
+//            ../core/operand_buffer.sv
 //   vvp path.out
 //
 // Geometry is overridable, and N = 8 is the degenerate case where the A and B
