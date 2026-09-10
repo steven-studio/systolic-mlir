@@ -48,8 +48,27 @@ module vio_0 (
   input wire [31:0] probe_in7,  input wire [31:0] probe_in8,
   input wire [31:0] probe_in9,  input wire [31:0] probe_in10,
   input wire [31:0] probe_in11, input wire [31:0] probe_in12,
-  input wire [31:0] probe_in13
+  input wire [31:0] probe_in13,
+  // the invocation loop's three: wall clock, summed compute, status word
+  input wire [31:0] probe_in14, input wire [31:0] probe_in15,
+  input wire [31:0] probe_in16,
+  // OUTPUT probe.  On the board this is a JTAG-written register; here it is
+  // +n_inv=<count> on the simulation command line, which is the same contract
+  // -- the invocation count reaches the design from outside it, and the design
+  // latches it once, on the way out of P_CALIB.
+  output wire [3:0] probe_out0,
+  // The re-run request.  On the board dma_top_build.tcl writes it over JTAG;
+  // here the bench pokes rerun_arg directly, which is the same contract.
+  output wire       probe_out1
 );
+  logic [3:0] n_inv_arg = 4'd1;
+  logic       rerun_arg = 1'b0;
+  int unsigned n_inv_plus;
+  initial begin
+    if ($value$plusargs("n_inv=%d", n_inv_plus)) n_inv_arg = 4'(n_inv_plus);
+  end
+  assign probe_out0 = n_inv_arg;
+  assign probe_out1 = rerun_arg;
 endmodule
 
 `default_nettype wire

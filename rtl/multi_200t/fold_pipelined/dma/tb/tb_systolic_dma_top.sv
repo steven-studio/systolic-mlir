@@ -17,7 +17,7 @@
  *      fp_add here are integer pipelines.  If it does not, the write-back work
  *      broke the read path.
  *   2. Does the result tile reach memory intact?  Every word of the image at
- *      WB_BASE_ADDR is compared against the C register itself, in the order
+ *      the result region is compared against the C register itself, in the order
  *      systolic_tx_source defines.
  *   3. Did the two write masters ever overlap?  err_w_owner is the design's own
  *      answer; the memory model's interleaving check is an independent one,
@@ -49,14 +49,22 @@ module tb_systolic_dma_top #(
 );
 
   localparam integer N        = 8;
-  // Same rule as dma_top_build.tcl: one page clear of the operand image.
-  localparam integer WB_BASE  = K_MAX * 8 * N + 4096;
-  localparam integer RX_WORDS = (K_MAX * 8 * N) / 4;
+  localparam integer RX_BYTES = K_MAX * 8 * N;
+  localparam integer RX_WORDS = RX_BYTES / 4;
+  // How many invocations this run makes: +n_inv=<count> on the command line,
+  // which xil_stubs' vio_0 drives onto the design's output probe.  The operand
+  // image is that many slabs long, so the write-back region moves with it --
+  // the same arithmetic systolic_dma_top does from the latched n_inv, computed
+  // here independently so the two have to agree.
+  int unsigned n_inv = 1;
+  int unsigned wb_base;
+  int unsigned f;
   localparam integer MAX_CYC  = 400_000;
   // From tools/seed_ref.py --mode 1 --kmax <K_MAX>; the same table the build
   // script carries.  chk_wr does not depend on the arithmetic, so this bench
   // checks the tabulated constant even though fp_model is not floating point.
   localparam logic [31:0] EXPECT_WR_CHK = (K_MAX == 16)  ? 32'h3F88_0780 :
+                                          (K_MAX == 32)  ? 32'h805C_1F00 :
                                           (K_MAX == 256) ? 32'h2DC7_F800 : 32'h0;
 
   logic clk  = 1'b0;
@@ -70,9 +78,15 @@ module tb_systolic_dma_top #(
   wire [1:0]  ddr3_dm;
   wire [15:0] ddr3_dq;    wire [1:0] ddr3_dqs_n, ddr3_dqs_p;
 
+  // EXPECT_WR_CHK is passed in, as dma_top_build.tcl passes it on the board:
+  // the design's own growing expectation (want_wr, what led[4] is derived from)
+  // is only meaningful against the constant for THIS geometry, and taking the
+  // module default would leave the bench checking the K_MAX = 16 constant on a
+  // K_MAX = 32 run.
   systolic_dma_top #(
     .N (N), .K_MAX (K_MAX), .K_DIM (K_MAX),
-    .BASE_ADDR (0), .WB_BASE_ADDR (WB_BASE), .USE_V2 (USE_V2)
+    .BASE_ADDR (0), .WB_GAP_BYTES (4096), .USE_V2 (USE_V2),
+    .EXPECT_WR_CHK (EXPECT_WR_CHK)
   ) dut (
     .sys_clk_pin (clk), .cpu_resetn (rstn), .led (led),
     .ddr3_addr (ddr3_addr), .ddr3_ba (ddr3_ba), .ddr3_cas_n (ddr3_cas_n),
@@ -88,10 +102,12 @@ module tb_systolic_dma_top #(
   // passes it as +wb_region=<bytes>.  Check that it arrived, or the monitor is
   // silently checking the wrong line.
   initial begin
+    if (!$value$plusargs("n_inv=%d", n_inv)) n_inv = 1;
+    wb_base = n_inv * RX_BYTES + 4096;
     #1;
-    if (dut.u_mig_7series_0.wb_region != WB_BASE) begin
-      $display("  FAIL: memory model wb_region=%0d but WB_BASE=%0d -- pass +wb_region=%0d",
-               dut.u_mig_7series_0.wb_region, WB_BASE, WB_BASE);
+    if (dut.u_mig_7series_0.wb_region != wb_base) begin
+      $display("  FAIL: memory model wb_region=%0d but wb_base=%0d -- pass +wb_region=%0d",
+               dut.u_mig_7series_0.wb_region, wb_base, wb_base);
       $fatal(1);
     end
   end
@@ -109,22 +125,28 @@ module tb_systolic_dma_top #(
 
   integer errors = 0;
   integer waited = 0;
+  // the first run's counters, kept to compare the re-run against
+  logic [31:0] f_fill, f_cyc, f_wb, f_span, f_chk, f_words, f_eng;
   integer i, r, c;
   logic [31:0] got, want;
 
   initial begin
     $display("== tb_systolic_dma_top: seed -> DDR -> fold -> C -> DDR  (operand path %0s) ==",
              USE_V2 ? "v2, beat-wide" : "v1, four cycles per beat");
+    $display("   %0d invocation(s) of k = %0d; result region at 0x%0h",
+             n_inv, K_MAX, wb_base);
     repeat (20) @(posedge clk);
     rstn = 1'b1;
 
-    while (dut.wb_done_sticky !== 1'b1 && waited < MAX_CYC) begin
+    // wb_done_sticky is set by the FIRST write-back, so it is not the end of a
+    // multi-invocation run.  P_DONE is.
+    while (dut.phase !== 4'd7 && waited < MAX_CYC) begin
       @(posedge clk);
       waited = waited + 1;
     end
 
-    if (dut.wb_done_sticky !== 1'b1) begin
-      $display("  FAIL: no write-back completion after %0d cycles", MAX_CYC);
+    if (dut.phase !== 4'd7) begin
+      $display("  FAIL: the run did not reach P_DONE after %0d cycles", MAX_CYC);
       $display("        phase=%0d seed=%0b read=%0b fold=%0b words=%0d",
                dut.phase, dut.seed_done_sticky, dut.read_done_sticky,
                dut.fold_done_sticky, dut.words_written);
@@ -134,33 +156,66 @@ module tb_systolic_dma_top #(
     repeat (20) @(posedge clk);
 
     // ---- 1. the operand path is untouched ---------------------------------
-    if (dut.words_written !== 32'(RX_WORDS)) begin
-      $display("  FAIL: words_written = %0d, want %0d",
-               dut.words_written, RX_WORDS);
+    if (dut.words_written !== 32'(n_inv * RX_WORDS)) begin
+      $display("  FAIL: words_written = %0d, want %0d (%0d slabs)",
+               dut.words_written, n_inv * RX_WORDS, n_inv);
+      errors = errors + 1;
+    end
+    if (dut.folds_done !== 8'(n_inv)) begin
+      $display("  FAIL: folds_done = %0d, want %0d", dut.folds_done, n_inv);
+      errors = errors + 1;
+    end
+    // The design latches n_inv on the way out of P_CALIB, so this is checked
+    // after the run, not at time 0 when the register is still at its reset
+    // value: the address map the design used has to be the one this bench
+    // checked the image against.
+    if (dut.n_inv !== 4'(n_inv)) begin
+      $display("  FAIL: the design latched n_inv = %0d, the bench asked for %0d",
+               dut.n_inv, n_inv);
+      errors = errors + 1;
+    end
+    if (dut.wb_region_base !== wb_base) begin
+      $display("  FAIL: the design put the result region at %0d, this bench at %0d",
+               dut.wb_region_base, wb_base);
       errors = errors + 1;
     end
     if (EXPECT_WR_CHK == 32'h0)
       $display("  (no tabulated chk_wr for K_MAX=%0d -- add it from seed_ref.py)", K_MAX);
-    else if (dut.chk_wr !== EXPECT_WR_CHK) begin
-      $display("  FAIL: chk_wr = %h, want %h (the board's constant)",
-               dut.chk_wr, EXPECT_WR_CHK);
+    else if (dut.chk_wr !== (EXPECT_WR_CHK * 32'(n_inv))) begin
+      $display("  FAIL: chk_wr = %h, want %h (the board's constant x %0d)",
+               dut.chk_wr, EXPECT_WR_CHK * 32'(n_inv), n_inv);
       errors = errors + 1;
     end else
-      $display("  chk_wr = %h matches the board's constant", dut.chk_wr);
+      $display("  chk_wr = %h matches the board's constant x %0d",
+               dut.chk_wr, n_inv);
+    // The design's own growing expectation must have grown the same way -- it
+    // is what drives led[4], and a bench that only checked chk_wr would not
+    // notice the gate going dark on a correct run.
+    if (dut.want_wr !== (EXPECT_WR_CHK * 32'(n_inv))) begin
+      $display("  FAIL: want_wr = %h after %0d invocation(s), expected %h",
+               dut.want_wr, n_inv, EXPECT_WR_CHK * 32'(n_inv));
+      errors = errors + 1;
+    end
 
     // ---- 2. the result image ----------------------------------------------
     // Word w of the image is C[w >> log2 N][w & (N-1)]: row major, exactly the
     // order systolic_tx_source walks and tb_dma_result_reader pins down.
-    for (i = 0; i < N*N; i = i + 1) begin
-      r    = i / N;
-      c    = i % N;
-      want = dut.C[r][c];
-      got  = dut.u_mig_7series_0.mem[WB_BASE/4 + i];
-      if (got !== want) begin
-        if (errors < 8)
-          $display("  FAIL: result word %0d (row %0d col %0d): memory %h, C %h",
-                   i, r, c, got, want);
-        errors = errors + 1;
+    // One tile per invocation, each 256 B on from the last.  Every slab carries
+    // the same operands, so every tile must equal the C register the last
+    // invocation left behind: a tile that differs is a tile written from the
+    // wrong fold, or to the wrong address.
+    for (f = 0; f < n_inv; f = f + 1) begin
+      for (i = 0; i < N*N; i = i + 1) begin
+        r    = i / N;
+        c    = i % N;
+        want = dut.C[r][c];
+        got  = dut.u_mig_7series_0.mem[(wb_base + f*N*N*4)/4 + i];
+        if (got !== want) begin
+          if (errors < 8)
+            $display("  FAIL: tile %0d word %0d (row %0d col %0d): memory %h, C %h",
+                     f, i, r, c, got, want);
+          errors = errors + 1;
+        end
       end
     end
 
@@ -184,7 +239,7 @@ module tb_systolic_dma_top #(
 
     if (errors == 0)
       $display("  all %0d result words in memory match C, from one owner at a time",
-               N*N);
+               n_inv * N*N);
 
     // ---- 4. reported, not asserted ----------------------------------------
     // Printed, not checked.  The PE is deliberately agnostic to how many
@@ -197,6 +252,8 @@ module tb_systolic_dma_top #(
     // checks that one against EXPECT_CYC.
     $display("  cyc_latched = %0d  (the board reports k + 2(N-1) + 95 = %0d at k_dim = %0d)",
              dut.cyc_latched, K_MAX + 2*(N-1) + 95, K_MAX);
+    if (n_inv > 1)
+      $display("  cyc_total   = %0d over %0d invocations", dut.cyc_total, n_inv);
 
     // ---- 5. the operand-path counters, reported ---------------------------
     // The memory model returns a beat per cycle with no DRAM latency, so these
@@ -210,6 +267,11 @@ module tb_systolic_dma_top #(
     $display("  wb_cycles   = %0d   wb engine busy %0d  aw_stall %0d  w_stall %0d  src_starve %0d",
              dut.wb_cycles, dut.wb_busy_cycles, dut.wb_aw_stall_cycles,
              dut.wb_w_stall_cycles, dut.wb_src_starve_cycles);
+    // T as the paper adds it up, and the wall clock it sits inside.  The gap is
+    // P_GO, the hand-offs, and n_inv scans of C -- instrumentation, not work.
+    $display("  T (fill+compute+wb) = %0d   t_span (first AR to last B) = %0d   gap %0d",
+             dut.fill_cycles + dut.cyc_total + dut.wb_cycles, dut.t_span,
+             dut.t_span - (dut.fill_cycles + dut.cyc_total + dut.wb_cycles));
     if (USE_V2 && dut.eng_r_stall_cycles > dut.fill_cycles / 8) begin
       $display("  FAIL: v2 should not stall the engine's data channel (r_stall %0d of fill %0d)",
                dut.eng_r_stall_cycles, dut.fill_cycles);
@@ -219,6 +281,58 @@ module tb_systolic_dma_top #(
       $display("  FAIL: v1 should stall the data channel ~3/4 of the fill (r_stall %0d of fill %0d)",
                dut.eng_r_stall_cycles, dut.fill_cycles);
       errors = errors + 1;
+    end
+
+    // ---- 6. the same run again, through the re-run probe ------------------
+    // +rerun asks the design to start over from P_CALIB without a reset, which
+    // is how the board sweeps n_inv.  Every counter is defined over "this run",
+    // so the second run's numbers must equal the first's exactly.  A counter
+    // that is cleared only by ui_rst_n doubles here -- and on the board it
+    // would have been read as a slower run rather than as a broken counter.
+    if ($test$plusargs("rerun")) begin
+      f_fill  = dut.fill_cycles;   f_cyc   = dut.cyc_total;
+      f_wb    = dut.wb_cycles;     f_span  = dut.t_span;
+      f_chk   = dut.chk_wr;        f_words = dut.words_written;
+      f_eng   = dut.eng_busy_cycles;
+      // The memory model's interleaving monitor is a per-run invariant: once a
+      // write has landed in the result region, a write back down in the operand
+      // region means the two masters overlapped.  A re-run seeds the operand
+      // region again, legitimately, so the monitor is re-armed here rather than
+      // taught about runs -- the check it makes is exactly the check the second
+      // run needs, once its starting assumption is restored.
+      dut.u_mig_7series_0.wb_seen = 0;
+      dut.u_vio.rerun_arg = 1'b1;
+      repeat (4) @(posedge clk);
+      dut.u_vio.rerun_arg = 1'b0;
+      waited = 0;
+      while (dut.phase !== 4'd7 && waited < MAX_CYC) begin
+        @(posedge clk);
+        waited = waited + 1;
+      end
+      repeat (20) @(posedge clk);
+      if (dut.phase !== 4'd7) begin
+        $display("  FAIL: the re-run never reached P_DONE (phase %0d)", dut.phase);
+        errors = errors + 1;
+      end
+      if (dut.fill_cycles !== f_fill || dut.cyc_total !== f_cyc ||
+          dut.wb_cycles !== f_wb || dut.t_span !== f_span ||
+          dut.chk_wr !== f_chk || dut.words_written !== f_words ||
+          dut.eng_busy_cycles !== f_eng) begin
+        $display("  FAIL: the re-run does not report the same run as the first");
+        $display("        fill %0d/%0d  cyc %0d/%0d  wb %0d/%0d  span %0d/%0d",
+                 dut.fill_cycles, f_fill, dut.cyc_total, f_cyc,
+                 dut.wb_cycles, f_wb, dut.t_span, f_span);
+        $display("        chk_wr %h/%h  words %0d/%0d  eng busy %0d/%0d",
+                 dut.chk_wr, f_chk, dut.words_written, f_words,
+                 dut.eng_busy_cycles, f_eng);
+        errors = errors + 1;
+      end else
+        $display("  re-run reproduces the first run exactly (fill %0d, T %0d)",
+                 dut.fill_cycles, dut.fill_cycles + dut.cyc_total + dut.wb_cycles);
+      if (dut.any_err !== 1'b0) begin
+        $display("  FAIL: any_err latched during the re-run");
+        errors = errors + 1;
+      end
     end
 
     $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);

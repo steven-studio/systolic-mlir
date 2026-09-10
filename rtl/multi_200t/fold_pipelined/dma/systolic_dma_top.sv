@@ -107,11 +107,16 @@ module systolic_dma_top #(
 
   parameter integer BASE_ADDR = 0,
 
-  // Where the result tile lands.  One page clear of the operand image, which
-  // is RX_BYTES = K_MAX*8*N long (1 KiB at K_MAX = 16): far enough that an
+  // The gap between the operand image and the result image.  The operand
+  // image is n_inv * RX_BYTES long (RX_BYTES = K_MAX*8*N, 1 KiB at K_MAX = 16)
+  // and n_inv is a RUN-TIME quantity, so the write-back base is computed from
+  // the latched n_inv rather than folded here: far enough that an
   // address-arithmetic error in either direction shows up as a wrong checksum
-  // rather than as one image quietly overwriting the other.
-  parameter integer WB_BASE_ADDR = BASE_ADDR + 4096,
+  // rather than as one image quietly overwriting the other.  At n_inv = 1 the
+  // computed base is BASE_ADDR + RX_BYTES + WB_GAP_BYTES, which is the
+  // constant the old WB_BASE_ADDR parameter carried -- the single-invocation
+  // address map is unchanged, byte for byte.
+  parameter integer WB_GAP_BYTES = 4096,
 
   // OPERAND PATH VERSION.  0 = v1: dma_operand_writer unpacks each 128-bit
   // beat into four serial writes to systolic_operand_buffer's single 32-bit
@@ -274,13 +279,20 @@ module systolic_dma_top #(
   // =========================================================================
   // Bring-up sequencer
   //
-  //   P_CALIB  wait for DDR3
-  //   P_SEED   write the known image
-  //   P_READ   pull it back through the DMA into the operand buffers
+  //   P_CALIB  wait for DDR3, latch n_inv
+  //   P_SEED   write the known image -- once per slab, all n_inv of them
+  //   P_READ   pull slab fi back through the DMA into the operand buffers
   //   P_GO     one pulse to start the fold
   //   P_FOLD   wait for the array
   //   P_SCAN   read C back, one entry per cycle
-  //   P_WB     push the same C out to DRAM through the write-back engine
+  //   P_WB     push the same C out to DRAM through the write-back engine,
+  //            then back to P_READ for slab fi+1 until fi = n_inv-1
+  //
+  // The loop is the whole point of the n_inv > 1 build: a GEMM of depth
+  // K = n_inv * K_MAX run as n_inv invocations of depth K_MAX, each paying
+  // 2(N-1) + H and its own write-back, which is the split the cost model
+  // prices against one invocation of depth K.  All seeding happens before the
+  // first read so the AXI write channel changes hands exactly once.
   // =========================================================================
   typedef enum logic [3:0] {
     P_CALIB, P_SEED, P_READ, P_GO, P_FOLD, P_SCAN, P_WB, P_DONE
@@ -307,6 +319,13 @@ module systolic_dma_top #(
   logic          wb_desc_started, wb_done_sticky;
   logic          err_w_owner;
   localparam integer WB_BEATS = (N * N) / (AXI_DATA_W / 32);
+  localparam integer WB_TILE_BYTES = N * N * 4;
+  // Both strides are powers of two (N and K_MAX both are), so indexing a slab
+  // or a tile is a shift, not a multiplier, on a design with 0.9 ns of slack.
+  // The elaboration check at the bottom of the file is what keeps that true.
+  localparam int RX_SHIFT  = $clog2(RX_BYTES);
+  localparam int RXW_SHIFT = $clog2(RX_WORDS);
+  localparam int WBT_SHIFT = $clog2(WB_TILE_BYTES);
 
   // P_READ ends when the last word has LANDED, not when the last beat has been
   // received.  dma_operand_writer takes four cycles to unpack a 128-bit beat
@@ -315,15 +334,82 @@ module systolic_dma_top #(
   // last three operands into the array -- intermittently, and only at the tail
   // of the payload, which is the worst kind of bug to hunt on a board.
   // words_written is exact.
-  wire fill_complete = read_done_sticky && (words_written == 32'(RX_WORDS));
+  // words_written is cumulative (the writer's clear is tied low), so the
+  // finishing line moves one slab per invocation: invocation fi is full when
+  // the (fi+1)-th slab has landed.  At n_inv = 1 this is the old comparison.
+  wire [31:0] words_want = (32'(fi) + 32'd1) << RXW_SHIFT;
+  wire fill_complete = read_done_fold && (words_written == words_want);
 
   localparam integer C_N = N * N;
   logic [2*LANE_W:0] scan_c;
   wire scan_c_last = (scan_c == (2*LANE_W+1)'(C_N));
 
+  // ---- how many invocations this run makes --------------------------------
+  // K > K_MAX is a scheduling quantity, not a hardware capacity: the operand
+  // buffers are indexed by absolute k and no fold count appears in them.
+  // uart/build_kmax.tcl says why a top-level NFOLD generic was the wrong
+  // abstraction and asks that it not come back under another name, so the count
+  // arrives from OUTSIDE the RTL at run time -- vio_0's one output probe -- and
+  // ONE bitstream measures the whole sweep n_inv = 1..8.  What the sweep buys
+  // over a single point is the slope: the per-descriptor start-up inside the
+  // fill is measured rather than inferred from a single fill's excess.
+  //
+  // Latched on the way out of P_CALIB.  A probe written mid-run would move the
+  // finishing line under a measurement, and every counter below is defined over
+  // "this run".  0 reads as 1: an unset probe must not produce a run that does
+  // nothing and reports it as a total.
+  wire  [3:0] n_inv_probe;
+  wire  [3:0] n_inv_next = (n_inv_probe == 4'd0) ? 4'd1 : n_inv_probe;
+  // The second output probe re-runs the design from P_CALIB without a reset, so
+  // the whole n_inv sweep is one script instead of eight presses of BTNC with a
+  // project re-opened between them.  A rising edge, not a level: a level would
+  // re-run for as long as JTAG left it high.  It is honoured only in P_DONE --
+  // there is no way to interrupt a run in flight, which is the point.
+  //
+  // Everything a run measures is therefore cleared in P_CALIB rather than by
+  // ui_rst_n alone: the counters below, both engines' own counters (stat_clear),
+  // the writer's word count, the checksums and their expectations, and the four
+  // done flags.  The rule is "P_CALIB is the start of a run"; a counter that
+  // does not obey it would report the sum of every run since power-on and look
+  // like a slow run.  err flags are the deliberate exception -- an alignment or
+  // response fault is a property of the bitstream, not of one run, and stays
+  // latched until reset.
+  wire        rerun_probe;
+  logic       rerun_d;
+  wire        rerun_pulse = rerun_probe & ~rerun_d;
+  logic [3:0] n_inv;
+  logic [3:0] fi;                     // which invocation is in flight
+  wire        run_clear;              // = (phase == P_CALIB), assigned below
+  wire        fi_last = (fi == n_inv - 4'd1);
+
+  wire [AXI_ADDR_W-1:0] slab_addr =
+       AXI_ADDR_W'(BASE_ADDR) + (AXI_ADDR_W'(fi) << RX_SHIFT);
+  wire [AXI_ADDR_W-1:0] wb_region_base =
+       AXI_ADDR_W'(BASE_ADDR) + (AXI_ADDR_W'(n_inv) << RX_SHIFT)
+                              + AXI_ADDR_W'(WB_GAP_BYTES);
+  wire [AXI_ADDR_W-1:0] wb_tile_addr =
+       wb_region_base + (AXI_ADDR_W'(fi) << WBT_SHIFT);
+
+  // The engine's completion, re-armed per invocation.  read_done_sticky stays
+  // what it was -- a run-level flag for led[2] and probe_in4.
+  logic read_done_fold;
+  // And the array's.  c_done is a LEVEL: it goes high when the array publishes
+  // C and stays high until the next fold_start clears it, which was sound when
+  // there was only ever one fold.  On invocation 2 and after it is still high
+  // from the previous invocation at the moment P_FOLD is entered, so the FSM
+  // would leave P_FOLD at once and scan the previous C -- a run that looks
+  // right (the operands are identical, so the tile is identical) and is
+  // 147 cycles too fast.  This latch holds only the completion that belongs to
+  // the invocation in flight.  The clear covers two cycles because fold_start
+  // is registered: P_GO sets it, and it does not reach c_done until the first
+  // cycle of P_FOLD, so that cycle is cleared too.
+  logic c_done_fold;
+
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       phase         <= P_CALIB;
+      n_inv         <= 4'd1;
+      fi            <= 4'd0;
       seed_start    <= 1'b0;
       desc_valid    <= 1'b0;
       fold_start    <= 1'b0;
@@ -336,10 +422,25 @@ module systolic_dma_top #(
       wb_desc_valid <= 1'b0;
       case (phase)
         P_CALIB: if (init_calib_complete) begin
+                   n_inv      <= n_inv_next;
+                   fi         <= 4'd0;
                    seed_start <= 1'b1;
                    phase      <= P_SEED;
                  end
-        P_SEED:  if (seed_done) phase <= P_READ;
+        // One seed pass per slab.  seed_start is registered, so the next pulse
+        // lands the cycle AFTER seed_done, by which time dma_seed_writer is
+        // back in S_IDLE and will take it.  Every slab carries the same pattern
+        // (the writer restarts beat_idx and vbase on each start), which is what
+        // makes the expected checksums n_inv times the tabulated ones.
+        P_SEED:  if (seed_done) begin
+                   if (fi_last) begin
+                     fi    <= 4'd0;
+                     phase <= P_READ;
+                   end else begin
+                     fi         <= fi + 4'd1;
+                     seed_start <= 1'b1;
+                   end
+                 end
         P_READ:  begin
                    if (!desc_started) desc_valid <= 1'b1;
                    if (fill_complete) phase <= P_GO;
@@ -348,7 +449,7 @@ module systolic_dma_top #(
                    fold_start <= 1'b1;
                    phase      <= P_FOLD;
                  end
-        P_FOLD:  if (c_done) begin
+        P_FOLD:  if (c_done_fold) begin
                    scan_c <= '0;
                    phase  <= P_SCAN;
                  end
@@ -359,32 +460,74 @@ module systolic_dma_top #(
         // compute fault: by the time anything is written, led[5] has settled.
         P_WB:    begin
                    if (!wb_desc_started) wb_desc_valid <= 1'b1;
-                   if (wb_done)          phase <= P_DONE;
+                   if (wb_done) begin
+                     if (fi_last) phase <= P_DONE;
+                     else begin
+                       fi    <= fi + 4'd1;
+                       phase <= P_READ;    // refill, fold and store slab fi+1
+                     end
+                   end
+                 end
+        P_DONE:  if (rerun_pulse) begin
+                   // Straight back to the top.  init_calib_complete is still
+                   // high, so P_CALIB is one cycle and the next run starts with
+                   // the n_inv the probe now holds and every counter at zero.
+                   phase <= P_CALIB;
                  end
         default: ;
       endcase
     end
   end
 
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) rerun_d <= 1'b0;
+    else           rerun_d <= rerun_probe;
+  end
+
+  assign run_clear = (phase == P_CALIB);
+
   // desc_valid is a pulse; remember it was taken so P_READ does not re-issue.
+  // Cleared OUTSIDE the phase rather than in one named predecessor, so the
+  // n_inv-th pass through P_READ arms exactly as the first one did.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n)                     desc_started <= 1'b0;
-    else if (phase == P_SEED)          desc_started <= 1'b0;
+    else if (phase != P_READ)          desc_started <= 1'b0;
     else if (desc_valid && desc_ready) desc_started <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n)                           wb_desc_started <= 1'b0;
+    else if (phase != P_WB)                  wb_desc_started <= 1'b0;
     else if (wb_desc_valid && wb_desc_ready) wb_desc_started <= 1'b1;
+  end
+
+  // The read engine's own done pulse, held only for the invocation it belongs
+  // to: fill_complete must not be satisfied by the previous invocation's.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n)            read_done_fold <= 1'b0;
+    else if (phase != P_READ) read_done_fold <= 1'b0;
+    else if (read_done)       read_done_fold <= 1'b1;
+  end
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n)                             c_done_fold <= 1'b0;
+    else if ((phase == P_GO) || fold_start)    c_done_fold <= 1'b0;
+    else if (c_done)                           c_done_fold <= 1'b1;
   end
 
   // Ownership is registered from the phase, so it is already settled one cycle
   // before the engine can raise awvalid: the descriptor it needs is itself a
   // registered pulse, and the engine issues no address in the cycle it accepts
-  // one.  Ownership is never handed back -- there is nothing after P_WB.
+  // one.  Ownership is never handed back, and the loop does not change that:
+  // all n_inv slabs are seeded in P_SEED, before the first descriptor, so the
+  // seeder has finished for good by the time the first P_WB takes the channel.
+  // Handed back at the start of a run, not never: a re-run seeds again, and a
+  // seeder writing into a channel the write-back engine still owns is a hang
+  // (its AW never reaches the controller) plus an err_w_owner that blames the
+  // wrong master.  Within a run the hand-over is still one-way.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)          wb_owns_w <= 1'b0;
-    else if (phase == P_WB) wb_owns_w <= 1'b1;
+    if (!ui_rst_n || run_clear) wb_owns_w <= 1'b0;
+    else if (phase == P_WB)     wb_owns_w <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -395,6 +538,11 @@ module systolic_dma_top #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
+      seed_done_sticky <= 1'b0;
+      read_done_sticky <= 1'b0;
+      fold_done_sticky <= 1'b0;
+      wb_done_sticky   <= 1'b0;
+    end else if (run_clear) begin
       seed_done_sticky <= 1'b0;
       read_done_sticky <= 1'b0;
       fold_done_sticky <= 1'b0;
@@ -424,7 +572,7 @@ module systolic_dma_top #(
   logic        fill_running, wb_running;
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
+    if (!ui_rst_n || run_clear) begin
       fill_cycles  <= '0;
       fill_running <= 1'b0;
       wb_cycles    <= '0;
@@ -432,7 +580,7 @@ module systolic_dma_top #(
     end else begin
       if (desc_valid && desc_ready) begin
         fill_running <= 1'b1;
-        fill_cycles  <= 32'd1;
+        fill_cycles  <= fill_cycles + 32'd1;   // summed over invocations
       end else if (fill_running) begin
         fill_cycles <= fill_cycles + 1'b1;
         if (fill_complete) fill_running <= 1'b0;
@@ -440,7 +588,7 @@ module systolic_dma_top #(
 
       if (wb_desc_valid && wb_desc_ready) begin
         wb_running <= 1'b1;
-        wb_cycles  <= 32'd1;
+        wb_cycles  <= wb_cycles + 32'd1;       // summed over invocations
       end else if (wb_running) begin
         wb_cycles <= wb_cycles + 1'b1;
         if (wb_done) wb_running <= 1'b0;
@@ -448,9 +596,38 @@ module systolic_dma_top #(
     end
   end
 
+  // ---- the run, end to end ------------------------------------------------
+  // fill + compute + write-back is what the paper's per-invocation table adds
+  // up, and it is a sum of three phases, not a wall clock: P_GO, the hand-offs
+  // and the whole of P_SCAN sit between them.  t_span is the wall clock --
+  // first descriptor accepted to the last write response -- so the difference
+  // between the two says exactly how much of the run is instrumentation rather
+  // than leaving it to be argued.  Neither number is the other's estimate.
+  logic [31:0] t_span;
+  logic [7:0]  folds_done;
+  logic        t_running;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear) begin
+      t_span     <= '0;
+      t_running  <= 1'b0;
+      folds_done <= '0;
+    end else begin
+      if (desc_valid && desc_ready && !t_running && (t_span == 32'd0)) begin
+        t_running <= 1'b1;
+        t_span    <= 32'd1;
+      end else if (t_running) begin
+        t_span <= t_span + 1'b1;
+        if (wb_done && fi_last) t_running <= 1'b0;
+      end
+      if (wb_done) folds_done <= folds_done + 8'd1;
+    end
+  end
+
   // The engines' own counters, previously left unconnected.  They count from
-  // reset (stat_clear is tied low) and each engine runs exactly one descriptor
-  // in this design, so they are per-descriptor totals.
+  // reset (stat_clear is tied low) across every descriptor the run issues, so
+  // at n_inv = 1 they are per-descriptor totals and above it they are run
+  // totals -- the same quantity fill_cycles and wb_cycles report.
   wire [31:0] eng_busy_cycles, eng_rdy_stall_cycles, eng_r_stall_cycles;
   wire [31:0] wb_busy_cycles, wb_aw_stall_cycles, wb_w_stall_cycles, wb_src_starve_cycles;
 
@@ -461,7 +638,7 @@ module systolic_dma_top #(
     .SEED_MODE (1), .MODULUS (127)
   ) u_seed (
     .clk (ui_clk), .rst_n (ui_rst_n),
-    .start (seed_start), .base_addr (AXI_ADDR_W'(BASE_ADDR)),
+    .start (seed_start), .base_addr (slab_addr),
     .busy (seed_busy), .done (seed_done),
     .err_align (seed_err_align), .err_resp (seed_err_resp),
     .m_axi_awid (sd_awid), .m_axi_awaddr (sd_awaddr), .m_axi_awlen (sd_awlen),
@@ -487,7 +664,7 @@ module systolic_dma_top #(
   ) u_eng (
     .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
     .desc_valid (desc_valid), .desc_ready (desc_ready),
-    .desc_addr (AXI_ADDR_W'(BASE_ADDR)), .desc_beats (16'(N_BEATS)),
+    .desc_addr (slab_addr), .desc_beats (16'(N_BEATS)),
     .desc_tag (8'h3B),
     .done_valid (read_done), .done_tag (),
     .m_axi_arid (arid), .m_axi_araddr (araddr), .m_axi_arlen (arlen),
@@ -501,7 +678,7 @@ module systolic_dma_top #(
     .dst_wr_data (dst_wr_data), .dst_wr_tag (),
     .busy_cycles (eng_busy_cycles), .rdy_stall_cycles (eng_rdy_stall_cycles),
     .r_stall_cycles (eng_r_stall_cycles),
-    .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (1'b0)
+    .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (run_clear)
   );
 
   // ---- operand writer + checksum 1 + operand memories ---------------------
@@ -538,7 +715,7 @@ module systolic_dma_top #(
       .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
       .dst_full (dst_full), .dst_almost_full (dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (1'b0)
+      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
     );
 
     wire [15:0] k16   = 16'(waddr);
@@ -588,7 +765,7 @@ module systolic_dma_top #(
       .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
       .dst_full (dst_full), .dst_almost_full (dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (1'b0)
+      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
     );
 
     dma_wr_checksum_v2 #(
@@ -769,7 +946,12 @@ module systolic_dma_top #(
         end
 
         ST_DONE: begin
-          // One fold per configuration.  Nothing re-arms it.
+          // Back to idle, so invocation fi+1's fold_start finds the machine
+          // invocation fi found.  The accumulators need no help: systolic_pe
+          // clears the reduced set's bank valids at RED_DONE, so nothing of
+          // invocation fi survives into fi+1 and each one is an independent
+          // k-deep GEMM whose C is written back on its own.
+          state <= ST_IDLE;
         end
 
         default: state <= ST_IDLE;
@@ -783,13 +965,15 @@ module systolic_dma_top #(
   // published (c_valid_out).  Both ends inclusive -- the same interval
   // systolic_uart_top measures, which is what makes 125 comparable.
   logic [31:0] cyc_count;
-  logic [31:0] cyc_latched;
+  logic [31:0] cyc_latched;    // the LAST invocation's, so the golden still checks
+  logic [31:0] cyc_total;      // summed over the run's invocations
   logic        cyc_running;
 
   always_ff @(posedge ui_clk) begin
-    if (rst_i) begin
+    if (rst_i || run_clear) begin
       cyc_count   <= '0;
       cyc_latched <= '0;
+      cyc_total   <= '0;
       cyc_running <= 1'b0;
     end
     else begin
@@ -802,6 +986,7 @@ module systolic_dma_top #(
         if (c_valid_out) begin
           cyc_running <= 1'b0;
           cyc_latched <= cyc_count + 1'b1;
+          cyc_total   <= cyc_total + cyc_count + 32'd1;
         end
       end
     end
@@ -866,7 +1051,7 @@ module systolic_dma_top #(
   ) u_wb (
     .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
     .desc_valid (wb_desc_valid), .desc_ready (wb_desc_ready),
-    .desc_addr (AXI_ADDR_W'(WB_BASE_ADDR)), .desc_beats (16'(WB_BEATS)),
+    .desc_addr (wb_tile_addr), .desc_beats (16'(WB_BEATS)),
     .desc_tag (8'h3C),
     .done_valid (wb_done), .done_tag (),
     .m_axi_awid (wb_awid), .m_axi_awaddr (wb_awaddr), .m_axi_awlen (wb_awlen),
@@ -881,7 +1066,7 @@ module systolic_dma_top #(
     .src_valid (wb_src_valid), .src_data (wb_src_data), .src_ready (wb_src_ready),
     .busy_cycles (wb_busy_cycles), .aw_stall_cycles (wb_aw_stall_cycles),
     .w_stall_cycles (wb_w_stall_cycles), .src_starve_cycles (wb_src_starve_cycles),
-    .err_align (wb_err_align), .err_resp (wb_err_resp), .stat_clear (1'b0)
+    .err_align (wb_err_align), .err_resp (wb_err_resp), .stat_clear (run_clear)
   );
 
   // ---- checksum 2: the result matrix --------------------------------------
@@ -923,8 +1108,30 @@ module systolic_dma_top #(
     end
   end
 
-  wire wr_match = read_done_sticky && (chk_wr == EXPECT_WR_CHK);
-  wire c_match  = (phase == P_DONE)  && (chk_c  == EXPECT_C_CHK);
+  // chk_wr and chk_c are RUN totals: both are cleared in P_CALIB and both
+  // accumulate across the run's invocations, so the constant they are compared
+  // against has to grow with the run or led[4] and led[5] would go dark on a
+  // correct 8-invocation run.  Every slab carries the same pattern and every
+  // invocation therefore produces the same C, so the expected total is the
+  // tabulated per-invocation constant added once per completed invocation --
+  // 32-bit wrapping addition, the same arithmetic the hardware does.  At
+  // n_inv = 1 this is the old comparison against the tabulated constant.
+  logic [31:0] want_wr, want_c;
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      want_wr <= '0;
+      want_c  <= '0;
+    end else if (phase == P_CALIB) begin
+      want_wr <= '0;
+      want_c  <= '0;
+    end else begin
+      if ((phase == P_READ) && fill_complete) want_wr <= want_wr + EXPECT_WR_CHK;
+      if ((phase == P_SCAN) && scan_c_last)   want_c  <= want_c  + EXPECT_C_CHK;
+    end
+  end
+
+  wire wr_match = read_done_sticky && (want_wr != 32'd0) && (chk_wr == want_wr);
+  wire c_match  = (phase == P_DONE)  && (chk_c  == want_c);
   wire any_err  = seed_err_align | seed_err_resp
                 | eng_err_align  | eng_err_resp | wr_err_range
                 | wb_err_align   | wb_err_resp  | err_w_owner;
@@ -965,8 +1172,12 @@ module systolic_dma_top #(
   );
 
   // ---- JTAG readout -------------------------------------------------------
-  // FOURTEEN probes: 3b's five (four 32-bit values plus an 8-bit flag word)
-  // and the nine operand-path counters.  dma_top_build.tcl configures vio_0
+  // SEVENTEEN probes in, ONE out: 3b's five (four 32-bit values plus an 8-bit
+  // flag word), the nine operand-path counters, and the three the invocation
+  // loop adds (t_span, cyc_total, and the n_inv/folds_done status word).  The
+  // two output probes are n_inv itself -- see its declaration for why the count
+  // is driven from outside the RTL rather than built in -- and the re-run
+  // request that makes a sweep over n_inv one script.  dma_top_build.tcl configures vio_0
   // to match -- 3a's IP had probe_in3 at 8 bits, and reusing a stale
   // configuration silently truncates a 32-bit probe, which still looks like a
   // number.  Probe order is append-only: 0..4 keep their numbers so the
@@ -992,7 +1203,12 @@ module systolic_dma_top #(
     .probe_in10 (wb_busy_cycles),
     .probe_in11 (wb_aw_stall_cycles),
     .probe_in12 (wb_w_stall_cycles),
-    .probe_in13 (wb_src_starve_cycles)
+    .probe_in13 (wb_src_starve_cycles),
+    .probe_in14 (t_span),
+    .probe_in15 (cyc_total),
+    .probe_in16 ({16'd0, folds_done, 4'd0, n_inv}),
+    .probe_out0 (n_inv_probe),
+    .probe_out1 (rerun_probe)
   );
 
   // ---- LEDs ---------------------------------------------------------------
@@ -1007,6 +1223,15 @@ module systolic_dma_top #(
   initial begin
     if (K_DIM > K_MAX)
       $fatal(1, "K_DIM %0d exceeds K_MAX %0d -- the golden would not match", K_DIM, K_MAX);
+    // The slab and tile strides are shifted, not multiplied.  If either stride
+    // stopped being a power of two the shift would silently address the wrong
+    // slab, so it is checked here rather than assumed in a comment.
+    if ((1 << RX_SHIFT) != RX_BYTES)
+      $fatal(1, "RX_BYTES %0d is not a power of two -- slab_addr shifts", RX_BYTES);
+    if ((1 << RXW_SHIFT) != RX_WORDS)
+      $fatal(1, "RX_WORDS %0d is not a power of two -- words_want shifts", RX_WORDS);
+    if ((1 << WBT_SHIFT) != WB_TILE_BYTES)
+      $fatal(1, "WB_TILE_BYTES %0d is not a power of two -- wb_tile_addr shifts", WB_TILE_BYTES);
   end
 `endif
 

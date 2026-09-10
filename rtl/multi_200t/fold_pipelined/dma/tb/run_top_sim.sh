@@ -5,6 +5,13 @@
 #   ./run_top_sim.sh              # v1 operand path (four cycles per beat), K_MAX=16
 #   ./run_top_sim.sh v2           # beat-wide v2 (USE_V2=1)
 #   ./run_top_sim.sh v1 256       # the paper's geometry, either variant
+#   ./run_top_sim.sh v2 32 8      # eight invocations of k=32: the k_max split
+#
+# The third argument is the invocation count.  It is not a generic: the design
+# takes it from vio_0's output probe, which xil_stubs drives from +n_inv, for
+# the same reason the board takes it from JTAG -- the fold count is a
+# scheduling quantity, and baking it into the hardware is the mistake
+# uart/build_kmax.tcl records.
 #
 # What it runs is the real top with only the Xilinx IP replaced: the MIG by a
 # behavioural AXI4 memory that also monitors the write channel, the primitives
@@ -25,12 +32,13 @@ DMA="$(dirname "$HERE")"
 ROOT="$(dirname "$DMA")"                               # .../fold_pipelined
 VARIANT="${1:-v1}"
 KMAX="${2:-16}"
+NINV="${3:-1}"
 case "$VARIANT" in
   v1) GEN="-GUSE_V2=0 -GK_MAX=$KMAX" ;;
   v2) GEN="-GUSE_V2=1 -GK_MAX=$KMAX" ;;
   *)  echo "usage: $0 [v1|v2] [K_MAX]"; exit 2 ;;
 esac
-OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}"
+OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}"
 
 command -v verilator >/dev/null 2>&1 || {
     echo "verilator not found."
@@ -62,4 +70,4 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/core/operand_buffer_v2.sv" \
     > "$HERE/build_top_${VARIANT}_k${KMAX}.log" 2>&1 || { tail -30 "$HERE/build_top_${VARIANT}_k${KMAX}.log"; exit 1; }
 
-"$OUT/tbrun" +wb_region=$((KMAX * 8 * 8 + 4096))
+"$OUT/tbrun" +n_inv=$NINV +wb_region=$((NINV * KMAX * 8 * 8 + 4096))
