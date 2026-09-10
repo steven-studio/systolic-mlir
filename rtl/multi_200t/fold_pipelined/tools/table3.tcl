@@ -13,6 +13,22 @@
 # it.  The last two are what decide whether the 0.913 ns WNS the bitstream
 # reports is the MIG's own fixed path (it is 0.913 in the bandwidth-probe
 # builds too) or something in the DMA logic.
+#
+# It then prints the three rows of the paper's resource table verbatim, ready
+# to paste over the \tbd cells:
+#
+#   MIG + read engine + writer v1     u_mig_7series_0 + u_eng + u_wr   (v1 run)
+#   Result reader + write-back        u_rdr + u_wb_fifo + u_wb         (v1 run)
+#   DMA top, N=8, kmax=256, v2        everything                       (v2 run)
+#
+# Primitives are counted by REF_NAME, the same convention ooc_v2.tcl uses for
+# the table's Delta row -- PRIMITIVE_TYPE strings are not stable across Vivado
+# versions and 2026.1 silently matched none of them.  BRAM is in RAMB36 tiles
+# (RAMB36 + RAMB18/2).  f_max is 1000/(10 - slack) from the worst path that
+# starts or ends inside the row's cells, so it is what that block alone could
+# clock, not the build's: the build's own number is printed beside it, with
+# the block that owns the worst path named, because if that block is the MIG
+# then no amount of work on the operand path moves it.
 
 set variants {v1 v2}
 set kmax     256
@@ -68,5 +84,110 @@ foreach v $variants {
                  *u_seed/* *u_rdr/* *u_wb_fifo/* *u_wb/* *u_feeder/* *u_array/* *u_vio/*} {
         puts [blk_slack $pat]
     }
+    paper_rows $v $kmax
     close_project
 }
+
+# -----------------------------------------------------------------------------
+# The paper's rows.
+proc name_or {pats} {
+    set t {}
+    foreach p $pats { lappend t "NAME =~ $p" }
+    return "([join $t { || }])"
+}
+
+proc count_prims {pats ref} {
+    return [llength [get_cells -hierarchical -quiet \
+        -filter "[name_or $pats] && REF_NAME =~ $ref"]]
+}
+
+# Worst slack (ns) of any path that starts or ends inside $pats, or "" if the
+# patterns match no sequential cell.
+proc worst_slack {pats} {
+    set cells [get_cells -hierarchical -quiet -filter \
+        "[name_or $pats] && (IS_SEQUENTIAL || REF_NAME =~ RAMB* || REF_NAME =~ DSP*)"]
+    if {[llength $cells] == 0} { return "" }
+    set worst ""
+    foreach dir {-from -to} {
+        set pth [get_timing_paths -quiet {*}[list $dir $cells] -max_paths 1 -nworst 1]
+        if {[llength $pth] == 0} { continue }
+        set sl [get_property SLACK $pth]
+        if {$worst eq "" || $sl < $worst} { set worst $sl }
+    }
+    return $worst
+}
+
+proc paper_rows {v kmax} {
+    global ROW
+    set defs [list \
+        [list mig  "MIG + read engine + writer v1" {*u_mig_7series_0/* *u_eng/* *u_wr/*}] \
+        [list wb   "Result reader + write-back"    {*u_rdr/* *u_wb_fifo/* *u_wb/*}] \
+        [list top  "DMA top"                       {*}] ]
+    foreach d $defs {
+        lassign $d key label pats
+        set lut [count_prims $pats "LUT*"]
+        set ff  [count_prims $pats "FD*"]
+        set b36 [count_prims $pats "RAMB36*"]
+        set b18 [count_prims $pats "RAMB18*"]
+        set dsp [count_prims $pats "DSP*"]
+        set sl  [worst_slack $pats]
+        set fmx [expr {$sl eq "" ? "" : 1000.0 / (10.0 - $sl)}]
+        set ROW($v,$key) [list $label $lut $ff [expr {$b36 + $b18 / 2.0}] $dsp $sl $fmx]
+    }
+    # who owns the build's worst path -- the question the f_max column hangs on
+    set p [get_timing_paths -quiet -max_paths 1 -nworst 1 -sort_by slack]
+    if {[llength $p]} {
+        set ROW($v,wns)  [get_property SLACK $p]
+        set ROW($v,path) [get_property ENDPOINT_PIN $p]
+    } else {
+        set ROW($v,wns) "" ; set ROW($v,path) "(none)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# The array rows print 51.2k / 13.1k, so anything at that scale gets the same
+# treatment and anything smaller stays an integer -- 0.3k for 312 LUTs would
+# be a worse number than 312.
+proc kfmt {n} {
+    if {$n >= 1000} { return [format "%.1fk" [expr {$n/1000.0}]] }
+    return [format "%d" $n]
+}
+proc bfmt {b} { return [expr {$b == int($b) ? int($b) : $b}] }
+
+proc fmt_row {r} {
+    lassign $r label lut ff bram dsp sl fmx
+    set fmx_s [expr {$fmx eq "" ? "--" : [format "%.0f" $fmx]}]
+    return [format "%-34s & %6s & %6s & %5s & %3d & %4s \\\\" \
+            $label [kfmt $lut] [kfmt $ff] [bfmt $bram] $dsp $fmx_s]
+}
+
+puts "\n=============================================================="
+puts "  tab:resources -- paste these over the \\tbd cells"
+puts "  LUT/FF/RAMB counted by REF_NAME (ooc_v2.tcl's convention);"
+puts "  BRAM in RAMB36 tiles; f_max = 1000/(10 - block worst slack)."
+puts "=============================================================="
+foreach {v key} {v1 mig v1 wb v2 top} {
+    if {![info exists ROW($v,$key)]} {
+        puts "  (missing: $v $key -- that variant was not in this run)"
+        continue
+    }
+    set r $ROW($v,$key)
+    if {$key eq "top"} { lset r 0 "DMA top, \$N{=}8\$, \$\\kmax{=}256\$, v2" }
+    puts "  [fmt_row $r]"
+    puts [format "      raw: LUT %d  FF %d  BRAM %s tiles  DSP %d  block slack %s ns" \
+          [lindex $r 1] [lindex $r 2] [bfmt [lindex $r 3]] [lindex $r 4] [lindex $r 5]]
+}
+puts ""
+foreach v $variants {
+    if {[info exists ROW($v,wns)]} {
+        puts [format "  %s build WNS %s ns  ->  %.0f MHz   worst path ends at:" \
+              $v $ROW($v,wns) [expr {1000.0/(10.0 - $ROW($v,wns))}]]
+        puts "      $ROW($v,path)"
+        if {[string match "*mig_7series*" $ROW($v,path)]} {
+            puts "      ^ inside the MIG: the build's f_max is the controller's, not the operand path's."
+        } else {
+            puts "      ^ NOT in the MIG -- say so in the caption; the operand path owns the critical path."
+        }
+    }
+}
+puts ""
