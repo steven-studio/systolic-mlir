@@ -40,9 +40,15 @@ endmodule
 
 module vio_0 (
   input wire clk,
-  input wire [31:0] probe_in0, input wire [31:0] probe_in1,
-  input wire [31:0] probe_in2, input wire [31:0] probe_in3,
-  input wire [7:0]  probe_in4
+  input wire [31:0] probe_in0,  input wire [31:0] probe_in1,
+  input wire [31:0] probe_in2,  input wire [31:0] probe_in3,
+  input wire [7:0]  probe_in4,
+  // the nine operand-path counters (fill, engine x3, wb, wb engine x4)
+  input wire [31:0] probe_in5,  input wire [31:0] probe_in6,
+  input wire [31:0] probe_in7,  input wire [31:0] probe_in8,
+  input wire [31:0] probe_in9,  input wire [31:0] probe_in10,
+  input wire [31:0] probe_in11, input wire [31:0] probe_in12,
+  input wire [31:0] probe_in13
 );
 endmodule
 

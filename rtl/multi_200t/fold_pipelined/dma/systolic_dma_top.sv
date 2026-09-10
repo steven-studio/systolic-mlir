@@ -78,6 +78,17 @@
 //   other fault.
 //
 // Read the numbers over JTAG with dma_top_build.tcl -tclargs read.
+//
+// TWO OPERAND PATHS, ONE TOP (USE_V2, Sep 2026)
+//   The FPGA'27 draft measures the operand path stage by stage and then widens
+//   the buffer write port.  Both versions are built from this file: USE_V2=0
+//   is the v1 path (four-cycle writer, one 32-bit port -- the bottleneck),
+//   USE_V2=1 the beat-wide one.  Nine counters were added for it and probed:
+//   fill_cycles (descriptor accepted -> last word landed), the read engine's
+//   busy / rdy_stall / r_stall, wb_cycles (descriptor -> last B), and the
+//   write-back engine's busy / aw_stall / w_stall / src_starve.  Nothing in
+//   the copied core changed; cyc_latched is still the equivalence check, on
+//   both versions.
 // -----------------------------------------------------------------------------
 
 `default_nettype none
@@ -100,7 +111,19 @@ module systolic_dma_top #(
   // is RX_BYTES = K_MAX*8*N long (1 KiB at K_MAX = 16): far enough that an
   // address-arithmetic error in either direction shows up as a wrong checksum
   // rather than as one image quietly overwriting the other.
-  parameter integer WB_BASE_ADDR = BASE_ADDR + 4096
+  parameter integer WB_BASE_ADDR = BASE_ADDR + 4096,
+
+  // OPERAND PATH VERSION.  0 = v1: dma_operand_writer unpacks each 128-bit
+  // beat into four serial writes to systolic_operand_buffer's single 32-bit
+  // port (1.00 word/cycle by construction -- the bottleneck the paper
+  // measures).  1 = v2: dma_operand_writer_v2 hands the beat whole to
+  // systolic_operand_buffer_v2, cyclic layout on A and block layout on B, and
+  // chk_wr is accumulated four terms per beat by dma_wr_checksum_v2 -- same
+  // constant.  Everything downstream of the buffers' read ports -- feeder,
+  // array, FSM, cyc_latched, chk_c, EXPECT_* -- is identical in both, which is
+  // what makes the two bitstreams comparable: same operands, same array, same
+  // golden, only the write side of the buffers differs.
+  parameter bit USE_V2 = 1'b0
 ) (
   input  wire        sys_clk_pin,     // R4, 100 MHz
   input  wire        cpu_resetn,      // G4, active low
@@ -384,6 +407,53 @@ module systolic_dma_top #(
     end
   end
 
+  // ---- the operand path, counted ------------------------------------------
+  // The paper's Table 4 row "DMA v1/v2 [measured]" is three numbers: fill,
+  // compute (cyc_latched, below, unchanged), write-back.  Both new counters are
+  // inclusive: they start at 1 on the cycle the descriptor is accepted and stop
+  // on the cycle the phase's completion condition is first true.
+  //
+  //   fill_cycles   desc accepted -> fill_complete (last word LANDED, not the
+  //                 last beat received -- the same distinction P_READ makes).
+  //                 v1 at N=8, k=256: ~4096 + startup, the port-bound number;
+  //                 v2: ~1129, the controller-bound one.  The engine's own
+  //                 r_stall_cycles (rvalid && !rready) says where the difference
+  //                 went: ~3/4 of fill on v1, ~0 on v2.
+  //   wb_cycles     wb descriptor accepted -> wb_done (the last B response).
+  logic [31:0] fill_cycles, wb_cycles;
+  logic        fill_running, wb_running;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      fill_cycles  <= '0;
+      fill_running <= 1'b0;
+      wb_cycles    <= '0;
+      wb_running   <= 1'b0;
+    end else begin
+      if (desc_valid && desc_ready) begin
+        fill_running <= 1'b1;
+        fill_cycles  <= 32'd1;
+      end else if (fill_running) begin
+        fill_cycles <= fill_cycles + 1'b1;
+        if (fill_complete) fill_running <= 1'b0;
+      end
+
+      if (wb_desc_valid && wb_desc_ready) begin
+        wb_running <= 1'b1;
+        wb_cycles  <= 32'd1;
+      end else if (wb_running) begin
+        wb_cycles <= wb_cycles + 1'b1;
+        if (wb_done) wb_running <= 1'b0;
+      end
+    end
+  end
+
+  // The engines' own counters, previously left unconnected.  They count from
+  // reset (stat_clear is tied low) and each engine runs exactly one descriptor
+  // in this design, so they are per-descriptor totals.
+  wire [31:0] eng_busy_cycles, eng_rdy_stall_cycles, eng_r_stall_cycles;
+  wire [31:0] wb_busy_cycles, wb_aw_stall_cycles, wb_w_stall_cycles, wb_src_starve_cycles;
+
   // ---- seeder -------------------------------------------------------------
   dma_seed_writer #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
@@ -429,46 +499,125 @@ module systolic_dma_top #(
     .dst_almost_full (dst_almost_full), .dst_full (dst_full),
     .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat),
     .dst_wr_data (dst_wr_data), .dst_wr_tag (),
-    .busy_cycles (), .rdy_stall_cycles (), .r_stall_cycles (),
+    .busy_cycles (eng_busy_cycles), .rdy_stall_cycles (eng_rdy_stall_cycles),
+    .r_stall_cycles (eng_r_stall_cycles),
     .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (1'b0)
   );
 
-  // ---- operand writer -----------------------------------------------------
-  wire              a_wr, b_wr;
-  wire [LANE_W-1:0] wsel;
-  wire [K_W-1:0]    waddr;
-  wire [31:0]       wdata_buf;
-
-  dma_operand_writer #(
-    .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
-  ) u_wr (
-    .clk (ui_clk), .rst_n (ui_rst_n),
-    .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
-    .dst_full (dst_full), .dst_almost_full (dst_almost_full),
-    .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-    .words_written (words_written), .err_range (wr_err_range), .clear (1'b0)
-  );
-
-  // ---- checksum 1: the write stream ---------------------------------------
-  // seed_ref.py's formula, accumulated as the words go past rather than by
-  // reading the buffers back.  The read ports belong to the feeder; taking them
-  // for a scan would mean muxing the array's own datapath in order to observe
-  // it.  This costs two adders and touches nothing.
+  // ---- operand writer + checksum 1 + operand memories ---------------------
+  // The one place the two operand-path versions differ.  Selected by USE_V2 at
+  // elaboration; see the parameter's comment.  The operand memories' READ
+  // side -- a_raddr/b_raddr in, a_rdata/b_rdata out one cycle later -- is the
+  // same in both versions and is what the copied core below is wired to.
   //
-  // The order differs from seed_ref's -- payload order, not (k, bank) order --
-  // and that is fine: 32-bit wrapping addition is commutative and associative,
-  // so the total is identical.  It is the same constant 3a compared against.
-  logic [31:0] chk_wr;
-  wire [15:0] k16   = 16'(waddr);
-  wire [7:0]  bank8 = 8'(wsel);
-  wire [31:0] wpos  = {8'd0, bank8, k16};
+  // checksum 1, the write stream: seed_ref.py's formula, accumulated as the
+  // words go past rather than by reading the buffers back.  The read ports
+  // belong to the feeder; taking them for a scan would mean muxing the array's
+  // own datapath in order to observe it.  The order differs from seed_ref's --
+  // payload order, not (k, bank) order -- and that is fine: 32-bit wrapping
+  // addition is commutative and associative, so the total is identical.  It is
+  // the same constant 3a compared against, and it stays the same constant on
+  // v2, where four terms are added per cycle instead of one.
+  logic [31:0]    chk_wr;
+  logic [K_W-1:0] a_raddr [0:N-1];
+  logic [K_W-1:0] b_raddr [0:N-1];
+  wire  [31:0]    a_rdata [0:N-1];
+  wire  [31:0]    b_rdata [0:N-1];
 
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)              chk_wr <= '0;
-    else if (phase == P_CALIB)  chk_wr <= '0;
-    else if (a_wr)              chk_wr <= chk_wr + (wdata_buf ^ wpos);
-    else if (b_wr)              chk_wr <= chk_wr + (wdata_buf ^ (32'h8000_0000 | wpos));
+  generate
+  if (!USE_V2) begin : OP_V1
+    wire              a_wr, b_wr;
+    wire [LANE_W-1:0] wsel;
+    wire [K_W-1:0]    waddr;
+    wire [31:0]       wdata_buf;
+
+    dma_operand_writer #(
+      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
+    ) u_wr (
+      .clk (ui_clk), .rst_n (ui_rst_n),
+      .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+      .dst_full (dst_full), .dst_almost_full (dst_almost_full),
+      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .words_written (words_written), .err_range (wr_err_range), .clear (1'b0)
+    );
+
+    wire [15:0] k16   = 16'(waddr);
+    wire [7:0]  bank8 = 8'(wsel);
+    wire [31:0] wpos  = {8'd0, bank8, k16};
+
+    always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)              chk_wr <= '0;
+      else if (phase == P_CALIB)  chk_wr <= '0;
+      else if (a_wr)              chk_wr <= chk_wr + (wdata_buf ^ wpos);
+      else if (b_wr)              chk_wr <= chk_wr + (wdata_buf ^ (32'h8000_0000 | wpos));
+    end
+
+    // One write port and one synchronous read port each, which is the shape
+    // block RAM wants.  The read is SYNCHRONOUS: the address issued on beat t
+    // returns data on t+1, and the feeder already delays valid to match.  That
+    // one cycle is why the cost is k + 2(N-1) + H rather than one less.
+    //
+    // A and B are the same hardware; the only difference is which field
+    // selects the bank and which forms the address, and that swap is the A/B
+    // transpose.  Both come from dma_operand_writer, which computes them with
+    // the same bit slices systolic_uart_top's rx_count decode uses -- proved
+    // equivalent in tb_dma_operand_writer against a golden model of that decode.
+    systolic_operand_buffer #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
+    ) u_a_buf (
+      .clk (ui_clk), .wr (a_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (a_raddr), .rdata (a_rdata)
+    );
+
+    systolic_operand_buffer #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
+    ) u_b_buf (
+      .clk (ui_clk), .wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (b_raddr), .rdata (b_rdata)
+    );
+  end else begin : OP_V2
+    wire                  a_wr, b_wr;
+    wire [LANE_W-1:0]     wsel;
+    wire [K_W-1:0]        waddr;
+    wire [AXI_DATA_W-1:0] wdata_buf;       // the whole beat, word j at [32j +: 32]
+
+    dma_operand_writer_v2 #(
+      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
+    ) u_wr (
+      .clk (ui_clk), .rst_n (ui_rst_n),
+      .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+      .dst_full (dst_full), .dst_almost_full (dst_almost_full),
+      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .words_written (words_written), .err_range (wr_err_range), .clear (1'b0)
+    );
+
+    dma_wr_checksum_v2 #(
+      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W)
+    ) u_chk_wr (
+      .clk (ui_clk), .rst_n (ui_rst_n), .clear (phase == P_CALIB),
+      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .chk (chk_wr)
+    );
+
+    // Same read side as v1; the write side takes a beat.  A is the cyclic
+    // layout (a beat is four depths of one bank), B the block layout (a beat
+    // is four banks at one depth) -- the wire format decides which is which.
+    // Proven against v1's image at N = 4/8/16 in tb_dma_path_v2.
+    systolic_operand_buffer_v2 #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N), .LAYOUT_CYCLIC (1'b1)
+    ) u_a_buf (
+      .clk (ui_clk), .wr (a_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (a_raddr), .rdata (a_rdata)
+    );
+
+    systolic_operand_buffer_v2 #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N), .LAYOUT_CYCLIC (1'b0)
+    ) u_b_buf (
+      .clk (ui_clk), .wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (b_raddr), .rdata (b_rdata)
+    );
   end
+  endgenerate
 
   // =========================================================================
   // FROM HERE TO THE MIG INSTANCE, EVERYTHING IS systolic_uart_top's COMPUTE
@@ -478,47 +627,12 @@ module systolic_dma_top #(
   // =========================================================================
 
   // ---- operand memories ---------------------------------------------------
-  // One write port and one synchronous read port each, which is the shape block
-  // RAM wants.  The read is SYNCHRONOUS: the address issued on beat t returns
-  // data on t+1, and the feeder already delays valid to match.  That one cycle
-  // is why the cost is k + 2(N-1) + H rather than one less.
-  logic [K_W-1:0] a_raddr [0:N-1];
-  logic [K_W-1:0] b_raddr [0:N-1];
-  wire  [31:0]    a_rdata [0:N-1];
-  wire  [31:0]    b_rdata [0:N-1];
-
-  // A and B are the same hardware; the only difference is which field selects
-  // the bank and which forms the address, and that swap is the A/B transpose.
-  // Here both come from dma_operand_writer, which computes them with the same
-  // bit slices systolic_uart_top's rx_count decode uses -- proved equivalent in
-  // tb_dma_operand_writer against a golden model of that decode.
-  systolic_operand_buffer #(
-    .K_MAX   (K_MAX),
-    .K_W     (K_W),
-    .N_BANKS (N)
-  ) u_a_buf (
-    .clk   (ui_clk),
-    .wr    (a_wr),
-    .wsel  (wsel),
-    .waddr (waddr),
-    .wdata (wdata_buf),
-    .raddr (a_raddr),
-    .rdata (a_rdata)
-  );
-
-  systolic_operand_buffer #(
-    .K_MAX   (K_MAX),
-    .K_W     (K_W),
-    .N_BANKS (N)
-  ) u_b_buf (
-    .clk   (ui_clk),
-    .wr    (b_wr),
-    .wsel  (wsel),
-    .waddr (waddr),
-    .wdata (wdata_buf),
-    .raddr (b_raddr),
-    .rdata (b_rdata)
-  );
+  // Instantiated above, inside the USE_V2 generate, because the write side is
+  // what the two versions differ in.  What the copied core sees is unchanged:
+  // a_raddr/b_raddr in, a_rdata/b_rdata out one cycle later, from block RAM
+  // with one synchronous read port per bank.  That one cycle is why the cost
+  // is k + 2(N-1) + H rather than one less, and cyc_latched below is the check
+  // that neither version has moved it.
 
   // ---- array interface ----------------------------------------------------
   logic [31:0] a_in [0:N-1];
@@ -765,8 +879,8 @@ module systolic_dma_top #(
     .m_axi_bid (bid), .m_axi_bresp (bresp), .m_axi_bvalid (wb_bvalid),
     .m_axi_bready (wb_bready),
     .src_valid (wb_src_valid), .src_data (wb_src_data), .src_ready (wb_src_ready),
-    .busy_cycles (), .aw_stall_cycles (), .w_stall_cycles (),
-    .src_starve_cycles (),
+    .busy_cycles (wb_busy_cycles), .aw_stall_cycles (wb_aw_stall_cycles),
+    .w_stall_cycles (wb_w_stall_cycles), .src_starve_cycles (wb_src_starve_cycles),
     .err_align (wb_err_align), .err_resp (wb_err_resp), .stat_clear (1'b0)
   );
 
@@ -851,23 +965,34 @@ module systolic_dma_top #(
   );
 
   // ---- JTAG readout -------------------------------------------------------
-  // FIVE probes, not 3a's four: four 32-bit values plus an 8-bit flag word.
-  // dma_top_build.tcl configures vio_0 to match -- 3a's IP has probe_in3 at 8
-  // bits, and reusing that configuration would silently truncate a 32-bit
-  // probe, which still looks like a number.
+  // FOURTEEN probes: 3b's five (four 32-bit values plus an 8-bit flag word)
+  // and the nine operand-path counters.  dma_top_build.tcl configures vio_0
+  // to match -- 3a's IP had probe_in3 at 8 bits, and reusing a stale
+  // configuration silently truncates a 32-bit probe, which still looks like a
+  // number.  Probe order is append-only: 0..4 keep their numbers so the
+  // 'read' script's fallbacks and every earlier run's printout stay valid.
   //
   // The expected constants are folded parameters with no net behind them, so
   // they are NOT probed; the script prints them from its own variables.  3a
   // shipped a bitstream that printed "expected 0x" for exactly this reason.
   vio_0 u_vio (
-    .clk       (ui_clk),
-    .probe_in0 (chk_wr),
-    .probe_in1 (chk_c),
-    .probe_in2 (cyc_latched),
-    .probe_in3 (words_written),
-    .probe_in4 ({ wb_done_sticky, any_err, c_match, wr_match,
-                  fold_done_sticky, read_done_sticky, seed_done_sticky,
-                  init_calib_complete })
+    .clk        (ui_clk),
+    .probe_in0  (chk_wr),
+    .probe_in1  (chk_c),
+    .probe_in2  (cyc_latched),
+    .probe_in3  (words_written),
+    .probe_in4  ({ wb_done_sticky, any_err, c_match, wr_match,
+                   fold_done_sticky, read_done_sticky, seed_done_sticky,
+                   init_calib_complete }),
+    .probe_in5  (fill_cycles),
+    .probe_in6  (eng_busy_cycles),
+    .probe_in7  (eng_rdy_stall_cycles),
+    .probe_in8  (eng_r_stall_cycles),
+    .probe_in9  (wb_cycles),
+    .probe_in10 (wb_busy_cycles),
+    .probe_in11 (wb_aw_stall_cycles),
+    .probe_in12 (wb_w_stall_cycles),
+    .probe_in13 (wb_src_starve_cycles)
   );
 
   // ---- LEDs ---------------------------------------------------------------

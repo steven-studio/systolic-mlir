@@ -1,10 +1,18 @@
 # -----------------------------------------------------------------------------
 # dma_top_build.tcl -- build and program systolic_dma_top (bring-up step 3b).
 #
-#   vivado -mode batch -source dma_top_build.tcl -tclargs build
-#   vivado -mode batch -source dma_top_build.tcl -tclargs program
-#   vivado -mode batch -source dma_top_build.tcl -tclargs all      (both)
-#   vivado -mode batch -source dma_top_build.tcl -tclargs read
+#   vivado -mode batch -source dma_top_build.tcl -tclargs build   [v1|v2] [K_MAX]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs program [v1|v2] [K_MAX]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs all     [v1|v2] [K_MAX]   (both)
+#   vivado -mode batch -source dma_top_build.tcl -tclargs read    [v1|v2] [K_MAX]
+#
+#   v1 (default) is the four-cycle operand writer into the single-port buffer;
+#   v2 the beat-wide path (USE_V2=1 in systolic_dma_top).  K_MAX defaults to
+#   16 (the 3b geometry); 256 is the paper's.  Each (variant, K_MAX) pair gets
+#   its own project directory, so the v1 and v2 bitstreams of one geometry
+#   coexist and 'read' opens the one you name.  The golden constants for each
+#   K_MAX are tabulated below; add a row from seed_ref.py before building a
+#   new one.
 #
 # This is bringup_build.tcl (3a) with the array added: the MIG and the DMA read
 # path from that script, plus the floating-point IP and the thirteen RTL files
@@ -36,33 +44,56 @@
 set PART       xc7a200tsbg484-1
 set BOARD_PART digilentinc.com:nexys_video:part0:1.2
 set BOARD_REPO $::env(HOME)/work/vivado/vivado-boards/new/board_files
-set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma
 set PROJ_NAME  systolic_dma
 set TOP        systolic_dma_top
 set JOBS       8
 
-# Geometry.  K_MAX = 16 for the first 3b build: it is the geometry whose golden
-# was confirmed on the board over UART, the payload is 1 KiB, and the build is
-# minutes.  K_MAX = 256 belongs to 3c, where bandwidth is the point.
-set NARR   8
-set KMAX   16
-set KDIM   16
+# ---- arguments: mode [variant] [K_MAX] ----------------------------------
+set MODE    [lindex $argv 0]
+set VARIANT [lindex $argv 1]
+set KARG    [lindex $argv 2]
+if {$MODE eq ""}    { set MODE all }
+if {$VARIANT eq ""} { set VARIANT v1 }
+if {$VARIANT ne "v1" && $VARIANT ne "v2"} {
+    error "variant must be v1 or v2, got '$VARIANT'"
+}
+set USE_V2 [expr {$VARIANT eq "v2" ? 1 : 0}]
 
-# From:  python3 tools/seed_ref.py --mode 1 --kmax 16
+# Geometry.  K_MAX = 16 is the 3b geometry: the golden confirmed on the board
+# over UART, a 1 KiB payload, a build measured in minutes.  K_MAX = 256 is the
+# paper's: 16 KiB, 1024 beats, the geometry every Table 4 number is quoted at.
+# K_DIM = K_MAX: one fold of the full depth.
+set NARR   8
+set KMAX   [expr {$KARG eq "" ? 16 : $KARG}]
+set KDIM   $KMAX
+
+# From:  python3 tools/seed_ref.py --mode 1 --kmax <K_MAX>
 # Passed down as generics so this script is the single source of truth; the
-# defaults in systolic_dma_top.sv agree, but only one place should decide.
-# These are folded constants in hardware with no net behind them, so they are
-# NOT probed -- 'read' prints them from here.  3a shipped a bitstream that
-# printed "expected 0x" because that lesson had not been learned yet.
-set EXPECT_WR_CHK 3f880780
-set EXPECT_C_CHK  c74b2660
-set EXPECT_CYC    125          ;# = K_DIM + 2(N-1) + H, H = 95, measured
+# defaults in systolic_dma_top.sv agree for 16, but only one place should
+# decide.  These are folded constants in hardware with no net behind them, so
+# they are NOT probed -- 'read' prints them from here.  3a shipped a bitstream
+# that printed "expected 0x" because that lesson had not been learned yet.
+# EXPECT_CYC = K_DIM + 2(N-1) + H with H = 95 measured on paper-hw-v1.
+array set GOLDEN {
+    16  {3f880780 c74b2660 125}
+    256 {2dc7f800 54ccf610 365}
+}
+if {![info exists GOLDEN($KMAX)]} {
+    error "no golden constants tabulated for K_MAX=$KMAX -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $KMAX\nand add a GOLDEN row"
+}
+lassign $GOLDEN($KMAX) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+
+# One project per (variant, K_MAX) so bitstreams coexist and 'read' cannot open
+# the wrong one.  The pre-Sep-10 3b build lives in plain systolic_dma/ and is
+# left alone.
+set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma_${VARIANT}_k${KMAX}
 
 # Where the result tile is written back.  One page clear of the operand image,
-# which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16), so that an address error
-# in either direction shows up as a wrong image rather than as one quietly
-# overwriting the other.
-set WB_BASE       4096
+# which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16, 16 KiB at 256), so that
+# an address error in either direction shows up as a wrong image rather than
+# as one quietly overwriting the other.  4096 was fine for 3b; at K_MAX = 256
+# it would land INSIDE the operand image, so it is computed from the geometry.
+set WB_BASE       [expr {$KMAX * 8 * $NARR + 4096}]
 
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../fold_pipelined
@@ -90,6 +121,8 @@ set SRC [list \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
     $SCRIPT_DIR/dma_operand_writer.sv \
+    $SCRIPT_DIR/dma_operand_writer_v2.sv \
+    $SCRIPT_DIR/dma_wr_checksum_v2.sv \
     $SCRIPT_DIR/dma_result_reader.sv \
     $SCRIPT_DIR/dma_writeback_engine.sv \
     $SCRIPT_DIR/dma_cdc_fifo.sv \
@@ -99,10 +132,8 @@ set SRC [list \
     $ROOT/core/systolic_pe_bram.sv \
     $ROOT/core/systolic_array.sv \
     $ROOT/core/tile_feeder.sv \
-    $ROOT/core/operand_buffer.sv ]
-
-set MODE [lindex $argv 0]
-if {$MODE eq ""} { set MODE all }
+    $ROOT/core/operand_buffer.sv \
+    $ROOT/core/operand_buffer_v2.sv ]
 
 # -----------------------------------------------------------------------------
 proc build {} {
@@ -141,7 +172,7 @@ proc build {} {
 proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
     global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
-    global WB_BASE
+    global WB_BASE USE_V2 VARIANT
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -193,20 +224,17 @@ proc build_body {} {
         }
     }
 
-    # VIO: FIVE probes, not 3a's four.  3a's vio_0 has probe_in3 at 8 bits;
-    # reusing that configuration here would silently truncate words_written to
-    # its low byte, and a truncated count still looks like a count.
+    # VIO: FOURTEEN probes -- 3b's five plus the nine operand-path counters
+    # (probe_in5..13, all 32-bit).  3a's vio_0 had probe_in3 at 8 bits; reusing
+    # a stale configuration silently truncates a 32-bit probe, and a truncated
+    # count still looks like a count.  So the widths are all spelled out.
     create_ip -name vio -vendor xilinx.com -library ip -version 3.0 \
               -module_name vio_0
-    set_property -dict [list \
-        CONFIG.C_NUM_PROBE_IN    {5} \
-        CONFIG.C_NUM_PROBE_OUT   {0} \
-        CONFIG.C_PROBE_IN0_WIDTH {32} \
-        CONFIG.C_PROBE_IN1_WIDTH {32} \
-        CONFIG.C_PROBE_IN2_WIDTH {32} \
-        CONFIG.C_PROBE_IN3_WIDTH {32} \
-        CONFIG.C_PROBE_IN4_WIDTH {8}  \
-    ] [get_ips vio_0]
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {14} CONFIG.C_NUM_PROBE_OUT {0}]
+    for {set i 0} {$i < 14} {incr i} {
+        lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
+    }
+    set_property -dict $vio_cfg [get_ips vio_0]
 
     foreach f $SRC { add_files -norecurse $f }
     add_files -fileset constrs_1 -norecurse $XDC
@@ -218,8 +246,10 @@ proc build_body {} {
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
         WB_BASE_ADDR=$WB_BASE \
+        USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
+    puts "building $VARIANT at N=$NARR K_MAX=$KMAX K_DIM=$KDIM (USE_V2=$USE_V2), project $PROJ_DIR"
 
     generate_target all [get_ips]
     update_compile_order -fileset sources_1
@@ -247,6 +277,7 @@ proc build_body {} {
     set wns  [get_property STATS.WNS [get_runs impl_1]]
     set whs  [get_property STATS.WHS [get_runs impl_1]]
     puts "\n=== bitstream ================================================="
+    puts "  $VARIANT  N=$NARR K_MAX=$KMAX"
     foreach b [glob -nocomplain $dir/*.bit] { puts "  $b" }
     puts "  WNS = $wns ns"
     puts "  WHS = $whs ns   (already includes 0.150 ns of forced hold pessimism)"
@@ -262,7 +293,7 @@ proc build_body {} {
 
 # -----------------------------------------------------------------------------
 proc program {} {
-    global PROJ_DIR PROJ_NAME
+    global PROJ_DIR PROJ_NAME VARIANT KMAX
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
@@ -304,7 +335,7 @@ proc program {} {
     puts "  led\[6\] like any other fault."
     puts ""
     puts "  Then:"
-    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read"
+    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $KMAX"
     puts ""
     puts "  This bitstream has NO UART -- uart_check.py will time out against it."
     puts "  The independent reference lives in its own bitstream: program a"
@@ -348,7 +379,7 @@ proc pick_device {} {
 # -----------------------------------------------------------------------------
 proc read_vio {} {
     global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC KMAX NARR KDIM
-    global WB_BASE
+    global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
@@ -416,6 +447,17 @@ proc read_vio {} {
     set er    [pval $all_probes BINARY any_err]
     set wb    [pval $all_probes BINARY wb_done_sticky]
 
+    # the operand-path counters (probe_in5..13)
+    set fill    [pval $all_probes UNSIGNED fill_cycles          probe_in5]
+    set ebusy   [pval $all_probes UNSIGNED eng_busy_cycles      probe_in6]
+    set erdy    [pval $all_probes UNSIGNED eng_rdy_stall_cycles probe_in7]
+    set erst    [pval $all_probes UNSIGNED eng_r_stall_cycles   probe_in8]
+    set wbcyc   [pval $all_probes UNSIGNED wb_cycles            probe_in9]
+    set wbbusy  [pval $all_probes UNSIGNED wb_busy_cycles       probe_in10]
+    set wbaw    [pval $all_probes UNSIGNED wb_aw_stall_cycles   probe_in11]
+    set wbw     [pval $all_probes UNSIGNED wb_w_stall_cycles    probe_in12]
+    set wbstv   [pval $all_probes UNSIGNED wb_src_starve_cycles probe_in13]
+
     if {$wchk eq "" || $cyc eq ""} {
         puts "\nA probe lookup came back EMPTY.  Read the list above: those are"
         puts "the real names in the bitstream on the board, and one of them is"
@@ -426,7 +468,7 @@ proc read_vio {} {
     set want_words [expr {$KMAX * 2 * $NARR}]
 
     puts "\n=== bring-up step 3b =========================================="
-    puts "  N = $NARR   K_MAX = $KMAX   k_dim = $KDIM"
+    puts "  $VARIANT operand path   N = $NARR   K_MAX = $KMAX   k_dim = $KDIM"
     puts ""
     puts "  init_calib_complete = $calib     memory alive"
     puts "  seed written        = $sd"
@@ -443,9 +485,38 @@ proc read_vio {} {
 
     puts "  chk_wr  0x$wchk     expected 0x$EXPECT_WR_CHK    operands"
     puts "  chk_c   0x$cchk     expected 0x$EXPECT_C_CHK    result"
-    puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence"
+    puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
     puts ""
     puts "  any error latched   = $er"
+    puts ""
+
+    # ---- the operand path, stage by stage (Table 4 / Sec. 5.2 of the draft) --
+    set beats [expr {$want_words / 4}]
+    puts "=== operand path ($VARIANT) ==================================="
+    if {$fill ne "" && $fill > 0} {
+        puts [format "  fill        %6s cycles   %5.2f words/cycle   (%d words, %d beats)" \
+              $fill [expr {double($want_words) / $fill}] $want_words $beats]
+    } else {
+        puts "  fill        $fill cycles   <-- empty or zero: probe missing or fill never completed"
+    }
+    puts "  read engine busy $ebusy   rdy_stall $erdy   r_stall $erst"
+    if {$fill ne "" && $fill > 0 && $erst ne ""} {
+        puts [format "              r_stall / fill = %.2f   (v1: ~0.75, the port; v2: ~0, the port is gone)" \
+              [expr {double($erst) / $fill}]]
+    }
+    puts "  compute     $cyc cycles   (cyc_latched; expected $EXPECT_CYC on both paths)"
+    puts "  write-back  $wbcyc cycles   wb engine busy $wbbusy   aw_stall $wbaw   w_stall $wbw   src_starve $wbstv"
+    if {$fill ne "" && $cyc ne "" && $wbcyc ne "" && $fill > 0 && $cyc > 0 && $wbcyc > 0} {
+        set total [expr {$fill + $cyc + $wbcyc}]
+        puts [format "  total       %d cycles, serial   MAC utilisation k/T = %.1f%%" \
+              $total [expr {100.0 * $KDIM / $total}]]
+    }
+    if {$USE_V2} {
+        puts "  v2 expectation at K=256: fill ~1129 (controller-bound, 3.63 w/c), r_stall ~0."
+        puts "  If r_stall is still ~3/4 of fill the v2 writer is not the one in the bitstream."
+    } else {
+        puts "  v1 expectation at K=256: fill ~4096 (port-bound, 1.00 w/c), r_stall ~3/4 of fill."
+    }
     puts ""
 
     # The cycle count is part of the verdict, not a footnote.  systolic_dma_top

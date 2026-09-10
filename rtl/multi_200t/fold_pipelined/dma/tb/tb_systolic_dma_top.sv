@@ -40,14 +40,24 @@
  * That is why the array's own benches in tb/ are Verilator commands.
  */
 
-module tb_systolic_dma_top;
+module tb_systolic_dma_top #(
+  // 0 = v1 operand path, 1 = beat-wide v2.  verilator -GUSE_V2=1 selects v2;
+  // run_top_sim.sh v2 does that.  Same bench, same checks, both paths.
+  parameter bit     USE_V2 = 1'b0,
+  // 16 is the 3b geometry, 256 the paper's.  run_top_sim.sh [v1|v2] [K_MAX].
+  parameter integer K_MAX  = 16
+);
 
   localparam integer N        = 8;
-  localparam integer K_MAX    = 16;
-  localparam integer WB_BASE  = 4096;
+  // Same rule as dma_top_build.tcl: one page clear of the operand image.
+  localparam integer WB_BASE  = K_MAX * 8 * N + 4096;
   localparam integer RX_WORDS = (K_MAX * 8 * N) / 4;
-  localparam integer MAX_CYC  = 200_000;
-  localparam logic [31:0] EXPECT_WR_CHK = 32'h3F88_0780;
+  localparam integer MAX_CYC  = 400_000;
+  // From tools/seed_ref.py --mode 1 --kmax <K_MAX>; the same table the build
+  // script carries.  chk_wr does not depend on the arithmetic, so this bench
+  // checks the tabulated constant even though fp_model is not floating point.
+  localparam logic [31:0] EXPECT_WR_CHK = (K_MAX == 16)  ? 32'h3F88_0780 :
+                                          (K_MAX == 256) ? 32'h2DC7_F800 : 32'h0;
 
   logic clk  = 1'b0;
   logic rstn = 1'b0;
@@ -62,7 +72,7 @@ module tb_systolic_dma_top;
 
   systolic_dma_top #(
     .N (N), .K_MAX (K_MAX), .K_DIM (K_MAX),
-    .BASE_ADDR (0), .WB_BASE_ADDR (WB_BASE)
+    .BASE_ADDR (0), .WB_BASE_ADDR (WB_BASE), .USE_V2 (USE_V2)
   ) dut (
     .sys_clk_pin (clk), .cpu_resetn (rstn), .led (led),
     .ddr3_addr (ddr3_addr), .ddr3_ba (ddr3_ba), .ddr3_cas_n (ddr3_cas_n),
@@ -72,6 +82,19 @@ module tb_systolic_dma_top;
     .ddr3_dqs_n (ddr3_dqs_n), .ddr3_dqs_p (ddr3_dqs_p),
     .ddr3_dm (ddr3_dm), .ddr3_odt (ddr3_odt)
   );
+
+  // The memory model's ownership monitor needs the real boundary between the
+  // operand image and the result tile, which moves with K_MAX; run_top_sim.sh
+  // passes it as +wb_region=<bytes>.  Check that it arrived, or the monitor is
+  // silently checking the wrong line.
+  initial begin
+    #1;
+    if (dut.u_mig_7series_0.wb_region != WB_BASE) begin
+      $display("  FAIL: memory model wb_region=%0d but WB_BASE=%0d -- pass +wb_region=%0d",
+               dut.u_mig_7series_0.wb_region, WB_BASE, WB_BASE);
+      $fatal(1);
+    end
+  end
 
   // A stall in this design is a phase that never advances, so the phase is the
   // trace.  One line per transition turns a timeout from "it hung" into "it
@@ -90,7 +113,8 @@ module tb_systolic_dma_top;
   logic [31:0] got, want;
 
   initial begin
-    $display("== tb_systolic_dma_top: seed -> DDR -> fold -> C -> DDR ==");
+    $display("== tb_systolic_dma_top: seed -> DDR -> fold -> C -> DDR  (operand path %0s) ==",
+             USE_V2 ? "v2, beat-wide" : "v1, four cycles per beat");
     repeat (20) @(posedge clk);
     rstn = 1'b1;
 
@@ -115,7 +139,9 @@ module tb_systolic_dma_top;
                dut.words_written, RX_WORDS);
       errors = errors + 1;
     end
-    if (dut.chk_wr !== EXPECT_WR_CHK) begin
+    if (EXPECT_WR_CHK == 32'h0)
+      $display("  (no tabulated chk_wr for K_MAX=%0d -- add it from seed_ref.py)", K_MAX);
+    else if (dut.chk_wr !== EXPECT_WR_CHK) begin
       $display("  FAIL: chk_wr = %h, want %h (the board's constant)",
                dut.chk_wr, EXPECT_WR_CHK);
       errors = errors + 1;
@@ -169,8 +195,31 @@ module tb_systolic_dma_top;
     // it here would be claiming these stubs are the array.  The number that
     // means something is the one the board reports, and dma_top_build.tcl
     // checks that one against EXPECT_CYC.
-    $display("  cyc_latched = %0d  (the board reports 125 at k_dim = %0d)",
-             dut.cyc_latched, K_MAX);
+    $display("  cyc_latched = %0d  (the board reports k + 2(N-1) + 95 = %0d at k_dim = %0d)",
+             dut.cyc_latched, K_MAX + 2*(N-1) + 95, K_MAX);
+
+    // ---- 5. the operand-path counters, reported ---------------------------
+    // The memory model returns a beat per cycle with no DRAM latency, so these
+    // are the port-bound floor, not the board's numbers: v1 fill is ~4x the
+    // beat count (one word per cycle into the single port) with r_stall about
+    // three quarters of it; v2 fill is ~the beat count with r_stall ~0.  The
+    // board adds the controller's latency and its 3.63 words/cycle ceiling.
+    $display("  fill_cycles = %0d   (%0d beats)   engine busy %0d  rdy_stall %0d  r_stall %0d",
+             dut.fill_cycles, RX_WORDS / 4, dut.eng_busy_cycles,
+             dut.eng_rdy_stall_cycles, dut.eng_r_stall_cycles);
+    $display("  wb_cycles   = %0d   wb engine busy %0d  aw_stall %0d  w_stall %0d  src_starve %0d",
+             dut.wb_cycles, dut.wb_busy_cycles, dut.wb_aw_stall_cycles,
+             dut.wb_w_stall_cycles, dut.wb_src_starve_cycles);
+    if (USE_V2 && dut.eng_r_stall_cycles > dut.fill_cycles / 8) begin
+      $display("  FAIL: v2 should not stall the engine's data channel (r_stall %0d of fill %0d)",
+               dut.eng_r_stall_cycles, dut.fill_cycles);
+      errors = errors + 1;
+    end
+    if (!USE_V2 && dut.eng_r_stall_cycles < dut.fill_cycles / 2) begin
+      $display("  FAIL: v1 should stall the data channel ~3/4 of the fill (r_stall %0d of fill %0d)",
+               dut.eng_r_stall_cycles, dut.fill_cycles);
+      errors = errors + 1;
+    end
 
     $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);
     if (errors != 0) $fatal(1);

@@ -23,8 +23,12 @@
  */
 
 module mig_7series_0 #(
-  parameter integer MEM_WORDS = 4096,      // 32-bit words
+  parameter integer MEM_WORDS = 32768,     // 32-bit words: room for K_MAX = 256
   parameter integer WB_REGION = 4096       // byte address where results start
+                                           // (default; +wb_region=<bytes> overrides,
+                                           // because the boundary moves with K_MAX
+                                           // and a defparam through the DUT does not
+                                           // survive every simulator)
 ) (
   output wire [14:0] ddr3_addr, output wire [2:0] ddr3_ba,
   output wire ddr3_cas_n, output wire [0:0] ddr3_ck_n, output wire [0:0] ddr3_ck_p,
@@ -76,7 +80,11 @@ module mig_7series_0 #(
 
   logic [31:0] mem [0:MEM_WORDS-1];
   integer      errors = 0;
-  integer      wb_seen = 0;      // a write has landed at or above WB_REGION
+  integer      wb_seen = 0;      // a write has landed at or above wb_region
+  integer      wb_region = WB_REGION;
+  initial begin
+    if (!$value$plusargs("wb_region=%d", wb_region)) wb_region = WB_REGION;
+  end
 
   // ---- reset and calibration ---------------------------------------------
   integer calib_ctr;
@@ -137,7 +145,7 @@ module mig_7series_0 #(
             $display("  FAIL: wlast=%0b with %0d beat(s) left", s_axi_wlast, w_left);
             errors <= errors + 1;
           end
-          if (w_addr >= WB_REGION) wb_seen <= 1;
+          if (w_addr >= wb_region) wb_seen <= 1;
           else if (wb_seen != 0) begin
             $display("  FAIL: a write returned to the operand region (addr %0d) after the write-back region was touched -- the two masters interleaved",
                      w_addr);
