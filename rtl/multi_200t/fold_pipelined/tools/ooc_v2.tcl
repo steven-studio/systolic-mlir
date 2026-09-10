@@ -34,14 +34,26 @@ set RUN_IMPL  1
 set N         8
 set K_MAX     256
 set OUTDIR    $ROOT/ooc_reports/v2
+set IO_BUDGET 2.0      ;# ns charged at each pin, see ooc_cost
 
 if {[info exists argv] && [lsearch -exact $argv synth] >= 0} { set RUN_IMPL 0 }
 
 file mkdir $OUTDIR
 
 # -----------------------------------------------------------------------------
+# Count by REF_NAME (LUT6, FDCE, RAMB18E1 ...), which is stable across Vivado
+# versions; the PRIMITIVE_TYPE strings are not -- 2026.1 matched none of the
+# CLB.LUT.* / REGISTER.SDR.* patterns an earlier revision of this file used,
+# and printed 0 LUTs for a module the synthesis report showed 256 LUT6 in.
 proc count_prims {pattern} {
-    return [llength [get_cells -hierarchical -filter "PRIMITIVE_TYPE =~ $pattern"]]
+    return [llength [get_cells -hierarchical -filter "REF_NAME =~ $pattern"]]
+}
+proc grab_counts {r} {
+    dict set r lut    [count_prims "LUT*"]
+    dict set r ff     [count_prims "FD*"]
+    dict set r ramb36 [count_prims "RAMB36*"]
+    dict set r ramb18 [count_prims "RAMB18*"]
+    return $r
 }
 
 # returns a dict: lut ff ramb36 ramb18 wns_synth wns_impl
@@ -56,16 +68,20 @@ proc ooc_cost {label top files generics period outdir run_impl part} {
     foreach g $generics { lappend gen_args -generic $g }
     synth_design -top $top -part $part -mode out_of_context {*}$gen_args
     create_clock -name ui_clk -period $period [get_ports clk]
+    # Out of context there is no reg-to-reg path inside the buffers (pin ->
+    # BRAM -> mux -> pin), so without an I/O budget get_timing_paths returns
+    # nothing and WNS prints blank.  Charge IO_BUDGET ns at each end: the
+    # remaining slack is what the in-context neighbours (writer register on
+    # the way in, feeder + PE input register on the way out) get to spend.
+    set data_in [remove_from_collection [all_inputs] [get_ports clk]]
+    set_input_delay  -clock ui_clk $::IO_BUDGET $data_in
+    set_output_delay -clock ui_clk $::IO_BUDGET [all_outputs]
 
     set tag [string map {" " _ "=" _ "," _} $label]
     report_timing_summary -max_paths 5 -file $outdir/${tag}_synth_timing.rpt
     report_utilization            -file $outdir/${tag}_synth_util.rpt
 
-    set r [dict create]
-    dict set r lut    [count_prims "CLB.LUT.*"]
-    dict set r ff     [count_prims "REGISTER.SDR.*"]
-    dict set r ramb36 [count_prims "BMEM.BRAM.RAMB36*"]
-    dict set r ramb18 [count_prims "BMEM.BRAM.RAMB18*"]
+    set r [grab_counts [dict create]]
     dict set r wns_synth [get_property SLACK [get_timing_paths -max_paths 1 -delay_type max]]
     dict set r wns_impl  "-"
     puts "  \[synth\] LUT [dict get $r lut]  FF [dict get $r ff]  RAMB36 [dict get $r ramb36]  RAMB18 [dict get $r ramb18]  WNS [dict get $r wns_synth] ns"
@@ -77,10 +93,7 @@ proc ooc_cost {label top files generics period outdir run_impl part} {
         route_design
         report_timing_summary -max_paths 10 -file $outdir/${tag}_impl_timing.rpt
         report_utilization              -file $outdir/${tag}_impl_util.rpt
-        dict set r lut    [count_prims "CLB.LUT.*"]
-        dict set r ff     [count_prims "REGISTER.SDR.*"]
-        dict set r ramb36 [count_prims "BMEM.BRAM.RAMB36*"]
-        dict set r ramb18 [count_prims "BMEM.BRAM.RAMB18*"]
+        set r [grab_counts $r]
         dict set r wns_impl [get_property SLACK [get_timing_paths -max_paths 1 -delay_type max]]
         puts "  \[impl \] LUT [dict get $r lut]  FF [dict get $r ff]  RAMB36 [dict get $r ramb36]  RAMB18 [dict get $r ramb18]  WNS [dict get $r wns_impl] ns   <-- believe this one"
     }
@@ -129,7 +142,8 @@ set v2_total [sum {buf_v2_A buf_v2_B wr_v2 chk_v2}]
 
 puts "\n=========================================================="
 puts "  OOC cost at N=$N K_MAX=$K_MAX, $PART, ui_clk $UI_PERIOD ns"
-puts "  (impl numbers if RUN_IMPL=1; BRAM tiles = RAMB36 + RAMB18/2)"
+puts "  (impl numbers if RUN_IMPL=1; BRAM tiles = RAMB36 + RAMB18/2;"
+puts "   WNS with $IO_BUDGET ns charged at every data pin -- pin paths, not fmax)"
 puts "=========================================================="
 puts [format "  %-34s %7s %7s %7s %7s   %8s %8s" "module" LUT FF RAMB36 RAMB18 WNSsyn WNSimpl]
 puts [row "buffer v1 (one instance)"        $R(buf_v1)]
