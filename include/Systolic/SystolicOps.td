@@ -172,10 +172,26 @@ def Systolic_PEArrayOp : Systolic_Op<"pe_array", [Pure]> {
 // MacOp
 //===----------------------------------------------------------------------===//
 
-def Systolic_MacOp : Systolic_Op<"mac", [Pure]> {
+def Systolic_MacOp : Systolic_Op<"mac", [Pure,
+    AllTypesMatch<["a", "a_out"]>,
+    AllTypesMatch<["b", "b_out"]>,
+    AllTypesMatch<["acc_in", "acc_out"]>]> {
   let summary = "單一 PE 的 multiply-accumulate,pass-through a/b,累加 acc";
+  let description = [{
+    Takes (a, b, acc) and returns (a, b, acc + a*b). Both input operands are
+    forwarded unchanged to the neighbouring PEs -- that pass-through is the
+    systolic property, and the type constraints above state it, so an
+    expansion that dropped an operand would not verify. The accumulator type
+    is deliberately left free of the input types: an int8 or bf16 array
+    accumulating in a wider type is the same operation.
+  }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$acc_in);
   let results = (outs AnyType:$a_out, AnyType:$b_out, AnyType:$acc_out);
+
+  let assemblyFormat = [{
+      $a `,` $b `,` $acc_in attr-dict
+      `:` type($a) `,` type($b) `,` type($acc_in)
+    }];
 }
 
 //===----------------------------------------------------------------------===//
