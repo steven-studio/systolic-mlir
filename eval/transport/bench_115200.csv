@@ -1,0 +1,2 @@
+kmax,n,k,baud,reps,med_write_ms,med_read_ms,med_total_ms,pred_write_ms,pred_read_ms,pred_total_ms
+16,8,16,115200,20,90.9538,35.9025,126.8602,89.9306,22.2222,112.1528

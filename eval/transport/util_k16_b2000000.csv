@@ -1,0 +1,2 @@
+k_max,baud,lut,ff,bram,dsp,wns_ns,whs_ns,fmax_mhz,timing_met
+16,2000000,51089,68397,136,384,0.800,0.004,108.70,1
