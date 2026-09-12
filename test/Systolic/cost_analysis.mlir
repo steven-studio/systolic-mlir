@@ -6,17 +6,22 @@
 // If someone changes the formula or the fitted constants, this test fails
 // rather than the model silently drifting away from the hardware.
 //
-//   cycles_tile = II * (depth + rows + cols - 2) + fixedOverhead
-//   with II = 1 and fixedOverhead = 6.
+//   cycles_tile = II * (k_max + rows + cols - 2) + tile_overhead
+//   with II = 1 and tile_overhead = 6.
 //
-// The device `depth` attribute is the array's K-tile depth -- the same
-// quantity as K_DIM in hls/gemm_4x4/design.h. It must match the synthesised
-// kernel or the estimate describes hardware that was never built.
+// The device `k_max` attribute is the array's reduction capacity per
+// invocation -- the same quantity as K_DIM in hls/gemm_4x4/design.h. It
+// must match the synthesised kernel or the estimate describes hardware
+// that was never built. `tile_overhead` has no default, so each device
+// below states the HLS calibration explicitly.
 
 module {
-  systolic.device @acc_4x4  rows = 4  cols = 4 depth = 4 dataflow = weight_stationary
-  systolic.device @acc_8x8  rows = 8  cols = 8 depth = 8 dataflow = weight_stationary
-  systolic.device @acc_32x2 rows = 32 cols = 2 depth = 8 dataflow = weight_stationary
+  systolic.device @acc_4x4  rows = 4  cols = 4 dataflow = weight_stationary
+      {k_max = 4 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_8x8  rows = 8  cols = 8 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_32x2 rows = 32 cols = 2 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
 
   // 4x4x4, one tile: 1 * (4 + 4 + 4 - 2) + 6 = 16. Cosim measured 16.
   // CHECK-LABEL: func.func @tile_4x4x4

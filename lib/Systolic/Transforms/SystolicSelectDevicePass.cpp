@@ -44,7 +44,10 @@ struct SystolicSelectDevicePass
       ::systolic::ArrayConfig cfg;
       cfg.rows = device.getRows();
       cfg.cols = device.getCols();
-      cfg.depth = device.getDepth();
+      if (IntegerAttr km = device.getKMaxAttr())
+        cfg.kMax = km.getInt();
+      if (IntegerAttr l1 = device.getL1BytesAttr())
+        cfg.l1Bytes = l1.getInt();
       if (FloatAttr clk = device.getClockHzAttr())
         cfg.clockHz = clk.getValueAsDouble();
       if (FloatAttr bw = device.getDmaBytesPerCycleAttr())
@@ -54,8 +57,8 @@ struct SystolicSelectDevicePass
       // off keeps the ArrayConfig default.
       if (IntegerAttr ii = device.getInitiationIntervalAttr())
         cfg.initiationInterval = ii.getInt();
-      if (IntegerAttr fo = device.getFixedOverheadAttr())
-        cfg.fixedOverhead = fo.getInt();
+      if (IntegerAttr to = device.getTileOverheadAttr())
+        cfg.tileOverhead = to.getInt();
       std::string name = device.getSymName().str();
       configs[name] = cfg;
       deviceNames.push_back(name);

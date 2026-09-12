@@ -8,8 +8,8 @@
 // The pass only touches tiles with no device attribute, so nothing here
 // may be written `on @acc_...`.
 //
-// Costs come from the calibrated model, cycles = II*(depth+rows+cols-2)
-// + fixedOverhead per tile, times the tile count:
+// Costs come from the calibrated model, cycles = II*(k_max+rows+cols-2)
+// + tile_overhead per tile, times the tile count:
 //
 //   acc_8x8 (8,8,8):  per-tile 1*(8+8+8-2)+6 = 28
 //   acc_4x4 (4,4,4):  per-tile 1*(4+4+4-2)+6 = 16
@@ -19,8 +19,10 @@
 // determined -- there is no tie to break.
 
 module {
-  systolic.device @acc_8x8 rows = 8 cols = 8 depth = 8 dataflow = weight_stationary
-  systolic.device @acc_4x4 rows = 4 cols = 4 depth = 4 dataflow = weight_stationary
+  systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = weight_stationary
+      {k_max = 4 : i64, tile_overhead = 6 : i64}
 
   // Largest tile, considered first. Both devices are idle, so this is a
   // straight cost comparison:

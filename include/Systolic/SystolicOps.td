@@ -41,8 +41,11 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
   let description = [{
     Example:
     ```mlir
-    systolic.device @acc_8x8 rows = 8 cols = 8 depth = 1 dataflow = weight_stationary
-    systolic.device @acc_4x4 rows = 4 cols = 4 depth = 1 dataflow = weight_stationary
+    systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = output_stationary
+      {k_max = 256 : i64, tile_overhead = 95 : i64,
+       dma_bytes_per_cycle = 32.0 : f64, l1_bytes = 16384 : i64}
+    systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = output_stationary
+      {k_max = 256 : i64, tile_overhead = 95 : i64}
     ```
     Every numeric field here is an ordinary attribute: nothing about this
     op is specific to one physical board. Re-targeting to a different
@@ -54,33 +57,43 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     SymbolNameAttr:$sym_name,
     I64Attr:$rows,
     I64Attr:$cols,
-    I64Attr:$depth,
     Systolic_DataflowKind:$dataflow,
+
+    // Reduction capacity: how many reduction steps the operand buffers
+    // hold in one invocation. This is a synthesis-time parameter of the
+    // implementation, not a property of the architecture, and it decides
+    // how many times the per-invocation costs recur for a deep reduction.
+    // Distinct from l1_bytes, which is a scratchpad capacity read only by
+    // the optional capacity check in device selection.
+    OptionalAttr<I64Attr>:$k_max,
+    OptionalAttr<I64Attr>:$l1_bytes,
     OptionalAttr<F64Attr>:$clock_hz,
     OptionalAttr<F64Attr>:$dma_bytes_per_cycle,
 
     // Calibration constants, per microarchitecture rather than per array
     // shape. The geometric term of the cost model is determined by rows,
-    // cols and depth; these two describe what the datapath adds on top of
+    // cols and k_max; these two describe what the datapath adds on top of
     // it -- pipeline latency of the arithmetic, the final reduction, and
     // whatever the output handshake costs.
     //
     // They belong on the device rather than in the model because two
     // accelerators of identical geometry can differ here by more than an
     // order of magnitude. The HLS pipeline this model was first fitted to
-    // has fixed_overhead 6; the hand-written fold RTL measures 104. A
+    // has tile_overhead 6; the hand-written fold RTL measures 104. A
     // single global constant cannot describe both, and using the wrong one
     // makes device selection pick the wrong accelerator for the right
     // reason.
     //
-    // Absent means "use the ArrayConfig default", which keeps every
-    // existing device declaration behaving exactly as before.
+    // tile_overhead has no default: a device that does not declare it is
+    // costed with H = 0, which is exactly the geometric model. Comparing
+    // the calibrated map against the geometric one is therefore a matter
+    // of one attribute.
     OptionalAttr<I64Attr>:$initiation_interval,
-    OptionalAttr<I64Attr>:$fixed_overhead
+    OptionalAttr<I64Attr>:$tile_overhead
   );
 
   let assemblyFormat = "$sym_name `rows` `=` $rows `cols` `=` $cols "
-      "`depth` `=` $depth `dataflow` `=` $dataflow attr-dict";
+      "`dataflow` `=` $dataflow attr-dict";
 }
 
 //===----------------------------------------------------------------------===//

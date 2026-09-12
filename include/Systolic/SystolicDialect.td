@@ -20,7 +20,8 @@ def Systolic_Dialect : Dialect {
 
     1. Hardware description -- one `systolic.device` op per accelerator
        instance in the target SoC, carrying its fixed array geometry
-       (rows, cols, depth) and dataflow as IR attributes. These are data,
+       (rows, cols), its reduction capacity (k_max) and its dataflow as IR
+       attributes. These are data,
        not compiled-in constants, so the same IR and passes retarget to a
        different board just by changing these attributes.
     2. Compute tiles -- `systolic.matmul_tile` ops representing one
