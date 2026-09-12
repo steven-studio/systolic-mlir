@@ -48,9 +48,16 @@ set SUM "build_kmax/k${KMAX}/summary.csv"
 if {[file exists $SUM]} {
     set fh [open $SUM r]; set lines [split [read $fh] "\n"]; close $fh
     set row [lindex $lines 1]
-    if {[llength [split $row ","]] >= 9} {
-        set tmet [lindex [split $row ","] 8]
-        set wns  [lindex [split $row ","] 5]
+    # 用欄名查,不要寫死 index。summary.csv 加過欄位(baud),寫死 index
+    # 會讓舊目錄的 CSV 被讀成別欄 —— 而讀錯的後果是「時序沒收斂的 .bit
+    # 被放行燒錄」,在板上看起來跟設計本身壞掉一模一樣。
+    set hdr  [split [lindex $lines 0] ","]
+    set cols [split $row ","]
+    set i_tmet [lsearch -exact $hdr "timing_met"]
+    set i_wns  [lsearch -exact $hdr "wns_ns"]
+    if {$i_tmet >= 0 && $i_wns >= 0 && [llength $cols] > $i_tmet} {
+        set tmet [lindex $cols $i_tmet]
+        set wns  [lindex $cols $i_wns]
         if {$tmet != 1} {
             error "summary.csv 記錄此 K_MAX 時序未收斂 (WNS=$wns)。路徑上的 .bit 是更早一輪的殘留,拒絕燒錄。重跑 build_kmax.tcl。"
         }
@@ -101,13 +108,22 @@ refresh_hw_device $dev
 
 puts "========================================"
 puts " PROGRAMMED K_MAX = $KMAX"
-if {[string is integer -strict $KMAX]} {
+# BITTAG 可能帶後綴(_dbg、_n4、_b2000000)。wire format 只由前導的
+# K_MAX 決定,所以取前導整數,不要拿整串去比對 —— 否則燒 2 Mbaud 那顆
+# 會掉進下面的 else,印出 echo bitstream 的說明,而那在板上 bring-up
+# 時是會讓人找錯方向的。
+set KNUM ""
+set KBAUD 115200
+regexp {^([0-9]+)} $KMAX -> KNUM
+regexp {_b([0-9]+)} $KMAX -> KBAUD
+if {$KNUM ne ""} {
     puts ""
-    puts " Wire format for this build:"
-    puts "   RX  [expr {$KMAX * 64}] bytes   (A,B interleaved, [expr {$KMAX / 8}] windows of 8)"
-    puts "   TX  512 bytes    (C_ctx0 then C_ctx1; host adds them)"
+    puts " Wire format for this build (N=8):"
+    puts "   RX  [expr {$KNUM * 64}] bytes   (A,B interleaved, [expr {$KNUM / 8}] windows of 8)"
+    puts "   TX  256 bytes    (4*N*N;ctx 合併後的單一 C,host 不再相加)"
     puts ""
-    puts " Then:  python3 test_uart_kmax.py --kmax $KMAX"
+    puts " Then:  python3 test_uart_kmax.py --kmax $KNUM --baud $KBAUD"
+    puts "        python3 bench_uart.py      --kmax $KNUM --baud $KBAUD --reps 20"
 } else {
     # 非數字的 KMAX(echo、16_dbg 等)是診斷 bitstream。
     puts ""
