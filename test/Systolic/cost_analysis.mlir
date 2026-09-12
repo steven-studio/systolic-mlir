@@ -81,11 +81,17 @@ module {
     return %0 : tensor<8x8xf32>
   }
 
-  // Non-divisible: 5x5x5 on 4x4x4 rounds up to 2*2*2 = 8 tiles -> 128.
-  // The padding waste is real and the model must not smooth it away.
+  // Non-divisible, and the two dimensions behave differently. M and N round
+  // up to 2*2 = 4 folds and each pays its geometry and its H in full: that
+  // padding waste is real and the model must not smooth it away. K does not
+  // round up the same way -- ceil(5/4) = 2 invocations, but the second runs
+  // at depth 1, not at the buffer's capacity of 4. Per fold that is
+  // 5 + 2*(4+4-2+6) = 29, and 4*29 = 116. Charging the capacity for the
+  // short invocation instead would give 128, which is what the board does
+  // not do.
   // CHECK-LABEL: func.func @ragged
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: est_cycles = 128
+  // CHECK-SAME: est_cycles = 116
   func.func @ragged(%a: tensor<5x5xf32>, %b: tensor<5x5xf32>,
                     %c: tensor<5x5xf32>) -> tensor<5x5xf32> {
     %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4

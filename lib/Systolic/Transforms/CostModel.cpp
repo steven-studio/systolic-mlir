@@ -16,11 +16,17 @@ int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,
   if (array.rows <= 0 || array.cols <= 0 || array.kMax <= 0)
     return 0;
 
-  int64_t tiles = ceilDiv(m, array.rows) * ceilDiv(n, array.cols) *
-                  ceilDiv(k, array.kMax);
+  // One fold is one rows x cols output tile. The reduction is split into
+  // ceil(k / k_max) invocations, and -- this is the part a capacity-only
+  // count gets wrong -- the last invocation runs at whatever depth is left,
+  // not at the buffer's capacity. Summing the true depths gives exactly k,
+  // so the arithmetic term is k per fold regardless of how it is split, and
+  // only the per-invocation costs recur.
+  int64_t folds = ceilDiv(m, array.rows) * ceilDiv(n, array.cols);
+  int64_t invocations = ceilDiv(k, array.kMax);
 
-  // PE(i,j) performs its k-th MAC on beat i+j+k, so the time loop runs
-  // k_max + rows + cols - 2 beats. Every tile pays that fill/drain, not
+  // PE(i,j) performs its k-th MAC on beat i+j+k, so one invocation of depth
+  // k_i runs k_i + rows + cols - 2 beats. Every tile pays that fill/drain, not
   // the GEMM as a whole -- charging it once made the estimate monotonically
   // decreasing in rows and cols, so the model could never express the
   // trade-off it exists to express.
@@ -40,10 +46,12 @@ int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,
   //
   // The two differ by more than 17x on the same formula, which is why the
   // constants live on the device op and not here.
-  int64_t beats = array.kMax + array.rows + array.cols - 2;
-  int64_t perTile = array.initiationInterval * beats + array.tileOverhead;
+  int64_t perInvocation =
+      array.initiationInterval * (array.rows + array.cols - 2) +
+      array.tileOverhead;
+  int64_t perFold = array.initiationInterval * k + invocations * perInvocation;
 
-  return tiles * perTile;
+  return folds * perFold;
 }
 
 int64_t estimateDmaCycles(int64_t bytes, double bytesPerCycle) {
