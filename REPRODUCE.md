@@ -17,27 +17,32 @@
 
 ### 1.1 手寫 fold RTL（今日的主線）
 
-| 數字 | 指令 | 輸出 |
-|---|---|---|
-| K_MAX=16/64/128 的 LUT / FF / DSP / WNS | `vivado -mode batch -source build_kmax.tcl -tclargs <K>` | `build_kmax/k<K>/summary.csv` |
-| drain 111、feed K+7、errors 0 | `vivado -mode batch -source sim_kmax.tcl -tclargs <K>` | stdout 的 `KMAXCSV,` 那行 |
-| 矽上週期 134 / 150 / 182 | `python3 test_uart_kmax.py --kmax 64 --k <16\|32\|64>` | stdout `hardware cycles` |
-| bit-exact | 同上 | stdout 三行 `BIT-EXACT` |
-| 一顆 PE 的 1,318 LUT / 4 DSP | `/tmp/pe.tcl`（見 `eval/scalesim/`） | `/tmp/util_pe.rpt` |
-| 8x8+4x4 的 78.1% LUT | `eval/scalesim/dual.tcl` | `/tmp/util_dual.rpt` |
-
-工作目錄一律是 `hls/multi_200t/fold_pipelined/rtl/`，且需先
+工作目錄一律是 `rtl/multi_200t/fold_pipelined/`，且需先
 `source ~/tools/Xilinx/2026.1/2026.1/Vivado/settings64.sh`。
 
-彙整見 `eval/scalesim/KMAX_SCALING.md`。
+`build_kmax/` 被 gitignore 擋著，重跑一次就覆蓋，所以要引用的那幾份
+已複製到 `eval/transport/`。
+
+| 數字 | 指令 | 輸出 |
+|---|---|---|
+| 任一 (K_MAX, N, BAUD) 的 LUT / FF / BRAM / DSP / WNS / WHS | `vivado -mode batch -source uart/build_kmax.tcl -tclargs <K_MAX> [DBG] [DIRECTIVE] [N] [BAUD]` | `build_kmax/k<tag>/summary.csv`、`.../reports/post_route_utilization.rpt` |
+| N=8, K_MAX=16：**DSP 384 = 6N²、LUT 51,131 = 38.0%、BRAM 136**（論文 §4 的三個資源數字） | 上列，`-tclargs 16` | `eval/transport/util_k16_b115200.csv`、`eval/transport/post_route_utilization.rpt` |
+| 同組態但 BAUD=2000000：LUT 51,089（差 42 —— 除數 868→50，計數器少 4 bits） | 上列，`-tclargs 16 0 Default 8 2000000` | `eval/transport/util_k16_b2000000.csv` |
+| 矽上週期 **125**（K_MAX=16, k_dim=16, N=8）、bit-exact | `cd tools && python3 test_uart_kmax.py --kmax 16 --baud <115200\|2000000>` | stdout `hardware cycles`、`BIT-EXACT` |
+| 兩速率往返時間，與主機端固定成本 **13.7 ms** | `cd tools && python3 bench_uart.py --kmax 16 --baud <rate> --reps 20 --csv <out>` | `eval/transport/bench_115200.csv`、`eval/transport/bench_2m.csv` |
+
+最後一列的判準是**不變性**而不是單一數字：read 的殘差在 115200 下是
+13.68 ms、在 2 Mbaud 下是 13.76 ms，中間隔著 17.36 倍的位元率。
+on-chip counter 兩邊都是 125，兩邊都 bit-exact —— 計算被當成對照變數握住，
+差額才能讀成傳輸。
 
 ### 1.2 成本模型
 
 | 數字 | 來源 |
 |---|---|
-| `fixedOverhead = 104` | 由 1.1 的矽上兩點（k_dim=16 → 134、k_dim=64 → 182）減去幾何項 `k_dim+14` |
+| `tileOverhead = 95` | 2026-09-12 的 N=8 板測：`125 = 16 + 2(8-1) + 95`。CGO 稿另在 N=4 量到同一個常數（H₄ = H₈ = 95，零殘差） |
 | 六個 est_cycles | `cmake --build build --target check-systolic` → `test/Systolic/cost_model_fold_rtl.mlir` |
-| k_dim=32 → 150 的「先預測後驗證」 | 測試先寫入 150，之後 `test_uart_kmax.py --kmax 64 --k 32` 回報 150 |
+| 十一種陣列組態的 makespan（論文 tab:config-sweep） | `python3 eval/config_sweep/sweep_opt.py`（實跑 `systolic-opt --systolic-select-device`，不是 Python 重演） | 
 
 ### 1.3 SCALE-Sim 幾何項驗證
 
@@ -115,6 +120,33 @@ dfdbec135d284e4e853202254f8a0dd3  sweep_results_nexys_8x8.csv
 `hls/multi_200t/vivado/build_project.tcl`。
 
 若論文要保留這一列，至少要確認該 tcl 仍能執行完成。
+
+### 2.5 重構前的數字曾留在第 1 節（2026-09-13 移出，此處記其去向）
+
+第 1 節的判準是「指得出來」，但以下四項在 ctx 移除與 paper-hw-v1 之後已經
+指不出來了，仍留在表裡到今天為止。移出不刪除，去向如下：
+
+- **矽上週期 134 / 150 / 182**（K_MAX=64，k_dim=16/32/64）：對應 H = 104。
+  重構後 H = 95，同樣三點應為 125 / 141 / 173，但**只有 K_MAX=16 的 125
+  實測過**。要保留這三點就得重跑
+  `python3 test_uart_kmax.py --kmax 64 --k <16|32|64>`。
+- **drain 111**：`tb/sim_kmax.tcl` 的輸出。論文 6.3.2 仍引用，而該節自己的
+  註解指出 111 的拆解只在 N=8 成立（套到 N=4 會預測 115，板上量到 111）。
+  論文的 TODO 寫「用 tb_pe_counters 重測」，但那個 testbench 量的是
+  pass-through 延遲與 bank counter 序列，不量 drain —— 指令本身要先重寫。
+- **一顆 PE 的 1,318 LUT / 4 DSP**：paper-hw-v1 之前的 build。現在是
+  6 DSP/PE；2026-09-12 的 N=8 合成是 51,131 LUT / 64 PE ≈ 799 LUT/PE
+  （含 UART、operand buffer、feeder，所以是每 PE 的上界）。多的兩顆 DSP
+  換回了每 PE 約 520 個 LUT，這是這個設計裝得進 200T 的原因。
+- **8x8+4x4 的 78.1% LUT**：`eval/scalesim/dual.tcl` 仍在，但輸出寫到
+  `/tmp/util_dual.rpt`，重開機即消失；而且那是 HLS 的 5 DSP/PE 設計。
+  `pe.tcl` 同樣寫 `/tmp/util_pe.rpt`。要保留就得把輸出路徑改進 repo。
+
+另外兩個純粹的路徑錯誤，一併記在這裡：舊版寫「工作目錄一律是
+`hls/multi_200t/fold_pipelined/rtl/`」，該路徑不存在 —— RTL 在
+`rtl/multi_200t/fold_pipelined/`，而 `hls/multi_200t/fold_pipelined/` 是
+HLS 的 C++ 版本，兩者是不同東西；並且引用了從未存在的
+`eval/scalesim/KMAX_SCALING.md`。
 
 ---
 
