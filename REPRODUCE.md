@@ -26,10 +26,19 @@
 | 數字 | 指令 | 輸出 |
 |---|---|---|
 | 任一 (K_MAX, N, BAUD) 的 LUT / FF / BRAM / DSP / WNS / WHS | `vivado -mode batch -source uart/build_kmax.tcl -tclargs <K_MAX> [DBG] [DIRECTIVE] [N] [BAUD]` | `build_kmax/k<tag>/summary.csv`、`.../reports/post_route_utilization.rpt` |
-| N=8, K_MAX=16：**DSP 384 = 6N²、LUT 51,131 = 38.0%、BRAM 136**（論文 §4 的三個資源數字） | 上列，`-tclargs 16` | `eval/transport/util_k16_b115200.csv`、`eval/transport/post_route_utilization.rpt` |
+| N=8, K_MAX=16：**DSP 384 / 740 = 51.89%、LUT 51,131 / 133,800 = 38.21%、BRAM 136 / 365 = 37.26%** | 上列，`-tclargs 16` | `eval/transport/util_k16_b115200.csv`、`eval/transport/post_route_utilization_k16_b115200.rpt` |
 | 同組態但 BAUD=2000000：LUT 51,089（差 42 —— 除數 868→50，計數器少 4 bits） | 上列，`-tclargs 16 0 Default 8 2000000` | `eval/transport/util_k16_b2000000.csv` |
 | 矽上週期 **125**（K_MAX=16, k_dim=16, N=8）、bit-exact | `cd tools && python3 test_uart_kmax.py --kmax 16 --baud <115200\|2000000>` | stdout `hardware cycles`、`BIT-EXACT` |
 | 兩速率往返時間，與主機端固定成本 **13.7 ms** | `cd tools && python3 bench_uart.py --kmax 16 --baud <rate> --reps 20 --csv <out>` | `eval/transport/bench_115200.csv`、`eval/transport/bench_2m.csv` |
+
+LUT 的分母以合成報告為準：部件標稱 134,600，該次建置有 800 顆 prohibited，
+Available 是 133,800，所以報告印的是 38.21%。論文 7.5 寫「51.2k LUT（38% of
+the part）」用的是標稱值 134,600，兩者四捨五入後同為 38%，但引用時要指明是哪
+一個分母。DSP 384 = 6N² 是這份報告第一次替論文 §4 的資源數字提供合成證據。
+
+今天這一點也延長了 7.5 的 K_MAX 掃描表：該表 N=8 在 k_max 64/256/512/1024/2048
+量到 LUT 51,157--51,212、DSP 384、BRAM 136--160；k_max=16 的 51,131 / 384 / 136
+落在同一條線的下端，符合「buffer 變淺、位址位元變少」的預期。
 
 最後一列的判準是**不變性**而不是單一數字：read 的殘差在 115200 下是
 13.68 ms、在 2 Mbaud 下是 13.76 ms，中間隔著 17.36 倍的位元率。
