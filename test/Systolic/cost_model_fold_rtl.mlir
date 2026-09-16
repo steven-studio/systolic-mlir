@@ -173,6 +173,54 @@ module {
     return %0 : tensor<8x8xf32>
   }
 
+  // ---- the K = 1024 fold across the capacity candidate set -------------
+  //
+  // The same fold on four bitstreams (thesis tab:kmax-frontier; the fifth,
+  // k_max = 1024, is @fold_1024 above): the invocation count is the only
+  // thing that changes, and each invocation costs its depth + 109.
+  systolic.device @fold_k64 rows = 8 cols = 8
+      dataflow = output_stationary {k_max = 64 : i64, tile_overhead = 95 : i64}
+
+  // Board: 2768 = 16 * 173.
+  // CHECK-LABEL: func.func @fold_1024_k64
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 2768
+  func.func @fold_1024_k64(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
+                           %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k64
+         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+         : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
+  // Board: 1242 = 621 + 621.
+  // CHECK-LABEL: func.func @fold_1024_k512
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 1242
+  func.func @fold_1024_k512(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
+                            %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k512
+         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+         : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
+  // Board: 1133 on the k_max = 2048 bitstream -- one invocation, the same
+  // count as on k_max = 1024, sixteen more block-RAM tiles for nothing.
+  // CHECK-LABEL: func.func @fold_1024_k2048
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 1133
+  func.func @fold_1024_k2048(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
+                             %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k2048
+         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+         : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
   // ---- several invocations, k > k_max ---------------------------------
   //
   // The fold design pays the per-invocation cost once per invocation, and
