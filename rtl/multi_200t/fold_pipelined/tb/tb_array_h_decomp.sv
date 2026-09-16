@@ -57,14 +57,22 @@
  * 24 + 71 + 6 = 101,對不上板測的 95 —— 這是 IP 延遲是 8/11 而不是
  * 9/12 的旁證(正證是 .xci 本身)。
  *
+ * -GACC_BANKS=<B> 改每個 PE 的 bank 數,樹的層數跟著變成 log2(B)。這是
+ * 「先預測再量」的旋鈕:B=32 給五層 29/21/17/15/14,22 + 96 + 6 = 124,
+ * T(8)=146、T(256)=394;B=8 給三層 17/15/14,H = 74,但 8 < 13 違反
+ * bank hazard,64 個結果全錯 —— bench 會 FAIL,那是預期的負對照。
+ *
  * 陣列埠一律由 always_ff 驅動、initial 只推進純量 feed_t,理由見
  * tb_array_pulse 檔頭的 Verilator 註記。
  */
 module tb_array_h_decomp;
 
-    parameter int N   = 8;
-    parameter int K   = 8;
-    parameter int NTX = 2;      // 連做幾次交易(第二次驗證交棒後狀態乾淨)
+    parameter int N         = 8;
+    parameter int K         = 8;
+    parameter int NTX       = 2;    // 連做幾次交易(第二次驗證交棒後狀態乾淨)
+    parameter int ACC_BANKS = 16;   // 每個 PE 的 bank 數;樹的層數 = $clog2(ACC_BANKS)
+
+    localparam int LEVELS = $clog2(ACC_BANKS);
 
     localparam int L = N - 1;   // 最後一個 PE 的座標 (L, L)
 
@@ -81,7 +89,7 @@ module tb_array_h_decomp;
     logic        c_valid_out;
     logic [31:0] c_out [0:N-1][0:N-1];
 
-    systolic_array #(.N(N), .DATA_W(32)) dut (
+    systolic_array #(.N(N), .DATA_W(32), .ACC_BANKS(ACC_BANKS)) dut (
         .clk(clk), .rst(rst),
         .a_in(a_in), .b_in(b_in),
         .a_valid_in(a_valid_in), .b_valid_in(b_valid_in),
@@ -127,13 +135,13 @@ module tb_array_h_decomp;
     always_ff @(posedge clk) cyc <= cyc + 1;
 
     int t_start, t_last, t_hand, t_done, t_pulse, t_arr, t_pub, t_cv;
-    int t_bar [0:3];
+    int t_bar [0:LEVELS-1];
     int n_bar;
 
     task automatic clear_stamps();
         t_start = -1; t_last = -1; t_hand = -1; t_done = -1;
         t_pulse = -1; t_arr = -1;  t_pub = -1;  t_cv = -1;
-        for (int i = 0; i < 4; i++) t_bar[i] = -1;
+        for (int i = 0; i < LEVELS; i++) t_bar[i] = -1;
         n_bar = 0;
     endtask
 
@@ -159,7 +167,7 @@ module tb_array_h_decomp;
                 t_last <= cyc - 2;
 
             if (dut.ROW[L].COL[L].u_pe.acc_handoff && t_hand < 0)       t_hand  <= cyc;
-            if (pe_bar && n_bar < 4) begin
+            if (pe_bar && n_bar < LEVELS) begin
                 t_bar[n_bar] <= cyc;
                 n_bar        <= n_bar + 1;
             end
@@ -202,8 +210,8 @@ module tb_array_h_decomp;
                     Cexp[i][j] = Cexp[i][j] + Amat[i][kk] * Bmat[kk][j];
             end
 
-        $display("tb_array_h_decomp  N=%0d  K=%0d  fp_mul LAT=%0d  fp_add LAT=%0d",
-                 N, K,
+        $display("tb_array_h_decomp  N=%0d  K=%0d  ACC_BANKS=%0d  fp_mul LAT=%0d  fp_add LAT=%0d",
+                 N, K, ACC_BANKS,
                  dut.ROW[0].COL[0].u_pe.u_fp_mul.LAT,
                  dut.ROW[0].COL[0].u_pe.u_fp_add_accum.LAT);
 
@@ -247,8 +255,8 @@ module tb_array_h_decomp;
             T = t_cv - t_start + 1;
             H = T - K - 2 * (N - 1);
             g = t_hand   - t_last;
-            r = t_bar[3] - t_hand;
-            c = t_cv     - t_bar[3] + 1;
+            r = t_bar[LEVELS-1] - t_hand;
+            c = t_cv            - t_bar[LEVELS-1] + 1;
 
             $display("");
             $display("--- 交易 %0d ---", tx);
@@ -256,11 +264,11 @@ module tb_array_h_decomp;
             $display("  最後運算元到 PE(%0d,%0d) cyc %0d   (= 起點 + k + 2(N-1) = %0d)",
                      L, L, t_last, t_start + K + 2 * (N - 1));
             $display("  acc_handoff          cyc %0d   g = %0d", t_hand, g);
-            $display("  樹 barrier stride 8  cyc %0d   層 = %0d", t_bar[0], t_bar[0] - t_hand);
-            $display("  樹 barrier stride 4  cyc %0d   層 = %0d", t_bar[1], t_bar[1] - t_bar[0]);
-            $display("  樹 barrier stride 2  cyc %0d   層 = %0d", t_bar[2], t_bar[2] - t_bar[1]);
-            $display("  樹 barrier stride 1  cyc %0d   層 = %0d   r = %0d",
-                     t_bar[3], t_bar[3] - t_bar[2], r);
+            for (int lv = 0; lv < LEVELS; lv++)
+                $display("  樹 barrier stride %-3d cyc %0d   層 = %0d%s",
+                         ACC_BANKS >> (lv + 1), t_bar[lv],
+                         t_bar[lv] - (lv == 0 ? t_hand : t_bar[lv-1]),
+                         lv == LEVELS-1 ? $sformatf("   r = %0d", r) : "");
             $display("  RED_DONE             cyc %0d", t_done);
             $display("  acc_valid_out        cyc %0d", t_pulse);
             $display("  all_arrived          cyc %0d", t_arr);
@@ -272,9 +280,9 @@ module tb_array_h_decomp;
 
             chk($sformatf("tx%0d 最後運算元抵達拍 = 起點+k+2(N-1)", tx),
                 t_last, t_start + K + 2 * (N - 1));
-            chk($sformatf("tx%0d 四層 barrier 都有量到", tx), n_bar, 4);
+            chk($sformatf("tx%0d %0d 層 barrier 都有量到", tx, LEVELS), n_bar, LEVELS);
             chk($sformatf("tx%0d g + r + c == H", tx), g + r + c, H);
-            chk($sformatf("tx%0d RED_DONE 緊接最後一層 barrier", tx), t_done, t_bar[3] + 1);
+            chk($sformatf("tx%0d RED_DONE 緊接最後一層 barrier", tx), t_done, t_bar[LEVELS-1] + 1);
             chk($sformatf("tx%0d acc_valid_out 緊接 RED_DONE", tx), t_pulse, t_done + 1);
             chk($sformatf("tx%0d all_arrived 緊接脈衝", tx), t_arr, t_pulse + 1);
             chk($sformatf("tx%0d CAN_PUBLISH 緊接 all_arrived", tx), t_pub, t_arr + 1);

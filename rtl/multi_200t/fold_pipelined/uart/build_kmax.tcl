@@ -30,7 +30,7 @@
 # K_MAX=16 test. It needs updating before it can drive a deeper build.
 
 if {$argc < 1} {
-    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\] \[N\] \[BAUD\]"
+    error "usage: -tclargs <K_MAX> \[DEBUG_MARKERS\] \[PLACE_DIRECTIVE\] \[N\] \[BAUD\] \[ACC_BANKS\]"
 }
 
 set KMAX [lindex $argv 0]
@@ -69,6 +69,21 @@ set NARR [expr {$argc >= 4 ? [lindex $argv 3] : 8}]
 # 否則「同一組態、同一顆 K_MAX、只有 baud 不同」這個對照做不出來 ——
 # 後面那顆會蓋掉前面那顆,而板上分不出自己燒的是哪一顆。
 set BAUD [expr {$argc >= 5 ? [lindex $argv 4] : 115200}]
+
+# 第六個參數 = 每個 PE 的 accumulator bank 數(預設 16 = paper-hw-v1)。
+# 這是 H 拆解的實驗旋鈕:bank 數 B 決定歸約樹的層數 log2(B) 與每層的
+# 發射數 B/2, B/4, ..., 1,每層成本 = 發射數 + 1 同步讀 + 11 加法器 +
+# 1 barrier;drain 22 與 hand-off 6 不隨 B 變。所以先寫預測再上板:
+#   B = 16 -> tree 67, H = 95(已量)
+#   B = 32 -> tree 96, H = 124(tb_array_h_decomp -GACC_BANKS=32 同值)
+#   B =  8 -> tree 46, H = 74,但 8 < 13 = 讀 1 + 加法器 11 + 寫回 1,
+#             同一個 bank 再被讀到時上一次寫回還沒落地,結果會錯(負對照)
+# 輸出目錄與 bit 名帶 _banks<B> 後綴(16 不帶),量測時
+# measure_fold.py --tag <K_MAX>_banks<B> --h <預測的 H>。
+set BANKS [expr {$argc >= 6 ? [lindex $argv 5] : 16}]
+if {$BANKS < 2 || ($BANKS & ($BANKS - 1)) != 0} {
+    error "ACC_BANKS must be a power of two >= 2 (got $BANKS)"
+}
 
 # CLK_HZ 固定 100 MHz(見下方 CLK_PERIOD = 10.000)。接收端對齊到 start
 # bit 中點之後每 CLKS_PER_BIT 拍取樣一次,除數太小就沒有相位餘裕。
@@ -109,6 +124,7 @@ if {$DBG} { append BITTAG "_dbg" }
 if {$PDIR ne "Default"} { append BITTAG "_[string tolower $PDIR]" }
 if {$NARR != 8} { append BITTAG "_n$NARR" }
 if {$BAUD != 115200} { append BITTAG "_b$BAUD" }
+if {$BANKS != 16} { append BITTAG "_banks$BANKS" }
 set OUT "$ROOT/build_kmax/k${BITTAG}"
 
 file mkdir $OUT
@@ -125,6 +141,7 @@ puts " k_max sweep point"
 puts "   K_MAX = $KMAX"
 puts "   N     = $NARR"
 puts "   BAUD  = $BAUD  ($CLKS_PER_BIT clks/bit)"
+puts "   BANKS = $BANKS"
 puts "   root  = $ROOT"
 puts "   out   = $OUT"
 puts "========================================"
@@ -203,6 +220,7 @@ synth_design -top $TOP -part $PART \
     -generic N=$NARR \
     -generic DEBUG_MARKERS=$DBG \
     -generic BAUD=$BAUD \
+    -generic ACC_BANKS=$BANKS \
     -generic CYCLE_COUNTER=1
 
 # Fail loudly if the XDC did not take: every later step assumes a clock.
@@ -276,7 +294,7 @@ puts $fh [format "%d,%d,%s,%s,%s,%s,%.3f,%.3f,%.2f,%d" \
 close $fh
 
 puts "========================================"
-puts " K_MAX=$KMAX  BAUD=$BAUD  LUT=$LUT  FF=$FF  BRAM=$BRAM  DSP=$DSP"
+puts " K_MAX=$KMAX  BAUD=$BAUD  BANKS=$BANKS  LUT=$LUT  FF=$FF  BRAM=$BRAM  DSP=$DSP"
 puts " WNS=$WNS ns   WHS=$WHS ns   Fmax=[format %.2f $FMAX] MHz"
 if {$TIMING_OK} {
     puts " TIMING MET"

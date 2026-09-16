@@ -47,10 +47,11 @@ def split_k(K, kmax):
     return chunks
 
 
-def bit_identity(kmax):
-    """回報這顆 K_MAX 對應的 .bit 檔身分(路徑、mtime、sha256 前 12 碼)。
+def bit_identity(tag):
+    """回報這個 build tag 對應的 .bit 檔身分(路徑、mtime、sha256 前 12 碼)。
+    tag 預設就是 K_MAX;帶後綴的 build(_n4、_b2000000、_banks32)用 --tag 指定。
     找不到就回 NA -- 板上是哪顆 bit 這支腳本管不到,只能把能查的記下來。"""
-    bit = os.path.join(ROOT, "build_kmax", f"k{kmax}", f"systolic_uart_top_k{kmax}.bit")
+    bit = os.path.join(ROOT, "build_kmax", f"k{tag}", f"systolic_uart_top_k{tag}.bit")
     if not os.path.exists(bit):
         return ("NA", "NA", "NA")
     h = hashlib.sha256()
@@ -66,7 +67,9 @@ def main():
     ap.add_argument("--kmax", type=int, required=True, help="板上這顆 bitstream 的 K_MAX")
     ap.add_argument("--K", type=int, required=True, help="這個 fold 的 reduction depth(workload 的 K)")
     ap.add_argument("--n", type=int, default=8)
-    ap.add_argument("--h", type=int, default=95, help="模型常數 H(paper-hw-v1: 95)")
+    ap.add_argument("--h", type=int, default=95, help="模型常數 H(paper-hw-v1: 95;ACC_BANKS=32 的預測是 124)")
+    ap.add_argument("--tag", default=None,
+                    help="build_kmax/k<tag>/ 的 tag,預設 = --kmax;例如 256_banks32")
     ap.add_argument("--label", required=True, help="例如 layer1.0.conv1 / features.6 / fc")
     ap.add_argument("--port", default="/dev/ttyUSB2")
     ap.add_argument("--baud", type=int, default=115200)
@@ -92,7 +95,8 @@ def main():
     print(f"K          : {a.K}   on K_MAX = {a.kmax}  (N = {a.n}, H = {a.h})")
     print(f"invocations: {len(chunks)}  -> k = {chunks}")
     print(f"predicted  : " + " + ".join(f"({k}+{geo}+{a.h})" for k in chunks) + f" = {predicted}")
-    print(f"bitstream  : {bit_identity(a.kmax)}")
+    tag = a.tag if a.tag else str(a.kmax)
+    print(f"bitstream  : {bit_identity(tag)}")
     if a.dry_run:
         print("(dry-run: 沒有碰板子)")
         return 0
@@ -138,7 +142,7 @@ def main():
     print(f"  predicted : {predicted}")
     print(f"  {'MATCH' if match else 'MISMATCH  <- 差 ' + str(measured - predicted)}")
 
-    bit_file, bit_mtime, bit_sha = bit_identity(a.kmax)
+    bit_file, bit_mtime, bit_sha = bit_identity(tag)
     summary = os.path.join(a.outdir, "summary.csv")
     new = not os.path.exists(summary)
     with open(summary, "a", newline="") as f:
