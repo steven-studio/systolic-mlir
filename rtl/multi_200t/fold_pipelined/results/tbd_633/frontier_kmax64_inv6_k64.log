@@ -1,0 +1,21 @@
+$ /home/steven-studio/miniconda3/bin/python3 /home/steven-studio/work/systolic-mlir/rtl/multi_200t/fold_pipelined/tools/test_uart_kmax.py --kmax 64 --k 64 --n 8 --port /dev/ttyUSB2 --baud 115200 --seed 6 --timeout 60.0 --h 95
+
+K_MAX      : 64   (hardware capacity)
+N          : 8   (array edge length)
+k_dim      : 64   (this invocation)
+tail       : poisoned with 1024.0
+port       : /dev/ttyUSB2 @ 115200
+request    : 4108 bytes  (4 start + 4 header + 4096 payload + 4 end)
+response   : 256 bytes expected
+
+sent, waiting for FPGA...
+
+RX 256/256
+hardware cycles : 173
+  T = k + 2(N-1) + H  ->  H = 173 - 64 - 14 = 95
+                        與 --h 95 相同
+C : BIT-EXACT
+
+max |error| : 0.0
+
+PASS: K_MAX=64, k_dim=64 end-to-end bit-exact on hardware.
