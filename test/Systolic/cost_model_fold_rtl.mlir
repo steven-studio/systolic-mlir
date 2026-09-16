@@ -236,6 +236,56 @@ module {
     return %0 : tensor<8x8xf32>
   }
 
+  // ---- the same array with 32 accumulator banks -----------------------
+  //
+  // One synthesis parameter changed (ACC_BANKS 16 -> 32, build_kmax.tcl's
+  // sixth argument): the reduction tree gains a level of 16 additions, so H
+  // was predicted to move by 16 + 13 = 29 cycles and nothing else, from 95
+  // to 124, before the bitstream was built. Board (k256_banks32,
+  // sha256 83302e6057d7): 146 / 202 / 394 at k = 8 / 64 / 256 -- all three
+  // match. In the dialect that is a second device differing in one attribute.
+  systolic.device @fold_k256_b32 rows = 8 cols = 8
+      dataflow = output_stationary {k_max = 256 : i64, tile_overhead = 124 : i64}
+
+  // Board: 146 = 8 + 14 + 124.
+  // CHECK-LABEL: func.func @b32_8
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 146
+  func.func @b32_8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
+                   %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
+         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+         : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
+  // Board: 202.
+  // CHECK-LABEL: func.func @b32_64
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 202
+  func.func @b32_64(%a: tensor<8x64xf32>, %b: tensor<64x8xf32>,
+                    %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
+         {m = 8 : i64, n = 8 : i64, k = 64 : i64}
+         : (tensor<8x64xf32>, tensor<64x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
+  // Board: 394.
+  // CHECK-LABEL: func.func @b32_256
+  // CHECK: systolic.matmul_tile
+  // CHECK-SAME: est_cycles = 394
+  func.func @b32_256(%a: tensor<8x256xf32>, %b: tensor<256x8xf32>,
+                     %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
+         {m = 8 : i64, n = 8 : i64, k = 256 : i64}
+         : (tensor<8x256xf32>, tensor<256x8xf32>, tensor<8x8xf32>)
+           -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+
   // ---- the same geometry under other maps -----------------------------
 
   // The HLS calibration instead of the fold one: 8 + 14 + 6 = 28. This is
