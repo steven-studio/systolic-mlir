@@ -6,3 +6,6 @@ features.6,1728,2048,8,1,1837,1837,1837,1,1,build_kmax/k2048/systolic_uart_top_k
 banks32,8,256,8,1,146,146,146,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
 banks32,64,256,8,1,202,202,202,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
 banks32,256,256,8,1,394,394,394,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
+fc,512,256,8,2,365+365,730,730,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+l4.0.downsample,256,256,8,1,365,365,365,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+fc,512,512,8,1,621,621,621,1,1,build_kmax/k512/systolic_uart_top_k512.bit,2026-09-09 10:28:26,8b4555a1b578
