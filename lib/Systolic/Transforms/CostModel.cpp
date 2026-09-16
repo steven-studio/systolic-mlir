@@ -31,25 +31,28 @@ int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,
   // decreasing in rows and cols, so the model could never express the
   // trade-off it exists to express.
   //
-  // II and tileOverhead are calibration constants, and which values are
-  // correct depends on the microarchitecture rather than on the geometry
-  // this function computes.
+  // tileOverhead is a calibration constant, and which value is correct
+  // depends on the microarchitecture rather than on the geometry this
+  // function computes.
   //
-  //   HLS pipeline    II = 1, tileOverhead =   6
+  //   HLS pipeline    tileOverhead =  6
   //     C/RTL cosim over 14 (rows, cols, k_max) configurations, residual
   //     exactly zero at every point (TIME_STEPS 8..70, rows+cols 4..34).
   //
-  //   fold RTL 8x8    II = 1, tileOverhead = 104
-  //     xc7a200t at 100 MHz. Silicon measurement at k_dim = 16 and 64
-  //     gives 134 and 182 cycles; subtracting the geometric term
-  //     (k_dim + 8 + 8 - 2) leaves 104 at both points.
+  //   fold RTL 8x8    tileOverhead = 95   (tag paper-hw-v1)
+  //     xc7a200t. Board measurement at k = 16, 64 and 128 gives 125, 173
+  //     and 237 cycles; subtracting k and the geometric term 8 + 8 - 2
+  //     leaves 95 at every point, and the held-out depths 8, 32, 96, 192
+  //     and 256, every other k_max, every K > k_max and the whole N = 4
+  //     sweep reproduce to the cycle. 95 = 22 drain + 67 tree + 6 hand-off
+  //     (rtl/multi_200t/fold_pipelined/tb/tb_array_h_decomp.sv).
   //
-  // The two differ by more than 17x on the same formula, which is why the
-  // constants live on the device op and not here.
-  int64_t perInvocation =
-      array.initiationInterval * (array.rows + array.cols - 2) +
-      array.tileOverhead;
-  int64_t perFold = array.initiationInterval * k + invocations * perInvocation;
+  // The two differ by more than 15x on the same formula, which is why the
+  // constant lives on the device op and not here. There is no initiation
+  // interval: the array sustains one product per PE per cycle by
+  // construction, so the arithmetic term is exactly k.
+  int64_t perInvocation = array.rows + array.cols - 2 + array.tileOverhead;
+  int64_t perFold = k + invocations * perInvocation;
 
   return folds * perFold;
 }

@@ -70,25 +70,30 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     OptionalAttr<F64Attr>:$clock_hz,
     OptionalAttr<F64Attr>:$dma_bytes_per_cycle,
 
-    // Calibration constants, per microarchitecture rather than per array
+    // Calibration constant, per microarchitecture rather than per array
     // shape. The geometric term of the cost model is determined by rows,
-    // cols and k_max; these two describe what the datapath adds on top of
-    // it -- pipeline latency of the arithmetic, the final reduction, and
-    // whatever the output handshake costs.
+    // cols and k_max; this one describes what the datapath adds on top of
+    // it per invocation -- the pipeline drain of the arithmetic, the final
+    // reduction tree, and the result hand-off.
     //
-    // They belong on the device rather than in the model because two
+    // It belongs on the device rather than in the model because two
     // accelerators of identical geometry can differ here by more than an
     // order of magnitude. The HLS pipeline this model was first fitted to
-    // has tile_overhead 6; the hand-written fold RTL measures 104. A
-    // single global constant cannot describe both, and using the wrong one
-    // makes device selection pick the wrong accelerator for the right
-    // reason.
+    // has tile_overhead 6; the hand-written fold RTL (tag paper-hw-v1)
+    // measures 95 = 22 + 67 + 6 on the board. A single global constant
+    // cannot describe both, and using the wrong one makes device selection
+    // pick the wrong accelerator for the right reason.
+    //
+    // There is no initiation-interval attribute. The array sustains one
+    // product per PE per cycle by construction (rotating accumulator
+    // banks, rtl/multi_200t/fold_pipelined/core/systolic_pe_bram.sv), so
+    // the arithmetic term is exactly k; an II other than 1 was only ever a
+    // knob of the HLS prototype's cost model, which is superseded.
     //
     // tile_overhead has no default: a device that does not declare it is
     // costed with H = 0, which is exactly the geometric model. Comparing
     // the calibrated map against the geometric one is therefore a matter
     // of one attribute.
-    OptionalAttr<I64Attr>:$initiation_interval,
     OptionalAttr<I64Attr>:$tile_overhead
   );
 

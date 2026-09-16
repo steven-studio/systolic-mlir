@@ -42,9 +42,7 @@ struct SystolicCostAnalysisPass
         cfg.dmaBytesPerCycle = bw.getValueAsDouble();
       // Calibration is a property of the microarchitecture, not of the
       // array shape, so it travels on the device op. Leaving the attribute
-      // off keeps the ArrayConfig default.
-      if (IntegerAttr ii = device.getInitiationIntervalAttr())
-        cfg.initiationInterval = ii.getInt();
+      // off keeps the ArrayConfig default (H = 0, the geometric model).
       if (IntegerAttr to = device.getTileOverheadAttr())
         cfg.tileOverhead = to.getInt();
       configs[device.getSymName()] = cfg;
