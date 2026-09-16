@@ -21,7 +21,8 @@
 `source ~/tools/Xilinx/2026.1/2026.1/Vivado/settings64.sh`。
 
 `build_kmax/` 被 gitignore 擋著，重跑一次就覆蓋，所以要引用的那幾份
-已複製到 `eval/transport/`。
+已複製出來：傳輸實驗的在 `eval/transport/`，資源掃描（論文 tab:resources）
+的在 `eval/resources/util_k<tag>.csv`。
 
 | 數字 | 指令 | 輸出 |
 |---|---|---|
@@ -30,6 +31,10 @@
 | 同組態但 BAUD=2000000：LUT 51,089（差 42 —— 除數 868→50，計數器少 4 bits） | 上列，`-tclargs 16 0 Default 8 2000000` | `eval/transport/util_k16_b2000000.csv` |
 | 矽上週期 **125**（K_MAX=16, k_dim=16, N=8）、bit-exact | `cd tools && python3 test_uart_kmax.py --kmax 16 --baud <115200\|2000000>` | stdout `hardware cycles`、`BIT-EXACT` |
 | 兩速率往返時間，與主機端固定成本 **13.7 ms** | `cd tools && python3 bench_uart.py --kmax 16 --baud <rate> --reps 20 --csv <out>` | `eval/transport/bench_115200.csv`、`eval/transport/bench_2m.csv` |
+| tab:resources 的 LUT / FF / BRAM / DSP / fmax（N=8：k_max 64/256/512/1024/2048；N=4 各點） | `build_kmax.tcl` 各跑一次 | `eval/resources/util_k<tag>.csv`（複製自 `build_kmax/k<tag>/summary.csv`） |
+| **H = 95 的拆解 22 + 67 + 6**（論文 eq:H-decomp）：在 PE(N-1,N-1) 與陣列輸出控制器打時間戳 | `mkdir -p sim_out/h && verilator --binary -Wno-fatal --top-module tb_array_h_decomp -DFP_MUL_LAT=8 -DFP_ADD_LAT=11 -GN=8 -GK=8 tb/fp_model.sv core/systolic_pe_bram.sv core/systolic_array.sv tb/tb_array_h_decomp.sv -o tb_h --Mdir sim_out/h && sim_out/h/tb_h` | stdout `H = g + r + c = 22 + 67 + 6 = 95`，`T = 117`（與板測相同）。8/11 是 `ip/fp32/*/*.xci` 的 C_Latency；用 9/12 會得到 101，對不上板測 |
+| survey 四列板測 **903 / 685 / 2491 / 1837** 與多次 invocation 的逐次拍數 | `python3 tools/measure_fold.py --kmax <K_MAX> --K <K> --label <layer>` | `results/tbd_633/summary.csv`（含 bitstream sha256 前 12 碼）與同目錄的 `.log`（`.gitignore` 擋 `*.log`，新增要 `git add -f`） |
+| **32 banks：先預測 124，後板測 146 / 202 / 394**（論文 §7.3.5） | build：`-tclargs 256 0 Default 8 115200 32`；燒錄：`program_kmax.tcl -tclargs 256_banks32`；量：`python3 tools/measure_fold.py --kmax 256 --K <8\|64\|256> --label banks32 --h 124 --tag 256_banks32` | `results/tbd_633/summary.csv` 的 banks32 三列（sha256 `83302e6057d7`）、`eval/resources/util_k256_banks32.csv`。模擬預測：上一列的指令加 `-GACC_BANKS=32` → `22 + 96 + 6 = 124` |
 
 LUT 的分母以合成報告為準：部件標稱 134,600，該次建置有 800 顆 prohibited，
 Available 是 133,800，所以報告印的是 38.21%。論文 7.5 寫「51.2k LUT（38% of
@@ -49,8 +54,9 @@ on-chip counter 兩邊都是 125，兩邊都 bit-exact —— 計算被當成對
 
 | 數字 | 來源 |
 |---|---|
-| `tileOverhead = 95` | 2026-09-12 的 N=8 板測：`125 = 16 + 2(8-1) + 95`。CGO 稿另在 N=4 量到同一個常數（H₄ = H₈ = 95，零殘差） |
-| 六個 est_cycles | `cmake --build build --target check-systolic` → `test/Systolic/cost_model_fold_rtl.mlir` |
+| `tileOverhead = 95` | 2026-09-12 的 N=8 板測：`125 = 16 + 2(8-1) + 95`。CGO 稿另在 N=4 量到同一個常數（H₄ = H₈ = 95，零殘差）。拆解 22 + 67 + 6 見 1.1 |
+| `cost_model_fold_rtl.mlir` 釘的 17 個板測點（k = 8…1728、k_max 256/512/1024/2048、多次 invocation）＋ 32 banks 的 146/202/394（同一幾何、`tile_overhead = 124` 的第二顆 device） | `./configure.sh --test`（或 `cmake --build build --target check-systolic`）→ `test/Systolic/cost_model_fold_rtl.mlir` |
+| l1_bytes 容量檢查（論文 ch05 §5.3.1：開／關各落到不同 device；放不下報錯） | 同上 → `test/Systolic/select_device_l1.mlir`、`bad_l1_capacity.mlir` |
 | 十一種陣列組態的 makespan（論文 tab:config-sweep） | `python3 eval/config_sweep/sweep_opt.py`（實跑 `systolic-opt --systolic-select-device`，不是 Python 重演） | 
 
 ### 1.3 SCALE-Sim 幾何項驗證
@@ -60,7 +66,14 @@ on-chip counter 兩邊都是 125，兩邊都 bit-exact —— 計算被當成對
 
 ### 1.4 建置環境
 
-`./configure.sh --test`。LLVM/MLIR 18，Ninja，Release。
+`./configure.sh --test`。LLVM/MLIR 18，Ninja，Release。Verilator 5.020 跑
+`tb/` 底下的 bench；Icarus 12 也能跑 `tb_array_h_decomp`（見檔頭）。
+
+### 1.5 論文對應的 repo 狀態
+
+論文（ntu-thesis）附錄 A.4 引用的是 tag `thesis-draft-20260916`：板測硬體
+仍是 `paper-hw-v1`（RTL 內容未變），這個 tag 多的是之後加進來的
+測試、量測紀錄與 32 banks 的 build 參數。
 
 ---
 
