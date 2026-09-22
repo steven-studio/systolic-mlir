@@ -6,34 +6,60 @@ the MLIR/compiler results in this repository.
 For the provenance of FPGA measurements, bitstreams, cycle counts, and
 paper numbers, see `docs/PROVENANCE.md`.
 
-## 1. Environment and clean build
+## 1. Clone, environment, and clean build
 
-Tested environment:
+Clone the repository from GitHub:
 
-- LLVM/MLIR 18
-- CMake + Ninja
-- Release build
+    git clone https://github.com/steven-studio/systolic-mlir.git
+    cd systolic-mlir
 
 Record the exact revision:
 
     git rev-parse HEAD
     git status --short
+    git branch --show-current
 
-Build and run all regression tests:
+The following environment was used for the verified reproduction:
+
+    uname -a
+    cmake --version
+    ninja --version
+    gcc --version
+    g++ --version
+    /usr/lib/llvm-18/bin/llvm-config --version
+    /usr/lib/llvm-18/bin/FileCheck --version
+    lit --version
+
+The verified setup uses LLVM/MLIR 18 installed under:
+
+    /usr/lib/llvm-18
+
+Before configuring, verify that the LLVM and MLIR CMake packages exist:
+
+    test -d /usr/lib/llvm-18/lib/cmake/llvm && echo "LLVM CMake: OK"
+    test -d /usr/lib/llvm-18/lib/cmake/mlir && echo "MLIR CMake: OK"
+
+Configure from a fresh build directory, build the project, and run all
+Systolic regression tests:
 
     LLVM_VERSION=18 ./configure.sh --fresh --test
 
-Expected result:
+On the verified system, `configure.sh` selects `/usr/bin/gcc` and
+`/usr/bin/g++` when they are available. Clang 18 may also be installed,
+but it is not the compiler selected by this configuration.
 
-    Total Discovered Tests: 15
-      Passed: 15 (100.00%)
+A successful run should end with:
+
+    Total Discovered Tests: 16
+      Passed: 16 (100.00%)
 
 The canonical compiler binary used below is:
 
     ./build/bin/systolic-opt
 
-Check that the Systolic passes are registered:
+Verify the binary and registered Systolic passes:
 
+    ./build/bin/systolic-opt --version
     ./build/bin/systolic-opt --help | grep systolic
 
 
@@ -60,7 +86,7 @@ Machine-checkable regression:
 
     ./build/bin/systolic-opt test/Systolic/matmul.mlir \
       --convert-matmul-to-systolic="rows=8 cols=8" | \
-      FileCheck test/Systolic/matmul.mlir
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/matmul.mlir
 
 
 ## 3. Reproduce `systolic.pe_array -> scf.for + systolic.mac`
@@ -81,6 +107,13 @@ The final IR should no longer contain `systolic.pe_array` or
 `systolic.stream`, and should contain a three-level `scf.for` loop nest
 and `systolic.mac`.
 
+Machine-checkable regression:
+
+    ./build/bin/systolic-opt test/Systolic/expand_to_mac.mlir \
+      --convert-matmul-to-systolic="rows=8 cols=8" \
+      --expand-pe-array-to-mac | \
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/expand_to_mac.mlir
+
 
 ## 4. Reproduce GEMM tiling
 
@@ -93,7 +126,17 @@ Run:
 For the 16x16x16 test GEMM, this produces 64
 `systolic.matmul_tile` operations.
 
-K-dimension tiles are chained through the accumulator input.
+The emitted IR also shows K-dimension tiles chained through the
+accumulator input. The current regression checks the tiling structure
+and tile count, but does not separately FileCheck the accumulator SSA
+chain.
+
+Machine-checkable regression:
+
+    ./build/bin/systolic-opt \
+      --systolic-tile-matmul="tile-m=4 tile-n=4 tile-k=4" \
+      test/Systolic/tile_matmul.mlir | \
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/tile_matmul.mlir
 
 
 ## 5. Reproduce device selection
@@ -114,6 +157,13 @@ must not be interpreted as the FPGA-calibrated `H = 95`.
 
 Hardware-calibrated measurements are documented separately in
 `docs/PROVENANCE.md`.
+
+Machine-checkable regression:
+
+    ./build/bin/systolic-opt \
+      --systolic-select-device \
+      test/Systolic/select_device.mlir | \
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/select_device.mlir
 
 
 ## 6. Reproduce overlap scheduling
@@ -139,50 +189,100 @@ It should not currently be interpreted as hardware-enforced launch
 timing because the runtime lowering does not yet consume this
 attribute.
 
+Machine-checkable regression:
 
-## 7. Runtime-call lowering
+    ./build/bin/systolic-opt \
+      --systolic-tile-matmul="tile-m=8 tile-n=8 tile-k=8" \
+      --systolic-select-device \
+      --systolic-schedule-overlap \
+      test/Systolic/schedule_overlap.mlir | \
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/schedule_overlap.mlir
 
-The pass:
 
-    --systolic-tile-to-fpga
+## 7. Reproduce runtime-call lowering
 
-lowers assigned `systolic.matmul_tile` operations toward external
-runtime calls.
+Input:
 
-Implementation:
+    test/Systolic/tile_to_fpga.mlir
+
+Run:
+
+    ./build/bin/systolic-opt \
+      --systolic-tile-to-fpga \
+      test/Systolic/tile_to_fpga.mlir
+
+The input contains one assigned 4x4 `systolic.matmul_tile`. The
+lowering emits declarations and calls for the current dispatch-runtime
+ABI:
+
+    llvm.func @systolic_dispatch_open
+    llvm.func @systolic_dispatch_matmul4x4_dev
+    llvm.call @systolic_dispatch_open
+    llvm.call @systolic_dispatch_matmul4x4_dev
+
+After successful lowering, no `systolic.matmul_tile` remains.
+
+The implementation of this pass is:
 
     lib/Systolic/Transforms/SystolicTileToFpga.cpp
 
-The current lowering emits calls corresponding to:
-
-    systolic_dispatch_open()
-    systolic_dispatch_matmul4x4_dev(...)
-
-In the C++ MLIR implementation these calls are represented by
+In the C++ MLIR implementation the calls are represented by
 `LLVM::CallOp`; textual LLVM-dialect MLIR prints them as `llvm.call`.
+
+Machine-checkable regression:
+
+    ./build/bin/systolic-opt \
+      --systolic-tile-to-fpga \
+      test/Systolic/tile_to_fpga.mlir | \
+      /usr/lib/llvm-18/bin/FileCheck test/Systolic/tile_to_fpga.mlir
 
 
 ## 8. Current end-to-end limitation
 
-The scheduled-tile lowering currently targets the older 4x4 dispatch
-interface:
+This repository currently contains two distinct FPGA-oriented lowering
+paths.
 
-    systolic_dispatch_matmul4x4_dev(...)
+The scheduled-tile path reproduced in Section 7 lowers:
 
-while the newer 8x8 runtime interface defines:
+    systolic.matmul_tile
+      -> systolic_dispatch_matmul4x4_dev(...)
+
+through:
+
+    --systolic-tile-to-fpga
+
+This path is regression-tested by:
+
+    test/Systolic/tile_to_fpga.mlir
+
+A separate pass:
+
+    --tile-matmul-for-fpga
+
+lowers `linalg.matmul` toward the newer runtime entry point:
 
     systolic_dispatch_matmul(handle, K, ...)
 
-with:
+whose current runtime interface defines:
 
     SYS_DISPATCH_R = 8
     SYS_DISPATCH_C = 8
     SYS_DISPATCH_K_MAX = 64
 
-Therefore this repository does not yet claim that these two interface
-generations form one fully integrated compiler-to-board pipeline.
+The two lowering paths should not be treated as one integrated
+scheduling-to-board pipeline. In particular, the
+`--systolic-tile-to-fpga` implementation does not consume the
+`start_cycle` metadata produced by `--systolic-schedule-overlap`, and
+the separate `--tile-matmul-for-fpga` path is not currently covered by
+the Systolic regression fixtures in `test/Systolic`.
 
-The intended final reproducibility chain is:
+Therefore the compiler-side stages reproduced in this document are
+verified through runtime-call lowering, but this document does not
+claim a single regression-tested chain from overlap scheduling through
+the newer 8x8 runtime interface to FPGA execution and a bit-exact
+hardware result.
+
+The intended fully integrated chain is:
 
     00-input.mlir
       -> 10-tiled.mlir
@@ -196,16 +296,18 @@ The intended final reproducibility chain is:
 
 ## 9. Full regression suite
 
-At any time, run:
+At any time after configuration, run:
 
-    ./configure.sh --test
+    LLVM_VERSION=18 ./configure.sh --test
 
-or:
+or, using the existing build directory:
 
     cmake --build build --target check-systolic
 
-A successful reproduction should pass the complete Systolic regression
-suite.
+A successful reproduction should end with:
+
+    Total Discovered Tests: 16
+      Passed: 16 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:
