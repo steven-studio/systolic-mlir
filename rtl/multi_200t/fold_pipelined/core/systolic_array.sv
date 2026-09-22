@@ -46,7 +46,11 @@ module systolic_array #(
      */
     parameter int N = 8,
 
-    parameter int DATA_W = 32
+    parameter int DATA_W = 32,
+
+    /* 每個 PE 的 accumulator bank 數,原樣傳給 PE。預設 16 = paper-hw-v1;
+     * 改它會改歸約樹的層數(log2),是 H 拆解的「先預測再量」實驗用的旋鈕。 */
+    parameter int ACC_BANKS = 16
 ) (
     input  logic clk,
     input  logic rst,
@@ -115,7 +119,8 @@ module systolic_array #(
             for (c = 0; c < N; c = c + 1) begin : COL
 
                 systolic_pe #(
-                    .DATA_W (DATA_W)
+                    .DATA_W    (DATA_W),
+                    .ACC_BANKS (ACC_BANKS)
                 ) u_pe (
                     .clk           (clk),
                     .rst           (rst),

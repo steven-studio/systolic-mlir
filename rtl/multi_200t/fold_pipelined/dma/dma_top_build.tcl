@@ -1,10 +1,18 @@
 # -----------------------------------------------------------------------------
 # dma_top_build.tcl -- build and program systolic_dma_top (bring-up step 3b).
 #
-#   vivado -mode batch -source dma_top_build.tcl -tclargs build
-#   vivado -mode batch -source dma_top_build.tcl -tclargs program
-#   vivado -mode batch -source dma_top_build.tcl -tclargs all      (both)
-#   vivado -mode batch -source dma_top_build.tcl -tclargs read
+#   vivado -mode batch -source dma_top_build.tcl -tclargs build   [v1|v2] [K_MAX]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs program [v1|v2] [K_MAX]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs all     [v1|v2] [K_MAX]   (both)
+#   vivado -mode batch -source dma_top_build.tcl -tclargs read    [v1|v2] [K_MAX]
+#
+#   v1 (default) is the four-cycle operand writer into the single-port buffer;
+#   v2 the beat-wide path (USE_V2=1 in systolic_dma_top).  K_MAX defaults to
+#   16 (the 3b geometry); 256 is the paper's.  Each (variant, K_MAX) pair gets
+#   its own project directory, so the v1 and v2 bitstreams of one geometry
+#   coexist and 'read' opens the one you name.  The golden constants for each
+#   K_MAX are tabulated below; add a row from seed_ref.py before building a
+#   new one.
 #
 # This is bringup_build.tcl (3a) with the array added: the MIG and the DMA read
 # path from that script, plus the floating-point IP and the thirteen RTL files
@@ -36,27 +44,82 @@
 set PART       xc7a200tsbg484-1
 set BOARD_PART digilentinc.com:nexys_video:part0:1.2
 set BOARD_REPO $::env(HOME)/work/vivado/vivado-boards/new/board_files
-set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma
 set PROJ_NAME  systolic_dma
 set TOP        systolic_dma_top
 set JOBS       8
 
-# Geometry.  K_MAX = 16 for the first 3b build: it is the geometry whose golden
-# was confirmed on the board over UART, the payload is 1 KiB, and the build is
-# minutes.  K_MAX = 256 belongs to 3c, where bandwidth is the point.
-set NARR   8
-set KMAX   16
-set KDIM   16
+# ---- arguments: mode [variant] [K_MAX] [n_inv] --------------------------
+# n_inv is how many invocations the RUN makes, not anything about the build:
+# one bitstream serves every count, because systolic_dma_top takes the number
+# from vio_0's output probe.  'read' sets it and re-runs; 'sweep' walks
+# 1..n_inv and writes one CSV row per point.  The build ignores it.
+set MODE    [lindex $argv 0]
+set VARIANT [lindex $argv 1]
+set KARG    [lindex $argv 2]
+set NARG    [lindex $argv 3]
+if {$NARG eq ""} { set NARG 1 }
+if {![string is integer -strict $NARG] || $NARG < 1 || $NARG > 15} {
+    error "n_inv must be 1..15 (the probe is four bits), got '$NARG'"
+}
+if {$MODE eq ""}    { set MODE all }
+if {$VARIANT eq ""} { set VARIANT v1 }
+if {$VARIANT ne "v1" && $VARIANT ne "v2"} {
+    error "variant must be v1 or v2, got '$VARIANT'"
+}
+set USE_V2 [expr {$VARIANT eq "v2" ? 1 : 0}]
 
-# From:  python3 tools/seed_ref.py --mode 1 --kmax 16
+# Geometry.  K_MAX = 16 is the 3b geometry: the golden confirmed on the board
+# over UART, a 1 KiB payload, a build measured in minutes.  K_MAX = 256 is the
+# paper's: 16 KiB, 1024 beats, the geometry every Table 4 number is quoted at.
+# K_DIM = K_MAX: one fold of the full depth.
+set NARR   8
+set KMAX   [expr {$KARG eq "" ? 16 : $KARG}]
+set KDIM   $KMAX
+
+# From:  python3 tools/seed_ref.py --mode 1 --kmax <K_MAX>
 # Passed down as generics so this script is the single source of truth; the
-# defaults in systolic_dma_top.sv agree, but only one place should decide.
-# These are folded constants in hardware with no net behind them, so they are
-# NOT probed -- 'read' prints them from here.  3a shipped a bitstream that
-# printed "expected 0x" because that lesson had not been learned yet.
-set EXPECT_WR_CHK 3f880780
-set EXPECT_C_CHK  c74b2660
-set EXPECT_CYC    125          ;# = K_DIM + 2(N-1) + H, H = 95, measured
+# defaults in systolic_dma_top.sv agree for 16, but only one place should
+# decide.  These are folded constants in hardware with no net behind them, so
+# they are NOT probed -- 'read' prints them from here.  3a shipped a bitstream
+# that printed "expected 0x" because that lesson had not been learned yet.
+# EXPECT_CYC = K_DIM + 2(N-1) + H with H = 95 measured on paper-hw-v1.
+array set GOLDEN {
+    16  {3f880780 c74b2660 125}
+    32  {805c1f00 e906e560 141}
+    256 {2dc7f800 54ccf610 365}
+}
+# The 32 row is the k_max split the cost model is tested on: eight invocations
+# of k = 32 against one of k = 256, same K, same operands.  Its constants are
+# PER INVOCATION.  chk_wr and chk_c are run totals, so what the design compares
+# against -- and what 'read' prints -- is the constant times the number of
+# invocations, mod 2^32.  seed_ref.py's own mode-0 self-check only reproduces
+# the board's 0x387fdc00 at --kmax 16, where that constant was measured; a
+# "self-check FAILED" line from any other geometry says nothing about this row.
+if {![info exists GOLDEN($KMAX)]} {
+    error "no golden constants tabulated for K_MAX=$KMAX -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $KMAX\nand add a GOLDEN row"
+}
+lassign $GOLDEN($KMAX) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+
+# One project per (variant, K_MAX) so bitstreams coexist and 'read' cannot open
+# the wrong one.  The pre-Sep-10 3b build lives in plain systolic_dma/ and is
+# left alone.
+set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma_${VARIANT}_k${KMAX}
+
+# Where the result tile is written back.  One page clear of the operand image,
+# which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16, 16 KiB at 256), so that
+# an address error in either direction shows up as a wrong image rather than
+# as one quietly overwriting the other.  4096 was fine for 3b; at K_MAX = 256
+# it would land INSIDE the operand image, so it is computed from the geometry.
+#
+# It is no longer a generic.  The operand image is n_inv slabs long and n_inv is
+# a run-time number, so systolic_dma_top computes the base from the n_inv it
+# latched and this is only what the script PRINTS -- one place decides, and it
+# is the one that knows how many slabs were seeded.
+proc wb_base {n} {
+    global KMAX NARR
+    expr {$n * $KMAX * 8 * $NARR + 4096}
+}
+set WB_BASE       [expr {$KMAX * 8 * $NARR + 4096}]
 
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../fold_pipelined
@@ -84,16 +147,19 @@ set SRC [list \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
     $SCRIPT_DIR/dma_operand_writer.sv \
+    $SCRIPT_DIR/dma_operand_writer_v2.sv \
+    $SCRIPT_DIR/dma_wr_checksum_v2.sv \
+    $SCRIPT_DIR/dma_result_reader.sv \
+    $SCRIPT_DIR/dma_writeback_engine.sv \
+    $SCRIPT_DIR/dma_cdc_fifo.sv \
     $ROOT/core/fp_mul.sv \
     $ROOT/core/fp_add.sv \
     $ROOT/core/fp_reduce16.sv \
     $ROOT/core/systolic_pe_bram.sv \
     $ROOT/core/systolic_array.sv \
     $ROOT/core/tile_feeder.sv \
-    $ROOT/core/operand_buffer.sv ]
-
-set MODE [lindex $argv 0]
-if {$MODE eq ""} { set MODE all }
+    $ROOT/core/operand_buffer.sv \
+    $ROOT/core/operand_buffer_v2.sv ]
 
 # -----------------------------------------------------------------------------
 proc build {} {
@@ -132,6 +198,7 @@ proc build {} {
 proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
     global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
+    global WB_BASE USE_V2 VARIANT
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -183,20 +250,24 @@ proc build_body {} {
         }
     }
 
-    # VIO: FIVE probes, not 3a's four.  3a's vio_0 has probe_in3 at 8 bits;
-    # reusing that configuration here would silently truncate words_written to
-    # its low byte, and a truncated count still looks like a count.
+    # VIO: FOURTEEN probes -- 3b's five plus the nine operand-path counters
+    # (probe_in5..13, all 32-bit).  3a's vio_0 had probe_in3 at 8 bits; reusing
+    # a stale configuration silently truncates a 32-bit probe, and a truncated
+    # count still looks like a count.  So the widths are all spelled out.
     create_ip -name vio -vendor xilinx.com -library ip -version 3.0 \
               -module_name vio_0
-    set_property -dict [list \
-        CONFIG.C_NUM_PROBE_IN    {5} \
-        CONFIG.C_NUM_PROBE_OUT   {0} \
-        CONFIG.C_PROBE_IN0_WIDTH {32} \
-        CONFIG.C_PROBE_IN1_WIDTH {32} \
-        CONFIG.C_PROBE_IN2_WIDTH {32} \
-        CONFIG.C_PROBE_IN3_WIDTH {32} \
-        CONFIG.C_PROBE_IN4_WIDTH {8}  \
-    ] [get_ips vio_0]
+    # 17 in, 2 out.  The three new inputs are t_span, cyc_total and the
+    # n_inv/folds_done status word; the outputs are n_inv itself and the re-run
+    # request.  n_inv's INIT is 1, so a freshly programmed board runs exactly
+    # what it ran before the invocation loop existed -- the single-invocation
+    # numbers in the paper are reproducible without touching a probe.
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {17} CONFIG.C_NUM_PROBE_OUT {2}]
+    for {set i 0} {$i < 17} {incr i} {
+        lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
+    }
+    lappend vio_cfg CONFIG.C_PROBE_OUT0_WIDTH {4} CONFIG.C_PROBE_OUT0_INIT_VAL {0x1}
+    lappend vio_cfg CONFIG.C_PROBE_OUT1_WIDTH {1} CONFIG.C_PROBE_OUT1_INIT_VAL {0x0}
+    set_property -dict $vio_cfg [get_ips vio_0]
 
     foreach f $SRC { add_files -norecurse $f }
     add_files -fileset constrs_1 -norecurse $XDC
@@ -207,8 +278,10 @@ proc build_body {} {
     # itself, so those are not generics here -- they are structural.
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
+        USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
+    puts "building $VARIANT at N=$NARR K_MAX=$KMAX K_DIM=$KDIM (USE_V2=$USE_V2), project $PROJ_DIR"
 
     generate_target all [get_ips]
     update_compile_order -fileset sources_1
@@ -236,6 +309,7 @@ proc build_body {} {
     set wns  [get_property STATS.WNS [get_runs impl_1]]
     set whs  [get_property STATS.WHS [get_runs impl_1]]
     puts "\n=== bitstream ================================================="
+    puts "  $VARIANT  N=$NARR K_MAX=$KMAX"
     foreach b [glob -nocomplain $dir/*.bit] { puts "  $b" }
     puts "  WNS = $wns ns"
     puts "  WHS = $whs ns   (already includes 0.150 ns of forced hold pessimism)"
@@ -251,7 +325,7 @@ proc build_body {} {
 
 # -----------------------------------------------------------------------------
 proc program {} {
-    global PROJ_DIR PROJ_NAME
+    global PROJ_DIR PROJ_NAME VARIANT KMAX
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
@@ -287,8 +361,13 @@ proc program {} {
     puts "    led\[6\]  any error latched"
     puts "    led\[7\]  heartbeat, ui_clk"
     puts ""
+    puts "  The write-back has no LED -- all eight are spoken for, and"
+    puts "  renumbering them would invalidate every photograph of a previous"
+    puts "  run.  It is in the JTAG flag word; a write-back fault raises"
+    puts "  led\[6\] like any other fault."
+    puts ""
     puts "  Then:"
-    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read"
+    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $KMAX"
     puts ""
     puts "  This bitstream has NO UART -- uart_check.py will time out against it."
     puts "  The independent reference lives in its own bitstream: program a"
@@ -330,8 +409,49 @@ proc pick_device {} {
 }
 
 # -----------------------------------------------------------------------------
+# Put the board on a given invocation count and start a fresh run.  The design
+# latches n_inv on the way out of P_CALIB and clears every counter there, so the
+# order matters: write n_inv first, then edge the re-run probe.  The request is
+# only honoured in P_DONE, which is where a finished board sits.
+proc arm_run {v n} {
+    set pn [get_hw_probes -of_objects $v -quiet]
+    set probe_n ""
+    set probe_r ""
+    foreach p $pn {
+        set nm [get_property NAME $p]
+        if {[string match "*n_inv_probe*" $nm]} { set probe_n $p }
+        if {[string match "*rerun_probe*" $nm]} { set probe_r $p }
+    }
+    if {$probe_n eq "" || $probe_r eq ""} {
+        # An older bitstream -- the k_max = 256 pair, say, built before the
+        # invocation loop.  It still runs, and it still runs exactly one
+        # invocation, so reading it is meaningful; only asking it for a
+        # different n_inv is not.  Warn and read what is there rather than
+        # refusing, but refuse to pretend a request was honoured.
+        if {$n != 1} {
+            error "this bitstream has no n_inv probe (it predates the invocation\n\
+                   loop) and cannot run n_inv = $n.  Rebuild it, or read it at n_inv = 1."
+        }
+        puts "  NOTE: no n_inv/rerun probe -- pre-loop bitstream, reading its one run as it stands."
+        return
+    }
+    catch {set_property OUTPUT_VALUE_RADIX UNSIGNED $probe_n}
+    catch {set_property OUTPUT_VALUE_RADIX UNSIGNED $probe_r}
+    set_property OUTPUT_VALUE $n $probe_n
+    commit_hw_vio $probe_n
+    set_property OUTPUT_VALUE 1 $probe_r
+    commit_hw_vio $probe_r
+    after 200
+    set_property OUTPUT_VALUE 0 $probe_r
+    commit_hw_vio $probe_r
+    # The run itself is tens of microseconds at 100 MHz; this is JTAG latency.
+    after 500
+    refresh_hw_vio $v
+}
+
 proc read_vio {} {
     global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC KMAX NARR KDIM
+    global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
@@ -357,6 +477,8 @@ proc read_vio {} {
     if {[llength $vios] == 0} { error "no VIO found -- was this design rebuilt with it?" }
     set v [lindex $vios 0]
     refresh_hw_vio $v
+    global NARG
+    arm_run $v $NARG
 
     # Vivado names each probe after the NET that drives it, not probe_inN, and
     # it splits a concatenation into one probe per signal.  Match on net names
@@ -397,6 +519,25 @@ proc read_vio {} {
     set wm    [pval $all_probes BINARY wr_match]
     set cm    [pval $all_probes BINARY c_match]
     set er    [pval $all_probes BINARY any_err]
+    set wb    [pval $all_probes BINARY wb_done_sticky]
+
+    # the operand-path counters (probe_in5..13)
+    set fill    [pval $all_probes UNSIGNED fill_cycles          probe_in5]
+    set ebusy   [pval $all_probes UNSIGNED eng_busy_cycles      probe_in6]
+    set erdy    [pval $all_probes UNSIGNED eng_rdy_stall_cycles probe_in7]
+    set erst    [pval $all_probes UNSIGNED eng_r_stall_cycles   probe_in8]
+    set wbcyc   [pval $all_probes UNSIGNED wb_cycles            probe_in9]
+    set wbbusy  [pval $all_probes UNSIGNED wb_busy_cycles       probe_in10]
+    set wbaw    [pval $all_probes UNSIGNED wb_aw_stall_cycles   probe_in11]
+    set wbw     [pval $all_probes UNSIGNED wb_w_stall_cycles    probe_in12]
+    set wbstv   [pval $all_probes UNSIGNED wb_src_starve_cycles probe_in13]
+
+    # the invocation loop's three (probe_in14..16)
+    set tspan [pval $all_probes UNSIGNED t_span     probe_in14]
+    set ctot  [pval $all_probes UNSIGNED cyc_total  probe_in15]
+    set nrun  [pval $all_probes UNSIGNED n_inv]
+    set fdone [pval $all_probes UNSIGNED folds_done]
+    if {$nrun eq "" || $nrun == 0} { set nrun 1 }
 
     if {$wchk eq "" || $cyc eq ""} {
         puts "\nA probe lookup came back EMPTY.  Read the list above: those are"
@@ -405,24 +546,83 @@ proc read_vio {} {
         puts "a blank value is an absent check, not a passing one."
     }
 
-    set want_words [expr {$KMAX * 2 * $NARR}]
+    # Every expectation below is a RUN total: $nrun invocations, each seeding
+    # and reading the same slab pattern into the same buffers.
+    set want_words [expr {$nrun * $KMAX * 2 * $NARR}]
+    # 0x$VAR does not substitute inside a braced expr -- Tcl parses the
+    # expression before the variable is there.  Make the string first.
+    set wr_hex 0x$EXPECT_WR_CHK
+    set c_hex  0x$EXPECT_C_CHK
+    set want_wchk  [format %08x [expr {($nrun * $wr_hex) & 0xffffffff}]]
+    set want_cchk  [format %08x [expr {($nrun * $c_hex)  & 0xffffffff}]]
 
     puts "\n=== bring-up step 3b =========================================="
-    puts "  N = $NARR   K_MAX = $KMAX   k_dim = $KDIM"
+    puts "  $VARIANT operand path   N = $NARR   K_MAX = $KMAX   k_dim = $KDIM"
     puts ""
     puts "  init_calib_complete = $calib     memory alive"
     puts "  seed written        = $sd"
     puts "  descriptor complete = $rd"
     puts "  fold complete       = $fd"
-    puts "  words written       = $wrds     (expect $want_words = K_MAX*2*N)"
+    puts "  write-back complete = $wb     $nrun result tile(s) from 0x[format %x [wb_base $nrun]]"
+    puts "    (that the writes were ACCEPTED and every response returned.  That"
+    puts "     the right bytes are in memory is proved in simulation by"
+    puts "     tb/run_top_sim.sh; reading the image back on the board is the"
+    puts "     next step and is not in this bitstream.)"
+    puts "  invocations         = $nrun     (folds_done $fdone)"
+    puts "  words written       = $wrds     (expect $want_words = n_inv*K_MAX*2*N)"
     puts ""
     set cyc_ok [expr {$cyc ne "" && $cyc == $EXPECT_CYC}]
 
-    puts "  chk_wr  0x$wchk     expected 0x$EXPECT_WR_CHK    operands"
-    puts "  chk_c   0x$cchk     expected 0x$EXPECT_C_CHK    result"
-    puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence"
+    puts "  chk_wr  0x$wchk     expected 0x$want_wchk    operands ($nrun x 0x$EXPECT_WR_CHK)"
+    puts "  chk_c   0x$cchk     expected 0x$want_cchk    result   ($nrun x 0x$EXPECT_C_CHK)"
+    puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
     puts ""
     puts "  any error latched   = $er"
+    puts ""
+
+    # ---- the operand path, stage by stage (Table 4 / Sec. 5.2 of the draft) --
+    set beats [expr {$want_words / 4}]
+    puts "=== operand path ($VARIANT) ==================================="
+    if {$fill ne "" && $fill > 0} {
+        puts [format "  fill        %6s cycles   %5.2f words/cycle   (%d words, %d beats)" \
+              $fill [expr {double($want_words) / $fill}] $want_words $beats]
+    } else {
+        puts "  fill        $fill cycles   <-- empty or zero: probe missing or fill never completed"
+    }
+    puts "  read engine busy $ebusy   rdy_stall $erdy   r_stall $erst"
+    if {$fill ne "" && $fill > 0 && $erst ne ""} {
+        puts [format "              r_stall / fill = %.2f   (v1: ~0.75, the port; v2: ~0, the port is gone)" \
+              [expr {double($erst) / $fill}]]
+    }
+    puts "  compute     $cyc cycles   (cyc_latched; expected $EXPECT_CYC on both paths)"
+    puts "  write-back  $wbcyc cycles   wb engine busy $wbbusy   aw_stall $wbaw   w_stall $wbw   src_starve $wbstv"
+    # T is fill + compute + write-back, summed over the run's invocations -- the
+    # same three counters at n_inv = 1, where cyc_total is one invocation.  It is
+    # NOT the wall clock: t_span is, and the difference is P_GO, the hand-offs
+    # and n_inv scans of C, which are instrumentation.  Both are printed because
+    # a total that quietly included the checksum scan would be a slower design
+    # than the one the paper describes.
+    if {$fill ne "" && $ctot ne "" && $wbcyc ne "" && $fill > 0 && $ctot > 0 && $wbcyc > 0} {
+        set total [expr {$fill + $ctot + $wbcyc}]
+        puts [format "  total       %d cycles, serial   MAC utilisation K/T = %.1f%%" \
+              $total [expr {100.0 * $nrun * $KDIM / $total}]]
+        if {$nrun > 1} {
+            puts [format "              %d invocations of k = %d: %.1f cycles each (fill %.1f, compute %.1f, wb %.1f)" \
+                  $nrun $KDIM [expr {double($total)/$nrun}] \
+                  [expr {double($fill)/$nrun}] [expr {double($ctot)/$nrun}] \
+                  [expr {double($wbcyc)/$nrun}]]
+        }
+        if {$tspan ne "" && $tspan > 0} {
+            puts [format "              t_span %d (first AR to last B); %d of it is the C scan and the hand-offs" \
+                  $tspan [expr {$tspan - $total}]]
+        }
+    }
+    if {$USE_V2} {
+        puts "  v2 expectation at K=256: fill ~1129 (controller-bound, 3.63 w/c), r_stall ~0."
+        puts "  If r_stall is still ~3/4 of fill the v2 writer is not the one in the bitstream."
+    } else {
+        puts "  v1 expectation at K=256: fill ~4096 (port-bound, 1.00 w/c), r_stall ~3/4 of fill."
+    }
     puts ""
 
     # The cycle count is part of the verdict, not a footnote.  systolic_dma_top
@@ -475,15 +675,46 @@ proc read_vio {} {
         puts "                        refused work rather than moving garbage"
         puts "    words != $want_words   beats lost or misfiled"
     }
+    # One row per point, appended: the sweep is eight runs and the interesting
+    # number is the SLOPE through them -- how many cycles each extra invocation
+    # costs -- which is the per-descriptor start-up measured rather than
+    # inferred from one fill's excess over beta_mem.
+    global CSV
+    set csv [open $CSV a]
+    if {[file size $CSV] == 0} {
+        puts $csv "variant,k_max,k_dim,n_inv,fill,compute,wb,total,t_span,eng_busy,rdy_stall,r_stall,chk_wr,chk_c,wr_match,c_match,any_err"
+    }
+    puts $csv "$VARIANT,$KMAX,$KDIM,$nrun,$fill,$ctot,$wbcyc,[expr {$fill+$ctot+$wbcyc}],$tspan,$ebusy,$erdy,$erst,$wchk,$cchk,$wm,$cm,$er"
+    close $csv
+    puts "  appended to $CSV"
+
     close_hw_manager
     close_project
 }
 
+# Walk n_inv = 1..NARG on the board that is already programmed.  Each point is a
+# fresh run: the design clears every counter in P_CALIB, which the bench proves
+# by re-running and demanding the identical numbers, so the rows are comparable
+# without reprogramming between them.
+proc sweep_vio {} {
+    global NARG
+    set top $NARG
+    for {set n 1} {$n <= $top} {incr n} {
+        set NARG $n
+        puts "\n########## n_inv = $n ##########"
+        read_vio
+    }
+    set NARG $top
+}
+
 # -----------------------------------------------------------------------------
+set CSV $PROJ_DIR/ninv_sweep.csv
+
 switch -- $MODE {
     build   { build }
     program { program }
     read    { read_vio }
+    sweep   { sweep_vio }
     all     { build ; program }
-    default { error "unknown mode '$MODE' (build | program | all | read)" }
+    default { error "unknown mode '$MODE' (build | program | all | read | sweep)" }
 }

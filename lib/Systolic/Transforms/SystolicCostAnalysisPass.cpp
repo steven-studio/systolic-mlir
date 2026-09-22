@@ -32,18 +32,19 @@ struct SystolicCostAnalysisPass
       ::systolic::ArrayConfig cfg;
       cfg.rows = device.getRows();
       cfg.cols = device.getCols();
-      cfg.depth = device.getDepth();
+      if (IntegerAttr km = device.getKMaxAttr())
+        cfg.kMax = km.getInt();
+      if (IntegerAttr l1 = device.getL1BytesAttr())
+        cfg.l1Bytes = l1.getInt();
       if (FloatAttr clk = device.getClockHzAttr())
         cfg.clockHz = clk.getValueAsDouble();
       if (FloatAttr bw = device.getDmaBytesPerCycleAttr())
         cfg.dmaBytesPerCycle = bw.getValueAsDouble();
       // Calibration is a property of the microarchitecture, not of the
       // array shape, so it travels on the device op. Leaving the attribute
-      // off keeps the ArrayConfig default.
-      if (IntegerAttr ii = device.getInitiationIntervalAttr())
-        cfg.initiationInterval = ii.getInt();
-      if (IntegerAttr fo = device.getFixedOverheadAttr())
-        cfg.fixedOverhead = fo.getInt();
+      // off keeps the ArrayConfig default (H = 0, the geometric model).
+      if (IntegerAttr to = device.getTileOverheadAttr())
+        cfg.tileOverhead = to.getInt();
       configs[device.getSymName()] = cfg;
     });
 

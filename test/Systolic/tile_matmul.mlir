@@ -1,8 +1,10 @@
 // test/Systolic/tile_matmul_exec.mlir
 // RUN: systolic-opt --systolic-tile-matmul="tile-m=4 tile-n=4 tile-k=4" %s | FileCheck %s
 module {
-  systolic.device @acc_8x8 rows = 8 cols = 8 depth = 8 dataflow = weight_stationary
-  systolic.device @acc_4x4 rows = 4 cols = 4 depth = 4 dataflow = weight_stationary
+  systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = weight_stationary
+      {k_max = 4 : i64, tile_overhead = 6 : i64}
 
   // 16x16x16 tiled at 4x4x4 decomposes into 4*4*4 = 64 tiles. The K-dimension
   // tiles chain through c_in so the partial sums accumulate in one tensor,

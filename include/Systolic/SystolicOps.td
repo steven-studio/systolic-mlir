@@ -41,8 +41,11 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
   let description = [{
     Example:
     ```mlir
-    systolic.device @acc_8x8 rows = 8 cols = 8 depth = 1 dataflow = weight_stationary
-    systolic.device @acc_4x4 rows = 4 cols = 4 depth = 1 dataflow = weight_stationary
+    systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = output_stationary
+      {k_max = 256 : i64, tile_overhead = 95 : i64,
+       dma_bytes_per_cycle = 32.0 : f64, l1_bytes = 16384 : i64}
+    systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = output_stationary
+      {k_max = 256 : i64, tile_overhead = 95 : i64}
     ```
     Every numeric field here is an ordinary attribute: nothing about this
     op is specific to one physical board. Re-targeting to a different
@@ -54,33 +57,48 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     SymbolNameAttr:$sym_name,
     I64Attr:$rows,
     I64Attr:$cols,
-    I64Attr:$depth,
     Systolic_DataflowKind:$dataflow,
+
+    // Reduction capacity: how many reduction steps the operand buffers
+    // hold in one invocation. This is a synthesis-time parameter of the
+    // implementation, not a property of the architecture, and it decides
+    // how many times the per-invocation costs recur for a deep reduction.
+    // Distinct from l1_bytes, which is a scratchpad capacity read only by
+    // the optional capacity check in device selection.
+    OptionalAttr<I64Attr>:$k_max,
+    OptionalAttr<I64Attr>:$l1_bytes,
     OptionalAttr<F64Attr>:$clock_hz,
     OptionalAttr<F64Attr>:$dma_bytes_per_cycle,
 
-    // Calibration constants, per microarchitecture rather than per array
+    // Calibration constant, per microarchitecture rather than per array
     // shape. The geometric term of the cost model is determined by rows,
-    // cols and depth; these two describe what the datapath adds on top of
-    // it -- pipeline latency of the arithmetic, the final reduction, and
-    // whatever the output handshake costs.
+    // cols and k_max; this one describes what the datapath adds on top of
+    // it per invocation -- the pipeline drain of the arithmetic, the final
+    // reduction tree, and the result hand-off.
     //
-    // They belong on the device rather than in the model because two
+    // It belongs on the device rather than in the model because two
     // accelerators of identical geometry can differ here by more than an
     // order of magnitude. The HLS pipeline this model was first fitted to
-    // has fixed_overhead 6; the hand-written fold RTL measures 104. A
-    // single global constant cannot describe both, and using the wrong one
-    // makes device selection pick the wrong accelerator for the right
-    // reason.
+    // has tile_overhead 6; the hand-written fold RTL (tag paper-hw-v1)
+    // measures 95 = 22 + 67 + 6 on the board. A single global constant
+    // cannot describe both, and using the wrong one makes device selection
+    // pick the wrong accelerator for the right reason.
     //
-    // Absent means "use the ArrayConfig default", which keeps every
-    // existing device declaration behaving exactly as before.
-    OptionalAttr<I64Attr>:$initiation_interval,
-    OptionalAttr<I64Attr>:$fixed_overhead
+    // There is no initiation-interval attribute. The array sustains one
+    // product per PE per cycle by construction (rotating accumulator
+    // banks, rtl/multi_200t/fold_pipelined/core/systolic_pe_bram.sv), so
+    // the arithmetic term is exactly k; an II other than 1 was only ever a
+    // knob of the HLS prototype's cost model, which is superseded.
+    //
+    // tile_overhead has no default: a device that does not declare it is
+    // costed with H = 0, which is exactly the geometric model. Comparing
+    // the calibrated map against the geometric one is therefore a matter
+    // of one attribute.
+    OptionalAttr<I64Attr>:$tile_overhead
   );
 
   let assemblyFormat = "$sym_name `rows` `=` $rows `cols` `=` $cols "
-      "`depth` `=` $depth `dataflow` `=` $dataflow attr-dict";
+      "`dataflow` `=` $dataflow attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -159,10 +177,26 @@ def Systolic_PEArrayOp : Systolic_Op<"pe_array", [Pure]> {
 // MacOp
 //===----------------------------------------------------------------------===//
 
-def Systolic_MacOp : Systolic_Op<"mac", [Pure]> {
+def Systolic_MacOp : Systolic_Op<"mac", [Pure,
+    AllTypesMatch<["a", "a_out"]>,
+    AllTypesMatch<["b", "b_out"]>,
+    AllTypesMatch<["acc_in", "acc_out"]>]> {
   let summary = "單一 PE 的 multiply-accumulate,pass-through a/b,累加 acc";
+  let description = [{
+    Takes (a, b, acc) and returns (a, b, acc + a*b). Both input operands are
+    forwarded unchanged to the neighbouring PEs -- that pass-through is the
+    systolic property, and the type constraints above state it, so an
+    expansion that dropped an operand would not verify. The accumulator type
+    is deliberately left free of the input types: an int8 or bf16 array
+    accumulating in a wider type is the same operation.
+  }];
   let arguments = (ins AnyType:$a, AnyType:$b, AnyType:$acc_in);
   let results = (outs AnyType:$a_out, AnyType:$b_out, AnyType:$acc_out);
+
+  let assemblyFormat = [{
+      $a `,` $b `,` $acc_in attr-dict
+      `:` type($a) `,` type($b) `,` type($acc_in)
+    }];
 }
 
 //===----------------------------------------------------------------------===//

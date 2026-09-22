@@ -6,17 +6,22 @@
 // If someone changes the formula or the fitted constants, this test fails
 // rather than the model silently drifting away from the hardware.
 //
-//   cycles_tile = II * (depth + rows + cols - 2) + fixedOverhead
-//   with II = 1 and fixedOverhead = 6.
+//   cycles_tile = II * (k_max + rows + cols - 2) + tile_overhead
+//   with II = 1 and tile_overhead = 6.
 //
-// The device `depth` attribute is the array's K-tile depth -- the same
-// quantity as K_DIM in hls/gemm_4x4/design.h. It must match the synthesised
-// kernel or the estimate describes hardware that was never built.
+// The device `k_max` attribute is the array's reduction capacity per
+// invocation -- the same quantity as K_DIM in hls/gemm_4x4/design.h. It
+// must match the synthesised kernel or the estimate describes hardware
+// that was never built. `tile_overhead` has no default, so each device
+// below states the HLS calibration explicitly.
 
 module {
-  systolic.device @acc_4x4  rows = 4  cols = 4 depth = 4 dataflow = weight_stationary
-  systolic.device @acc_8x8  rows = 8  cols = 8 depth = 8 dataflow = weight_stationary
-  systolic.device @acc_32x2 rows = 32 cols = 2 depth = 8 dataflow = weight_stationary
+  systolic.device @acc_4x4  rows = 4  cols = 4 dataflow = weight_stationary
+      {k_max = 4 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_8x8  rows = 8  cols = 8 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
+  systolic.device @acc_32x2 rows = 32 cols = 2 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64}
 
   // 4x4x4, one tile: 1 * (4 + 4 + 4 - 2) + 6 = 16. Cosim measured 16.
   // CHECK-LABEL: func.func @tile_4x4x4
@@ -76,11 +81,17 @@ module {
     return %0 : tensor<8x8xf32>
   }
 
-  // Non-divisible: 5x5x5 on 4x4x4 rounds up to 2*2*2 = 8 tiles -> 128.
-  // The padding waste is real and the model must not smooth it away.
+  // Non-divisible, and the two dimensions behave differently. M and N round
+  // up to 2*2 = 4 folds and each pays its geometry and its H in full: that
+  // padding waste is real and the model must not smooth it away. K does not
+  // round up the same way -- ceil(5/4) = 2 invocations, but the second runs
+  // at depth 1, not at the buffer's capacity of 4. Per fold that is
+  // 5 + 2*(4+4-2+6) = 29, and 4*29 = 116. Charging the capacity for the
+  // short invocation instead would give 128, which is what the board does
+  // not do.
   // CHECK-LABEL: func.func @ragged
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: est_cycles = 128
+  // CHECK-SAME: est_cycles = 116
   func.func @ragged(%a: tensor<5x5xf32>, %b: tensor<5x5xf32>,
                     %c: tensor<5x5xf32>) -> tensor<5x5xf32> {
     %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4

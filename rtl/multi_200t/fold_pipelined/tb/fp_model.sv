@@ -30,7 +30,20 @@
  * 通過了就證明 PE 沒有把延遲寫死在邏輯裡。
  */
 
-module fp_mul #(parameter int LAT = 9) (
+/*
+ * LAT 的預設值可以從命令列覆寫(-DFP_MUL_LAT=8 -DFP_ADD_LAT=11),
+ * 不必改檔。既有的測試對 LAT 不敏感,預設維持 9/12;
+ * tb_array_h_decomp 要對回板測的 H,必須用 ip/fp32 底下的 .xci 裡的
+ * C_Latency(mul 8、add 11)。
+ */
+`ifndef FP_MUL_LAT
+`define FP_MUL_LAT 9
+`endif
+`ifndef FP_ADD_LAT
+`define FP_ADD_LAT 12
+`endif
+
+module fp_mul #(parameter int LAT = `FP_MUL_LAT) (
     input  logic        clk,
     input  logic        rst,
     input  logic        valid_in,
@@ -64,7 +77,7 @@ module fp_mul #(parameter int LAT = 9) (
 endmodule
 
 
-module fp_add #(parameter int LAT = 12) (
+module fp_add #(parameter int LAT = `FP_ADD_LAT) (
     input  logic        clk,
     input  logic        rst,
     input  logic        valid_in,

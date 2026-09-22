@@ -1,6 +1,7 @@
 // RUN: systolic-opt --systolic-tile-matmul="tile-m=8 tile-n=8 tile-k=8" --systolic-select-device --systolic-schedule-overlap %s | FileCheck %s
 module {
-  systolic.device @acc_8x8 rows = 8 cols = 8 depth = 8 dataflow = weight_stationary {dma_bytes_per_cycle = 32.0 : f64}
+  systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = weight_stationary
+      {k_max = 8 : i64, tile_overhead = 6 : i64, dma_bytes_per_cycle = 32.0 : f64}
 
   // Overlap scheduling needs tiles that have already been assigned to a
   // device, so this runs the whole pipeline rather than the overlap pass

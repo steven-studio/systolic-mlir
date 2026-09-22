@@ -48,6 +48,11 @@ module systolic_uart_top #(
 
     parameter int K_MAX = 16,
 
+    /* 每個 PE 的 accumulator bank 數,直通 systolic_array -> systolic_pe。
+     * 預設 16 與 paper-hw-v1 完全相同;build_kmax.tcl 的第六個參數可以改它。
+     * 不影響 wire format:RX/TX 的位元組數只看 K_MAX 與 N。 */
+    parameter int ACC_BANKS = 16,
+
     /*
      * ============================================================
      * DEBUG_MARKERS -- emit the 0xA1..0xA5 breadcrumb bytes
@@ -762,8 +767,9 @@ module systolic_uart_top #(
      * 薄包裝已不再使用(tb 中的階層路徑 u_array.u_arr.* 需改為
      * u_array.*)。 */
     systolic_array #(
-        .N      (N),
-        .DATA_W (32)
+        .N         (N),
+        .DATA_W    (32),
+        .ACC_BANKS (ACC_BANKS)
     ) u_array (
         .clk           (clk),
         .rst           (rst_i),
