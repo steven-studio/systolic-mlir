@@ -1,141 +1,485 @@
-# 數字的來源
+# Reproducibility Guide
 
-**建立於 2026-08-15。**
+**Updated 2026-09-22.**
 
-這份文件的判準只有一條：**投影片與論文裡的每個數字，能不能指出「哪支腳本、
-哪顆 bitstream、哪份輸出檔」。** 能指出的列在第 1 節，指不出的列在第 2 節。
+This document answers two separate reproducibility questions:
 
-第 2 節是這個 repo 目前唯一真正的問題。其餘看起來混亂的部分（34 個 tcl、
-六個設計目錄、三套 UART 協定）都是歷史，不影響任何一個要發表的數字 ——
-處理方式是移進 `attic/`，不是整理。
+1. **MLIR/compiler reproducibility** — can a clean checkout build `systolic-opt` and reproduce the IR transformations claimed by the project?
+2. **Hardware/result traceability** — can every published hardware number be traced to a script, bitstream/configuration, and output?
 
-平台：Nexys Video，`xc7a200tsbg484-1`，100 MHz，Vivado 2026.1。
+Do not treat “the source file exists” as sufficient evidence. A reproducible compiler claim should have an input, an exact command, and an observable output. A reproducible hardware claim should additionally identify the hardware configuration and measurement output.
 
 ---
 
-## 1. 可追溯的數字
+## 0. Current status
 
-### 1.1 手寫 fold RTL（今日的主線）
+### Reproducible now
 
-| 數字 | 指令 | 輸出 |
+- Build and test the MLIR project with `./configure.sh --test`.
+- `linalg.matmul -> systolic.stream + systolic.pe_array`.
+- `systolic.pe_array -> scf.for + systolic.mac`.
+- `linalg.matmul -> systolic.matmul_tile` tiling.
+- Device selection and `est_cycles` annotation.
+- Overlap scheduler annotation of `start_cycle`.
+- A lowering pass exists from scheduled `systolic.matmul_tile` to LLVM-dialect external runtime calls.
+
+### Integration boundaries that are **not yet closed**
+
+- `SystolicTileToFpga.cpp` currently emits
+  `systolic_dispatch_matmul4x4_dev(handle, device_id, ...)` and accepts only tile dimensions <= 4.
+- The newer runtime contract in
+  `runtime/lib/dispatch/systolic_dispatch_new.h` exposes
+  `systolic_dispatch_matmul(handle, K, ...)` for an 8x8 array with `K <= 64`.
+- Therefore the scheduling-to-runtime path and the newest 8x8 runtime ABI are presently at different interface generations.
+- `systolic-schedule-overlap` computes `start_cycle`, but the current
+  `SystolicTileToFpga.cpp` lowering does not consume `start_cycle`.
+  Until a runtime/executable mechanism enforces it, `start_cycle` should be described as compiler schedule metadata/model output, not as hardware-enforced launch timing.
+
+These are reproducibility findings, not things to hide: they define exactly which claims are executable today and which remain integration work.
+
+---
+
+## 1. Clean MLIR build
+
+### 1.1 Environment
+
+The build helper auto-detects LLVM/MLIR, Ninja, and `lit`. LLVM 18 can be forced explicitly:
+
+```bash
+LLVM_VERSION=18 ./configure.sh --fresh --test
+```
+
+Equivalent normal rebuild when the build directory is already valid:
+
+```bash
+./configure.sh --test
+```
+
+The script configures CMake with Ninja, builds the project, and runs the
+`check-systolic` target.
+
+### 1.2 Canonical compiler binary
+
+For reproducibility commands in this document, use:
+
+```bash
+./build/bin/systolic-opt
+```
+
+`tools/systolic-opt/` is the source directory and
+`build/tools/systolic-opt/` is a CMake/Ninja build directory. Do not use the existence of those directories as evidence of multiple compiler versions.
+
+Confirm the binary and registered passes with:
+
+```bash
+file ./build/bin/systolic-opt
+./build/bin/systolic-opt --help | grep systolic
+```
+
+Before recording results, record the source revision:
+
+```bash
+git rev-parse HEAD
+git status --short
+```
+
+A paper result should preferably be associated with a clean commit.
+
+---
+
+## 2. MLIR transformation reproducibility
+
+The commands below deliberately omit `FileCheck` first so the intermediate IR can be inspected directly. The corresponding tests then provide machine-checkable regression coverage.
+
+### 2.1 Matmul -> Systolic PE array
+
+Input:
+
+`test/Systolic/matmul.mlir`
+
+Run:
+
+```bash
+./build/bin/systolic-opt test/Systolic/matmul.mlir \
+  --convert-matmul-to-systolic="rows=8 cols=8"
+```
+
+Expected observable IR for the 8x8x8 case includes:
+
+```mlir
+systolic.stream
+systolic.pe_array<8 x 8> stationary(weight)
+```
+
+The 16x16x16 case remains `linalg.matmul` in this pass because it does not exactly match the configured 8x8 array.
+
+Machine-checkable test:
+
+```bash
+./build/bin/systolic-opt test/Systolic/matmul.mlir \
+  --convert-matmul-to-systolic="rows=8 cols=8" | \
+  FileCheck test/Systolic/matmul.mlir
+```
+
+### 2.2 PE array -> explicit SCF loops + MAC
+
+Input:
+
+`test/Systolic/expand_to_mac.mlir`
+
+Run:
+
+```bash
+./build/bin/systolic-opt test/Systolic/expand_to_mac.mlir \
+  --convert-matmul-to-systolic="rows=8 cols=8" \
+  --expand-pe-array-to-mac
+```
+
+Expected observable IR:
+
+- no `systolic.pe_array`
+- no `systolic.stream`
+- three `scf.for` levels
+- `systolic.mac`
+
+Machine-checkable test:
+
+```bash
+./build/bin/systolic-opt test/Systolic/expand_to_mac.mlir \
+  --convert-matmul-to-systolic="rows=8 cols=8" \
+  --expand-pe-array-to-mac | \
+  FileCheck test/Systolic/expand_to_mac.mlir
+```
+
+This is the explicit lowering path:
+
+```text
+linalg.matmul
+  -> systolic.stream + systolic.pe_array
+  -> scf.for + systolic.mac
+```
+
+### 2.3 Matmul -> `systolic.matmul_tile`
+
+Input:
+
+`test/Systolic/tile_matmul.mlir`
+
+Run:
+
+```bash
+./build/bin/systolic-opt \
+  --systolic-tile-matmul="tile-m=4 tile-n=4 tile-k=4" \
+  test/Systolic/tile_matmul.mlir
+```
+
+For a 16x16x16 GEMM tiled at 4x4x4, the test expects 64
+`systolic.matmul_tile` operations in total, with K-dimension tiles chained through the accumulator input.
+
+Machine-checkable test:
+
+```bash
+./build/bin/systolic-opt \
+  --systolic-tile-matmul="tile-m=4 tile-n=4 tile-k=4" \
+  test/Systolic/tile_matmul.mlir | \
+  FileCheck test/Systolic/tile_matmul.mlir
+```
+
+### 2.4 Device selection
+
+Input:
+
+`test/Systolic/select_device.mlir`
+
+Run:
+
+```bash
+./build/bin/systolic-opt --systolic-select-device \
+  test/Systolic/select_device.mlir
+```
+
+Expected output contains `systolic.matmul_tile` operations annotated with
+`on @acc_...` and `est_cycles`.
+
+The current test fixture expects, among other checks:
+
+- 64x64x64 -> `@acc_8x8`, `est_cycles = 14336`
+- 32x32x32 -> `@acc_4x4`, `est_cycles = 8192`
+
+Important: these test values use the device/test calibration encoded by that test. They must not be silently equated with a separately measured hardware `fixedOverhead` value without checking the device attributes and cost-model configuration used for the experiment.
+
+### 2.5 Overlap scheduling
+
+Input:
+
+`test/Systolic/schedule_overlap.mlir`
+
+Run:
+
+```bash
+./build/bin/systolic-opt \
+  --systolic-tile-matmul="tile-m=8 tile-n=8 tile-k=8" \
+  --systolic-select-device \
+  --systolic-schedule-overlap \
+  test/Systolic/schedule_overlap.mlir
+```
+
+The regression test expects `est_cycles = 28` and example
+`start_cycle` values 16, 44, and 72.
+
+What this proves:
+
+- the compiler computes an overlap-aware schedule model;
+- the schedule is materialized as `start_cycle` attributes.
+
+What this does **not** yet prove:
+
+- that the runtime waits until those exact cycles;
+- that measured FPGA execution overlaps according to those `start_cycle` values.
+
+### 2.6 Scheduled tile -> LLVM-dialect runtime call
+
+Implementation:
+
+`lib/Systolic/Transforms/SystolicTileToFpga.cpp`
+
+Pass:
+
+```text
+--systolic-tile-to-fpga
+```
+
+The rewrite matches `systolic.matmul_tile`, requires a device assignment,
+maps the device symbol to an integer `device_id`, materializes/pads operands,
+and creates LLVM-dialect calls to:
+
+```text
+systolic_dispatch_open()
+systolic_dispatch_matmul4x4_dev(handle, device_id, A, B, C_init, C_out)
+```
+
+In C++ this is created with `LLVM::CallOp`; in textual MLIR it prints as
+`llvm.call`.
+
+Current limitation: this executable lowering accepts only `m,n,k <= 4`.
+It is therefore not currently the same ABI as the newer 8x8 runtime described in Section 3.
+
+---
+
+## 3. Runtime ABI reproducibility
+
+### 3.1 New 8x8 runtime contract
+
+`runtime/lib/dispatch/systolic_dispatch_new.h` defines:
+
+```c
+#define SYS_DISPATCH_R      8
+#define SYS_DISPATCH_C      8
+#define SYS_DISPATCH_K_MAX  64
+
+int systolic_dispatch_open(void);
+
+int systolic_dispatch_matmul(int handle, int K,
+                             const float *A, const float *B,
+                             const float *C_init, float *C_out);
+```
+
+The documented semantics are:
+
+```text
+C_out[i][j] = C_init[i][j] + sum_k A[i][k] * B[k][j]
+```
+
+The end-to-end input shape in `runtime/e2e/e2e_gemm_new.mlir` is
+17x100x9, chosen to exercise M/N boundary tiles and a K tail
+(64 + 36).
+
+### 3.2 Known ABI mismatch to resolve
+
+The compiler scheduling path currently lowers to the older
+`systolic_dispatch_matmul4x4_dev` interface, whereas the new runtime header
+exposes `systolic_dispatch_matmul` for 8x8xK.
+
+Before claiming a single end-to-end scheduling pipeline, add a regression that starts from one MLIR input and proves:
+
+```text
+input linalg.matmul
+ -> systolic.matmul_tile
+ -> device assignment
+ -> schedule metadata
+ -> executable lowering
+ -> runtime ABI used by the current 8x8 backend
+ -> successful execution / bit-exact result
+```
+
+Until that exists, keep the compiler scheduling results and the newest 8x8 runtime results distinguishable in the paper and slides.
+
+---
+
+## 4. Hardware/result traceability
+
+Platform used by the hardware results below: Nexys Video,
+`xc7a200tsbg484-1`, 100 MHz, Vivado 2026.1.
+
+### 4.1 Handwritten fold RTL
+
+| Result | Command | Output |
 |---|---|---|
-| K_MAX=16/64/128 的 LUT / FF / DSP / WNS | `vivado -mode batch -source build_kmax.tcl -tclargs <K>` | `build_kmax/k<K>/summary.csv` |
-| drain 111、feed K+7、errors 0 | `vivado -mode batch -source sim_kmax.tcl -tclargs <K>` | stdout 的 `KMAXCSV,` 那行 |
-| 矽上週期 134 / 150 / 182 | `python3 test_uart_kmax.py --kmax 64 --k <16\|32\|64>` | stdout `hardware cycles` |
-| bit-exact | 同上 | stdout 三行 `BIT-EXACT` |
-| 一顆 PE 的 1,318 LUT / 4 DSP | `/tmp/pe.tcl`（見 `eval/scalesim/`） | `/tmp/util_pe.rpt` |
-| 8x8+4x4 的 78.1% LUT | `eval/scalesim/dual.tcl` | `/tmp/util_dual.rpt` |
+| K_MAX=16/64/128 LUT / FF / DSP / WNS | `vivado -mode batch -source build_kmax.tcl -tclargs <K>` | `build_kmax/k<K>/summary.csv` |
+| drain 111, feed K+7, errors 0 | `vivado -mode batch -source sim_kmax.tcl -tclargs <K>` | stdout `KMAXCSV,` line |
+| silicon cycles 134 / 150 / 182 | `python3 test_uart_kmax.py --kmax 64 --k <16\|32\|64>` | stdout `hardware cycles` |
+| bit-exact | same command | stdout `BIT-EXACT` |
+| one PE: 1,318 LUT / 4 DSP | `/tmp/pe.tcl` (see `eval/scalesim/`) | `/tmp/util_pe.rpt` |
+| 8x8+4x4: 78.1% LUT | `eval/scalesim/dual.tcl` | `/tmp/util_dual.rpt` |
 
-工作目錄一律是 `hls/multi_200t/fold_pipelined/rtl/`，且需先
-`source ~/tools/Xilinx/2026.1/2026.1/Vivado/settings64.sh`。
+Working directory for the fold RTL experiments:
 
-彙整見 `eval/scalesim/KMAX_SCALING.md`。
+```text
+hls/multi_200t/fold_pipelined/rtl/
+```
 
-### 1.2 成本模型
+Vivado environment:
 
-| 數字 | 來源 |
-|---|---|
-| `fixedOverhead = 104` | 由 1.1 的矽上兩點（k_dim=16 → 134、k_dim=64 → 182）減去幾何項 `k_dim+14` |
-| 六個 est_cycles | `cmake --build build --target check-systolic` → `test/Systolic/cost_model_fold_rtl.mlir` |
-| k_dim=32 → 150 的「先預測後驗證」 | 測試先寫入 150，之後 `test_uart_kmax.py --kmax 64 --k 32` 回報 150 |
+```bash
+source ~/tools/Xilinx/2026.1/2026.1/Vivado/settings64.sh
+```
 
-### 1.3 SCALE-Sim 幾何項驗證
+Summary: `eval/scalesim/KMAX_SCALING.md`.
 
-`eval/scalesim/`。設定檔 `nexys_8x8_os.cfg`，切分依 `VALIDATION_PLAN.md`
-與 `VALIDATION_PLAN_AMENDMENT_01.md`（皆在取得任何量測值之前宣告）。
+### 4.2 Hardware-calibrated cost model
 
-### 1.4 建置環境
+The previous version of this document recorded:
 
-`./configure.sh --test`。LLVM/MLIR 18，Ninja，Release。
+- silicon k_dim=16 -> 134 cycles
+- silicon k_dim=32 -> 150 cycles
+- silicon k_dim=64 -> 182 cycles
+- `fixedOverhead = 104`, obtained by subtracting the geometry term
+  `k_dim + 14` from the measured points
+
+These numbers must remain tied to the exact hardware configuration and cost-model revision that produced them. Do not mix them with older presentation constants or with small synthetic regression-test constants such as the `fixedOverhead = 6` example used by `select_device.mlir`.
+
+### 4.3 SCALE-Sim geometry validation
+
+See `eval/scalesim/`.
+
+Configuration:
+
+```text
+nexys_8x8_os.cfg
+```
+
+Experiment split/protocol:
+
+- `VALIDATION_PLAN.md`
+- `VALIDATION_PLAN_AMENDMENT_01.md`
+
+Keep SCALE-Sim geometry validation conceptually separate from RTL/FPGA-specific calibrated overhead.
 
 ---
 
-## 2. 尚未可追溯（處理順序即優先順序）
+## 5. Unresolved hardware provenance
 
-### 2.1 conv2d 的 48/48 bit-exact 是在哪顆 bitstream 上跑的
+### 5.1 conv2d 48/48 bit-exact: exact bitstream not identified
 
-**這是唯一一個會影響論文主張的洞。**
+This remains a publication-relevant provenance gap.
 
-已知：
+Known:
 
-- `runtime/harness/sweep_out/sweep_results_nexys_8x8.csv` 記錄 48 個組態全部
-  `BIT-EXACT`，涵蓋 stride、dilation、padding、多通道、batch
-- 對照 `sweep_results_template.csv`（同樣 48 筆）是 20 PASS / 24 FAIL /
-  4 BIT-EXACT，兩者構成很強的前後對照
-- commit `e3b8817` 的訊息是
-  `Add dim/ndev-generic tile path; 48/48 bit-exact on Nexys Video 2x(8x8)`
+- `runtime/harness/sweep_out/sweep_results_nexys_8x8.csv` records 48 configurations as bit-exact.
+- Historical commit `e3b8817` reports 48/48 bit-exact on Nexys Video 2x(8x8).
+- The historical runtime call chain and protocol comments do not yet identify the exact bitstream unambiguously.
 
-矛盾之處：
+Until resolved, do **not** claim that the 48/48 conv2d result was verified on the current fold bitstream. The safe statement is that it was obtained on a historical hardware configuration whose exact bitstream provenance still needs to be pinned down.
 
-- 呼叫鏈是 `fpga_conv2d_im2col_*_auto` → `fpga_matmul_tiled_auto` →
-  `fpga_matmul4x4_reliable(fd, A[16], B[16], C_init[16], C_out[16])`，
-  也就是 **4x4 的 192 byte 協定**
-- 但 `runtime/lib/fpga_matmul_fold.h` 的檔頭明寫：
-  「`fpga_matmul4x4.h` … Targets the old 4x4 bitstream.
-  **Nothing on this board has accepted it since the 8x8 rewrite.**」
-- 而 `hls/multi_200t/vivado/explore_40mhz_util.rpt` 的 top 是
-  `matmul_top_dual`，DSP 640/740 = 86.5%。以 HLS 的 5 DSP/PE 計算，
-  640 = 2 x 64 PE，指向兩個 **8x8**，不是兩個 4x4
-
-三者無法同時為真。要確認的指令：
+Useful provenance commands:
 
 ```bash
 git log --format='%h %ad %s' --date=short -- \
-    runtime/harness/sweep_out/sweep_results_nexys_8x8.csv
+  runtime/harness/sweep_out/sweep_results_nexys_8x8.csv
+
 git show e3b8817 --stat
-grep -rn "MATRIX_ELEMENTS\|192\|ndev\|dev" runtime/lib/fpga_matmul4x4_reliable.c | head
+
+grep -rn "MATRIX_ELEMENTS\|192\|ndev\|dev" \
+  runtime/lib/fpga_matmul4x4_reliable.c | head
 ```
 
-在確認之前，投影片與論文**不應宣稱 conv2d 已在目前的 fold bitstream 上
-驗證**。目前能說的是：conv2d 在某一顆歷史 bitstream 上 48/48 bit-exact，
-而那顆是哪一顆待查。
+### 5.2 conv2d tile counts not hardware-validated
 
-### 2.2 conv2d 的 tile 數從未與硬體對照
+The existing sweep CSVs contain predicted tile counts but no populated measured tile-count field. Do not describe conv2d tile-count prediction as hardware-validated until a measured comparison is added.
 
-三份 CSV 的 `measured_tiles` 欄位全部是空的，只有 `predicted_tiles` 有值。
-也就是說成本模型預測的 tile 數在 conv2d 上**沒有任何驗證**。
+### 5.3 Duplicate sweep CSVs
 
-這與 `fixedOverhead` 在今天之前的狀況同型：欄位存在、從未被填、模型安靜地
-無法被檢查。
+Historically, `sweep_results_48_bitexact.csv` and
+`sweep_results_nexys_8x8.csv` were byte-identical. Choose one canonical artifact before citing the result.
 
-### 2.3 兩份 CSV 內容完全相同
+### 5.4 Historical `matmul_top_dual` report
 
-```
-dfdbec135d284e4e853202254f8a0dd3  sweep_results_48_bitexact.csv
-dfdbec135d284e4e853202254f8a0dd3  sweep_results_nexys_8x8.csv
-```
-
-需決定哪一份是正本，另一份刪除或移進 `attic/`。引用時指到兩個檔名會造成
-不必要的疑問。
-
-### 2.4 `matmul_top_dual` 的數字沒有人確認過還能重現
-
-投影片第 4 頁引用 `explore_40mhz_util.rpt`（LUT 31.5%、DSP 86.5%）。
-報告檔存在且內容合理，但那次建置是 2026-08-12，之後沒有人重跑過
-`hls/multi_200t/vivado/build_project.tcl`。
-
-若論文要保留這一列，至少要確認該 tcl 仍能執行完成。
+The utilization report exists, but the corresponding build should be rerun before treating it as a freshly reproducible result.
 
 ---
 
-## 3. 明確可以移進 attic 的東西
+## 6. Reproducibility checklist for a paper revision
 
-`runtime/attic/` 已經存在，沿用同一個慣例即可。**移動不刪除。**
+For every compiler claim, record:
 
-| 路徑 | 理由 |
+```text
+Git commit
+input .mlir
+exact systolic-opt command
+expected intermediate/output IR
+regression test / FileCheck
+```
+
+For every end-to-end FPGA claim, additionally record:
+
+```text
+runtime ABI
+runtime backend
+bitstream / hardware build
+board and clock
+host command
+raw output
+expected result / bit-exact check
+```
+
+A useful minimum artifact for the MLIR part is one script that performs a clean build and emits named IR snapshots, for example:
+
+```text
+00-input.mlir
+10-tiled.mlir
+20-selected.mlir
+30-scheduled.mlir
+40-runtime-call.mlir
+```
+
+The final snapshot should only be called “end-to-end executable scheduling” once its runtime symbol matches the runtime actually linked for the current 8x8 hardware path.
+
+---
+
+## 7. Historical/attic policy
+
+`runtime/attic/` already exists. Historical artifacts may be moved there, but do not delete them while provenance questions remain open.
+
+Candidates previously identified:
+
+| Path | Reason |
 |---|---|
-| `hls/multi_200t/_recovered/db___home_*.tcl` | Vitis HLS 的內部資料庫檔被還原出來，不是原始碼 |
-| `hls/multi_200t/_recovered/` 其餘 | 還原自舊路徑的重複品 |
-| `sweep_results_48_bitexact.csv` 或 `_nexys_8x8.csv` | 二者之一，見 2.3 |
+| `hls/multi_200t/_recovered/db___home_*.tcl` | recovered Vitis HLS internal database files, not source |
+| other duplicates under `hls/multi_200t/_recovered/` | recovered historical copies |
+| one duplicate sweep CSV | keep one canonical result after provenance is resolved |
 
-**不要**在確認 2.1 之前動 `runtime/lib/` 底下任何東西 —— 那三套協定看起來
-重複，但 `fpga_matmul_fold.h` 的檔頭說明了它們為何不能互通，而錯用的症狀是
-「在 tile 迴圈深處讀取逾時」，不是明顯的失敗。
+Do not move runtime implementations merely because several protocol generations coexist. The current reproducibility task is to identify which compiler path targets which ABI, then either update the lowering or explicitly preserve the old path as historical.
 
 ---
 
-## 4. 這份文件怎麼維護
+## 8. Maintenance rule
 
-新增一個要發表的數字時，在第 1 節加一列。做不到就代表那個數字還不能用。
+A result is ready to cite only when another person can answer:
 
-第 2 節清空的那天，這個 repo 就不亂了 —— 與檔案數量無關。
+> **Which commit, which input, which command, and which output produced it?**
+
+For hardware results add:
+
+> **Which runtime ABI, which bitstream/configuration, and which board measurement produced it?**
+
+If those questions cannot be answered, list the item as unresolved rather than silently treating it as reproduced.
