@@ -86,6 +86,8 @@ void registerConv2DToFpgaPass();
 std::unique_ptr<Pass> createSystolicTileToFpgaPass();
 void registerSystolicTileToFpgaPass();
 
+void registerTestAffineMatmulDiscoveryPass();
+
 void registerSystolicPasses();
 
 } // namespace systolic
