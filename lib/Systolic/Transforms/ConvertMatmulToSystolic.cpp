@@ -120,9 +120,17 @@ void mlir::systolic::registerSystolicPasses() {
   registerExpandPEArrayToMacPass();
   registerTileMatmulForFpgaPass();
   registerConv2DToFpgaPass();
+  registerConv2DToFpgaPass();
   registerConv2DNchwToFpgaPass();
   registerBatchMatmulToFpgaPass();
   registerVecmatToFpgaPass();
   registerMatvecToFpgaPass();
   registerDotGenericToFpgaPass();
+
+  registerSystolicCostAnalysisPass();
+  registerSystolicSelectDevicePass();
+  registerSystolicTileMatmulPass();
+  registerSystolicScheduleOverlapPass();
+  registerSystolicTileToFpgaPass();
+  registerTestAffineMatmulDiscoveryPass();
 }
