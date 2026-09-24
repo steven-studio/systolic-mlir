@@ -3,6 +3,19 @@
 using namespace mlir;
 using namespace mlir::systolic;
 
+static StringRef classifyLoopIV(Value value,
+                                affine::AffineForOp outerLoop,
+                                affine::AffineForOp middleLoop,
+                                affine::AffineForOp innerLoop) {
+  if (value == outerLoop.getInductionVar())
+    return "outer";
+  if (value == middleLoop.getInductionVar())
+    return "middle";
+  if (value == innerLoop.getInductionVar())
+    return "inner";
+  return "other";
+}
+
 void mlir::systolic::collectAffineMatmulCandidates(
     Operation *root,
     SmallVectorImpl<AffineMatmulCandidate> &candidates) {
@@ -67,6 +80,35 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   if (!candidate.anchor)
     return failure();
 
+  auto outerLoop = dyn_cast<affine::AffineForOp>(candidate.anchor);
+  if (!outerLoop)
+    return failure();
+
+  affine::AffineForOp middleLoop;
+  affine::AffineForOp innerLoop;
+
+  for (Operation &op : *outerLoop.getBody()) {
+    if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
+      if (middleLoop)
+        return failure();
+      middleLoop = loop;
+    }
+  }
+
+  if (!middleLoop)
+    return failure();
+
+  for (Operation &op : *middleLoop.getBody()) {
+    if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
+      if (innerLoop)
+        return failure();
+      innerLoop = loop;
+    }
+  }
+
+  if (!innerLoop)
+    return failure();
+
   SmallVector<affine::AffineLoadOp> loads;
   SmallVector<affine::AffineStoreOp> stores;
 
@@ -85,11 +127,23 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
     llvm::errs() << "  load[" << index << "] map: ";
     load.getMap().print(llvm::errs());
     llvm::errs() << "\n";
+
+    llvm::errs() << "    operands:";
+    for (Value operand : load.getIndices())
+      llvm::errs() << " "
+                   << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
+    llvm::errs() << "\n";
   }
 
   for (auto [index, store] : llvm::enumerate(stores)) {
     llvm::errs() << "  store[" << index << "] map: ";
     store.getMap().print(llvm::errs());
+    llvm::errs() << "\n";
+
+    llvm::errs() << "    operands:";
+    for (Value operand : store.getIndices())
+      llvm::errs() << " "
+                   << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
     llvm::errs() << "\n";
   }
 
