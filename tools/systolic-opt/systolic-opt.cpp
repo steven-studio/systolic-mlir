@@ -1,6 +1,7 @@
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -13,7 +14,8 @@ int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   registry.insert<mlir::systolic::SystolicDialect, mlir::func::FuncDialect,
                    mlir::linalg::LinalgDialect, mlir::arith::ArithDialect,
-                   mlir::tensor::TensorDialect, mlir::scf::SCFDialect>();
+                   mlir::tensor::TensorDialect, mlir::scf::SCFDialect,
+                   mlir::affine::AffineDialect>();
 
   mlir::systolic::registerSystolicPasses();
 

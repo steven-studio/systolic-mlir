@@ -55,6 +55,9 @@ std::unique_ptr<Pass> createDotGenericToFpgaPass();
 void registerDotGenericToFpgaPass();
 
 // 在 systolic-opt 工具里注册这个 pass
+void registerTestAffineMatmulDiscoveryPass();
+void registerTestAffineMatmulDiscoveryPass();
+
 void registerSystolicPasses();
 
 } // namespace systolic

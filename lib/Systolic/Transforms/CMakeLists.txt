@@ -1,4 +1,6 @@
 add_mlir_dialect_library(MLIRSystolicTransforms
+  AffineMatmulAnalysis.cpp
+  TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp
   TileMatmulForFpga.cpp
@@ -17,6 +19,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
 
   LINK_LIBS PUBLIC
   MLIRSystolic
+  MLIRAffineDialect
   MLIRLinalgDialect
   MLIRSCFDialect
   MLIRTensorDialect
