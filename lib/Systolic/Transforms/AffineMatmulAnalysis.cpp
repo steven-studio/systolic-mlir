@@ -227,6 +227,73 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
       return failure();
   }
 
+  // Recover canonical logical GEMM coordinates from access operands:
+  //
+  //   A = (I, K)
+  //   B = (K, J)
+  //   C = (I, J)
+  //
+  // This first checkpoint handles direct loop-IV operands only.
+  Value logicalI;
+  Value logicalJ;
+  Value logicalK;
+
+  auto lhsIndices = lhsLoad.getIndices();
+  auto rhsIndices = rhsLoad.getIndices();
+  auto accIndices = accLoad.getIndices();
+
+  // I is shared by A and C.
+  for (Value lhsIndex : lhsIndices) {
+    for (Value accIndex : accIndices) {
+      if (lhsIndex == accIndex) {
+        if (logicalI && logicalI != lhsIndex)
+          return failure();
+        logicalI = lhsIndex;
+      }
+    }
+  }
+
+  // J is shared by B and C.
+  for (Value rhsIndex : rhsIndices) {
+    for (Value accIndex : accIndices) {
+      if (rhsIndex == accIndex) {
+        if (logicalJ && logicalJ != rhsIndex)
+          return failure();
+        logicalJ = rhsIndex;
+      }
+    }
+  }
+
+  // K is shared by A and B.
+  for (Value lhsIndex : lhsIndices) {
+    for (Value rhsIndex : rhsIndices) {
+      if (lhsIndex == rhsIndex) {
+        if (logicalK && logicalK != lhsIndex)
+          return failure();
+        logicalK = lhsIndex;
+      }
+    }
+  }
+
+  if (!logicalI || !logicalJ || !logicalK)
+    return failure();
+
+  if (logicalI == logicalJ ||
+      logicalI == logicalK ||
+      logicalJ == logicalK)
+    return failure();
+
+  llvm::errs() << "  logical GEMM coordinates recovered\n";
+  llvm::errs() << "    I: "
+               << classifyLoopIV(logicalI, outerLoop, middleLoop, innerLoop)
+               << "\n";
+  llvm::errs() << "    J: "
+               << classifyLoopIV(logicalJ, outerLoop, middleLoop, innerLoop)
+               << "\n";
+  llvm::errs() << "    K: "
+               << classifyLoopIV(logicalK, outerLoop, middleLoop, innerLoop)
+               << "\n";
+
   llvm::errs() << "  accumulator read-modify-write verified\n";
   llvm::errs() << "  MAC dataflow recognized\n";
   llvm::errs() << "    accumulator load: ";
