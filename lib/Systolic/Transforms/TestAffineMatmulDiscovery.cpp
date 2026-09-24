@@ -34,6 +34,9 @@ struct TestAffineMatmulDiscoveryPass
     llvm::errs() << "candidate count: "
                  << candidates.size()
                  << "\n";
+
+    for (AffineMatmulCandidate candidate : candidates)
+      (void)recognizeLogicalMatmul(candidate);
   }
 };
 
