@@ -1,5 +1,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+
 using namespace mlir;
 using namespace mlir::systolic;
 
@@ -158,6 +160,86 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   // established multiply-accumulate semantics or recovered logical I/J/K.
   if (loads.size() != 3 || stores.size() != 1)
     return failure();
+
+  affine::AffineStoreOp store = stores.front();
+
+  // Follow the SSA def-use chain backward from the stored value.
+  auto add = store.getValue().getDefiningOp<arith::AddFOp>();
+  if (!add)
+    return failure();
+
+  affine::AffineLoadOp accLoad;
+  arith::MulFOp mul;
+
+  // Accept either:
+  //
+  //   acc + lhs * rhs
+  //
+  // or, because addf is commutative:
+  //
+  //   lhs * rhs + acc
+  if (auto load = add.getLhs().getDefiningOp<affine::AffineLoadOp>()) {
+    if (auto candidateMul =
+            add.getRhs().getDefiningOp<arith::MulFOp>()) {
+      accLoad = load;
+      mul = candidateMul;
+    }
+  }
+
+  if (!accLoad || !mul) {
+    if (auto load =
+            add.getRhs().getDefiningOp<affine::AffineLoadOp>()) {
+      if (auto candidateMul =
+              add.getLhs().getDefiningOp<arith::MulFOp>()) {
+        accLoad = load;
+        mul = candidateMul;
+      }
+    }
+  }
+
+  if (!accLoad || !mul)
+    return failure();
+
+  auto lhsLoad =
+      mul.getLhs().getDefiningOp<affine::AffineLoadOp>();
+  auto rhsLoad =
+      mul.getRhs().getDefiningOp<affine::AffineLoadOp>();
+
+  if (!lhsLoad || !rhsLoad)
+    return failure();
+
+  // The accumulator must be read from and written back to the same
+  // memref location.
+  if (accLoad.getMemref() != store.getMemref())
+    return failure();
+
+  if (accLoad.getMap() != store.getMap())
+    return failure();
+
+  auto loadIndices = accLoad.getIndices();
+  auto storeIndices = store.getIndices();
+
+  if (loadIndices.size() != storeIndices.size())
+    return failure();
+
+  for (unsigned i = 0; i < loadIndices.size(); ++i) {
+    if (loadIndices[i] != storeIndices[i])
+      return failure();
+  }
+
+  llvm::errs() << "  accumulator read-modify-write verified\n";
+  llvm::errs() << "  MAC dataflow recognized\n";
+  llvm::errs() << "    accumulator load: ";
+  accLoad.getOperation()->print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "    lhs load: ";
+  lhsLoad.getOperation()->print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "    rhs load: ";
+  rhsLoad.getOperation()->print(llvm::errs());
+  llvm::errs() << "\n";
 
   return failure();
 }
