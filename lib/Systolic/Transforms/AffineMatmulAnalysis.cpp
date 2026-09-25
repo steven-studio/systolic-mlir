@@ -111,10 +111,6 @@ void mlir::systolic::collectAffineMatmulCandidates(
     if (!innerLoop)
       return;
 
-    // Avoid discovering the same nest again starting from middleLoop/innerLoop.
-    if (outerLoop->getParentOfType<affine::AffineForOp>())
-      return;
-
     AffineMatmulCandidate candidate;
     candidate.anchor = outerLoop.getOperation();
 
