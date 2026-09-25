@@ -18,6 +18,48 @@ static StringRef classifyLoopIV(Value value,
   return "other";
 }
 
+static SmallVector<Value>
+collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
+                          affine::AffineLoadOp rhsLoad,
+                          affine::AffineLoadOp accLoad,
+                          affine::AffineStoreOp store) {
+  SmallVector<Value> usedIVs;
+
+  auto collectUsedIVs = [&](ValueRange indices) {
+    for (Value value : indices) {
+      if (llvm::find(usedIVs, value) == usedIVs.end())
+        usedIVs.push_back(value);
+    }
+  };
+
+  collectUsedIVs(lhsLoad.getIndices());
+  collectUsedIVs(rhsLoad.getIndices());
+  collectUsedIVs(accLoad.getIndices());
+  collectUsedIVs(store.getIndices());
+
+  // Recover the enclosing affine.for chain around the MAC, initially from
+  // inner to outer.
+  SmallVector<affine::AffineForOp> enclosingLoops;
+  for (Operation *op = store.getOperation()->getParentOp();
+       op != nullptr;
+       op = op->getParentOp()) {
+    if (auto loop = dyn_cast<affine::AffineForOp>(op))
+      enclosingLoops.push_back(loop);
+  }
+
+  // Canonicalize the iteration domain to lexical outer-to-inner order.
+  std::reverse(enclosingLoops.begin(), enclosingLoops.end());
+
+  SmallVector<Value> iterationIVs;
+  for (affine::AffineForOp loop : enclosingLoops) {
+    Value iv = loop.getInductionVar();
+    if (llvm::find(usedIVs, iv) != usedIVs.end())
+      iterationIVs.push_back(iv);
+  }
+
+  return iterationIVs;
+}
+
 static FailureOr<AffineMap>
 normalizeAccessMap(AffineMap map,
                    ValueRange operands,
@@ -410,6 +452,12 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
 
   if (!lhsLoad || !rhsLoad)
     return failure();
+
+  auto iterationIVs =
+      collectAccessIterationIVs(lhsLoad, rhsLoad, accLoad, store);
+
+  llvm::errs() << "  access iteration IV count: "
+               << iterationIVs.size() << "\n";
 
   // The accumulator must be read from and written back to the same
   // memref location.
