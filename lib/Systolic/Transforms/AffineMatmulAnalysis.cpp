@@ -320,24 +320,36 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
       normalizedAcc->getNumResults() != 2)
     return failure();
 
-  AffineExpr logicalI = normalizedLhs->getResult(0);
-  AffineExpr logicalK = normalizedLhs->getResult(1);
-  AffineExpr logicalJ = normalizedRhs->getResult(1);
+  // Multiplication is commutative, so the source operand order does not
+  // determine which load is logical A=(I,K) and which is B=(K,J).
+  affine::AffineLoadOp aLoad = lhsLoad;
+  affine::AffineLoadOp bLoad = rhsLoad;
+  AffineMap accessA = *normalizedLhs;
+  AffineMap accessB = *normalizedRhs;
 
-  if (logicalI != normalizedAcc->getResult(0))
-    return failure();
+  auto matchesGemmAccesses =
+      [&](AffineMap a, AffineMap b) {
+        AffineExpr i = a.getResult(0);
+        AffineExpr k = a.getResult(1);
+        AffineExpr j = b.getResult(1);
 
-  if (logicalJ != normalizedAcc->getResult(1))
-    return failure();
+        return i == normalizedAcc->getResult(0) &&
+               j == normalizedAcc->getResult(1) &&
+               k == b.getResult(0) &&
+               i != j && i != k && j != k;
+      };
 
-  if (logicalK != normalizedRhs->getResult(0))
-    return failure();
+  if (!matchesGemmAccesses(accessA, accessB)) {
+    if (!matchesGemmAccesses(accessB, accessA))
+      return failure();
 
-  // Keep I, J, and K logically distinct.
-  if (logicalI == logicalJ ||
-      logicalI == logicalK ||
-      logicalJ == logicalK)
-    return failure();
+    std::swap(aLoad, bLoad);
+    std::swap(accessA, accessB);
+  }
+
+  AffineExpr logicalI = accessA.getResult(0);
+  AffineExpr logicalK = accessA.getResult(1);
+  AffineExpr logicalJ = accessB.getResult(1);
 
   llvm::errs() << "  logical GEMM coordinates recovered\n";
   llvm::errs() << "    I: ";
@@ -369,12 +381,12 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   LogicalMatmul result;
   result.anchor = candidate.anchor;
 
-  result.lhs = lhsLoad.getMemRef();
-  result.rhs = rhsLoad.getMemRef();
+  result.lhs = aLoad.getMemRef();
+  result.rhs = bLoad.getMemRef();
   result.output = store.getMemRef();
 
-  result.accessA = *normalizedLhs;
-  result.accessB = *normalizedRhs;
+  result.accessA = accessA;
+  result.accessB = accessB;
   result.accessC = *normalizedAcc;
 
   result.rowMap =
