@@ -178,9 +178,7 @@ extractLinearForm(AffineExpr expr, unsigned numDims) {
 
 static LogicalExtent
 recoverLogicalExtent(AffineExpr expr,
-                     affine::AffineForOp outerLoop,
-                     affine::AffineForOp middleLoop,
-                     affine::AffineForOp innerLoop) {
+                     ValueRange iterationIVs) {
   LogicalExtent result;
 
   // First checkpoint: only recover extents for a logical coordinate that is
@@ -190,20 +188,20 @@ recoverLogicalExtent(AffineExpr expr,
   if (!dimExpr)
     return result;
 
-  affine::AffineForOp loop;
-  switch (dimExpr.getPosition()) {
-  case 0:
-    loop = outerLoop;
-    break;
-  case 1:
-    loop = middleLoop;
-    break;
-  case 2:
-    loop = innerLoop;
-    break;
-  default:
+  unsigned position = dimExpr.getPosition();
+  if (position >= iterationIVs.size())
     return result;
-  }
+
+  Value iv = iterationIVs[position];
+
+  auto blockArg = dyn_cast<BlockArgument>(iv);
+  if (!blockArg)
+    return result;
+
+  auto loop =
+      dyn_cast<affine::AffineForOp>(blockArg.getOwner()->getParentOp());
+  if (!loop || loop.getInductionVar() != iv)
+    return result;
 
   // Static affine.for trip count.
   if (loop.hasConstantLowerBound() &&
@@ -502,21 +500,23 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   normalizedAcc->print(llvm::errs());
   llvm::errs() << "\n";
 
-  // A logical GEMM has the normalized access pattern:
+  // A logical GEMM may have a shared partition prefix P*:
   //
-  //   A = (I, K)
-  //   B = (K, J)
-  //   C = (I, J)
+  //   A = (P*, I, K)
+  //   B = (P*, K, J)
+  //   C = (P*, I, J)
   //
-  // Unlike the previous direct-IV checkpoint, I/J/K are AffineExprs.
-  // This allows coordinates such as I = d0 + d1.
-  if (normalizedLhs->getNumResults() != 2 ||
-      normalizedRhs->getNumResults() != 2 ||
-      normalizedAcc->getNumResults() != 2)
+  // Ordinary GEMM is the special case where P* is empty.
+  unsigned numAccessResults = normalizedAcc->getNumResults();
+  if (numAccessResults < 2 ||
+      normalizedLhs->getNumResults() != numAccessResults ||
+      normalizedRhs->getNumResults() != numAccessResults)
     return failure();
 
+  unsigned numPartitionDims = numAccessResults - 2;
+
   // Multiplication is commutative, so the source operand order does not
-  // determine which load is logical A=(I,K) and which is B=(K,J).
+  // determine which load is logical A=(P*,I,K) and which is B=(P*,K,J).
   affine::AffineLoadOp aLoad = lhsLoad;
   affine::AffineLoadOp bLoad = rhsLoad;
   AffineMap accessA = *normalizedLhs;
@@ -524,13 +524,19 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
 
   auto matchesGemmAccesses =
       [&](AffineMap a, AffineMap b) {
-        AffineExpr i = a.getResult(0);
-        AffineExpr k = a.getResult(1);
-        AffineExpr j = b.getResult(1);
+        for (unsigned p = 0; p < numPartitionDims; ++p) {
+          if (a.getResult(p) != normalizedAcc->getResult(p) ||
+              b.getResult(p) != normalizedAcc->getResult(p))
+            return false;
+        }
 
-        return i == normalizedAcc->getResult(0) &&
-               j == normalizedAcc->getResult(1) &&
-               k == b.getResult(0) &&
+        AffineExpr i = a.getResult(numPartitionDims);
+        AffineExpr k = a.getResult(numPartitionDims + 1);
+        AffineExpr j = b.getResult(numPartitionDims + 1);
+
+        return i == normalizedAcc->getResult(numPartitionDims) &&
+               j == normalizedAcc->getResult(numPartitionDims + 1) &&
+               k == b.getResult(numPartitionDims) &&
                i != j && i != k && j != k;
       };
 
@@ -542,9 +548,9 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
     std::swap(accessA, accessB);
   }
 
-  AffineExpr logicalI = accessA.getResult(0);
-  AffineExpr logicalK = accessA.getResult(1);
-  AffineExpr logicalJ = accessB.getResult(1);
+  AffineExpr logicalI = accessA.getResult(numPartitionDims);
+  AffineExpr logicalK = accessA.getResult(numPartitionDims + 1);
+  AffineExpr logicalJ = accessB.getResult(numPartitionDims + 1);
 
   unsigned numIterationDims = accessA.getNumDims();
 
@@ -612,22 +618,38 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   result.accessB = accessB;
   result.accessC = *normalizedAcc;
 
+  SmallVector<AffineExpr> logicalPartitions;
+  logicalPartitions.reserve(numPartitionDims);
+  for (unsigned p = 0; p < numPartitionDims; ++p)
+    logicalPartitions.push_back(accessA.getResult(p));
+
+  result.partitionMap =
+      AffineMap::get(/*dimCount=*/numIterationDims,
+                     /*symbolCount=*/0,
+                     logicalPartitions,
+                     candidate.anchor->getContext());
   result.rowMap =
-      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
-                     logicalI, candidate.anchor->getContext());
+      AffineMap::get(/*dimCount=*/numIterationDims,
+                     /*symbolCount=*/0,
+                     logicalI,
+                     candidate.anchor->getContext());
   result.columnMap =
-      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
-                     logicalJ, candidate.anchor->getContext());
+      AffineMap::get(/*dimCount=*/numIterationDims,
+                     /*symbolCount=*/0,
+                     logicalJ,
+                     candidate.anchor->getContext());
   result.reductionMap =
-      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
-                     logicalK, candidate.anchor->getContext());
+      AffineMap::get(/*dimCount=*/numIterationDims,
+                     /*symbolCount=*/0,
+                     logicalK,
+                     candidate.anchor->getContext());
 
   result.rowExtent =
-      recoverLogicalExtent(logicalI, outerLoop, middleLoop, innerLoop);
+      recoverLogicalExtent(logicalI, iterationIVs);
   result.columnExtent =
-      recoverLogicalExtent(logicalJ, outerLoop, middleLoop, innerLoop);
+      recoverLogicalExtent(logicalJ, iterationIVs);
   result.reductionExtent =
-      recoverLogicalExtent(logicalK, outerLoop, middleLoop, innerLoop);
+      recoverLogicalExtent(logicalK, iterationIVs);
 
   return result;
 }
