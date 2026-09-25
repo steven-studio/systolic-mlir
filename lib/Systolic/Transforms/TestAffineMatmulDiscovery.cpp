@@ -56,6 +56,8 @@ struct TestAffineMatmulDiscoveryPass
                  << candidates.size()
                  << "\n";
 
+    SmallVector<LogicalMatmul> logicalMatmuls;
+
     for (AffineMatmulCandidate candidate : candidates) {
       auto result = recognizeLogicalMatmul(candidate);
 
@@ -64,23 +66,40 @@ struct TestAffineMatmulDiscoveryPass
         continue;
       }
 
+      bool duplicate = false;
+      for (const LogicalMatmul &existing : logicalMatmuls) {
+        if (existing.outputStore == result->outputStore) {
+          duplicate = true;
+          break;
+        }
+      }
+
+      if (!duplicate)
+        logicalMatmuls.push_back(*result);
+    }
+
+    llvm::errs() << "unique logical matmul count: "
+                 << logicalMatmuls.size()
+                 << "\n";
+
+    for (const LogicalMatmul &result : logicalMatmuls) {
       llvm::errs() << "recognition result: success\n";
 
       llvm::errs() << "  row map: ";
-      result->rowMap.print(llvm::errs());
+      result.rowMap.print(llvm::errs());
       llvm::errs() << "\n";
 
       llvm::errs() << "  column map: ";
-      result->columnMap.print(llvm::errs());
+      result.columnMap.print(llvm::errs());
       llvm::errs() << "\n";
 
       llvm::errs() << "  reduction map: ";
-      result->reductionMap.print(llvm::errs());
+      result.reductionMap.print(llvm::errs());
       llvm::errs() << "\n";
 
-      printLogicalExtent("row", result->rowExtent);
-      printLogicalExtent("column", result->columnExtent);
-      printLogicalExtent("reduction", result->reductionExtent);
+      printLogicalExtent("row", result.rowExtent);
+      printLogicalExtent("column", result.columnExtent);
+      printLogicalExtent("reduction", result.reductionExtent);
     }
   }
 };

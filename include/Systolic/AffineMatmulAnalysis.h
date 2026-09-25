@@ -44,6 +44,7 @@ struct LogicalExtent {
 
 struct LogicalMatmul {
   Operation *anchor = nullptr;
+  Operation *outputStore = nullptr;
 
   Value lhs;
   Value rhs;
