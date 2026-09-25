@@ -2,6 +2,8 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
+#include <utility>
+
 using namespace mlir;
 using namespace mlir::systolic;
 
@@ -174,6 +176,71 @@ extractLinearForm(AffineExpr expr, unsigned numDims) {
   }
 
   return failure();
+}
+
+static FailureOr<int64_t>
+recoverStaticIterationOrigin(Value iv) {
+  auto blockArg = dyn_cast<BlockArgument>(iv);
+  if (!blockArg)
+    return failure();
+
+  auto loop =
+      dyn_cast<affine::AffineForOp>(blockArg.getOwner()->getParentOp());
+  if (!loop || loop.getInductionVar() != iv)
+    return failure();
+
+  if (!loop.hasConstantLowerBound())
+    return failure();
+
+  return loop.getConstantLowerBound();
+}
+
+static bool
+isInvertibleSquareMapping(
+    const SmallVector<SmallVector<int64_t>> &transformation) {
+  const unsigned size = transformation.size();
+  if (size == 0)
+    return false;
+
+  for (const auto &row : transformation) {
+    if (row.size() != size)
+      return false;
+  }
+
+  // Fraction-free Gaussian elimination.  This tests full rank exactly over
+  // the rationals without introducing floating-point tolerances.
+  SmallVector<SmallVector<int64_t>> matrix = transformation;
+  int64_t previousPivot = 1;
+
+  for (unsigned column = 0; column + 1 < size; ++column) {
+    unsigned pivotRow = column;
+    while (pivotRow < size && matrix[pivotRow][column] == 0)
+      ++pivotRow;
+
+    if (pivotRow == size)
+      return false;
+
+    if (pivotRow != column)
+      std::swap(matrix[pivotRow], matrix[column]);
+
+    const int64_t pivot = matrix[column][column];
+
+    for (unsigned row = column + 1; row < size; ++row) {
+      for (unsigned j = column + 1; j < size; ++j) {
+        const int64_t numerator =
+            matrix[row][j] * pivot -
+            matrix[row][column] * matrix[column][j];
+
+        matrix[row][j] = numerator / previousPivot;
+      }
+
+      matrix[row][column] = 0;
+    }
+
+    previousPivot = pivot;
+  }
+
+  return matrix[size - 1][size - 1] != 0;
 }
 
 static LogicalExtent
@@ -558,6 +625,11 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   auto linearJ = extractLinearForm(logicalJ, numIterationDims);
   auto linearK = extractLinearForm(logicalK, numIterationDims);
 
+  if (failed(linearI) ||
+      failed(linearJ) ||
+      failed(linearK))
+    return failure();
+
   llvm::errs() << "  affine logical mapping\n";
   if (succeeded(linearI) &&
       succeeded(linearJ) &&
@@ -611,6 +683,25 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   result.anchor = candidate.anchor;
   result.outputStore = store.getOperation();
 
+  SmallVector<int64_t> sourceOrigin;
+  sourceOrigin.reserve(iterationIVs.size());
+
+  bool hasStaticSourceOrigin = true;
+  for (Value iv : iterationIVs) {
+    auto origin = recoverStaticIterationOrigin(iv);
+    if (failed(origin)) {
+      hasStaticSourceOrigin = false;
+      break;
+    }
+
+    sourceOrigin.push_back(*origin);
+  }
+
+  if (hasStaticSourceOrigin) {
+    result.logicalMapping.sourceOrigin = std::move(sourceOrigin);
+    result.logicalMapping.hasStaticSourceOrigin = true;
+  }
+
   result.lhs = aLoad.getMemRef();
   result.rhs = bLoad.getMemRef();
   result.output = store.getMemRef();
@@ -623,6 +714,35 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   logicalPartitions.reserve(numPartitionDims);
   for (unsigned p = 0; p < numPartitionDims; ++p)
     logicalPartitions.push_back(accessA.getResult(p));
+
+  // Materialize the complete affine coordinate transformation
+  //
+  //   y = T x + c
+  //
+  // where y = (P*, I, J, K).
+  for (AffineExpr logicalPartition : logicalPartitions) {
+    auto linearPartition =
+        extractLinearForm(logicalPartition, numIterationDims);
+    if (failed(linearPartition))
+      return failure();
+
+    result.logicalMapping.transformation.push_back(
+        linearPartition->coefficients);
+    result.logicalMapping.offset.push_back(
+        linearPartition->constant);
+  }
+
+  result.logicalMapping.transformation.push_back(linearI->coefficients);
+  result.logicalMapping.transformation.push_back(linearJ->coefficients);
+  result.logicalMapping.transformation.push_back(linearK->coefficients);
+
+  result.logicalMapping.offset.push_back(linearI->constant);
+  result.logicalMapping.offset.push_back(linearJ->constant);
+  result.logicalMapping.offset.push_back(linearK->constant);
+
+  result.logicalMapping.isInvertible =
+      isInvertibleSquareMapping(
+          result.logicalMapping.transformation);
 
   result.partitionMap =
       AffineMap::get(/*dimCount=*/numIterationDims,

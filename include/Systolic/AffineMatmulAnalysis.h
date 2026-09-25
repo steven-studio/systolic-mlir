@@ -42,6 +42,25 @@ struct LogicalExtent {
   Value symbolicValue;
 };
 
+struct AffineLogicalMapping {
+  // y = T x + c, where y = (P*, I, J, K).
+  //
+  // transformation[row][column] is the coefficient multiplying x[column]
+  // in logical coordinate y[row].
+  SmallVector<SmallVector<int64_t>> transformation;
+  SmallVector<int64_t> offset;
+
+  // Static lower bounds x0 of the source iteration coordinates.
+  // Together with T and c, this permits zero-origin normalization
+  // without losing the original affine access mapping y = T x + c.
+  SmallVector<int64_t> sourceOrigin;
+  bool hasStaticSourceOrigin = false;
+
+  // True when T is square and full-rank, so the source iteration
+  // coordinates can be recovered from the logical coordinates over Q.
+  bool isInvertible = false;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
   Operation *outputStore = nullptr;
@@ -60,6 +79,10 @@ struct LogicalMatmul {
   AffineMap rowMap;
   AffineMap columnMap;
   AffineMap reductionMap;
+
+  // Affine coordinate transformation y = T x + c for
+  // y = (P*, I, J, K).
+  AffineLogicalMapping logicalMapping;
 
   // Logical problem extents.  Extent recovery is deliberately separate from
   // GEMM recognition: an unknown extent does not make recognition fail.
