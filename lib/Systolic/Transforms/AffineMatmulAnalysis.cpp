@@ -69,25 +69,27 @@ normalizeAccessMap(AffineMap map,
 }
 
 struct LinearForm {
-  int64_t coefficients[3] = {0, 0, 0};
+  SmallVector<int64_t> coefficients;
   int64_t constant = 0;
 };
 
 static FailureOr<LinearForm>
-extractLinearForm(AffineExpr expr) {
+extractLinearForm(AffineExpr expr, unsigned numDims) {
   switch (expr.getKind()) {
   case AffineExprKind::DimId: {
     auto dim = cast<AffineDimExpr>(expr);
-    if (dim.getPosition() >= 3)
+    if (dim.getPosition() >= numDims)
       return failure();
 
     LinearForm result;
+    result.coefficients.assign(numDims, 0);
     result.coefficients[dim.getPosition()] = 1;
     return result;
   }
 
   case AffineExprKind::Constant: {
     LinearForm result;
+    result.coefficients.assign(numDims, 0);
     result.constant = cast<AffineConstantExpr>(expr).getValue();
     return result;
   }
@@ -95,13 +97,14 @@ extractLinearForm(AffineExpr expr) {
   case AffineExprKind::Add: {
     auto binary = cast<AffineBinaryOpExpr>(expr);
 
-    auto lhs = extractLinearForm(binary.getLHS());
-    auto rhs = extractLinearForm(binary.getRHS());
+    auto lhs = extractLinearForm(binary.getLHS(), numDims);
+    auto rhs = extractLinearForm(binary.getRHS(), numDims);
     if (failed(lhs) || failed(rhs))
       return failure();
 
     LinearForm result;
-    for (unsigned i = 0; i < 3; ++i)
+    result.coefficients.assign(numDims, 0);
+    for (unsigned i = 0; i < numDims; ++i)
       result.coefficients[i] =
           lhs->coefficients[i] + rhs->coefficients[i];
     result.constant = lhs->constant + rhs->constant;
@@ -116,14 +119,15 @@ extractLinearForm(AffineExpr expr) {
     if (!scale)
       return failure();
 
-    auto lhs = extractLinearForm(binary.getLHS());
+    auto lhs = extractLinearForm(binary.getLHS(), numDims);
     if (failed(lhs))
       return failure();
 
     LinearForm result;
+    result.coefficients.assign(numDims, 0);
     int64_t factor = scale.getValue();
 
-    for (unsigned i = 0; i < 3; ++i)
+    for (unsigned i = 0; i < numDims; ++i)
       result.coefficients[i] =
           lhs->coefficients[i] * factor;
     result.constant = lhs->constant * factor;
@@ -504,9 +508,11 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   AffineExpr logicalK = accessA.getResult(1);
   AffineExpr logicalJ = accessB.getResult(1);
 
-  auto linearI = extractLinearForm(logicalI);
-  auto linearJ = extractLinearForm(logicalJ);
-  auto linearK = extractLinearForm(logicalK);
+  unsigned numIterationDims = accessA.getNumDims();
+
+  auto linearI = extractLinearForm(logicalI, numIterationDims);
+  auto linearJ = extractLinearForm(logicalJ, numIterationDims);
+  auto linearK = extractLinearForm(logicalK, numIterationDims);
 
   llvm::errs() << "  affine logical mapping\n";
   if (succeeded(linearI) &&
@@ -514,11 +520,13 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
       succeeded(linearK)) {
     auto printLinearForm = [](StringRef name,
                               const LinearForm &form) {
-      llvm::errs() << "    " << name << " = ["
-                   << form.coefficients[0] << " "
-                   << form.coefficients[1] << " "
-                   << form.coefficients[2] << " | "
-                   << form.constant << "]\n";
+      llvm::errs() << "    " << name << " = [";
+      for (unsigned i = 0; i < form.coefficients.size(); ++i) {
+        if (i != 0)
+          llvm::errs() << " ";
+        llvm::errs() << form.coefficients[i];
+      }
+      llvm::errs() << " | " << form.constant << "]\n";
     };
 
     printLinearForm("I", *linearI);
