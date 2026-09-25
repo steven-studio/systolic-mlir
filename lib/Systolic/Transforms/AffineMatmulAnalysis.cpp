@@ -370,5 +370,26 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   rhsLoad.getOperation()->print(llvm::errs());
   llvm::errs() << "\n";
 
-  return failure();
+  LogicalMatmul result;
+  result.anchor = candidate.anchor;
+
+  result.lhs = lhsLoad.getMemRef();
+  result.rhs = rhsLoad.getMemRef();
+  result.output = store.getMemRef();
+
+  result.accessA = *normalizedLhs;
+  result.accessB = *normalizedRhs;
+  result.accessC = *normalizedAcc;
+
+  result.rowMap =
+      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
+                     logicalI, candidate.anchor->getContext());
+  result.columnMap =
+      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
+                     logicalJ, candidate.anchor->getContext());
+  result.reductionMap =
+      AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
+                     logicalK, candidate.anchor->getContext());
+
+  return result;
 }
