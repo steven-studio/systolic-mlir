@@ -68,6 +68,78 @@ normalizeAccessMap(AffineMap map,
       /*numResultSyms=*/0);
 }
 
+struct LinearForm {
+  int64_t coefficients[3] = {0, 0, 0};
+  int64_t constant = 0;
+};
+
+static FailureOr<LinearForm>
+extractLinearForm(AffineExpr expr) {
+  switch (expr.getKind()) {
+  case AffineExprKind::DimId: {
+    auto dim = cast<AffineDimExpr>(expr);
+    if (dim.getPosition() >= 3)
+      return failure();
+
+    LinearForm result;
+    result.coefficients[dim.getPosition()] = 1;
+    return result;
+  }
+
+  case AffineExprKind::Constant: {
+    LinearForm result;
+    result.constant = cast<AffineConstantExpr>(expr).getValue();
+    return result;
+  }
+
+  case AffineExprKind::Add: {
+    auto binary = cast<AffineBinaryOpExpr>(expr);
+
+    auto lhs = extractLinearForm(binary.getLHS());
+    auto rhs = extractLinearForm(binary.getRHS());
+    if (failed(lhs) || failed(rhs))
+      return failure();
+
+    LinearForm result;
+    for (unsigned i = 0; i < 3; ++i)
+      result.coefficients[i] =
+          lhs->coefficients[i] + rhs->coefficients[i];
+    result.constant = lhs->constant + rhs->constant;
+    return result;
+  }
+
+  case AffineExprKind::Mul: {
+    auto binary = cast<AffineBinaryOpExpr>(expr);
+
+    auto scale =
+        dyn_cast<AffineConstantExpr>(binary.getRHS());
+    if (!scale)
+      return failure();
+
+    auto lhs = extractLinearForm(binary.getLHS());
+    if (failed(lhs))
+      return failure();
+
+    LinearForm result;
+    int64_t factor = scale.getValue();
+
+    for (unsigned i = 0; i < 3; ++i)
+      result.coefficients[i] =
+          lhs->coefficients[i] * factor;
+    result.constant = lhs->constant * factor;
+    return result;
+  }
+
+  case AffineExprKind::SymbolId:
+  case AffineExprKind::Mod:
+  case AffineExprKind::FloorDiv:
+  case AffineExprKind::CeilDiv:
+    return failure();
+  }
+
+  return failure();
+}
+
 static LogicalExtent
 recoverLogicalExtent(AffineExpr expr,
                      affine::AffineForOp outerLoop,
@@ -431,6 +503,30 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   AffineExpr logicalI = accessA.getResult(0);
   AffineExpr logicalK = accessA.getResult(1);
   AffineExpr logicalJ = accessB.getResult(1);
+
+  auto linearI = extractLinearForm(logicalI);
+  auto linearJ = extractLinearForm(logicalJ);
+  auto linearK = extractLinearForm(logicalK);
+
+  llvm::errs() << "  affine logical mapping\n";
+  if (succeeded(linearI) &&
+      succeeded(linearJ) &&
+      succeeded(linearK)) {
+    auto printLinearForm = [](StringRef name,
+                              const LinearForm &form) {
+      llvm::errs() << "    " << name << " = ["
+                   << form.coefficients[0] << " "
+                   << form.coefficients[1] << " "
+                   << form.coefficients[2] << " | "
+                   << form.constant << "]\n";
+    };
+
+    printLinearForm("I", *linearI);
+    printLinearForm("J", *linearJ);
+    printLinearForm("K", *linearK);
+  } else {
+    llvm::errs() << "    unsupported non-linear affine form\n";
+  }
 
   llvm::errs() << "  logical GEMM coordinates recovered\n";
   llvm::errs() << "    I: ";
