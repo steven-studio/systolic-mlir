@@ -56,7 +56,7 @@ struct TestAffineMatmulDiscoveryPass
                  << candidates.size()
                  << "\n";
 
-    SmallVector<LogicalMatmul> logicalMatmuls;
+    SmallVector<LogicalMatmul, 1> logicalMatmuls;
 
     for (AffineMatmulCandidate candidate : candidates) {
       auto result = recognizeLogicalMatmul(candidate);
@@ -96,6 +96,55 @@ struct TestAffineMatmulDiscoveryPass
       llvm::errs() << "  reduction map: ";
       result.reductionMap.print(llvm::errs());
       llvm::errs() << "\n";
+
+      llvm::errs() << "  logical mapping:\n";
+      for (unsigned row = 0;
+           row < result.logicalMapping.transformation.size();
+           ++row) {
+        llvm::errs() << "    T[" << row << "] = [";
+        const auto &coefficients =
+            result.logicalMapping.transformation[row];
+
+        for (unsigned column = 0;
+             column < coefficients.size();
+             ++column) {
+          if (column != 0)
+            llvm::errs() << " ";
+          llvm::errs() << coefficients[column];
+        }
+
+        llvm::errs() << "]\n";
+      }
+
+      llvm::errs() << "    c = [";
+      for (unsigned i = 0;
+           i < result.logicalMapping.offset.size();
+           ++i) {
+        if (i != 0)
+          llvm::errs() << " ";
+        llvm::errs() << result.logicalMapping.offset[i];
+      }
+      llvm::errs() << "]\n";
+
+      llvm::errs() << "    source origin: [";
+      for (unsigned i = 0;
+           i < result.logicalMapping.sourceOrigin.size();
+           ++i) {
+        if (i != 0)
+          llvm::errs() << " ";
+        llvm::errs() << result.logicalMapping.sourceOrigin[i];
+      }
+      llvm::errs() << "]\n";
+
+      llvm::errs() << "    static source origin: "
+                   << (result.logicalMapping.hasStaticSourceOrigin
+                           ? "yes"
+                           : "no")
+                   << "\n";
+
+      llvm::errs() << "    invertible: "
+                   << (result.logicalMapping.isInvertible ? "yes" : "no")
+                   << "\n";
 
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
