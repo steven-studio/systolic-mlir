@@ -11,6 +11,27 @@ using namespace mlir::systolic;
 
 namespace {
 
+static void printLogicalExtent(StringRef name,
+                               const LogicalExtent &extent) {
+  llvm::errs() << "  " << name << " extent: ";
+
+  switch (extent.kind) {
+  case LogicalExtent::Kind::Unknown:
+    llvm::errs() << "unknown";
+    break;
+
+  case LogicalExtent::Kind::Static:
+    llvm::errs() << "static " << extent.staticValue;
+    break;
+
+  case LogicalExtent::Kind::Symbolic:
+    llvm::errs() << "symbolic " << extent.symbolicValue;
+    break;
+  }
+
+  llvm::errs() << "\n";
+}
+
 struct TestAffineMatmulDiscoveryPass
     : public PassWrapper<TestAffineMatmulDiscoveryPass,
                          OperationPass<ModuleOp>> {
@@ -56,6 +77,10 @@ struct TestAffineMatmulDiscoveryPass
       llvm::errs() << "  reduction map: ";
       result->reductionMap.print(llvm::errs());
       llvm::errs() << "\n";
+
+      printLogicalExtent("row", result->rowExtent);
+      printLogicalExtent("column", result->columnExtent);
+      printLogicalExtent("reduction", result->reductionExtent);
     }
   }
 };
