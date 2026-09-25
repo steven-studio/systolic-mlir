@@ -63,9 +63,7 @@ collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
 static FailureOr<AffineMap>
 normalizeAccessMap(AffineMap map,
                    ValueRange operands,
-                   affine::AffineForOp outerLoop,
-                   affine::AffineForOp middleLoop,
-                   affine::AffineForOp innerLoop) {
+                   ValueRange iterationIVs) {
   MLIRContext *context = map.getContext();
 
   SmallVector<AffineExpr> dimReplacements;
@@ -73,25 +71,17 @@ normalizeAccessMap(AffineMap map,
 
   // Rewrite each map-local dimension into a common iteration domain:
   //
-  //   d0 = outer loop IV
-  //   d1 = middle loop IV
-  //   d2 = inner loop IV
+  //   iterationIVs[p] -> common dp
   //
-  // For example, a map whose operands are [inner, middle] rewrites
-  // its local dimensions as:
-  //
-  //   local d0 -> common d2
-  //   local d1 -> common d1
+  // The common domain may have any number of access-related loop IVs.
   for (Value operand : operands) {
-    if (operand == outerLoop.getInductionVar()) {
-      dimReplacements.push_back(getAffineDimExpr(0, context));
-    } else if (operand == middleLoop.getInductionVar()) {
-      dimReplacements.push_back(getAffineDimExpr(1, context));
-    } else if (operand == innerLoop.getInductionVar()) {
-      dimReplacements.push_back(getAffineDimExpr(2, context));
-    } else {
+    auto it = llvm::find(iterationIVs, operand);
+    if (it == iterationIVs.end())
       return failure();
-    }
+
+    unsigned position =
+        static_cast<unsigned>(std::distance(iterationIVs.begin(), it));
+    dimReplacements.push_back(getAffineDimExpr(position, context));
   }
 
   // replaceDimsAndSymbols() requires one replacement for every map dim.
@@ -106,7 +96,7 @@ normalizeAccessMap(AffineMap map,
   return map.replaceDimsAndSymbols(
       dimReplacements,
       /*symReplacements=*/{},
-      /*numResultDims=*/3,
+      /*numResultDims=*/iterationIVs.size(),
       /*numResultSyms=*/0);
 }
 
@@ -487,13 +477,13 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   // This first checkpoint handles direct loop-IV operands only.
   auto normalizedLhs =
       normalizeAccessMap(lhsLoad.getMap(), lhsLoad.getIndices(),
-                         outerLoop, middleLoop, innerLoop);
+                         iterationIVs);
   auto normalizedRhs =
       normalizeAccessMap(rhsLoad.getMap(), rhsLoad.getIndices(),
-                         outerLoop, middleLoop, innerLoop);
+                         iterationIVs);
   auto normalizedAcc =
       normalizeAccessMap(accLoad.getMap(), accLoad.getIndices(),
-                         outerLoop, middleLoop, innerLoop);
+                         iterationIVs);
 
   if (failed(normalizedLhs) ||
       failed(normalizedRhs) ||
