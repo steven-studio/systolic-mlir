@@ -30,6 +30,18 @@ struct AffineMatmulCandidate {
 ///
 /// together with the original operand access functions F_A/F_B/F_C and
 /// factor maps phi_A/phi_B/phi_C.
+struct LogicalExtent {
+  enum class Kind {
+    Unknown,
+    Static,
+    Symbolic,
+  };
+
+  Kind kind = Kind::Unknown;
+  int64_t staticValue = 0;
+  Value symbolicValue;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
 
@@ -47,6 +59,12 @@ struct LogicalMatmul {
   AffineMap rowMap;
   AffineMap columnMap;
   AffineMap reductionMap;
+
+  // Logical problem extents.  Extent recovery is deliberately separate from
+  // GEMM recognition: an unknown extent does not make recognition fail.
+  LogicalExtent rowExtent;
+  LogicalExtent columnExtent;
+  LogicalExtent reductionExtent;
 
   // Factor maps:
   //

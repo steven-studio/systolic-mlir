@@ -68,6 +68,87 @@ normalizeAccessMap(AffineMap map,
       /*numResultSyms=*/0);
 }
 
+static LogicalExtent
+recoverLogicalExtent(AffineExpr expr,
+                     affine::AffineForOp outerLoop,
+                     affine::AffineForOp middleLoop,
+                     affine::AffineForOp innerLoop) {
+  LogicalExtent result;
+
+  // First checkpoint: only recover extents for a logical coordinate that is
+  // exactly one iteration dimension.  Composed coordinates such as d0 + d1
+  // remain valid GEMM coordinates, but their extent is currently unknown.
+  auto dimExpr = dyn_cast<AffineDimExpr>(expr);
+  if (!dimExpr)
+    return result;
+
+  affine::AffineForOp loop;
+  switch (dimExpr.getPosition()) {
+  case 0:
+    loop = outerLoop;
+    break;
+  case 1:
+    loop = middleLoop;
+    break;
+  case 2:
+    loop = innerLoop;
+    break;
+  default:
+    return result;
+  }
+
+  // Static affine.for trip count.
+  if (loop.hasConstantLowerBound() &&
+      loop.hasConstantUpperBound()) {
+    int64_t lower = loop.getConstantLowerBound();
+    int64_t upper = loop.getConstantUpperBound();
+    int64_t step = loop.getStep().getSExtValue();
+
+    if (step <= 0 || upper <= lower)
+      return result;
+
+    result.kind = LogicalExtent::Kind::Static;
+    result.staticValue = (upper - lower + step - 1) / step;
+    return result;
+  }
+
+  // First symbolic checkpoint:
+  //
+  //   affine.for %iv = 0 to %n
+  //
+  // is represented as:
+  //
+  //   LB: () -> (0)
+  //   UB: ()[s0] -> (s0), operand = %n
+  //
+  // Keep this deliberately narrow.  More general affine bounds can be
+  // supported later without weakening GEMM recognition.
+  if (loop.getStep() != 1)
+    return result;
+
+  if (!loop.hasConstantLowerBound() ||
+      loop.getConstantLowerBound() != 0)
+    return result;
+
+  AffineMap upperMap = loop.getUpperBoundMap();
+  auto upperOperands = loop.getUpperBoundOperands();
+
+  if (upperMap.getNumDims() != 0 ||
+      upperMap.getNumSymbols() != 1 ||
+      upperMap.getNumResults() != 1 ||
+      upperOperands.size() != 1)
+    return result;
+
+  auto symbolExpr =
+      dyn_cast<AffineSymbolExpr>(upperMap.getResult(0));
+  if (!symbolExpr || symbolExpr.getPosition() != 0)
+    return result;
+
+  result.kind = LogicalExtent::Kind::Symbolic;
+  result.symbolicValue = *upperOperands.begin();
+  return result;
+}
+
 void mlir::systolic::collectAffineMatmulCandidates(
     Operation *root,
     SmallVectorImpl<AffineMatmulCandidate> &candidates) {
@@ -398,6 +479,13 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   result.reductionMap =
       AffineMap::get(/*dimCount=*/3, /*symbolCount=*/0,
                      logicalK, candidate.anchor->getContext());
+
+  result.rowExtent =
+      recoverLogicalExtent(logicalI, outerLoop, middleLoop, innerLoop);
+  result.columnExtent =
+      recoverLogicalExtent(logicalJ, outerLoop, middleLoop, innerLoop);
+  result.reductionExtent =
+      recoverLogicalExtent(logicalK, outerLoop, middleLoop, innerLoop);
 
   return result;
 }
