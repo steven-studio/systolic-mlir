@@ -18,6 +18,56 @@ static StringRef classifyLoopIV(Value value,
   return "other";
 }
 
+static FailureOr<AffineMap>
+normalizeAccessMap(AffineMap map,
+                   ValueRange operands,
+                   affine::AffineForOp outerLoop,
+                   affine::AffineForOp middleLoop,
+                   affine::AffineForOp innerLoop) {
+  MLIRContext *context = map.getContext();
+
+  SmallVector<AffineExpr> dimReplacements;
+  dimReplacements.reserve(operands.size());
+
+  // Rewrite each map-local dimension into a common iteration domain:
+  //
+  //   d0 = outer loop IV
+  //   d1 = middle loop IV
+  //   d2 = inner loop IV
+  //
+  // For example, a map whose operands are [inner, middle] rewrites
+  // its local dimensions as:
+  //
+  //   local d0 -> common d2
+  //   local d1 -> common d1
+  for (Value operand : operands) {
+    if (operand == outerLoop.getInductionVar()) {
+      dimReplacements.push_back(getAffineDimExpr(0, context));
+    } else if (operand == middleLoop.getInductionVar()) {
+      dimReplacements.push_back(getAffineDimExpr(1, context));
+    } else if (operand == innerLoop.getInductionVar()) {
+      dimReplacements.push_back(getAffineDimExpr(2, context));
+    } else {
+      return failure();
+    }
+  }
+
+  // replaceDimsAndSymbols() requires one replacement for every map dim.
+  if (dimReplacements.size() != map.getNumDims())
+    return failure();
+
+  // First checkpoint: handle dim-only affine accesses. Symbol support can
+  // be added later without complicating the initial normalization logic.
+  if (map.getNumSymbols() != 0)
+    return failure();
+
+  return map.replaceDimsAndSymbols(
+      dimReplacements,
+      /*symReplacements=*/{},
+      /*numResultDims=*/3,
+      /*numResultSyms=*/0);
+}
+
 void mlir::systolic::collectAffineMatmulCandidates(
     Operation *root,
     SmallVectorImpl<AffineMatmulCandidate> &candidates) {
@@ -237,6 +287,33 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   Value logicalI;
   Value logicalJ;
   Value logicalK;
+
+  auto normalizedLhs =
+      normalizeAccessMap(lhsLoad.getMap(), lhsLoad.getIndices(),
+                         outerLoop, middleLoop, innerLoop);
+  auto normalizedRhs =
+      normalizeAccessMap(rhsLoad.getMap(), rhsLoad.getIndices(),
+                         outerLoop, middleLoop, innerLoop);
+  auto normalizedAcc =
+      normalizeAccessMap(accLoad.getMap(), accLoad.getIndices(),
+                         outerLoop, middleLoop, innerLoop);
+
+  if (failed(normalizedLhs) ||
+      failed(normalizedRhs) ||
+      failed(normalizedAcc))
+    return failure();
+
+  llvm::errs() << "  normalized A: ";
+  normalizedLhs->print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "  normalized B: ";
+  normalizedRhs->print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "  normalized C: ";
+  normalizedAcc->print(llvm::errs());
+  llvm::errs() << "\n";
 
   auto lhsIndices = lhsLoad.getIndices();
   auto rhsIndices = rhsLoad.getIndices();
