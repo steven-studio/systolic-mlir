@@ -284,10 +284,6 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   //   C = (I, J)
   //
   // This first checkpoint handles direct loop-IV operands only.
-  Value logicalI;
-  Value logicalJ;
-  Value logicalK;
-
   auto normalizedLhs =
       normalizeAccessMap(lhsLoad.getMap(), lhsLoad.getIndices(),
                          outerLoop, middleLoop, innerLoop);
@@ -315,61 +311,50 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   normalizedAcc->print(llvm::errs());
   llvm::errs() << "\n";
 
-  auto lhsIndices = lhsLoad.getIndices();
-  auto rhsIndices = rhsLoad.getIndices();
-  auto accIndices = accLoad.getIndices();
-
-  // I is shared by A and C.
-  for (Value lhsIndex : lhsIndices) {
-    for (Value accIndex : accIndices) {
-      if (lhsIndex == accIndex) {
-        if (logicalI && logicalI != lhsIndex)
-          return failure();
-        logicalI = lhsIndex;
-      }
-    }
-  }
-
-  // J is shared by B and C.
-  for (Value rhsIndex : rhsIndices) {
-    for (Value accIndex : accIndices) {
-      if (rhsIndex == accIndex) {
-        if (logicalJ && logicalJ != rhsIndex)
-          return failure();
-        logicalJ = rhsIndex;
-      }
-    }
-  }
-
-  // K is shared by A and B.
-  for (Value lhsIndex : lhsIndices) {
-    for (Value rhsIndex : rhsIndices) {
-      if (lhsIndex == rhsIndex) {
-        if (logicalK && logicalK != lhsIndex)
-          return failure();
-        logicalK = lhsIndex;
-      }
-    }
-  }
-
-  if (!logicalI || !logicalJ || !logicalK)
+  // A logical GEMM has the normalized access pattern:
+  //
+  //   A = (I, K)
+  //   B = (K, J)
+  //   C = (I, J)
+  //
+  // Unlike the previous direct-IV checkpoint, I/J/K are AffineExprs.
+  // This allows coordinates such as I = d0 + d1.
+  if (normalizedLhs->getNumResults() != 2 ||
+      normalizedRhs->getNumResults() != 2 ||
+      normalizedAcc->getNumResults() != 2)
     return failure();
 
+  AffineExpr logicalI = normalizedLhs->getResult(0);
+  AffineExpr logicalK = normalizedLhs->getResult(1);
+  AffineExpr logicalJ = normalizedRhs->getResult(1);
+
+  if (logicalI != normalizedAcc->getResult(0))
+    return failure();
+
+  if (logicalJ != normalizedAcc->getResult(1))
+    return failure();
+
+  if (logicalK != normalizedRhs->getResult(0))
+    return failure();
+
+  // Keep I, J, and K logically distinct.
   if (logicalI == logicalJ ||
       logicalI == logicalK ||
       logicalJ == logicalK)
     return failure();
 
   llvm::errs() << "  logical GEMM coordinates recovered\n";
-  llvm::errs() << "    I: "
-               << classifyLoopIV(logicalI, outerLoop, middleLoop, innerLoop)
-               << "\n";
-  llvm::errs() << "    J: "
-               << classifyLoopIV(logicalJ, outerLoop, middleLoop, innerLoop)
-               << "\n";
-  llvm::errs() << "    K: "
-               << classifyLoopIV(logicalK, outerLoop, middleLoop, innerLoop)
-               << "\n";
+  llvm::errs() << "    I: ";
+  logicalI.print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "    J: ";
+  logicalJ.print(llvm::errs());
+  llvm::errs() << "\n";
+
+  llvm::errs() << "    K: ";
+  logicalK.print(llvm::errs());
+  llvm::errs() << "\n";
 
   llvm::errs() << "  accumulator read-modify-write verified\n";
   llvm::errs() << "  MAC dataflow recognized\n";
