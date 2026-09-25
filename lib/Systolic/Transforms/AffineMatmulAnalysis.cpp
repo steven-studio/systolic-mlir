@@ -609,6 +609,7 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
 
   LogicalMatmul result;
   result.anchor = candidate.anchor;
+  result.outputStore = store.getOperation();
 
   result.lhs = aLoad.getMemRef();
   result.rhs = bLoad.getMemRef();
