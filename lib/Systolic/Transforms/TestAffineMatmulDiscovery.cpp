@@ -35,8 +35,28 @@ struct TestAffineMatmulDiscoveryPass
                  << candidates.size()
                  << "\n";
 
-    for (AffineMatmulCandidate candidate : candidates)
-      (void)recognizeLogicalMatmul(candidate);
+    for (AffineMatmulCandidate candidate : candidates) {
+      auto result = recognizeLogicalMatmul(candidate);
+
+      if (failed(result)) {
+        llvm::errs() << "recognition result: failure\n";
+        continue;
+      }
+
+      llvm::errs() << "recognition result: success\n";
+
+      llvm::errs() << "  row map: ";
+      result->rowMap.print(llvm::errs());
+      llvm::errs() << "\n";
+
+      llvm::errs() << "  column map: ";
+      result->columnMap.print(llvm::errs());
+      llvm::errs() << "\n";
+
+      llvm::errs() << "  reduction map: ";
+      result->reductionMap.print(llvm::errs());
+      llvm::errs() << "\n";
+    }
   }
 };
 
