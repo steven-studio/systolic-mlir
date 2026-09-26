@@ -2,6 +2,7 @@
 #define SYSTOLIC_AFFINE_MATMUL_ANALYSIS_H
 
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
+#include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Operation.h"
@@ -86,6 +87,10 @@ struct LogicalMatmul {
   // Affine coordinate transformation y = T x + c for
   // y = (P*, I, J, K).
   AffineLogicalMapping logicalMapping;
+
+  // Exact source iteration domain D_S over the original iteration
+  // coordinates x, in the same order as the columns of logicalMapping.
+  std::optional<affine::FlatAffineValueConstraints> sourceDomain;
 
   // Exact integer logical iteration domain:
   //

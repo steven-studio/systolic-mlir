@@ -1,4 +1,5 @@
 #include "Systolic/AffineMatmulAnalysis.h"
+#include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/Passes.h"
 
 #include "mlir/IR/BuiltinOps.h"
@@ -146,9 +147,29 @@ struct TestAffineMatmulDiscoveryPass
                    << (result.logicalMapping.isInvertible ? "yes" : "no")
                    << "\n";
 
+      if (result.sourceDomain) {
+        llvm::errs() << "  source iteration domain:\n";
+        result.sourceDomain->dump();
+      }
+
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);
+
+      auto partitions = partitionLogicalMatmul(result);
+      if (failed(partitions)) {
+        llvm::errs() << "  partitioning result: failure\n";
+      } else {
+        llvm::errs() << "  partition count: "
+                     << partitions->size()
+                     << "\n";
+
+        for (unsigned i = 0; i < partitions->size(); ++i) {
+          llvm::errs() << "  partition[" << i
+                       << "] execution domain:\n";
+          (*partitions)[i].iterationDomain.dump();
+        }
+      }
     }
   }
 };
