@@ -20,6 +20,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   LINK_LIBS PUBLIC
   MLIRSystolic
   MLIRAffineDialect
+  MLIRAffineAnalysis
   MLIRLinalgDialect
   MLIRSCFDialect
   MLIRTensorDialect

@@ -1,7 +1,9 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 
+#include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
+#include <numeric>
 #include <utility>
 
 using namespace mlir;
@@ -60,6 +62,29 @@ collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
   }
 
   return iterationIVs;
+}
+
+static FailureOr<affine::FlatAffineValueConstraints>
+recoverSourceDomain(ValueRange iterationIVs) {
+  SmallVector<Value> iterationValues(iterationIVs.begin(),
+                                     iterationIVs.end());
+
+  affine::FlatAffineValueConstraints domain(
+      /*numDims=*/iterationValues.size(),
+      /*numSymbols=*/0,
+      /*numLocals=*/0,
+      iterationValues);
+
+  for (Value iv : iterationValues) {
+    affine::AffineForOp loop = affine::getForInductionVarOwner(iv);
+    if (!loop)
+      return failure();
+
+    if (failed(domain.addAffineForOpDomain(loop)))
+      return failure();
+  }
+
+  return domain;
 }
 
 static FailureOr<AffineMap>
@@ -194,6 +219,290 @@ recoverStaticIterationOrigin(Value iv) {
 
   return loop.getConstantLowerBound();
 }
+
+struct Rational {
+  int64_t numerator = 0;
+  int64_t denominator = 1;
+
+  Rational() = default;
+
+  Rational(int64_t numerator, int64_t denominator = 1)
+      : numerator(numerator), denominator(denominator) {
+    normalize();
+  }
+
+  bool isZero() const {
+    return numerator == 0;
+  }
+
+  Rational operator+(const Rational &other) const {
+    return Rational(
+        numerator * other.denominator +
+            other.numerator * denominator,
+        denominator * other.denominator);
+  }
+
+  Rational operator-(const Rational &other) const {
+    return Rational(
+        numerator * other.denominator -
+            other.numerator * denominator,
+        denominator * other.denominator);
+  }
+
+  Rational operator*(const Rational &other) const {
+    return Rational(numerator * other.numerator,
+                    denominator * other.denominator);
+  }
+
+  Rational operator/(const Rational &other) const {
+    assert(!other.isZero() && "division by zero rational");
+    return Rational(numerator * other.denominator,
+                    denominator * other.numerator);
+  }
+
+private:
+  void normalize() {
+    assert(denominator != 0 && "rational denominator must be nonzero");
+
+    if (denominator < 0) {
+      numerator = -numerator;
+      denominator = -denominator;
+    }
+
+    int64_t divisor = std::gcd(numerator, denominator);
+    numerator /= divisor;
+    denominator /= divisor;
+  }
+};
+
+static FailureOr<SmallVector<SmallVector<Rational>>>
+invertSquareMapping(
+    const SmallVector<SmallVector<int64_t>> &transformation) {
+  const unsigned size = transformation.size();
+  if (size == 0)
+    return failure();
+
+  for (const auto &row : transformation) {
+    if (row.size() != size)
+      return failure();
+  }
+
+  // Gauss-Jordan elimination on [T | I], performed exactly over Q.
+  SmallVector<SmallVector<Rational>> augmented(
+      size, SmallVector<Rational>(2 * size));
+
+  for (unsigned row = 0; row < size; ++row) {
+    for (unsigned column = 0; column < size; ++column) {
+      augmented[row][column] =
+          Rational(transformation[row][column]);
+      augmented[row][size + column] =
+          Rational(row == column ? 1 : 0);
+    }
+  }
+
+  for (unsigned column = 0; column < size; ++column) {
+    unsigned pivotRow = column;
+    while (pivotRow < size &&
+           augmented[pivotRow][column].isZero())
+      ++pivotRow;
+
+    if (pivotRow == size)
+      return failure();
+
+    if (pivotRow != column)
+      std::swap(augmented[pivotRow], augmented[column]);
+
+    Rational pivot = augmented[column][column];
+
+    for (unsigned j = 0; j < 2 * size; ++j)
+      augmented[column][j] =
+          augmented[column][j] / pivot;
+
+    for (unsigned row = 0; row < size; ++row) {
+      if (row == column)
+        continue;
+
+      Rational factor = augmented[row][column];
+      if (factor.isZero())
+        continue;
+
+      for (unsigned j = 0; j < 2 * size; ++j) {
+        augmented[row][j] =
+            augmented[row][j] -
+            factor * augmented[column][j];
+      }
+    }
+  }
+
+  SmallVector<SmallVector<Rational>> inverse(
+      size, SmallVector<Rational>(size));
+
+  for (unsigned row = 0; row < size; ++row) {
+    for (unsigned column = 0; column < size; ++column)
+      inverse[row][column] =
+          augmented[row][size + column];
+  }
+
+  return inverse;
+}
+
+static FailureOr<SmallVector<SmallVector<Rational>>>
+transformDomainToLogical(
+    const affine::FlatAffineValueConstraints &sourceDomain,
+    const SmallVector<SmallVector<Rational>> &inverse,
+    ArrayRef<int64_t> offset) {
+  const unsigned numSourceDims = inverse.size();
+  if (numSourceDims == 0)
+    return failure();
+
+  const unsigned numLogicalDims = inverse.front().size();
+
+  if (sourceDomain.getNumDimVars() != numSourceDims)
+    return failure();
+
+  if (offset.size() != numLogicalDims)
+    return failure();
+
+  for (const auto &row : inverse) {
+    if (row.size() != numLogicalDims)
+      return failure();
+  }
+
+  SmallVector<SmallVector<Rational>> logicalInequalities;
+
+  for (unsigned i = 0; i < sourceDomain.getNumInequalities(); ++i) {
+    auto source = sourceDomain.getInequality64(i);
+
+    // One coefficient per source dimension, followed by the constant.
+    if (source.size() != numSourceDims + 1)
+      return failure();
+
+    SmallVector<Rational> logical(numLogicalDims + 1);
+
+    // a^T T^-1
+    for (unsigned logicalDim = 0;
+         logicalDim < numLogicalDims;
+         ++logicalDim) {
+      Rational coefficient;
+
+      for (unsigned sourceDim = 0;
+           sourceDim < numSourceDims;
+           ++sourceDim) {
+        coefficient =
+            coefficient +
+            Rational(source[sourceDim]) *
+                inverse[sourceDim][logicalDim];
+      }
+
+      logical[logicalDim] = coefficient;
+    }
+
+    // b - (a^T T^-1) c
+    Rational constant(source.back());
+    for (unsigned logicalDim = 0;
+         logicalDim < numLogicalDims;
+         ++logicalDim) {
+      constant =
+          constant -
+          logical[logicalDim] * Rational(offset[logicalDim]);
+    }
+
+    logical[numLogicalDims] = constant;
+    logicalInequalities.push_back(std::move(logical));
+  }
+
+  return logicalInequalities;
+}
+
+static FailureOr<presburger::IntegerPolyhedron>
+buildExactLogicalDomain(
+    const affine::FlatAffineValueConstraints &sourceDomain,
+    const SmallVector<SmallVector<int64_t>> &transformation,
+    ArrayRef<int64_t> offset) {
+  const unsigned numSourceDims = sourceDomain.getNumDimVars();
+  const unsigned numLogicalDims = transformation.size();
+
+  if (numSourceDims == 0 || numLogicalDims == 0)
+    return failure();
+
+  if (offset.size() != numLogicalDims)
+    return failure();
+
+  for (const auto &row : transformation) {
+    if (row.size() != numSourceDims)
+      return failure();
+  }
+
+  // Logical coordinates are set dimensions.
+  // Source iteration variables are existential integer locals.
+  //
+  // Variable layout:
+  //
+  //   [logical dims | source locals | constant]
+  //
+  // This represents:
+  //
+  //   { l | exists x in D_S : l = T x + c }.
+  auto space = presburger::PresburgerSpace::getSetSpace(
+      /*numDims=*/numLogicalDims,
+      /*numSymbols=*/0,
+      /*numLocals=*/numSourceDims);
+
+  presburger::IntegerPolyhedron logicalDomain(space);
+
+  // Copy source-domain inequalities into the local-variable columns:
+  //
+  //   a^T x + b >= 0
+  //
+  // becomes
+  //
+  //   0^T l + a^T x + b >= 0.
+  for (unsigned i = 0; i < sourceDomain.getNumInequalities(); ++i) {
+    auto source = sourceDomain.getInequality64(i);
+
+    if (source.size() != numSourceDims + 1)
+      return failure();
+
+    SmallVector<int64_t> inequality(
+        logicalDomain.getNumCols(), 0);
+
+    for (unsigned sourceDim = 0;
+         sourceDim < numSourceDims;
+         ++sourceDim) {
+      inequality[numLogicalDims + sourceDim] =
+          source[sourceDim];
+    }
+
+    inequality.back() = source.back();
+    logicalDomain.addInequality(inequality);
+  }
+
+  // Add l = T x + c as one equality per logical dimension:
+  //
+  //   l_r - sum_j T[r][j] x_j - c_r = 0.
+  for (unsigned logicalDim = 0;
+       logicalDim < numLogicalDims;
+       ++logicalDim) {
+    SmallVector<int64_t> equality(
+        logicalDomain.getNumCols(), 0);
+
+    equality[logicalDim] = 1;
+
+    for (unsigned sourceDim = 0;
+         sourceDim < numSourceDims;
+         ++sourceDim) {
+      equality[numLogicalDims + sourceDim] =
+          -transformation[logicalDim][sourceDim];
+    }
+
+    equality.back() = -offset[logicalDim];
+
+    logicalDomain.addEquality(equality);
+  }
+
+  return logicalDomain;
+}
+
 
 static bool
 isInvertibleSquareMapping(
@@ -514,6 +823,26 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   llvm::errs() << "  access iteration IV count: "
                << iterationIVs.size() << "\n";
 
+  auto sourceDomain = recoverSourceDomain(iterationIVs);
+  if (failed(sourceDomain))
+    return failure();
+
+  llvm::errs() << "  source iteration domain:\n";
+  sourceDomain->dump();
+
+  llvm::errs() << "  source inequalities:\n";
+  for (unsigned i = 0; i < sourceDomain->getNumInequalities(); ++i) {
+    auto inequality = sourceDomain->getInequality64(i);
+
+    llvm::errs() << "    [";
+    for (unsigned j = 0; j < inequality.size(); ++j) {
+      if (j != 0)
+        llvm::errs() << " ";
+      llvm::errs() << inequality[j];
+    }
+    llvm::errs() << "] >= 0\n";
+  }
+
   // The accumulator must be read from and written back to the same
   // memref location.
   if (accLoad.getMemref() != store.getMemref())
@@ -743,6 +1072,73 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   result.logicalMapping.isInvertible =
       isInvertibleSquareMapping(
           result.logicalMapping.transformation);
+
+  if (result.logicalMapping.isInvertible) {
+    auto inverse =
+        invertSquareMapping(result.logicalMapping.transformation);
+    if (failed(inverse))
+      return failure();
+
+    llvm::errs() << "  inverse logical mapping\n";
+    for (unsigned row = 0; row < inverse->size(); ++row) {
+      llvm::errs() << "    T^-1[" << row << "] = [";
+
+      for (unsigned column = 0;
+           column < (*inverse)[row].size();
+           ++column) {
+        if (column != 0)
+          llvm::errs() << " ";
+
+        const Rational &value = (*inverse)[row][column];
+        llvm::errs() << value.numerator;
+        if (value.denominator != 1)
+          llvm::errs() << "/" << value.denominator;
+      }
+
+      llvm::errs() << "]\n";
+    }
+
+    auto logicalInequalities =
+        transformDomainToLogical(
+            *sourceDomain,
+            *inverse,
+            result.logicalMapping.offset);
+    if (failed(logicalInequalities))
+      return failure();
+
+    llvm::errs() << "  logical iteration domain:\n";
+    for (const auto &inequality : *logicalInequalities) {
+      llvm::errs() << "    [";
+
+      for (unsigned column = 0;
+           column < inequality.size();
+           ++column) {
+        if (column != 0)
+          llvm::errs() << " ";
+
+        const Rational &value = inequality[column];
+        llvm::errs() << value.numerator;
+        if (value.denominator != 1)
+          llvm::errs() << "/" << value.denominator;
+      }
+
+      llvm::errs() << "] >= 0\n";
+    }
+
+  }
+
+  auto exactLogicalDomain =
+      buildExactLogicalDomain(
+          *sourceDomain,
+          result.logicalMapping.transformation,
+          result.logicalMapping.offset);
+
+  if (succeeded(exactLogicalDomain)) {
+    result.logicalDomain = std::move(*exactLogicalDomain);
+
+    llvm::errs() << "  exact logical iteration domain:\n";
+    result.logicalDomain->dump();
+  }
 
   result.partitionMap =
       AffineMap::get(/*dimCount=*/numIterationDims,

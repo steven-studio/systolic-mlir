@@ -1,6 +1,7 @@
 #ifndef SYSTOLIC_AFFINE_MATMUL_ANALYSIS_H
 #define SYSTOLIC_AFFINE_MATMUL_ANALYSIS_H
 
+#include "mlir/Analysis/Presburger/IntegerRelation.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Operation.h"
@@ -8,6 +9,8 @@
 #include "mlir/Support/LogicalResult.h"
 
 #include "llvm/ADT/SmallVector.h"
+
+#include <optional>
 
 namespace mlir {
 namespace systolic {
@@ -83,6 +86,14 @@ struct LogicalMatmul {
   // Affine coordinate transformation y = T x + c for
   // y = (P*, I, J, K).
   AffineLogicalMapping logicalMapping;
+
+  // Exact integer logical iteration domain:
+  //
+  //   D_L = { y in Z^m | exists x in D_S : y = T x + c }.
+  //
+  // Source iteration coordinates may remain as existential local variables,
+  // preserving lattice information for non-unimodular mappings.
+  std::optional<presburger::IntegerPolyhedron> logicalDomain;
 
   // Logical problem extents.  Extent recovery is deliberately separate from
   // GEMM recognition: an unknown extent does not make recognition fail.
