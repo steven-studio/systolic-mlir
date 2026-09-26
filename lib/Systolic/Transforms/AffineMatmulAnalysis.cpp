@@ -420,9 +420,17 @@ buildExactLogicalDomain(
     const SmallVector<SmallVector<int64_t>> &transformation,
     ArrayRef<int64_t> offset) {
   const unsigned numSourceDims = sourceDomain.getNumDimVars();
+  const unsigned numSourceSymbols = sourceDomain.getNumSymbolVars();
+  const unsigned numSourceLocals = sourceDomain.getNumLocalVars();
   const unsigned numLogicalDims = transformation.size();
 
   if (numSourceDims == 0 || numLogicalDims == 0)
+    return failure();
+
+  // Symbolic source bounds require carrying source symbols into the logical
+  // Presburger space.  Keep that case explicit until its representation is
+  // implemented.
+  if (numSourceSymbols != 0)
     return failure();
 
   if (offset.size() != numLogicalDims)
@@ -433,53 +441,90 @@ buildExactLogicalDomain(
       return failure();
   }
 
-  // Logical coordinates are set dimensions.
-  // Source iteration variables are existential integer locals.
+  // Logical coordinates are set dimensions.  Source iteration dimensions and
+  // any source-domain locals are existential integer locals.
   //
-  // Variable layout:
+  // Source layout:
   //
-  //   [logical dims | source locals | constant]
+  //   [source dims x | source locals q | constant]
+  //
+  // Logical-domain layout:
+  //
+  //   [logical dims l | source dims x | source locals q | constant]
   //
   // This represents:
   //
-  //   { l | exists x in D_S : l = T x + c }.
+  //   { l | exists x, q : (x, q) in D_S and l = T x + c }.
+  const unsigned numLogicalLocals =
+      numSourceDims + numSourceLocals;
+
   auto space = presburger::PresburgerSpace::getSetSpace(
       /*numDims=*/numLogicalDims,
       /*numSymbols=*/0,
-      /*numLocals=*/numSourceDims);
+      /*numLocals=*/numLogicalLocals);
 
   presburger::IntegerPolyhedron logicalDomain(space);
 
-  // Copy source-domain inequalities into the local-variable columns:
-  //
-  //   a^T x + b >= 0
-  //
-  // becomes
-  //
-  //   0^T l + a^T x + b >= 0.
-  for (unsigned i = 0; i < sourceDomain.getNumInequalities(); ++i) {
-    auto source = sourceDomain.getInequality64(i);
+  const unsigned expectedSourceCols =
+      numSourceDims + numSourceLocals + 1;
 
-    if (source.size() != numSourceDims + 1)
+  auto copySourceConstraint =
+      [&](ArrayRef<int64_t> source, bool equality) -> LogicalResult {
+    if (source.size() != expectedSourceCols)
       return failure();
 
-    SmallVector<int64_t> inequality(
+    SmallVector<int64_t> constraint(
         logicalDomain.getNumCols(), 0);
 
+    // Copy source dimensions into the first existential-local block.
     for (unsigned sourceDim = 0;
          sourceDim < numSourceDims;
          ++sourceDim) {
-      inequality[numLogicalDims + sourceDim] =
+      constraint[numLogicalDims + sourceDim] =
           source[sourceDim];
     }
 
-    inequality.back() = source.back();
-    logicalDomain.addInequality(inequality);
+    // Preserve source-domain locals, including divisibility/stride witnesses.
+    for (unsigned sourceLocal = 0;
+         sourceLocal < numSourceLocals;
+         ++sourceLocal) {
+      constraint[numLogicalDims + numSourceDims + sourceLocal] =
+          source[numSourceDims + sourceLocal];
+    }
+
+    constraint.back() = source.back();
+
+    if (equality)
+      logicalDomain.addEquality(constraint);
+    else
+      logicalDomain.addInequality(constraint);
+
+    return success();
+  };
+
+  for (unsigned i = 0;
+       i < sourceDomain.getNumInequalities();
+       ++i) {
+    if (failed(copySourceConstraint(
+            sourceDomain.getInequality64(i),
+            /*equality=*/false)))
+      return failure();
+  }
+
+  for (unsigned i = 0;
+       i < sourceDomain.getNumEqualities();
+       ++i) {
+    if (failed(copySourceConstraint(
+            sourceDomain.getEquality64(i),
+            /*equality=*/true)))
+      return failure();
   }
 
   // Add l = T x + c as one equality per logical dimension:
   //
   //   l_r - sum_j T[r][j] x_j - c_r = 0.
+  //
+  // Existing source-domain locals q do not participate in this mapping.
   for (unsigned logicalDim = 0;
        logicalDim < numLogicalDims;
        ++logicalDim) {
@@ -496,13 +541,11 @@ buildExactLogicalDomain(
     }
 
     equality.back() = -offset[logicalDim];
-
     logicalDomain.addEquality(equality);
   }
 
   return logicalDomain;
 }
-
 
 static bool
 isInvertibleSquareMapping(
@@ -1012,6 +1055,10 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
   result.anchor = candidate.anchor;
   result.outputStore = store.getOperation();
 
+  // Preserve the exact source/execution iteration domain D_S.  Its dimension
+  // order matches iterationIVs and therefore the columns of logicalMapping.
+  result.sourceDomain = *sourceDomain;
+
   SmallVector<int64_t> sourceOrigin;
   sourceOrigin.reserve(iterationIVs.size());
 
@@ -1103,26 +1150,26 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
             *sourceDomain,
             *inverse,
             result.logicalMapping.offset);
-    if (failed(logicalInequalities))
-      return failure();
 
-    llvm::errs() << "  logical iteration domain:\n";
-    for (const auto &inequality : *logicalInequalities) {
-      llvm::errs() << "    [";
+    if (succeeded(logicalInequalities)) {
+      llvm::errs() << "  logical iteration domain:\n";
+      for (const auto &inequality : *logicalInequalities) {
+        llvm::errs() << "    [";
 
-      for (unsigned column = 0;
-           column < inequality.size();
-           ++column) {
-        if (column != 0)
-          llvm::errs() << " ";
+        for (unsigned column = 0;
+             column < inequality.size();
+             ++column) {
+          if (column != 0)
+            llvm::errs() << " ";
 
-        const Rational &value = inequality[column];
-        llvm::errs() << value.numerator;
-        if (value.denominator != 1)
-          llvm::errs() << "/" << value.denominator;
+          const Rational &value = inequality[column];
+          llvm::errs() << value.numerator;
+          if (value.denominator != 1)
+            llvm::errs() << "/" << value.denominator;
+        }
+
+        llvm::errs() << "] >= 0\n";
       }
-
-      llvm::errs() << "] >= 0\n";
     }
 
   }
