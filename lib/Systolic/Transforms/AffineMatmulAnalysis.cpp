@@ -600,14 +600,28 @@ recoverLogicalExtent(AffineExpr expr,
                      ValueRange iterationIVs) {
   LogicalExtent result;
 
-  // First checkpoint: only recover extents for a logical coordinate that is
-  // exactly one iteration dimension.  Composed coordinates such as d0 + d1
-  // remain valid GEMM coordinates, but their extent is currently unknown.
-  auto dimExpr = dyn_cast<AffineDimExpr>(expr);
-  if (!dimExpr)
+  // First checkpoint: recover an extent when the logical coordinate depends
+  // on exactly one source iteration dimension.  The affine expression may be
+  // composed, e.g. d0 * 2 + 7, because the extent is the number of source
+  // iterations rather than the numerical span of the logical coordinate.
+  //
+  // Multi-IV expressions such as d0 + d1 remain unsupported for now because
+  // their extent cannot be recovered from a single source loop directly.
+
+  SmallVector<unsigned> usedDims;
+  expr.walk([&](AffineExpr subExpr) {
+    if (auto dimExpr = dyn_cast<AffineDimExpr>(subExpr))
+      usedDims.push_back(dimExpr.getPosition());
+  });
+
+  llvm::sort(usedDims);
+  usedDims.erase(std::unique(usedDims.begin(), usedDims.end()),
+                 usedDims.end());
+
+  if (usedDims.size() != 1)
     return result;
 
-  unsigned position = dimExpr.getPosition();
+  unsigned position = usedDims.front();
   if (position >= iterationIVs.size())
     return result;
 
@@ -1329,6 +1343,61 @@ mlir::systolic::recognizeLogicalMatmul(
   result.accessA = accessA;
   result.accessB = accessB;
   result.accessC = *normalizedAcc;
+
+  // Materialize operand factor maps:
+  //
+  //   F_A = phiA(P*, I, K)
+  //   F_B = phiB(P*, K, J)
+  //   F_C = phiC(P*, I, J)
+  //
+  // accessA/B/C have already been verified against the canonical
+  // logical GEMM pattern above, so these maps are derived from the
+  // recognized access structure rather than rediscovered independently.
+  SmallVector<AffineExpr> phiAResults;
+  SmallVector<AffineExpr> phiBResults;
+  SmallVector<AffineExpr> phiCResults;
+
+  for (unsigned p = 0; p < numPartitionDims; ++p) {
+    phiAResults.push_back(accessA.getResult(p));
+    phiBResults.push_back(accessB.getResult(p));
+    phiCResults.push_back(result.accessC.getResult(p));
+  }
+
+  phiAResults.push_back(
+      accessA.getResult(numPartitionDims));      // I
+  phiAResults.push_back(
+      accessA.getResult(numPartitionDims + 1));  // K
+
+  phiBResults.push_back(
+      accessB.getResult(numPartitionDims));      // K
+  phiBResults.push_back(
+      accessB.getResult(numPartitionDims + 1));  // J
+
+  phiCResults.push_back(
+      result.accessC.getResult(numPartitionDims));      // I
+  phiCResults.push_back(
+      result.accessC.getResult(numPartitionDims + 1));  // J
+
+  result.phiA =
+      AffineMap::get(
+          /*dimCount=*/numIterationDims,
+          /*symbolCount=*/0,
+          phiAResults,
+          candidate.anchor->getContext());
+
+  result.phiB =
+      AffineMap::get(
+          /*dimCount=*/numIterationDims,
+          /*symbolCount=*/0,
+          phiBResults,
+          candidate.anchor->getContext());
+
+  result.phiC =
+      AffineMap::get(
+          /*dimCount=*/numIterationDims,
+          /*symbolCount=*/0,
+          phiCResults,
+          candidate.anchor->getContext());
 
   SmallVector<AffineExpr> logicalPartitions;
   logicalPartitions.reserve(numPartitionDims);

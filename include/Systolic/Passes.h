@@ -8,6 +8,26 @@ namespace systolic {
 
 // 把 linalg.matmul lowering 成 systolic dialect。
 // 目前只处理形状固定、且刚好等于 (rows x cols) 的 matmul(阶段 2 MVP)。
+
+//===----------------------------------------------------------------------===//
+// Stage 1: Accelerator selection
+//===----------------------------------------------------------------------===//
+
+std::unique_ptr<Pass> createSystolicCostAnalysisPass();
+void registerSystolicCostAnalysisPass();
+
+std::unique_ptr<Pass> createSystolicSelectDevicePass();
+void registerSystolicSelectDevicePass();
+
+//===----------------------------------------------------------------------===//
+// Stage 2: Tile partitioning
+//===----------------------------------------------------------------------===//
+
+std::unique_ptr<Pass> createSystolicTileMatmulPass();
+void registerSystolicTileMatmulPass();
+
+std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
+void registerAffineMatmulToSystolicPass();
 std::unique_ptr<Pass> createConvertMatmulToSystolicPass();
 
 // 把 systolic.pe_array 展开成 rows x cols x K 的三层 scf.for 迴圈,
