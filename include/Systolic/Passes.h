@@ -32,6 +32,9 @@ void registerSystolicSelectDevicePass();
 std::unique_ptr<Pass> createSystolicTileMatmulPass();
 void registerSystolicTileMatmulPass();
 
+std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
+void registerAffineMatmulToSystolicPass();
+
 std::unique_ptr<Pass> createConvertMatmulToSystolicPass();
 
 //===----------------------------------------------------------------------===//

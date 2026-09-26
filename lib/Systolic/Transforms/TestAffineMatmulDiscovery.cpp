@@ -152,6 +152,18 @@ struct TestAffineMatmulDiscoveryPass
         result.sourceDomain->dump();
       }
 
+      llvm::errs() << "  phiA: ";
+      result.phiA.print(llvm::errs());
+      llvm::errs() << "\n";
+
+      llvm::errs() << "  phiB: ";
+      result.phiB.print(llvm::errs());
+      llvm::errs() << "\n";
+
+      llvm::errs() << "  phiC: ";
+      result.phiC.print(llvm::errs());
+      llvm::errs() << "\n";
+
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);
