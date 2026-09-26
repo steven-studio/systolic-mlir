@@ -1,5 +1,6 @@
 add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulAnalysis.cpp
+  AffineMatmulPartitioning.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp
