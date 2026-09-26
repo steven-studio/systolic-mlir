@@ -844,7 +844,70 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
   // the affine composition above is the canonical representation used
   // by downstream logical-coordinate consumers.
 
-  normalization.domain = sourceDomain;
+  // Canonical normalized execution domain.
+  //
+  // z_i is the iteration ordinal of the corresponding affine.for:
+  //
+  //   x_i = lower_i + step_i * z_i
+  //
+  // For static bounds:
+  //
+  //   0 <= z_i < ceil((upper_i - lower_i) / step_i)
+  //
+  // This intentionally constructs the normalized domain directly rather
+  // than carrying the original x-coordinates through Presburger
+  // substitution.  The result therefore contains only z dimensions,
+  // with no auxiliary local variables.
+
+  affine::FlatAffineValueConstraints normalizedDomain(
+      numSourceDims, /*numSymbolVars=*/0, /*numLocalVars=*/0);
+
+  for (unsigned i = 0; i < numSourceDims; ++i) {
+    auto blockArg = dyn_cast<BlockArgument>(iterationIVs[i]);
+    if (!blockArg)
+      return failure();
+
+    auto loop = dyn_cast<affine::AffineForOp>(
+        blockArg.getOwner()->getParentOp());
+    if (!loop)
+      return failure();
+
+    const int64_t lower =
+        loop.getConstantLowerBound();
+    const int64_t upper =
+        loop.getConstantUpperBound();
+
+    const int64_t step =
+        loop.getStep().getSExtValue();
+
+    if (step <= 0 || upper <= lower)
+      return failure();
+
+    const int64_t distance = upper - lower;
+    const int64_t extent =
+        (distance + step - 1) / step;
+
+    if (extent <= 0)
+      return failure();
+
+    // z_i >= 0
+    SmallVector<int64_t> lowerConstraint(
+        numSourceDims + 1, 0);
+    lowerConstraint[i] = 1;
+    normalizedDomain.addInequality(lowerConstraint);
+
+    // z_i <= extent - 1
+    SmallVector<int64_t> upperConstraint(
+        numSourceDims + 1, 0);
+    upperConstraint[i] = -1;
+    upperConstraint.back() = extent - 1;
+    normalizedDomain.addInequality(upperConstraint);
+  }
+
+  normalization.domain = std::move(normalizedDomain);
+
+  llvm::errs() << "  normalized execution domain:\n";
+  normalization.domain->dump();
 
   normalization.isIdentity = true;
 
