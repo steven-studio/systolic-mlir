@@ -65,6 +65,39 @@ struct AffineLogicalMapping {
   bool isInvertible = false;
 };
 
+struct AffineLogicalNormalization {
+  // Dense normalized coordinates z represent the original execution
+  // coordinates after removing their static origins.
+  //
+  //   x = S z + sourceOrigin
+  //
+  // The logical coordinates remain:
+  //
+  //   y = T x + c
+  //
+  // so downstream passes never need to pretend that T is identity.
+  SmallVector<SmallVector<int64_t>> sourceTransformation;
+  SmallVector<int64_t> sourceOffset;
+
+  // Composed logical coordinates:
+  //
+  //   y = logicalTransformation * z + logicalOffset
+  //
+  // after composing the source-loop normalization with the recovered
+  // logical mapping.
+  SmallVector<SmallVector<int64_t>> logicalTransformation;
+  SmallVector<int64_t> logicalOffset;
+
+  // Exact normalized execution domain.
+  //
+  // This is deliberately kept separate from LogicalMatmul::logicalDomain:
+  // logicalDomain describes y, while this domain describes normalized z.
+  std::optional<affine::FlatAffineValueConstraints> domain;
+
+  // True iff normalization is just x = z.
+  bool isIdentity = false;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
   Operation *outputStore = nullptr;
@@ -87,6 +120,9 @@ struct LogicalMatmul {
   // Affine coordinate transformation y = T x + c for
   // y = (P*, I, J, K).
   AffineLogicalMapping logicalMapping;
+
+  // Normalized dense logical coordinates used by later tiling/lowering.
+  AffineLogicalNormalization normalization;
 
   // Exact source iteration domain D_S over the original iteration
   // coordinates x, in the same order as the columns of logicalMapping.

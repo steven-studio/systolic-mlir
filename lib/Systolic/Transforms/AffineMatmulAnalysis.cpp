@@ -729,8 +729,189 @@ void mlir::systolic::collectAffineMatmulCandidates(
   });
 }
 
+
+static FailureOr<AffineLogicalNormalization>
+normalizeLogicalCoordinates(const LogicalMatmul &matmul,
+                            ValueRange iterationIVs) {
+  if (!matmul.sourceDomain)
+    return failure();
+
+  const auto &sourceDomain = *matmul.sourceDomain;
+  const unsigned numSourceDims = sourceDomain.getNumDimVars();
+
+  if (numSourceDims == 0 ||
+      iterationIVs.size() != numSourceDims)
+    return failure();
+
+  if (!matmul.logicalMapping.hasStaticSourceOrigin ||
+      matmul.logicalMapping.sourceOrigin.size() != numSourceDims)
+    return failure();
+
+  const auto &T = matmul.logicalMapping.transformation;
+  const auto &c = matmul.logicalMapping.offset;
+
+  const unsigned numLogicalDims = T.size();
+
+  if (numLogicalDims == 0 ||
+      c.size() != numLogicalDims)
+    return failure();
+
+  for (const auto &row : T) {
+    if (row.size() != numSourceDims)
+      return failure();
+  }
+
+  AffineLogicalNormalization normalization;
+
+  // Normalize source loop coordinates:
+  //
+  //   x_i = s_i * z_i + origin_i
+  //
+  // where s_i is the affine.for step.
+
+  normalization.sourceTransformation.assign(
+      numSourceDims,
+      SmallVector<int64_t>(numSourceDims, 0));
+
+  normalization.sourceOffset =
+      matmul.logicalMapping.sourceOrigin;
+
+  for (unsigned i = 0; i < numSourceDims; ++i) {
+    auto blockArg =
+        dyn_cast<BlockArgument>(iterationIVs[i]);
+
+    if (!blockArg)
+      return failure();
+
+    auto loop =
+        dyn_cast<affine::AffineForOp>(
+            blockArg.getOwner()->getParentOp());
+
+    if (!loop)
+      return failure();
+
+    const int64_t step = loop.getStep().getSExtValue();
+
+    if (step <= 0)
+      return failure();
+
+    normalization.sourceTransformation[i][i] = step;
+  }
+
+  // Compose:
+  //
+  //   x = S z + origin
+  //   y = T x + c
+  //
+  // therefore:
+  //
+  //   y = (T S) z + (T origin + c).
+
+  normalization.logicalTransformation.assign(
+      numLogicalDims,
+      SmallVector<int64_t>(numSourceDims, 0));
+
+  normalization.logicalOffset.assign(
+      numLogicalDims, 0);
+
+  for (unsigned logicalDim = 0;
+       logicalDim < numLogicalDims;
+       ++logicalDim) {
+    for (unsigned sourceDim = 0;
+         sourceDim < numSourceDims;
+         ++sourceDim) {
+      normalization.logicalTransformation[logicalDim][sourceDim] =
+          T[logicalDim][sourceDim] *
+          normalization.sourceTransformation[sourceDim][sourceDim];
+    }
+
+    int64_t composedOffset = c[logicalDim];
+
+    for (unsigned sourceDim = 0;
+         sourceDim < numSourceDims;
+         ++sourceDim) {
+      composedOffset +=
+          T[logicalDim][sourceDim] *
+          normalization.sourceOffset[sourceDim];
+    }
+
+    normalization.logicalOffset[logicalDim] =
+        composedOffset;
+  }
+
+  // Keep the exact source domain attached for now.
+  // The source-domain constraints are still expressed in x-coordinates;
+  // the affine composition above is the canonical representation used
+  // by downstream logical-coordinate consumers.
+
+  normalization.domain = sourceDomain;
+
+  normalization.isIdentity = true;
+
+  for (unsigned row = 0;
+       row < numLogicalDims;
+       ++row) {
+    for (unsigned column = 0;
+         column < numSourceDims;
+         ++column) {
+      const int64_t expected =
+          (row == column) ? 1 : 0;
+
+      if (normalization.logicalTransformation[row][column] !=
+          expected)
+        normalization.isIdentity = false;
+    }
+
+    if (normalization.logicalOffset[row] != 0)
+      normalization.isIdentity = false;
+  }
+
+  llvm::errs() << "  normalized logical coordinates:\n";
+
+  for (unsigned logicalDim = 0;
+       logicalDim < numLogicalDims;
+       ++logicalDim) {
+    llvm::errs() << "    y" << logicalDim << " = ";
+
+    bool printed = false;
+
+    for (unsigned sourceDim = 0;
+         sourceDim < numSourceDims;
+         ++sourceDim) {
+      const int64_t coefficient =
+          normalization.logicalTransformation
+              [logicalDim][sourceDim];
+
+      if (coefficient == 0)
+        continue;
+
+      if (printed)
+        llvm::errs() << " + ";
+
+      llvm::errs() << coefficient
+                   << "*z" << sourceDim;
+
+      printed = true;
+    }
+
+    if (normalization.logicalOffset[logicalDim] != 0 ||
+        !printed) {
+      if (printed)
+        llvm::errs() << " + ";
+
+      llvm::errs()
+          << normalization.logicalOffset[logicalDim];
+    }
+
+    llvm::errs() << "\n";
+  }
+
+  return normalization;
+}
+
 FailureOr<LogicalMatmul>
-mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
+mlir::systolic::recognizeLogicalMatmul(
+    AffineMatmulCandidate candidate) {
   if (!candidate.anchor)
     return failure();
 
@@ -1207,6 +1388,13 @@ mlir::systolic::recognizeLogicalMatmul(AffineMatmulCandidate candidate) {
                      /*symbolCount=*/0,
                      logicalK,
                      candidate.anchor->getContext());
+
+  auto normalization =
+      normalizeLogicalCoordinates(result, iterationIVs);
+  if (failed(normalization))
+    return failure();
+
+  result.normalization = std::move(*normalization);
 
   result.rowExtent =
       recoverLogicalExtent(logicalI, iterationIVs);
