@@ -4,6 +4,10 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulPartitioning.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
+  CostModel.cpp
+  SystolicCostAnalysisPass.cpp
+  SystolicSelectDevicePass.cpp
+  SystolicTileMatmulPass.cpp
   ExpandPEArrayToMac.cpp
   TileMatmulForFpga.cpp
   Conv2DToFpga.cpp

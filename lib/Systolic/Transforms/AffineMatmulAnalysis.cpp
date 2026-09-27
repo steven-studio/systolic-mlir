@@ -600,91 +600,240 @@ recoverLogicalExtent(AffineExpr expr,
                      ValueRange iterationIVs) {
   LogicalExtent result;
 
-  // First checkpoint: recover an extent when the logical coordinate depends
-  // on exactly one source iteration dimension.  The affine expression may be
-  // composed, e.g. d0 * 2 + 7, because the extent is the number of source
-  // iterations rather than the numerical span of the logical coordinate.
+  const unsigned numDims = iterationIVs.size();
+
+  // Recover a linear affine expression:
   //
-  // Multi-IV expressions such as d0 + d1 remain unsupported for now because
-  // their extent cannot be recovered from a single source loop directly.
+  //   expr = sum_i coeff[i] * d_i + constant
+  //
+  // This handles composed logical coordinates such as:
+  //
+  //   I = d0 + d1
+  //   I = 2 * d0 + 7
+  //
+  // which cannot be handled by the old single-IV checkpoint.
+  SmallVector<int64_t> coeffs(numDims, 0);
+  int64_t constant = 0;
 
-  SmallVector<unsigned> usedDims;
-  expr.walk([&](AffineExpr subExpr) {
-    if (auto dimExpr = dyn_cast<AffineDimExpr>(subExpr))
-      usedDims.push_back(dimExpr.getPosition());
-  });
+  std::function<LogicalResult(AffineExpr)> collectLinear =
+      [&](AffineExpr e) -> LogicalResult {
+    if (auto dim = dyn_cast<AffineDimExpr>(e)) {
+      unsigned pos = dim.getPosition();
+      if (pos >= numDims)
+        return failure();
 
-  llvm::sort(usedDims);
-  usedDims.erase(std::unique(usedDims.begin(), usedDims.end()),
-                 usedDims.end());
+      ++coeffs[pos];
+      return success();
+    }
 
-  if (usedDims.size() != 1)
+    if (auto c = dyn_cast<AffineConstantExpr>(e)) {
+      constant += c.getValue();
+      return success();
+    }
+
+    auto binary = dyn_cast<AffineBinaryOpExpr>(e);
+    if (!binary)
+      return failure();
+
+    switch (binary.getKind()) {
+    case AffineExprKind::Add:
+      if (failed(collectLinear(binary.getLHS())))
+        return failure();
+      if (failed(collectLinear(binary.getRHS())))
+        return failure();
+      return success();
+
+    case AffineExprKind::Mul: {
+      auto lhsConst =
+          dyn_cast<AffineConstantExpr>(binary.getLHS());
+      auto rhsConst =
+          dyn_cast<AffineConstantExpr>(binary.getRHS());
+
+      if (!lhsConst && !rhsConst)
+        return failure();
+
+      int64_t factor;
+      AffineExpr other;
+
+      if (lhsConst) {
+        factor = lhsConst.getValue();
+        other = binary.getRHS();
+      } else {
+        factor = rhsConst.getValue();
+        other = binary.getLHS();
+      }
+
+
+      std::fill(coeffs.begin(), coeffs.end(), 0);
+      constant = 0;
+
+      if (failed(collectLinear(other)))
+        return failure();
+
+      for (unsigned i = 0; i < numDims; ++i)
+        coeffs[i] *= factor;
+
+      constant *= factor;
+      return success();
+    }
+
+    default:
+      return failure();
+    }
+  };
+
+  if (failed(collectLinear(expr)))
     return result;
 
-  unsigned position = usedDims.front();
-  if (position >= iterationIVs.size())
+  bool hasUsedDim = false;
+  for (int64_t coeff : coeffs) {
+    if (coeff != 0) {
+      hasUsedDim = true;
+      break;
+    }
+  }
+
+  if (!hasUsedDim)
     return result;
 
-  Value iv = iterationIVs[position];
+  // If the logical coordinate depends on exactly one source IV,
+  // its extent is the number of source iterations, not the numerical
+  // span of the logical coordinate.
+  //
+  // Example:
+  //
+  //   affine.for %i = 3 to 103 step 5
+  //   I = 5 * %i + 3
+  //
+  // The logical coordinates are 3, 8, ..., 98, which contain 20
+  // iterations.  The numerical span is 96, but the logical extent
+  // required by the GEMM tensor is 20.
+  unsigned singleUsedDim = numDims;
+  unsigned numUsedDims = 0;
 
-  auto blockArg = dyn_cast<BlockArgument>(iv);
-  if (!blockArg)
-    return result;
+  for (unsigned dim = 0; dim < numDims; ++dim) {
+    if (coeffs[dim] != 0) {
+      singleUsedDim = dim;
+      ++numUsedDims;
+    }
+  }
 
-  auto loop =
-      dyn_cast<affine::AffineForOp>(blockArg.getOwner()->getParentOp());
-  if (!loop || loop.getInductionVar() != iv)
-    return result;
+  if (numUsedDims == 1) {
+    Value iv = iterationIVs[singleUsedDim];
 
-  // Static affine.for trip count.
-  if (loop.hasConstantLowerBound() &&
-      loop.hasConstantUpperBound()) {
+    auto blockArg = dyn_cast<BlockArgument>(iv);
+    if (!blockArg)
+      return result;
+
+    auto loop =
+        dyn_cast<affine::AffineForOp>(
+            blockArg.getOwner()->getParentOp());
+
+    if (!loop || loop.getInductionVar() != iv)
+      return result;
+
+    int64_t step = loop.getStep().getSExtValue();
+    if (step <= 0)
+      return result;
+
+    if (!loop.hasConstantLowerBound() ||
+        !loop.hasConstantUpperBound())
+      return result;
+
     int64_t lower = loop.getConstantLowerBound();
     int64_t upper = loop.getConstantUpperBound();
-    int64_t step = loop.getStep().getSExtValue();
 
-    if (step <= 0 || upper <= lower)
+    if (upper <= lower)
+      return result;
+
+    int64_t tripCount =
+        (upper - lower + step - 1) / step;
+
+    if (tripCount <= 0)
       return result;
 
     result.kind = LogicalExtent::Kind::Static;
-    result.staticValue = (upper - lower + step - 1) / step;
+    result.staticValue = tripCount;
     return result;
   }
 
-  // First symbolic checkpoint:
-  //
-  //   affine.for %iv = 0 to %n
-  //
-  // is represented as:
-  //
-  //   LB: () -> (0)
-  //   UB: ()[s0] -> (s0), operand = %n
-  //
-  // Keep this deliberately narrow.  More general affine bounds can be
-  // supported later without weakening GEMM recognition.
-  if (loop.getStep() != 1)
+  // For an affine-linear expression depending on multiple source IVs,
+  // keep the existing dense-span interpretation.  This handles cases
+  // such as I = d0 + d1, where the logical coordinates form a dense
+  // interval.
+  int64_t minValue = constant;
+  int64_t maxValue = constant;
+
+  for (unsigned dim = 0; dim < numDims; ++dim) {
+    if (coeffs[dim] == 0)
+      continue;
+
+    Value iv = iterationIVs[dim];
+
+    auto blockArg = dyn_cast<BlockArgument>(iv);
+    if (!blockArg)
+      return result;
+
+    auto loop =
+        dyn_cast<affine::AffineForOp>(
+            blockArg.getOwner()->getParentOp());
+
+    if (!loop || loop.getInductionVar() != iv)
+      return result;
+
+    int64_t step = loop.getStep().getSExtValue();
+    if (step <= 0)
+      return result;
+
+    if (!loop.hasConstantLowerBound() ||
+        !loop.hasConstantUpperBound())
+      return result;
+
+    int64_t lower = loop.getConstantLowerBound();
+    int64_t upper = loop.getConstantUpperBound();
+
+    if (upper <= lower)
+      return result;
+
+    int64_t tripCount =
+        (upper - lower + step - 1) / step;
+
+    int64_t last =
+        lower + (tripCount - 1) * step;
+
+    int64_t coeff = coeffs[dim];
+
+    if (coeff > 0) {
+      minValue += coeff * lower;
+      maxValue += coeff * last;
+    } else {
+      minValue += coeff * last;
+      maxValue += coeff * lower;
+    }
+  }
+
+  if (maxValue < minValue)
     return result;
 
-  if (!loop.hasConstantLowerBound() ||
-      loop.getConstantLowerBound() != 0)
+  // The logical extent is the size of the dense interval containing
+  // the recovered logical coordinate.
+  //
+  // Example:
+  //
+  //   I = d0 + d1
+  //   d0,d1 in [0,4)
+  //
+  //   min(I) = 0
+  //   max(I) = 6
+  //   extent = 7
+  int64_t extent = maxValue - minValue + 1;
+
+  if (extent <= 0)
     return result;
 
-  AffineMap upperMap = loop.getUpperBoundMap();
-  auto upperOperands = loop.getUpperBoundOperands();
+  result.kind = LogicalExtent::Kind::Static;
+  result.staticValue = extent;
 
-  if (upperMap.getNumDims() != 0 ||
-      upperMap.getNumSymbols() != 1 ||
-      upperMap.getNumResults() != 1 ||
-      upperOperands.size() != 1)
-    return result;
-
-  auto symbolExpr =
-      dyn_cast<AffineSymbolExpr>(upperMap.getResult(0));
-  if (!symbolExpr || symbolExpr.getPosition() != 0)
-    return result;
-
-  result.kind = LogicalExtent::Kind::Symbolic;
-  result.symbolicValue = *upperOperands.begin();
   return result;
 }
 
@@ -1534,6 +1683,29 @@ mlir::systolic::recognizeLogicalMatmul(
       recoverLogicalExtent(logicalJ, iterationIVs);
   result.reductionExtent =
       recoverLogicalExtent(logicalK, iterationIVs);
+
+  llvm::errs() << "  recovered extents:\\n";
+
+  llvm::errs() << "    row: ";
+  if (result.rowExtent.kind == LogicalExtent::Kind::Static)
+    llvm::errs() << result.rowExtent.staticValue;
+  else
+    llvm::errs() << "unknown";
+  llvm::errs() << "\\n";
+
+  llvm::errs() << "    column: ";
+  if (result.columnExtent.kind == LogicalExtent::Kind::Static)
+    llvm::errs() << result.columnExtent.staticValue;
+  else
+    llvm::errs() << "unknown";
+  llvm::errs() << "\\n";
+
+  llvm::errs() << "    reduction: ";
+  if (result.reductionExtent.kind == LogicalExtent::Kind::Static)
+    llvm::errs() << result.reductionExtent.staticValue;
+  else
+    llvm::errs() << "unknown";
+  llvm::errs() << "\\n";
 
   return result;
 }

@@ -27,7 +27,8 @@ namespace {
 static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
                              Value tensorVal, RankedTensorType ty) {
   auto memrefTy = MemRefType::get(ty.getShape(), ty.getElementType());
-  return rewriter.create<bufferization::ToMemrefOp>(loc, memrefTy, tensorVal);
+  return bufferization::ToBufferOp::create(
+      rewriter, loc, memrefTy, tensorVal);
 }
 
 static Value memrefToLLVMPtr(PatternRewriter &rewriter, Location loc,
@@ -122,7 +123,7 @@ struct MatvecToFpgaPass
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<MatvecToFpgaPattern>(&getContext());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+    if (failed(applyPatternsGreedily(getOperation(),
                                              std::move(patterns))))
       signalPassFailure();
   }

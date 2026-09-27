@@ -74,6 +74,50 @@ LogicalResult PEArrayOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// MatmulTileOp 的 verifier
+//===----------------------------------------------------------------------===//
+LogicalResult MatmulTileOp::verify() {
+  auto aTy = llvm::dyn_cast<RankedTensorType>(getA().getType());
+  auto bTy = llvm::dyn_cast<RankedTensorType>(getB().getType());
+  auto cInTy = llvm::dyn_cast<RankedTensorType>(getCIn().getType());
+
+  if (!aTy || !bTy || !cInTy)
+    return emitOpError("a, b, c_in 必须都是 ranked tensor");
+
+  if (aTy.getRank() != 2 || bTy.getRank() != 2 || cInTy.getRank() != 2)
+    return emitOpError("a, b, c_in 目前只支援 rank-2 tensor");
+
+  int64_t m = getM();
+  int64_t n = getN();
+  int64_t k = getK();
+
+  if (m <= 0 || n <= 0 || k <= 0)
+    return emitOpError("m, n, k 必须都是正数, got ")
+           << "m=" << m << ", n=" << n << ", k=" << k;
+
+  auto aShape = aTy.getShape();
+  auto bShape = bTy.getShape();
+  auto cInShape = cInTy.getShape();
+
+  if (aShape[0] != m || aShape[1] != k)
+    return emitOpError("a 的形状必须是 [m, k] = [")
+           << m << ", " << k << "], got ["
+           << aShape[0] << ", " << aShape[1] << "]";
+
+  if (bShape[0] != k || bShape[1] != n)
+    return emitOpError("b 的形状必须是 [k, n] = [")
+           << k << ", " << n << "], got ["
+           << bShape[0] << ", " << bShape[1] << "]";
+
+  if (cInShape[0] != m || cInShape[1] != n)
+    return emitOpError("c_in 的形状必须是 [m, n] = [")
+           << m << ", " << n << "], got ["
+           << cInShape[0] << ", " << cInShape[1] << "]";
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // StreamOp 的 verifier
 //===----------------------------------------------------------------------===//
 LogicalResult StreamOp::verify() {

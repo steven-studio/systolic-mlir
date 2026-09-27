@@ -38,7 +38,8 @@ namespace {
 static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
                              Value tensorVal, RankedTensorType ty) {
   auto memrefTy = MemRefType::get(ty.getShape(), ty.getElementType());
-  return rewriter.create<bufferization::ToMemrefOp>(loc, memrefTy, tensorVal);
+  return bufferization::ToBufferOp::create(
+      rewriter, loc, memrefTy, tensorVal);
 }
 
 static Value memrefToLLVMPtr(PatternRewriter &rewriter, Location loc,
@@ -187,8 +188,8 @@ struct DotGenericToFpgaPattern : public OpRewritePattern<linalg::GenericOp> {
     // reduceOp's result here would create a circular def-use chain: this
     // memref would depend on reduceOp's result, but reduceOp's result is
     // about to be replaced by a tensor derived from this very memref.
-    Value resultMemref = rewriter.create<bufferization::ToMemrefOp>(
-        loc, scalarMemrefTy, reduceInit);
+    Value resultMemref = bufferization::ToBufferOp::create(
+        rewriter, loc, scalarMemrefTy, reduceInit);
 
     Value xPtr = memrefToLLVMPtr(rewriter, loc, xMemref);
     Value yPtr = memrefToLLVMPtr(rewriter, loc, yMemref);
@@ -237,7 +238,7 @@ struct DotGenericToFpgaPass
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<DotGenericToFpgaPattern>(&getContext());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+    if (failed(applyPatternsGreedily(getOperation(),
                                              std::move(patterns))))
       signalPassFailure();
   }

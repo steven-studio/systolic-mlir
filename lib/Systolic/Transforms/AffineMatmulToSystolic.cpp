@@ -47,10 +47,6 @@ struct AffineMatmulToSystolicPass
         !matmul.normalization.domain)
       return failure();
 
-    // The recognized logical GEMM may use a non-identity affine
-    // mapping in the original loop nest.  We materialize the logical
-    // operands explicitly below instead of requiring physical memref
-    // shapes to equal logical GEMM shapes.
     if (matmul.rowExtent.kind != LogicalExtent::Kind::Static ||
         matmul.columnExtent.kind != LogicalExtent::Kind::Static ||
         matmul.reductionExtent.kind != LogicalExtent::Kind::Static)
@@ -78,27 +74,49 @@ struct AffineMatmulToSystolicPass
         !outTy.hasStaticShape())
       return failure();
 
-    if (lhsTy.getRank() != 2 ||
-        rhsTy.getRank() != 2 ||
-        outTy.getRank() != 2)
-      return failure();
-
     if (lhsTy.getElementType() != rhsTy.getElementType() ||
         lhsTy.getElementType() != outTy.getElementType())
       return failure();
 
-    if (lhsTy.getRank() != 2 ||
-        rhsTy.getRank() != 2 ||
-        outTy.getRank() != 2)
+    // The normalized access maps have the form:
+    //
+    //   A = (P*, I, K)
+    //   B = (P*, K, J)
+    //   C = (P*, I, J)
+    //
+    // Therefore:
+    //
+    //   rank = numPartitionDims + 2
+    //
+    // and the source iteration space contains:
+    //
+    //   P* + I + J + K
+    //
+    const unsigned numPartitionDims =
+        matmul.accessC.getNumResults() - 2;
+
+    if (matmul.accessA.getNumResults() !=
+            numPartitionDims + 2 ||
+        matmul.accessB.getNumResults() !=
+            numPartitionDims + 2 ||
+        matmul.accessC.getNumResults() !=
+            numPartitionDims + 2)
       return failure();
 
-    if (matmul.accessA.getNumResults() != 2 ||
-        matmul.accessB.getNumResults() != 2 ||
-        matmul.accessC.getNumResults() != 2)
+    if (lhsTy.getRank() != numPartitionDims + 2 ||
+        rhsTy.getRank() != numPartitionDims + 2 ||
+        outTy.getRank() != numPartitionDims + 2)
       return failure();
 
     if (!matmul.logicalMapping.hasStaticSourceOrigin ||
-        matmul.logicalMapping.sourceOrigin.size() != 3)
+        matmul.logicalMapping.sourceOrigin.size() !=
+            matmul.normalization.sourceTransformation.size())
+      return failure();
+
+    const unsigned numSourceDims =
+        matmul.normalization.sourceTransformation.size();
+
+    if (numSourceDims != numPartitionDims + 3)
       return failure();
 
     Operation *anchor = matmul.anchor;
@@ -106,317 +124,557 @@ struct AffineMatmulToSystolicPass
 
     OpBuilder builder(anchor);
 
-    auto lhsTensorTy =
-        RankedTensorType::get({M, K}, lhsTy.getElementType());
-    auto rhsTensorTy =
-        RankedTensorType::get({K, N}, rhsTy.getElementType());
-    auto outTensorTy =
-        RankedTensorType::get({M, N}, outTy.getElementType());
+    // ----------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------
 
-    auto materialize = [&](Value memref, AffineMap accessMap,
-                           ArrayRef<int64_t> logicalShape) -> Value {
-      auto tensorTy =
-          RankedTensorType::get(logicalShape, cast<MemRefType>(
-              memref.getType()).getElementType());
+    auto createConstantIndex =
+        [&](OpBuilder &b, Location l, int64_t value) -> Value {
+      return b.create<arith::ConstantIndexOp>(l, value);
+    };
 
-      Value tensor =
-          builder.create<tensor::EmptyOp>(
-              loc, logicalShape,
-              tensorTy.getElementType());
+    // Convert a normalized source coordinate z_d into the original
+    // affine.for induction-variable coordinate:
+    //
+    //   x_d = origin_d + step_d * z_d
+    //
+    auto makeSourceIV =
+        [&](OpBuilder &b,
+            Location l,
+            Value normalized,
+            unsigned sourceDim) -> Value {
+      int64_t step =
+          matmul.normalization.sourceTransformation
+              [sourceDim][sourceDim];
 
-      SmallVector<Value> z;
-      z.reserve(3);
+      int64_t origin =
+          matmul.normalization.sourceOffset[sourceDim];
+
+      Value value = normalized;
+
+      if (step != 1) {
+        Value c = createConstantIndex(b, l, step);
+        value = b.create<arith::MulIOp>(l, value, c);
+      }
+
+      if (origin != 0) {
+        Value c = createConstantIndex(b, l, origin);
+        value = b.create<arith::AddIOp>(l, value, c);
+      }
+
+      return value;
+    };
+
+    // Construct source IVs from logical coordinates.
+    //
+    // Current supported form:
+    //
+    //   source coordinate d
+    //       = corresponding normalized coordinate d
+    //
+    // followed by the affine.for step/origin reconstruction above.
+    //
+    // This is sufficient for ordinary GEMM and the current batched
+    // partition tests, whose logical transformation is identity.
+    //
+    // Non-identity logical mappings continue to be handled by the
+    // existing stride/non-unimodular path only when there are no
+    // partition dimensions.
+    auto buildSourceIVs =
+        [&](OpBuilder &b,
+            Location l,
+            ArrayRef<Value> logicalCoordinates)
+        -> FailureOr<SmallVector<Value>> {
+      if (logicalCoordinates.size() != numSourceDims)
+        return failure();
 
       SmallVector<Value> sourceIVs;
-      sourceIVs.reserve(3);
+      sourceIVs.reserve(numSourceDims);
 
-      // The normalized execution domain is dense in this MVP.  Its
-      // coordinates are exactly the logical loop coordinates used to
-      // materialize the operand tensor.
-      for (unsigned d = 0; d < 3; ++d) {
-        Value upper =
-            builder.create<arith::ConstantIndexOp>(loc, logicalShape[d < 2
-                ? (accessMap == matmul.accessA
-                       ? (d == 0 ? M : K)
-                       : accessMap == matmul.accessB
-                             ? (d == 0 ? K : N)
-                             : (d == 0 ? M : N))
-                : 1]);
+      for (unsigned d = 0; d < numSourceDims; ++d) {
+        Value normalized = logicalCoordinates[d];
 
-        (void)upper;
+        sourceIVs.push_back(
+            makeSourceIV(b, l, normalized, d));
       }
 
-      return tensor;
+      return sourceIVs;
     };
 
-    // The general affine materialization is emitted explicitly below.
-    // Keep the source-coordinate construction separate from the tensor
-    // shape so physical affine offsets/strides do not leak into TileOp.
-    auto makeSourceIV = [&](Value z, unsigned dim) -> Value {
-      int64_t step =
-          matmul.normalization.sourceTransformation[dim][dim];
-      int64_t origin =
-          matmul.normalization.sourceOffset[dim];
+    auto buildPhysicalIndices =
+        [&](OpBuilder &b,
+            Location l,
+            Value memref,
+            AffineMap accessMap,
+            ArrayRef<Value> sourceIVs)
+        -> FailureOr<SmallVector<Value>> {
+      SmallVector<Value> physicalIndices;
+      physicalIndices.reserve(accessMap.getNumResults());
 
-      Value v = z;
-      if (step != 1) {
-        Value c = builder.create<arith::ConstantIndexOp>(loc, step);
-        v = builder.create<arith::MulIOp>(loc, v, c);
+      for (unsigned r = 0;
+           r < accessMap.getNumResults();
+           ++r) {
+        AffineMap resultMap =
+            AffineMap::get(
+                accessMap.getNumInputs(),
+                /*symbolCount=*/0,
+                accessMap.getResult(r),
+                memref.getContext());
+
+        Value index =
+            b.create<affine::AffineApplyOp>(
+                l,
+                resultMap,
+                sourceIVs);
+
+        physicalIndices.push_back(index);
       }
-      if (origin != 0) {
-        Value c = builder.create<arith::ConstantIndexOp>(loc, origin);
-        v = builder.create<arith::AddIOp>(loc, v, c);
-      }
-      return v;
+
+      return physicalIndices;
     };
+
+    // ----------------------------------------------------------
+    // Verify partition transformation
+    // ----------------------------------------------------------
+    //
+    // For the partitioned lowering we currently require the
+    // partition coordinates to correspond directly to source
+    // normalized coordinates:
+    //
+    //   P0 -> z0
+    //   P1 -> z1
+    //   ...
+    //
+    // This is exactly the representation produced by the current
+    // batched testcase and leaves the general affine partition
+    // inversion as a separate analysis/lowering extension.
+    //
+    if (numPartitionDims > 0) {
+      const auto &T =
+          matmul.logicalMapping.transformation;
+
+      if (T.size() != numSourceDims)
+        return failure();
+
+      for (unsigned d = 0; d < numPartitionDims; ++d) {
+        for (unsigned c = 0; c < numSourceDims; ++c) {
+          int64_t expected = (d == c) ? 1 : 0;
+
+          if (T[d][c] != expected)
+            return failure();
+        }
+
+        if (matmul.logicalMapping.offset[d] != 0)
+          return failure();
+      }
+    }
+
+    // ----------------------------------------------------------
+    // Tensor materialization
+    // ----------------------------------------------------------
 
     auto buildLogicalTensor =
-        [&](Value memref, AffineMap accessMap,
+        [&](OpBuilder &b,
+            Location l,
+            Value memref,
+            AffineMap accessMap,
             ArrayRef<int64_t> shape,
+            ArrayRef<Value> partitionIVs,
             unsigned logicalDim0,
-            unsigned logicalDim1) -> FailureOr<Value> {
-      auto memrefTy = dyn_cast<MemRefType>(memref.getType());
+            unsigned logicalDim1)
+        -> FailureOr<Value> {
+      auto memrefTy =
+          dyn_cast<MemRefType>(memref.getType());
+
       if (!memrefTy)
         return failure();
 
       Type elemTy = memrefTy.getElementType();
-      RankedTensorType resultTy =
+
+      RankedTensorType tensorTy =
           RankedTensorType::get(shape, elemTy);
 
       auto generate =
-          builder.create<tensor::GenerateOp>(
-              loc, resultTy, ValueRange{},
-              [&](OpBuilder &bodyBuilder, Location bodyLoc,
+          b.create<tensor::GenerateOp>(
+              l,
+              tensorTy,
+              ValueRange{},
+              [&](OpBuilder &bodyBuilder,
+                  Location bodyLoc,
                   ValueRange indices) {
                 Value i0 = indices[0];
                 Value i1 = indices[1];
 
                 Value zero =
-                    bodyBuilder.create<arith::ConstantIndexOp>(
-                        bodyLoc, 0);
+                    createConstantIndex(
+                        bodyBuilder,
+                        bodyLoc,
+                        0);
 
-                // Construct the normalized/source iteration vector.
+                // Logical coordinate order:
                 //
-                // logicalDim0/logicalDim1 identify which normalized
-                // coordinates correspond to the two dimensions of
-                // this tensor:
+                //   P0, P1, ..., I, J, K
                 //
-                //   A: (I,K)
-                //   B: (K,J)
-                //   C: (I,J)
-                SmallVector<Value> sourceIVs;
-                sourceIVs.reserve(3);
+                // For this tensor:
+                //
+                //   A -> (P*, I, K)
+                //   B -> (P*, K, J)
+                //   C -> (P*, I, J)
+                //
+                SmallVector<Value> logicalCoordinates;
+                logicalCoordinates.reserve(numSourceDims);
 
-                for (unsigned d = 0; d < 3; ++d) {
-                  Value value;
-
-                  if (d == logicalDim0)
-                    value = i0;
-                  else if (d == logicalDim1)
-                    value = i1;
-                  else
-                    value = zero;
-
-                  int64_t step =
-                      matmul.normalization.sourceTransformation[d][d];
-                  int64_t offset =
-                      matmul.normalization.sourceOffset[d];
-
-                  if (step != 1) {
-                    Value c =
-                        bodyBuilder.create<arith::ConstantIndexOp>(
-                            bodyLoc, step);
-                    value =
-                        bodyBuilder.create<arith::MulIOp>(
-                            bodyLoc, value, c);
-                  }
-
-                  if (offset != 0) {
-                    Value c =
-                        bodyBuilder.create<arith::ConstantIndexOp>(
-                            bodyLoc, offset);
-                    value =
-                        bodyBuilder.create<arith::AddIOp>(
-                            bodyLoc, value, c);
-                  }
-
-                  sourceIVs.push_back(value);
+                for (unsigned d = 0;
+                     d < numPartitionDims;
+                     ++d) {
+                  logicalCoordinates.push_back(
+                      partitionIVs[d]);
                 }
 
-                // Evaluate each result of the affine access map
-                // independently.  affine.apply produces ordinary
-                // index values, which are then consumed by memref.load.
-                SmallVector<Value> physicalIndices;
-                physicalIndices.reserve(
-                    accessMap.getNumResults());
+                // I / J / K occupy the final three
+                // normalized source coordinates.
+                Value I = zero;
+                Value J = zero;
+                Value Kvalue = zero;
 
-                for (unsigned r = 0;
-                     r < accessMap.getNumResults();
-                     ++r) {
-                  AffineMap resultMap =
-                      AffineMap::get(
-                          accessMap.getNumInputs(),
-                          /*symbolCount=*/0,
-                          accessMap.getResult(r),
-                          memref.getContext());
+                if (logicalDim0 == 0)
+                  I = i0;
+                else if (logicalDim0 == 1)
+                  J = i0;
+                else
+                  Kvalue = i0;
 
-                  Value physicalIndex =
-                      bodyBuilder.create<affine::AffineApplyOp>(
-                          bodyLoc, resultMap, sourceIVs);
+                if (logicalDim1 == 0)
+                  I = i1;
+                else if (logicalDim1 == 1)
+                  J = i1;
+                else
+                  Kvalue = i1;
 
-                  physicalIndices.push_back(physicalIndex);
+                logicalCoordinates.push_back(I);
+                logicalCoordinates.push_back(J);
+                logicalCoordinates.push_back(Kvalue);
+
+                auto sourceIVs =
+                    buildSourceIVs(
+                        bodyBuilder,
+                        bodyLoc,
+                        logicalCoordinates);
+
+                if (failed(sourceIVs)) {
+                  bodyBuilder.create<tensor::YieldOp>(
+                      bodyLoc,
+                      Value{});
+                  return;
+                }
+
+                auto physicalIndices =
+                    buildPhysicalIndices(
+                        bodyBuilder,
+                        bodyLoc,
+                        memref,
+                        accessMap,
+                        *sourceIVs);
+
+                if (failed(physicalIndices)) {
+                  bodyBuilder.create<tensor::YieldOp>(
+                      bodyLoc,
+                      Value{});
+                  return;
                 }
 
                 Value value =
                     bodyBuilder.create<memref::LoadOp>(
-                        bodyLoc, memref, physicalIndices);
+                        bodyLoc,
+                        memref,
+                        *physicalIndices);
 
                 bodyBuilder.create<tensor::YieldOp>(
-                    bodyLoc, value);
+                    bodyLoc,
+                    value);
               });
 
       return generate.getResult();
     };
 
-    auto lhsTensor =
-        buildLogicalTensor(matmul.lhs, matmul.accessA,
-                           {M, K}, 0, 2);
-    if (failed(lhsTensor))
-      return failure();
+    // ----------------------------------------------------------
+    // Emit one matmul instance
+    // ----------------------------------------------------------
 
-    auto rhsTensor =
-        buildLogicalTensor(matmul.rhs, matmul.accessB,
-                           {K, N}, 2, 1);
-    if (failed(rhsTensor))
-      return failure();
+    auto emitOneMatmul =
+        [&](OpBuilder &b,
+            Location l,
+            ArrayRef<Value> partitionIVs)
+        -> LogicalResult {
+      SmallVector<int64_t> lhsShape = {M, K};
+      SmallVector<int64_t> rhsShape = {K, N};
+      SmallVector<int64_t> outShape = {M, N};
 
-    auto outTensor =
-        buildLogicalTensor(matmul.output, matmul.accessC,
-                           {M, N}, 0, 1);
-    if (failed(outTensor))
-      return failure();
+      auto lhsTensor =
+          buildLogicalTensor(
+              b, l,
+              matmul.lhs,
+              matmul.accessA,
+              lhsShape,
+              partitionIVs,
+              /*logicalDim0=*/0,
+              /*logicalDim1=*/2);
 
-    auto result = builder.create<MatmulTileOp>(
-        loc,
-        outTensorTy,
-        *lhsTensor,
-        *rhsTensor,
-        *outTensor,
-        builder.getI64IntegerAttr(M),
-        builder.getI64IntegerAttr(N),
-        builder.getI64IntegerAttr(K),
-        /*device=*/FlatSymbolRefAttr(),
-        /*est_cycles=*/IntegerAttr(),
-        /*start_cycle=*/IntegerAttr());
+      if (failed(lhsTensor))
+        return failure();
 
-    // Scatter the logical GEMM result back to the original
-    // physical output memref.  The logical result has shape M x N,
-    // while the original memref may have a different physical shape
-    // because the affine access can contain offsets/strides.
-    //
-    // For each logical (I,J), compute the physical output coordinates
-    // using accessC and store the corresponding result element.
-    Value zero = builder.create<arith::ConstantIndexOp>(loc, 0);
-    Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+      auto rhsTensor =
+          buildLogicalTensor(
+              b, l,
+              matmul.rhs,
+              matmul.accessB,
+              rhsShape,
+              partitionIVs,
+              /*logicalDim0=*/2,
+              /*logicalDim1=*/1);
 
-    auto scatterOuter =
-        builder.create<scf::ForOp>(
-            loc, zero,
-            builder.create<arith::ConstantIndexOp>(loc, M),
-            one);
+      if (failed(rhsTensor))
+        return failure();
 
-    {
-      OpBuilder::InsertionGuard outerGuard(builder);
-      builder.setInsertionPointToStart(scatterOuter.getBody());
+      auto outTensor =
+          buildLogicalTensor(
+              b, l,
+              matmul.output,
+              matmul.accessC,
+              outShape,
+              partitionIVs,
+              /*logicalDim0=*/0,
+              /*logicalDim1=*/1);
 
-      Value i = scatterOuter.getInductionVar();
+      if (failed(outTensor))
+        return failure();
 
-      auto scatterInner =
-          builder.create<scf::ForOp>(
-              loc, zero,
-              builder.create<arith::ConstantIndexOp>(loc, N),
+      auto result =
+          b.create<MatmulTileOp>(
+              l,
+              RankedTensorType::get(
+                  {M, N},
+                  outTy.getElementType()),
+              *lhsTensor,
+              *rhsTensor,
+              *outTensor,
+              b.getI64IntegerAttr(M),
+              b.getI64IntegerAttr(N),
+              b.getI64IntegerAttr(K),
+              /*device=*/FlatSymbolRefAttr(),
+              /*est_cycles=*/IntegerAttr(),
+              /*start_cycle=*/IntegerAttr());
+
+      // --------------------------------------------------------
+      // Scatter C(M,N) back to the original physical C tensor.
+      // --------------------------------------------------------
+
+      Value zero =
+          createConstantIndex(b, l, 0);
+
+      Value one =
+          createConstantIndex(b, l, 1);
+
+      auto emitScatter =
+          [&](Value i,
+              Value j) -> LogicalResult {
+        SmallVector<Value> logicalCoordinates;
+        logicalCoordinates.reserve(numSourceDims);
+
+        for (unsigned d = 0;
+             d < numPartitionDims;
+             ++d)
+          logicalCoordinates.push_back(
+              partitionIVs[d]);
+
+        logicalCoordinates.push_back(i);
+        logicalCoordinates.push_back(j);
+        logicalCoordinates.push_back(zero);
+
+        auto sourceIVs =
+            buildSourceIVs(
+                b,
+                l,
+                logicalCoordinates);
+
+        if (failed(sourceIVs))
+          return failure();
+
+        auto physicalIndices =
+            buildPhysicalIndices(
+                b,
+                l,
+                matmul.output,
+                matmul.accessC,
+                *sourceIVs);
+
+        if (failed(physicalIndices))
+          return failure();
+
+        Value value =
+            b.create<tensor::ExtractOp>(
+                l,
+                result.getResult(),
+                ValueRange{i, j});
+
+        b.create<memref::StoreOp>(
+            l,
+            value,
+            matmul.output,
+            *physicalIndices);
+
+        return success();
+      };
+
+      auto emitScatterBody =
+          [&](OpBuilder &scatterBuilder,
+              Location scatterLoc,
+              Value i) -> LogicalResult {
+        auto inner =
+            scatterBuilder.create<scf::ForOp>(
+                scatterLoc,
+                zero,
+                createConstantIndex(
+                    scatterBuilder,
+                    scatterLoc,
+                    N),
+                one);
+
+        {
+          OpBuilder::InsertionGuard guard(
+              scatterBuilder);
+
+          scatterBuilder.setInsertionPointToStart(
+              inner.getBody());
+
+          Value j =
+              inner.getInductionVar();
+
+          if (failed(emitScatter(i, j)))
+            return failure();
+        }
+
+        return success();
+      };
+
+      auto outer =
+          b.create<scf::ForOp>(
+              l,
+              zero,
+              createConstantIndex(b, l, M),
               one);
 
       {
-        OpBuilder::InsertionGuard innerGuard(builder);
-        builder.setInsertionPointToStart(scatterInner.getBody());
+        OpBuilder::InsertionGuard guard(b);
 
-        Value j = scatterInner.getInductionVar();
+        b.setInsertionPointToStart(
+            outer.getBody());
 
-        // Convert dense logical coordinates (i, j) back to the
-        // original source loop coordinates before applying accessC.
-        //
-        // For this testcase:
-        //   x = 5 * i + 3
-        //   y = j
-        //
-        // so accessC computes:
-        //   C[7 + 2 * x, y]
-        // = C[13 + 10 * i, j].
-        SmallVector<Value> sourceIVs;
-        sourceIVs.reserve(3);
+        Value i =
+            outer.getInductionVar();
 
-        for (unsigned d = 0; d < 3; ++d) {
-          Value value;
-
-          if (d == 0)
-            value = i;
-          else if (d == 1)
-            value = j;
-          else
-            value = zero;
-
-          int64_t step =
-              matmul.normalization.sourceTransformation[d][d];
-          int64_t offset =
-              matmul.normalization.sourceOffset[d];
-
-          if (step != 1) {
-            Value c =
-                builder.create<arith::ConstantIndexOp>(loc, step);
-            value =
-                builder.create<arith::MulIOp>(loc, value, c);
-          }
-
-          if (offset != 0) {
-            Value c =
-                builder.create<arith::ConstantIndexOp>(loc, offset);
-            value =
-                builder.create<arith::AddIOp>(loc, value, c);
-          }
-
-          sourceIVs.push_back(value);
-        }
-
-        SmallVector<Value> physicalIndices;
-        physicalIndices.reserve(matmul.accessC.getNumResults());
-
-        for (unsigned r = 0;
-             r < matmul.accessC.getNumResults();
-             ++r) {
-          AffineMap resultMap =
-              AffineMap::get(
-                  /*dimCount=*/matmul.accessC.getNumInputs(),
-                  /*symbolCount=*/0,
-                  matmul.accessC.getResult(r),
-                  matmul.output.getContext());
-
-          Value index =
-              builder.create<affine::AffineApplyOp>(
-                  loc, resultMap, sourceIVs);
-
-          physicalIndices.push_back(index);
-        }
-
-        Value value =
-            builder.create<tensor::ExtractOp>(
-                loc, result.getResult(),
-                ValueRange{i, j});
-
-        builder.create<memref::StoreOp>(
-            loc, value, matmul.output, physicalIndices);
+        if (failed(
+                emitScatterBody(
+                    b,
+                    l,
+                    i)))
+          return failure();
       }
-    }
+
+      return success();
+    };
+
+    // ----------------------------------------------------------
+    // Emit partition loops
+    // ----------------------------------------------------------
+    //
+    // For:
+    //
+    //   P0 x P1 x ... x M x K
+    //
+    // emit:
+    //
+    //   for p0
+    //     for p1
+    //       ...
+    //         matmul_tile(...)
+    //
+    // Thus every partition point becomes one independent
+    // matmul_tile instance.
+    // ----------------------------------------------------------
+
+    SmallVector<Value> partitionIVs;
+    partitionIVs.reserve(numPartitionDims);
+
+    std::function<LogicalResult(unsigned)> emitPartitionNest;
+
+    emitPartitionNest =
+        [&](unsigned depth) -> LogicalResult {
+      if (depth == numPartitionDims)
+        return emitOneMatmul(
+            builder,
+            loc,
+            partitionIVs);
+
+      // The logical partition extent is the corresponding
+      // physical memref dimension.
+      int64_t extent =
+          lhsTy.getDimSize(depth);
+
+      if (extent == ShapedType::kDynamic)
+        return failure();
+
+      if (extent <= 0)
+        return failure();
+
+      Value zero =
+          createConstantIndex(
+              builder,
+              loc,
+              0);
+
+      Value one =
+          createConstantIndex(
+              builder,
+              loc,
+              1);
+
+      Value upper =
+          createConstantIndex(
+              builder,
+              loc,
+              extent);
+
+      auto loop =
+          builder.create<scf::ForOp>(
+              loc,
+              zero,
+              upper,
+              one);
+
+      {
+        OpBuilder::InsertionGuard guard(
+            builder);
+
+        builder.setInsertionPointToStart(
+            loop.getBody());
+
+        partitionIVs.push_back(
+            loop.getInductionVar());
+
+        if (failed(
+                emitPartitionNest(
+                    depth + 1)))
+          return failure();
+
+        partitionIVs.pop_back();
+      }
+
+      return success();
+    };
+
+    if (failed(emitPartitionNest(0)))
+      return failure();
 
     // The recognized affine loop nest has now been replaced.
     anchor->erase();

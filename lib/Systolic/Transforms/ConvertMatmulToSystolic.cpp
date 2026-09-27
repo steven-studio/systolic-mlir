@@ -97,7 +97,7 @@ struct ConvertMatmulToSystolicPass
     RewritePatternSet patterns(&getContext());
     patterns.add<MatmulToSystolicPattern>(&getContext(), rows.getValue(),
                                            cols.getValue());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+    if (failed(applyPatternsGreedily(getOperation(),
                                              std::move(patterns))))
       signalPassFailure();
   }
@@ -131,7 +131,5 @@ void mlir::systolic::registerSystolicPasses() {
   registerSystolicSelectDevicePass();
   registerSystolicTileMatmulPass();
   registerAffineMatmulToSystolicPass();
-  registerSystolicScheduleOverlapPass();
-  registerSystolicTileToFpgaPass();
   registerTestAffineMatmulDiscoveryPass();
 }

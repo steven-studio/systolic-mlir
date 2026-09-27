@@ -100,7 +100,7 @@ struct ExpandPEArrayToMacPass
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<ExpandPEArrayToMacPattern>(&getContext());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+    if (failed(applyPatternsGreedily(getOperation(),
                                              std::move(patterns))))
       signalPassFailure();
   }
