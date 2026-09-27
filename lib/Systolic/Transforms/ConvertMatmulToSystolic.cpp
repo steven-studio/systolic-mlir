@@ -29,45 +29,78 @@ namespace {
 //   - M 必须刚好等于 rows,N 必须刚好等于 cols
 //   - 不处理 tiling,阵列比矩阵小的情况直接拒绝转换
 // -----------------------------------------------------------------------
-struct MatmulToSystolicPattern : public OpRewritePattern<linalg::MatmulOp> {
+struct MatmulToSystolicPattern
+    : public OpRewritePattern<linalg::MatmulOp> {
   MatmulToSystolicPattern(MLIRContext *ctx, int64_t rows, int64_t cols)
       : OpRewritePattern<linalg::MatmulOp>(ctx), rows(rows), cols(cols) {}
 
   LogicalResult matchAndRewrite(linalg::MatmulOp op,
                                  PatternRewriter &rewriter) const override {
-    Value a = op.getInputs()[0]; // [M, K]
-    Value b = op.getInputs()[1]; // [K, N]
-    Value c = op.getOutputs()[0]; // [M, N]
+    Value a = op.getDpsInputs()[0];
+    Value b = op.getDpsInputs()[1];
+    Value c = op.getDpsInits()[0];
 
-    auto aTy = llvm::dyn_cast<RankedTensorType>(a.getType());
-    auto bTy = llvm::dyn_cast<RankedTensorType>(b.getType());
-    if (!aTy || !bTy || !aTy.hasStaticShape() || !bTy.hasStaticShape())
-      return rewriter.notifyMatchFailure(op, "只处理静态形状的 matmul");
+    auto aTy = dyn_cast<RankedTensorType>(a.getType());
+    auto bTy = dyn_cast<RankedTensorType>(b.getType());
+    auto cTy = dyn_cast<RankedTensorType>(c.getType());
 
-    int64_t M = aTy.getShape()[0];
-    int64_t N = bTy.getShape()[1];
-    if (M != rows || N != cols)
+    if (!aTy || !bTy || !cTy ||
+        !aTy.hasStaticShape() ||
+        !bTy.hasStaticShape() ||
+        !cTy.hasStaticShape())
       return rewriter.notifyMatchFailure(
-          op, "matmul 的 [M, N] 必须刚好等于阵列大小 [rows, cols]"
-              "(tiling 留给阶段 4 处理)");
+          op, "only static ranked-tensor matmul is supported");
+
+    if (aTy.getRank() != 2 ||
+        bTy.getRank() != 2 ||
+        cTy.getRank() != 2)
+      return rewriter.notifyMatchFailure(
+          op, "matmul operands must be rank-2 tensors");
+
+    const int64_t M = aTy.getDimSize(0);
+    const int64_t K = aTy.getDimSize(1);
+    const int64_t BK = bTy.getDimSize(0);
+    const int64_t N = bTy.getDimSize(1);
+
+    if (BK != K)
+      return rewriter.notifyMatchFailure(
+          op, "A and B reduction dimensions do not match");
+
+    if (cTy.getDimSize(0) != M ||
+        cTy.getDimSize(1) != N)
+      return rewriter.notifyMatchFailure(
+          op, "C shape does not match M x N");
+
+    if (aTy.getElementType() != bTy.getElementType() ||
+        aTy.getElementType() != cTy.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, "matmul element types must match");
 
     Location loc = op.getLoc();
 
-    // A 沿 row 方向 stream 进阵列,skew=1 表示相邻 row 之间差一个 cycle
-    auto aStream = rewriter.create<StreamOp>(
-        loc, a.getType(), a, StreamDirection::row, /*skew=*/1);
+    // No tiling here.
+    //
+    // The entire linalg.matmul becomes one systolic.matmul_tile:
+    //
+    //   A : M x K
+    //   B : K x N
+    //   C : M x N
+    //
+    // Tiling is deliberately left to a later pass.
+    auto result = rewriter.create<MatmulTileOp>(
+        loc,
+        cTy,
+        a,
+        b,
+        c,
+        rewriter.getI64IntegerAttr(M),
+        rewriter.getI64IntegerAttr(N),
+        rewriter.getI64IntegerAttr(K),
+        /*device=*/FlatSymbolRefAttr(),
+        /*est_cycles=*/IntegerAttr(),
+        /*start_cycle=*/IntegerAttr());
 
-    // 用 weight-stationary:B 固定不动,不需要额外 stream,直接当
-    // stationary_operand 喂进 pe_array
-    auto peArray = rewriter.create<PEArrayOp>(
-        loc, c.getType(),
-        /*stationary_operand=*/b,
-        /*moving_operand=*/aStream.getResult(),
-        /*acc_operand=*/c,
-        /*rows=*/rows, /*cols=*/cols,
-        /*stationary=*/StationaryKind::weight);
-
-    rewriter.replaceOp(op, peArray.getResult());
+    rewriter.replaceOp(op, result.getResult());
     return success();
   }
 

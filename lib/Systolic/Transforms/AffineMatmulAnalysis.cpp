@@ -57,6 +57,17 @@ collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
   SmallVector<Value> iterationIVs;
   for (affine::AffineForOp loop : enclosingLoops) {
     Value iv = loop.getInductionVar();
+
+    // Only loop IVs that actually participate in the memory-access
+    // coordinates belong to the logical iteration domain.
+    //
+    // An enclosing loop may control repetition without being a logical
+    // coordinate. In particular, a symbolic-bound loop such as
+    //
+    //   affine.for %k = 0 to %symbol
+    //
+    // must not become a logical coordinate merely because it encloses
+    // the MAC. Logical coordinates are recovered from the access maps.
     if (llvm::find(usedIVs, iv) != usedIVs.end())
       iterationIVs.push_back(iv);
   }
@@ -346,74 +357,6 @@ invertSquareMapping(
   return inverse;
 }
 
-static FailureOr<SmallVector<SmallVector<Rational>>>
-transformDomainToLogical(
-    const affine::FlatAffineValueConstraints &sourceDomain,
-    const SmallVector<SmallVector<Rational>> &inverse,
-    ArrayRef<int64_t> offset) {
-  const unsigned numSourceDims = inverse.size();
-  if (numSourceDims == 0)
-    return failure();
-
-  const unsigned numLogicalDims = inverse.front().size();
-
-  if (sourceDomain.getNumDimVars() != numSourceDims)
-    return failure();
-
-  if (offset.size() != numLogicalDims)
-    return failure();
-
-  for (const auto &row : inverse) {
-    if (row.size() != numLogicalDims)
-      return failure();
-  }
-
-  SmallVector<SmallVector<Rational>> logicalInequalities;
-
-  for (unsigned i = 0; i < sourceDomain.getNumInequalities(); ++i) {
-    auto source = sourceDomain.getInequality64(i);
-
-    // One coefficient per source dimension, followed by the constant.
-    if (source.size() != numSourceDims + 1)
-      return failure();
-
-    SmallVector<Rational> logical(numLogicalDims + 1);
-
-    // a^T T^-1
-    for (unsigned logicalDim = 0;
-         logicalDim < numLogicalDims;
-         ++logicalDim) {
-      Rational coefficient;
-
-      for (unsigned sourceDim = 0;
-           sourceDim < numSourceDims;
-           ++sourceDim) {
-        coefficient =
-            coefficient +
-            Rational(source[sourceDim]) *
-                inverse[sourceDim][logicalDim];
-      }
-
-      logical[logicalDim] = coefficient;
-    }
-
-    // b - (a^T T^-1) c
-    Rational constant(source.back());
-    for (unsigned logicalDim = 0;
-         logicalDim < numLogicalDims;
-         ++logicalDim) {
-      constant =
-          constant -
-          logical[logicalDim] * Rational(offset[logicalDim]);
-    }
-
-    logical[numLogicalDims] = constant;
-    logicalInequalities.push_back(std::move(logical));
-  }
-
-  return logicalInequalities;
-}
-
 static FailureOr<presburger::IntegerPolyhedron>
 buildExactLogicalDomain(
     const affine::FlatAffineValueConstraints &sourceDomain,
@@ -427,12 +370,6 @@ buildExactLogicalDomain(
   if (numSourceDims == 0 || numLogicalDims == 0)
     return failure();
 
-  // Symbolic source bounds require carrying source symbols into the logical
-  // Presburger space.  Keep that case explicit until its representation is
-  // implemented.
-  if (numSourceSymbols != 0)
-    return failure();
-
   if (offset.size() != numLogicalDims)
     return failure();
 
@@ -441,32 +378,34 @@ buildExactLogicalDomain(
       return failure();
   }
 
-  // Logical coordinates are set dimensions.  Source iteration dimensions and
-  // any source-domain locals are existential integer locals.
+  // Logical coordinates are set dimensions. Source iteration dimensions and
+  // source-domain locals are existential integer locals, while source symbols
+  // remain symbols.
   //
   // Source layout:
   //
-  //   [source dims x | source locals q | constant]
+  //   [source dims x | source symbols s | source locals q | constant]
   //
   // Logical-domain layout:
   //
-  //   [logical dims l | source dims x | source locals q | constant]
+  //   [logical dims l | source symbols s | source dims x | source locals q |
+  //    constant]
   //
   // This represents:
   //
-  //   { l | exists x, q : (x, q) in D_S and l = T x + c }.
+  //   { l | exists x, q : (x, s, q) in D_S and l = T x + c }.
   const unsigned numLogicalLocals =
       numSourceDims + numSourceLocals;
 
   auto space = presburger::PresburgerSpace::getSetSpace(
       /*numDims=*/numLogicalDims,
-      /*numSymbols=*/0,
+      /*numSymbols=*/numSourceSymbols,
       /*numLocals=*/numLogicalLocals);
 
   presburger::IntegerPolyhedron logicalDomain(space);
 
   const unsigned expectedSourceCols =
-      numSourceDims + numSourceLocals + 1;
+      numSourceDims + numSourceSymbols + numSourceLocals + 1;
 
   auto copySourceConstraint =
       [&](ArrayRef<int64_t> source, bool equality) -> LogicalResult {
@@ -480,16 +419,25 @@ buildExactLogicalDomain(
     for (unsigned sourceDim = 0;
          sourceDim < numSourceDims;
          ++sourceDim) {
-      constraint[numLogicalDims + sourceDim] =
+      constraint[numLogicalDims + numSourceSymbols + sourceDim] =
           source[sourceDim];
+    }
+
+    // Preserve source symbols in the logical-domain symbol block.
+    for (unsigned sourceSymbol = 0;
+         sourceSymbol < numSourceSymbols;
+         ++sourceSymbol) {
+      constraint[numLogicalDims + sourceSymbol] =
+          source[numSourceDims + sourceSymbol];
     }
 
     // Preserve source-domain locals, including divisibility/stride witnesses.
     for (unsigned sourceLocal = 0;
          sourceLocal < numSourceLocals;
          ++sourceLocal) {
-      constraint[numLogicalDims + numSourceDims + sourceLocal] =
-          source[numSourceDims + sourceLocal];
+      constraint[numLogicalDims + numSourceSymbols +
+                 numSourceDims + sourceLocal] =
+          source[numSourceDims + numSourceSymbols + sourceLocal];
     }
 
     constraint.back() = source.back();
@@ -880,13 +828,54 @@ void mlir::systolic::collectAffineMatmulCandidates(
     if (!innerLoop)
       return;
 
+    // The three-level pattern above is only a local discovery pattern.
+    // It must not determine the execution anchor.
+    //
+    // Extra enclosing affine loops may exist around the logical GEMM
+    // coordinates.  Therefore climb from the discovered loop to the
+    // outermost enclosing affine.for.
+    //
+    // Example:
+    //
+    //   affine.for %p0 {                 // execution anchor
+    //     affine.for %i {
+    //       affine.for %p1 {
+    //         affine.for %j {
+    //           affine.for %k {
+    //             ...
+    //
+    // Any local three-level match inside this nest must resolve to
+    // %p0 as the candidate anchor.
+
+    affine::AffineForOp executionAnchor = outerLoop;
+
+    while (Operation *parent = executionAnchor->getParentOp()) {
+      auto parentLoop = dyn_cast<affine::AffineForOp>(parent);
+      if (!parentLoop)
+        break;
+
+      executionAnchor = parentLoop;
+    }
+
+    // Avoid emitting the same execution anchor multiple times when
+    // several nested local three-level patterns are discovered.
+    for (const AffineMatmulCandidate &existing : candidates) {
+      if (existing.anchor == executionAnchor.getOperation())
+        return;
+    }
+
     AffineMatmulCandidate candidate;
-    candidate.anchor = outerLoop.getOperation();
+    candidate.anchor = executionAnchor.getOperation();
 
     llvm::errs() << "Found affine matmul candidate:\n";
-    llvm::errs() << "  outer IV: " << outerLoop.getInductionVar() << "\n";
-    llvm::errs() << "  middle IV: " << middleLoop.getInductionVar() << "\n";
-    llvm::errs() << "  inner IV: " << innerLoop.getInductionVar() << "\n";
+    llvm::errs() << "  local outer IV: "
+                 << outerLoop.getInductionVar() << "\n";
+    llvm::errs() << "  local middle IV: "
+                 << middleLoop.getInductionVar() << "\n";
+    llvm::errs() << "  local inner IV: "
+                 << innerLoop.getInductionVar() << "\n";
+    llvm::errs() << "  execution anchor IV: "
+                 << executionAnchor.getInductionVar() << "\n";
 
     candidates.push_back(candidate);
   });
@@ -1141,36 +1130,37 @@ mlir::systolic::recognizeLogicalMatmul(
   if (!candidate.anchor)
     return failure();
 
-  auto outerLoop = dyn_cast<affine::AffineForOp>(candidate.anchor);
-  if (!outerLoop)
+  auto anchorLoop =
+      dyn_cast<affine::AffineForOp>(candidate.anchor);
+  if (!anchorLoop)
     return failure();
 
-  affine::AffineForOp middleLoop;
-  affine::AffineForOp innerLoop;
-
-  for (Operation &op : *outerLoop.getBody()) {
-    if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
-      if (middleLoop)
-        return failure();
-      middleLoop = loop;
-    }
-  }
-
-  if (!middleLoop)
-    return failure();
-
-  for (Operation &op : *middleLoop.getBody()) {
-    if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
-      if (innerLoop)
-        return failure();
-      innerLoop = loop;
-    }
-  }
-
-  if (!innerLoop)
-    return failure();
-
-  SmallVector<affine::AffineLoadOp> loads;
+  // The candidate anchor identifies the outermost execution loop
+  // containing the recognized MAC.  It must not be confused with
+  // the three logical GEMM coordinates.
+  //
+  // Logical GEMM coordinates are recovered from the memory-access
+  // maps below.  Enclosing loops may contain additional preserved
+  // execution loops, and those loops need not correspond to I/J/K.
+  //
+  // Example:
+  //
+  //   affine.for %p = 0 to 4 {          // preserved
+  //     affine.for %i = 0 to %M {       // logical I
+  //       affine.for %q = 0 to 4 {      // preserved
+  //         affine.for %j = 0 to %N {   // logical J
+  //           affine.for %k = 0 to %K { // logical K
+  //             ...
+  //
+  // Therefore recognition must not assume:
+  //
+  //   outerLoop = I
+  //   middleLoop = J
+  //   innerLoop = K
+  //
+  // The complete enclosing execution structure is recovered later
+  // from the actual output-store parent chain.
+    SmallVector<affine::AffineLoadOp> loads;
   SmallVector<affine::AffineStoreOp> stores;
 
   candidate.anchor->walk([&](Operation *op) {
@@ -1190,9 +1180,10 @@ mlir::systolic::recognizeLogicalMatmul(
     llvm::errs() << "\n";
 
     llvm::errs() << "    operands:";
-    for (Value operand : load.getIndices())
-      llvm::errs() << " "
-                   << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
+    for (Value operand : load.getIndices()) {
+      llvm::errs() << " ";
+      operand.print(llvm::errs());
+    }
     llvm::errs() << "\n";
   }
 
@@ -1202,9 +1193,10 @@ mlir::systolic::recognizeLogicalMatmul(
     llvm::errs() << "\n";
 
     llvm::errs() << "    operands:";
-    for (Value operand : store.getIndices())
-      llvm::errs() << " "
-                   << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
+    for (Value operand : store.getIndices()) {
+      llvm::errs() << " ";
+      operand.print(llvm::errs());
+    }
     llvm::errs() << "\n";
   }
 
@@ -1605,33 +1597,6 @@ mlir::systolic::recognizeLogicalMatmul(
       }
 
       llvm::errs() << "]\n";
-    }
-
-    auto logicalInequalities =
-        transformDomainToLogical(
-            *sourceDomain,
-            *inverse,
-            result.logicalMapping.offset);
-
-    if (succeeded(logicalInequalities)) {
-      llvm::errs() << "  logical iteration domain:\n";
-      for (const auto &inequality : *logicalInequalities) {
-        llvm::errs() << "    [";
-
-        for (unsigned column = 0;
-             column < inequality.size();
-             ++column) {
-          if (column != 0)
-            llvm::errs() << " ";
-
-          const Rational &value = inequality[column];
-          llvm::errs() << value.numerator;
-          if (value.denominator != 1)
-            llvm::errs() << "/" << value.denominator;
-        }
-
-        llvm::errs() << "] >= 0\n";
-      }
     }
 
   }
