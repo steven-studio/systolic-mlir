@@ -114,3 +114,18 @@ target_include_directories(check_dp_optimizer_scaling
   ${PROJECT_BINARY_DIR}/include
 )
 
+
+add_executable(check_area_count_vectors
+  check_area_count_vectors.cpp
+)
+
+target_link_libraries(check_area_count_vectors
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_area_count_vectors
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
