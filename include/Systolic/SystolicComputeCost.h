@@ -67,6 +67,40 @@ FailureOr<int64_t> estimateSystolicTileComputeCycles(
     int64_t K,
     const SystolicComputeCostParams &params);
 
+/// Estimate compute cycles for a logical task assigned to a
+/// physical systolic-array resource.
+///
+/// The logical task size and physical accelerator geometry are
+/// intentionally separate:
+///
+///   task.size          = spatial work size
+///   resource.arraySize = physical systolic-array geometry
+///
+/// A larger physical array may execute a smaller logical task.
+///
+/// The physical resource determines the systolic geometry term:
+///
+///   rows = resource.arraySize
+///   cols = resource.arraySize
+///
+/// Therefore:
+///
+///   I = ceil(K / kMax)
+///
+///   T = K + I * (rows + cols - 2 + H)
+///
+/// The assignment is legal when:
+///
+///   resource.arraySize >= task.size
+///
+/// The supplied kMax and H calibration parameters must
+/// correspond to the physical resource geometry.
+FailureOr<int64_t> estimateSystolicTaskComputeCycles(
+    const SystolicExecutionTask &task,
+    const SystolicArrayResource &resource,
+    int64_t K,
+    const SystolicComputeCostParams &params);
+
 } // namespace systolic
 } // namespace mlir
 

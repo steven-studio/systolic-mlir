@@ -93,5 +93,58 @@ FailureOr<int64_t> estimateSystolicTileComputeCycles(
       params);
 }
 
+FailureOr<int64_t> estimateSystolicTaskComputeCycles(
+    const SystolicExecutionTask &task,
+    const SystolicArrayResource &resource,
+    int64_t K,
+    const SystolicComputeCostParams &params) {
+
+  if (K <= 0)
+    return failure();
+
+  if (params.kMax <= 0 ||
+      params.implementationOverhead < 0)
+    return failure();
+
+  if (task.size <= 0 ||
+      resource.arraySize <= 0)
+    return failure();
+
+  // A physical array cannot execute a logical spatial task
+  // larger than its physical geometry.
+  if (resource.arraySize < task.size)
+    return failure();
+
+  // IMPORTANT:
+  //
+  // The geometry term is determined by the PHYSICAL systolic
+  // array, not by the logical task size.
+  //
+  // Example:
+  //
+  //   4x4 work on 4x4 physical array:
+  //     geometry term = 4 + 4 - 2 = 6
+  //
+  //   4x4 work on 8x8 physical array:
+  //     geometry term = 8 + 8 - 2 = 14
+  //
+  const int64_t rows = resource.arraySize;
+  const int64_t cols = resource.arraySize;
+
+  const int64_t numInvocations =
+      (K + params.kMax - 1) /
+      params.kMax;
+
+  const int64_t perInvocationOverhead =
+      rows +
+      cols -
+      2 +
+      params.implementationOverhead;
+
+  return K +
+      numInvocations *
+      perInvocationOverhead;
+}
+
 } // namespace systolic
 } // namespace mlir

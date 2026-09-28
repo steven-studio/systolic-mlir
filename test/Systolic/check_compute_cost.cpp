@@ -87,5 +87,83 @@ int main() {
   std::cout
       << "All execution-task compute-cost tests passed.\n";
 
+  // ----------------------------------------------------------
+  // Assignment-aware compute cost.
+  //
+  // The logical work remains 4x4, while the physical resource
+  // geometry changes.
+  //
+  // Cost must therefore depend on the selected physical
+  // accelerator:
+  //
+  //   4x4 work -> 4x4 physical:
+  //
+  //     T = 128 + 4 * (4 + 4 - 2 + 95)
+  //       = 532
+  //
+  //   4x4 work -> 8x8 physical:
+  //
+  //     T = 128 + 4 * (8 + 8 - 2 + 95)
+  //       = 564
+  //
+  // A 2x2 physical resource cannot execute 4x4 work.
+  // ----------------------------------------------------------
+
+  SystolicArrayResource physical4;
+  physical4.arraySize = 4;
+  physical4.acceleratorId = 0;
+
+  SystolicArrayResource physical8;
+  physical8.arraySize = 8;
+  physical8.acceleratorId = 1;
+
+  SystolicArrayResource physical2;
+  physical2.arraySize = 2;
+  physical2.acceleratorId = 2;
+
+  FailureOr<int64_t> cost4On4 =
+      estimateSystolicTaskComputeCycles(
+          task4,
+          physical4,
+          K,
+          params);
+
+  FailureOr<int64_t> cost4On8 =
+      estimateSystolicTaskComputeCycles(
+          task4,
+          physical8,
+          K,
+          params);
+
+  FailureOr<int64_t> cost4On2 =
+      estimateSystolicTaskComputeCycles(
+          task4,
+          physical2,
+          K,
+          params);
+
+  assert(succeeded(cost4On4));
+  assert(succeeded(cost4On8));
+  assert(failed(cost4On2));
+
+  assert(*cost4On4 == 532);
+  assert(*cost4On8 == 564);
+
+  std::cout
+      << "4x4 work on 4x4 physical="
+      << *cost4On4
+      << "\n";
+
+  std::cout
+      << "4x4 work on 8x8 physical="
+      << *cost4On8
+      << "\n";
+
+  std::cout
+      << "4x4 work on 2x2 physical=illegal\n";
+
+  std::cout
+      << "All assignment-aware compute-cost tests passed.\n";
+
   return 0;
 }
