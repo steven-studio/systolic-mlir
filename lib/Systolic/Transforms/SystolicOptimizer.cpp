@@ -277,16 +277,65 @@ optimizeSystolicRectangleWithSchedulingDP(
       geometries.end());
 
   // ----------------------------------------------------------
+  // Pad the logical problem to the minimum supported geometry.
+  //
+  // This guarantees that every positive input rectangle has at
+  // least one legal decomposition: in the worst case, the
+  // padded domain can be covered entirely by minGeometry tiles.
+  //
+  // Padding is currently modeled as real zero-padded work, so
+  // the existing decomposition, cost, and scheduling models do
+  // not need special boundary-tile handling.
+  // ----------------------------------------------------------
+
+  const int64_t minGeometry =
+      geometries.front();
+
+  const int64_t rowRemainder =
+      rows % minGeometry;
+
+  const int64_t columnRemainder =
+      columns % minGeometry;
+
+  int64_t paddedRows = rows;
+  int64_t paddedColumns = columns;
+
+  if (rowRemainder != 0) {
+    const int64_t padding =
+        minGeometry - rowRemainder;
+
+    if (rows >
+        std::numeric_limits<int64_t>::max() -
+            padding)
+      return failure();
+
+    paddedRows += padding;
+  }
+
+  if (columnRemainder != 0) {
+    const int64_t padding =
+        minGeometry - columnRemainder;
+
+    if (columns >
+        std::numeric_limits<int64_t>::max() -
+            padding)
+      return failure();
+
+    paddedColumns += padding;
+  }
+
+  // ----------------------------------------------------------
   // First DP layer:
   //
-  // Enumerate only unique geometry multisets. Spatial
-  // placements producing the same multiset are collapsed.
+  // Enumerate only unique geometry multisets over the padded
+  // logical domain. Spatial placements producing the same
+  // multiset are collapsed.
   // ----------------------------------------------------------
 
   auto multisets =
       enumerateSystolicGeometryMultisetsDP(
-          rows,
-          columns,
+          paddedRows,
+          paddedColumns,
           geometries);
 
   if (multisets.empty())

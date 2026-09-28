@@ -143,6 +143,65 @@ int main() {
         << "\n";
   }
 
+  // ----------------------------------------------------------
+  // Padding regression.
+  //
+  // The minimum supported geometry is 4x4, so a 17x19 logical
+  // problem is zero-padded to a 20x20 decomposition domain.
+  // The selected decomposition must therefore cover exactly
+  // 400 elements.
+  // ----------------------------------------------------------
+
+  {
+    constexpr int64_t rows = 17;
+    constexpr int64_t columns = 19;
+    constexpr int64_t paddedRows = 20;
+    constexpr int64_t paddedColumns = 20;
+
+    auto result =
+        optimizeSystolicRectangleWithSchedulingDP(
+            rows,
+            columns,
+            K,
+            fleet,
+            costParams);
+
+    assert(succeeded(result));
+
+    int64_t coveredArea = 0;
+
+    for (const SystolicExecutionTask &task :
+         result->decomposition) {
+      assert(
+          (task.size == 4 ||
+           task.size == 8 ||
+           task.size == 16) &&
+          "unexpected logical geometry");
+
+      coveredArea +=
+          task.size * task.size;
+    }
+
+    assert(
+        coveredArea ==
+        paddedRows * paddedColumns);
+
+    assert(result->makespan > 0);
+
+    std::cout
+        << "\nPadding regression\n"
+        << rows << "x" << columns
+        << " -> "
+        << paddedRows << "x" << paddedColumns
+        << ": tasks="
+        << result->decomposition.size()
+        << " area="
+        << coveredArea
+        << " makespan="
+        << result->makespan
+        << "\n";
+  }
+
   std::cout
       << "\nEnd-to-end DP scalability sweep passed.\n";
 
