@@ -481,19 +481,29 @@ enumerateSystolicDecompositions(
   if (tile.size <= 0 || fleet.empty())
     return decompositions;
 
-  // Collect distinct accelerator geometries that can exactly
-  // divide this spatial tile.
+  // ----------------------------------------------------------
+  // Collect distinct legal accelerator geometries.
+  //
+  // Enumeration is spatial only.  Multiple physical instances
+  // of the same geometry do not create different spatial
+  // decompositions.
+  // ----------------------------------------------------------
+
   llvm::SmallVector<int64_t> geometries;
 
   for (const SystolicArrayResource &resource : fleet) {
     const int64_t size = resource.arraySize;
 
-    if (size <= 0 || tile.size % size != 0)
+    if (size <= 0 || size > tile.size)
       continue;
 
-    if (llvm::find(geometries, size) == geometries.end())
+    if (llvm::find(geometries, size) ==
+        geometries.end())
       geometries.push_back(size);
   }
+
+  if (geometries.empty())
+    return decompositions;
 
   llvm::sort(
       geometries,
@@ -502,48 +512,156 @@ enumerateSystolicDecompositions(
       });
 
   // ----------------------------------------------------------
-  // Generate one homogeneous decomposition for each geometry.
+  // Exact-cover state.
   //
-  // A tile of size T using accelerator geometry A produces:
+  // coverage[r * tile.size + c]:
+  //   false -> not covered yet
+  //   true  -> already occupied by one execution task
   //
-  //   (T / A) x (T / A)
-  //
-  // execution tasks.
+  // Coordinates in coverage are local to the parent tile.
   // ----------------------------------------------------------
 
-  for (int64_t acceleratorSize : geometries) {
-    const int64_t tilesPerDimension =
-        tile.size / acceleratorSize;
+  const int64_t dimension = tile.size;
 
-    llvm::SmallVector<SystolicExecutionTask> decomposition;
+  llvm::SmallVector<bool> coverage(
+      static_cast<size_t>(dimension * dimension),
+      false);
 
-    for (int64_t r = 0;
-         r < tilesPerDimension;
-         ++r) {
-      for (int64_t c = 0;
-           c < tilesPerDimension;
+  llvm::SmallVector<SystolicExecutionTask>
+      currentDecomposition;
+
+  // Return true iff a square accelerator of the requested size
+  // can be placed at local coordinate (row, column).
+  auto canPlace =
+      [&](int64_t row,
+          int64_t column,
+          int64_t size) -> bool {
+
+    if (row < 0 ||
+        column < 0 ||
+        row + size > dimension ||
+        column + size > dimension)
+      return false;
+
+    for (int64_t r = row; r < row + size; ++r) {
+      for (int64_t c = column;
+           c < column + size;
            ++c) {
+        const size_t index =
+            static_cast<size_t>(
+                r * dimension + c);
 
-        SystolicExecutionTask task;
-        task.row =
-            tile.row +
-            r * acceleratorSize;
-        task.column =
-            tile.column +
-            c * acceleratorSize;
-        task.size = acceleratorSize;
-        task.acceleratorSize = acceleratorSize;
-
-        // Assignment belongs to scheduling.
-        task.acceleratorId = -1;
-
-        decomposition.push_back(task);
+        if (coverage[index])
+          return false;
       }
     }
 
-    decompositions.push_back(
-        std::move(decomposition));
-  }
+    return true;
+  };
+
+  auto setCoverage =
+      [&](int64_t row,
+          int64_t column,
+          int64_t size,
+          bool value) {
+
+    for (int64_t r = row; r < row + size; ++r) {
+      for (int64_t c = column;
+           c < column + size;
+           ++c) {
+        const size_t index =
+            static_cast<size_t>(
+                r * dimension + c);
+
+        coverage[index] = value;
+      }
+    }
+  };
+
+  // ----------------------------------------------------------
+  // Recursive exact-cover enumeration.
+  //
+  // Always choose the first uncovered cell in row-major order.
+  // Every legal decomposition must place exactly one tile whose
+  // top-left corner is this cell.
+  //
+  // Fixing this canonical next position avoids enumerating
+  // permutations of the same spatial decomposition.
+  // ----------------------------------------------------------
+
+  std::function<void()> search = [&]() {
+    int64_t uncoveredRow = -1;
+    int64_t uncoveredColumn = -1;
+
+    for (int64_t r = 0;
+         r < dimension && uncoveredRow < 0;
+         ++r) {
+      for (int64_t c = 0;
+           c < dimension;
+           ++c) {
+        const size_t index =
+            static_cast<size_t>(
+                r * dimension + c);
+
+        if (!coverage[index]) {
+          uncoveredRow = r;
+          uncoveredColumn = c;
+          break;
+        }
+      }
+    }
+
+    // No uncovered cell remains: exact cover found.
+    if (uncoveredRow < 0) {
+      decompositions.push_back(
+          currentDecomposition);
+      return;
+    }
+
+    // Try every legal accelerator geometry at the canonical
+    // uncovered position.
+    for (int64_t acceleratorSize : geometries) {
+      if (!canPlace(
+              uncoveredRow,
+              uncoveredColumn,
+              acceleratorSize))
+        continue;
+
+      setCoverage(
+          uncoveredRow,
+          uncoveredColumn,
+          acceleratorSize,
+          true);
+
+      SystolicExecutionTask task;
+
+      task.row =
+          tile.row + uncoveredRow;
+
+      task.column =
+          tile.column + uncoveredColumn;
+
+      task.size = acceleratorSize;
+      task.acceleratorSize = acceleratorSize;
+
+      // Physical accelerator assignment belongs to scheduling.
+      task.acceleratorId = -1;
+
+      currentDecomposition.push_back(task);
+
+      search();
+
+      currentDecomposition.pop_back();
+
+      setCoverage(
+          uncoveredRow,
+          uncoveredColumn,
+          acceleratorSize,
+          false);
+    }
+  };
+
+  search();
 
   return decompositions;
 }
