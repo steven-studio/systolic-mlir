@@ -4,6 +4,7 @@
 #include "mlir/Support/LogicalResult.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 
@@ -14,25 +15,18 @@ int main() {
   constexpr int64_t K = 128;
 
   // ----------------------------------------------------------
-  // Scalability case:
+  // End-to-end scalability sweep.
   //
-  // Logical output:
+  // For every square output size:
   //
-  //   16 x 16
+  //   decomposition DP
+  //       -> unique geometry multisets
+  //       -> count-based scheduling DP
+  //       -> global minimum makespan
   //
-  // Physical heterogeneous fleet:
-  //
-  //   one 4x4 array
-  //   one 8x8 array
-  //   one 16x16 array
-  //
-  // The decomposition DP has only six unique geometry
-  // multisets for this case.  Each multiset is evaluated using
-  // the count-based scheduling DP.
-  //
-  // Importantly, this test does NOT invoke the old spatial
-  // decomposition + task-identity DFS oracle, which previously
-  // became prohibitively expensive for this case.
+  // No spatial-enumeration / task-identity DFS oracle is run
+  // here.  The purpose of this test is to characterize how far
+  // the new end-to-end DP path scales.
   // ----------------------------------------------------------
 
   llvm::SmallVector<SystolicArrayResource> fleet = {
@@ -48,82 +42,109 @@ int main() {
           {16, {128, 120}},
       };
 
-  auto result =
-      optimizeSystolicRectangleWithSchedulingDP(
-          16,
-          16,
-          K,
-          fleet,
-          costParams);
+  constexpr int64_t sizes[] = {
+      16,
+      24,
+      32,
+      40,
+      48,
+      64,
+  };
 
-  assert(succeeded(result));
+  std::cout
+      << "End-to-end DP scalability sweep\n"
+      << "K=" << K << "\n"
+      << "fleet={4x4,8x8,16x16}\n\n";
 
-  int64_t count4 = 0;
-  int64_t count8 = 0;
-  int64_t count16 = 0;
+  for (const int64_t size : sizes) {
+    const int64_t rows = size;
+    const int64_t columns = size;
 
-  for (const SystolicExecutionTask &task :
-       result->decomposition) {
-    switch (task.size) {
-    case 4:
-      ++count4;
-      break;
+    const auto start =
+        std::chrono::steady_clock::now();
 
-    case 8:
-      ++count8;
-      break;
+    auto result =
+        optimizeSystolicRectangleWithSchedulingDP(
+            rows,
+            columns,
+            K,
+            fleet,
+            costParams);
 
-    case 16:
-      ++count16;
-      break;
+    const auto stop =
+        std::chrono::steady_clock::now();
 
-    default:
-      assert(false &&
-             "unexpected logical geometry");
+    assert(succeeded(result));
+
+    const auto elapsedUs =
+        std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                stop - start)
+            .count();
+
+    int64_t count4 = 0;
+    int64_t count8 = 0;
+    int64_t count16 = 0;
+
+    for (const SystolicExecutionTask &task :
+         result->decomposition) {
+      switch (task.size) {
+      case 4:
+        ++count4;
+        break;
+
+      case 8:
+        ++count8;
+        break;
+
+      case 16:
+        ++count16;
+        break;
+
+      default:
+        assert(false &&
+               "unexpected logical geometry");
+      }
     }
+
+    const int64_t coveredArea =
+        count4 * 4 * 4 +
+        count8 * 8 * 8 +
+        count16 * 16 * 16;
+
+    assert(coveredArea == rows * columns);
+    assert(result->makespan > 0);
+
+    std::cout
+        << rows
+        << "x"
+        << columns
+        << ": "
+        << "4x4="
+        << count4
+        << " "
+        << "8x8="
+        << count8
+        << " "
+        << "16x16="
+        << count16
+        << " "
+        << "tasks="
+        << result->decomposition.size()
+        << " "
+        << "area="
+        << coveredArea
+        << " "
+        << "makespan="
+        << result->makespan
+        << " "
+        << "time_us="
+        << elapsedUs
+        << "\n";
   }
 
   std::cout
-      << "16x16 end-to-end DP result\n";
-
-  std::cout
-      << "selected tasks="
-      << result->decomposition.size()
-      << "\n";
-
-  std::cout
-      << "logical 4x4 tasks="
-      << count4
-      << "\n";
-
-  std::cout
-      << "logical 8x8 tasks="
-      << count8
-      << "\n";
-
-  std::cout
-      << "logical 16x16 tasks="
-      << count16
-      << "\n";
-
-  std::cout
-      << "minimum makespan="
-      << result->makespan
-      << "\n";
-
-  // The selected logical decomposition must exactly cover the
-  // 16x16 output area.
-  const int64_t coveredArea =
-      count4 * 4 * 4 +
-      count8 * 8 * 8 +
-      count16 * 16 * 16;
-
-  assert(coveredArea == 16 * 16);
-
-  assert(result->makespan > 0);
-
-  std::cout
-      << "16x16 end-to-end DP scalability test passed.\n";
+      << "\nEnd-to-end DP scalability sweep passed.\n";
 
   return 0;
 }

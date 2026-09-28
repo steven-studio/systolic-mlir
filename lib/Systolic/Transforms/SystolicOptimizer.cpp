@@ -349,14 +349,16 @@ optimizeSystolicRectangleWithSchedulingDP(
       continue;
 
     // --------------------------------------------------------
-    // Second DP layer:
+    // Exact scheduling layer:
     //
-    // Compute the exact minimum makespan while representing
-    // identical logical tasks by counts rather than identities.
+    // Enumerate count allocations of indistinguishable logical
+    // geometries across physical resources.  This preserves the
+    // assignment-aware cost model without exploring task-order
+    // permutations.
     // --------------------------------------------------------
 
     auto makeSpan =
-        minimizeSystolicMakeSpanDP(
+        minimizeSystolicMakeSpanCountAllocation(
             tasks,
             K,
             fleet,

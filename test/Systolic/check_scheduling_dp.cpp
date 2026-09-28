@@ -103,11 +103,27 @@ int main() {
       << *dp
       << "\n";
 
-  assert(exactMakeSpan == 234);
-  assert(*dp == exactMakeSpan);
+  auto smallAllocation =
+      minimizeSystolicMakeSpanCountAllocation(
+          smallTasks,
+          K,
+          smallFleet,
+          smallCostParams);
+
+  assert(succeeded(smallAllocation));
 
   std::cout
-      << "Scheduling DP matches exact DFS.\n";
+      << "small count-allocation makespan="
+      << *smallAllocation
+      << "\n";
+
+  assert(exactMakeSpan == 234);
+  assert(*dp == exactMakeSpan);
+  assert(*smallAllocation == exactMakeSpan);
+
+  std::cout
+      << "Scheduling DP and count allocation "
+         "match exact DFS.\n";
 
   // ----------------------------------------------------------
   // Case 2:
@@ -149,13 +165,136 @@ int main() {
 
   assert(succeeded(manyDP));
 
+  auto manyAllocation =
+      minimizeSystolicMakeSpanCountAllocation(
+          manyTasks,
+          K,
+          largeFleet,
+          largeCostParams);
+
+  assert(succeeded(manyAllocation));
+
   std::cout
       << "16 identical 4x4 tasks DP makespan="
       << *manyDP
       << "\n";
 
   std::cout
-      << "Count-based scheduling DP test passed.\n";
+      << "16 identical 4x4 tasks "
+         "count-allocation makespan="
+      << *manyAllocation
+      << "\n";
+
+  assert(*manyDP == 1072);
+  assert(*manyAllocation == *manyDP);
+
+  // ----------------------------------------------------------
+  // Case 3:
+  //
+  // Geometry multiset selected by the 16x24 rectangular
+  // end-to-end optimizer:
+  //
+  //   2 x logical 8x8
+  //   1 x logical 16x16
+  //
+  // Expected exact makespan: 364.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<SystolicExecutionTask>
+      rectangleTasks = {
+          makeTask(8),
+          makeTask(8),
+          makeTask(16),
+      };
+
+  auto rectangleDP =
+      minimizeSystolicMakeSpanDP(
+          rectangleTasks,
+          K,
+          largeFleet,
+          largeCostParams);
+
+  auto rectangleAllocation =
+      minimizeSystolicMakeSpanCountAllocation(
+          rectangleTasks,
+          K,
+          largeFleet,
+          largeCostParams);
+
+  assert(succeeded(rectangleDP));
+  assert(succeeded(rectangleAllocation));
+
+  std::cout
+      << "16x24 selected multiset DP makespan="
+      << *rectangleDP
+      << "\n";
+
+  std::cout
+      << "16x24 selected multiset "
+         "count-allocation makespan="
+      << *rectangleAllocation
+      << "\n";
+
+  assert(*rectangleDP == 364);
+  assert(*rectangleAllocation == *rectangleDP);
+
+  // ----------------------------------------------------------
+  // Case 4:
+  //
+  // Geometry multiset selected by the 32x32 end-to-end
+  // optimizer:
+  //
+  //   4 x logical 8x8
+  //   3 x logical 16x16
+  //
+  // Expected exact makespan: 834.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<SystolicExecutionTask>
+      square32Tasks;
+
+  for (int i = 0; i < 4; ++i)
+    square32Tasks.push_back(
+        makeTask(8));
+
+  for (int i = 0; i < 3; ++i)
+    square32Tasks.push_back(
+        makeTask(16));
+
+  auto square32DP =
+      minimizeSystolicMakeSpanDP(
+          square32Tasks,
+          K,
+          largeFleet,
+          largeCostParams);
+
+  auto square32Allocation =
+      minimizeSystolicMakeSpanCountAllocation(
+          square32Tasks,
+          K,
+          largeFleet,
+          largeCostParams);
+
+  assert(succeeded(square32DP));
+  assert(succeeded(square32Allocation));
+
+  std::cout
+      << "32x32 selected multiset DP makespan="
+      << *square32DP
+      << "\n";
+
+  std::cout
+      << "32x32 selected multiset "
+         "count-allocation makespan="
+      << *square32Allocation
+      << "\n";
+
+  assert(*square32DP == 834);
+  assert(*square32Allocation == *square32DP);
+
+  std::cout
+      << "Count-allocation scheduler matches "
+         "all scheduling correctness oracles.\n";
 
   return 0;
 }
