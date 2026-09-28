@@ -3,6 +3,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulAnalysis.cpp
   AffineMatmulPartitioning.cpp
   SystolicTiling.cpp
+  SystolicComputeCost.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   CostModel.cpp

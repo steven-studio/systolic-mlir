@@ -103,6 +103,35 @@ struct SystolicTile {
   int64_t acceleratorId;
 };
 
+/// A tile together with its scheduled execution interval.
+///
+/// startCycle and endCycle are compute-only cycles.
+/// DMA is intentionally not represented here.
+struct ScheduledSystolicTile {
+  SystolicTile tile;
+
+  int64_t startCycle;
+  int64_t endCycle;
+};
+
+/// One compute task generated from a spatial tile decomposition.
+///
+/// This represents an execution unit, not a physical accelerator
+/// assignment.  acceleratorId remains unset until scheduling.
+struct SystolicExecutionTask {
+  int64_t row;
+  int64_t column;
+  int64_t size;
+
+  /// Physical accelerator geometry required by this task.
+  int64_t acceleratorSize;
+
+  /// Physical accelerator instance assigned by the scheduler.
+  ///
+  /// -1 means not assigned yet.
+  int64_t acceleratorId;
+};
+
 /// Return physical hardware resources sorted from largest to
 /// smallest array geometry.
 ///
@@ -165,6 +194,92 @@ LogicalResult verifySystolicTiling(
     int64_t inputColumns,
     llvm::ArrayRef<SystolicTile> tiles,
     const SystolicFleetState &fleet);
+
+/// Schedule tiles onto physical accelerators to minimize
+/// compute makespan.
+///
+/// Tiles are grouped by accelerator geometry.  For each geometry,
+/// tiles are assigned using a longest-processing-time-first
+/// load-balancing strategy:
+///
+///   1. process larger tiles first
+///   2. assign each tile to the least-loaded accelerator
+///   3. reuse the physical accelerator when it becomes available
+///
+/// The scheduler only models compute time.
+/// DMA and DMA/compute overlap are future work.
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+scheduleSystolicTiles(
+    llvm::ArrayRef<SystolicTile> tiles,
+    llvm::ArrayRef<int64_t> computeCycles,
+    const SystolicFleetState &fleet);
+
+/// Enumerate legal homogeneous decompositions of one spatial tile.
+///
+/// For every supported accelerator geometry that divides the tile
+/// exactly, generate a decomposition using only that geometry.
+///
+/// Examples:
+///   8x8 tile + {8, 4}
+///     -> one 8x8 task
+///     -> four 4x4 tasks
+///
+///   128x128 tile + {128, 32}
+///     -> one 128x128 task
+///     -> sixteen 32x32 tasks
+///
+/// Accelerator instance assignment is intentionally deferred to
+/// the scheduler.
+llvm::SmallVector<llvm::SmallVector<SystolicExecutionTask>>
+enumerateSystolicDecompositions(
+    const SystolicTile &tile,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
+
+/// Assign each execution task to a physical accelerator.
+///
+/// Assignment is performed independently for one decomposition.
+/// Every task must be assigned to an accelerator whose geometry
+/// can execute the task.
+///
+/// Accelerator IDs are taken from the physical fleet and are
+/// therefore concrete after this function returns.
+///
+/// This function does not model execution time or temporal reuse.
+/// If more tasks exist than physical accelerators, accelerators
+/// may be reused; temporal feasibility is handled by scheduling.
+LogicalResult assignSystolicAccelerators(
+    llvm::MutableArrayRef<SystolicExecutionTask> tasks,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
+
+/// Exhaustively schedule execution tasks to minimize compute
+/// makespan.
+///
+/// The scheduler enumerates physical accelerator assignments
+/// and execution ordering subject to accelerator compatibility.
+///
+/// The objective is:
+///
+///   minimize max_i(endCycle_i)
+///
+/// where each task occupies exactly one physical accelerator
+/// for its compute duration.
+///
+/// This model intentionally excludes:
+///   - DMA
+///   - DMA/compute overlap
+///   - write-back
+///   - communication costs
+///
+/// `computeCycles[i]` is the compute-only execution time of
+/// `tasks[i]`.
+///
+/// Returns the minimum-makespan schedule found by exhaustive
+/// enumeration.
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+minimizeSystolicMakeSpan(
+    llvm::ArrayRef<SystolicExecutionTask> tasks,
+    llvm::ArrayRef<int64_t> computeCycles,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
 
 /// Tile a square input using a deterministic
 /// top-to-bottom, left-to-right traversal.

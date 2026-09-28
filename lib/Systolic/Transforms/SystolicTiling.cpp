@@ -2,6 +2,10 @@
 
 #include "llvm/ADT/STLExtras.h"
 
+#include <algorithm>
+#include <functional>
+#include <limits>
+
 namespace mlir {
 namespace systolic {
 
@@ -273,6 +277,275 @@ LogicalResult verifySystolicTiling(
   }
 
   return success();
+}
+
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+minimizeSystolicMakeSpan(
+    llvm::ArrayRef<SystolicExecutionTask> tasks,
+    llvm::ArrayRef<int64_t> computeCycles,
+    llvm::ArrayRef<SystolicArrayResource> fleet) {
+
+  if (tasks.empty() ||
+      tasks.size() != computeCycles.size() ||
+      fleet.empty())
+    return failure();
+
+  // ----------------------------------------------------------
+  // Build the list of physical accelerator instances.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<SystolicArrayResource> compatibleResources;
+
+  for (const SystolicArrayResource &resource : fleet)
+    compatibleResources.push_back(resource);
+
+  // ----------------------------------------------------------
+  // Validate tasks and compute costs.
+  // ----------------------------------------------------------
+
+  for (int64_t i = 0;
+       i < static_cast<int64_t>(tasks.size());
+       ++i) {
+    if (tasks[i].size <= 0 ||
+        tasks[i].acceleratorSize <= 0 ||
+        computeCycles[i] <= 0)
+      return failure();
+  }
+
+  // ----------------------------------------------------------
+  // Exhaustive search state.
+  //
+  // Each physical accelerator has a current load.
+  //
+  // load[k] = cycle at which accelerator k becomes free.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<int64_t> bestLoad(
+      compatibleResources.size(), 0);
+
+  int64_t bestMakespan =
+      std::numeric_limits<int64_t>::max();
+
+  llvm::SmallVector<ScheduledSystolicTile> bestSchedule(
+      tasks.size());
+
+  llvm::SmallVector<ScheduledSystolicTile> currentSchedule(
+      tasks.size());
+
+  llvm::SmallVector<bool> scheduled(
+      tasks.size(), false);
+
+  llvm::SmallVector<int64_t> load(
+      compatibleResources.size(), 0);
+
+  // ----------------------------------------------------------
+  // Recursive exhaustive enumeration.
+  //
+  // At every level:
+  //
+  //   choose one unscheduled task
+  //   choose one compatible physical accelerator
+  //   start it when that accelerator becomes free
+  //
+  // This enumerates both task ordering and accelerator
+  // assignment.
+  // ----------------------------------------------------------
+
+  std::function<void(int64_t)> search =
+      [&](int64_t scheduledCount) {
+
+    if (scheduledCount ==
+        static_cast<int64_t>(tasks.size())) {
+
+      int64_t makespan = 0;
+
+      for (int64_t value : load)
+        makespan = std::max(makespan, value);
+
+      if (makespan < bestMakespan) {
+        bestMakespan = makespan;
+        bestSchedule = currentSchedule;
+        bestLoad = load;
+      }
+
+      return;
+    }
+
+    // --------------------------------------------------------
+    // Branch-and-bound:
+    //
+    // If the current partial schedule already reaches the
+    // best known makespan, no descendant can improve it.
+    // --------------------------------------------------------
+
+    int64_t currentMakespan = 0;
+
+    for (int64_t value : load)
+      currentMakespan =
+          std::max(currentMakespan, value);
+
+    if (currentMakespan >= bestMakespan)
+      return;
+
+    for (int64_t taskIndex = 0;
+         taskIndex < static_cast<int64_t>(tasks.size());
+         ++taskIndex) {
+
+      if (scheduled[taskIndex])
+        continue;
+
+      const SystolicExecutionTask &task =
+          tasks[taskIndex];
+
+      for (int64_t resourceIndex = 0;
+           resourceIndex <
+               static_cast<int64_t>(
+                   compatibleResources.size());
+           ++resourceIndex) {
+
+        const SystolicArrayResource &resource =
+            compatibleResources[resourceIndex];
+
+        // Physical accelerator must be large enough.
+        if (resource.arraySize < task.acceleratorSize)
+          continue;
+
+        const int64_t startCycle =
+            load[resourceIndex];
+
+        const int64_t endCycle =
+            startCycle + computeCycles[taskIndex];
+
+        if (endCycle >= bestMakespan)
+          continue;
+
+        scheduled[taskIndex] = true;
+
+        const int64_t oldLoad =
+            load[resourceIndex];
+
+        load[resourceIndex] = endCycle;
+
+        ScheduledSystolicTile scheduledTile;
+
+        scheduledTile.tile.row =
+            task.row;
+
+        scheduledTile.tile.column =
+            task.column;
+
+        scheduledTile.tile.size =
+            task.size;
+
+        scheduledTile.tile.acceleratorSize =
+            resource.arraySize;
+
+        scheduledTile.tile.acceleratorId =
+            resource.acceleratorId;
+
+        scheduledTile.startCycle =
+            startCycle;
+
+        scheduledTile.endCycle =
+            endCycle;
+
+        currentSchedule[taskIndex] =
+            scheduledTile;
+
+        search(scheduledCount + 1);
+
+        load[resourceIndex] = oldLoad;
+        scheduled[taskIndex] = false;
+      }
+    }
+  };
+
+  search(0);
+
+  if (bestMakespan ==
+      std::numeric_limits<int64_t>::max())
+    return failure();
+
+  return bestSchedule;
+}
+
+llvm::SmallVector<llvm::SmallVector<SystolicExecutionTask>>
+enumerateSystolicDecompositions(
+    const SystolicTile &tile,
+    llvm::ArrayRef<SystolicArrayResource> fleet) {
+
+  llvm::SmallVector<
+      llvm::SmallVector<SystolicExecutionTask>>
+      decompositions;
+
+  if (tile.size <= 0 || fleet.empty())
+    return decompositions;
+
+  // Collect distinct accelerator geometries that can exactly
+  // divide this spatial tile.
+  llvm::SmallVector<int64_t> geometries;
+
+  for (const SystolicArrayResource &resource : fleet) {
+    const int64_t size = resource.arraySize;
+
+    if (size <= 0 || tile.size % size != 0)
+      continue;
+
+    if (llvm::find(geometries, size) == geometries.end())
+      geometries.push_back(size);
+  }
+
+  llvm::sort(
+      geometries,
+      [](int64_t lhs, int64_t rhs) {
+        return lhs > rhs;
+      });
+
+  // ----------------------------------------------------------
+  // Generate one homogeneous decomposition for each geometry.
+  //
+  // A tile of size T using accelerator geometry A produces:
+  //
+  //   (T / A) x (T / A)
+  //
+  // execution tasks.
+  // ----------------------------------------------------------
+
+  for (int64_t acceleratorSize : geometries) {
+    const int64_t tilesPerDimension =
+        tile.size / acceleratorSize;
+
+    llvm::SmallVector<SystolicExecutionTask> decomposition;
+
+    for (int64_t r = 0;
+         r < tilesPerDimension;
+         ++r) {
+      for (int64_t c = 0;
+           c < tilesPerDimension;
+           ++c) {
+
+        SystolicExecutionTask task;
+        task.row =
+            tile.row +
+            r * acceleratorSize;
+        task.column =
+            tile.column +
+            c * acceleratorSize;
+        task.size = acceleratorSize;
+        task.acceleratorSize = acceleratorSize;
+
+        // Assignment belongs to scheduling.
+        task.acceleratorId = -1;
+
+        decomposition.push_back(task);
+      }
+    }
+
+    decompositions.push_back(
+        std::move(decomposition));
+  }
+
+  return decompositions;
 }
 
 } // namespace systolic
