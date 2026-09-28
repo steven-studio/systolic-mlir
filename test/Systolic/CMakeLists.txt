@@ -223,6 +223,21 @@ target_include_directories(check_mixed_decomposition
   ${PROJECT_BINARY_DIR}/include
 )
 
+add_executable(check_partial_boundary_decomposition
+  check_partial_boundary_decomposition.cpp
+)
+
+target_link_libraries(check_partial_boundary_decomposition
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_partial_boundary_decomposition
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
 
 add_executable(check_macro_split_makespan
   check_macro_split_makespan.cpp

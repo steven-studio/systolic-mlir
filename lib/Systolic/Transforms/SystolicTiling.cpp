@@ -898,23 +898,51 @@ enumerateSystolicDecompositions(
   llvm::SmallVector<SystolicExecutionTask>
       currentDecomposition;
 
-  // Return true iff a square accelerator of the requested size
-  // can be placed at local coordinate (row, column).
+  // Return true iff the requested square has a non-empty
+  // intersection with the parent tile and that intersection
+  // does not overlap already-covered area.
+  //
+  // A candidate is allowed to extend beyond the parent tile.
+  // Only its actual intersection with the parent tile
+  // participates in coverage.
   auto canPlace =
       [&](int64_t row,
           int64_t column,
           int64_t size) -> bool {
 
-    if (row < 0 ||
-        column < 0 ||
-        row + size > dimension ||
-        column + size > dimension)
+    if (size <= 0)
       return false;
 
-    for (int64_t r = row; r < row + size; ++r) {
-      for (int64_t c = column;
-           c < column + size;
+    const int64_t intersectionRowBegin =
+        std::max<int64_t>(0, row);
+
+    const int64_t intersectionColumnBegin =
+        std::max<int64_t>(0, column);
+
+    const int64_t intersectionRowEnd =
+        std::min<int64_t>(
+            dimension,
+            row + size);
+
+    const int64_t intersectionColumnEnd =
+        std::min<int64_t>(
+            dimension,
+            column + size);
+
+    // Empty intersection: this candidate covers no part
+    // of the parent tile and must never be enumerated.
+    if (intersectionRowBegin >= intersectionRowEnd ||
+        intersectionColumnBegin >= intersectionColumnEnd)
+      return false;
+
+    for (int64_t r = intersectionRowBegin;
+         r < intersectionRowEnd;
+         ++r) {
+
+      for (int64_t c = intersectionColumnBegin;
+           c < intersectionColumnEnd;
            ++c) {
+
         const size_t index =
             static_cast<size_t>(
                 r * dimension + c);
@@ -933,10 +961,35 @@ enumerateSystolicDecompositions(
           int64_t size,
           bool value) {
 
-    for (int64_t r = row; r < row + size; ++r) {
-      for (int64_t c = column;
-           c < column + size;
+    const int64_t intersectionRowBegin =
+        std::max<int64_t>(0, row);
+
+    const int64_t intersectionColumnBegin =
+        std::max<int64_t>(0, column);
+
+    const int64_t intersectionRowEnd =
+        std::min<int64_t>(
+            dimension,
+            row + size);
+
+    const int64_t intersectionColumnEnd =
+        std::min<int64_t>(
+            dimension,
+            column + size);
+
+    // No intersection: there is nothing to mark.
+    if (intersectionRowBegin >= intersectionRowEnd ||
+        intersectionColumnBegin >= intersectionColumnEnd)
+      return;
+
+    for (int64_t r = intersectionRowBegin;
+         r < intersectionRowEnd;
+         ++r) {
+
+      for (int64_t c = intersectionColumnBegin;
+           c < intersectionColumnEnd;
            ++c) {
+
         const size_t index =
             static_cast<size_t>(
                 r * dimension + c);
