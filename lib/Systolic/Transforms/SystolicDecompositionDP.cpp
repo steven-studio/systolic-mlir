@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <numeric>
 #include <set>
 #include <utility>
 #include <vector>
@@ -44,6 +45,24 @@ enumerateSystolicGeometryMultisetsDP(
     if (!isPowerOfTwo(geometry))
       return output;
   }
+
+  int64_t geometryGCD = 0;
+
+  for (int64_t geometry : geometries)
+    geometryGCD =
+        std::gcd(
+            geometryGCD,
+            geometry);
+
+  if (geometryGCD <= 0)
+    return output;
+
+  // A rectangle tiled entirely by the supported square
+  // geometries must have both dimensions aligned to their
+  // greatest common divisor.
+  if (rows % geometryGCD != 0 ||
+      columns % geometryGCD != 0)
+    return output;
 
   // ----------------------------------------------------------
   // DP memo:
@@ -105,7 +124,9 @@ enumerateSystolicGeometryMultisetsDP(
         //     (R-r) x C
         // ----------------------------------------------------
 
-        for (int64_t r = 1; r < R; ++r) {
+        for (int64_t r = geometryGCD;
+             r <= R / 2;
+             r += geometryGCD) {
           const DPResult &top =
               solve(r, C);
 
@@ -140,7 +161,9 @@ enumerateSystolicGeometryMultisetsDP(
         //   = R x c  +  R x (C-c)
         // ----------------------------------------------------
 
-        for (int64_t c = 1; c < C; ++c) {
+        for (int64_t c = geometryGCD;
+             c <= C / 2;
+             c += geometryGCD) {
           const DPResult &left =
               solve(R, c);
 
