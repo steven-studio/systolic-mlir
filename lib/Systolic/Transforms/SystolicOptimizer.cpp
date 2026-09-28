@@ -1,5 +1,6 @@
 #include "Systolic/SystolicOptimizer.h"
 #include "Systolic/SystolicDecompositionDP.h"
+#include "Systolic/SystolicSchedulingDP.h"
 
 #include <algorithm>
 #include <limits>
@@ -233,5 +234,155 @@ optimizeSystolicRectangleDP(
   return bestResult;
 }
 
+
+
+FailureOr<SystolicDPOptimizationResult>
+optimizeSystolicRectangleWithSchedulingDP(
+    int64_t rows,
+    int64_t columns,
+    int64_t K,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    llvm::ArrayRef<SystolicGeometryCostParams> costParams) {
+
+  if (rows <= 0 ||
+      columns <= 0 ||
+      K <= 0 ||
+      fleet.empty() ||
+      costParams.empty())
+    return failure();
+
+  // ----------------------------------------------------------
+  // Extract unique logical geometry sizes from the physical
+  // fleet.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<int64_t> geometries;
+
+  for (const SystolicArrayResource &resource : fleet) {
+    if (resource.arraySize <= 0)
+      return failure();
+
+    if (std::find(
+            geometries.begin(),
+            geometries.end(),
+            resource.arraySize) ==
+        geometries.end()) {
+      geometries.push_back(
+          resource.arraySize);
+    }
+  }
+
+  std::sort(
+      geometries.begin(),
+      geometries.end());
+
+  // ----------------------------------------------------------
+  // First DP layer:
+  //
+  // Enumerate only unique geometry multisets. Spatial
+  // placements producing the same multiset are collapsed.
+  // ----------------------------------------------------------
+
+  auto multisets =
+      enumerateSystolicGeometryMultisetsDP(
+          rows,
+          columns,
+          geometries);
+
+  if (multisets.empty())
+    return failure();
+
+  SystolicDPOptimizationResult bestResult;
+
+  int64_t bestMakeSpan =
+      std::numeric_limits<int64_t>::max();
+
+  bool foundValidSchedule = false;
+
+  for (const SystolicGeometryMultiset &multiset :
+       multisets) {
+
+    if (multiset.counts.size() !=
+        geometries.size())
+      return failure();
+
+    llvm::SmallVector<SystolicExecutionTask> tasks;
+
+    // --------------------------------------------------------
+    // Materialize the geometry multiset as logical tasks.
+    //
+    // Spatial coordinates are intentionally discarded because
+    // the current compute-cost and scheduling models are
+    // position-independent.
+    // --------------------------------------------------------
+
+    for (size_t geometryIndex = 0;
+         geometryIndex < geometries.size();
+         ++geometryIndex) {
+
+      const int64_t geometry =
+          geometries[geometryIndex];
+
+      const int64_t count =
+          multiset.counts[geometryIndex];
+
+      if (count < 0)
+        return failure();
+
+      for (int64_t taskIndex = 0;
+           taskIndex < count;
+           ++taskIndex) {
+
+        SystolicExecutionTask task;
+
+        task.row = 0;
+        task.column = 0;
+        task.size = geometry;
+        task.acceleratorSize = geometry;
+        task.acceleratorId = -1;
+
+        tasks.push_back(task);
+      }
+    }
+
+    if (tasks.empty())
+      continue;
+
+    // --------------------------------------------------------
+    // Second DP layer:
+    //
+    // Compute the exact minimum makespan while representing
+    // identical logical tasks by counts rather than identities.
+    // --------------------------------------------------------
+
+    auto makeSpan =
+        minimizeSystolicMakeSpanDP(
+            tasks,
+            K,
+            fleet,
+            costParams);
+
+    if (failed(makeSpan))
+      continue;
+
+    if (!foundValidSchedule ||
+        *makeSpan < bestMakeSpan) {
+
+      foundValidSchedule = true;
+      bestMakeSpan = *makeSpan;
+
+      bestResult.decomposition =
+          tasks;
+
+      bestResult.makespan =
+          *makeSpan;
+    }
+  }
+
+  if (!foundValidSchedule)
+    return failure();
+
+  return bestResult;
+}
 } // namespace systolic
 } // namespace mlir

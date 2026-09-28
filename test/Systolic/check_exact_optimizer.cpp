@@ -263,6 +263,65 @@ int main() {
   std::cout
       << "DP optimizer matches brute-force oracle.\n";
 
+
+  // ----------------------------------------------------------
+  // End-to-end DP cross-check.
+  //
+  // Compare all three optimization paths:
+  //
+  //   A. spatial decomposition + exact scheduling DFS
+  //   B. geometry-multiset DP + exact scheduling DFS
+  //   C. geometry-multiset DP + count-based scheduling DP
+  //
+  // All three must preserve the same global optimum.
+  // ----------------------------------------------------------
+
+  auto endToEndDP =
+      optimizeSystolicRectangleWithSchedulingDP(
+          8,
+          8,
+          K,
+          fleet,
+          costParams);
+
+  assert(succeeded(endToEndDP));
+
+  std::cout
+      << "end-to-end DP minimum makespan="
+      << endToEndDP->makespan
+      << "\n";
+
+  assert(endToEndDP->makespan ==
+         result->makespan);
+
+  assert(endToEndDP->makespan ==
+         dpResult->makespan);
+
+  auto reverseEndToEndDP =
+      optimizeSystolicRectangleWithSchedulingDP(
+          8,
+          8,
+          K,
+          fleet,
+          reverseCostParams);
+
+  assert(succeeded(reverseEndToEndDP));
+
+  std::cout
+      << "reverse end-to-end DP minimum makespan="
+      << reverseEndToEndDP->makespan
+      << "\n";
+
+  assert(reverseEndToEndDP->makespan ==
+         reverseResult->makespan);
+
+  assert(reverseEndToEndDP->makespan ==
+         reverseDPResult->makespan);
+
+  std::cout
+      << "End-to-end DP optimizer matches both "
+         "correctness oracles.\n";
+
   std::cout
       << "All exact optimizer tests passed.\n";
 

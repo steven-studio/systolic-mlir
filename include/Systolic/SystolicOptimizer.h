@@ -26,6 +26,16 @@ struct ExactSystolicOptimizationResult {
   int64_t makespan;
 };
 
+/// Result of the end-to-end DP optimizer.
+///
+/// Unlike ExactSystolicOptimizationResult, this first DP result does not
+/// contain a reconstructed schedule. The scheduling DP currently computes
+/// only the exact minimum makespan.
+struct SystolicDPOptimizationResult {
+  llvm::SmallVector<SystolicExecutionTask> decomposition;
+  int64_t makespan;
+};
+
 /// Enumerate every legal spatial decomposition of `tile`,
 /// compute the exact assignment-aware minimum-makespan schedule
 /// for each decomposition, and return the globally best result.
@@ -51,6 +61,25 @@ optimizeSystolicTileExact(
 /// discarded by this optimizer.
 FailureOr<ExactSystolicOptimizationResult>
 optimizeSystolicRectangleDP(
+    int64_t rows,
+    int64_t columns,
+    int64_t K,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
+
+
+/// Optimize an R x C logical output using both decomposition DP
+/// and count-based scheduling DP.
+///
+/// The decomposition DP enumerates unique logical geometry
+/// multisets. For each multiset, the scheduling DP computes the
+/// exact minimum makespan while treating identical logical tasks
+/// as indistinguishable.
+///
+/// This version returns the selected decomposition and minimum
+/// makespan. Schedule reconstruction is intentionally deferred.
+FailureOr<SystolicDPOptimizationResult>
+optimizeSystolicRectangleWithSchedulingDP(
     int64_t rows,
     int64_t columns,
     int64_t K,
