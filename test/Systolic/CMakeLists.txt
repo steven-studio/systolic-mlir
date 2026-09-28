@@ -83,3 +83,19 @@ target_link_libraries(check_decomposition_dp
   PRIVATE
   MLIRSystolicTransforms
 )
+
+add_executable(check_scheduling_dp
+  check_scheduling_dp.cpp
+)
+
+target_link_libraries(check_scheduling_dp
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_scheduling_dp
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+

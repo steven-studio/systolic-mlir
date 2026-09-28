@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicTiling.cpp
   SystolicComputeCost.cpp
   SystolicScheduling.cpp
+  SystolicSchedulingDP.cpp
   SystolicOptimizer.cpp
   SystolicDecompositionDP.cpp
   TestAffineMatmulDiscovery.cpp
