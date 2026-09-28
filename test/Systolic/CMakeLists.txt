@@ -37,3 +37,21 @@ target_include_directories(check_compute_cost
   ${PROJECT_BINARY_DIR}/include
 )
 
+add_executable(
+  check_assignment_aware_schedule
+  check_assignment_aware_schedule.cpp
+)
+
+target_link_libraries(
+  check_assignment_aware_schedule
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(
+  check_assignment_aware_schedule
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+

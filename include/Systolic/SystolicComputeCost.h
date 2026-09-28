@@ -20,6 +20,16 @@ struct SystolicComputeCostParams {
   int64_t implementationOverhead;
 };
 
+/// Compute-cost parameters associated with one physical
+/// systolic-array geometry.
+///
+/// Multiple physical accelerator instances may share the same
+/// geometry and therefore the same calibrated parameters.
+struct SystolicGeometryCostParams {
+  int64_t arraySize;
+  SystolicComputeCostParams params;
+};
+
 /// Estimate compute cycles for one spatial systolic tile.
 ///
 /// For one tile mapped to one accelerator:
