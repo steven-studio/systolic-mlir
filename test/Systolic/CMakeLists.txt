@@ -55,3 +55,21 @@ target_include_directories(
   ${PROJECT_BINARY_DIR}/include
 )
 
+add_executable(
+  check_exact_optimizer
+  check_exact_optimizer.cpp
+)
+
+target_link_libraries(
+  check_exact_optimizer
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(
+  check_exact_optimizer
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
