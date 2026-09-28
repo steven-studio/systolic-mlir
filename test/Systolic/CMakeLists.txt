@@ -73,3 +73,13 @@ target_include_directories(
   ${PROJECT_BINARY_DIR}/include
 )
 
+
+
+add_executable(check_decomposition_dp
+  check_decomposition_dp.cpp
+)
+
+target_link_libraries(check_decomposition_dp
+  PRIVATE
+  MLIRSystolicTransforms
+)
