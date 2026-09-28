@@ -234,6 +234,35 @@ int main() {
   std::cout
       << "DP multiset enumeration matches brute-force oracle.\n";
 
+
+  // ----------------------------------------------------------
+  // DP-only candidate growth.
+  //
+  // Do not run the brute-force spatial oracle here: the purpose
+  // is to observe how the number of unique geometry multisets
+  // grows for larger rectangles.
+  // ----------------------------------------------------------
+
+  std::cout
+      << "DP candidate growth:\n";
+
+  for (int64_t size :
+       {4, 8, 12, 16, 20, 24, 28, 32}) {
+
+    auto candidates =
+        enumerateSystolicGeometryMultisetsDP(
+            size,
+            size,
+            geometries);
+
+    std::cout
+        << "  "
+        << size << "x" << size
+        << ": "
+        << candidates.size()
+        << " unique multisets\n";
+  }
+
   std::cout
       << "All decomposition DP tests passed.\n";
 
