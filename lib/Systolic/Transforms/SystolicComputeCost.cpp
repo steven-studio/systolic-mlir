@@ -3,8 +3,21 @@
 namespace mlir {
 namespace systolic {
 
-FailureOr<int64_t> estimateSystolicTileComputeCycles(
-    const SystolicTile &tile,
+namespace {
+
+/// Shared implementation for square systolic compute cost.
+///
+/// Both SystolicTile and SystolicExecutionTask carry the two
+/// fields required by the current analytical model:
+///
+///   size
+///   acceleratorSize
+///
+/// Keeping the formula here prevents the two public overloads
+/// from drifting apart.
+FailureOr<int64_t> estimateSquareComputeCycles(
+    int64_t size,
+    int64_t acceleratorSize,
     int64_t K,
     const SystolicComputeCostParams &params) {
 
@@ -17,40 +30,67 @@ FailureOr<int64_t> estimateSystolicTileComputeCycles(
       params.implementationOverhead < 0)
     return failure();
 
-  // A tile must be mapped to a valid square accelerator.
-  if (tile.size <= 0 ||
-      tile.acceleratorSize <= 0 ||
-      tile.size != tile.acceleratorSize)
+  // Current scope requires a square spatial task whose size
+  // exactly matches its requested accelerator geometry.
+  if (size <= 0 ||
+      acceleratorSize <= 0 ||
+      size != acceleratorSize)
     return failure();
 
-  const int64_t rows = tile.acceleratorSize;
-  const int64_t cols = tile.acceleratorSize;
+  const int64_t rows = acceleratorSize;
+  const int64_t cols = acceleratorSize;
 
-  // Number of reduction invocations within this spatial tile.
+  // Number of reduction invocations:
   //
   //   I = ceil(K / kMax)
   //
-  // The final invocation may have a smaller k_i, but
-  // sum(k_i) remains exactly K.
   const int64_t numInvocations =
-      (K + params.kMax - 1) / params.kMax;
+      (K + params.kMax - 1) /
+      params.kMax;
 
-  // Sum of all k_i is exactly K.
+  // Since sum_i k_i = K, the total compute cost is:
+  //
+  //   T = K + I * (rows + cols - 2 + H)
+  //
   int64_t cycles = K;
 
-  // Every invocation pays:
-  //
-  //   systolic fill/drain = rows + cols - 2
-  //   implementation H    = per-invocation overhead
-  //
-  // Therefore H is charged numInvocations times.
   const int64_t perInvocationOverhead =
-      rows + cols - 2 +
+      rows +
+      cols -
+      2 +
       params.implementationOverhead;
 
-  cycles += numInvocations * perInvocationOverhead;
+  cycles +=
+      numInvocations *
+      perInvocationOverhead;
 
   return cycles;
+}
+
+} // namespace
+
+FailureOr<int64_t> estimateSystolicTileComputeCycles(
+    const SystolicTile &tile,
+    int64_t K,
+    const SystolicComputeCostParams &params) {
+
+  return estimateSquareComputeCycles(
+      tile.size,
+      tile.acceleratorSize,
+      K,
+      params);
+}
+
+FailureOr<int64_t> estimateSystolicTileComputeCycles(
+    const SystolicExecutionTask &task,
+    int64_t K,
+    const SystolicComputeCostParams &params) {
+
+  return estimateSquareComputeCycles(
+      task.size,
+      task.acceleratorSize,
+      K,
+      params);
 }
 
 } // namespace systolic

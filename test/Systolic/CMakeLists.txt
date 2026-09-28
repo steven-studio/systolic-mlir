@@ -23,3 +23,17 @@ target_include_directories(check_decomposition PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_BINARY_DIR}/include
 )
+
+add_executable(check_compute_cost check_compute_cost.cpp)
+
+target_link_libraries(check_compute_cost
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_compute_cost
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+

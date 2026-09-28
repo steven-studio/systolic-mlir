@@ -47,6 +47,26 @@ FailureOr<int64_t> estimateSystolicTileComputeCycles(
     int64_t K,
     const SystolicComputeCostParams &params);
 
+/// Estimate compute cycles for an execution task.
+///
+/// This overload allows decomposition candidates to be costed
+/// directly before physical accelerator assignment.
+///
+/// The current model requires:
+///
+///   task.size == task.acceleratorSize
+///
+/// and uses the same analytical model as SystolicTile:
+///
+///   I = ceil(K / kMax)
+///
+///   T = K + I * (rows + cols - 2 + H)
+///
+FailureOr<int64_t> estimateSystolicTileComputeCycles(
+    const SystolicExecutionTask &task,
+    int64_t K,
+    const SystolicComputeCostParams &params);
+
 } // namespace systolic
 } // namespace mlir
 
