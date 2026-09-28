@@ -29,108 +29,151 @@ static CountSet toSet(
   return result;
 }
 
-static void printSet(
-    const char *name,
-    const CountSet &set) {
-
-  std::cout
-      << name
-      << " (" << set.size() << "):\n";
-
-  for (const CountVector &counts : set) {
-    std::cout
-        << "  4x4=" << counts[0]
-        << " 8x8=" << counts[1]
-        << " 16x16=" << counts[2]
-        << "\n";
-  }
-}
-
 static bool checkCase(
     int64_t rows,
-    int64_t columns) {
+    int64_t columns,
+    const llvm::SmallVector<int64_t> &geometries) {
 
-  const std::vector<int64_t> geometries{
-      4,
-      8,
-      16,
-  };
+  const auto oldResult =
+      enumerateSystolicGeometryMultisetsDP(
+          rows,
+          columns,
+          geometries);
+
+  const auto frontierResult =
+      enumerateSystolicGeometryMultisetsFrontierDP(
+          rows,
+          columns,
+          geometries);
+
+  const auto areaFirstResult =
+      enumerateSystolicGeometryMultisetsAreaFirstDP(
+          rows,
+          columns,
+          geometries);
 
   const CountSet oldSet =
-      toSet(
-          enumerateSystolicGeometryMultisetsDP(
-              rows,
-              columns,
-              geometries));
+      toSet(oldResult);
 
   const CountSet frontierSet =
-      toSet(
-          enumerateSystolicGeometryMultisetsFrontierDP(
-              rows,
-              columns,
-              geometries));
+      toSet(frontierResult);
+
+  const CountSet areaFirstSet =
+      toSet(areaFirstResult);
 
   std::cout
       << rows << "x" << columns
       << ": old=" << oldSet.size()
-      << " frontier=" << frontierSet.size();
+      << " frontier=" << frontierSet.size()
+      << " area-first=" << areaFirstSet.size();
 
-  if (oldSet == frontierSet) {
+  if (oldSet == frontierSet &&
+      oldSet == areaFirstSet) {
+
     std::cout << " MATCH\n";
+
+    if (rows == 8 && columns == 16) {
+      auto printSet = [](const char *name,
+                         const CountSet &set) {
+        std::cout << "\n  " << name << ":\n";
+
+        for (const CountVector &counts : set) {
+          std::cout
+              << "    4x4=" << counts[0]
+              << " 8x8=" << counts[1]
+              << " 16x16=" << counts[2]
+              << "\n";
+        }
+      };
+
+      printSet("old", oldSet);
+      printSet("frontier", frontierSet);
+      printSet("area-first", areaFirstSet);
+    }
+
     return true;
   }
 
   std::cout << " DIFFER\n";
 
-  printSet("old-only / old", oldSet);
-  printSet("frontier", frontierSet);
+  for (const CountVector &counts : oldSet) {
+
+    if (!frontierSet.count(counts) ||
+        !areaFirstSet.count(counts)) {
+
+      std::cout
+          << "  old-only:"
+          << " 4x4=" << counts[0]
+          << " 8x8=" << counts[1]
+          << " 16x16=" << counts[2]
+          << "\n";
+    }
+  }
+
+  for (const CountVector &counts : areaFirstSet) {
+
+    if (!oldSet.count(counts)) {
+
+      std::cout
+          << "  area-first-only:"
+          << " 4x4=" << counts[0]
+          << " 8x8=" << counts[1]
+          << " 16x16=" << counts[2]
+          << "\n";
+    }
+  }
 
   return false;
 }
 
 int main() {
 
-  // ----------------------------------------------------------
-  // B algorithm correctness gate.
-  //
-  // The first target is intentionally limited to 16x16.
-  //
-  // Old DP:
-  //   rectangular-cut enumeration
-  //
-  // Frontier DP:
-  //   canonical frontier-state enumeration
-  //
-  // The two implementations must produce exactly the same
-  // geometry-count multisets before B can replace the old DP.
-  // ----------------------------------------------------------
+  const llvm::SmallVector<int64_t> geometries{
+      4,
+      8,
+      16,
+  };
+
+  const std::vector<std::pair<int64_t, int64_t>>
+      cases{
+          {4, 4},
+          {8, 8},
+          {8, 12},
+          {8, 16},
+          {12, 12},
+          {12, 16},
+          {16, 16},
+          {20, 20},
+          {24, 24},
+          {28, 28},
+          {32, 32},
+      };
 
   bool allMatch = true;
 
-  const std::vector<std::pair<int64_t, int64_t>> cases{
-      {4, 4},
-      {8, 8},
-      {8, 12},
-      {8, 16},
-      {12, 12},
-      {12, 16},
-      {16, 16},
-      {20, 20},
-      {24, 24},
-      {28, 28},
-      {32, 32},
-  };
-
   for (const auto &[rows, columns] : cases) {
-    if (!checkCase(rows, columns))
+
+    if (!checkCase(
+            rows,
+            columns,
+            geometries)) {
+
       allMatch = false;
+    }
   }
 
-  assert(allMatch);
+  if (!allMatch) {
+
+    std::cout
+        << "\nAreaFirstDP correctness "
+        << "cross-check FAILED.\n";
+
+    return 1;
+  }
 
   std::cout
-      << "\nFrontier DP matches old DP "
-      << "for all 16x16-or-smaller cases.\n";
+      << "\nOld DP == Frontier DP == "
+      << "AreaFirstDP for all test cases.\n";
 
   return 0;
 }

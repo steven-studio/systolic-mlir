@@ -69,6 +69,24 @@ enumerateSystolicGeometryMultisetsFrontierDP(
     int64_t columns,
     llvm::ArrayRef<int64_t> geometries);
 
+/// Enumerate geometry multisets using an exact two-stage algorithm.
+///
+/// Stage 1 enumerates CountVectors satisfying the necessary area
+/// equation:
+///
+///   sum_i counts[i] * geometries[i]^2 = rows * columns
+///
+/// Stage 2 performs an exact skyline tileability search for each
+/// area-feasible CountVector.
+///
+/// No heuristic pruning is used: a CountVector is returned iff
+/// there exists an exact square tiling using exactly those counts.
+llvm::SmallVector<SystolicGeometryMultiset>
+enumerateSystolicGeometryMultisetsAreaFirstDP(
+    int64_t rows,
+    int64_t columns,
+    llvm::ArrayRef<int64_t> geometries);
+
 } // namespace systolic
 } // namespace mlir
 

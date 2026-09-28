@@ -159,3 +159,50 @@ target_include_directories(check_frontier_dp_scaling
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_BINARY_DIR}/include
 )
+
+
+add_executable(check_area_first_scaling
+  check_area_first_scaling.cpp
+)
+
+target_link_libraries(check_area_first_scaling
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_area_first_scaling
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
+add_executable(check_packed_count_vector
+  check_packed_count_vector.cpp
+)
+
+target_link_libraries(check_packed_count_vector
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_packed_count_vector
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
+
+add_executable(benchmark_decomposition_dp
+  benchmark_decomposition_dp.cpp
+)
+
+target_link_libraries(benchmark_decomposition_dp
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(benchmark_decomposition_dp
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
