@@ -129,3 +129,33 @@ target_include_directories(check_area_count_vectors
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_BINARY_DIR}/include
 )
+
+add_executable(check_largest_tile_enumerator
+  check_largest_tile_enumerator.cpp
+)
+
+target_link_libraries(check_largest_tile_enumerator
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_largest_tile_enumerator
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
+add_executable(check_frontier_dp_scaling
+  check_frontier_dp_scaling.cpp
+)
+
+target_link_libraries(check_frontier_dp_scaling
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_frontier_dp_scaling
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)

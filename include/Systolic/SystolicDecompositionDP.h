@@ -46,6 +46,29 @@ enumerateSystolicGeometryMultisetsDP(
     int64_t columns,
     llvm::ArrayRef<int64_t> geometries);
 
+
+/// Enumerate geometry multisets using an exact frontier-state DP.
+///
+/// Unlike enumerateSystolicGeometryMultisetsDP(), this algorithm
+/// does not enumerate rectangular cut histories.  It scans the
+/// normalized output grid through a canonical skyline frontier and
+/// memoizes states of the form:
+///
+///   (column heights, remaining geometry counts)
+///
+/// Every transition places one square tile at the lowest-leftmost
+/// frontier position.  This preserves a column-prefix occupancy
+/// invariant and provides an exact tiling decision procedure.
+///
+/// This API is initially kept separate from the existing
+/// rectangular-cut DP so that the two implementations can be
+/// cross-checked before changing the production optimizer.
+llvm::SmallVector<SystolicGeometryMultiset>
+enumerateSystolicGeometryMultisetsFrontierDP(
+    int64_t rows,
+    int64_t columns,
+    llvm::ArrayRef<int64_t> geometries);
+
 } // namespace systolic
 } // namespace mlir
 
