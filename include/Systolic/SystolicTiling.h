@@ -1,3 +1,4 @@
+#include <functional>
 #ifndef SYSTOLIC_TILING_H
 #define SYSTOLIC_TILING_H
 
@@ -280,6 +281,84 @@ minimizeSystolicMakeSpan(
     llvm::ArrayRef<SystolicExecutionTask> tasks,
     llvm::ArrayRef<int64_t> computeCycles,
     llvm::ArrayRef<SystolicArrayResource> fleet);
+
+
+/// Result of the integrated decomposition/scheduling DP.
+///
+/// The DP chooses both:
+///   1. the spatial square-tile decomposition, and
+///   2. the physical accelerator assignment.
+///
+/// No complete decomposition list is materialized.
+///
+/// `schedule` contains the selected spatial tiles together with
+/// their physical accelerator and compute interval.
+/// `makespan` is the minimum possible compute makespan under
+/// the supplied cost function.
+/// Directly minimize makespan while simultaneously choosing
+/// the spatial decomposition and physical accelerator assignment.
+///
+/// The DP state is:
+///
+///   (skyline, canonicalized physical accelerator loads)
+///
+/// A transition chooses:
+///
+///   - the next square tile geometry,
+///   - a compatible physical accelerator,
+///   - and advances that accelerator's load by `costFn`.
+///
+/// Accelerators with the same geometry are canonicalized by their
+/// sorted loads, so permutations of physically identical machines
+/// are not represented as different DP states.
+///
+/// `costFn(tileSize, acceleratorSize)` returns the compute cycles
+/// required when a tile of `tileSize x tileSize` executes on an
+/// accelerator of `acceleratorSize x acceleratorSize`.
+///
+/// The function performs exact optimization; no decomposition
+/// enumeration API is called internally.
+// ---------------------------------------------------------------------------
+// Heterogeneous macro-block split optimization.
+//
+// The input square is first viewed as a grid of largest-array macro-blocks.
+// Each macro-block may either:
+//   (1) remain one GxG tile, or
+//   (2) be split into four (G/2)x(G/2) tiles.
+//
+// For the current hardware:
+//   32x32 -> 16 macro-blocks of 8x8
+//   each macro-block -> 8x8 OR four 4x4 tiles
+//
+// The optimizer chooses the number and placement of split macro-blocks
+// directly from the makespan objective. It does not enumerate arbitrary
+// spatial decompositions.
+//
+// `largestGeometry` is the largest supported array, e.g. 8.
+// `splitGeometry` is its half-size, e.g. 4.
+//
+// The returned schedule contains concrete tile coordinates and physical
+// accelerator assignments.
+//
+/// Result of a decomposition + makespan optimization.
+///
+/// The result contains the selected physical schedule and its
+/// resulting makespan.  This type is shared by the current
+/// MacroSplit optimizer.
+struct SystolicDecompositionDPResult {
+  llvm::SmallVector<ScheduledSystolicTile> schedule;
+  int64_t makespan;
+};
+
+FailureOr<SystolicDecompositionDPResult>
+minimizeSystolicMakeSpanMacroSplit(
+    int64_t rows,
+    int64_t columns,
+    int64_t largestGeometry,
+    int64_t splitGeometry,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    const std::function<int64_t(int64_t, int64_t)> &costFn);
+
 
 /// Tile a square input using a deterministic
 /// top-to-bottom, left-to-right traversal.

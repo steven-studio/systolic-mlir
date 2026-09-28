@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <map>
 
 namespace mlir {
 namespace systolic {
@@ -467,6 +468,373 @@ minimizeSystolicMakeSpan(
     return failure();
 
   return bestSchedule;
+}
+
+FailureOr<SystolicDecompositionDPResult>
+minimizeSystolicMakeSpanMacroSplit(
+    int64_t rows,
+    int64_t columns,
+    int64_t largestGeometry,
+    int64_t splitGeometry,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    const std::function<int64_t(int64_t, int64_t)> &costFn) {
+
+  // ----------------------------------------------------------
+  // Validate the structured split model.
+  // ----------------------------------------------------------
+
+  if (rows <= 0 ||
+      columns <= 0 ||
+      rows != columns ||
+      largestGeometry <= 0 ||
+      splitGeometry <= 0 ||
+      splitGeometry * 2 != largestGeometry ||
+      rows % largestGeometry != 0 ||
+      !costFn ||
+      fleet.empty())
+    return failure();
+
+  // ----------------------------------------------------------
+  // Locate physical accelerators.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<SystolicArrayResource> largeMachines;
+  llvm::SmallVector<SystolicArrayResource> smallMachines;
+
+  for (const SystolicArrayResource &resource : fleet) {
+    if (resource.arraySize == largestGeometry)
+      largeMachines.push_back(resource);
+
+    if (resource.arraySize == splitGeometry)
+      smallMachines.push_back(resource);
+  }
+
+  if (largeMachines.empty() ||
+      smallMachines.empty())
+    return failure();
+
+  // This structured formulation intentionally models:
+  //
+  //   one largest accelerator
+  //   plus multiple half-size accelerators.
+  //
+  // For the current target this is:
+  //
+  //   1 x 8x8
+  //   3 x 4x4
+  //
+  // If there are multiple largest accelerators, this formulation
+  // would need to be generalized because the objective changes.
+  if (largeMachines.size() != 1)
+    return failure();
+
+  // ----------------------------------------------------------
+  // The input consists of a regular grid of largestGeometry
+  // macro-blocks.
+  //
+  // Example:
+  //
+  //   32 / 8 = 4
+  //
+  // therefore:
+  //
+  //   4 x 4 = 16 macro-blocks.
+  // ----------------------------------------------------------
+
+  const int64_t macroRows =
+      rows / largestGeometry;
+
+  const int64_t macroColumns =
+      columns / largestGeometry;
+
+  const int64_t macroCount =
+      macroRows * macroColumns;
+
+  // ----------------------------------------------------------
+  // Cost of the two possible forms.
+  // ----------------------------------------------------------
+
+  const int64_t largeCost =
+      costFn(
+          largestGeometry,
+          largestGeometry);
+
+  const int64_t smallCost =
+      costFn(
+          splitGeometry,
+          splitGeometry);
+
+  if (largeCost <= 0 ||
+      smallCost <= 0)
+    return failure();
+
+  // ----------------------------------------------------------
+  // For x split macro-blocks:
+  //
+  //   largeCount = macroCount - x
+  //   smallCount = 4*x
+  //
+  // The one 8x8 accelerator executes all remaining large tiles.
+  //
+  // The small tiles are distributed over the three 4x4
+  // accelerators.
+  //
+  // Since all small tiles have identical cost, the minimum
+  // small-array makespan is:
+  //
+  //   ceil((4*x) / numSmallMachines) * smallCost
+  //
+  // The global objective is:
+  //
+  //   max(
+  //       (macroCount-x) * largeCost,
+  //       ceil(4*x/numSmallMachines) * smallCost
+  //   )
+  //
+  // This is the optimization problem actually solved here.
+  // ----------------------------------------------------------
+
+  const int64_t smallMachineCount =
+      static_cast<int64_t>(smallMachines.size());
+
+  int64_t bestMakespan =
+      std::numeric_limits<int64_t>::max();
+
+  int64_t bestSplitCount = -1;
+
+  for (int64_t splitCount = 0;
+       splitCount <= macroCount;
+       ++splitCount) {
+
+    const int64_t largeCount =
+        macroCount - splitCount;
+
+    const int64_t smallCount =
+        4 * splitCount;
+
+    const int64_t largeMakespan =
+        largeCount * largeCost;
+
+    const int64_t smallRounds =
+        (smallCount + smallMachineCount - 1) /
+        smallMachineCount;
+
+    const int64_t smallMakespan =
+        smallRounds * smallCost;
+
+    const int64_t makespan =
+        std::max(
+            largeMakespan,
+            smallMakespan);
+
+    if (makespan < bestMakespan) {
+      bestMakespan = makespan;
+      bestSplitCount = splitCount;
+    }
+  }
+
+  if (bestSplitCount < 0)
+    return failure();
+
+  // ----------------------------------------------------------
+  // Reconstruct the spatial decomposition.
+  //
+  // We deliberately choose the first `bestSplitCount`
+  // macro-blocks in row-major order to be split.
+  //
+  // The objective depends only on counts, not on which
+  // macro-blocks are split, so this gives a deterministic
+  // representative.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<SystolicTile> tiles;
+
+  int64_t macroIndex = 0;
+
+  for (int64_t mr = 0;
+       mr < macroRows;
+       ++mr) {
+
+    for (int64_t mc = 0;
+         mc < macroColumns;
+         ++mc) {
+
+      const int64_t originRow =
+          mr * largestGeometry;
+
+      const int64_t originColumn =
+          mc * largestGeometry;
+
+      const bool split =
+          macroIndex < bestSplitCount;
+
+      ++macroIndex;
+
+      if (!split) {
+
+        SystolicTile tile;
+        tile.row = originRow;
+        tile.column = originColumn;
+        tile.size = largestGeometry;
+        tile.acceleratorSize = largestGeometry;
+        tile.acceleratorId = -1;
+
+        tiles.push_back(tile);
+        continue;
+      }
+
+      // Split one GxG macro-block into four
+      // (G/2)x(G/2) tiles.
+
+      for (int64_t sr = 0;
+           sr < 2;
+           ++sr) {
+
+        for (int64_t sc = 0;
+             sc < 2;
+             ++sc) {
+
+          SystolicTile tile;
+
+          tile.row =
+              originRow +
+              sr * splitGeometry;
+
+          tile.column =
+              originColumn +
+              sc * splitGeometry;
+
+          tile.size =
+              splitGeometry;
+
+          tile.acceleratorSize =
+              splitGeometry;
+
+          tile.acceleratorId = -1;
+
+          tiles.push_back(tile);
+        }
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Verify the generated spatial decomposition.
+  // ----------------------------------------------------------
+
+  if (failed(
+          verifySystolicTiling(
+              rows,
+              columns,
+              tiles,
+              SystolicFleetState{
+                  llvm::SmallVector<SystolicArrayResource>(
+                      fleet.begin(),
+                      fleet.end())})))
+    return failure();
+
+  // ----------------------------------------------------------
+  // Physical accelerator assignment.
+  //
+  // Large tiles all execute on the single largest accelerator.
+  //
+  // Small tiles are assigned round-robin to the small
+  // accelerators. Because all small jobs have identical cost,
+  // this realizes the ceil(N/P) bound exactly.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<ScheduledSystolicTile> schedule;
+
+  int64_t largeAvailable = 0;
+
+  llvm::SmallVector<int64_t> smallAvailable(
+      smallMachines.size(),
+      0);
+
+  int64_t smallIndex = 0;
+
+  for (const SystolicTile &tile : tiles) {
+
+    if (tile.size == largestGeometry) {
+
+      const int64_t start =
+          largeAvailable;
+
+      const int64_t end =
+          start + largeCost;
+
+      ScheduledSystolicTile scheduled;
+
+      scheduled.tile = tile;
+      scheduled.tile.acceleratorSize =
+          largestGeometry;
+      scheduled.tile.acceleratorId =
+          largeMachines[0].acceleratorId;
+      scheduled.startCycle = start;
+      scheduled.endCycle = end;
+
+      schedule.push_back(scheduled);
+
+      largeAvailable = end;
+      continue;
+    }
+
+    if (tile.size == splitGeometry) {
+
+      const size_t machineIndex =
+          static_cast<size_t>(
+              smallIndex %
+              static_cast<int64_t>(
+                  smallMachines.size()));
+
+      const int64_t start =
+          smallAvailable[machineIndex];
+
+      const int64_t end =
+          start + smallCost;
+
+      ScheduledSystolicTile scheduled;
+
+      scheduled.tile = tile;
+      scheduled.tile.acceleratorSize =
+          splitGeometry;
+      scheduled.tile.acceleratorId =
+          smallMachines[machineIndex].acceleratorId;
+
+      scheduled.startCycle = start;
+      scheduled.endCycle = end;
+
+      schedule.push_back(scheduled);
+
+      smallAvailable[machineIndex] = end;
+      ++smallIndex;
+      continue;
+    }
+
+    return failure();
+  }
+
+  // ----------------------------------------------------------
+  // Check the actual reconstructed schedule.
+  // ----------------------------------------------------------
+
+  int64_t observedMakespan = 0;
+
+  for (const ScheduledSystolicTile &scheduled :
+       schedule) {
+
+    observedMakespan =
+        std::max(
+            observedMakespan,
+            scheduled.endCycle);
+  }
+
+  if (observedMakespan != bestMakespan)
+    return failure();
+
+  return SystolicDecompositionDPResult{
+      std::move(schedule),
+      bestMakespan};
 }
 
 llvm::SmallVector<llvm::SmallVector<SystolicExecutionTask>>

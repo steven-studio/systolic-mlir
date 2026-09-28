@@ -206,3 +206,35 @@ target_include_directories(benchmark_decomposition_dp
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_BINARY_DIR}/include
 )
+
+
+add_executable(check_mixed_decomposition
+  check_mixed_decomposition.cpp
+)
+
+target_link_libraries(check_mixed_decomposition
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_mixed_decomposition
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
+
+add_executable(check_macro_split_makespan
+  check_macro_split_makespan.cpp
+)
+
+target_link_libraries(check_macro_split_makespan
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_macro_split_makespan
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
