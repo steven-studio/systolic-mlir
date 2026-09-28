@@ -47,8 +47,6 @@ struct SystolicArrayResource {
   //   8x8 #2 -> arraySize = 8, acceleratorId = 2
   int64_t acceleratorId;
 
-  // Whether this physical accelerator is currently available.
-  bool available;
 };
 
 /// Runtime state of the physical systolic-array fleet.
@@ -66,8 +64,20 @@ struct SystolicArrayResource {
 ///   availableCount[8] = 2
 ///   availableCount[4] = 3
 struct SystolicFleetState {
+  /// Every physical accelerator instance in the fleet.
   llvm::SmallVector<SystolicArrayResource> resources;
-  llvm::DenseMap<int64_t, int64_t> availableCount;
+
+  /// Total number of physical accelerators for each geometry.
+  ///
+  /// This is hardware capacity, not scheduling availability.
+  llvm::DenseMap<int64_t, int64_t> countBySize;
+
+  /// Next accelerator ID to use for each geometry.
+  ///
+  /// Tiling uses round-robin assignment only to make the
+  /// physical accelerator identity explicit. Scheduling may
+  /// later override this assignment.
+  llvm::DenseMap<int64_t, int64_t> nextAcceleratorId;
 };
 
 /// Validate a physical systolic-array fleet.
@@ -123,7 +133,7 @@ SystolicFleetState createSystolicFleetState(
 /// remaining rectangular region.
 ///
 /// Returns 0 if no fleet array fits.
-FailureOr<SystolicArrayResource> selectLargestAvailableArray(
+FailureOr<SystolicArrayResource> selectLargestFittingArray(
     SystolicFleetState &state,
     int64_t remainingRows,
     int64_t remainingColumns);
@@ -137,6 +147,39 @@ FailureOr<SystolicTile> createSystolicTile(
     int64_t column,
     int64_t remainingRows,
     int64_t remainingColumns);
+
+/// Verify that a set of tiles forms a legal spatial partition
+/// of the input.
+///
+/// This verifier checks:
+///   - every tile is square and has positive size
+///   - every tile lies within the input bounds
+///   - every tile uses a supported accelerator geometry
+///   - tiles do not overlap
+///   - the complete input region is covered
+///
+/// Physical accelerator reuse across different tiles is allowed here.
+/// Temporal resource feasibility belongs to scheduling.
+LogicalResult verifySystolicTiling(
+    int64_t inputRows,
+    int64_t inputColumns,
+    llvm::ArrayRef<SystolicTile> tiles,
+    const SystolicFleetState &fleet);
+
+/// Tile a square input using a deterministic
+/// top-to-bottom, left-to-right traversal.
+///
+/// At each position, the largest currently available
+/// physical accelerator that fits the remaining region
+/// is assigned to the tile.
+///
+/// This function performs resource allocation only.
+/// It does not optimize MakeSpan.
+FailureOr<llvm::SmallVector<SystolicTile>>
+tileSystolicInput(
+    int64_t M,
+    int64_t N,
+    SystolicFleetState &state);
 
 } // namespace systolic
 } // namespace mlir
