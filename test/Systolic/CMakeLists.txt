@@ -99,3 +99,18 @@ target_include_directories(check_scheduling_dp
   ${PROJECT_BINARY_DIR}/include
 )
 
+add_executable(check_dp_optimizer_scaling
+  check_dp_optimizer_scaling.cpp
+)
+
+target_link_libraries(check_dp_optimizer_scaling
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_dp_optimizer_scaling
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_BINARY_DIR}/include
+)
+
