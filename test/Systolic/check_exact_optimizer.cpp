@@ -215,6 +215,54 @@ int main() {
   std::cout
       << "Calibration changed the optimal decomposition.\n";
 
+  // ----------------------------------------------------------
+  // DP geometry-multiset optimizer must agree with the
+  // brute-force spatial-decomposition oracle.
+  // ----------------------------------------------------------
+
+  auto dpResult =
+      optimizeSystolicRectangleDP(
+          8,
+          8,
+          K,
+          fleet,
+          costParams);
+
+  assert(succeeded(dpResult));
+
+  std::cout
+      << "DP minimum makespan="
+      << dpResult->makespan
+      << "\n";
+
+  assert(dpResult->makespan ==
+         result->makespan);
+
+  assert(dpResult->makespan == 242);
+
+  auto reverseDPResult =
+      optimizeSystolicRectangleDP(
+          8,
+          8,
+          K,
+          fleet,
+          reverseCostParams);
+
+  assert(succeeded(reverseDPResult));
+
+  std::cout
+      << "reverse DP minimum makespan="
+      << reverseDPResult->makespan
+      << "\n";
+
+  assert(reverseDPResult->makespan ==
+         reverseResult->makespan);
+
+  assert(reverseDPResult->makespan == 536);
+
+  std::cout
+      << "DP optimizer matches brute-force oracle.\n";
+
   std::cout
       << "All exact optimizer tests passed.\n";
 

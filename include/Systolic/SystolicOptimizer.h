@@ -39,6 +39,24 @@ optimizeSystolicTileExact(
     llvm::ArrayRef<SystolicArrayResource> fleet,
     llvm::ArrayRef<SystolicGeometryCostParams> costParams);
 
+
+/// Enumerate unique geometry multisets for an R x C output
+/// rectangle using the decomposition DP, schedule each multiset
+/// with the exact assignment-aware scheduler, and return the
+/// minimum-makespan result.
+///
+/// Under the current position-independent compute-cost model,
+/// decompositions with the same geometry multiset are scheduling
+/// equivalent. Therefore spatial placement is intentionally
+/// discarded by this optimizer.
+FailureOr<ExactSystolicOptimizationResult>
+optimizeSystolicRectangleDP(
+    int64_t rows,
+    int64_t columns,
+    int64_t K,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
+
 } // namespace systolic
 } // namespace mlir
 
