@@ -78,6 +78,13 @@ enumerateSystolicGeometryMultisetsDP(
   std::function<const DPResult &(int64_t, int64_t)> solve =
       [&](int64_t R, int64_t C) -> const DPResult & {
 
+        // Square logical geometries are invariant under a
+        // 90-degree rotation. Canonicalize every rectangle so
+        // that R <= C, allowing R x C and C x R to share the
+        // same DP state and recurrence expansion.
+        if (R > C)
+          std::swap(R, C);
+
         const std::pair<int64_t, int64_t> key{R, C};
 
         auto existing = memo.find(key);
