@@ -263,6 +263,39 @@ int main() {
         << " unique multisets\n";
   }
 
+  // ----------------------------------------------------------
+  // Three-geometry candidate growth.
+  //
+  // This better represents a heterogeneous logical geometry
+  // space than the two-geometry {4, 8} experiment.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<int64_t> threeGeometries = {
+      4,
+      8,
+      16,
+  };
+
+  std::cout
+      << "DP candidate growth for {4,8,16}:\n";
+
+  for (int64_t size :
+       {16, 20, 24, 28, 32, 36, 40, 48, 64}) {
+
+    auto candidates =
+        enumerateSystolicGeometryMultisetsDP(
+            size,
+            size,
+            threeGeometries);
+
+    std::cout
+        << "  "
+        << size << "x" << size
+        << ": "
+        << candidates.size()
+        << " unique multisets\n";
+  }
+
   std::cout
       << "All decomposition DP tests passed.\n";
 
