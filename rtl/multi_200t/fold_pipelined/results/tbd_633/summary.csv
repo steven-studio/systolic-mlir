@@ -1,0 +1,14 @@
+label,K,kmax,n,n_inv,per_inv_cycles,measured,predicted,match,bitexact,bit_file,bit_mtime,bit_sha256_12
+layer1.0.conv1,576,256,8,3,365+365+173,903,903,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+features.6,1728,256,8,7,365+365+365+365+365+365+301,2491,2491,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+layer1.0.conv1,576,1024,8,1,685,685,685,1,1,build_kmax/k1024/systolic_uart_top_k1024.bit,2026-08-27 22:43:43,96f5a5744cd7
+features.6,1728,2048,8,1,1837,1837,1837,1,1,build_kmax/k2048/systolic_uart_top_k2048.bit,2026-09-11 12:11:39,66ff6845416f
+banks32,8,256,8,1,146,146,146,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
+banks32,64,256,8,1,202,202,202,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
+banks32,256,256,8,1,394,394,394,1,1,build_kmax/k256_banks32/systolic_uart_top_k256_banks32.bit,2026-09-16 15:52:19,83302e6057d7
+fc,512,256,8,2,365+365,730,730,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+l4.0.downsample,256,256,8,1,365,365,365,1,1,build_kmax/k256/systolic_uart_top_k256.bit,2026-08-26 17:02:03,d5dec484041b
+fc,512,512,8,1,621,621,621,1,1,build_kmax/k512/systolic_uart_top_k512.bit,2026-09-09 10:28:26,8b4555a1b578
+frontier,1024,512,8,2,621+621,1242,1242,1,1,build_kmax/k512/systolic_uart_top_k512.bit,2026-09-09 10:28:26,8b4555a1b578
+frontier,1024,64,8,16,173+173+173+173+173+173+173+173+173+173+173+173+173+173+173+173,2768,2768,1,1,build_kmax/k64/systolic_uart_top_k64.bit,2026-08-27 21:30:44,cf1a221fd072
+frontier,1024,2048,8,1,1133,1133,1133,1,1,build_kmax/k2048/systolic_uart_top_k2048.bit,2026-09-11 12:11:39,66ff6845416f
