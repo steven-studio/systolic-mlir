@@ -36,55 +36,27 @@ struct SystolicDPOptimizationResult {
   int64_t makespan;
 };
 
-/// Enumerate every legal spatial decomposition of `tile`,
-/// compute the exact assignment-aware minimum-makespan schedule
-/// for each decomposition, and return the globally best result.
+/// Greedy end-to-end systolic optimization.
 ///
-/// This is intended primarily as a correctness oracle for future
-/// scalable heuristics / dynamic-programming algorithms.
-FailureOr<ExactSystolicOptimizationResult>
-optimizeSystolicTileExact(
-    const SystolicTile &tile,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
-
-
-/// Enumerate unique geometry multisets for an R x C output
-/// rectangle using the decomposition DP, schedule each multiset
-/// with the exact assignment-aware scheduler, and return the
-/// minimum-makespan result.
+/// The optimizer performs exactly three stages:
 ///
-/// Under the current position-independent compute-cost model,
-/// decompositions with the same geometry multiset are scheduling
-/// equivalent. Therefore spatial placement is intentionally
-/// discarded by this optimizer.
+///   1. greedy spatial decomposition
+///   2. geometry-based compute-cost construction
+///   3. physical accelerator scheduling
+///
+/// The decomposition is unique: this function does not enumerate
+/// alternative decompositions and does not perform DP/backtracking.
+///
+/// For the current analytical model:
+///
+///   C(g) = 2g - 2
+///
+/// where g is the systolic-array geometry.
 FailureOr<ExactSystolicOptimizationResult>
-optimizeSystolicRectangleDP(
+optimizeSystolicGreedy(
     int64_t rows,
     int64_t columns,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
-
-
-/// Optimize an R x C logical output using both decomposition DP
-/// and count-based scheduling DP.
-///
-/// The decomposition DP enumerates unique logical geometry
-/// multisets. For each multiset, the scheduling DP computes the
-/// exact minimum makespan while treating identical logical tasks
-/// as indistinguishable.
-///
-/// This version returns the selected decomposition and minimum
-/// makespan. Schedule reconstruction is intentionally deferred.
-FailureOr<SystolicDPOptimizationResult>
-optimizeSystolicRectangleWithSchedulingDP(
-    int64_t rows,
-    int64_t columns,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
+    llvm::ArrayRef<SystolicArrayResource> fleet);
 
 } // namespace systolic
 } // namespace mlir

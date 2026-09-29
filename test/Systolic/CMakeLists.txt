@@ -11,19 +11,6 @@ target_include_directories(test_systolic_tiling PRIVATE
   ${PROJECT_BINARY_DIR}/include
 )
 
-add_executable(check_decomposition
-  check_decomposition.cpp
-)
-
-target_link_libraries(check_decomposition PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(check_decomposition PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
 add_executable(check_compute_cost check_compute_cost.cpp)
 
 target_link_libraries(check_compute_cost
@@ -36,84 +23,6 @@ target_include_directories(check_compute_cost
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_BINARY_DIR}/include
 )
-
-add_executable(
-  check_assignment_aware_schedule
-  check_assignment_aware_schedule.cpp
-)
-
-target_link_libraries(
-  check_assignment_aware_schedule
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(
-  check_assignment_aware_schedule
-  PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
-add_executable(
-  check_exact_optimizer
-  check_exact_optimizer.cpp
-)
-
-target_link_libraries(
-  check_exact_optimizer
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(
-  check_exact_optimizer
-  PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
-
-
-add_executable(check_decomposition_dp
-  check_decomposition_dp.cpp
-)
-
-target_link_libraries(check_decomposition_dp
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-add_executable(check_scheduling_dp
-  check_scheduling_dp.cpp
-)
-
-target_link_libraries(check_scheduling_dp
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(check_scheduling_dp
-  PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
-add_executable(check_dp_optimizer_scaling
-  check_dp_optimizer_scaling.cpp
-)
-
-target_link_libraries(check_dp_optimizer_scaling
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(check_dp_optimizer_scaling
-  PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
 
 add_executable(check_area_count_vectors
   check_area_count_vectors.cpp
@@ -208,48 +117,65 @@ target_include_directories(benchmark_decomposition_dp
 )
 
 
-add_executable(check_mixed_decomposition
-  check_mixed_decomposition.cpp
+
+add_executable(check_greedy_decompose_1to32
+  check_greedy_decompose_1to32.cpp
 )
 
-target_link_libraries(check_mixed_decomposition
+target_link_libraries(check_greedy_decompose_1to32
   PRIVATE
   MLIRSystolicTransforms
 )
 
-target_include_directories(check_mixed_decomposition
+target_include_directories(check_greedy_decompose_1to32
   PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
-)
-
-add_executable(check_partial_boundary_decomposition
-  check_partial_boundary_decomposition.cpp
-)
-
-target_link_libraries(check_partial_boundary_decomposition
-  PRIVATE
-  MLIRSystolicTransforms
-)
-
-target_include_directories(check_partial_boundary_decomposition
-  PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
 
-add_executable(check_macro_split_makespan
-  check_macro_split_makespan.cpp
+add_executable(check_scheduler_25x25
+  check_scheduler_25x25.cpp
 )
 
-target_link_libraries(check_macro_split_makespan
+target_link_libraries(check_scheduler_25x25
   PRIVATE
   MLIRSystolicTransforms
 )
 
-target_include_directories(check_macro_split_makespan
+target_include_directories(check_scheduler_25x25
   PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_BINARY_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
+
+
+
+add_executable(check_scheduler_cases
+  check_scheduler_cases.cpp
+)
+
+target_link_libraries(check_scheduler_cases
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_scheduler_cases
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+
+
+add_executable(check_optimizer_25x25
+  check_optimizer_25x25.cpp
+)
+
+target_link_libraries(check_optimizer_25x25
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_optimizer_25x25
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+

@@ -280,811 +280,459 @@ LogicalResult verifySystolicTiling(
   return success();
 }
 
-FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
-minimizeSystolicMakeSpan(
-    llvm::ArrayRef<SystolicExecutionTask> tasks,
-    llvm::ArrayRef<int64_t> computeCycles,
-    llvm::ArrayRef<SystolicArrayResource> fleet) {
-
-  if (tasks.empty() ||
-      tasks.size() != computeCycles.size() ||
-      fleet.empty())
-    return failure();
-
-  // ----------------------------------------------------------
-  // Build the list of physical accelerator instances.
-  // ----------------------------------------------------------
-
-  llvm::SmallVector<SystolicArrayResource> compatibleResources;
-
-  for (const SystolicArrayResource &resource : fleet)
-    compatibleResources.push_back(resource);
-
-  // ----------------------------------------------------------
-  // Validate tasks and compute costs.
-  // ----------------------------------------------------------
-
-  for (int64_t i = 0;
-       i < static_cast<int64_t>(tasks.size());
-       ++i) {
-    if (tasks[i].size <= 0 ||
-        tasks[i].acceleratorSize <= 0 ||
-        computeCycles[i] <= 0)
-      return failure();
-  }
-
-  // ----------------------------------------------------------
-  // Exhaustive search state.
-  //
-  // Each physical accelerator has a current load.
-  //
-  // load[k] = cycle at which accelerator k becomes free.
-  // ----------------------------------------------------------
-
-  llvm::SmallVector<int64_t> bestLoad(
-      compatibleResources.size(), 0);
-
-  int64_t bestMakespan =
-      std::numeric_limits<int64_t>::max();
-
-  llvm::SmallVector<ScheduledSystolicTile> bestSchedule(
-      tasks.size());
-
-  llvm::SmallVector<ScheduledSystolicTile> currentSchedule(
-      tasks.size());
-
-  llvm::SmallVector<bool> scheduled(
-      tasks.size(), false);
-
-  llvm::SmallVector<int64_t> load(
-      compatibleResources.size(), 0);
-
-  // ----------------------------------------------------------
-  // Recursive exhaustive enumeration.
-  //
-  // At every level:
-  //
-  //   choose one unscheduled task
-  //   choose one compatible physical accelerator
-  //   start it when that accelerator becomes free
-  //
-  // This enumerates both task ordering and accelerator
-  // assignment.
-  // ----------------------------------------------------------
-
-  std::function<void(int64_t)> search =
-      [&](int64_t scheduledCount) {
-
-    if (scheduledCount ==
-        static_cast<int64_t>(tasks.size())) {
-
-      int64_t makespan = 0;
-
-      for (int64_t value : load)
-        makespan = std::max(makespan, value);
-
-      if (makespan < bestMakespan) {
-        bestMakespan = makespan;
-        bestSchedule = currentSchedule;
-        bestLoad = load;
-      }
-
-      return;
-    }
-
-    // --------------------------------------------------------
-    // Branch-and-bound:
-    //
-    // If the current partial schedule already reaches the
-    // best known makespan, no descendant can improve it.
-    // --------------------------------------------------------
-
-    int64_t currentMakespan = 0;
-
-    for (int64_t value : load)
-      currentMakespan =
-          std::max(currentMakespan, value);
-
-    if (currentMakespan >= bestMakespan)
-      return;
-
-    for (int64_t taskIndex = 0;
-         taskIndex < static_cast<int64_t>(tasks.size());
-         ++taskIndex) {
-
-      if (scheduled[taskIndex])
-        continue;
-
-      const SystolicExecutionTask &task =
-          tasks[taskIndex];
-
-      for (int64_t resourceIndex = 0;
-           resourceIndex <
-               static_cast<int64_t>(
-                   compatibleResources.size());
-           ++resourceIndex) {
-
-        const SystolicArrayResource &resource =
-            compatibleResources[resourceIndex];
-
-        // Physical accelerator must be large enough.
-        if (resource.arraySize < task.acceleratorSize)
-          continue;
-
-        const int64_t startCycle =
-            load[resourceIndex];
-
-        const int64_t endCycle =
-            startCycle + computeCycles[taskIndex];
-
-        if (endCycle >= bestMakespan)
-          continue;
-
-        scheduled[taskIndex] = true;
-
-        const int64_t oldLoad =
-            load[resourceIndex];
-
-        load[resourceIndex] = endCycle;
-
-        ScheduledSystolicTile scheduledTile;
-
-        scheduledTile.tile.row =
-            task.row;
-
-        scheduledTile.tile.column =
-            task.column;
-
-        scheduledTile.tile.size =
-            task.size;
-
-        scheduledTile.tile.acceleratorSize =
-            resource.arraySize;
-
-        scheduledTile.tile.acceleratorId =
-            resource.acceleratorId;
-
-        scheduledTile.startCycle =
-            startCycle;
-
-        scheduledTile.endCycle =
-            endCycle;
-
-        currentSchedule[taskIndex] =
-            scheduledTile;
-
-        search(scheduledCount + 1);
-
-        load[resourceIndex] = oldLoad;
-        scheduled[taskIndex] = false;
-      }
-    }
-  };
-
-  search(0);
-
-  if (bestMakespan ==
-      std::numeric_limits<int64_t>::max())
-    return failure();
-
-  return bestSchedule;
-}
-
-FailureOr<SystolicDecompositionDPResult>
-minimizeSystolicMakeSpanMacroSplit(
+FailureOr<SystolicDecompositionResult>
+greedySystolicDecompose(
     int64_t rows,
     int64_t columns,
-    int64_t largestGeometry,
-    int64_t splitGeometry,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    const std::function<int64_t(int64_t, int64_t)> &costFn) {
-
-  // ----------------------------------------------------------
-  // Validate the structured split model.
-  // ----------------------------------------------------------
+    llvm::ArrayRef<SystolicArrayResource> fleet) {
 
   if (rows <= 0 ||
       columns <= 0 ||
-      rows != columns ||
-      largestGeometry <= 0 ||
-      splitGeometry <= 0 ||
-      splitGeometry * 2 != largestGeometry ||
-      rows % largestGeometry != 0 ||
-      !costFn ||
       fleet.empty())
     return failure();
 
   // ----------------------------------------------------------
-  // Locate physical accelerators.
-  // ----------------------------------------------------------
-
-  llvm::SmallVector<SystolicArrayResource> largeMachines;
-  llvm::SmallVector<SystolicArrayResource> smallMachines;
-
-  for (const SystolicArrayResource &resource : fleet) {
-    if (resource.arraySize == largestGeometry)
-      largeMachines.push_back(resource);
-
-    if (resource.arraySize == splitGeometry)
-      smallMachines.push_back(resource);
-  }
-
-  if (largeMachines.empty() ||
-      smallMachines.empty())
-    return failure();
-
-  // This structured formulation intentionally models:
+  // Collect distinct hardware geometries.
   //
-  //   one largest accelerator
-  //   plus multiple half-size accelerators.
+  // The supported hierarchy is strictly dyadic:
   //
-  // For the current target this is:
+  //   g_i = 2 * g_{i+1}
   //
-  //   1 x 8x8
-  //   3 x 4x4
+  // Therefore:
   //
-  // If there are multiple largest accelerators, this formulation
-  // would need to be generalized because the objective changes.
-  if (largeMachines.size() != 1)
-    return failure();
-
-  // ----------------------------------------------------------
-  // The input consists of a regular grid of largestGeometry
-  // macro-blocks.
+  //   32 -> 16 -> 8 -> 4
   //
-  // Example:
+  // is legal, while:
   //
-  //   32 / 8 = 4
+  //   128 -> 32 -> 4
   //
-  // therefore:
-  //
-  //   4 x 4 = 16 macro-blocks.
-  // ----------------------------------------------------------
-
-  const int64_t macroRows =
-      rows / largestGeometry;
-
-  const int64_t macroColumns =
-      columns / largestGeometry;
-
-  const int64_t macroCount =
-      macroRows * macroColumns;
-
-  // ----------------------------------------------------------
-  // Cost of the two possible forms.
-  // ----------------------------------------------------------
-
-  const int64_t largeCost =
-      costFn(
-          largestGeometry,
-          largestGeometry);
-
-  const int64_t smallCost =
-      costFn(
-          splitGeometry,
-          splitGeometry);
-
-  if (largeCost <= 0 ||
-      smallCost <= 0)
-    return failure();
-
-  // ----------------------------------------------------------
-  // For x split macro-blocks:
-  //
-  //   largeCount = macroCount - x
-  //   smallCount = 4*x
-  //
-  // The one 8x8 accelerator executes all remaining large tiles.
-  //
-  // The small tiles are distributed over the three 4x4
-  // accelerators.
-  //
-  // Since all small tiles have identical cost, the minimum
-  // small-array makespan is:
-  //
-  //   ceil((4*x) / numSmallMachines) * smallCost
-  //
-  // The global objective is:
-  //
-  //   max(
-  //       (macroCount-x) * largeCost,
-  //       ceil(4*x/numSmallMachines) * smallCost
-  //   )
-  //
-  // This is the optimization problem actually solved here.
-  // ----------------------------------------------------------
-
-  const int64_t smallMachineCount =
-      static_cast<int64_t>(smallMachines.size());
-
-  int64_t bestMakespan =
-      std::numeric_limits<int64_t>::max();
-
-  int64_t bestSplitCount = -1;
-
-  for (int64_t splitCount = 0;
-       splitCount <= macroCount;
-       ++splitCount) {
-
-    const int64_t largeCount =
-        macroCount - splitCount;
-
-    const int64_t smallCount =
-        4 * splitCount;
-
-    const int64_t largeMakespan =
-        largeCount * largeCost;
-
-    const int64_t smallRounds =
-        (smallCount + smallMachineCount - 1) /
-        smallMachineCount;
-
-    const int64_t smallMakespan =
-        smallRounds * smallCost;
-
-    const int64_t makespan =
-        std::max(
-            largeMakespan,
-            smallMakespan);
-
-    if (makespan < bestMakespan) {
-      bestMakespan = makespan;
-      bestSplitCount = splitCount;
-    }
-  }
-
-  if (bestSplitCount < 0)
-    return failure();
-
-  // ----------------------------------------------------------
-  // Reconstruct the spatial decomposition.
-  //
-  // We deliberately choose the first `bestSplitCount`
-  // macro-blocks in row-major order to be split.
-  //
-  // The objective depends only on counts, not on which
-  // macro-blocks are split, so this gives a deterministic
-  // representative.
-  // ----------------------------------------------------------
-
-  llvm::SmallVector<SystolicTile> tiles;
-
-  int64_t macroIndex = 0;
-
-  for (int64_t mr = 0;
-       mr < macroRows;
-       ++mr) {
-
-    for (int64_t mc = 0;
-         mc < macroColumns;
-         ++mc) {
-
-      const int64_t originRow =
-          mr * largestGeometry;
-
-      const int64_t originColumn =
-          mc * largestGeometry;
-
-      const bool split =
-          macroIndex < bestSplitCount;
-
-      ++macroIndex;
-
-      if (!split) {
-
-        SystolicTile tile;
-        tile.row = originRow;
-        tile.column = originColumn;
-        tile.size = largestGeometry;
-        tile.acceleratorSize = largestGeometry;
-        tile.acceleratorId = -1;
-
-        tiles.push_back(tile);
-        continue;
-      }
-
-      // Split one GxG macro-block into four
-      // (G/2)x(G/2) tiles.
-
-      for (int64_t sr = 0;
-           sr < 2;
-           ++sr) {
-
-        for (int64_t sc = 0;
-             sc < 2;
-             ++sc) {
-
-          SystolicTile tile;
-
-          tile.row =
-              originRow +
-              sr * splitGeometry;
-
-          tile.column =
-              originColumn +
-              sc * splitGeometry;
-
-          tile.size =
-              splitGeometry;
-
-          tile.acceleratorSize =
-              splitGeometry;
-
-          tile.acceleratorId = -1;
-
-          tiles.push_back(tile);
-        }
-      }
-    }
-  }
-
-  // ----------------------------------------------------------
-  // Verify the generated spatial decomposition.
-  // ----------------------------------------------------------
-
-  if (failed(
-          verifySystolicTiling(
-              rows,
-              columns,
-              tiles,
-              SystolicFleetState{
-                  llvm::SmallVector<SystolicArrayResource>(
-                      fleet.begin(),
-                      fleet.end())})))
-    return failure();
-
-  // ----------------------------------------------------------
-  // Physical accelerator assignment.
-  //
-  // Large tiles all execute on the single largest accelerator.
-  //
-  // Small tiles are assigned round-robin to the small
-  // accelerators. Because all small jobs have identical cost,
-  // this realizes the ceil(N/P) bound exactly.
-  // ----------------------------------------------------------
-
-  llvm::SmallVector<ScheduledSystolicTile> schedule;
-
-  int64_t largeAvailable = 0;
-
-  llvm::SmallVector<int64_t> smallAvailable(
-      smallMachines.size(),
-      0);
-
-  int64_t smallIndex = 0;
-
-  for (const SystolicTile &tile : tiles) {
-
-    if (tile.size == largestGeometry) {
-
-      const int64_t start =
-          largeAvailable;
-
-      const int64_t end =
-          start + largeCost;
-
-      ScheduledSystolicTile scheduled;
-
-      scheduled.tile = tile;
-      scheduled.tile.acceleratorSize =
-          largestGeometry;
-      scheduled.tile.acceleratorId =
-          largeMachines[0].acceleratorId;
-      scheduled.startCycle = start;
-      scheduled.endCycle = end;
-
-      schedule.push_back(scheduled);
-
-      largeAvailable = end;
-      continue;
-    }
-
-    if (tile.size == splitGeometry) {
-
-      const size_t machineIndex =
-          static_cast<size_t>(
-              smallIndex %
-              static_cast<int64_t>(
-                  smallMachines.size()));
-
-      const int64_t start =
-          smallAvailable[machineIndex];
-
-      const int64_t end =
-          start + smallCost;
-
-      ScheduledSystolicTile scheduled;
-
-      scheduled.tile = tile;
-      scheduled.tile.acceleratorSize =
-          splitGeometry;
-      scheduled.tile.acceleratorId =
-          smallMachines[machineIndex].acceleratorId;
-
-      scheduled.startCycle = start;
-      scheduled.endCycle = end;
-
-      schedule.push_back(scheduled);
-
-      smallAvailable[machineIndex] = end;
-      ++smallIndex;
-      continue;
-    }
-
-    return failure();
-  }
-
-  // ----------------------------------------------------------
-  // Check the actual reconstructed schedule.
-  // ----------------------------------------------------------
-
-  int64_t observedMakespan = 0;
-
-  for (const ScheduledSystolicTile &scheduled :
-       schedule) {
-
-    observedMakespan =
-        std::max(
-            observedMakespan,
-            scheduled.endCycle);
-  }
-
-  if (observedMakespan != bestMakespan)
-    return failure();
-
-  return SystolicDecompositionDPResult{
-      std::move(schedule),
-      bestMakespan};
-}
-
-llvm::SmallVector<llvm::SmallVector<SystolicExecutionTask>>
-enumerateSystolicDecompositions(
-    const SystolicTile &tile,
-    llvm::ArrayRef<SystolicArrayResource> fleet) {
-
-  llvm::SmallVector<
-      llvm::SmallVector<SystolicExecutionTask>>
-      decompositions;
-
-  if (tile.size <= 0 || fleet.empty())
-    return decompositions;
-
-  // ----------------------------------------------------------
-  // Collect distinct legal accelerator geometries.
-  //
-  // Enumeration is spatial only.  Multiple physical instances
-  // of the same geometry do not create different spatial
-  // decompositions.
+  // is intentionally outside the current problem scope.
   // ----------------------------------------------------------
 
   llvm::SmallVector<int64_t> geometries;
 
   for (const SystolicArrayResource &resource : fleet) {
-    const int64_t size = resource.arraySize;
+    if (resource.arraySize <= 0)
+      return failure();
 
-    if (size <= 0 || size > tile.size)
-      continue;
-
-    if (llvm::find(geometries, size) ==
-        geometries.end())
-      geometries.push_back(size);
+    if (std::find(
+            geometries.begin(),
+            geometries.end(),
+            resource.arraySize) ==
+        geometries.end()) {
+      geometries.push_back(resource.arraySize);
+    }
   }
 
   if (geometries.empty())
-    return decompositions;
+    return failure();
 
-  llvm::sort(
-      geometries,
-      [](int64_t lhs, int64_t rhs) {
-        return lhs > rhs;
-      });
-
-  // ----------------------------------------------------------
-  // Exact-cover state.
-  //
-  // coverage[r * tile.size + c]:
-  //   false -> not covered yet
-  //   true  -> already occupied by one execution task
-  //
-  // Coordinates in coverage are local to the parent tile.
-  // ----------------------------------------------------------
-
-  const int64_t dimension = tile.size;
-
-  llvm::SmallVector<bool> coverage(
-      static_cast<size_t>(dimension * dimension),
-      false);
-
-  llvm::SmallVector<SystolicExecutionTask>
-      currentDecomposition;
-
-  // Return true iff the requested square has a non-empty
-  // intersection with the parent tile and that intersection
-  // does not overlap already-covered area.
-  //
-  // A candidate is allowed to extend beyond the parent tile.
-  // Only its actual intersection with the parent tile
-  // participates in coverage.
-  auto canPlace =
-      [&](int64_t row,
-          int64_t column,
-          int64_t size) -> bool {
-
-    if (size <= 0)
-      return false;
-
-    const int64_t intersectionRowBegin =
-        std::max<int64_t>(0, row);
-
-    const int64_t intersectionColumnBegin =
-        std::max<int64_t>(0, column);
-
-    const int64_t intersectionRowEnd =
-        std::min<int64_t>(
-            dimension,
-            row + size);
-
-    const int64_t intersectionColumnEnd =
-        std::min<int64_t>(
-            dimension,
-            column + size);
-
-    // Empty intersection: this candidate covers no part
-    // of the parent tile and must never be enumerated.
-    if (intersectionRowBegin >= intersectionRowEnd ||
-        intersectionColumnBegin >= intersectionColumnEnd)
-      return false;
-
-    for (int64_t r = intersectionRowBegin;
-         r < intersectionRowEnd;
-         ++r) {
-
-      for (int64_t c = intersectionColumnBegin;
-           c < intersectionColumnEnd;
-           ++c) {
-
-        const size_t index =
-            static_cast<size_t>(
-                r * dimension + c);
-
-        if (coverage[index])
-          return false;
-      }
-    }
-
-    return true;
-  };
-
-  auto setCoverage =
-      [&](int64_t row,
-          int64_t column,
-          int64_t size,
-          bool value) {
-
-    const int64_t intersectionRowBegin =
-        std::max<int64_t>(0, row);
-
-    const int64_t intersectionColumnBegin =
-        std::max<int64_t>(0, column);
-
-    const int64_t intersectionRowEnd =
-        std::min<int64_t>(
-            dimension,
-            row + size);
-
-    const int64_t intersectionColumnEnd =
-        std::min<int64_t>(
-            dimension,
-            column + size);
-
-    // No intersection: there is nothing to mark.
-    if (intersectionRowBegin >= intersectionRowEnd ||
-        intersectionColumnBegin >= intersectionColumnEnd)
-      return;
-
-    for (int64_t r = intersectionRowBegin;
-         r < intersectionRowEnd;
-         ++r) {
-
-      for (int64_t c = intersectionColumnBegin;
-           c < intersectionColumnEnd;
-           ++c) {
-
-        const size_t index =
-            static_cast<size_t>(
-                r * dimension + c);
-
-        coverage[index] = value;
-      }
-    }
-  };
+  std::sort(
+      geometries.begin(),
+      geometries.end(),
+      std::greater<int64_t>());
 
   // ----------------------------------------------------------
-  // Recursive exact-cover enumeration.
+  // Enforce the dyadic hierarchy.
   //
-  // Always choose the first uncovered cell in row-major order.
-  // Every legal decomposition must place exactly one tile whose
-  // top-left corner is this cell.
+  // Every adjacent pair must satisfy:
   //
-  // Fixing this canonical next position avoids enumerating
-  // permutations of the same spatial decomposition.
+  //   larger = 2 * smaller
+  //
+  // This removes arbitrary/sparse power-of-two hierarchies from
+  // the current decomposition problem.
   // ----------------------------------------------------------
 
-  std::function<void()> search = [&]() {
-    int64_t uncoveredRow = -1;
-    int64_t uncoveredColumn = -1;
+  for (size_t i = 0;
+       i + 1 < geometries.size();
+       ++i) {
 
-    for (int64_t r = 0;
-         r < dimension && uncoveredRow < 0;
-         ++r) {
-      for (int64_t c = 0;
-           c < dimension;
-           ++c) {
-        const size_t index =
-            static_cast<size_t>(
-                r * dimension + c);
+    if (geometries[i] !=
+        2 * geometries[i + 1])
+      return failure();
+  }
 
-        if (!coverage[index]) {
-          uncoveredRow = r;
-          uncoveredColumn = c;
+  const int64_t smallestGeometry =
+      geometries.back();
+
+  // ----------------------------------------------------------
+  // Padding.
+  //
+  // The original matrix does not have to be divisible by the
+  // smallest hardware geometry.
+  //
+  // Extend it to the smallest geometry boundary:
+  //
+  //   paddedRows =
+  //       ceil(rows / g_min) * g_min
+  //
+  //   paddedColumns =
+  //       ceil(columns / g_min) * g_min
+  //
+  // Tiles are allowed to cover this padding region.
+  // ----------------------------------------------------------
+
+  if (rows >
+          std::numeric_limits<int64_t>::max() -
+              (smallestGeometry - 1) ||
+      columns >
+          std::numeric_limits<int64_t>::max() -
+              (smallestGeometry - 1))
+    return failure();
+
+  const int64_t paddedRows =
+      ((rows + smallestGeometry - 1) /
+       smallestGeometry) *
+      smallestGeometry;
+
+  const int64_t paddedColumns =
+      ((columns + smallestGeometry - 1) /
+       smallestGeometry) *
+      smallestGeometry;
+
+  if (paddedRows <= 0 ||
+      paddedColumns <= 0)
+    return failure();
+
+  // ----------------------------------------------------------
+  // Greedy decomposition.
+  //
+  // Work from the first uncovered padded element in row-major
+  // order.
+  //
+  // At that position, choose the LARGEST geometry that fits.
+  //
+  // Because the geometry hierarchy is dyadic, choosing a smaller
+  // geometry is equivalent to recursively splitting the larger
+  // geometry:
+  //
+  //   g_i x g_i
+  //       ->
+  //   4 * (g_{i+1} x g_{i+1})
+  //
+  // No enumeration, backtracking, DP, skyline, or scheduling
+  // occurs here.
+  // ----------------------------------------------------------
+
+  if (paddedRows >
+          std::numeric_limits<int64_t>::max() /
+              paddedColumns)
+    return failure();
+
+  const int64_t paddedElements =
+      paddedRows * paddedColumns;
+
+  std::vector<uint8_t> covered(
+      static_cast<size_t>(paddedElements),
+      0);
+
+  llvm::SmallVector<SystolicTile> tiles;
+
+  const auto indexOf =
+      [paddedColumns](int64_t row, int64_t column) {
+        return static_cast<size_t>(
+            row * paddedColumns + column);
+      };
+
+  int64_t coveredElements = 0;
+
+  while (coveredElements < paddedElements) {
+
+    // --------------------------------------------------------
+    // First uncovered padded element.
+    // --------------------------------------------------------
+
+    int64_t startRow = -1;
+    int64_t startColumn = -1;
+
+    for (int64_t row = 0;
+         row < paddedRows && startRow < 0;
+         ++row) {
+
+      for (int64_t column = 0;
+           column < paddedColumns;
+           ++column) {
+
+        if (covered[indexOf(row, column)] == 0) {
+          startRow = row;
+          startColumn = column;
           break;
         }
       }
     }
 
-    // No uncovered cell remains: exact cover found.
-    if (uncoveredRow < 0) {
-      decompositions.push_back(
-          currentDecomposition);
-      return;
-    }
+    if (startRow < 0 ||
+        startColumn < 0)
+      return failure();
 
-    // Try every legal accelerator geometry at the canonical
-    // uncovered position.
-    for (int64_t acceleratorSize : geometries) {
-      if (!canPlace(
-              uncoveredRow,
-              uncoveredColumn,
-              acceleratorSize))
+    // --------------------------------------------------------
+    // Largest geometry first.
+    // --------------------------------------------------------
+
+    int64_t selectedGeometry = -1;
+
+    for (int64_t geometry : geometries) {
+
+      if (geometry >
+              paddedRows - startRow ||
+          geometry >
+              paddedColumns - startColumn)
         continue;
 
-      setCoverage(
-          uncoveredRow,
-          uncoveredColumn,
-          acceleratorSize,
-          true);
+      bool legal = true;
 
-      SystolicExecutionTask task;
+      for (int64_t r = startRow;
+           r < startRow + geometry && legal;
+           ++r) {
 
-      task.row =
-          tile.row + uncoveredRow;
+        for (int64_t c = startColumn;
+             c < startColumn + geometry;
+             ++c) {
 
-      task.column =
-          tile.column + uncoveredColumn;
+          if (covered[indexOf(r, c)] != 0) {
+            legal = false;
+            break;
+          }
+        }
+      }
 
-      task.size = acceleratorSize;
-      task.acceleratorSize = acceleratorSize;
-
-      // Physical accelerator assignment belongs to scheduling.
-      task.acceleratorId = -1;
-
-      currentDecomposition.push_back(task);
-
-      search();
-
-      currentDecomposition.pop_back();
-
-      setCoverage(
-          uncoveredRow,
-          uncoveredColumn,
-          acceleratorSize,
-          false);
+      if (legal) {
+        selectedGeometry = geometry;
+        break;
+      }
     }
-  };
 
-  search();
+    if (selectedGeometry <= 0)
+      return failure();
 
-  return decompositions;
+    // --------------------------------------------------------
+    // Commit one greedy tile.
+    // --------------------------------------------------------
+
+    SystolicTile tile;
+    tile.row = startRow;
+    tile.column = startColumn;
+    tile.size = selectedGeometry;
+    tile.acceleratorSize = selectedGeometry;
+    tile.acceleratorId = -1;
+
+    tiles.push_back(tile);
+
+    // --------------------------------------------------------
+    // Mark the selected square as covered.
+    // --------------------------------------------------------
+
+    for (int64_t r = startRow;
+         r < startRow + selectedGeometry;
+         ++r) {
+
+      for (int64_t c = startColumn;
+           c < startColumn + selectedGeometry;
+           ++c) {
+
+        const size_t index =
+            indexOf(r, c);
+
+        if (covered[index] != 0)
+          return failure();
+
+        covered[index] = 1;
+        ++coveredElements;
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Exact coverage of the padded domain.
+  // ----------------------------------------------------------
+
+  if (coveredElements != paddedElements)
+    return failure();
+
+  for (uint8_t value : covered) {
+    if (value != 1)
+      return failure();
+  }
+
+  return SystolicDecompositionResult{
+      std::move(tiles)};
+}
+
+
+
+
+
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+scheduleSystolicTiles(
+    llvm::ArrayRef<SystolicTile> tiles,
+    llvm::ArrayRef<int64_t> computeCycles,
+    const SystolicFleetState &fleet) {
+
+  if (tiles.size() != computeCycles.size())
+    return failure();
+
+  if (tiles.empty())
+    return llvm::SmallVector<ScheduledSystolicTile>{};
+
+  if (fleet.resources.empty())
+    return failure();
+
+  // ----------------------------------------------------------
+  // Sort tasks by decreasing compute time.
+  //
+  // This is the scheduling policy:
+  //
+  //   largest task first
+  //
+  // Spatial decomposition has already been completed before
+  // entering this function.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<size_t> order;
+
+  for (size_t i = 0; i < tiles.size(); ++i) {
+    if (tiles[i].size <= 0 ||
+        computeCycles[i] < 0)
+      return failure();
+
+    order.push_back(i);
+  }
+
+  std::sort(
+      order.begin(),
+      order.end(),
+      [&](size_t lhs, size_t rhs) {
+        if (computeCycles[lhs] !=
+            computeCycles[rhs])
+          return computeCycles[lhs] >
+                 computeCycles[rhs];
+
+        if (tiles[lhs].size !=
+            tiles[rhs].size)
+          return tiles[lhs].size >
+                 tiles[rhs].size;
+
+        if (tiles[lhs].row !=
+            tiles[rhs].row)
+          return tiles[lhs].row <
+                 tiles[rhs].row;
+
+        return tiles[lhs].column <
+               tiles[rhs].column;
+      });
+
+  // ----------------------------------------------------------
+  // Track the next available cycle of every physical
+  // accelerator.
+  // ----------------------------------------------------------
+
+  llvm::SmallVector<int64_t> load(
+      fleet.resources.size(),
+      0);
+
+  llvm::SmallVector<ScheduledSystolicTile> result;
+  result.reserve(tiles.size());
+
+  // ----------------------------------------------------------
+  // Greedy list scheduling.
+  //
+  // For each task:
+  //
+  //   1. find compatible accelerators
+  //   2. choose the least-loaded one
+  //   3. schedule the task there
+  //
+  // An accelerator may be reused after its previous task
+  // finishes.
+  // ----------------------------------------------------------
+
+  for (size_t taskIndex : order) {
+
+    const SystolicTile &tile =
+        tiles[taskIndex];
+
+    const int64_t cycles =
+        computeCycles[taskIndex];
+
+    size_t selectedResource =
+        fleet.resources.size();
+
+    for (size_t resourceIndex = 0;
+         resourceIndex < fleet.resources.size();
+         ++resourceIndex) {
+
+      const SystolicArrayResource &resource =
+          fleet.resources[resourceIndex];
+
+      // A tile may execute only on the same physical geometry.
+      //
+      // Decomposition has already decided the tile geometry.
+      // Scheduling must not remap a tile onto a larger array.
+      if (resource.arraySize != tile.size)
+        continue;
+
+      if (selectedResource ==
+          fleet.resources.size()) {
+        selectedResource = resourceIndex;
+        continue;
+      }
+
+      // Prefer the accelerator that becomes available first.
+      if (load[resourceIndex] <
+          load[selectedResource]) {
+        selectedResource = resourceIndex;
+        continue;
+      }
+
+      // Deterministic tie-break.
+      if (load[resourceIndex] ==
+              load[selectedResource] &&
+          resource.acceleratorId <
+              fleet.resources[selectedResource]
+                  .acceleratorId) {
+        selectedResource = resourceIndex;
+      }
+    }
+
+    if (selectedResource ==
+        fleet.resources.size())
+      return failure();
+
+    const int64_t startCycle =
+        load[selectedResource];
+
+    if (cycles >
+        std::numeric_limits<int64_t>::max() -
+            startCycle)
+      return failure();
+
+    const int64_t endCycle =
+        startCycle + cycles;
+
+    ScheduledSystolicTile scheduled;
+
+    scheduled.tile = tile;
+    scheduled.tile.acceleratorSize =
+        fleet.resources[selectedResource]
+            .arraySize;
+    scheduled.tile.acceleratorId =
+        fleet.resources[selectedResource]
+            .acceleratorId;
+
+    scheduled.startCycle =
+        startCycle;
+
+    scheduled.endCycle =
+        endCycle;
+
+    result.push_back(
+        scheduled);
+
+    load[selectedResource] =
+        endCycle;
+  }
+
+  return result;
 }
 
 } // namespace systolic
