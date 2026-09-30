@@ -144,6 +144,7 @@ set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 # build made from a different set of sources is not exercising the same array.
 set SRC [list \
     $SCRIPT_DIR/systolic_dma_top.sv \
+    $SCRIPT_DIR/systolic_dma_core.sv \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
     $SCRIPT_DIR/dma_operand_writer.sv \
@@ -159,7 +160,9 @@ set SRC [list \
     $ROOT/core/systolic_array.sv \
     $ROOT/core/tile_feeder.sv \
     $ROOT/core/operand_buffer.sv \
-    $ROOT/core/operand_buffer_v2.sv ]
+    $ROOT/core/operand_buffer_v2.sv \
+    $ROOT/scheduler/systolic_hw_scheduler.sv \
+    $ROOT/scheduler/systolic_hw_scheduler_adapter.sv ]
 
 # -----------------------------------------------------------------------------
 proc build {} {
