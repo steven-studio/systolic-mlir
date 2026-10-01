@@ -200,6 +200,29 @@ module dma_writeback_engine #(
     m_axi_wlast   = (w_left == LEN_W'(1));
   end
 
+  // --------------------------------------------------------------------------
+  // DEBUG: descriptor -> addr_r -> AXI AW address pipeline.
+  // Diagnostic only. No functional behavior is changed.
+  // --------------------------------------------------------------------------
+  always @(posedge clk) begin
+    if (rst_n &&
+        ((desc_valid && desc_ready) ||
+         aw_fire)) begin
+      $display(
+        "WBPIPE t=%0t state=%0d desc_fire=%0b desc_addr=0x%08h addr_r=0x%08h aw_fire=%0b awaddr=0x%08h awvalid=%0b awready=%0b",
+        $time,
+        state,
+        desc_valid && desc_ready,
+        desc_addr,
+        addr_r,
+        aw_fire,
+        m_axi_awaddr,
+        m_axi_awvalid,
+        m_axi_awready
+      );
+    end
+  end
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state      <= S_IDLE;

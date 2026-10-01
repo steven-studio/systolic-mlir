@@ -131,7 +131,12 @@ module systolic_hw_scheduler #(
                 // Wait until the scheduled start cycle.
                 // ------------------------------------------------------------
                 ST_WAIT: begin
-                    if (cycle_counter >= active_start_cycle) begin
+                    // cycle_counter is incremented in the same clock edge
+                    // while busy.  Therefore, the next visible counter
+                    // value is cycle_counter + 1.  Fire the start pulse
+                    // when that next cycle reaches the requested
+                    // compiler schedule cycle.
+                    if ((cycle_counter + 1'b1) >= active_start_cycle) begin
                         accelerator_start[active_accelerator_id] <= 1'b1;
                         state <= ST_RUN;
                     end
@@ -146,6 +151,15 @@ module systolic_hw_scheduler #(
                 // ------------------------------------------------------------
                 ST_RUN: begin
                     if (accelerator_done[active_accelerator_id]) begin
+                        $display(
+                            "SCHEDDONE t=%0t state=%0d active_dev=%0d accelerator_done=%b busy=%0b",
+                            $time,
+                            state,
+                            active_accelerator_id,
+                            accelerator_done,
+                            busy
+                        );
+
                         busy          <= 1'b0;
                         schedule_done <= 1'b1;
                         state         <= ST_IDLE;

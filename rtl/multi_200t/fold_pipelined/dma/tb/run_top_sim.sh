@@ -6,6 +6,12 @@
 #   ./run_top_sim.sh v2           # beat-wide v2 (USE_V2=1)
 #   ./run_top_sim.sh v1 256       # the paper's geometry, either variant
 #   ./run_top_sim.sh v2 32 8      # eight invocations of k=32: the k_max split
+#   ./run_top_sim.sh v1 16 1 external 16
+#                                  # external scheduler, K_MAX=16, JOB_K=16
+#   ./run_top_sim.sh v1 32 1 external 16
+#                                  # K_MAX=32 hardware, runtime JOB_K=16
+#   ./run_top_sim.sh v1 32 1 external 32
+#                                  # K_MAX=32 hardware, runtime JOB_K=32
 #
 # The third argument is the invocation count.  It is not a generic: the design
 # takes it from vio_0's output probe, which xil_stubs drives from +n_inv, for
@@ -33,12 +39,30 @@ ROOT="$(dirname "$DMA")"                               # .../fold_pipelined
 VARIANT="${1:-v1}"
 KMAX="${2:-16}"
 NINV="${3:-1}"
+
+# Runtime reduction length.
+#
+# KMAX = compiled hardware capacity.
+# JOB_K = K of the submitted scheduler job.
+#
+# Only external-scheduler mode consumes JOB_K.
+# Legacy mode defaults it to KMAX and remains unchanged.
+JOB_K="${5:-$KMAX}"
+
+SCHEDULER_GEN=""
+if [[ "${4:-}" == "external" ]]; then
+  SCHEDULER_GEN="-GUSE_EXTERNAL_SCHEDULER=1"
+elif [[ -n "${4:-}" ]]; then
+  echo "usage: $0 [v1|v2] [K_MAX] [N_INV] [external]"
+  exit 2
+fi
+
 case "$VARIANT" in
   v1) GEN="-GUSE_V2=0 -GK_MAX=$KMAX" ;;
   v2) GEN="-GUSE_V2=1 -GK_MAX=$KMAX" ;;
   *)  echo "usage: $0 [v1|v2] [K_MAX]"; exit 2 ;;
 esac
-OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}"
+OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_jobk${JOB_K}_n${NINV}"
 
 command -v verilator >/dev/null 2>&1 || {
     echo "verilator not found."
@@ -47,13 +71,19 @@ command -v verilator >/dev/null 2>&1 || {
 }
 
 rm -rf "$OUT"
-verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
+verilator --binary -Wno-fatal --timing --public-flat-rw $GEN $SCHEDULER_GEN \
+    -GJOB_K=$JOB_K \
+    -DFP_MUL_LAT=8 -DFP_ADD_LAT=11 \
     --top-module tb_systolic_dma_top -o tbrun --Mdir "$OUT" \
     "$HERE/tb_systolic_dma_top.sv" \
     "$HERE/xil_stubs.sv" \
     "$HERE/mig_axi_model.sv" \
     "$ROOT/tb/fp_model.sv" \
+    "$ROOT/tb/fp32_dpi.cpp" \
     "$DMA/systolic_dma_top.sv" \
+    "$ROOT/scheduler/systolic_job_ingress.sv" \
+    "$ROOT/scheduler/systolic_hw_scheduler.sv" \
+    "$ROOT/scheduler/systolic_hw_scheduler_adapter.sv" \
     "$DMA/dma_engine.sv" \
     "$DMA/dma_seed_writer.sv" \
     "$DMA/dma_operand_writer.sv" \
@@ -68,6 +98,35 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/core/tile_feeder.sv" \
     "$ROOT/core/operand_buffer.sv" \
     "$ROOT/core/operand_buffer_v2.sv" \
-    > "$HERE/build_top_${VARIANT}_k${KMAX}.log" 2>&1 || { tail -30 "$HERE/build_top_${VARIANT}_k${KMAX}.log"; exit 1; }
+    > "$HERE/build_top_${VARIANT}_k${KMAX}_jobk${JOB_K}.log" 2>&1 || {
+    tail -30 "$HERE/build_top_${VARIANT}_k${KMAX}_jobk${JOB_K}.log"
+    exit 1
+}
 
-"$OUT/tbrun" +n_inv=$NINV +wb_region=$((NINV * KMAX * 8 * 8 + 4096))
+if [[ "${4:-}" == "external" ]]; then
+  EXTRA_ARGS=("${@:6}")
+else
+  EXTRA_ARGS=("${@:4}")
+fi
+
+if [[ "${4:-}" == "external" ]]; then
+
+  # External scheduler owns the job's C/result region.
+
+  # Keep synchronized with tb_systolic_dma_top.sv job_c_base.
+
+  JOB_C_BASE_RUNTIME=$((0x3000))
+
+  WB_REGION_RUNTIME=$JOB_C_BASE_RUNTIME
+
+else
+
+  # Legacy mode keeps the original run-level result region.
+
+  WB_REGION_RUNTIME=$((NINV * KMAX * 8 * 8 + 4096))
+
+fi
+
+
+
+"$OUT/tbrun" +n_inv=$NINV +wb_region=$WB_REGION_RUNTIME "${EXTRA_ARGS[@]}"

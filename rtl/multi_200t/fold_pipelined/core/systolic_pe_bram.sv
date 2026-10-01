@@ -30,11 +30,11 @@
  * 為什麼有兩組 bank(乒乓)
  * -------------------------
  * 舊版只有一組。歸約要把 16 格併成 1 格,樹狀四層、層間要等加法器
- * 排空,總共約 63 拍:
+ * 排空。以目前 FP ADD latency = 11 計:
  *
- *   (8+12) + (4+12) + (2+12) + (1+12) = 63
+ *   (8+11) + (4+11) + (2+11) + (1+11) = 59
  *
- * 這 63 拍裡那 16 格正在被讀、被寫、被合併。下一個 tile 的乘積
+ * 這 59 拍裡那 16 格正在被讀、被寫、被合併。下一個 tile 的乘積
  * 如果掉進來,會加進一個正在歸約的格子 —— 答案就錯了,而且不會
  * 有任何錯誤訊息。所以舊版的上層必須等歸約做完才能餵下一個 tile。
  *
@@ -60,12 +60,12 @@
  * 剩下的那一段沒有被消除
  * ----------------------
  * PE 是靠「輸入停了而且管線排空了」來判斷一次交易結束的,那需要
- * 大約 MUL_LATENCY + ADD_LATENCY = 21 拍的靜默。所以兩個 tile
+ * 大約 MUL_LATENCY + ADD_LATENCY = 19 拍的靜默。所以兩個 tile
  * 之間仍然需要這段間隔,上層不能背靠背地餵。
  *
- * 尾巴從 21 + 63 = 84 拍縮到 21 拍。
+ * 尾巴從 19 + 63 = 82 拍縮到 19 拍。
  *
- * ⚠ 這 21 拍沒有任何硬體防線。上層若餵太早,PE 會把兩個 tile 當成
+ * ⚠ 這 19 拍沒有任何硬體防線。上層若餵太早,PE 會把兩個 tile 當成
  *   同一次交易加在一起,而且不會有任何錯誤訊息 —— 症狀是結果偏大,
  *   不是掛掉。這條約束只存在於這段註解和 tb_pe_overlap 裡。
  *
@@ -117,8 +117,16 @@ module pe_acc_bram #(
     always_ff @(posedge clk) begin
         rdata <= mem[raddr];
 
-        if (we)
+        if (we) begin
             mem[waddr] <= wdata;
+
+            $display(
+                "[BRAMWR] t=%0t dut=%m addr=%0d data=0x%08x",
+                $time,
+                waddr,
+                wdata
+            );
+        end
     end
 
 endmodule
@@ -133,8 +141,8 @@ module systolic_pe #(
      * 哪個 bank,而是用計數器重播同一個序列。tb 把 fp_model 的 LAT
      * 改成 3/5 或 17/23 仍然通過,就是這件事的證明。
      */
-    parameter int MUL_LATENCY = 9,
-    parameter int ADD_LATENCY = 12
+    parameter int MUL_LATENCY = 8,
+    parameter int ADD_LATENCY = 11
 ) (
     input  logic clk,
     input  logic rst,
@@ -220,6 +228,43 @@ module systolic_pe #(
         .valid_out (product_valid),
         .result    (product)
     );
+
+
+    /* ============================================================
+     * DEBUG: FP multiplier timing probe
+     *
+     * The Xilinx FP multiplier IP is configured as:
+     *   latency = 8 cycles
+     *   rate    = 1 result/cycle
+     *
+     * Observation only. No functional signal is modified.
+     *
+     * This probe is intentionally placed immediately after the
+     * fp_mul wrapper so that we can distinguish:
+     *
+     *   pipe_pair_valid
+     *       ->
+     *   floating_point_mul_0
+     *       ->
+     *   product_valid / product
+     *
+     * from any higher-level PE / array timing.
+     * ============================================================ */
+    always_ff @(posedge clk) begin
+        if (!rst) begin
+            if (pipe_pair_valid || product_valid) begin
+                $display(
+                    "MULDBG t=%0t pipeV=%b a=%h b=%h | prodV=%b prod=%h",
+                    $time,
+                    pipe_pair_valid,
+                    a_reg,
+                    b_reg,
+                    product_valid,
+                    product
+                );
+            end
+        end
+    end
 
 
     /* ============================================================
@@ -430,6 +475,33 @@ module systolic_pe #(
         .valid_out (accum_add_valid),
         .result    (accum_add_result)
     );
+
+
+    /* ============================================================
+     * DEBUG: FP accumulator-adder timing probe
+     *
+     * Xilinx FP32 add IP:
+     *   expected latency = 11 cycles
+     *   rate             = 1 result/cycle
+     *
+     * Observation only. No functional signal is modified.
+     * ============================================================ */
+    always_ff @(posedge clk) begin
+        if (!rst) begin
+            if (accum_read_valid || accum_add_valid) begin
+                $display(
+                    "ADDDBG t=%0t readV=%b old=%h product=%h | addV=%b result=%h",
+                    $time,
+                    accum_read_valid,
+                    accum_old_value,
+                    accum_product_d,
+                    accum_add_valid,
+                    accum_add_result
+                );
+            end
+        end
+    end
+
 
 
     /* ============================================================
@@ -907,10 +979,19 @@ module systolic_pe #(
             acc_out       <= '0;
         end
         else begin
-            acc_valid_out <= (red_state == RED_DONE);
+            /*
+             * Lock the final reduction result at the same edge where
+             * the stride-1 reduction produces it.
+             *
+             * acc_valid_out is still generated from RED_DONE below,
+             * so the result is already stable before the publication
+             * pulse reaches the array output.
+             */
+            if (reduce_add_valid &&
+                reduce_stride == ACC_SEL_W'(1))
+                acc_out <= reduce_add_result;
 
-            if (red_state == RED_DONE)
-                acc_out <= final_reduce_result;
+            acc_valid_out <= (red_state == RED_DONE);
         end
     end
 

@@ -232,6 +232,7 @@ module tb_systolic_hw_scheduler;
 
     task automatic test_future_start;
         integer started_acc;
+        integer start_cycle_observed;
         begin
             $display("");
             $display("TEST 1: future scheduled start");
@@ -267,7 +268,29 @@ module tb_systolic_hw_scheduler;
                 errors = errors + 1;
             end
 
-            wait_for_start(started_acc);
+            // Observe the registered start pulse after NBA updates have
+            // settled.  At negedge, both cycle_counter and
+            // accelerator_start reflect the state produced by the
+            // preceding posedge.
+            start_cycle_observed = -1;
+
+            while (start_cycle_observed < 0) begin
+                @(negedge clk);
+
+                if (accelerator_start[0]) begin
+                    start_cycle_observed = cycle_counter;
+                    started_acc = 0;
+                end
+            end
+
+            if (start_cycle_observed != 5) begin
+                $display("FAIL: accelerator_start at cycle %0d, expected 5",
+                         start_cycle_observed);
+                errors = errors + 1;
+            end
+            else begin
+                $display("PASS: accelerator_start at scheduled cycle 5");
+            end
 
             if (started_acc !== 0) begin
                 $display("FAIL: started accelerator = %0d, expected 0",

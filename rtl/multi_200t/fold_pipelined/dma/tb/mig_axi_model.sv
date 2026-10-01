@@ -23,7 +23,7 @@
  */
 
 module mig_7series_0 #(
-  parameter integer MEM_WORDS = 32768,     // 32-bit words: room for K_MAX = 256
+  parameter integer MEM_WORDS = 131072,     // 32-bit words: room for K_MAX = 256
   parameter integer WB_REGION = 4096       // byte address where results start
                                            // (default; +wb_region=<bytes> overrides,
                                            // because the boundary moves with K_MAX
@@ -151,6 +151,14 @@ module mig_7series_0 #(
                      w_addr);
             errors <= errors + 1;
           end
+          if (w_addr >= 32'h0000_3200 &&
+              w_addr <  32'h0000_3240) begin
+            $display(
+              "MIGWRDBG JOB9: addr=0x%08x data=%h strb=%h last=%0b",
+              w_addr, s_axi_wdata, s_axi_wstrb, s_axi_wlast
+            );
+          end
+
           for (int j = 0; j < 4; j++)
             if (s_axi_wstrb[4*j +: 4] == 4'hF)
               mem[w_addr/4 + j] = s_axi_wdata[32*j +: 32];
@@ -202,6 +210,19 @@ module mig_7series_0 #(
           r_addr       <= q_addr[0];
           r_left       <= q_len[0];
           s_axi_rdata  <= beat_at(q_addr[0]);
+
+          // DEBUG: inspect the first beat returned for JOB16's
+          // physical operand slab (0x18000..0x187FF).
+          if (q_addr[0] >= 32'h0001_8000 &&
+              q_addr[0] <  32'h0001_8800) begin
+            $display(
+              "MIGRDBG: addr=0x%08x data=%h len=%0d",
+              q_addr[0],
+              beat_at(q_addr[0]),
+              q_len[0]
+            );
+          end
+
           s_axi_rlast  <= (q_len[0] == 1);
           s_axi_rvalid <= 1'b1;
           q_addr.delete(0);

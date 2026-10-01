@@ -126,6 +126,25 @@ module dma_operand_writer #(
   // bursts; leaving it equal to dst_full is conservative and correct.
   assign dst_almost_full = dst_full;
 
+  // -------------------------------------------------------------------------
+  // DEBUG: trace the DMA destination beat entering the operand writer.
+  // Observation only; no functional signal is modified.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst_n && dst_wr_en) begin
+      $display(
+        "DSTDBG t=%0t beat=%0d dst=%h accept=%b busy=%b cnt=%0d data_q=%h",
+        $time,
+        dst_wr_beat,
+        dst_wr_data,
+        accept,
+        busy,
+        cnt,
+        data_q
+      );
+    end
+  end
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       busy     <= 1'b0;
@@ -144,6 +163,38 @@ module dma_operand_writer #(
         if (cnt == 2'd3) busy <= 1'b0;
         else             cnt  <= cnt + 1'b1;
       end
+    end
+  end
+
+  // -------------------------------------------------------------------------
+  // DEBUG: observe the exact operand-writer state seen by the write port.
+  // Observation only; no functional signal is modified.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst_n && busy && in_range) begin
+      $display(
+        "WRSTEPDBG t=%0t beat=%0d cnt=%0d busy=%b in_range=%b data_q=%h word_sel=%h wdata=%h w=%0d mat=%0d is_b=%b win=%0d a_lane=%0d a_koff=%0d b_lane=%0d b_koff=%0d a_wr=%b b_wr=%b wsel=%0d waddr=%0d",
+        $time,
+        beat_q,
+        cnt,
+        busy,
+        in_range,
+        data_q,
+        data_q[32*cnt +: 32],
+        wdata,
+        w,
+        mat,
+        is_b,
+        win,
+        a_lane,
+        a_koff,
+        b_lane,
+        b_koff,
+        a_wr,
+        b_wr,
+        wsel,
+        waddr
+      );
     end
   end
 
@@ -171,6 +222,36 @@ module dma_operand_writer #(
     wsel  = is_b ? b_lane : a_lane;
     waddr = is_b ? {win, b_koff} : {win, a_koff};
     wdata = word_sel;
+  end
+
+  // -------------------------------------------------------------------------
+  // DEBUG: first B-side decode.
+  // Observation only; no functional signal is modified.
+  // -------------------------------------------------------------------------
+  logic b_decode_seen;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      b_decode_seen <= 1'b0;
+    end else if (busy && in_range && is_b && !b_decode_seen) begin
+      $display(
+        "FIRSTBDBG t=%0t beat=%0d cnt=%0d w=%0d mat=%0d is_b=%b win=%0d b_lane=%0d b_koff=%0d wsel=%0d waddr=%0d dst=%h data=%h",
+        $time,
+        beat_q,
+        cnt,
+        w,
+        mat,
+        is_b,
+        win,
+        b_lane,
+        b_koff,
+        wsel,
+        waddr,
+        dst_wr_data,
+        wdata
+      );
+      b_decode_seen <= 1'b1;
+    end
   end
 
   // ---- observability -----------------------------------------------------

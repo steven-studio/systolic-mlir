@@ -227,6 +227,33 @@ module dma_engine #(
     end else begin
       done_valid <= 1'b0;
 
+      // -----------------------------------------------------------------------
+      // DEBUG: correlate AXI read commands with returned data.
+      // Observation only; no functional signal is modified.
+      // -----------------------------------------------------------------------
+      if (ar_fire) begin
+        $display(
+          "AXIARDBG t=%0t addr=%h len=%0d arlen=%0d issue_left=%0d ret_idx=%0d",
+          $time,
+          m_axi_araddr,
+          cur_len,
+          m_axi_arlen,
+          issue_left,
+          ret_idx
+        );
+      end
+
+      if (r_fire) begin
+        $display(
+          "AXIRDBG2 t=%0t ret_idx=%0d rdata=%h rlast=%b rresp=%b",
+          $time,
+          ret_idx,
+          m_axi_rdata,
+          m_axi_rlast,
+          m_axi_rresp
+        );
+      end
+
       // Credit: one per burst, spent on an accepted AR, returned on that
       // burst's last beat.  Both in the same cycle cancel out.
       if (ar_fire && !(r_fire && m_axi_rlast))      credit <= credit - 1'b1;
@@ -286,6 +313,24 @@ module dma_engine #(
 
         default: state <= S_IDLE;
       endcase
+    end
+  end
+
+  // -------------------------------------------------------------------------
+  // DEBUG: observe AXI read data entering the destination write stream.
+  //
+  // Observation only; no functional signal is modified.
+  // At r_fire, m_axi_rdata is exactly the beat forwarded as dst_wr_data.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst_n && r_fire) begin
+      $display(
+        "AXIRDBG t=%0t ret_idx=%0d rdata=%h rlast=%b",
+        $time,
+        ret_idx,
+        m_axi_rdata,
+        m_axi_rlast
+      );
     end
   end
 

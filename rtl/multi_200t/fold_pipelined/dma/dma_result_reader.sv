@@ -86,10 +86,26 @@ module dma_result_reader #(
   // slices of it -- no arithmetic on the index path.
   always_comb begin
     wr_data = '0;
+
+    // One AXI beat contains WORDS_PER_BEAT consecutive row-major
+    // result words.  Compute the row/column explicitly instead of
+    // reconstructing the flattened index with packed bit slices.
+    //
+    // For N=4:
+    //   bidx=0 -> C[0][0..3]
+    //   bidx=1 -> C[1][0..3]
+    //   bidx=2 -> C[2][0..3]
+    //   bidx=3 -> C[3][0..3]
     for (int j = 0; j < WORDS_PER_BEAT; j++) begin
-      logic [WORD_W-1:0] w;
-      w = {bidx, J_W'(j)};
-      wr_data[32*j +: 32] = C[w[WORD_W-1 -: LANE_W]][w[LANE_W-1:0]];
+      integer word_index;
+      integer row;
+      integer col;
+
+      word_index = bidx * WORDS_PER_BEAT + j;
+      row        = word_index / N;
+      col        = word_index % N;
+
+      wr_data[32*j +: 32] = C[row][col];
     end
   end
 

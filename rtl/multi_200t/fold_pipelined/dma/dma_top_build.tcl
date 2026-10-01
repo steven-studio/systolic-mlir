@@ -144,6 +144,7 @@ set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 # build made from a different set of sources is not exercising the same array.
 set SRC [list \
     $SCRIPT_DIR/systolic_dma_top.sv \
+    $SCRIPT_DIR/../scheduler/systolic_job_ingress.sv \
     $SCRIPT_DIR/systolic_dma_core.sv \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
@@ -200,6 +201,7 @@ proc build {} {
 
 proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
+    global SCRIPT_DIR
     global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
     global WB_BASE USE_V2 VARIANT
 
@@ -297,6 +299,14 @@ proc build_body {} {
     if {![file exists $HOLD_TCL]} { error "missing: $HOLD_TCL" }
     add_files -fileset utils_1 -norecurse $HOLD_TCL
     set_property STEPS.PLACE_DESIGN.TCL.PRE $HOLD_TCL [get_runs impl_1]
+
+    # job_ready and scheduler_c_done are scheduler/debug handshake
+    # outputs used by simulation/integration, not physical board pins.
+    # Do not invent package-pin assignments for them.
+    set DRC_TCL $SCRIPT_DIR/allow_internal_scheduler_ports.tcl
+    if {![file exists $DRC_TCL]} { error "missing: $DRC_TCL" }
+    add_files -fileset utils_1 -norecurse $DRC_TCL
+    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
 
     launch_runs impl_1 -to_step write_bitstream -jobs $JOBS
     wait_on_run impl_1
