@@ -48,6 +48,11 @@ struct SystolicArrayResource {
   //   8x8 #2 -> arraySize = 8, acceleratorId = 2
   int64_t acceleratorId;
 
+  // Hardware-calibrated fixed implementation overhead per invocation.
+  //
+  // H = 0 means the pure geometric model.
+  int64_t tileOverhead = 0;
+
 };
 
 /// Runtime state of the physical systolic-array fleet.
@@ -231,11 +236,6 @@ scheduleSystolicTiles(
 ///
 /// Accelerator instance assignment is intentionally deferred to
 /// the scheduler.
-llvm::SmallVector<llvm::SmallVector<SystolicExecutionTask>>
-enumerateSystolicDecompositions(
-    const SystolicTile &tile,
-    llvm::ArrayRef<SystolicArrayResource> fleet);
-
 /// Assign each execution task to a physical accelerator.
 ///
 /// Assignment is performed independently for one decomposition.
@@ -318,46 +318,45 @@ minimizeSystolicMakeSpan(
 ///
 /// The function performs exact optimization; no decomposition
 /// enumeration API is called internally.
-// ---------------------------------------------------------------------------
-// Heterogeneous macro-block split optimization.
-//
-// The input square is first viewed as a grid of largest-array macro-blocks.
-// Each macro-block may either:
-//   (1) remain one GxG tile, or
-//   (2) be split into four (G/2)x(G/2) tiles.
-//
-// For the current hardware:
-//   32x32 -> 16 macro-blocks of 8x8
-//   each macro-block -> 8x8 OR four 4x4 tiles
-//
-// The optimizer chooses the number and placement of split macro-blocks
-// directly from the makespan objective. It does not enumerate arbitrary
-// spatial decompositions.
-//
-// `largestGeometry` is the largest supported array, e.g. 8.
-// `splitGeometry` is its half-size, e.g. 4.
-//
-// The returned schedule contains concrete tile coordinates and physical
-// accelerator assignments.
-//
-/// Result of a decomposition + makespan optimization.
+/// Result of greedy heterogeneous spatial decomposition.
 ///
-/// The result contains the selected physical schedule and its
-/// resulting makespan.  This type is shared by the current
-/// MacroSplit optimizer.
-struct SystolicDecompositionDPResult {
-  llvm::SmallVector<ScheduledSystolicTile> schedule;
-  int64_t makespan;
+/// The decomposition is generated from the geometries that actually
+/// exist in the physical fleet.  Geometry relationships such as
+/// G/2 are never assumed.
+///
+/// Larger tiles may be replaced by smaller legal geometries.  Physical
+/// accelerator assignment and temporal scheduling are handled by the
+/// subsequent scheduling stage.
+struct SystolicDecompositionResult {
+  llvm::SmallVector<SystolicTile> tiles;
 };
 
-FailureOr<SystolicDecompositionDPResult>
-minimizeSystolicMakeSpanMacroSplit(
+/// Greedily decompose an R x C logical region using the geometries
+/// available in the physical accelerator fleet.
+///
+/// Geometries are considered from largest to smallest.  A tile is
+/// placed only when the corresponding geometry exists in the fleet
+/// and fits completely inside the remaining spatial region.
+///
+/// The decomposition is spatial only:
+///
+///   physical accelerator IDs
+///   execution order
+///   compute intervals
+///   makespan
+///
+/// are deliberately deferred to the scheduling stage.
+///
+/// No relationship such as:
+///
+///   smallerGeometry * 2 == largerGeometry
+///
+/// is assumed.
+FailureOr<SystolicDecompositionResult>
+greedySystolicDecompose(
     int64_t rows,
     int64_t columns,
-    int64_t largestGeometry,
-    int64_t splitGeometry,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    const std::function<int64_t(int64_t, int64_t)> &costFn);
+    llvm::ArrayRef<SystolicArrayResource> fleet);
 
 
 /// Tile a square input using a deterministic

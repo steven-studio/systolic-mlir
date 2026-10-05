@@ -134,7 +134,15 @@ module systolic_dma_top #(
   //
   // 0: existing bring-up FSM owns fold_start.
   // 1: external scheduler owns the accelerator transaction start.
-  parameter bit USE_EXTERNAL_SCHEDULER = 1'b0
+  parameter bit USE_EXTERNAL_SCHEDULER = 1'b0,
+
+  // Legacy compiler/testbench descriptor producer.
+  //
+  // 1: allow the top-level job_* ports to provide descriptors.
+  // 0: production board build uses only the internal descriptor bridge.
+  //
+  // Keep the default enabled so existing simulation testbenches are unchanged.
+  parameter bit USE_LEGACY_JOB_PORTS = 1'b1
 ) (
   input  wire        sys_clk_pin,     // R4, 100 MHz
   input  wire        cpu_resetn,      // G4, active low
@@ -205,7 +213,39 @@ module systolic_dma_top #(
   input  wire [31:0]     job_est_cycles,
   input  wire [63:0]     job_a_base,
   input  wire [63:0]     job_b_base,
-  input  wire [63:0]     job_c_base
+  input  wire [63:0]     job_c_base,
+
+  // ----------------------------------------------------------
+  // DPTI descriptor transport.
+  //
+  // Generic register-write interface. A physical host/MMIO
+  // transport can be connected above this boundary.
+  // ----------------------------------------------------------
+  input  wire            dpti_wr_valid,
+  output wire            dpti_wr_ready,
+  input  wire [7:0]      dpti_wr_addr,
+  input  wire [31:0]     dpti_wr_data,
+
+  // ----------------------------------------------------------
+  // Physical Nexys Video FT2232H DPTI interface.
+  //
+  // DPTI is an 8-bit bidirectional synchronous FIFO interface.
+  // The FT2232H drives/receives the data bus depending on direction.
+  //
+  // DPTI clock:
+  //   dpti_clkout = FT2232H CLKO
+  //
+  // All *_n signals are active-low.
+  // ----------------------------------------------------------
+  inout  wire [7:0]      dpti_d,
+  input  wire            dpti_rxf_n,
+  input  wire            dpti_txe_n,
+  input  wire            dpti_clkout,
+
+  output wire            dpti_rd_n,
+  output wire            dpti_wr_n,
+  output wire            dpti_oe_n,
+  input  wire             dpti_siwun
 );
 
   localparam integer AXI_DATA_W = 128;
@@ -299,33 +339,70 @@ module systolic_dma_top #(
   wire         wb_wlast, wb_wvalid, wb_wready;
   wire         wb_bvalid, wb_bready;
 
+  // Host-staging write side.
+  wire [1:0]   hs_awid;    wire [28:0] hs_awaddr;  wire [7:0] hs_awlen;
+  wire [2:0]   hs_awsize;  wire [1:0]  hs_awburst; wire [0:0] hs_awlock;
+  wire [3:0]   hs_awcache; wire [2:0]  hs_awprot;  wire [3:0] hs_awqos;
+  wire         hs_awvalid; wire        hs_awready;
+  wire [127:0] hs_wdata;   wire [15:0] hs_wstrb;
+  wire         hs_wlast, hs_wvalid, hs_wready;
+  wire         hs_bvalid, hs_bready;
+
+  wire         hs_busy;
+  wire         hs_done;
+  wire         hs_err_protocol;
+  wire         hs_err_align;
+  wire         hs_err_resp;
+
   logic        wb_owns_w;
 
-  assign awid       = wb_owns_w ? wb_awid    : sd_awid;
-  assign awaddr     = wb_owns_w ? wb_awaddr  : sd_awaddr;
-  assign awlen      = wb_owns_w ? wb_awlen   : sd_awlen;
-  assign awsize     = wb_owns_w ? wb_awsize  : sd_awsize;
-  assign awburst    = wb_owns_w ? wb_awburst : sd_awburst;
-  assign awlock     = wb_owns_w ? wb_awlock  : sd_awlock;
-  assign awcache    = wb_owns_w ? wb_awcache : sd_awcache;
-  assign awprot     = wb_owns_w ? wb_awprot  : sd_awprot;
-  assign awqos      = wb_owns_w ? wb_awqos   : sd_awqos;
-  assign awvalid    = wb_owns_w ? wb_awvalid : sd_awvalid;
-  assign sd_awready = !wb_owns_w && awready;
-  assign wb_awready =  wb_owns_w && awready;
+  // Host staging has ownership only while its writer is active.
+  // Otherwise preserve the original writeback-versus-seeder selection.
+  assign awid       = hs_busy ? hs_awid
+                              : (wb_owns_w ? wb_awid    : sd_awid);
+  assign awaddr     = hs_busy ? hs_awaddr
+                              : (wb_owns_w ? wb_awaddr  : sd_awaddr);
+  assign awlen      = hs_busy ? hs_awlen
+                              : (wb_owns_w ? wb_awlen   : sd_awlen);
+  assign awsize     = hs_busy ? hs_awsize
+                              : (wb_owns_w ? wb_awsize  : sd_awsize);
+  assign awburst    = hs_busy ? hs_awburst
+                              : (wb_owns_w ? wb_awburst : sd_awburst);
+  assign awlock     = hs_busy ? hs_awlock
+                              : (wb_owns_w ? wb_awlock  : sd_awlock);
+  assign awcache    = hs_busy ? hs_awcache
+                              : (wb_owns_w ? wb_awcache : sd_awcache);
+  assign awprot     = hs_busy ? hs_awprot
+                              : (wb_owns_w ? wb_awprot  : sd_awprot);
+  assign awqos      = hs_busy ? hs_awqos
+                              : (wb_owns_w ? wb_awqos   : sd_awqos);
+  assign awvalid    = hs_busy ? hs_awvalid
+                              : (wb_owns_w ? wb_awvalid : sd_awvalid);
 
-  assign wdata_axi  = wb_owns_w ? wb_wdata   : sd_wdata;
-  assign wstrb      = wb_owns_w ? wb_wstrb   : sd_wstrb;
-  assign wlast      = wb_owns_w ? wb_wlast   : sd_wlast;
-  assign wvalid     = wb_owns_w ? wb_wvalid  : sd_wvalid;
-  assign sd_wready  = !wb_owns_w && wready;
-  assign wb_wready  =  wb_owns_w && wready;
+  assign hs_awready = hs_busy && awready;
+  assign sd_awready = !hs_busy && !wb_owns_w && awready;
+  assign wb_awready = !hs_busy &&  wb_owns_w && awready;
 
-  // bid and bresp fan out to both; only the owner's bvalid is raised, so only
-  // the owner can retire a response or latch a slave error from one.
-  assign bready     = wb_owns_w ? wb_bready  : sd_bready;
-  assign sd_bvalid  = !wb_owns_w && bvalid;
-  assign wb_bvalid  =  wb_owns_w && bvalid;
+  assign wdata_axi  = hs_busy ? hs_wdata
+                              : (wb_owns_w ? wb_wdata  : sd_wdata);
+  assign wstrb      = hs_busy ? hs_wstrb
+                              : (wb_owns_w ? wb_wstrb  : sd_wstrb);
+  assign wlast      = hs_busy ? hs_wlast
+                              : (wb_owns_w ? wb_wlast  : sd_wlast);
+  assign wvalid     = hs_busy ? hs_wvalid
+                              : (wb_owns_w ? wb_wvalid : sd_wvalid);
+
+  assign hs_wready  = hs_busy && wready;
+  assign sd_wready  = !hs_busy && !wb_owns_w && wready;
+  assign wb_wready  = !hs_busy &&  wb_owns_w && wready;
+
+  // Response is visible only to the selected write master.
+  assign bready     = hs_busy ? hs_bready
+                              : (wb_owns_w ? wb_bready : sd_bready);
+
+  assign hs_bvalid  = hs_busy && bvalid;
+  assign sd_bvalid  = !hs_busy && !wb_owns_w && bvalid;
+  assign wb_bvalid  = !hs_busy &&  wb_owns_w && bvalid;
 
   // ---- AXI read channel: the engine ---------------------------------------
   wire [1:0]   arid;   wire [28:0] araddr;  wire [7:0] arlen;
@@ -532,9 +609,9 @@ module systolic_dma_top #(
     .desc_valid             (job_fire),
     .desc_ready             (scheduler_desc_ready),
 
-    .desc_accelerator_id    (job_device_id[0]),
-    .desc_start_cycle       (job_start_cycle),
-    .desc_compute_cycles    (job_est_cycles),
+    .desc_accelerator_id    (effective_job_device_id[0]),
+    .desc_start_cycle       (effective_job_start_cycle),
+    .desc_compute_cycles    (effective_job_est_cycles),
 
     .accelerator_start      (scheduler_accelerator_start),
     .accelerator_done       (scheduler_accelerator_done),
@@ -726,11 +803,660 @@ module systolic_dma_top #(
   // and the seed writer would write the operand image to address 0.
   wire core_job_ready;
 
+  // A completed compute/writeback job may still own the shared DMA read
+  // engine while its result tile is being read back.  Do not accept the next
+  // external descriptor until that readback has completely drained.
+  wire result_readback_busy;
+
   assign core_job_ready =
       USE_EXTERNAL_SCHEDULER &&
       ui_rst_n &&
       !job_busy &&
+      !hs_busy &&
+      !result_readback_busy &&
       (phase == P_CALIB || phase == P_READ || phase == P_DONE);
+
+  // ----------------------------------------------------------
+  // DPTI descriptor bridge.
+  //
+  // Converts host register writes into the existing DPTI job
+  // descriptor protocol.
+  // ----------------------------------------------------------
+
+  wire        dpti_job_valid;
+  wire        dpti_job_ready;
+
+  wire [31:0] dpti_job_id;
+  wire [31:0] dpti_job_device_id;
+
+  wire [31:0] dpti_job_m;
+  wire [31:0] dpti_job_n;
+  wire [31:0] dpti_job_k;
+
+  wire [31:0] dpti_job_start_cycle;
+  wire [31:0] dpti_job_est_cycles;
+
+  wire [63:0] dpti_job_a_base;
+  wire [63:0] dpti_job_b_base;
+  wire [63:0] dpti_job_c_base;
+
+  wire [31:0] dpti_status;
+
+  // ----------------------------------------------------------
+  // Physical FT2232H DPTI host command path.
+  //
+  // Ubuntu -> USB -> FT2232H -> DPTI -> RX parser
+  //       -> async CDC FIFO -> ui_clk AXI4-Lite master.
+  //
+  // This is the real host transport.  UART is not involved.
+  // ----------------------------------------------------------
+
+  wire        dpti_host_cmd_valid;
+  wire        dpti_host_cmd_ready;
+  wire [7:0]  dpti_host_cmd_addr;
+  wire [31:0] dpti_host_cmd_data;
+
+  // Shared physical byte stream.
+  wire [7:0]  dpti_byte_data;
+  wire        dpti_byte_valid;
+  wire        dpti_byte_ready;
+
+  // MEM_WRITE branch.  During this first integration step the decoded
+  // payload is intentionally consumed locally.  The CDC/DDR writer is
+  // connected only after the existing WRITE32 path regresses cleanly.
+  wire                    dpti_mem_start;
+  wire [AXI_ADDR_W-1:0]   dpti_mem_base_addr;
+  wire [AXI_DATA_W-1:0]   dpti_mem_data;
+  wire                    dpti_mem_valid;
+  wire                    dpti_mem_ready;
+  wire                    dpti_mem_done;
+
+  wire dpti_frontend_err_opcode;
+  wire dpti_frontend_err_write32_opcode;
+  wire dpti_frontend_err_mem_opcode;
+  wire dpti_frontend_err_mem_length;
+
+  wire        dpti_fifo_wr_ready;
+  wire        dpti_fifo_rd_valid;
+  wire        dpti_fifo_rd_ready;
+  wire [7:0]  dpti_fifo_rd_addr;
+  wire [31:0] dpti_fifo_rd_data;
+
+  wire        dpti_axi_cmd_valid;
+  wire        dpti_axi_cmd_ready;
+
+  wire        dpti_axi_rsp_valid;
+  wire        dpti_axi_rsp_ready;
+  wire [1:0]  dpti_axi_rsp_resp;
+
+  wire [7:0]  dpti_axi_awaddr;
+  wire        dpti_axi_awvalid;
+  wire        dpti_axi_awready;
+
+  wire [31:0] dpti_axi_wdata;
+  wire [3:0]  dpti_axi_wstrb;
+  wire        dpti_axi_wvalid;
+  wire        dpti_axi_wready;
+
+  wire [1:0]  dpti_axi_bresp;
+  wire        dpti_axi_bvalid;
+  wire        dpti_axi_bready;
+
+  // ------------------------------------------------------------------------
+  // FT2232H DPTI RX parser.
+  //
+  // The DPTI data bus is only driven by the FT2232H during RX.
+  // Therefore the FPGA side remains high-Z here.
+  // ------------------------------------------------------------------------
+
+  // Physical data bus ownership is selected by the output path.
+  // Otherwise the FPGA releases the bidirectional bus for input traffic.
+  wire [7:0] dpti_tx_data;
+  wire       dpti_tx_oe;
+  wire       dpti_tx_wr_n;
+
+  assign dpti_d =
+      dpti_tx_oe
+          ? dpti_tx_data
+          : 8'bz;
+
+  assign dpti_wr_n = dpti_tx_wr_n;
+
+  // ------------------------------------------------------------------------
+  // DPTI clock-domain reset.
+  //
+  // dpti_host_rx is clocked by dpti_clkout, so synchronize the
+  // system reset into the DPTI clock domain before using it there.
+  // ------------------------------------------------------------------------
+
+  reg dpti_rst_meta;
+  reg dpti_rst;
+
+  always @(posedge dpti_clkout) begin
+    if (!ui_rst_n) begin
+      dpti_rst_meta <= 1'b1;
+      dpti_rst      <= 1'b1;
+    end
+    else begin
+      dpti_rst_meta <= 1'b0;
+      dpti_rst      <= dpti_rst_meta;
+    end
+  end
+
+  // ------------------------------------------------------------------------
+  // Physical-input diagnostic state.
+  //
+  // This state is generated entirely in dpti_clkout.  Do not sample the
+  // short physical-interface events directly from ui_clk.
+  //
+  // bit0: dpti_clkout has run after reset release
+  // bit1: input data was reported available
+  // bit2: the receiver asserted its physical read control
+  // bit3: the receiver produced a valid byte
+  // bit4: one byte completed the frontend valid/ready handshake
+  // ------------------------------------------------------------------------
+
+  reg [31:0] dpti_phy_debug;
+
+  // Free-running physical-clock activity counter.
+  //
+  // Deliberately NOT reset by dpti_rst or ui_rst_n.  This is observation-only:
+  // if dpti_clkout is reaching the FPGA, this counter must change regardless of
+  // the state of the physical-interface reset synchronizer.
+  reg [31:0] dpti_clk_activity = 32'd0;
+
+  always @(posedge dpti_clkout) begin
+    dpti_clk_activity <= dpti_clk_activity + 32'd1;
+  end
+
+  always @(posedge dpti_clkout) begin
+    if (dpti_rst) begin
+      dpti_phy_debug <= 32'd0;
+    end
+    else begin
+      dpti_phy_debug[0] <= 1'b1;
+
+      if (!dpti_rxf_n)
+        dpti_phy_debug[1] <= 1'b1;
+
+      if (!dpti_rd_n)
+        dpti_phy_debug[2] <= 1'b1;
+
+      if (dpti_byte_valid)
+        dpti_phy_debug[3] <= 1'b1;
+
+      if (dpti_byte_valid && dpti_byte_ready)
+        dpti_phy_debug[4] <= 1'b1;
+    end
+  end
+
+  // Observation-only CDC into ui_clk.
+  //
+  // dpti_phy_debug is sticky: bits only transition 0 -> 1 after reset.
+  // The synchronized copy is used only for diagnostics, never for control.
+  (* ASYNC_REG = "TRUE" *) reg [31:0] dpti_phy_debug_meta;
+  (* ASYNC_REG = "TRUE" *) reg [31:0] dpti_phy_debug_sync;
+
+  // Observation-only sampling of the free-running physical-clock counter.
+  // Exact numeric coherence is not required here; we only compare successive
+  // observations to determine whether the source clock is advancing.
+  (* ASYNC_REG = "TRUE" *) reg [31:0] dpti_clk_activity_meta;
+  (* ASYNC_REG = "TRUE" *) reg [31:0] dpti_clk_activity_sync;
+
+  always @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      dpti_phy_debug_meta     <= 32'd0;
+      dpti_phy_debug_sync     <= 32'd0;
+      dpti_clk_activity_meta  <= 32'd0;
+      dpti_clk_activity_sync  <= 32'd0;
+    end
+    else begin
+      dpti_phy_debug_meta     <= dpti_phy_debug;
+      dpti_phy_debug_sync     <= dpti_phy_debug_meta;
+      dpti_clk_activity_meta  <= dpti_clk_activity;
+      dpti_clk_activity_sync  <= dpti_clk_activity_meta;
+    end
+  end
+
+  // ------------------------------------------------------------------------
+  // Result output path.
+  //
+  // DDR readback beats originate in ui_clk.  Cross them through an
+  // asynchronous FIFO before serializing them in the physical-interface
+  // clock domain.
+  // ------------------------------------------------------------------------
+
+  wire [AXI_DATA_W-1:0] rb_cdc_dst_data;
+  wire                  rb_cdc_dst_valid;
+  wire                  rb_cdc_dst_ready;
+
+  wire [7:0]            rb_tx_byte_data;
+  wire                  rb_tx_byte_valid;
+  wire                  rb_tx_byte_ready;
+
+  dpti_output_cdc #(
+    .DATA_W (AXI_DATA_W),
+    .DEPTH  (8)
+  ) u_dpti_output_cdc (
+    .src_clk   (ui_clk),
+    .src_rst   (!ui_rst_n),
+
+    .src_data  (dst_wr_data),
+    .src_valid (rb_dst_wr_en),
+    .src_ready (rb_cdc_src_ready),
+
+    .dst_clk   (dpti_clkout),
+    .dst_rst   (dpti_rst),
+
+    .dst_data  (rb_cdc_dst_data),
+    .dst_valid (rb_cdc_dst_valid),
+    .dst_ready (rb_cdc_dst_ready)
+  );
+
+  dpti_beat_to_byte #(
+    .DATA_W (AXI_DATA_W)
+  ) u_dpti_beat_to_byte (
+    .clk        (dpti_clkout),
+    .rst        (dpti_rst),
+
+    .beat_data  (rb_cdc_dst_data),
+    .beat_valid (rb_cdc_dst_valid),
+    .beat_ready (rb_cdc_dst_ready),
+
+    .byte_data  (rb_tx_byte_data),
+    .byte_valid (rb_tx_byte_valid),
+    .byte_ready (rb_tx_byte_ready)
+  );
+
+  dpti_byte_tx u_dpti_byte_tx (
+    .clk         (dpti_clkout),
+    .rst         (dpti_rst),
+
+    .byte_data   (rb_tx_byte_data),
+    .byte_valid  (rb_tx_byte_valid),
+    .byte_ready  (rb_tx_byte_ready),
+
+    .dpti_txe_n  (dpti_txe_n),
+
+    .dpti_d_out  (dpti_tx_data),
+    .dpti_d_oe   (dpti_tx_oe),
+    .dpti_wr_n   (dpti_tx_wr_n)
+  );
+
+  dpti_byte_rx u_dpti_byte_rx (
+    .dpti_clkout (dpti_clkout),
+    .rst         (dpti_rst),
+
+    .dpti_d_in   (dpti_d),
+    .dpti_rxf_n  (dpti_rxf_n),
+
+    .dpti_rd_n   (dpti_rd_n),
+    .dpti_oe_n   (dpti_oe_n),
+
+    .byte_data   (dpti_byte_data),
+    .byte_valid  (dpti_byte_valid),
+    .byte_ready  (dpti_byte_ready)
+  );
+
+  dpti_command_frontend #(
+    .ADDR_W        (8),
+    .MEM_ADDR_W    (AXI_ADDR_W),
+    .MEM_DATA_W    (AXI_DATA_W),
+    .PAYLOAD_BYTES (RX_BYTES)
+  ) u_dpti_command_frontend (
+    .clk                (dpti_clkout),
+    .rst                (dpti_rst),
+
+    .byte_data          (dpti_byte_data),
+    .byte_valid         (dpti_byte_valid),
+    .byte_ready         (dpti_byte_ready),
+
+    .cmd_valid          (dpti_host_cmd_valid),
+    .cmd_ready          (dpti_host_cmd_ready),
+    .cmd_addr           (dpti_host_cmd_addr),
+    .cmd_data           (dpti_host_cmd_data),
+
+    .mem_start          (dpti_mem_start),
+    .mem_base_addr      (dpti_mem_base_addr),
+    .mem_data           (dpti_mem_data),
+    .mem_valid          (dpti_mem_valid),
+    .mem_ready          (dpti_mem_ready),
+    .mem_done           (dpti_mem_done),
+
+    .err_opcode         (dpti_frontend_err_opcode),
+    .err_write32_opcode (dpti_frontend_err_write32_opcode),
+    .err_mem_opcode     (dpti_frontend_err_mem_opcode),
+    .err_mem_length     (dpti_frontend_err_mem_length)
+  );
+
+  // MEM_WRITE payload crosses into ui_clk and is staged into DDR.
+  dpti_mem_write_cdc_engine #(
+    .AXI_DATA_W  (AXI_DATA_W),
+    .AXI_ADDR_W  (AXI_ADDR_W),
+    .AXI_ID_W    (2),
+    .FIFO_DEPTH  (8),
+    .BURST_LEN   (16),
+    .TOTAL_BEATS (N_BEATS)
+  ) u_dpti_mem_write_cdc_engine (
+    .src_clk       (dpti_clkout),
+    .src_rst       (dpti_rst),
+
+    .src_start     (dpti_mem_start),
+    .src_base_addr (dpti_mem_base_addr),
+    .src_data      (dpti_mem_data),
+    .src_valid     (dpti_mem_valid),
+    .src_ready     (dpti_mem_ready),
+
+    .ui_clk        (ui_clk),
+    .ui_rst_n      (ui_rst_n),
+
+    .busy          (hs_busy),
+    .done          (hs_done),
+    .err_protocol  (hs_err_protocol),
+    .err_align     (hs_err_align),
+    .err_resp      (hs_err_resp),
+
+    .m_axi_awid    (hs_awid),
+    .m_axi_awaddr  (hs_awaddr),
+    .m_axi_awlen   (hs_awlen),
+    .m_axi_awsize  (hs_awsize),
+    .m_axi_awburst (hs_awburst),
+    .m_axi_awlock  (hs_awlock),
+    .m_axi_awcache (hs_awcache),
+    .m_axi_awprot  (hs_awprot),
+    .m_axi_awqos   (hs_awqos),
+    .m_axi_awvalid (hs_awvalid),
+    .m_axi_awready (hs_awready),
+
+    .m_axi_wdata   (hs_wdata),
+    .m_axi_wstrb   (hs_wstrb),
+    .m_axi_wlast   (hs_wlast),
+    .m_axi_wvalid  (hs_wvalid),
+    .m_axi_wready  (hs_wready),
+
+    .m_axi_bid     (bid),
+    .m_axi_bresp   (bresp),
+    .m_axi_bvalid  (hs_bvalid),
+    .m_axi_bready  (hs_bready)
+  );
+
+  // ------------------------------------------------------------------------
+  // DPTI -> ui_clk asynchronous command FIFO.
+  // ------------------------------------------------------------------------
+
+  dpti_cmd_async_fifo #(
+    .ADDR_W(8),
+    .DEPTH (4)
+  ) u_dpti_cmd_async_fifo (
+    .wr_clk   (dpti_clkout),
+    .wr_rst   (dpti_rst),
+
+    .wr_valid (dpti_host_cmd_valid),
+    .wr_ready (dpti_fifo_wr_ready),
+
+    .wr_addr  (dpti_host_cmd_addr),
+    .wr_data  (dpti_host_cmd_data),
+
+    .rd_clk   (ui_clk),
+    .rd_rst   (!ui_rst_n),
+
+    .rd_valid (dpti_fifo_rd_valid),
+    .rd_ready (dpti_fifo_rd_ready),
+
+    .rd_addr  (dpti_fifo_rd_addr),
+    .rd_data  (dpti_fifo_rd_data)
+  );
+
+  assign dpti_host_cmd_ready = dpti_fifo_wr_ready;
+
+  // ------------------------------------------------------------------------
+  // ui_clk-domain AXI4-Lite master.
+  // ------------------------------------------------------------------------
+
+  assign dpti_axi_cmd_valid = dpti_fifo_rd_valid;
+  assign dpti_fifo_rd_ready = dpti_axi_cmd_ready;
+
+  dpti_axi4lite_master #(
+    .ADDR_W(8)
+  ) u_dpti_axi4lite_master (
+    .clk       (ui_clk),
+    .rst       (!ui_rst_n),
+
+    .cmd_valid (dpti_axi_cmd_valid),
+    .cmd_ready (dpti_axi_cmd_ready),
+
+    .cmd_addr  (dpti_fifo_rd_addr),
+    .cmd_data  (dpti_fifo_rd_data),
+
+    .rsp_valid (dpti_axi_rsp_valid),
+    .rsp_ready (dpti_axi_rsp_ready),
+    .rsp_resp  (dpti_axi_rsp_resp),
+
+    .m_axi_awaddr  (dpti_axi_awaddr),
+    .m_axi_awvalid (dpti_axi_awvalid),
+    .m_axi_awready (dpti_axi_awready),
+
+    .m_axi_wdata   (dpti_axi_wdata),
+    .m_axi_wstrb   (dpti_axi_wstrb),
+    .m_axi_wvalid  (dpti_axi_wvalid),
+    .m_axi_wready  (dpti_axi_wready),
+
+    .m_axi_bresp   (dpti_axi_bresp),
+    .m_axi_bvalid  (dpti_axi_bvalid),
+    .m_axi_bready  (dpti_axi_bready)
+  );
+
+  // The current DPTI AXI master only performs writes.
+  // Completion is consumed locally for now.  A later TX path can expose
+  // the response to Ubuntu.
+  assign dpti_axi_rsp_ready = 1'b1;
+
+  // ------------------------------------------------------------------------
+  // Physical DPTI AXI4-Lite master drives the existing AXI4-Lite slave
+  // bridge.
+  // ------------------------------------------------------------------------
+  // ----------------------------------------------------------
+  // AXI4-Lite -> generic DPTI register-write transport.
+  //
+  // AXI4-Lite is terminated here.  The descriptor bridge below
+  // remains independent of the physical host transport.
+  // ----------------------------------------------------------
+
+  // ------------------------------------------------------------------------
+  // AXI4-Lite slave termination.
+  //
+  // The physical DPTI AXI4-Lite master is the AXI source.
+  // This bridge converts AXI4-Lite into the generic register-write
+  // transaction consumed by dpti_descriptor_bridge.
+  // ------------------------------------------------------------------------
+
+  wire        axi_dpti_wr_valid;
+  wire        axi_dpti_wr_ready;
+  wire [7:0]  axi_dpti_wr_addr;
+  wire [31:0] axi_dpti_wr_data;
+
+  // ----------------------------------------------------------
+  // Internal AXI4-Lite bus driven by the DPTI host master.
+  //
+  // DPTI host bytes are converted into register-write commands,
+  // then this master generates a genuine AXI4-Lite transaction.
+  //
+  // No AXI4-Lite signal leaves the FPGA top-level.
+  // ----------------------------------------------------------
+
+  // AW/W/B signals are declared above at the physical DPTI
+  // AXI4-Lite master.  The bridge below consumes that same bus.
+
+  wire [7:0]  dpti_axi_araddr;
+  wire        dpti_axi_arvalid;
+  wire        dpti_axi_arready;
+
+  wire [31:0] dpti_axi_rdata;
+  wire [1:0]  dpti_axi_rresp;
+  wire        dpti_axi_rvalid;
+  wire        dpti_axi_rready;
+
+  // ----------------------------------------------------------
+  // DPTI command source -> AXI4-Lite master.
+  //
+  // The command source will be connected to the physical DPTI
+  // RX/FIFO path.  Until then these command signals remain an
+  // internal protocol boundary.
+  // ----------------------------------------------------------
+
+  // ----------------------------------------------------------
+  // Internal AXI4-Lite master -> DPTI descriptor register bank.
+  // ----------------------------------------------------------
+
+  axi4lite_dpti_bridge #(
+    .ADDR_W(8)
+  ) u_axi4lite_dpti_bridge (
+    .aclk          (ui_clk),
+    .aresetn       (ui_rst_n),
+
+    .s_axi_awaddr  (dpti_axi_awaddr),
+    .s_axi_awvalid (dpti_axi_awvalid),
+    .s_axi_awready (dpti_axi_awready),
+
+    .s_axi_wdata   (dpti_axi_wdata),
+    .s_axi_wstrb   (dpti_axi_wstrb),
+    .s_axi_wvalid  (dpti_axi_wvalid),
+    .s_axi_wready  (dpti_axi_wready),
+
+    .s_axi_bresp   (dpti_axi_bresp),
+    .s_axi_bvalid  (dpti_axi_bvalid),
+    .s_axi_bready  (dpti_axi_bready),
+
+    .s_axi_araddr  (dpti_axi_araddr),
+    .s_axi_arvalid (dpti_axi_arvalid),
+    .s_axi_arready (dpti_axi_arready),
+
+    .s_axi_rdata   (dpti_axi_rdata),
+    .s_axi_rresp   (dpti_axi_rresp),
+    .s_axi_rvalid  (dpti_axi_rvalid),
+    .s_axi_rready  (dpti_axi_rready),
+
+    .wr_valid      (axi_dpti_wr_valid),
+    .wr_ready      (axi_dpti_wr_ready),
+    .wr_addr       (axi_dpti_wr_addr),
+    .wr_data       (axi_dpti_wr_data),
+
+    .status        (dpti_status)
+  );
+
+  dpti_descriptor_bridge u_dpti_descriptor_bridge (
+    .clk             (ui_clk),
+    .rst             (!ui_rst_n),
+
+    .wr_valid        (axi_dpti_wr_valid),
+    .wr_ready        (axi_dpti_wr_ready),
+    .wr_addr         (axi_dpti_wr_addr),
+    .wr_data         (axi_dpti_wr_data),
+
+    .job_valid       (dpti_job_valid),
+    .job_ready       (dpti_job_ready),
+
+    .job_id          (dpti_job_id),
+    .job_device_id   (dpti_job_device_id),
+
+    .job_m           (dpti_job_m),
+    .job_n           (dpti_job_n),
+    .job_k           (dpti_job_k),
+
+    .job_start_cycle (dpti_job_start_cycle),
+    .job_est_cycles  (dpti_job_est_cycles),
+
+    .job_a_base      (dpti_job_a_base),
+    .job_b_base      (dpti_job_b_base),
+    .job_c_base      (dpti_job_c_base),
+
+    .status          (dpti_status)
+  );
+
+  // ----------------------------------------------------------
+  // Descriptor source arbitration.
+  //
+  // DPTI has priority when a descriptor is pending.  Otherwise
+  // preserve the existing external job producer unchanged.
+  //
+  // There is intentionally only ONE descriptor entering the
+  // existing ingress path.
+  // ----------------------------------------------------------
+
+  wire        effective_job_valid;
+  wire [31:0] effective_job_id;
+  wire [31:0] effective_job_device_id;
+
+  wire [31:0] effective_job_m;
+  wire [31:0] effective_job_n;
+  wire [31:0] effective_job_k;
+
+  wire [31:0] effective_job_start_cycle;
+  wire [31:0] effective_job_est_cycles;
+
+  wire [63:0] effective_job_a_base;
+  wire [63:0] effective_job_b_base;
+  wire [63:0] effective_job_c_base;
+
+  // Downstream acceptance boundary.
+  wire descriptor_downstream_ready;
+
+  assign descriptor_downstream_ready =
+      ingress_job_ready &&
+      core_job_ready &&
+      scheduler_desc_ready;
+
+  // DPTI descriptor gets priority over the legacy external
+  // descriptor producer.
+  assign effective_job_valid =
+      dpti_job_valid ||
+      (USE_LEGACY_JOB_PORTS && job_valid);
+
+  assign effective_job_id =
+      dpti_job_valid ? dpti_job_id :
+      (USE_LEGACY_JOB_PORTS ? job_id : 32'd0);
+
+  assign effective_job_device_id =
+      dpti_job_valid ? dpti_job_device_id :
+      (USE_LEGACY_JOB_PORTS ? job_device_id : 32'd0);
+
+  assign effective_job_m =
+      dpti_job_valid ? dpti_job_m :
+      (USE_LEGACY_JOB_PORTS ? job_m : 32'd0);
+
+  assign effective_job_n =
+      dpti_job_valid ? dpti_job_n :
+      (USE_LEGACY_JOB_PORTS ? job_n : 32'd0);
+
+  assign effective_job_k =
+      dpti_job_valid ? dpti_job_k :
+      (USE_LEGACY_JOB_PORTS ? job_k : 32'd0);
+
+  assign effective_job_start_cycle =
+      dpti_job_valid ? dpti_job_start_cycle :
+      (USE_LEGACY_JOB_PORTS ? job_start_cycle : 32'd0);
+
+  assign effective_job_est_cycles =
+      dpti_job_valid ? dpti_job_est_cycles :
+      (USE_LEGACY_JOB_PORTS ? job_est_cycles : 32'd0);
+
+  assign effective_job_a_base =
+      dpti_job_valid ? dpti_job_a_base :
+      (USE_LEGACY_JOB_PORTS ? job_a_base : 64'd0);
+
+  assign effective_job_b_base =
+      dpti_job_valid ? dpti_job_b_base :
+      (USE_LEGACY_JOB_PORTS ? job_b_base : 64'd0);
+
+  assign effective_job_c_base =
+      dpti_job_valid ? dpti_job_c_base :
+      (USE_LEGACY_JOB_PORTS ? job_c_base : 64'd0);
+
+  // DPTI is accepted only when its descriptor is actually selected
+  // and the complete downstream path is ready.
+  assign dpti_job_ready =
+      dpti_job_valid &&
+      descriptor_downstream_ready;
 
   // ----------------------------------------------------------
   // Job ingress.
@@ -760,22 +1486,22 @@ module systolic_dma_top #(
     .clk              (ui_clk),
     .rst_n            (ui_rst_n),
 
-    .in_valid         (job_valid),
+    .in_valid         (effective_job_valid),
     .in_ready         (ingress_job_ready),
 
-    .in_job_id        (job_id),
-    .in_device_id     (job_device_id),
+    .in_job_id        (effective_job_id),
+    .in_device_id     (effective_job_device_id),
 
-    .in_m             (job_m),
-    .in_n             (job_n),
-    .in_k             (job_k),
+    .in_m             (effective_job_m),
+    .in_n             (effective_job_n),
+    .in_k             (effective_job_k),
 
-    .in_start_cycle   (job_start_cycle),
-    .in_est_cycles    (job_est_cycles),
+    .in_start_cycle   (effective_job_start_cycle),
+    .in_est_cycles    (effective_job_est_cycles),
 
-    .in_a_base        (job_a_base),
-    .in_b_base        (job_b_base),
-    .in_c_base        (job_c_base),
+    .in_a_base        (effective_job_a_base),
+    .in_b_base        (effective_job_b_base),
+    .in_c_base        (effective_job_c_base),
 
     .consumer_ready   (core_job_ready),
     .job_valid        (ingress_job_valid),
@@ -805,17 +1531,21 @@ module systolic_dma_top #(
   // hardware scheduler are both ready.  Do not derive job_fire from the
   // registered ingress output: that output may still contain the descriptor
   // of the job that just completed.
+  // Legacy external producer readiness.
+  //
+  // If a DPTI descriptor is pending, the legacy producer is not
+  // allowed to believe that its descriptor was accepted.
   assign job_ready =
-      ingress_job_ready &&
-      core_job_ready &&
-      scheduler_desc_ready;
+      USE_LEGACY_JOB_PORTS &&
+      !dpti_job_valid &&
+      descriptor_downstream_ready;
 
-  // A producer handshake creates the accepted job.
+  // A descriptor is accepted at the common downstream boundary.
   wire job_fire =
-      job_valid &&
-      job_ready;
+      effective_job_valid &&
+      descriptor_downstream_ready;
 
-  // The scheduler accepts exactly the same producer descriptor.
+  // The scheduler accepts exactly the same accepted descriptor.
   wire scheduler_desc_fire =
       job_fire;
 
@@ -1004,12 +1734,9 @@ module systolic_dma_top #(
     end
   end
 
-  // Completion is meaningful only while a scheduler job is active.
-  // This prevents a stale c_done level from being interpreted as
-  // completion of a later job.
-  wire job_done = USE_EXTERNAL_SCHEDULER &&
-                  job_active &&
-                  scheduler_c_done;
+  // Job-level completion is defined later, after the write-back
+  // completion signal and final-invocation predicate are available.
+  wire job_done;
 
   // DEBUG: observe the exact job completion condition.
   always_ff @(posedge ui_clk) begin
@@ -1059,15 +1786,15 @@ module systolic_dma_top #(
         job_busy       <= 1'b1;
         job_active     <= 1'b1;
 
-        job_id_reg     <= job_id;
-        job_device_id_reg <= job_device_id;
-        job_m_reg      <= job_m;
-        job_n_reg      <= job_n;
-        job_k_reg      <= job_k;
-        job_start_cycle_reg <= job_start_cycle;
-        job_est_cycles_reg  <= job_est_cycles;
-        job_a_base_reg <= job_a_base;
-        job_b_base_reg <= job_b_base;
+        job_id_reg     <= effective_job_id;
+        job_device_id_reg <= effective_job_device_id;
+        job_m_reg      <= effective_job_m;
+        job_n_reg      <= effective_job_n;
+        job_k_reg      <= effective_job_k;
+        job_start_cycle_reg <= effective_job_start_cycle;
+        job_est_cycles_reg  <= effective_job_est_cycles;
+        job_a_base_reg <= effective_job_a_base;
+        job_b_base_reg <= effective_job_b_base;
         if (ingress_job_id == 32'd102) begin
           $display(
             "JOB2_CBASECAP t=%0t job_fire=%0b ingress_job_id=%0d ingress_c_base=0x%08h c_base_reg_before=0x%08h",
@@ -1078,7 +1805,7 @@ module systolic_dma_top #(
             job_c_base_reg
           );
         end
-        job_c_base_reg <= job_c_base;
+        job_c_base_reg <= effective_job_c_base;
       end
 
       // Completion closes exactly the job that was accepted.
@@ -1258,6 +1985,15 @@ module systolic_dma_top #(
   logic [3:0] fi;                     // which invocation is in flight
   wire        run_clear;              // = (phase == P_CALIB), assigned below
   wire        fi_last = (fi == n_inv - 4'd1);
+
+  // A scheduler job is complete only after the final invocation has made
+  // its result memory-visible.  Accelerator completion alone is too early:
+  // P_SCAN and P_WB still have to execute after the array finishes.
+  assign job_done =
+      USE_EXTERNAL_SCHEDULER &&
+      job_active &&
+      wb_done &&
+      fi_last;
 
   // ----------------------------------------------------------
   // Job-aware DMA address generation.
@@ -1520,7 +2256,10 @@ module systolic_dma_top #(
                      phase <= P_FOLD;
                    end
                  end
-        P_FOLD:  if (c_done_fold) begin
+        P_FOLD:  if (!fold_start && c_done_fold) begin
+                   // fold_start is the transaction boundary and clears
+                   // completion state.  Do not consume a stale c_done_fold
+                   // from the previous transaction on that same clock edge.
                    $display("CDBG C00=%h C01=%h C10=%h C77=%h",
                             C[0][0], C[0][1], C[1][0], C[N-1][N-1]);
                    scan_c <= '0;
@@ -1612,9 +2351,19 @@ module systolic_dma_top #(
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) err_w_owner <= 1'b0;
-    else if (wb_owns_w ? (sd_awvalid || sd_wvalid)
-                       : (wb_awvalid || wb_wvalid)) err_w_owner <= 1'b1;
+    if (!ui_rst_n) begin
+      err_w_owner <= 1'b0;
+    end
+    else if (
+        (hs_busy &&
+         (sd_awvalid || sd_wvalid || wb_awvalid || wb_wvalid)) ||
+        (!hs_busy && wb_owns_w &&
+         (sd_awvalid || sd_wvalid || hs_awvalid || hs_wvalid)) ||
+        (!hs_busy && !wb_owns_w &&
+         (wb_awvalid || wb_wvalid || hs_awvalid || hs_wvalid))
+    ) begin
+      err_w_owner <= 1'b1;
+    end
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -1734,20 +2483,102 @@ module systolic_dma_top #(
   );
 
   // ---- read engine --------------------------------------------------------
+  //
+  // One AXI read engine serves two descriptor classes:
+  //
+  //   8'h3B : normal operand fetch
+  //   8'h3C : result readback
+  //
+  // Result readback is not enabled yet; rb_req_valid is held low below.
+  // Introducing the mux first lets the existing operand path regress
+  // unchanged before the readback producer and output CDC are connected.
+  //
+  localparam logic [7:0] DMA_TAG_OPERAND  = 8'h3B;
+  localparam logic [7:0] DMA_TAG_READBACK = 8'h3C;
+
   wire          dst_wr_en;
   wire [15:0]   dst_wr_beat;
   wire [127:0]  dst_wr_data;
+  wire [7:0]    dst_wr_tag;
+  // Destination backpressure is selected according to the descriptor
+  // currently using the shared read engine.
   wire          dst_full, dst_almost_full;
+  wire          op_dst_full, op_dst_almost_full;
+
+  // Result-output CDC backpressure.  The CDC itself is connected below.
+  wire          rb_cdc_src_ready;
+
+  // Existing operand descriptor source.
+  wire                    op_desc_valid = desc_valid;
+  wire [AXI_ADDR_W-1:0]   op_desc_addr  = slab_addr;
+  wire [15:0]             op_desc_beats = 16'(job_n_beats);
+
+  // Result-readback descriptor source.
+  //
+  // For the first integration checkpoint, automatically read back the
+  // completed external 4x4 result tile after its final DDR write response.
+  //
+  // A 4x4 FP32 tile is 16 words = 64 bytes = four 128-bit beats.
+  logic                   rb_pending;
+  logic                   rb_active;
+  logic [AXI_ADDR_W-1:0]  rb_addr_reg;
+
+  assign result_readback_busy = rb_pending || rb_active;
+
+  // Backpressure presented to the shared read engine.
+  //
+  // Operand descriptors retain the existing operand-writer behavior.
+  // During result readback, the output CDC FIFO is the destination.
+  //
+  // rb_active remains asserted for the lifetime of an accepted readback
+  // descriptor, so it is the correct selector after rb_pending is cleared.
+  assign dst_full =
+      (rb_pending || rb_active)
+          ? !rb_cdc_src_ready
+          : op_dst_full;
+
+  // The output FIFO exposes only ready/full, not an almost-full threshold.
+  // Full is sufficient for this four-beat result stream.
+  assign dst_almost_full =
+      (rb_pending || rb_active)
+          ? !rb_cdc_src_ready
+          : op_dst_almost_full;
+
+  wire                    rb_req_valid = rb_pending;
+  wire [AXI_ADDR_W-1:0]   rb_req_addr  = rb_addr_reg;
+  wire [15:0]             rb_req_beats = selected_wb_beats[15:0];
+
+  // Readback owns the descriptor input while pending.
+  wire                    eng_desc_is_readback = rb_req_valid;
+
+  wire                    eng_desc_valid =
+      eng_desc_is_readback ? rb_req_valid : op_desc_valid;
+
+  wire [AXI_ADDR_W-1:0]   eng_desc_addr =
+      eng_desc_is_readback ? rb_req_addr : op_desc_addr;
+
+  wire [15:0]             eng_desc_beats =
+      eng_desc_is_readback ? rb_req_beats : op_desc_beats;
+
+  wire [7:0]              eng_desc_tag =
+      eng_desc_is_readback ? DMA_TAG_READBACK : DMA_TAG_OPERAND;
+
+  wire                    eng_desc_ready;
+  wire                    eng_done_valid;
+  wire [7:0]              eng_done_tag;
+
+  // Preserve the existing operand-side handshake semantics.
+  assign desc_ready = !eng_desc_is_readback && eng_desc_ready;
 
   dma_engine #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
     .BEAT_W (16), .BURST_LEN (16), .MAX_OUTSTANDING (8)
   ) u_eng (
     .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
-    .desc_valid (desc_valid), .desc_ready (desc_ready),
-    .desc_addr (slab_addr), .desc_beats (16'(job_n_beats)),
-    .desc_tag (8'h3B),
-    .done_valid (read_done), .done_tag (),
+    .desc_valid (eng_desc_valid), .desc_ready (eng_desc_ready),
+    .desc_addr (eng_desc_addr), .desc_beats (eng_desc_beats),
+    .desc_tag (eng_desc_tag),
+    .done_valid (eng_done_valid), .done_tag (eng_done_tag),
     .m_axi_arid (arid), .m_axi_araddr (araddr), .m_axi_arlen (arlen),
     .m_axi_arsize (arsize), .m_axi_arburst (arburst), .m_axi_arlock (arlock),
     .m_axi_arcache (arcache), .m_axi_arprot (arprot), .m_axi_arqos (arqos),
@@ -1756,11 +2587,265 @@ module systolic_dma_top #(
     .m_axi_rlast (rlast), .m_axi_rvalid (rvalid), .m_axi_rready (rready),
     .dst_almost_full (dst_almost_full), .dst_full (dst_full),
     .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat),
-    .dst_wr_data (dst_wr_data), .dst_wr_tag (),
+    .dst_wr_data (dst_wr_data), .dst_wr_tag (dst_wr_tag),
     .busy_cycles (eng_busy_cycles), .rdy_stall_cycles (eng_rdy_stall_cycles),
     .r_stall_cycles (eng_r_stall_cycles),
     .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (run_clear)
   );
+
+  // Completion visible to the existing P_READ FSM only for an operand
+  // descriptor.  A future readback completion must not satisfy fill_complete
+  // or advance the compute FSM.
+  assign read_done =
+      eng_done_valid &&
+      (eng_done_tag == DMA_TAG_OPERAND);
+
+  // -----------------------------------------------------------------------
+  // First result-readback integration checkpoint.
+  //
+  // Arm exactly once when the final result writeback receives its final
+  // response.  The result is therefore already resident in DDR before the
+  // read descriptor can be accepted.
+  //
+  // rb_active remains asserted for the lifetime of the readback descriptor
+  // and clears only on the matching completion tag.
+  // -----------------------------------------------------------------------
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      rb_pending  <= 1'b0;
+      rb_active   <= 1'b0;
+      rb_addr_reg <= '0;
+    end
+    else begin
+      // Final result writeback completed.
+      if (USE_EXTERNAL_SCHEDULER &&
+          job_active &&
+          wb_done &&
+          fi_last &&
+          !rb_pending &&
+          !rb_active) begin
+        rb_pending  <= 1'b1;
+        rb_addr_reg <= job_c_base_reg[AXI_ADDR_W-1:0];
+      end
+
+      // Readback descriptor accepted by the shared read engine.
+      if (rb_pending && eng_desc_ready) begin
+        rb_pending <= 1'b0;
+        rb_active  <= 1'b1;
+      end
+
+      // Matching readback descriptor completely returned.
+      if (eng_done_valid &&
+          (eng_done_tag == DMA_TAG_READBACK)) begin
+        rb_active <= 1'b0;
+      end
+    end
+  end
+
+  wire rb_dst_wr_en =
+      dst_wr_en &&
+      (dst_wr_tag == DMA_TAG_READBACK);
+
+  // -----------------------------------------------------------------------
+  // External-job / result-readback hardware debug.
+  //
+  // Sticky event bits survive after the short handshakes themselves have
+  // disappeared, allowing the completed path to be inspected later.
+  //
+  //   bit 0 : external job accepted
+  //   bit 1 : result readback armed after final writeback
+  //   bit 2 : readback descriptor accepted
+  //   bit 3 : at least one readback data beat returned
+  //   bit 4 : JOB0 readback data mismatch observed
+  // -----------------------------------------------------------------------
+  logic [31:0] external_debug_sticky;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      external_debug_sticky <= 32'd0;
+    end
+    else begin
+      if (job_fire)
+        external_debug_sticky[0] <= 1'b1;
+
+      if (USE_EXTERNAL_SCHEDULER &&
+          job_active &&
+          wb_done &&
+          fi_last &&
+          !rb_pending &&
+          !rb_active)
+        external_debug_sticky[1] <= 1'b1;
+
+      if (rb_pending && eng_desc_ready)
+        external_debug_sticky[2] <= 1'b1;
+
+      if (rb_dst_wr_en)
+        external_debug_sticky[3] <= 1'b1;
+
+      // JOB0 numerical readback signature check.
+      // For the current smoke test, every 128-bit C beat must contain
+      // four FP32 values {8.0, 4.0, 2.0, 1.0}.
+      if (rb_dst_wr_en &&
+          (dst_wr_data != 128'h4100000040800000400000003f800000))
+        external_debug_sticky[4] <= 1'b1;
+
+      // Host-command ingress checkpoints.
+      //
+      // bit 5: frontend emitted and downstream accepted a WRITE32 command
+      // bit 6: command crossed the async FIFO into ui_clk
+      // bit 7: AXI4-Lite master accepted the command
+      // bit 8: register write reached and was accepted by descriptor bridge
+      // bit 9: submit write (CONTROL 0x00, bit 0 = 1) reached the bridge
+      // bit10: descriptor bridge asserted a pending job
+      // bit11: DMA core was ready for an external job
+      // bit12: hardware scheduler was ready for a descriptor
+      // JOB0 numerical writeback signature check.
+      //
+      // bit5 is temporarily repurposed from the command-ingress checkpoint.
+      // A writeback beat is checked only when it is actually accepted by the
+      // shared DDR write interface.
+      if (wb_wvalid &&
+          wb_wready &&
+          (wb_wdata !=
+           128'h4100000040800000400000003f800000))
+        external_debug_sticky[5] <= 1'b1;
+
+      if (dpti_fifo_rd_valid && dpti_fifo_rd_ready)
+        external_debug_sticky[6] <= 1'b1;
+
+      if (dpti_axi_cmd_valid && dpti_axi_cmd_ready)
+        external_debug_sticky[7] <= 1'b1;
+
+      if (axi_dpti_wr_valid && axi_dpti_wr_ready)
+        external_debug_sticky[8] <= 1'b1;
+
+      if (axi_dpti_wr_valid &&
+          axi_dpti_wr_ready &&
+          (axi_dpti_wr_addr == 8'h00) &&
+          axi_dpti_wr_data[0])
+        external_debug_sticky[9] <= 1'b1;
+
+      if (dpti_job_valid)
+        external_debug_sticky[10] <= 1'b1;
+
+      if (core_job_ready)
+        external_debug_sticky[11] <= 1'b1;
+
+      if (scheduler_desc_ready)
+        external_debug_sticky[12] <= 1'b1;
+
+      // Physical-input / MEM_WRITE checkpoints.
+      //
+      // bit13: at least one input byte accepted by the frontend
+      // bit14: MEM_WRITE opcode 0x02 accepted while starting a command
+      // bit15: MEM_WRITE header accepted and staging started
+      // bit16: at least one complete payload beat accepted downstream
+      // bit17: complete MEM_WRITE payload finished
+      // bit18: frontend/decoder error observed
+      // bit19: WRITE32 opcode 0x01 accepted while starting a command
+      if (dpti_byte_valid && dpti_byte_ready)
+        external_debug_sticky[13] <= 1'b1;
+
+      if (dpti_byte_valid &&
+          dpti_byte_ready &&
+          (dpti_byte_data == 8'h02))
+        external_debug_sticky[14] <= 1'b1;
+
+      if (dpti_mem_start)
+        external_debug_sticky[15] <= 1'b1;
+
+      if (dpti_mem_valid && dpti_mem_ready)
+        external_debug_sticky[16] <= 1'b1;
+
+      if (dpti_mem_done)
+        external_debug_sticky[17] <= 1'b1;
+
+      if (dpti_frontend_err_opcode ||
+          dpti_frontend_err_write32_opcode ||
+          dpti_frontend_err_mem_opcode ||
+          dpti_frontend_err_mem_length)
+        external_debug_sticky[18] <= 1'b1;
+
+      if (dpti_byte_valid &&
+          dpti_byte_ready &&
+          (dpti_byte_data == 8'h01))
+        external_debug_sticky[19] <= 1'b1;
+
+      // Core-readiness diagnosis.
+      //
+      // bit20: transaction FSM observed in P_CALIB
+      // bit21: transaction FSM observed in P_READ
+      // bit22: transaction FSM observed in P_DONE
+      // bit23: host staging writer observed busy
+      // bit24: external job lifetime observed busy
+      // bit25: external job observed active
+      // bit26: core_job_ready observed high
+      if (phase == P_CALIB)
+        external_debug_sticky[20] <= 1'b1;
+
+      if (phase == P_READ)
+        external_debug_sticky[21] <= 1'b1;
+
+      if (phase == P_DONE)
+        external_debug_sticky[22] <= 1'b1;
+
+      if (hs_busy)
+        external_debug_sticky[23] <= 1'b1;
+
+      if (job_busy)
+        external_debug_sticky[24] <= 1'b1;
+
+      if (job_active)
+        external_debug_sticky[25] <= 1'b1;
+
+      if (core_job_ready)
+        external_debug_sticky[26] <= 1'b1;
+
+      // External scheduler -> feeder diagnosis.
+      //
+      // bit27: transaction FSM reached P_GO
+      // bit28: remembered scheduler release was replayed
+      // bit29: 4x4 delayed scheduler start reached the adapter
+      // bit30: 4x4 adapter emitted fold_start
+      // bit31: common feeder entered ST_FEED
+      if (phase == P_GO)
+        external_debug_sticky[27] <= 1'b1;
+
+      if (scheduler_start_replay)
+        external_debug_sticky[28] <= 1'b1;
+
+      if (scheduler_accelerator_start_delayed[1])
+        external_debug_sticky[29] <= 1'b1;
+
+      if (scheduler_fold_start_4x4)
+        external_debug_sticky[30] <= 1'b1;
+
+      if (state == ST_FEED)
+        external_debug_sticky[31] <= 1'b1;
+    end
+  end
+
+  // Observation-only readback trace.
+  always_ff @(posedge ui_clk) begin
+    if (ui_rst_n && rb_dst_wr_en) begin
+      $display(
+        "RB_BEAT beat=%0d tag=%02h data=%032h",
+        dst_wr_beat,
+        dst_wr_tag,
+        dst_wr_data
+      );
+    end
+
+    if (ui_rst_n &&
+        eng_done_valid &&
+        (eng_done_tag == DMA_TAG_READBACK)) begin
+      $display("RB_DONE tag=%02h", eng_done_tag);
+    end
+  end
+
+  wire op_dst_wr_en =
+      dst_wr_en &&
+      (dst_wr_tag == DMA_TAG_OPERAND);
 
   // ---- operand writer + checksum 1 + operand memories ---------------------
   // The one place the two operand-path versions differ.  Selected by USE_V2 at
@@ -1793,8 +2878,8 @@ module systolic_dma_top #(
       .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
     ) u_wr (
       .clk (ui_clk), .rst_n (ui_rst_n),
-      .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
-      .dst_full (dst_full), .dst_almost_full (dst_almost_full),
+      .dst_wr_en (op_dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+      .dst_full (op_dst_full), .dst_almost_full (op_dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
       .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
     );
@@ -1803,11 +2888,16 @@ module systolic_dma_top #(
     wire [7:0]  bank8 = 8'(wsel);
     wire [31:0] wpos  = {8'd0, bank8, k16};
 
-    always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-      if (!ui_rst_n)              chk_wr <= '0;
-      else if (phase == P_CALIB)  chk_wr <= '0;
-      else if (a_wr)              chk_wr <= chk_wr + (wdata_buf ^ wpos);
-      else if (b_wr)              chk_wr <= chk_wr + (wdata_buf ^ (32'h8000_0000 | wpos));
+    // Diagnostic checksum only.
+    //
+    // chk_wr is synchronously cleared during P_CALIB, so it does not need
+    // an asynchronous reset event here.  Keeping this block on ui_clk only
+    // also avoids Vivado treating this debug-only event control as an
+    // ambiguous clock/reset structure during synthesis.
+    always_ff @(posedge ui_clk) begin
+      if (phase == P_CALIB)      chk_wr <= '0;
+      else if (a_wr)             chk_wr <= chk_wr + (wdata_buf ^ wpos);
+      else if (b_wr)             chk_wr <= chk_wr + (wdata_buf ^ (32'h8000_0000 | wpos));
 
       if ((a_wr || b_wr) && (words_written < 8))
         $display("CHKDBG %s wsel=%0d waddr=%0d data=%h wpos=%h",
@@ -1876,8 +2966,8 @@ module systolic_dma_top #(
       .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
     ) u_wr (
       .clk (ui_clk), .rst_n (ui_rst_n),
-      .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
-      .dst_full (dst_full), .dst_almost_full (dst_almost_full),
+      .dst_wr_en (op_dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+      .dst_full (op_dst_full), .dst_almost_full (op_dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
       .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
     );
@@ -2010,6 +3100,33 @@ module systolic_dma_top #(
         b_in[0],
         a_raddr[0],
         b_raddr[0]
+      );
+    end
+  end
+
+
+
+  // -------------------------------------------------------------------------
+  // DEBUG: first four common-feeder lanes.
+  // Observation only; no functional signal is modified.
+  //
+  // The physical 4x4 device consumes exactly lanes 0..3 of this N=8 feeder.
+  // Trace addresses, returned data, and delayed valids together so that
+  // per-lane K alignment can be checked directly.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge ui_clk) begin
+    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(8)) begin
+      $display(
+        "FEED4DBG t=%0t ft=%0d | L0 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L1 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L2 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L3 ar=%0d av=%b a=%h br=%0d bv=%b b=%h",
+        $time, feed_t,
+        a_raddr[0], a_valid_in[0], a_in[0],
+        b_raddr[0], b_valid_in[0], b_in[0],
+        a_raddr[1], a_valid_in[1], a_in[1],
+        b_raddr[1], b_valid_in[1], b_in[1],
+        a_raddr[2], a_valid_in[2], a_in[2],
+        b_raddr[2], b_valid_in[2], b_in[2],
+        a_raddr[3], a_valid_in[3], a_in[3],
+        b_raddr[3], b_valid_in[3], b_in[3]
       );
     end
   end
@@ -2813,6 +3930,9 @@ module systolic_dma_top #(
     .probe_in14 (t_span),
     .probe_in15 (cyc_total),
     .probe_in16 ({16'd0, folds_done, 4'd0, n_inv}),
+    .probe_in17 (external_debug_sticky),
+    .probe_in18 (dpti_phy_debug_sync),
+    .probe_in19 (dpti_clk_activity_sync),
     .probe_out0 (n_inv_probe),
     .probe_out1 (rerun_probe)
   );

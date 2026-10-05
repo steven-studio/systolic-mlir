@@ -8,13 +8,16 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicSchedulingDP.cpp
   SystolicSchedulingCountAllocation.cpp
   SystolicOptimizer.cpp
+  SystolicGreedyOptimizePass.cpp
   SystolicDecompositionDP.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   CostModel.cpp
   SystolicCostAnalysisPass.cpp
   SystolicSelectDevicePass.cpp
+  SystolicMaterializeSchedulePass.cpp
   SystolicTileMatmulPass.cpp
+  SystolicBinarySearchTileMatmulPass.cpp
   ExpandPEArrayToMac.cpp
   TileMatmulForFpga.cpp
   Conv2DToFpga.cpp
@@ -23,6 +26,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   VecmatToFpga.cpp
   MatvecToFpga.cpp
   DotGenericToFpga.cpp
+  SystolicJobCodegen.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic

@@ -115,6 +115,51 @@ module tb_systolic_dma_top #(
   wire [1:0]  ddr3_dqs_p;
 
   // --------------------------------------------------------------------
+  // Physical host byte-stream interface
+  //
+  // The TB models the external device side of the 8-bit synchronous
+  // FIFO interface.  No command is injected yet; this patch only makes
+  // the physical boundary explicit so the existing regression can prove
+  // that the wiring itself is non-invasive.
+  // --------------------------------------------------------------------
+
+  logic [7:0] dpti_d_drive;
+  logic       dpti_d_drive_en;
+
+  wire [7:0]  dpti_d;
+
+  logic       dpti_rxf_n;
+  logic       dpti_txe_n;
+  logic       dpti_clkout;
+  logic       dpti_siwun;
+
+  wire        dpti_rd_n;
+  wire        dpti_wr_n;
+  wire        dpti_oe_n;
+
+  assign dpti_d =
+      dpti_d_drive_en
+          ? dpti_d_drive
+          : 8'bz;
+
+  // Use the same 100 MHz period in simulation.  This is an independent
+  // clock signal even though its nominal frequency matches clk.
+  initial dpti_clkout = 1'b0;
+  always #5 dpti_clkout = ~dpti_clkout;
+
+  initial begin
+    dpti_d_drive    = 8'h00;
+    dpti_d_drive_en = 1'b0;
+
+    // No input bytes available during the existing baseline regression.
+    dpti_rxf_n      = 1'b1;
+
+    // Output-side inputs remain inactive.
+    dpti_txe_n      = 1'b0;
+    dpti_siwun      = 1'b1;
+  end
+
+  // --------------------------------------------------------------------
   // Scheduler interface
   // --------------------------------------------------------------------
 
@@ -283,6 +328,7 @@ module tb_systolic_dma_top #(
   integer jobs_accepted;
   integer jobs_started;
   integer jobs_completed;
+  integer readbacks_completed;
 
   integer errors;
 
@@ -393,7 +439,7 @@ module tb_systolic_dma_top #(
        * because an AXI write response is a bus transaction boundary,
        * not automatically a compiler-job boundary.
        */
-      if (job_inflight && scheduler_c_done) begin
+      if (job_inflight && dut.job_done) begin
 
         jobs_completed <= jobs_completed + 1;
 
@@ -748,7 +794,17 @@ module tb_systolic_dma_top #(
     .job_est_cycles  (job_est_cycles),
     .job_a_base      (job_a_base),
     .job_b_base      (job_b_base),
-    .job_c_base      (job_c_base)
+    .job_c_base      (job_c_base),
+
+    .dpti_d           (dpti_d),
+    .dpti_rxf_n       (dpti_rxf_n),
+    .dpti_txe_n       (dpti_txe_n),
+    .dpti_clkout      (dpti_clkout),
+
+    .dpti_rd_n        (dpti_rd_n),
+    .dpti_wr_n        (dpti_wr_n),
+    .dpti_oe_n        (dpti_oe_n),
+    .dpti_siwun       (dpti_siwun)
   );
 
 
@@ -924,9 +980,10 @@ module tb_systolic_dma_top #(
     current_job   = 0;
     job_inflight  = 1'b0;
 
-    jobs_accepted  = 0;
-    jobs_started   = 0;
-    jobs_completed = 0;
+    jobs_accepted      = 0;
+    jobs_started       = 0;
+    jobs_completed     = 0;
+    readbacks_completed = 0;
 
     ar_count    = 0;
     r_count     = 0;
@@ -982,6 +1039,26 @@ module tb_systolic_dma_top #(
            waited < MAX_CYCLES) begin
 
       @(posedge clk);
+
+      if (dut.eng_done_valid &&
+          dut.eng_done_tag == 8'h3C)
+        readbacks_completed = readbacks_completed + 1;
+
+      waited = waited + 1;
+    end
+
+    /*
+     * job_done precedes the separate result-readback transaction.
+     * Keep waiting until the final result tile has drained as well.
+     */
+    while (readbacks_completed < NUM_JOBS &&
+           waited < MAX_CYCLES) begin
+
+      @(posedge clk);
+
+      if (dut.eng_done_valid &&
+          dut.eng_done_tag == 8'h3C)
+        readbacks_completed = readbacks_completed + 1;
 
       waited = waited + 1;
     end
@@ -1066,7 +1143,15 @@ module tb_systolic_dma_top #(
 
 
     // ------------------------------------------------------------
-    // TARGET 2: Operand DMA
+    // TARGET 2: Shared DMA read traffic
+    //
+    // The shared read engine carries two descriptor classes per job:
+    //
+    //   operand fetch:    RX_BYTES / 16 beats
+    //                     grouped into 16-beat bursts
+    //
+    //   result readback:  4 beats
+    //                     one read burst
     //
     // Only reached if TARGET 1 passed.
     // ------------------------------------------------------------
@@ -1074,13 +1159,15 @@ module tb_systolic_dma_top #(
     if (!diagnostic_failed) begin
 
       $display("");
-      $display("[TARGET 2] OPERAND DMA READ");
+      $display("[TARGET 2] SHARED DMA READ TRAFFIC");
 
-      if (ar_count == 80 &&
-          r_count == 1280) begin
+      if (ar_count ==
+            NUM_JOBS * (((RX_BYTES / 16) / 16) + 1) &&
+          r_count ==
+            NUM_JOBS * ((RX_BYTES / 16) + 4)) begin
 
         $display(
-          "[PASS] OPERAND DMA: AR=%0d R=%0d",
+          "[PASS] SHARED DMA READ: AR=%0d R=%0d",
           ar_count,
           r_count
         );
@@ -1089,9 +1176,11 @@ module tb_systolic_dma_top #(
       else begin
 
         $display(
-          "[FAIL] OPERAND DMA: AR=%0d (want 80) R=%0d (want 1280)",
+          "[FAIL] SHARED DMA READ: AR=%0d (want %0d) R=%0d (want %0d)",
           ar_count,
-          r_count
+          NUM_JOBS * (((RX_BYTES / 16) / 16) + 1),
+          r_count,
+          NUM_JOBS * ((RX_BYTES / 16) + 4)
         );
 
         diagnostic_failed = 1'b1;
@@ -1370,6 +1459,52 @@ module tb_systolic_dma_top #(
      * Do not treat AXI counts as job completion.
      * They are diagnostics only.
      */
+
+    /*
+     * Result-readback signature checker validation.
+     *
+     * DUT sticky bit 3: at least one result-readback beat was observed.
+     * DUT sticky bit 4: at least one result-readback beat mismatched the
+     *                   expected 4x4 smoke-test signature.
+     */
+    if (dut.external_debug_sticky[3] !== 1'b1) begin
+      $display(
+        "[FAIL] RB SIGNATURE CHECKER: no readback beat observed (bit3=%b)",
+        dut.external_debug_sticky[3]
+      );
+      errors = errors + 1;
+    end
+    else begin
+      $display(
+        "[PASS] RB SIGNATURE CHECKER: readback beat observed (bit3=1)"
+      );
+    end
+
+    if (dut.external_debug_sticky[4] !== 1'b0) begin
+      $display(
+        "[FAIL] RB SIGNATURE CHECKER: data mismatch observed (bit4=%b)",
+        dut.external_debug_sticky[4]
+      );
+      errors = errors + 1;
+    end
+    else begin
+      $display(
+        "[PASS] RB SIGNATURE CHECKER: no data mismatch observed (bit4=0)"
+      );
+    end
+
+    if (dut.external_debug_sticky[5] !== 1'b0) begin
+      $display(
+        "[FAIL] WB SIGNATURE CHECKER: writeback data mismatch observed (bit5=%b)",
+        dut.external_debug_sticky[5]
+      );
+      errors = errors + 1;
+    end
+    else begin
+      $display(
+        "[PASS] WB SIGNATURE CHECKER: no writeback data mismatch observed (bit5=0)"
+      );
+    end
 
     /*
      * Final status.

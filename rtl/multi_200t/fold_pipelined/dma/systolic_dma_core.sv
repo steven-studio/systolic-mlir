@@ -280,48 +280,6 @@ module systolic_dma_core #(
   wire         awvalid, awready;
   wire [127:0] wdata_axi; wire [15:0] wstrb; wire wlast, wvalid, wready;
 
-  // --------------------------------------------------------------------------
-  // TEMP DEBUG: trace AXI write sources in external/compiler mode.
-  //
-  //   sd_*      = synthetic seed writer
-  //   wb_*      = result writeback engine
-  //   final     = actual AXI write channel
-  //
-  // Observational only. No functional behavior is changed.
-  // --------------------------------------------------------------------------
-  always @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER) begin
-      if (sd_awvalid || sd_wvalid ||
-          wb_awvalid || wb_wvalid ||
-          awvalid || wvalid) begin
-        $display(
-          "AXISRCDBG phase=%0d seed_start=%0b "
-          "SD{aw=%0b addr=0x%08x w=%0b data=%h} "
-          "WB{aw=%0b addr=0x%08x w=%0b data=%h} "
-          "FINAL{own=%0b aw=%0b addr=0x%08x w=%0b data=%h}",
-          phase,
-          seed_start,
-
-          sd_awvalid,
-          sd_awaddr,
-          sd_wvalid,
-          sd_wdata,
-
-          wb_awvalid,
-          wb_awaddr,
-          wb_wvalid,
-          wb_wdata,
-
-          wb_owns_w,
-          awvalid,
-          awaddr,
-          wvalid,
-          wdata_axi
-        );
-      end
-    end
-  end
-
   wire [1:0]   bid, bresp; wire bvalid, bready;
 
   // --------------------------------------------------------------------------
@@ -710,32 +668,6 @@ module systolic_dma_core #(
       c_done &&
       !c_done_seen;
 
-
-  // -------------------------------------------------------------------------
-  // Completion handshake debug
-  //
-  // Trace the entire completion path for the currently accepted job:
-  //
-  //   c_done -> scheduler_c_done -> job_done
-  //
-  // c_done_seen is included to determine whether the one-shot completion
-  // pulse is being consumed before the external scheduler can observe it.
-  // -------------------------------------------------------------------------
-  always @(posedge clk) begin
-    if (job_active || c_done || scheduler_c_done || job_done) begin
-      $display(
-          "JOBDBG t=%0t fire=%0d active=%0d c_done=%0d "
-          "c_done_seen=%0d sched_c_done=%0d job_done=%0d",
-          $time,
-          job_fire,
-          job_active,
-          c_done,
-          c_done_seen,
-          scheduler_c_done,
-          job_done
-      );
-    end
-  end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin

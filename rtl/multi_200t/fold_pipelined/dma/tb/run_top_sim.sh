@@ -81,6 +81,22 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN $SCHEDULER_GEN \
     "$ROOT/tb/fp_model.sv" \
     "$ROOT/tb/fp32_dpi.cpp" \
     "$DMA/systolic_dma_top.sv" \
+    "$DMA/dpti_host_rx.sv" \
+    "$DMA/dpti_byte_rx.sv" \
+    "$DMA/dpti_write32_decoder.sv" \
+    "$DMA/dpti_mem_write_decoder.sv" \
+    "$DMA/dpti_command_frontend.sv" \
+    "$DMA/dpti_async_fifo.sv" \
+    "$DMA/dpti_output_cdc.sv" \
+    "$DMA/dpti_beat_to_byte.sv" \
+    "$DMA/dpti_byte_tx.sv" \
+    "$DMA/dpti_mem_write_cdc.sv" \
+    "$DMA/dpti_mem_write_engine.sv" \
+    "$DMA/dpti_mem_write_cdc_engine.sv" \
+    "$DMA/dpti_cmd_async_fifo.sv" \
+    "$DMA/dpti_axi4lite_master.sv" \
+    "$DMA/axi4lite_dpti_bridge.sv" \
+    "$DMA/dpti_descriptor_bridge.sv" \
     "$ROOT/scheduler/systolic_job_ingress.sv" \
     "$ROOT/scheduler/systolic_hw_scheduler.sv" \
     "$ROOT/scheduler/systolic_hw_scheduler_adapter.sv" \

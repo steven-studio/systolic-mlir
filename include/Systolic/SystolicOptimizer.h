@@ -58,6 +58,31 @@ optimizeSystolicGreedy(
     int64_t columns,
     llvm::ArrayRef<SystolicArrayResource> fleet);
 
+/// Exact deadline-search systolic optimization.
+///
+/// Searches for the minimum feasible makespan T by binary search.
+///
+/// For geometry g:
+///
+///   C(g) = 2g - 2 + H(g)
+///
+/// and for m physical accelerators of that geometry:
+///
+///   capacity(T) = m * floor(T / C(g))
+///
+/// The feasibility test constructs a spatial decomposition using
+/// the largest geometry whose spatial and deadline capacity are
+/// both feasible.
+///
+/// Padding is allowed internally for spatial alignment, but a tile
+/// containing no element of the original rows x columns region is
+/// never emitted.
+FailureOr<ExactSystolicOptimizationResult>
+optimizeSystolicBinarySearch(
+    int64_t rows,
+    int64_t columns,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
+
 } // namespace systolic
 } // namespace mlir
 

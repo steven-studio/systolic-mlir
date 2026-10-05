@@ -59,3 +59,19 @@ runtime/test_fpga_matvec
 
 # Compiled dot test executable
 runtime/test_fpga_dot
+
+# Build / simulation artifacts
+a.out
+compile_commands.json
+obj_dir/
+xvlog.pb
+*.gen/
+sim_out_*/
+hls/*/work_*/
+hls/*/sweep_runs/
+tools/__pycache__/
+runtime/bin/
+
+# Local backup files
+*.bak_*
+*.before_*

@@ -144,6 +144,22 @@ set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 # build made from a different set of sources is not exercising the same array.
 set SRC [list \
     $SCRIPT_DIR/systolic_dma_top.sv \
+    $SCRIPT_DIR/dpti_host_rx.sv \
+    $SCRIPT_DIR/dpti_byte_rx.sv \
+    $SCRIPT_DIR/dpti_write32_decoder.sv \
+    $SCRIPT_DIR/dpti_mem_write_decoder.sv \
+    $SCRIPT_DIR/dpti_command_frontend.sv \
+    $SCRIPT_DIR/dpti_async_fifo.sv \
+    $SCRIPT_DIR/dpti_output_cdc.sv \
+    $SCRIPT_DIR/dpti_beat_to_byte.sv \
+    $SCRIPT_DIR/dpti_byte_tx.sv \
+    $SCRIPT_DIR/dpti_mem_write_cdc.sv \
+    $SCRIPT_DIR/dpti_mem_write_engine.sv \
+    $SCRIPT_DIR/dpti_mem_write_cdc_engine.sv \
+    $SCRIPT_DIR/dpti_cmd_async_fifo.sv \
+    $SCRIPT_DIR/dpti_axi4lite_master.sv \
+    $SCRIPT_DIR/axi4lite_dpti_bridge.sv \
+    $SCRIPT_DIR/dpti_descriptor_bridge.sv \
     $SCRIPT_DIR/../scheduler/systolic_job_ingress.sv \
     $SCRIPT_DIR/systolic_dma_core.sv \
     $SCRIPT_DIR/dma_engine.sv \
@@ -261,13 +277,14 @@ proc build_body {} {
     # count still looks like a count.  So the widths are all spelled out.
     create_ip -name vio -vendor xilinx.com -library ip -version 3.0 \
               -module_name vio_0
-    # 17 in, 2 out.  The three new inputs are t_span, cyc_total and the
-    # n_inv/folds_done status word; the outputs are n_inv itself and the re-run
-    # request.  n_inv's INIT is 1, so a freshly programmed board runs exactly
-    # what it ran before the invocation loop existed -- the single-invocation
-    # numbers in the paper are reproducible without touching a probe.
-    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {17} CONFIG.C_NUM_PROBE_OUT {2}]
-    for {set i 0} {$i < 17} {incr i} {
+    # 19 in, 2 out.  probe_in17 is the 32-bit external-job/readback
+    # diagnostic word; probe_in18 is the synchronized physical-input
+    # diagnostic word.
+    # sticky debug word.  The outputs remain n_inv and the re-run request.
+    # n_inv's INIT is 1, so a freshly programmed board preserves the
+    # single-invocation baseline until explicitly changed.
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {20} CONFIG.C_NUM_PROBE_OUT {2}]
+    for {set i 0} {$i < 20} {incr i} {
         lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
     }
     lappend vio_cfg CONFIG.C_PROBE_OUT0_WIDTH {4} CONFIG.C_PROBE_OUT0_INIT_VAL {0x1}
@@ -284,6 +301,8 @@ proc build_body {} {
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
         USE_V2=1'b$USE_V2 \
+        USE_EXTERNAL_SCHEDULER=1'b1 \
+        USE_LEGACY_JOB_PORTS=1'b0 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
     puts "building $VARIANT at N=$NARR K_MAX=$KMAX K_DIM=$KDIM (USE_V2=$USE_V2), project $PROJ_DIR"
@@ -462,7 +481,7 @@ proc arm_run {v n} {
     refresh_hw_vio $v
 }
 
-proc read_vio {} {
+proc read_vio {{do_arm 1}} {
     global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC KMAX NARR KDIM
     global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
@@ -491,7 +510,12 @@ proc read_vio {} {
     set v [lindex $vios 0]
     refresh_hw_vio $v
     global NARG
-    arm_run $v $NARG
+    if {$do_arm} {
+        arm_run $v $NARG
+    } else {
+        # Observation-only: do not start or restart hardware work.
+        refresh_hw_vio $v
+    }
 
     # Vivado names each probe after the NET that drives it, not probe_inN, and
     # it splits a concatenation into one probe per signal.  Match on net names
@@ -550,7 +574,38 @@ proc read_vio {} {
     set ctot  [pval $all_probes UNSIGNED cyc_total  probe_in15]
     set nrun  [pval $all_probes UNSIGNED n_inv]
     set fdone [pval $all_probes UNSIGNED folds_done]
+
+    # Sticky progress for the external job / result-readback path.
+    set extdbg [pval $all_probes HEX external_debug_sticky probe_in17]
+
+    # Physical-input diagnostic state, generated in dpti_clkout and
+    # synchronized into ui_clk only for observation.
+    set phydbg [pval $all_probes HEX dpti_phy_debug_sync probe_in18]
+
+    # Free-running activity counter from the physical clock domain.
+    # Compare successive peek values; the absolute value is not meaningful.
+    set phyact [pval $all_probes HEX dpti_clk_activity_sync probe_in19]
+
     if {$nrun eq "" || $nrun == 0} { set nrun 1 }
+
+    puts ""
+    puts "=== external job / result-readback debug ====================="
+    puts "  external_debug_sticky = 0x$extdbg"
+    puts "    bit0 job accepted"
+    puts "    bit1 result readback armed"
+    puts "    bit2 readback descriptor accepted"
+    puts "    bit3 at least one result beat returned"
+    puts "    bit4 readback descriptor completed"
+    puts ""
+    puts "=== physical input debug ======================================"
+    puts "  dpti_phy_debug_sync = 0x$phydbg"
+    puts "    bit0 physical clock ran after reset"
+    puts "    bit1 input data reported available"
+    puts "    bit2 receiver asserted read control"
+    puts "    bit3 receiver produced a valid byte"
+    puts "    bit4 byte completed frontend handshake"
+    puts "  dpti_clk_activity_sync = 0x$phyact"
+    puts "    compare this value across successive peeks"
 
     if {$wchk eq "" || $cyc eq ""} {
         puts "\nA probe lookup came back EMPTY.  Read the list above: those are"
@@ -727,7 +782,8 @@ switch -- $MODE {
     build   { build }
     program { program }
     read    { read_vio }
+    peek    { read_vio 0 }
     sweep   { sweep_vio }
     all     { build ; program }
-    default { error "unknown mode '$MODE' (build | program | all | read | sweep)" }
+    default { error "unknown mode '$MODE' (build | program | all | read | peek | sweep)" }
 }

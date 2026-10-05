@@ -223,6 +223,21 @@ module dma_writeback_engine #(
     end
   end
 
+  // --------------------------------------------------------------------------
+  // DEBUG: result data actually accepted by the AXI write channel.
+  // Diagnostic only. No functional behavior is changed.
+  // --------------------------------------------------------------------------
+  always @(posedge clk) begin
+    if (rst_n && w_fire) begin
+      $display(
+        "WBWDATA t=%0t data=%032h last=%0b",
+        $time,
+        m_axi_wdata,
+        m_axi_wlast
+      );
+    end
+  end
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state      <= S_IDLE;

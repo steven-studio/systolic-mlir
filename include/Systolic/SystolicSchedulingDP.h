@@ -25,14 +25,6 @@ namespace systolic {
 ///
 /// This first version returns only the minimum makespan.  Schedule
 /// reconstruction can be added later with predecessor information.
-FailureOr<int64_t>
-minimizeSystolicMakeSpanDP(
-    llvm::ArrayRef<SystolicExecutionTask> tasks,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
-
-
 /// Compute the exact minimum makespan by enumerating task-count
 /// allocations rather than task-by-task assignment histories.
 ///
@@ -49,13 +41,6 @@ minimizeSystolicMakeSpanDP(
 ///
 /// This formulation preserves exact assignment-aware costs while
 /// avoiding permutations of individual task assignments.
-FailureOr<int64_t>
-minimizeSystolicMakeSpanCountAllocation(
-    llvm::ArrayRef<SystolicExecutionTask> tasks,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
-
 } // namespace systolic
 } // namespace mlir
 

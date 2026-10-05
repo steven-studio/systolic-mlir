@@ -12,6 +12,44 @@
 namespace mlir {
 namespace systolic {
 
+/// Schedule already-assigned execution tasks on their concrete
+/// physical accelerators.
+///
+/// Physical accelerator assignment is NOT changed by this function.
+/// The scheduler only determines the temporal execution interval of
+/// each task.
+///
+/// `computeCycles[i]` is the compute-only duration of `tasks[i]`.
+///
+/// Tasks assigned to the same physical accelerator execute
+/// sequentially. Tasks assigned to different physical accelerators
+/// may execute concurrently.
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+scheduleAssignedSystolicTasks(
+    llvm::ArrayRef<SystolicExecutionTask> tasks,
+    llvm::ArrayRef<int64_t> computeCycles,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
+
+/// Schedule already-assigned execution tasks on their concrete
+/// physical accelerators.
+///
+/// Physical accelerator assignment is NOT changed by this function.
+/// The scheduler only determines the temporal execution interval of
+/// each task.
+///
+/// `computeCycles[i]` is the compute-only duration of `tasks[i]`.
+///
+/// Tasks assigned to the same physical accelerator execute
+/// sequentially. Tasks assigned to different physical accelerators
+/// may execute concurrently.
+///
+/// Returns one ScheduledSystolicTile per input task.
+FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
+scheduleSystolicExecutionTasks(
+    llvm::ArrayRef<SystolicExecutionTask> tasks,
+    llvm::ArrayRef<int64_t> computeCycles,
+    llvm::ArrayRef<SystolicArrayResource> fleet);
+
 /// Find an exact minimum-makespan schedule for a fixed logical
 /// task decomposition.
 ///
@@ -28,12 +66,7 @@ namespace systolic {
 ///
 /// This allows, for example, the same logical 4x4 task to have
 /// different costs on physical 4x4 and 8x8 arrays.
-FailureOr<llvm::SmallVector<ScheduledSystolicTile>>
-minimizeSystolicMakeSpanAssignmentAware(
-    llvm::ArrayRef<SystolicExecutionTask> tasks,
-    int64_t K,
-    llvm::ArrayRef<SystolicArrayResource> fleet,
-    llvm::ArrayRef<SystolicGeometryCostParams> costParams);
+
 
 } // namespace systolic
 } // namespace mlir

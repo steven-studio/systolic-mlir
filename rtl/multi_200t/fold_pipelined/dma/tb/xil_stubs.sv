@@ -52,6 +52,11 @@ module vio_0 (
   // the invocation loop's three: wall clock, summed compute, status word
   input wire [31:0] probe_in14, input wire [31:0] probe_in15,
   input wire [31:0] probe_in16,
+  // External-job/readback debug, physical-input debug, and
+  // physical-clock activity.  Observation-only in simulation.
+  input wire [31:0] probe_in17,
+  input wire [31:0] probe_in18,
+  input wire [31:0] probe_in19,
   // OUTPUT probe.  On the board this is a JTAG-written register; here it is
   // +n_inv=<count> on the simulation command line, which is the same contract
   // -- the invocation count reaches the design from outside it, and the design

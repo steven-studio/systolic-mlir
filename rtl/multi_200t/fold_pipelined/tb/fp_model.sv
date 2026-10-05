@@ -36,6 +36,16 @@
  * tb_array_h_decomp 要對回板測的 H,必須用 ip/fp32 底下的 .xci 裡的
  * C_Latency(mul 8、add 11)。
  */
+import "DPI-C" function int unsigned fp32_mul(
+    input int unsigned a,
+    input int unsigned b
+);
+
+import "DPI-C" function int unsigned fp32_add(
+    input int unsigned a,
+    input int unsigned b
+);
+
 `ifndef FP_MUL_LAT
 `define FP_MUL_LAT 9
 `endif
@@ -64,7 +74,7 @@ module fp_mul #(parameter int LAT = `FP_MUL_LAT) (
         end
         else begin
             v_pipe[0] <= valid_in;
-            d_pipe[0] <= $signed(a) * $signed(b);
+            d_pipe[0] <= fp32_mul(a, b);
             for (int i = 1; i < LAT; i++) begin
                 v_pipe[i] <= v_pipe[i-1];
                 d_pipe[i] <= d_pipe[i-1];
@@ -98,7 +108,7 @@ module fp_add #(parameter int LAT = `FP_ADD_LAT) (
         end
         else begin
             v_pipe[0] <= valid_in;
-            d_pipe[0] <= $signed(a) + $signed(b);
+            d_pipe[0] <= fp32_add(a, b);
             for (int i = 1; i < LAT; i++) begin
                 v_pipe[i] <= v_pipe[i-1];
                 d_pipe[i] <= d_pipe[i-1];

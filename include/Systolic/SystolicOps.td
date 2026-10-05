@@ -35,7 +35,11 @@ def Systolic_DataflowAttr : EnumAttr<Systolic_Dialect, Systolic_DataflowKind, "d
 // systolic.device -- hardware description of one accelerator instance
 //===----------------------------------------------------------------------===//
 
-def Systolic_DeviceOp : Systolic_Op<"device"> {
+def Systolic_DeviceOp : Systolic_Op<"device", [
+  Symbol,
+  SymbolName,
+  SymbolVisibility
+]> {
   let summary = "Declares one heterogeneous accelerator instance and its "
                 "fixed hardware geometry.";
   let description = [{
@@ -60,7 +64,8 @@ def Systolic_DeviceOp : Systolic_Op<"device"> {
     OptionalAttr<F64Attr>:$dma_bytes_per_cycle,
     OptionalAttr<I64Attr>:$k_max,
     OptionalAttr<I64Attr>:$l1_bytes,
-    OptionalAttr<I64Attr>:$tile_overhead
+    OptionalAttr<I64Attr>:$tile_overhead,
+    OptionalAttr<StrAttr>:$sym_visibility
   );
 
   let assemblyFormat = "$sym_name `rows` `=` $rows `cols` `=` $cols "
@@ -70,6 +75,7 @@ def Systolic_DeviceOp : Systolic_Op<"device"> {
       "(`k_max` `=` $k_max^)? "
       "(`l1_bytes` `=` $l1_bytes^)? "
       "(`tile_overhead` `=` $tile_overhead^)? "
+      "(`sym_visibility` `=` $sym_visibility^)? "
       "attr-dict";
 }
 

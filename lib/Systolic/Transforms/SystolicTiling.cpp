@@ -294,19 +294,9 @@ greedySystolicDecompose(
   // ----------------------------------------------------------
   // Collect distinct hardware geometries.
   //
-  // The supported hierarchy is strictly dyadic:
-  //
-  //   g_i = 2 * g_{i+1}
-  //
-  // Therefore:
-  //
-  //   32 -> 16 -> 8 -> 4
-  //
-  // is legal, while:
-  //
-  //   128 -> 32 -> 4
-  //
-  // is intentionally outside the current problem scope.
+  // No relationship between adjacent geometries is assumed.
+  // The optimizer may therefore use any set of square
+  // accelerator geometries declared by the hardware fleet.
   // ----------------------------------------------------------
 
   llvm::SmallVector<int64_t> geometries;
@@ -331,26 +321,6 @@ greedySystolicDecompose(
       geometries.begin(),
       geometries.end(),
       std::greater<int64_t>());
-
-  // ----------------------------------------------------------
-  // Enforce the dyadic hierarchy.
-  //
-  // Every adjacent pair must satisfy:
-  //
-  //   larger = 2 * smaller
-  //
-  // This removes arbitrary/sparse power-of-two hierarchies from
-  // the current decomposition problem.
-  // ----------------------------------------------------------
-
-  for (size_t i = 0;
-       i + 1 < geometries.size();
-       ++i) {
-
-    if (geometries[i] !=
-        2 * geometries[i + 1])
-      return failure();
-  }
 
   const int64_t smallestGeometry =
       geometries.back();

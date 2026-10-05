@@ -3,6 +3,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "mlir/Support/LogicalResult.h"
 
 #include <cstdint>
 
@@ -25,6 +26,13 @@ namespace systolic {
 ///   1 x 8x8
 struct SystolicGeometryMultiset {
   llvm::SmallVector<int64_t> counts;
+};
+
+/// One concrete placement of a square systolic tile.
+struct SystolicGeometryPlacement {
+  int64_t row;
+  int64_t column;
+  int64_t size;
 };
 
 /// Enumerate all unique geometry multisets that exactly cover an
@@ -86,6 +94,13 @@ enumerateSystolicGeometryMultisetsAreaFirstDP(
     int64_t rows,
     int64_t columns,
     llvm::ArrayRef<int64_t> geometries);
+
+mlir::FailureOr<llvm::SmallVector<SystolicGeometryPlacement>>
+reconstructSystolicGeometryMultiset(
+    int64_t rows,
+    int64_t columns,
+    llvm::ArrayRef<int64_t> geometries,
+    const SystolicGeometryMultiset &multiset);
 
 } // namespace systolic
 } // namespace mlir

@@ -8,12 +8,12 @@ using namespace mlir::systolic;
 
 int main() {
   SystolicArrayResource fleet[] = {
-      {16, 0},
-      {8, 0},
-      {8, 1},
-      {4, 0},
-      {4, 1},
-      {4, 2},
+      {16, 0, 10},
+      {8, 0, 10},
+      {8, 1, 10},
+      {4, 0, 10},
+      {4, 1, 10},
+      {4, 2, 10},
   };
 
   auto result =
@@ -59,7 +59,7 @@ int main() {
     return 1;
   }
 
-  if (result->makespan != 42) {
+  if (result->makespan != 80) {
     std::cerr
         << "FAIL: expected makespan 42\n";
     return 1;

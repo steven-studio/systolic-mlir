@@ -179,3 +179,67 @@ target_include_directories(check_optimizer_25x25
   ${CMAKE_CURRENT_SOURCE_DIR}/../../include
 )
 
+
+
+add_executable(check_binary_search_32x32
+  check_binary_search_32x32.cpp
+)
+
+target_link_libraries(check_binary_search_32x32
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_binary_search_32x32
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+
+
+add_executable(check_binary_search_25x25
+  check_binary_search_25x25.cpp
+)
+
+target_link_libraries(check_binary_search_25x25
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_binary_search_25x25
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+
+
+add_executable(check_binary_search_1to32
+  check_binary_search_1to32.cpp
+)
+
+target_link_libraries(check_binary_search_1to32
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_binary_search_1to32
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+
+
+
+add_executable(check_binary_search_33to64
+  check_binary_search_33to64.cpp
+)
+
+target_link_libraries(check_binary_search_33to64
+  PRIVATE
+  MLIRSystolicTransforms
+)
+
+target_include_directories(check_binary_search_33to64
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
+

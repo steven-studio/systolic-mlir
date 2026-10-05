@@ -147,10 +147,22 @@ module tb_array_h_decomp;
 
     /* 歸約樹的層間 barrier,條件逐字抄自 systolic_pe_bram 的 RED_RUN:
      * 沒事做 + 管線空了。red_state 的編碼是 IDLE=0 / RUN=1 / DONE=2。 */
+    /*
+     * A reduction layer is considered fully drained only when:
+     *
+     *   1. RED_RUN is still active,
+     *   2. no reduction issue remains,
+     *   3. the reduction adder has no outstanding transaction, and
+     *   4. no reduction result is being produced this cycle.
+     *
+     * Condition (4) prevents the probe from calling the layer complete
+     * while the final fp_add result is still visible on reduce_add_valid.
+     */
     wire pe_bar = (dut.ROW[L].COL[L].u_pe.red_state == 2'd1)
                && (dut.ROW[L].COL[L].u_pe.reduce_todo == '0)
                && (dut.ROW[L].COL[L].u_pe.reduce_add_busy == '0)
-               && !dut.ROW[L].COL[L].u_pe.reduce_read_valid;
+               && !dut.ROW[L].COL[L].u_pe.reduce_read_valid
+               && !dut.ROW[L].COL[L].u_pe.reduce_add_valid;
 
     /* 每個戳記的條件都先讀自己一次(t_x < 0)。Verilator 5.020 會把一個
      * 「在這個 always 裡只寫不讀」的戳記變數整個優化掉 —— initial 那邊
@@ -165,6 +177,25 @@ module tb_array_h_decomp;
             pair_d <= dut.ROW[L].COL[L].u_pe.pipe_pair_valid;
             if (pair_d && !dut.ROW[L].COL[L].u_pe.pipe_pair_valid && t_last < 0)
                 t_last <= cyc - 2;
+
+            if (dut.ROW[L].COL[L].u_pe.reduce_add_valid &&
+                dut.ROW[L].COL[L].u_pe.reduce_stride == 1) begin
+
+                $display(
+                    "[FINALADD] cyc=%0d ri=%0d rwb=%0d a_valid=%0d b_valid=%0d a_data=0x%08x b_data=0x%08x a_value=0x%08x b_value=0x%08x result=0x%08x final_before=0x%08x",
+                    cyc,
+                    dut.ROW[L].COL[L].u_pe.reduce_i,
+                    dut.ROW[L].COL[L].u_pe.reduce_wb_i,
+                    dut.ROW[L].COL[L].u_pe.reduce_a_old_valid,
+                    dut.ROW[L].COL[L].u_pe.reduce_b_old_valid,
+                    dut.ROW[L].COL[L].u_pe.reduce_a_data,
+                    dut.ROW[L].COL[L].u_pe.reduce_b_data,
+                    dut.ROW[L].COL[L].u_pe.reduce_a_value,
+                    dut.ROW[L].COL[L].u_pe.reduce_b_value,
+                    dut.ROW[L].COL[L].u_pe.reduce_add_result,
+                    dut.ROW[L].COL[L].u_pe.final_reduce_result
+                );
+            end
 
             if (dut.ROW[L].COL[L].u_pe.acc_handoff && t_hand < 0)       t_hand  <= cyc;
             if (pe_bar && n_bar < LEVELS) begin
@@ -195,19 +226,83 @@ module tb_array_h_decomp;
     int tx, t, i, j, guard;
     int T, H, g, r, c;
 
+    /*
+     * Convert a small positive integer to its exact IEEE-754 FP32
+     * representation.
+     *
+     * The test matrices contain only small integers, so every value
+     * and every matrix-product result is exactly representable in FP32.
+     *
+     * IMPORTANT:
+     *   Amat/Bmat/Cexp are bit patterns consumed by the FP32 datapath.
+     *   Do NOT store integer values such as 32'h00000001 here:
+     *       32'h00000001 is not FP32 1.0.
+     */
+    function automatic [31:0] int_to_fp32(input integer x);
+        integer e;
+        integer tmp;
+        integer mantissa;
+        begin
+            if (x == 0) begin
+                int_to_fp32 = 32'h00000000;
+            end
+            else if (x < 0) begin
+                $fatal(1, "int_to_fp32 only supports non-negative values");
+            end
+            else begin
+                e   = 0;
+                tmp = x;
+
+                while (tmp > 1) begin
+                    tmp = tmp >> 1;
+                    e   = e + 1;
+                end
+
+                /*
+                 * All test values are <= 3648, hence e <= 11 and
+                 * shifting left by (23-e) is safe and exact.
+                 */
+                mantissa = x << (23 - e);
+
+                int_to_fp32 = ((e + 127) << 23) |
+                              (mantissa & 32'h007fffff);
+            end
+        end
+    endfunction
+
+
     initial begin
-        /* 小整數,fp_model 用整數算術,結果逐位元可比。 */
+        /*
+         * FP32 test data.
+         *
+         * Example:
+         *   integer 1 -> 32'h3f800000 (FP32 1.0)
+         *   integer 2 -> 32'h40000000 (FP32 2.0)
+         *   integer 3 -> 32'h40400000 (FP32 3.0)
+         */
         for (i = 0; i < N; i++)
             for (j = 0; j < K; j++)
-                Amat[i][j] = 32'(i + j + 1);
+                Amat[i][j] = int_to_fp32(i + j + 1);
+
         for (i = 0; i < K; i++)
             for (j = 0; j < N; j++)
-                Bmat[i][j] = 32'(i * N + j + 1);
+                Bmat[i][j] = int_to_fp32(i * N + j + 1);
+
+        /*
+         * The products/sums in this test are small integers and therefore
+         * exact in FP32.  Compute the mathematical reference as integers,
+         * then encode the final result as FP32.
+         */
         for (i = 0; i < N; i++)
             for (j = 0; j < N; j++) begin
-                Cexp[i][j] = 32'd0;
+                int expected_int;
+                expected_int = 0;
+
                 for (int kk = 0; kk < K; kk++)
-                    Cexp[i][j] = Cexp[i][j] + Amat[i][kk] * Bmat[kk][j];
+                    expected_int +=
+                        (i + kk + 1) * (kk * N + j + 1);
+
+                Cexp[i][j] = int_to_fp32(expected_int);
             end
 
         $display("tb_array_h_decomp  N=%0d  K=%0d  ACC_BANKS=%0d  fp_mul LAT=%0d  fp_add LAT=%0d",

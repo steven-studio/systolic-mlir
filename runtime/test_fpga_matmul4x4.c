@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-#define PORT "/dev/ttyUSB1"
+#define PORT "/dev/ttyUSB2"
 
 int main() {
     // 跟 verify_matmul_float.py 完全相同的測資 (row-major flatten)

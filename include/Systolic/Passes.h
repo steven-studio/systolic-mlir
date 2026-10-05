@@ -19,11 +19,20 @@ void registerSystolicCostAnalysisPass();
 std::unique_ptr<Pass> createSystolicSelectDevicePass();
 void registerSystolicSelectDevicePass();
 
+std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
+void registerSystolicMaterializeSchedulePass();
+
+std::unique_ptr<Pass> createSystolicGreedyOptimizePass();
+void registerSystolicGreedyOptimizePass();
+
 //===----------------------------------------------------------------------===//
 // Stage 2: Tile partitioning
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<Pass> createSystolicTileMatmulPass();
+std::unique_ptr<Pass> createSystolicBinarySearchTileMatmulPass();
+void registerSystolicBinarySearchTileMatmulPass();
+
 void registerSystolicTileMatmulPass();
 
 std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
@@ -78,7 +87,9 @@ void registerDotGenericToFpgaPass();
 void registerTestAffineMatmulDiscoveryPass();
 void registerTestAffineMatmulDiscoveryPass();
 
+void registerSystolicJobCodegenPass();
 void registerSystolicPasses();
+
 
 } // namespace systolic
 } // namespace mlir

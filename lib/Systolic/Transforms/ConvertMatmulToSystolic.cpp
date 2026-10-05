@@ -149,10 +149,10 @@ std::unique_ptr<Pass> mlir::systolic::createConvertMatmulToSystolicPass() {
 }
 
 void mlir::systolic::registerSystolicPasses() {
+  registerSystolicJobCodegenPass();
   PassRegistration<ConvertMatmulToSystolicPass>();
   registerExpandPEArrayToMacPass();
   registerTileMatmulForFpgaPass();
-  registerConv2DToFpgaPass();
   registerConv2DToFpgaPass();
   registerConv2DNchwToFpgaPass();
   registerBatchMatmulToFpgaPass();
@@ -162,7 +162,10 @@ void mlir::systolic::registerSystolicPasses() {
 
   registerSystolicCostAnalysisPass();
   registerSystolicSelectDevicePass();
+  registerSystolicMaterializeSchedulePass();
+  registerSystolicGreedyOptimizePass();
   registerSystolicTileMatmulPass();
+  registerSystolicBinarySearchTileMatmulPass();
   registerAffineMatmulToSystolicPass();
   registerTestAffineMatmulDiscoveryPass();
 }
