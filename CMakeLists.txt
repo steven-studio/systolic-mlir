@@ -42,4 +42,5 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # 靠近檔案開�
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
+add_subdirectory(runtime)
 add_subdirectory(test)                                        # 在 add_subdirectory(tools) 之後
