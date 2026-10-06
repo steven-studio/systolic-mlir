@@ -18,14 +18,28 @@
 // CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4 est_cycles = 16 start_cycle = 32
 
 module {
-systolic.device @acc_8x8
+systolic.device @acc_8x8_0
     rows = 8
     cols = 8
     depth = 1
     dataflow = output_stationary
     tile_overhead = 95
 
-  systolic.device @acc_4x4
+  systolic.device @acc_4x4_0
+    rows = 4
+    cols = 4
+    depth = 1
+    dataflow = output_stationary
+    tile_overhead = 95
+
+  systolic.device @acc_4x4_1
+    rows = 4
+    cols = 4
+    depth = 1
+    dataflow = output_stationary
+    tile_overhead = 95
+
+  systolic.device @acc_4x4_2
     rows = 4
     cols = 4
     depth = 1

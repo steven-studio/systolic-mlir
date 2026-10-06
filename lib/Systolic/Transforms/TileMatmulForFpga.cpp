@@ -248,25 +248,35 @@ struct LowerSystolicMatmulTileToFpgaPattern
         rewriter.create<arith::ConstantIntOp>(loc, N, 32);
 
     // ----------------------------------------------------------
-    // Preserve the compiler-selected physical geometry and schedule.
+    // Preserve compiler-selected physical device identity.
     //
-    // est_cycles/start_cycle were already validated above and are
-    // carried unchanged into the runtime ABI.
+    // The MatmulTileOp already carries a FlatSymbolRefAttr naming
+    // the exact systolic.device selected by decomposition/scheduling.
+    // Map that symbol one-to-one onto the RTL physical device ID.
     //
-    // Current physical-device mapping:
-    //
-    //   device_id 0 -> 8x8 accelerator
-    //   device_id 1 -> 4x4 accelerator
-    //
-    // TODO: replace this prototype mapping with an explicit
-    // compiler-visible device-to-runtime-ID mapping.
+    //   @acc_8x8_0 -> device_id 0
+    //   @acc_4x4_0 -> device_id 1
+    //   @acc_4x4_1 -> device_id 2
+    //   @acc_4x4_2 -> device_id 3
     // ----------------------------------------------------------
 
-    constexpr int64_t kFpga8x8DeviceId = 0;
-    constexpr int64_t kFpga4x4DeviceId = 1;
+    const StringRef deviceName = deviceRef.getValue();
 
-    const int64_t runtimeDeviceId =
-        is8x8Device ? kFpga8x8DeviceId : kFpga4x4DeviceId;
+    int64_t runtimeDeviceId = -1;
+
+    if (deviceName == "acc_8x8_0" && is8x8Device)
+      runtimeDeviceId = 0;
+    else if (deviceName == "acc_4x4_0" && is4x4Device)
+      runtimeDeviceId = 1;
+    else if (deviceName == "acc_4x4_1" && is4x4Device)
+      runtimeDeviceId = 2;
+    else if (deviceName == "acc_4x4_2" && is4x4Device)
+      runtimeDeviceId = 3;
+    else {
+      return op.emitError(
+          "DEBUG: assigned systolic.device has no registered "
+          "physical FPGA device ID");
+    }
 
     auto deviceIdVal =
         rewriter.create<arith::ConstantIntOp>(

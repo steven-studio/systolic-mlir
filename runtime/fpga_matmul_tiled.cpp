@@ -186,8 +186,10 @@ int fpga_matmul_tiled_auto_scheduled(
     /*
      * Current compiler/RTL contract:
      *
-     *   device_id 0: 8x16 @ 16x8 -> 8x8
-     *   device_id 1: 4x16 @ 16x4 -> 4x4
+     *   device_id 0: 8x16 @ 16x8 -> 8x8 instance 0
+     *   device_id 1: 4x16 @ 16x4 -> 4x4 instance 0
+     *   device_id 2: 4x16 @ 16x4 -> 4x4 instance 1
+     *   device_id 3: 4x16 @ 16x4 -> 4x4 instance 2
      *
      * Both geometries use the same 1024-byte combined A+B slab.
      * The result size is determined by the selected output geometry.
@@ -196,7 +198,8 @@ int fpga_matmul_tiled_auto_scheduled(
         return -10;
 
     const bool is4x4 =
-        M == 4 && N == 4 && device_id == 1;
+        M == 4 && N == 4 &&
+        (device_id == 1 || device_id == 2 || device_id == 3);
 
     const bool is8x8 =
         M == 8 && N == 8 && device_id == 0;

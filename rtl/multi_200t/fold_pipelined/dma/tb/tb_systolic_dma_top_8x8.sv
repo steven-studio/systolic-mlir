@@ -43,14 +43,36 @@ module tb_systolic_dma_top_8x8 #(
   parameter bit     USE_V2 = 1'b0,
   parameter integer K_MAX  = 16,
   parameter integer JOB_K  = K_MAX,
-  parameter bit     USE_EXTERNAL_SCHEDULER = 1'b1
+  parameter bit     USE_EXTERNAL_SCHEDULER = 1'b1,
+  parameter integer TEST_DEVICE_ID = 0
 );
 
   // --------------------------------------------------------------------
   // Hardware geometry
+  //
+  // Physical fleet:
+  //   device 0 -> 8x8
+  //   device 1 -> 4x4 #0
+  //   device 2 -> 4x4 #1
+  //   device 3 -> 4x4 #2
+  //
+  // N remains the common physical feeder width.  TEST_DIM describes the
+  // geometry of the physical accelerator selected by TEST_DEVICE_ID.
   // --------------------------------------------------------------------
 
   localparam integer N = 8;
+
+  localparam integer TEST_DIM =
+      (TEST_DEVICE_ID == 0) ? 8 : 4;
+
+  localparam integer RESULT_WORDS =
+      TEST_DIM * TEST_DIM;
+
+  localparam integer RESULT_BYTES =
+      RESULT_WORDS * 4;
+
+  localparam integer RESULT_BEATS =
+      RESULT_BYTES / 16;
 
   localparam integer RX_BYTES = K_MAX * 8 * N;
   localparam integer RX_WORDS = RX_BYTES / 4;
@@ -58,17 +80,10 @@ module tb_systolic_dma_top_8x8 #(
   localparam integer MAX_CYCLES = 2_000_000;
 
   // --------------------------------------------------------------------
-  // Compiler test stream
+  // Physical-device test stream
   //
-  // Keep this deliberately small.
-  //
-  // Every job is a 4x4xK compiler tile.
-  // Each result is therefore:
-  //
-  //     4 * 4 * sizeof(float)
-  //       = 64 bytes
-  //
-  // This is a compiler-stream integration test, not a fake 32x32 GEMM.
+  // The same combined operand slab is used for every physical instance.
+  // Geometry and result size are derived from TEST_DEVICE_ID.
   // --------------------------------------------------------------------
 
   localparam integer NUM_JOBS = 1;
@@ -78,7 +93,7 @@ module tb_systolic_dma_top_8x8 #(
   localparam [63:0] C_BASE_START = 64'h0000_0000_0000_3000;
 
   localparam integer A_SLAB_BYTES = 32'h800;
-  localparam integer C_TILE_BYTES = 8 * 8 * 4;
+  localparam integer C_TILE_BYTES = RESULT_BYTES;
 
   // --------------------------------------------------------------------
   // Clock / reset
@@ -344,10 +359,10 @@ module tb_systolic_dma_top_8x8 #(
     job_valid = 1'b0;
 
     job_id          = 32'd0;
-    job_device_id   = 32'd0;
+    job_device_id   = 32'(TEST_DEVICE_ID);
 
-    job_m           = 32'd8;
-    job_n           = 32'd8;
+    job_m           = 32'(TEST_DIM);
+    job_n           = 32'(TEST_DIM);
     job_k           = 32'(JOB_K);
 
     job_start_cycle = 32'd0;
@@ -366,10 +381,10 @@ module tb_systolic_dma_top_8x8 #(
 
       job_id = 32'(100 + current_job);
 
-      job_device_id = 32'd0;
+      job_device_id = 32'(TEST_DEVICE_ID);
 
-      job_m = 32'd8;
-      job_n = 32'd8;
+      job_m = 32'(TEST_DIM);
+      job_n = 32'(TEST_DIM);
       job_k = 32'(JOB_K);
 
       /*
@@ -1131,7 +1146,7 @@ module tb_systolic_dma_top_8x8 #(
     //   operand fetch:    RX_BYTES / 16 beats
     //                     grouped into 16-beat bursts
     //
-    //   result readback:  4 beats
+    //   result readback:  RESULT_BEATS beats
     //                     one read burst
     //
     // Only reached if TARGET 1 passed.
@@ -1145,7 +1160,7 @@ module tb_systolic_dma_top_8x8 #(
       if (ar_count ==
             NUM_JOBS * (((RX_BYTES / 16) / 16) + 1) &&
           r_count ==
-            NUM_JOBS * ((RX_BYTES / 16) + 16)) begin
+            NUM_JOBS * ((RX_BYTES / 16) + RESULT_BEATS)) begin
 
         $display(
           "[PASS] SHARED DMA READ: AR=%0d R=%0d",
@@ -1161,7 +1176,7 @@ module tb_systolic_dma_top_8x8 #(
           ar_count,
           NUM_JOBS * (((RX_BYTES / 16) / 16) + 1),
           r_count,
-          NUM_JOBS * ((RX_BYTES / 16) + 16)
+          NUM_JOBS * ((RX_BYTES / 16) + RESULT_BEATS)
         );
 
         diagnostic_failed = 1'b1;
@@ -1183,7 +1198,7 @@ module tb_systolic_dma_top_8x8 #(
       $display("[TARGET 3] WRITEBACK AXI TRANSACTIONS");
 
       if (wb_aw_count == NUM_JOBS &&
-          wb_w_count == NUM_JOBS * 16 &&
+          wb_w_count == NUM_JOBS * RESULT_BEATS &&
           wb_b_count == NUM_JOBS) begin
 
         $display(
@@ -1206,7 +1221,7 @@ module tb_systolic_dma_top_8x8 #(
         $display(
           "       expected: AW=%0d W=%0d B=%0d",
           NUM_JOBS,
-          NUM_JOBS * 16,
+          NUM_JOBS * RESULT_BEATS,
           NUM_JOBS
         );
 
@@ -1312,11 +1327,11 @@ module tb_systolic_dma_top_8x8 #(
            result_j = result_j + 1) begin
 
         for (result_i = 0;
-             result_i < 64;
+             result_i < RESULT_WORDS;
              result_i = result_i + 1) begin
 
-          result_row = result_i / 8;
-          result_col = result_i % 8;
+          result_row = result_i / TEST_DIM;
+          result_col = result_i % TEST_DIM;
 
           result_word_addr =
               (ref_job_c_base(result_j) / 4) + result_i;
@@ -1361,7 +1376,7 @@ module tb_systolic_dma_top_8x8 #(
 
         $display(
           "[PASS] RESULT DATA: all %0d output words correct.",
-          NUM_JOBS * 64
+          NUM_JOBS * RESULT_WORDS
         );
 
       end
@@ -1370,7 +1385,7 @@ module tb_systolic_dma_top_8x8 #(
         $display(
           "[FAIL] RESULT DATA: %0d/%0d output words mismatch.",
           result_errors,
-          NUM_JOBS * 64
+          NUM_JOBS * RESULT_WORDS
         );
 
         diagnostic_failed = 1'b1;

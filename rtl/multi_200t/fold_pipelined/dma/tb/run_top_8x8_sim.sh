@@ -49,6 +49,13 @@ NINV="${3:-1}"
 # Legacy mode defaults it to KMAX and remains unchanged.
 JOB_K="${5:-$KMAX}"
 
+# Physical accelerator selected by the test descriptor:
+#   0 -> 8x8 #0
+#   1 -> 4x4 #0
+#   2 -> 4x4 #1
+#   3 -> 4x4 #2
+TEST_DEVICE_ID="${6:-0}"
+
 SCHEDULER_GEN=""
 if [[ "${4:-}" == "external" ]]; then
   SCHEDULER_GEN="-GUSE_EXTERNAL_SCHEDULER=1"
@@ -73,6 +80,7 @@ command -v verilator >/dev/null 2>&1 || {
 rm -rf "$OUT"
 verilator --binary -Wno-fatal --timing --public-flat-rw $GEN $SCHEDULER_GEN \
     -GJOB_K=$JOB_K \
+    -GTEST_DEVICE_ID=$TEST_DEVICE_ID \
     -DFP_MUL_LAT=8 -DFP_ADD_LAT=11 \
     --top-module tb_systolic_dma_top_8x8 -o tbrun --Mdir "$OUT" \
     "$HERE/tb_systolic_dma_top_8x8.sv" \
@@ -120,7 +128,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN $SCHEDULER_GEN \
 }
 
 if [[ "${4:-}" == "external" ]]; then
-  EXTRA_ARGS=("${@:6}")
+  EXTRA_ARGS=("${@:7}")
 else
   EXTRA_ARGS=("${@:4}")
 fi

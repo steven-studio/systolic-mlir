@@ -495,8 +495,8 @@ module systolic_dma_top #(
   // scheduling cost remains a compiler-side responsibility.
   // -------------------------------------------------------------------------
 
-  wire [1:0] scheduler_accelerator_start;
-  wire [1:0] scheduler_accelerator_done;
+  wire [3:0] scheduler_accelerator_start;
+  wire [3:0] scheduler_accelerator_done;
 
   // -------------------------------------------------------------------------
   // Scheduler start pulse capture
@@ -509,10 +509,12 @@ module systolic_dma_top #(
   // -------------------------------------------------------------------------
 
   wire scheduler_fold_start_8x8;
-  wire scheduler_fold_start_4x4;
+  wire scheduler_fold_start_4x4_0;
+  wire scheduler_fold_start_4x4_1;
+  wire scheduler_fold_start_4x4_2;
 
-  logic scheduler_start_pending;
-  logic scheduler_start_pending_id;
+  logic       scheduler_start_pending;
+  logic [1:0] scheduler_start_pending_id;
 
   // Registered one-cycle replay pulse.
   //
@@ -526,8 +528,7 @@ module systolic_dma_top #(
   logic scheduler_start_replay;
 
   wire scheduler_start_request =
-      scheduler_accelerator_start[0] ||
-      scheduler_accelerator_start[1];
+      |scheduler_accelerator_start;
 
   // -------------------------------------------------------------------------
   // Single scheduler-release capture.
@@ -547,7 +548,7 @@ module systolic_dma_top #(
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       scheduler_start_pending    <= 1'b0;
-      scheduler_start_pending_id <= 1'b0;
+      scheduler_start_pending_id <= 2'd0;
       scheduler_start_replay     <= 1'b0;
     end
     else begin
@@ -559,9 +560,13 @@ module systolic_dma_top #(
         scheduler_start_pending <= 1'b1;
 
         if (scheduler_accelerator_start[0])
-          scheduler_start_pending_id <= 1'b0;
+          scheduler_start_pending_id <= 2'd0;
+        else if (scheduler_accelerator_start[1])
+          scheduler_start_pending_id <= 2'd1;
+        else if (scheduler_accelerator_start[2])
+          scheduler_start_pending_id <= 2'd2;
         else
-          scheduler_start_pending_id <= 1'b1;
+          scheduler_start_pending_id <= 2'd3;
       end
 
       // When P_GO is reached, convert the remembered scheduler event
@@ -580,14 +585,12 @@ module systolic_dma_top #(
   //
   // A live scheduler pulse is also allowed while P_GO is active, although
   // the normal external-scheduler path should normally use the replay pulse.
-  wire [1:0] scheduler_accelerator_start_delayed =
+  wire [3:0] scheduler_accelerator_start_delayed =
       scheduler_start_replay
-        ? (scheduler_start_pending_id == 1'b0
-            ? 2'b01
-            : 2'b10)
+        ? (4'b0001 << scheduler_start_pending_id)
         : ((phase == P_GO)
             ? scheduler_accelerator_start
-            : 2'b00);
+            : 4'b0000);
 
   wire scheduler_busy;
   wire scheduler_schedule_done;
@@ -596,12 +599,12 @@ module systolic_dma_top #(
   wire [31:0] scheduler_cycle_counter;
   wire [31:0] scheduler_active_start_cycle;
   wire [31:0] scheduler_active_compute_cycles;
-  wire [0:0]  scheduler_active_accelerator_id;
+  wire [1:0]  scheduler_active_accelerator_id;
 
   systolic_hw_scheduler #(
-    .NUM_ACCEL (2),
+    .NUM_ACCEL (4),
     .CYCLE_W   (32),
-    .ACC_W     (1)
+    .ACC_W     (2)
   ) u_hw_scheduler (
     .clk                    (ui_clk),
     .rst                    (!ui_rst_n),
@@ -609,7 +612,7 @@ module systolic_dma_top #(
     .desc_valid             (job_fire),
     .desc_ready             (scheduler_desc_ready),
 
-    .desc_accelerator_id    (effective_job_device_id[0]),
+    .desc_accelerator_id    (effective_job_device_id[1:0]),
     .desc_start_cycle       (effective_job_start_cycle),
     .desc_compute_cycles    (effective_job_est_cycles),
 
@@ -627,7 +630,9 @@ module systolic_dma_top #(
   );
 
   wire scheduler_done_8x8;
-  wire scheduler_done_4x4;
+  wire scheduler_done_4x4_0;
+  wire scheduler_done_4x4_1;
+  wire scheduler_done_4x4_2;
 
   systolic_hw_scheduler_adapter #(
     .CYCLE_W (32)
@@ -644,68 +649,55 @@ module systolic_dma_top #(
 
   systolic_hw_scheduler_adapter #(
     .CYCLE_W (32)
-  ) u_scheduler_adapter_4x4 (
+  ) u_scheduler_adapter_4x4_0 (
     .clk               (ui_clk),
     .rst               (!ui_rst_n),
 
     .accelerator_start (scheduler_accelerator_start_delayed[1]),
-    .accelerator_done  (scheduler_done_4x4),
+    .accelerator_done  (scheduler_done_4x4_0),
 
-    .fold_start        (scheduler_fold_start_4x4),
-    .c_done            (c_valid_out_4x4)
+    .fold_start        (scheduler_fold_start_4x4_0),
+    .c_done            (c_valid_out_4x4_0)
+  );
+
+  systolic_hw_scheduler_adapter #(
+    .CYCLE_W (32)
+  ) u_scheduler_adapter_4x4_1 (
+    .clk               (ui_clk),
+    .rst               (!ui_rst_n),
+
+    .accelerator_start (scheduler_accelerator_start_delayed[2]),
+    .accelerator_done  (scheduler_done_4x4_1),
+
+    .fold_start        (scheduler_fold_start_4x4_1),
+    .c_done            (c_valid_out_4x4_1)
+  );
+
+  systolic_hw_scheduler_adapter #(
+    .CYCLE_W (32)
+  ) u_scheduler_adapter_4x4_2 (
+    .clk               (ui_clk),
+    .rst               (!ui_rst_n),
+
+    .accelerator_start (scheduler_accelerator_start_delayed[3]),
+    .accelerator_done  (scheduler_done_4x4_2),
+
+    .fold_start        (scheduler_fold_start_4x4_2),
+    .c_done            (c_valid_out_4x4_2)
   );
 
   assign scheduler_accelerator_done[0] = scheduler_done_8x8;
-  assign scheduler_accelerator_done[1] = scheduler_done_4x4;
+  assign scheduler_accelerator_done[1] = scheduler_done_4x4_0;
+  assign scheduler_accelerator_done[2] = scheduler_done_4x4_1;
+  assign scheduler_accelerator_done[3] = scheduler_done_4x4_2;
 
-  // Only the selected physical device may receive the scheduler release.
+  // Only the selected physical instance may receive the scheduler release.
   wire scheduler_fold_start_selected =
-      select_8x8 ? scheduler_fold_start_8x8 :
-      select_4x4 ? scheduler_fold_start_4x4 :
-                   1'b0;
-
-  // DEBUG: observe raw 4x4 scheduler protocol inputs.
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i) begin
-      $display(
-        "DEV4RAW t=%0t phase=%0d rst_i=%b start_delayed=%b fold_start=%b c_valid=%b done=%b sched_done=%b",
-        $time,
-        phase,
-        rst_i,
-        scheduler_accelerator_start_delayed[1],
-        scheduler_fold_start_4x4,
-        c_valid_out_4x4,
-        scheduler_done_4x4,
-        scheduler_schedule_done
-      );
-    end
-  end
-
-  // DEBUG: external scheduler -> adapter -> accelerator protocol.
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (scheduler_accelerator_start != 2'b00 ||
-         scheduler_accelerator_start_delayed != 2'b00 ||
-         scheduler_start_pending ||
-         scheduler_fold_start_8x8 ||
-         scheduler_fold_start_4x4 ||
-         fold_start)) begin
-      $display(
-        "PROTODBG t=%0t phase=%0d sched_start=%b delayed=%b pending=%0b replay=%0b pending_id=%0d fs8=%0b fs4=%0b selected=%0b fold=%0b",
-        $time,
-        phase,
-        scheduler_accelerator_start,
-        scheduler_accelerator_start_delayed,
-        scheduler_start_pending,
-        scheduler_start_replay,
-        scheduler_start_pending_id,
-        scheduler_fold_start_8x8,
-        scheduler_fold_start_4x4,
-        scheduler_fold_start_selected,
-        fold_start
-      );
-    end
-  end
+      select_8x8   ? scheduler_fold_start_8x8   :
+      select_4x4_0 ? scheduler_fold_start_4x4_0 :
+      select_4x4_1 ? scheduler_fold_start_4x4_1 :
+      select_4x4_2 ? scheduler_fold_start_4x4_2 :
+                     1'b0;
 
   // Selected accelerator start signal.
   //
@@ -756,21 +748,37 @@ module systolic_dma_top #(
   // device_id is an opaque physical-instance identifier.
   // Geometry is NOT encoded into the scheduler protocol.
   //
-  // These IDs describe the current RTL prototype only:
-  //   0 -> u_acc_8x8
-  //   1 -> u_acc_4x4
+  // These IDs describe the 1x8x8 + 3x4x4 physical fleet:
+  //   0 -> 8x8 instance 0
+  //   1 -> 4x4 instance 0
+  //   2 -> 4x4 instance 1
+  //   3 -> 4x4 instance 2
   //
-  // A larger heterogeneous fleet can replace this with a
-  // parameterized device table without changing the job ABI.
+  // Geometry and physical-instance identity are deliberately separate.
+  // All three 4x4 instances share the same geometry but retain distinct
+  // scheduler-visible device IDs.
   // ----------------------------------------------------------
-  localparam logic [31:0] DEVICE_ID_8X8 = 32'd0;
-  localparam logic [31:0] DEVICE_ID_4X4 = 32'd1;
+  localparam logic [31:0] DEVICE_ID_8X8   = 32'd0;
+  localparam logic [31:0] DEVICE_ID_4X4_0 = 32'd1;
+  localparam logic [31:0] DEVICE_ID_4X4_1 = 32'd2;
+  localparam logic [31:0] DEVICE_ID_4X4_2 = 32'd3;
 
   wire select_8x8 =
       (job_device_id_reg == DEVICE_ID_8X8);
 
+  wire select_4x4_0 =
+      (job_device_id_reg == DEVICE_ID_4X4_0);
+
+  wire select_4x4_1 =
+      (job_device_id_reg == DEVICE_ID_4X4_1);
+
+  wire select_4x4_2 =
+      (job_device_id_reg == DEVICE_ID_4X4_2);
+
+  // Geometry-level selection.  Existing geometry-dependent logic may use
+  // this signal; instance-dependent dispatch must use select_4x4_[0-2].
   wire select_4x4 =
-      (job_device_id_reg == DEVICE_ID_4X4);
+      select_4x4_0 || select_4x4_1 || select_4x4_2;
   logic [31:0] job_n_reg;
   logic [31:0] job_k_reg;
   logic [31:0] job_start_cycle_reg;
@@ -1893,8 +1901,10 @@ module systolic_dma_top #(
   //
   // Current prototype device table:
   //
-  //   DEVICE_ID_8X8 -> 64 result words -> 256 bytes -> 16 AXI beats
-  //   DEVICE_ID_4X4 -> 16 result words ->  64 bytes ->  4 AXI beats
+  //   DEVICE_ID_8X8   -> 64 result words -> 256 bytes -> 16 AXI beats
+  //   DEVICE_ID_4X4_0 -> 16 result words ->  64 bytes ->  4 AXI beats
+  //   DEVICE_ID_4X4_1 -> 16 result words ->  64 bytes ->  4 AXI beats
+  //   DEVICE_ID_4X4_2 -> 16 result words ->  64 bytes ->  4 AXI beats
   //
   // These are device properties.  The scheduler only supplies
   // device_id; it does not supply "use_4x4".
@@ -2817,7 +2827,10 @@ module systolic_dma_top #(
       if (scheduler_accelerator_start_delayed[1])
         external_debug_sticky[29] <= 1'b1;
 
-      if (scheduler_fold_start_4x4)
+      // bit30: any physical 4x4 instance received its fold-start event
+      if (scheduler_fold_start_4x4_0 ||
+          scheduler_fold_start_4x4_1 ||
+          scheduler_fold_start_4x4_2)
         external_debug_sticky[30] <= 1'b1;
 
       if (state == ST_FEED)
@@ -3182,50 +3195,40 @@ module systolic_dma_top #(
 
 
 
-  (* keep_hierarchy = "yes", dont_touch = "yes" *)
-  logic        a_valid_4x4 [0:3];
-
-  (* keep_hierarchy = "yes", dont_touch = "yes" *)
-  logic        b_valid_4x4 [0:3];
-
-  (* keep_hierarchy = "yes", dont_touch = "yes" *)
-  logic [31:0] c_out_4x4 [0:3][0:3];
-
-  (* keep_hierarchy = "yes", dont_touch = "yes" *)
-  logic        c_valid_out_4x4;
-
   // ----------------------------------------------------------
-  // Physical 4x4 device input data.
+  // Three independent physical 4x4 accelerator instances.
   //
-  // The common feeder produces N=8 lanes.  The 4x4 physical
-  // device consumes the first four lanes; CONNECT_4X4_DEVICE
-  // below performs that explicit lane mapping.
+  // All three instances share the same geometry and input data buses,
+  // but device selection gates their valid signals independently.
+  // Physical-instance identity therefore remains distinct from geometry.
   // ----------------------------------------------------------
   logic [31:0] a_in_4x4 [0:3];
   logic [31:0] b_in_4x4 [0:3];
 
   generate
     for (genvar d = 0; d < 4; d = d + 1) begin : CONNECT_4X4_DEVICE
-      assign a_in_4x4[d]    = a_in[d];
-      assign b_in_4x4[d]    = b_in[d];
-      assign a_valid_4x4[d] = a_valid_in[d];
-      assign b_valid_4x4[d] = b_valid_in[d];
+      assign a_in_4x4[d] = a_in[d];
+      assign b_in_4x4[d] = b_in[d];
     end
   endgenerate
 
-  // ----------------------------------------------------------
-  // Device-dispatch valid signals.
-  //
-  // The feeder continues to produce the common input stream.
-  // Device selection decides which physical accelerator consumes
-  // the stream.  Data itself is still shared at this stage;
-  // result routing is handled separately.
-  // ----------------------------------------------------------
   logic a_valid_to_8x8 [0:N-1];
   logic b_valid_to_8x8 [0:N-1];
 
-  logic a_valid_to_4x4 [0:3];
-  logic b_valid_to_4x4 [0:3];
+  logic a_valid_to_4x4_0 [0:3];
+  logic b_valid_to_4x4_0 [0:3];
+  logic a_valid_to_4x4_1 [0:3];
+  logic b_valid_to_4x4_1 [0:3];
+  logic a_valid_to_4x4_2 [0:3];
+  logic b_valid_to_4x4_2 [0:3];
+
+  logic [31:0] c_out_4x4_0 [0:3][0:3];
+  logic [31:0] c_out_4x4_1 [0:3][0:3];
+  logic [31:0] c_out_4x4_2 [0:3][0:3];
+
+  logic c_valid_out_4x4_0;
+  logic c_valid_out_4x4_1;
+  logic c_valid_out_4x4_2;
 
   generate
     for (genvar dispatch_d = 0;
@@ -3243,36 +3246,70 @@ module systolic_dma_top #(
     for (genvar dispatch_d4 = 0;
          dispatch_d4 < 4;
          dispatch_d4 = dispatch_d4 + 1) begin : DISPATCH_4X4_VALID
-      assign a_valid_to_4x4[dispatch_d4] =
-          a_valid_in[dispatch_d4] && select_4x4;
 
-      assign b_valid_to_4x4[dispatch_d4] =
-          b_valid_in[dispatch_d4] && select_4x4;
+      assign a_valid_to_4x4_0[dispatch_d4] =
+          a_valid_in[dispatch_d4] && select_4x4_0;
+      assign b_valid_to_4x4_0[dispatch_d4] =
+          b_valid_in[dispatch_d4] && select_4x4_0;
+
+      assign a_valid_to_4x4_1[dispatch_d4] =
+          a_valid_in[dispatch_d4] && select_4x4_1;
+      assign b_valid_to_4x4_1[dispatch_d4] =
+          b_valid_in[dispatch_d4] && select_4x4_1;
+
+      assign a_valid_to_4x4_2[dispatch_d4] =
+          a_valid_in[dispatch_d4] && select_4x4_2;
+      assign b_valid_to_4x4_2[dispatch_d4] =
+          b_valid_in[dispatch_d4] && select_4x4_2;
     end
   endgenerate
 
-  /*
-   * Real 4x4 physical device.
-   *
-   * This is deliberately independent from u_array.
-   */
-  (* keep_hierarchy = "yes", dont_touch = "yes" *)
+  (* keep_hierarchy = "yes" *)
   systolic_array #(
     .N        (4),
     .DATA_W   (32),
     .ACC_BANKS(16)
-  ) u_acc_4x4 (
-    .clk          (ui_clk),
-    .rst          (rst_i),
+  ) u_acc_4x4_0 (
+    .clk         (ui_clk),
+    .rst         (rst_i),
+    .a_in        (a_in_4x4),
+    .b_in        (b_in_4x4),
+    .a_valid_in  (a_valid_to_4x4_0),
+    .b_valid_in  (b_valid_to_4x4_0),
+    .c_valid_out (c_valid_out_4x4_0),
+    .c_out       (c_out_4x4_0)
+  );
 
-    .a_in         (a_in_4x4),
-    .b_in         (b_in_4x4),
+  (* keep_hierarchy = "yes" *)
+  systolic_array #(
+    .N        (4),
+    .DATA_W   (32),
+    .ACC_BANKS(16)
+  ) u_acc_4x4_1 (
+    .clk         (ui_clk),
+    .rst         (rst_i),
+    .a_in        (a_in_4x4),
+    .b_in        (b_in_4x4),
+    .a_valid_in  (a_valid_to_4x4_1),
+    .b_valid_in  (b_valid_to_4x4_1),
+    .c_valid_out (c_valid_out_4x4_1),
+    .c_out       (c_out_4x4_1)
+  );
 
-    .a_valid_in   (a_valid_to_4x4),
-    .b_valid_in   (b_valid_to_4x4),
-
-    .c_valid_out  (c_valid_out_4x4),
-    .c_out        (c_out_4x4)
+  (* keep_hierarchy = "yes" *)
+  systolic_array #(
+    .N        (4),
+    .DATA_W   (32),
+    .ACC_BANKS(16)
+  ) u_acc_4x4_2 (
+    .clk         (ui_clk),
+    .rst         (rst_i),
+    .a_in        (a_in_4x4),
+    .b_in        (b_in_4x4),
+    .a_valid_in  (a_valid_to_4x4_2),
+    .b_valid_in  (b_valid_to_4x4_2),
+    .c_valid_out (c_valid_out_4x4_2),
+    .c_out       (c_out_4x4_2)
   );
 
   systolic_array #(
@@ -3302,8 +3339,8 @@ module systolic_dma_top #(
   //   c_valid_selected = c_valid_out
   //   selected geometry = 8x8
   //
-  // 4x4 device:
-  //   c_valid_selected = c_valid_out_4x4
+  // 4x4 devices:
+  //   c_valid_selected = completion of the selected 4x4 instance
   //   selected geometry = 4x4
   //
   // The C data itself is intentionally NOT flattened into the 8x8 result
@@ -3314,9 +3351,15 @@ module systolic_dma_top #(
 
   logic c_valid_selected;
 
+  wire c_valid_out_4x4_selected =
+      select_4x4_0 ? c_valid_out_4x4_0 :
+      select_4x4_1 ? c_valid_out_4x4_1 :
+      select_4x4_2 ? c_valid_out_4x4_2 :
+                     1'b0;
+
   assign c_valid_selected =
       select_8x8 ? c_valid_out :
-      select_4x4 ? c_valid_out_4x4 :
+      select_4x4 ? c_valid_out_4x4_selected :
                    1'b0;
 
 
@@ -3351,115 +3394,6 @@ module systolic_dma_top #(
   end
 
 
-  // -------------------------------------------------------------------------
-  // DEBUG: observe physical accelerator dispatch and PE00 input/product.
-  //
-  // Observation only. No functional signal is modified.
-  //
-  // Distinguishes:
-  //   1. wrong physical accelerator selected;
-  //   2. selected accelerator receives valid inputs but PE00 does not produce;
-  //   3. PE00 produces but accumulation/reduction does not publish C.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i) begin
-      if (state == ST_FEED && feed_t <= FEED_W'(5)) begin
-
-        $display(
-          "ACC8DBG t=%0t t=%0d sel8=%b sel4=%b | aV=%b bV=%b a=%h b=%h | prodV=%b prod=%h",
-          $time,
-          feed_t,
-          select_8x8,
-          select_4x4,
-          a_valid_to_8x8[0],
-          b_valid_to_8x8[0],
-          a_in[0],
-          b_in[0],
-          u_acc_8x8.ROW[0].COL[0].u_pe.product_valid,
-          u_acc_8x8.ROW[0].COL[0].u_pe.product
-        );
-
-        $display(
-          "ACC4DBG t=%0t t=%0d sel8=%b sel4=%b | aV=%b bV=%b a=%h b=%h | prodV=%b prod=%h",
-          $time,
-          feed_t,
-          select_8x8,
-          select_4x4,
-          a_valid_to_4x4[0],
-          b_valid_to_4x4[0],
-          a_in_4x4[0],
-          b_in_4x4[0],
-          u_acc_4x4.ROW[0].COL[0].u_pe.product_valid,
-          u_acc_4x4.ROW[0].COL[0].u_pe.product
-        );
-
-      end
-    end
-  end
-
-
-
-  // -------------------------------------------------------------------------
-  // DEBUG: full 4x4 PE00 pipeline observation.
-  //
-  // Observe the selected 4x4 accelerator after the feeder phase:
-  //   product
-  //   accumulation
-  //   reduction
-  //   final PE result
-  //
-  // Observation only. No functional signal is modified.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && select_4x4) begin
-
-      if (u_acc_4x4.ROW[0].COL[0].u_pe.product_valid ||
-          u_acc_4x4.ROW[0].COL[0].u_pe.accum_add_valid ||
-          u_acc_4x4.ROW[0].COL[0].u_pe.acc_handoff ||
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_add_valid ||
-          u_acc_4x4.ROW[0].COL[0].u_pe.acc_valid_out) begin
-
-        $display(
-          "PE4DBG t=%0t prodV=%b prod=%h prod_bank=%0d | accAddV=%b accAdd=%h accWb=%0d handoff=%b | redState=%0d redSet=%0d stride=%0d todo=%0d | redAddV=%b redAdd=%h redWb=%0d | accV=%b acc=%h",
-          $time,
-          u_acc_4x4.ROW[0].COL[0].u_pe.product_valid,
-          u_acc_4x4.ROW[0].COL[0].u_pe.product,
-          u_acc_4x4.ROW[0].COL[0].u_pe.product_bank,
-          u_acc_4x4.ROW[0].COL[0].u_pe.accum_add_valid,
-          u_acc_4x4.ROW[0].COL[0].u_pe.accum_add_result,
-          u_acc_4x4.ROW[0].COL[0].u_pe.accum_wb_bank,
-          u_acc_4x4.ROW[0].COL[0].u_pe.acc_handoff,
-          u_acc_4x4.ROW[0].COL[0].u_pe.red_state,
-          u_acc_4x4.ROW[0].COL[0].u_pe.red_set,
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_stride,
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_todo,
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_add_valid,
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_add_result,
-          u_acc_4x4.ROW[0].COL[0].u_pe.reduce_wb_i,
-          u_acc_4x4.ROW[0].COL[0].u_pe.acc_valid_out,
-          u_acc_4x4.ROW[0].COL[0].u_pe.acc_out
-        );
-
-      end
-    end
-  end
-
-  // -------------------------------------------------------------------------
-  // DEBUG: observe 4x4 array publication.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && c_valid_out_4x4) begin
-      $display(
-        "ARRAY4OUTDBG t=%0t c_valid=1 c00=%h c01=%h c10=%h c33=%h",
-        $time,
-        c_out_4x4[0][0],
-        c_out_4x4[0][1],
-        c_out_4x4[1][0],
-        c_out_4x4[3][3]
-      );
-    end
-  end
-
   // ---- store final results ------------------------------------------------
   //
   // C is kept as an N x N backing store because the existing writeback path
@@ -3467,8 +3401,10 @@ module systolic_dma_top #(
   //
   // The producer, however, is selected by ingress_job_device_id:
   //
-  //   DEVICE_ID_8X8 -> u_acc_8x8 -> N x N results
-  //   DEVICE_ID_4X4 -> u_acc_4x4 -> 4 x 4 results
+  //   DEVICE_ID_8X8   -> u_acc_8x8   -> N x N results
+  //   DEVICE_ID_4X4_0 -> u_acc_4x4_0 -> 4 x 4 results
+  //   DEVICE_ID_4X4_1 -> u_acc_4x4_1 -> 4 x 4 results
+  //   DEVICE_ID_4X4_2 -> u_acc_4x4_2 -> 4 x 4 results
   //
   // Do not let the 8x8 storage shape imply the physical device shape.
   // The next writeback step will use the selected device geometry to decide
@@ -3514,17 +3450,41 @@ module systolic_dma_top #(
       // common C backing store.  Physical result size / placement
       // in DDR is handled by the device-aware writeback stage.
       // ----------------------------------------------------------
-      else if (select_4x4 && c_valid_out_4x4) begin
+      else if (select_4x4_0 && c_valid_out_4x4_0) begin
         for (rr = 0; rr < 4; rr = rr + 1)
           for (cc = 0; cc < 4; cc = cc + 1)
-            C[rr][cc] <= c_out_4x4[rr][cc];
+            C[rr][cc] <= c_out_4x4_0[rr][cc];
 
         $display(
-          "CDBG_RAW device=4x4 C00=%h C01=%h C10=%h C33=%h",
-          c_out_4x4[0][0],
-          c_out_4x4[0][1],
-          c_out_4x4[1][0],
-          c_out_4x4[3][3]
+          "CDBG_RAW device=4x4_0 C00=%h C01=%h C10=%h C33=%h",
+          c_out_4x4_0[0][0], c_out_4x4_0[0][1],
+          c_out_4x4_0[1][0], c_out_4x4_0[3][3]
+        );
+
+        c_done <= 1'b1;
+      end
+      else if (select_4x4_1 && c_valid_out_4x4_1) begin
+        for (rr = 0; rr < 4; rr = rr + 1)
+          for (cc = 0; cc < 4; cc = cc + 1)
+            C[rr][cc] <= c_out_4x4_1[rr][cc];
+
+        $display(
+          "CDBG_RAW device=4x4_1 C00=%h C01=%h C10=%h C33=%h",
+          c_out_4x4_1[0][0], c_out_4x4_1[0][1],
+          c_out_4x4_1[1][0], c_out_4x4_1[3][3]
+        );
+
+        c_done <= 1'b1;
+      end
+      else if (select_4x4_2 && c_valid_out_4x4_2) begin
+        for (rr = 0; rr < 4; rr = rr + 1)
+          for (cc = 0; cc < 4; cc = cc + 1)
+            C[rr][cc] <= c_out_4x4_2[rr][cc];
+
+        $display(
+          "CDBG_RAW device=4x4_2 C00=%h C01=%h C10=%h C33=%h",
+          c_out_4x4_2[0][0], c_out_4x4_2[0][1],
+          c_out_4x4_2[1][0], c_out_4x4_2[3][3]
         );
 
         c_done <= 1'b1;
