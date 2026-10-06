@@ -26,7 +26,8 @@ namespace {
 static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
                              Value tensorVal, RankedTensorType ty) {
   auto memrefTy = MemRefType::get(ty.getShape(), ty.getElementType());
-  return rewriter.create<bufferization::ToMemrefOp>(loc, memrefTy, tensorVal);
+  return bufferization::ToBufferOp::create(
+      rewriter, loc, memrefTy, tensorVal);
 }
 
 static Value memrefToLLVMPtr(PatternRewriter &rewriter, Location loc,
@@ -285,8 +286,8 @@ struct Conv2DToFpgaPass
     // producer present or absent) are mutually exclusive.
     patterns.add<Conv2DWithPadToFpgaPattern>(&getContext());
     patterns.add<Conv2DToFpgaPattern>(&getContext());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                             std::move(patterns))))
+    if (failed(applyPatternsGreedily(getOperation(),
+                                      std::move(patterns))))
       signalPassFailure();
   }
 };

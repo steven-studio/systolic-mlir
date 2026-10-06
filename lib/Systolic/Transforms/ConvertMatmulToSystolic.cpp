@@ -97,8 +97,8 @@ struct ConvertMatmulToSystolicPass
     RewritePatternSet patterns(&getContext());
     patterns.add<MatmulToSystolicPattern>(&getContext(), rows.getValue(),
                                            cols.getValue());
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                             std::move(patterns))))
+    if (failed(applyPatternsGreedily(getOperation(),
+                                      std::move(patterns))))
       signalPassFailure();
   }
 

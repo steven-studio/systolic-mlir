@@ -137,7 +137,8 @@ struct TileToFpgaPattern : public OpRewritePattern<MatmulTileOp> {
     // Materialize operands as memrefs.
     auto toMemref = [&](Value t, RankedTensorType ty) {
       auto mt = MemRefType::get(ty.getShape(), ty.getElementType());
-      return rewriter.create<bufferization::ToMemrefOp>(loc, mt, t).getResult();
+      return bufferization::ToBufferOp::create(
+          rewriter, loc, mt, t);
     };
     Value aMem = toMemref(op.getA(), aTy);
     Value bMem = toMemref(op.getB(), bTy);
@@ -216,7 +217,7 @@ struct SystolicTileToFpgaPass
 
     RewritePatternSet patterns(&getContext());
     patterns.add<TileToFpgaPattern>(&getContext(), deviceIds);
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns))))
+    if (failed(applyPatternsGreedily(module, std::move(patterns))))
       signalPassFailure();
   }
 };

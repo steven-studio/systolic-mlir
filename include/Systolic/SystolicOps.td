@@ -35,7 +35,11 @@ def Systolic_DataflowAttr : EnumAttr<Systolic_Dialect, Systolic_DataflowKind, "d
 // systolic.device -- hardware description of one accelerator instance
 //===----------------------------------------------------------------------===//
 
-def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
+def Systolic_DeviceOp : Systolic_Op<"device", [
+  Symbol,
+  SymbolName,
+  SymbolVisibility
+]> {
   let summary = "Declares one heterogeneous accelerator instance and its "
                 "fixed hardware geometry.";
   let description = [{
@@ -94,11 +98,19 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     // costed with H = 0, which is exactly the geometric model. Comparing
     // the calibrated map against the geometric one is therefore a matter
     // of one attribute.
-    OptionalAttr<I64Attr>:$tile_overhead
+    OptionalAttr<I64Attr>:$tile_overhead,
+    OptionalAttr<StrAttr>:$sym_visibility
   );
 
   let assemblyFormat = "$sym_name `rows` `=` $rows `cols` `=` $cols "
-      "`dataflow` `=` $dataflow attr-dict";
+      "`dataflow` `=` $dataflow "
+      "(`k_max` `=` $k_max^)? "
+      "(`l1_bytes` `=` $l1_bytes^)? "
+      "(`clock_hz` `=` $clock_hz^)? "
+      "(`dma_bytes_per_cycle` `=` $dma_bytes_per_cycle^)? "
+      "(`tile_overhead` `=` $tile_overhead^)? "
+      "(`sym_visibility` `=` $sym_visibility^)? "
+      "attr-dict";
 }
 
 //===----------------------------------------------------------------------===//
@@ -223,7 +235,14 @@ def Systolic_MatmulTileOp : Systolic_Op<"matmul_tile",
   let hasVerifier = 1;   // 檢查 a=m×k, b=k×n, c_in=m×n
 
   let assemblyFormat = [{
-    $a `,` $b `,` $c_in (`on` $device^)? attr-dict
+    $a `,` $b `,` $c_in
+    `m` `=` $m
+    `n` `=` $n
+    `k` `=` $k
+    (`on` $device^)?
+    (`est_cycles` `=` $est_cycles^)?
+    (`start_cycle` `=` $start_cycle^)?
+    attr-dict
     `:` `(` type($a) `,` type($b) `,` type($c_in) `)` `->` type($result)
   }];
 }
@@ -247,7 +266,8 @@ def Systolic_DmaOp : Systolic_Op<"dma"> {
     OptionalAttr<I64Attr>:$est_cycles
   );
 
-  let assemblyFormat = "$bytes (`on` $device^)? attr-dict";
+  let assemblyFormat = "$bytes (`on` $device^)? "
+      "(`est_cycles` `=` $est_cycles^)? attr-dict";
 }
 
 #endif // SYSTOLIC_OPS
