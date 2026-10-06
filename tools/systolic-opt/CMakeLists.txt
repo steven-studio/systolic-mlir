@@ -15,6 +15,17 @@ target_link_libraries(systolic-opt PRIVATE
   MLIRPass
   MLIRSupport
   MLIRTransforms
+  MLIRBufferizationTransforms
+  MLIRTensorTransforms
+  MLIRMemRefTransforms
+  MLIRMemRefToLLVM
+  MLIRArithToLLVM
+  MLIRIndexToLLVM
+  MLIRFuncToLLVM
+  MLIRAffineToStandard
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRReconcileUnrealizedCasts
 )
 
 mlir_check_all_link_libraries(systolic-opt)
