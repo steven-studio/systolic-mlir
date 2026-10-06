@@ -32,6 +32,14 @@ void registerSystolicSelectDevicePass();
 std::unique_ptr<Pass> createSystolicTileMatmulPass();
 void registerSystolicTileMatmulPass();
 
+std::unique_ptr<Pass> createSystolicBinarySearchTileMatmulPass();
+void registerSystolicBinarySearchTileMatmulPass();
+
+std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
+void registerSystolicMaterializeSchedulePass();
+
+void registerSystolicJobCodegenPass();
+
 std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
 void registerAffineMatmulToSystolicPass();
 
