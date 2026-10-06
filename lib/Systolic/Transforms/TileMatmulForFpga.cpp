@@ -1,11 +1,11 @@
 #include "Systolic/Passes.h"
+#include "Systolic/SystolicOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -16,58 +16,26 @@ using namespace mlir::systolic;
 namespace {
 
 // -----------------------------------------------------------------------
-// This pass lowers linalg.matmul into explicit MLIR tile loops that
-// dispatch each tile through a transport-neutral runtime call. The tiling,
-// boundary predicates, zero-padding and inter-tile accumulation are all
-// generated as inspectable IR rather than hidden inside a C library:
+// 阶段 4:把已经完成 physical accelerator mapping 的
+// systolic.matmul_tile lower 成对应的 FPGA runtime 呼叫。
 //
-//   scf.for %mi = 0 to ceil(M/8)
-//     scf.for %ni = 0 to ceil(N/8)
-//       <seed 8x8 accumulator from this tile of %C>
-//       scf.for %ki = 0 to ceil(K/64)
-//         %Kc = min(64, K - %ki*64)
-//         <fill 8 x %Kc A-tile from %A, boundary-checked, zero-padded>
-//         <fill %Kc x 8 B-tile from %B, boundary-checked, zero-padded>
-//         llvm.call @systolic_dispatch_matmul(%h, %Kc, %a, %b, %acc, %acc)
-//       <writeback accumulator into %C, boundary-checked>
+//   systolic.matmul_tile
+//       ... m = 4 n = 4 k = K on @acc_4x4_1
+//                    |
+//                    v
+//   llvm.call @fpga_matmul_tiled_auto_scheduled(
+//       4, K, 4, A_ptr, B_ptr, C_ptr)
 //
-// The pass only ever declares and calls systolic_dispatch_open and
-// systolic_dispatch_matmul -- never a UART-specific symbol -- so linking
-// the same compiled object against a different implementation of those two
-// swaps the backend with no change to the generated IR.
+// 本 pass 不负责 tile decomposition、device selection 或 scheduling。
+// 未标注 `on @acc_*` 的 matmul_tile 不得进入 FPGA backend。
 //
-// REVISION: was 4x4x4 tiles against systolic_dispatch_matmul4x4.
+// 当前 FPGA runtime 实作的是 4x4 physical accelerator。
+// K 维度可以大于 4；runtime 会沿 K 方向以 4-wide pieces
+// 进行内部 decomposition / accumulation。
 //
-// The array is 8x8 with a reduction depth supplied at run time (up to 64).
-// Emitting 4x4 tiles against it left three quarters of the PEs idle and
-// pinned the reduction at 4, which is precisely the capability the
-// runtime-K hardware rewrite added. Measured over the wire, a 4x4 tile
-// padded up to 8x8 sustains ~25 useful MAC/ms; a full 8x8x64 tile sustains
-// ~188.
-//
-// Three consequences worth keeping in view when editing:
-//
-//   * K is no longer padded. M and N still round up to 8 and their boundary
-//     tiles are zero-filled, because the array geometry is fixed; the K tail
-//     chunk instead sends exactly the depth that remains. Padding K would
-//     reduce this back to a fixed-depth accelerator.
-//
-//   * Scratch buffers are flat 1-D with an explicit row stride. The wire
-//     format wants A packed tightly as A[i*Kc + k]; a memref<8x64> would put
-//     row i at offset i*64, which coincides only when Kc == 64 -- correct for
-//     K a multiple of 64 and silently wrong otherwise.
-//
-//   * Tile fills are scf.for loops, not compile-time unrolled. Kc is a Value,
-//     so the trip count is not a constant and cannot be unrolled; and at 8x64
-//     an unrolled fill would emit 512 scf.if ops per operand. The loop
-//     overhead is irrelevant against ~23 ms of link time per tile.
-//
-// The accumulation order below is not a guess. The backend seeds its
-// accumulator with C_init and sums k ascending; that was measured against
-// the board after three other orderings were ruled out. It is what makes
-// the K-chunk loop exact -- each call consumes the previous call's output as
-// its C_init. Had the array folded C_init in at the end instead, this loop
-// would add C once per chunk, silently, and only for K > 64.
+// 实际 UART、4x4 tiling、zero-padding 与累加逻辑全部在
+// runtime/fpga_matmul_tiled.c 完成；本 pass 只负责将已经
+// physical-mapped 的 systolic.matmul_tile 接到 runtime。
 // -----------------------------------------------------------------------
 
 static Value tensorToMemref(PatternRewriter &rewriter, Location loc,
@@ -87,341 +55,323 @@ static Value memrefToLLVMPtr(PatternRewriter &rewriter, Location loc,
   return rewriter.create<LLVM::IntToPtrOp>(loc, ptrTy, idxAsI64);
 }
 
-static int64_t ceilDivConst(int64_t a, int64_t b) {
-  return (a + b - 1) / b;
-}
-
-struct TileMatmulForFpgaPattern : public OpRewritePattern<linalg::MatmulOp> {
+struct LowerSystolicMatmulTileToFpgaPattern
+    : public OpRewritePattern<MatmulTileOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  // Array geometry. Must track hls_rk.cfg and systolic_dispatch_new.h; a
-  // disagreement here surfaces as wrong numbers, not as a build failure.
-  static constexpr int64_t kTileR = 8;
-  static constexpr int64_t kTileC = 8;
-  static constexpr int64_t kTileKMax = 64;
+  LogicalResult matchAndRewrite(
+      MatmulTileOp op,
+      PatternRewriter &rewriter) const override {
 
-  // Copy an (nRows x nCols) window of `src` -- a 2-D memref of static shape
-  // (srcRows x srcCols) -- into the flat buffer `dest`, laid out row-major
-  // with `rowStride` elements per row. The window's top-left corner is the
-  // dynamic (rowOffset, colOffset). Positions outside the source are written
-  // as zero rather than read out of bounds.
-  //
-  // nRows, nCols and rowStride are Values because the K extent is only known
-  // at run time. rowStride is passed separately from nCols so a caller can
-  // pack a Kc-wide A tile tightly (stride == Kc) while a B tile keeps its
-  // full 8-wide rows (stride == 8) -- the two differ, and conflating them is
-  // the packing bug this signature exists to prevent.
-  void emitTileFillFlat(PatternRewriter &rewriter, Location loc, Value src,
-                        int64_t srcRows, int64_t srcCols, Value rowOffset,
-                        Value colOffset, Value nRows, Value nCols,
-                        Value rowStride, Value dest) const {
-    auto f32Ty = rewriter.getF32Type();
+    // ----------------------------------------------------------
+    // FPGA dispatch requires an explicit physical accelerator.
+    //
+    // An unassigned systolic.matmul_tile is still an intermediate
+    // compiler IR and must NOT bypass device selection/scheduling.
+    // ----------------------------------------------------------
 
-    Value zero = rewriter.create<arith::ConstantOp>(
-        loc, f32Ty, rewriter.getF32FloatAttr(0.0f));
-    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value cSrcRows = rewriter.create<arith::ConstantIndexOp>(loc, srcRows);
-    Value cSrcCols = rewriter.create<arith::ConstantIndexOp>(loc, srcCols);
+    FlatSymbolRefAttr deviceRef = op.getDeviceAttr();
 
-    auto rowLoop = rewriter.create<scf::ForOp>(loc, c0, nRows, c1);
-    {
-      OpBuilder::InsertionGuard g(rewriter);
-      rewriter.setInsertionPointToStart(rowLoop.getBody());
-
-      Value i = rowLoop.getInductionVar();
-      Value ridx = rewriter.create<arith::AddIOp>(loc, rowOffset, i);
-      Value rowOk = rewriter.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::slt, ridx, cSrcRows);
-      Value rowBase = rewriter.create<arith::MulIOp>(loc, i, rowStride);
-
-      auto colLoop = rewriter.create<scf::ForOp>(loc, c0, nCols, c1);
-      {
-        OpBuilder::InsertionGuard g2(rewriter);
-        rewriter.setInsertionPointToStart(colLoop.getBody());
-
-        Value k = colLoop.getInductionVar();
-        Value cidx = rewriter.create<arith::AddIOp>(loc, colOffset, k);
-        Value colOk = rewriter.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::slt, cidx, cSrcCols);
-        Value inBounds = rewriter.create<arith::AndIOp>(loc, rowOk, colOk);
-
-        // scf.if yielding a value, rather than a store in each branch: the
-        // load must not be hoisted out of the guard, and expressing it as a
-        // value makes that structural instead of a convention.
-        auto ifOp = rewriter.create<scf::IfOp>(loc, TypeRange{f32Ty}, inBounds,
-                                               /*withElseRegion=*/true);
-        {
-          OpBuilder::InsertionGuard g3(rewriter);
-          rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
-          Value loaded = rewriter.create<memref::LoadOp>(
-              loc, src, ValueRange{ridx, cidx});
-          rewriter.create<scf::YieldOp>(loc, ValueRange{loaded});
-        }
-        {
-          OpBuilder::InsertionGuard g3(rewriter);
-          rewriter.setInsertionPointToStart(&ifOp.getElseRegion().front());
-          rewriter.create<scf::YieldOp>(loc, ValueRange{zero});
-        }
-
-        Value flat = rewriter.create<arith::AddIOp>(loc, rowBase, k);
-        rewriter.create<memref::StoreOp>(loc, ifOp.getResult(0), dest,
-                                         ValueRange{flat});
-      }
+    if (!deviceRef) {
+      return op.emitError(
+          "DEBUG: systolic.matmul_tile has no assigned accelerator "
+          "(missing 'on @acc_*)'");
     }
-  }
 
-  // Write the flat 8x8 accumulator back into `dest` at the dynamic
-  // (rowOffset, colOffset), skipping positions past the true M x N shape.
-  void emitTileWritebackFlat(PatternRewriter &rewriter, Location loc,
-                             Value src, Value dest, int64_t dstRows,
-                             int64_t dstCols, Value rowOffset,
-                             Value colOffset) const {
-    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value cR = rewriter.create<arith::ConstantIndexOp>(loc, kTileR);
-    Value cC = rewriter.create<arith::ConstantIndexOp>(loc, kTileC);
-    Value cDstRows = rewriter.create<arith::ConstantIndexOp>(loc, dstRows);
-    Value cDstCols = rewriter.create<arith::ConstantIndexOp>(loc, dstCols);
-
-    auto rowLoop = rewriter.create<scf::ForOp>(loc, c0, cR, c1);
-    {
-      OpBuilder::InsertionGuard g(rewriter);
-      rewriter.setInsertionPointToStart(rowLoop.getBody());
-
-      Value i = rowLoop.getInductionVar();
-      Value ridx = rewriter.create<arith::AddIOp>(loc, rowOffset, i);
-      Value rowOk = rewriter.create<arith::CmpIOp>(
-          loc, arith::CmpIPredicate::slt, ridx, cDstRows);
-      Value rowBase = rewriter.create<arith::MulIOp>(loc, i, cC);
-
-      auto colLoop = rewriter.create<scf::ForOp>(loc, c0, cC, c1);
-      {
-        OpBuilder::InsertionGuard g2(rewriter);
-        rewriter.setInsertionPointToStart(colLoop.getBody());
-
-        Value j = colLoop.getInductionVar();
-        Value cidx = rewriter.create<arith::AddIOp>(loc, colOffset, j);
-        Value colOk = rewriter.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::slt, cidx, cDstCols);
-        Value inBounds = rewriter.create<arith::AndIOp>(loc, rowOk, colOk);
-
-        auto ifOp = rewriter.create<scf::IfOp>(loc, inBounds,
-                                               /*withElseRegion=*/false);
-        OpBuilder::InsertionGuard g3(rewriter);
-        rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
-
-        Value flat = rewriter.create<arith::AddIOp>(loc, rowBase, j);
-        Value val =
-            rewriter.create<memref::LoadOp>(loc, src, ValueRange{flat});
-        rewriter.create<memref::StoreOp>(loc, val, dest,
-                                         ValueRange{ridx, cidx});
-      }
+    auto module = op->getParentOfType<ModuleOp>();
+    if (!module) {
+      return op.emitError(
+          "DEBUG: systolic.matmul_tile is not inside a module");
     }
-  }
 
-  LogicalResult matchAndRewrite(linalg::MatmulOp op,
-                                PatternRewriter &rewriter) const override {
-    Value a = op.getInputs()[0];  // [M, K]
-    Value b = op.getInputs()[1];  // [K, N]
-    Value c = op.getOutputs()[0]; // [M, N]
+    auto device =
+        module.lookupSymbol<DeviceOp>(
+            deviceRef.getRootReference());
+
+    if (!device) {
+      return op.emitError(
+          "DEBUG: assigned accelerator does not resolve to a "
+          "systolic.device");
+    }
+
+    // ----------------------------------------------------------
+    // Scheduler boundary.
+    //
+    // FPGA lowering is allowed ONLY for a tile that has already
+    // gone through decomposition / device assignment / scheduling.
+    //
+    // Do not silently lower an unscheduled tile.
+    // ----------------------------------------------------------
+
+    IntegerAttr estCyclesAttr = op.getEstCyclesAttr();
+    IntegerAttr startCycleAttr = op.getStartCycleAttr();
+
+    if (!estCyclesAttr || !startCycleAttr) {
+      return op.emitError(
+          "DEBUG: FPGA lowering requires a scheduled "
+          "systolic.matmul_tile (missing est_cycles/start_cycle)");
+    }
+
+    const int64_t estCycles = estCyclesAttr.getInt();
+    const int64_t startCycle = startCycleAttr.getInt();
+
+    if (estCycles < 0 || startCycle < 0) {
+      return op.emitError(
+          "DEBUG: scheduled FPGA tile has invalid "
+          "est_cycles/start_cycle");
+    }
+
+    // ----------------------------------------------------------
+    // Registered physical FPGA geometries.
+    //
+    // A logical output tile must match the geometry of the physical
+    // accelerator selected by the compiler.
+    // ----------------------------------------------------------
+
+    const int64_t rows = device.getRows();
+    const int64_t cols = device.getCols();
+
+    const bool is4x4Device = rows == 4 && cols == 4;
+    const bool is8x8Device = rows == 8 && cols == 8;
+
+    if (!is4x4Device && !is8x8Device) {
+      return op.emitError(
+          "DEBUG: no FPGA backend registered for accelerator geometry");
+    }
+
+    const int64_t M = op.getM();
+    const int64_t K = op.getK();
+    const int64_t N = op.getN();
+
+    if (M != rows || N != cols) {
+      return op.emitError(
+          "DEBUG: logical tile geometry does not match assigned "
+          "physical accelerator");
+    }
+
+    if (K != 16) {
+      return op.emitError(
+          "DEBUG: scheduled FPGA backend currently requires k=16");
+    }
+
+    Value a = op.getA();
+    Value b = op.getB();
+    Value c = op.getCIn();
 
     auto aTy = llvm::dyn_cast<RankedTensorType>(a.getType());
     auto bTy = llvm::dyn_cast<RankedTensorType>(b.getType());
     auto cTy = llvm::dyn_cast<RankedTensorType>(c.getType());
-    if (!aTy || !bTy || !cTy || !aTy.hasStaticShape() ||
-        !bTy.hasStaticShape() || !cTy.hasStaticShape())
-      return rewriter.notifyMatchFailure(op, "只处理静态形状的 matmul");
 
-    if (!aTy.getElementType().isF32())
-      return rewriter.notifyMatchFailure(op, "目前只支援 f32");
-
-    const int64_t M = aTy.getShape()[0];
-    const int64_t K = aTy.getShape()[1];
-    const int64_t N = bTy.getShape()[1];
-
-    const int64_t Mt = ceilDivConst(M, kTileR);
-    const int64_t Nt = ceilDivConst(N, kTileC);
-    const int64_t Kt = ceilDivConst(K, kTileKMax);
-
-    Location loc = op.getLoc();
-    auto module = op->getParentOfType<ModuleOp>();
-    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
-    auto i32Ty = rewriter.getI32Type();
-    auto f32Ty = rewriter.getF32Type();
-
-    auto declareFn = [&](StringRef name, LLVM::LLVMFunctionType fnTy) {
-      auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name);
-      if (!fn) {
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(module.getBody());
-        fn = rewriter.create<LLVM::LLVMFuncOp>(module.getLoc(), name, fnTy);
-      }
-      return fn;
-    };
-
-    //   int systolic_dispatch_open(void);
-    //     Opens and caches a connection to the accelerator, or returns a
-    //     placeholder on backends where there is nothing to open.
-    //
-    //   int systolic_dispatch_matmul(int handle, int K, const float *A,
-    //       const float *B, const float *C_init, float *C_out);
-    //     One 8x8 output tile with a K-deep reduction, K in [1, 64]:
-    //     C_out = A @ B + C_init. A is 8*K row-major, B is K*8 row-major,
-    //     both C operands are 64 floats. Performs no tiling or padding.
-    //
-    // The name no longer carries a shape. systolic_dispatch_matmul4x4
-    // promised a geometry the hardware had stopped having, and nothing in
-    // the type system caught it -- the mismatch surfaced as wrong numbers.
-    auto openFnTy = LLVM::LLVMFunctionType::get(i32Ty, {}, false);
-    auto openFn = declareFn("systolic_dispatch_open", openFnTy);
-
-    auto matmulFnTy = LLVM::LLVMFunctionType::get(
-        i32Ty, {i32Ty, i32Ty, ptrTy, ptrTy, ptrTy, ptrTy}, false);
-    auto matmulFn = declareFn("systolic_dispatch_matmul", matmulFnTy);
-
-    Value aMemref = tensorToMemref(rewriter, loc, a, aTy);
-    Value bMemref = tensorToMemref(rewriter, loc, b, bTy);
-    Value cMemref = tensorToMemref(rewriter, loc, c, cTy);
-
-    // One handle for the whole matmul, before the tile loops. Reopening a
-    // serial port per tile would dominate everything else on the link.
-    auto openCall = rewriter.create<LLVM::CallOp>(loc, openFn, ValueRange{});
-    Value handle = openCall.getResult();
-
-    // Flat scratch, reused across every tile. Sized for the largest chunk;
-    // the tail chunk uses a prefix. acc doubles as C_init and C_out, which
-    // is safe because the backend finishes reading its inputs before it
-    // writes its result.
-    auto aBufTy = MemRefType::get({kTileR * kTileKMax}, f32Ty);
-    auto bBufTy = MemRefType::get({kTileKMax * kTileC}, f32Ty);
-    auto cBufTy = MemRefType::get({kTileR * kTileC}, f32Ty);
-
-    Value aTile = rewriter.create<memref::AllocaOp>(loc, aBufTy);
-    Value bTile = rewriter.create<memref::AllocaOp>(loc, bBufTy);
-    Value acc = rewriter.create<memref::AllocaOp>(loc, cBufTy);
-
-    Value aTilePtr = memrefToLLVMPtr(rewriter, loc, aTile);
-    Value bTilePtr = memrefToLLVMPtr(rewriter, loc, bTile);
-    Value accPtr = memrefToLLVMPtr(rewriter, loc, acc);
-
-    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Value cR = rewriter.create<arith::ConstantIndexOp>(loc, kTileR);
-    Value cC = rewriter.create<arith::ConstantIndexOp>(loc, kTileC);
-    Value cKMax = rewriter.create<arith::ConstantIndexOp>(loc, kTileKMax);
-    Value cK = rewriter.create<arith::ConstantIndexOp>(loc, K);
-    Value cMt = rewriter.create<arith::ConstantIndexOp>(loc, Mt);
-    Value cNt = rewriter.create<arith::ConstantIndexOp>(loc, Nt);
-    Value cKt = rewriter.create<arith::ConstantIndexOp>(loc, Kt);
-
-    auto miLoop = rewriter.create<scf::ForOp>(loc, c0, cMt, c1);
-    {
-      OpBuilder::InsertionGuard g(rewriter);
-      rewriter.setInsertionPointToStart(miLoop.getBody());
-
-      Value mi = miLoop.getInductionVar();
-      Value rowOffset = rewriter.create<arith::MulIOp>(loc, mi, cR);
-
-      auto niLoop = rewriter.create<scf::ForOp>(loc, c0, cNt, c1);
-      {
-        OpBuilder::InsertionGuard g2(rewriter);
-        rewriter.setInsertionPointToStart(niLoop.getBody());
-
-        Value ni = niLoop.getInductionVar();
-        Value colOffset = rewriter.create<arith::MulIOp>(loc, ni, cC);
-
-        // Seed the accumulator with this output tile of C, so the chain
-        // below computes C += A @ B as linalg.matmul specifies. The
-        // previous revision zeroed it and let the writeback overwrite C,
-        // computing C = A @ B and discarding whatever C held -- equivalent
-        // only when C is known zero. Boundary positions read as zero here,
-        // and the writeback skips them, so padding never reaches C.
-        emitTileFillFlat(rewriter, loc, cMemref, M, N, rowOffset, colOffset,
-                         cR, cC, cC, acc);
-
-        auto kiLoop = rewriter.create<scf::ForOp>(loc, c0, cKt, c1);
-        {
-          OpBuilder::InsertionGuard g3(rewriter);
-          rewriter.setInsertionPointToStart(kiLoop.getBody());
-
-          Value ki = kiLoop.getInductionVar();
-          Value kOffset = rewriter.create<arith::MulIOp>(loc, ki, cKMax);
-
-          // Kc = min(64, K - kOffset). Every chunk but the last is 64; the
-          // tail is whatever remains.
-          Value remaining = rewriter.create<arith::SubIOp>(loc, cK, kOffset);
-          Value Kc = rewriter.create<arith::MinSIOp>(loc, cKMax, remaining);
-
-          // A tile: 8 rows x Kc cols, packed tight -- row stride is Kc.
-          emitTileFillFlat(rewriter, loc, aMemref, M, K, rowOffset, kOffset,
-                           cR, Kc, Kc, aTile);
-
-          // B tile: Kc rows x 8 cols, row stride 8. The host-side packer
-          // transposes this onto the wire; the pass emits the natural
-          // row-major layout and never sees that convention.
-          emitTileFillFlat(rewriter, loc, bMemref, K, N, kOffset, colOffset,
-                           Kc, cC, cC, bTile);
-
-          Value KcI32 = rewriter.create<arith::IndexCastOp>(loc, i32Ty, Kc);
-
-          rewriter.create<LLVM::CallOp>(
-              loc, matmulFn,
-              ValueRange{handle, KcI32, aTilePtr, bTilePtr, accPtr, accPtr});
-        }
-
-        emitTileWritebackFlat(rewriter, loc, acc, cMemref, M, N, rowOffset,
-                              colOffset);
-      }
+    if (!aTy || !bTy || !cTy ||
+        !aTy.hasStaticShape() ||
+        !bTy.hasStaticShape() ||
+        !cTy.hasStaticShape()) {
+      return op.emitError(
+          "DEBUG: FPGA lowering currently requires static ranked tensors");
     }
 
-    // c_mem has now been written in place by the tile loops above; convert
-    // back to a tensor to replace the original matmul result.
-    // restrict=true: this memref was only just materialized from a distinct
-    // tensor and has no other aliases, which One-Shot Bufferize's alias
-    // analysis requires to be told explicitly.
-    auto toTensorOp = rewriter.create<bufferization::ToTensorOp>(
-        loc, cTy, cMemref, /*restrict=*/true, /*writable=*/true);
+    if (!aTy.getElementType().isF32() ||
+        !bTy.getElementType().isF32() ||
+        !cTy.getElementType().isF32()) {
+      return op.emitError(
+          "DEBUG: FPGA backend currently supports f32 tensors only");
+    }
+
+    Location loc = op.getLoc();
+
+    // ----------------------------------------------------------
+    // Declare:
+    //
+    //   int fpga_matmul_tiled_auto(
+    //       int M, int K, int N,
+    //       const float *A,
+    //       const float *B,
+    //       float *C);
+    // ----------------------------------------------------------
+
+    auto ptrTy = LLVM::LLVMPointerType::get(
+        rewriter.getContext());
+    auto i32Ty = rewriter.getI32Type();
+
+    StringRef fnName = "fpga_matmul_tiled_auto_scheduled";
+
+    auto fnTy = LLVM::LLVMFunctionType::get(
+        i32Ty,
+        {
+            i32Ty, i32Ty, i32Ty,
+            ptrTy, ptrTy, ptrTy,
+            i32Ty, i32Ty, i32Ty
+        },
+        /*isVarArg=*/false);
+
+    auto fpgaFunc =
+        module.lookupSymbol<LLVM::LLVMFuncOp>(fnName);
+
+    if (!fpgaFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+
+      fpgaFunc =
+          rewriter.create<LLVM::LLVMFuncOp>(
+              module.getLoc(), fnName, fnTy);
+    }
+
+    // ----------------------------------------------------------
+    // Tensor -> memref -> raw LLVM pointer.
+    // ----------------------------------------------------------
+
+    Value aMemref =
+        tensorToMemref(rewriter, loc, a, aTy);
+
+    Value bMemref =
+        tensorToMemref(rewriter, loc, b, bTy);
+
+    Value cMemref =
+        tensorToMemref(rewriter, loc, c, cTy);
+
+    Value aPtr =
+        memrefToLLVMPtr(rewriter, loc, aMemref);
+
+    Value bPtr =
+        memrefToLLVMPtr(rewriter, loc, bMemref);
+
+    Value cPtr =
+        memrefToLLVMPtr(rewriter, loc, cMemref);
+
+    Value mVal =
+        rewriter.create<arith::ConstantIntOp>(loc, M, 32);
+
+    Value kVal =
+        rewriter.create<arith::ConstantIntOp>(loc, K, 32);
+
+    Value nVal =
+        rewriter.create<arith::ConstantIntOp>(loc, N, 32);
+
+    // ----------------------------------------------------------
+    // Preserve compiler-selected physical device identity.
+    //
+    // The MatmulTileOp already carries a FlatSymbolRefAttr naming
+    // the exact systolic.device selected by decomposition/scheduling.
+    // Map that symbol one-to-one onto the RTL physical device ID.
+    //
+    //   @acc_8x8_0 -> device_id 0
+    //   @acc_4x4_0 -> device_id 1
+    //   @acc_4x4_1 -> device_id 2
+    //   @acc_4x4_2 -> device_id 3
+    // ----------------------------------------------------------
+
+    const StringRef deviceName = deviceRef.getValue();
+
+    int64_t runtimeDeviceId = -1;
+
+    if (deviceName == "acc_8x8_0" && is8x8Device)
+      runtimeDeviceId = 0;
+    else if (deviceName == "acc_4x4_0" && is4x4Device)
+      runtimeDeviceId = 1;
+    else if (deviceName == "acc_4x4_1" && is4x4Device)
+      runtimeDeviceId = 2;
+    else if (deviceName == "acc_4x4_2" && is4x4Device)
+      runtimeDeviceId = 3;
+    else {
+      return op.emitError(
+          "DEBUG: assigned systolic.device has no registered "
+          "physical FPGA device ID");
+    }
+
+    auto deviceIdVal =
+        rewriter.create<arith::ConstantIntOp>(
+            loc, runtimeDeviceId, 32);
+
+    auto startCycleVal =
+        rewriter.create<arith::ConstantIntOp>(
+            loc, startCycle, 32);
+
+    auto estCyclesVal =
+        rewriter.create<arith::ConstantIntOp>(
+            loc, estCycles, 32);
+
+    rewriter.create<LLVM::CallOp>(
+        loc,
+        fpgaFunc,
+        ValueRange{
+            mVal, kVal, nVal,
+            aPtr, bPtr, cPtr,
+            deviceIdVal,
+            startCycleVal,
+            estCyclesVal
+        });
+
+    // FPGA runtime writes the result into cMemref.
+    auto toTensorOp =
+        rewriter.create<bufferization::ToTensorOp>(
+            loc,
+            cTy,
+            cMemref,
+            /*restrict=*/true,
+            /*writable=*/true);
+
     rewriter.replaceOp(op, toTensorOp.getResult());
+
     return success();
   }
 };
 
-struct TileMatmulForFpgaPass
-    : public PassWrapper<TileMatmulForFpgaPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TileMatmulForFpgaPass)
+struct LowerSystolicMatmulTileToFpgaPass
+    : public PassWrapper<LowerSystolicMatmulTileToFpgaPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerSystolicMatmulTileToFpgaPass)
 
-  StringRef getArgument() const final { return "tile-matmul-for-fpga"; }
+  StringRef getArgument() const final { return "lower-systolic-matmul-tile-to-fpga"; }
   StringRef getDescription() const final {
-    return "Lower arbitrary-shape linalg.matmul into explicit MLIR tile "
-           "loops (scf.for) with boundary-checked (scf.if) 8x8 tiling and "
-           "a runtime reduction depth of up to 64, zero-padding M and N "
-           "but not K, dispatching each tile through a transport-neutral "
-           "dispatch-runtime call (systolic_dispatch_matmul), independent "
-           "of the backend linked to provide it";
+    return "Lower explicitly device-mapped systolic.matmul_tile "
+           "operations into the FPGA runtime";
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<linalg::LinalgDialect, bufferization::BufferizationDialect,
                      memref::MemRefDialect, LLVM::LLVMDialect,
-                     arith::ArithDialect, scf::SCFDialect>();
+                     arith::ArithDialect>();
   }
 
   void runOnOperation() override {
+    ModuleOp module = getOperation();
+
     RewritePatternSet patterns(&getContext());
-    patterns.add<TileMatmulForFpgaPattern>(&getContext());
-    if (failed(applyPatternsGreedily(getOperation(),
-                                             std::move(patterns))))
+    patterns.add<LowerSystolicMatmulTileToFpgaPattern>(&getContext());
+
+    if (failed(applyPatternsGreedily(module, std::move(patterns)))) {
       signalPassFailure();
+      return;
+    }
+
+    // After every systolic.matmul_tile has been lowered to the FPGA
+    // runtime ABI, systolic.device is compile-time metadata only.
+    //
+    // Keep devices if any matmul_tile remains so that partially lowered
+    // IR never loses its physical-device information.
+    bool hasRemainingMatmulTile = false;
+    module.walk([&](MatmulTileOp) {
+      hasRemainingMatmulTile = true;
+    });
+
+    if (hasRemainingMatmulTile)
+      return;
+
+    SmallVector<DeviceOp> devices;
+    module.walk([&](DeviceOp device) {
+      devices.push_back(device);
+    });
+
+    for (DeviceOp device : devices)
+      device.erase();
   }
 };
 
 } // namespace
 
 std::unique_ptr<Pass> mlir::systolic::createTileMatmulForFpgaPass() {
-  return std::make_unique<TileMatmulForFpgaPass>();
+  return std::make_unique<LowerSystolicMatmulTileToFpgaPass>();
 }
 
 void mlir::systolic::registerTileMatmulForFpgaPass() {
-  PassRegistration<TileMatmulForFpgaPass>();
+  PassRegistration<LowerSystolicMatmulTileToFpgaPass>();
 }
