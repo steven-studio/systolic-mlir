@@ -1956,8 +1956,9 @@ module systolic_dma_top #(
   wire compute_bank = compute_fi[0];
 
   wire        run_clear;              // = (phase == P_CALIB), assigned below
-  wire        fi_last    = (fi    == n_inv - 4'd1);
-  wire        wb_fi_last = (wb_fi == n_inv - 4'd1);
+  wire        fi_last      = (fi      == n_inv - 4'd1);
+  wire        read_fi_last = (read_fi == n_inv - 4'd1);
+  wire        wb_fi_last   = (wb_fi   == n_inv - 4'd1);
 
   // A scheduler job is complete only after the final invocation has made
   // its result memory-visible.  Accelerator completion alone is too early:
@@ -1986,7 +1987,14 @@ module systolic_dma_top #(
   // independent A/B streams is a later datapath change.
   // ----------------------------------------------------------
 
-  wire [AXI_ADDR_W-1:0] slab_addr =
+  wire [AXI_ADDR_W-1:0] seed_slab_addr =
+      USE_EXTERNAL_SCHEDULER
+          ? AXI_ADDR_W'(job_a_base_reg) +
+            (AXI_ADDR_W'(fi) << RX_SHIFT)
+          : AXI_ADDR_W'(BASE_ADDR) +
+            (AXI_ADDR_W'(fi) << RX_SHIFT);
+
+  wire [AXI_ADDR_W-1:0] read_slab_addr =
       USE_EXTERNAL_SCHEDULER
           ? AXI_ADDR_W'(job_a_base_reg) +
             (AXI_ADDR_W'(read_fi) << RX_SHIFT)
@@ -2150,6 +2158,21 @@ module systolic_dma_top #(
   // The engine's completion, re-armed per invocation.  read_done_sticky stays
   // what it was -- a run-level flag for led[2] and probe_in4.
   logic read_done_fold;
+
+  // Independent ownership of the operand-read transaction.
+  // Initially this mirrors P_READ; later it may remain active while compute
+  // advances independently.
+  logic read_active;
+  logic read_pipeline_started;
+  logic reads_complete;
+
+  // Completed operand tile waiting to be consumed by compute.
+  logic       compute_ready;
+  logic [3:0] filled_fi;
+
+  // Compute transaction ownership; maintained by the cycle counter below.
+  logic cyc_running;
+
   // And the array's.  c_done is a LEVEL: it goes high when the array publishes
   // C and stays high until the next fold_start clears it, which was sound when
   // there was only ever one fold.  On invocation 2 and after it is still high
@@ -2167,8 +2190,6 @@ module systolic_dma_top #(
       phase         <= P_CALIB;
       n_inv         <= 4'd1;
       fi            <= 4'd0;
-      read_fi       <= 4'd0;
-      compute_fi    <= 4'd0;
       wb_fi         <= 4'd0;
       seed_start    <= 1'b0;
       desc_valid    <= 1'b0;
@@ -2185,8 +2206,6 @@ module systolic_dma_top #(
                        (!USE_EXTERNAL_SCHEDULER || job_active)) begin
                    n_inv      <= n_inv_next;
                    fi         <= 4'd0;
-                   read_fi    <= 4'd0;
-                   compute_fi <= 4'd0;
                    wb_fi      <= 4'd0;
 
                    // Legacy bring-up owns synthetic operand generation.
@@ -2215,7 +2234,6 @@ module systolic_dma_top #(
                    end
                  end
         P_READ:  begin
-                   if (!desc_started) desc_valid <= 1'b1;
                    if (fill_complete) phase <= P_GO;
                  end
         P_GO:    begin
@@ -2254,11 +2272,15 @@ module systolic_dma_top #(
                    if (wb_done) begin
                      if (wb_fi_last) phase <= P_DONE;
                      else begin
-                       fi         <= fi + 4'd1;
-                       read_fi    <= fi + 4'd1;
-                       compute_fi <= fi + 4'd1;
-                       wb_fi      <= fi + 4'd1;
-                       phase      <= P_READ;    // refill, fold and store slab fi+1
+                       fi    <= fi + 4'd1;
+                       wb_fi <= wb_fi + 4'd1;
+
+                       // The next operand tile may already have landed while
+                       // this tile was computing or writing back.
+                       if (compute_ready || fill_complete)
+                         phase <= P_GO;
+                       else
+                         phase <= P_READ;
                      end
                    end
                  end
@@ -2273,14 +2295,22 @@ module systolic_dma_top #(
                    if (rerun_pulse ||
                        (USE_EXTERNAL_SCHEDULER && job_fire)) begin
                      fi         <= 4'd0;
-                     read_fi    <= 4'd0;
-                     compute_fi <= 4'd0;
                      wb_fi      <= 4'd0;
                      phase      <= P_CALIB;
                    end
                  end
         default: ;
       endcase
+
+      // After the first read phase, operand filling runs independently of the
+      // outer compute/writeback phase.  Keep at most one completely filled
+      // tile waiting for compute, and stop permanently after the final fill.
+      if ((phase == P_READ || read_pipeline_started) &&
+          !desc_started &&
+          !read_active &&
+          !compute_ready &&
+          !reads_complete)
+        desc_valid <= 1'b1;
     end
   end
 
@@ -2291,13 +2321,72 @@ module systolic_dma_top #(
 
   assign run_clear = (phase == P_CALIB);
 
-  // desc_valid is a pulse; remember it was taken so P_READ does not re-issue.
-  // Cleared OUTSIDE the phase rather than in one named predecessor, so the
-  // n_inv-th pass through P_READ arms exactly as the first one did.
+  // Once the first read phase is reached, the read pipeline may operate
+  // independently of the outer compute/writeback phases for the rest of the run.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)                     desc_started <= 1'b0;
-    else if (phase != P_READ)          desc_started <= 1'b0;
-    else if (desc_valid && desc_ready) desc_started <= 1'b1;
+    if (!ui_rst_n || run_clear)
+      read_pipeline_started <= 1'b0;
+    else if (phase == P_READ)
+      read_pipeline_started <= 1'b1;
+  end
+
+  // The final operand slab has completely landed.  Keep this asserted for
+  // the rest of the run so the last descriptor cannot be issued again.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)
+      reads_complete <= 1'b0;
+    else if (fill_complete && read_fi_last)
+      reads_complete <= 1'b1;
+  end
+
+  // Read ownership advances when the current operand slab has completely
+  // landed, independently of the later compute/writeback stages.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)
+      read_fi <= 4'd0;
+    else if (fill_complete && !read_fi_last)
+      read_fi <= read_fi + 4'd1;
+  end
+
+  // Compute takes ownership only when the accelerator actually starts.
+  // filled_fi names the completely landed operand tile selected for this fold.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)
+      compute_fi <= 4'd0;
+    else if (fold_start)
+      compute_fi <= filled_fi;
+  end
+
+  // Capture the tile index while read_fi still names the slab that just
+  // completed.  fold_start will later transfer this ownership to compute.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear) begin
+      compute_ready <= 1'b0;
+      filled_fi     <= 4'd0;
+    end else if (fill_complete) begin
+      compute_ready <= 1'b1;
+      filled_fi     <= read_fi;
+    end else if (fold_start) begin
+      compute_ready <= 1'b0;
+    end
+  end
+
+  // Remember that the current operand descriptor was accepted.  Ownership is
+  // transaction-local rather than phase-local so it can remain armed after the
+  // outer FSM advances beyond P_READ.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)             desc_started <= 1'b0;
+    else if (fill_complete)                 desc_started <= 1'b0;
+    else if (desc_valid && desc_ready)      desc_started <= 1'b1;
+  end
+
+  // Operand-read transaction ownership is independent of the outer phase.
+  // It begins when the descriptor is accepted and ends only after the final
+  // operand word has landed in the selected ping-pong buffer.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)             read_active <= 1'b0;
+    else if (fill_complete)                 read_active <= 1'b0;
+    else if (desc_valid && desc_ready)      read_active <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -2306,12 +2395,14 @@ module systolic_dma_top #(
     else if (wb_desc_valid && wb_desc_ready) wb_desc_started <= 1'b1;
   end
 
-  // The read engine's own done pulse, held only for the invocation it belongs
-  // to: fill_complete must not be satisfied by the previous invocation's.
+  // The read engine's completion belongs to the accepted operand transaction,
+  // not to the outer phase.  Re-arm it when a new descriptor is accepted and
+  // hold it until that transaction's final operand word has landed.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)            read_done_fold <= 1'b0;
-    else if (phase != P_READ) read_done_fold <= 1'b0;
-    else if (read_done)       read_done_fold <= 1'b1;
+    if (!ui_rst_n || run_clear)        read_done_fold <= 1'b0;
+    else if (fill_complete)            read_done_fold <= 1'b0;
+    else if (desc_valid && desc_ready) read_done_fold <= 1'b0;
+    else if (read_done)                read_done_fold <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -2453,7 +2544,7 @@ module systolic_dma_top #(
     .SEED_MODE (1), .MODULUS (127)
   ) u_seed (
     .clk (ui_clk), .rst_n (ui_rst_n),
-    .start (seed_start), .base_addr (slab_addr),
+    .start (seed_start), .base_addr (seed_slab_addr),
     .busy (seed_busy), .done (seed_done),
     .err_align (seed_err_align), .err_resp (seed_err_resp),
     .m_axi_awid (sd_awid), .m_axi_awaddr (sd_awaddr), .m_axi_awlen (sd_awlen),
@@ -2495,7 +2586,7 @@ module systolic_dma_top #(
 
   // Existing operand descriptor source.
   wire                    op_desc_valid = desc_valid;
-  wire [AXI_ADDR_W-1:0]   op_desc_addr  = slab_addr;
+  wire [AXI_ADDR_W-1:0]   op_desc_addr  = read_slab_addr;
   wire [15:0]             op_desc_beats = 16'(job_n_beats);
 
   // Result-readback descriptor source.
@@ -3425,7 +3516,6 @@ module systolic_dma_top #(
   logic [31:0] cyc_count;
   logic [31:0] cyc_latched;    // the LAST invocation's, so the golden still checks
   logic [31:0] cyc_total;      // summed over the run's invocations
-  logic        cyc_running;
 
   always_ff @(posedge ui_clk) begin
     if (rst_i || run_clear) begin
@@ -3687,7 +3777,7 @@ module systolic_dma_top #(
       want_wr <= '0;
       want_c  <= '0;
     end else begin
-      if ((phase == P_READ) && fill_complete) want_wr <= want_wr + EXPECT_WR_CHK;
+      if (fill_complete) want_wr <= want_wr + EXPECT_WR_CHK;
       if ((phase == P_SCAN) && scan_c_last)   want_c  <= want_c  + EXPECT_C_CHK;
     end
   end
