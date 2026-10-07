@@ -117,7 +117,7 @@ lassign $GOLDEN($KMAX) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
 # One project per (variant, K_MAX) so bitstreams coexist and 'read' cannot open
 # the wrong one.  The pre-Sep-10 3b build lives in plain systolic_dma/ and is
 # left alone.
-set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma_${VARIANT}_k${KMAX}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
+set PROJ_DIR   $::env(HOME)/work/vivado/tile_pipelined/systolic_dma_${VARIANT}_k${KMAX}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
 
 # Where the result tile is written back.  One page clear of the operand image,
 # which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16, 16 KiB at 256), so that

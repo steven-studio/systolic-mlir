@@ -1902,7 +1902,7 @@ module systolic_dma_top #(
   // finishing line moves one slab per invocation: invocation fi is full when
   // the (fi+1)-th slab has landed.  At n_inv = 1 this is the old comparison.
   wire [31:0] words_want =
-      (32'(fi) + 32'd1) * job_rx_words;
+      (32'(read_fi) + 32'd1) * job_rx_words;
   wire fill_complete = read_done_fold && (words_written == words_want);
 
   localparam integer C_N = N * N;
@@ -1944,8 +1944,20 @@ module systolic_dma_top #(
   wire        rerun_pulse = rerun_probe & ~rerun_d;
   logic [3:0] n_inv;
   logic [3:0] fi;                     // legacy serial invocation index
+
+  // Stage-local tile ownership.
+  // These remain lockstep with fi until the tile pipeline is enabled.
+  logic [3:0] read_fi;
+  logic [3:0] compute_fi;
+  logic [3:0] wb_fi;
+
+  // Ping-pong operand-buffer ownership.
+  wire fill_bank    = read_fi[0];
+  wire compute_bank = compute_fi[0];
+
   wire        run_clear;              // = (phase == P_CALIB), assigned below
-  wire        fi_last = (fi == n_inv - 4'd1);
+  wire        fi_last    = (fi    == n_inv - 4'd1);
+  wire        wb_fi_last = (wb_fi == n_inv - 4'd1);
 
   // A scheduler job is complete only after the final invocation has made
   // its result memory-visible.  Accelerator completion alone is too early:
@@ -1954,7 +1966,7 @@ module systolic_dma_top #(
       USE_EXTERNAL_SCHEDULER &&
       job_active &&
       wb_done &&
-      fi_last;
+      wb_fi_last;
 
   // ----------------------------------------------------------
   // Job-aware DMA address generation.
@@ -1977,9 +1989,9 @@ module systolic_dma_top #(
   wire [AXI_ADDR_W-1:0] slab_addr =
       USE_EXTERNAL_SCHEDULER
           ? AXI_ADDR_W'(job_a_base_reg) +
-            (AXI_ADDR_W'(fi) << RX_SHIFT)
+            (AXI_ADDR_W'(read_fi) << RX_SHIFT)
           : AXI_ADDR_W'(BASE_ADDR) +
-            (AXI_ADDR_W'(fi) << RX_SHIFT);
+            (AXI_ADDR_W'(read_fi) << RX_SHIFT);
 
   // --------------------------------------------------------------------------
   // DEBUG: observe the actual AXI read addresses issued by dma_engine.
@@ -2011,9 +2023,9 @@ module systolic_dma_top #(
   // The scheduler still supplies only the opaque device ID.
   wire [AXI_ADDR_W-1:0] wb_tile_addr =
       select_8x8
-          ? wb_region_base + (AXI_ADDR_W'(fi) << WBT_SHIFT_8X8)
+          ? wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT_8X8)
           : select_4x4
-              ? wb_region_base + (AXI_ADDR_W'(fi) << WBT_SHIFT_4X4)
+              ? wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT_4X4)
               : wb_region_base;
 
   // --------------------------------------------------------------------------
@@ -2155,6 +2167,9 @@ module systolic_dma_top #(
       phase         <= P_CALIB;
       n_inv         <= 4'd1;
       fi            <= 4'd0;
+      read_fi       <= 4'd0;
+      compute_fi    <= 4'd0;
+      wb_fi         <= 4'd0;
       seed_start    <= 1'b0;
       desc_valid    <= 1'b0;
       fsm_fold_start    <= 1'b0;
@@ -2168,8 +2183,11 @@ module systolic_dma_top #(
       case (phase)
         P_CALIB: if (init_calib_complete &&
                        (!USE_EXTERNAL_SCHEDULER || job_active)) begin
-                   n_inv <= n_inv_next;
-                   fi    <= 4'd0;
+                   n_inv      <= n_inv_next;
+                   fi         <= 4'd0;
+                   read_fi    <= 4'd0;
+                   compute_fi <= 4'd0;
+                   wb_fi      <= 4'd0;
 
                    // Legacy bring-up owns synthetic operand generation.
                    // External/compiler jobs consume operand slabs already
@@ -2234,10 +2252,13 @@ module systolic_dma_top #(
         P_WB:    begin
                    if (!wb_desc_started) wb_desc_valid <= 1'b1;
                    if (wb_done) begin
-                     if (fi_last) phase <= P_DONE;
+                     if (wb_fi_last) phase <= P_DONE;
                      else begin
-                       fi    <= fi + 4'd1;
-                       phase <= P_READ;    // refill, fold and store slab fi+1
+                       fi         <= fi + 4'd1;
+                       read_fi    <= fi + 4'd1;
+                       compute_fi <= fi + 4'd1;
+                       wb_fi      <= fi + 4'd1;
+                       phase      <= P_READ;    // refill, fold and store slab fi+1
                      end
                    end
                  end
@@ -2251,8 +2272,11 @@ module systolic_dma_top #(
                    // sequence execute for the newly accepted job.
                    if (rerun_pulse ||
                        (USE_EXTERNAL_SCHEDULER && job_fire)) begin
-                     fi    <= 4'd0;
-                     phase <= P_CALIB;
+                     fi         <= 4'd0;
+                     read_fi    <= 4'd0;
+                     compute_fi <= 4'd0;
+                     wb_fi      <= 4'd0;
+                     phase      <= P_CALIB;
                    end
                  end
         default: ;
@@ -2409,7 +2433,7 @@ module systolic_dma_top #(
         t_span    <= 32'd1;
       end else if (t_running) begin
         t_span <= t_span + 1'b1;
-        if (wb_done && fi_last) t_running <= 1'b0;
+        if (wb_done && wb_fi_last) t_running <= 1'b0;
       end
       if (wb_done) folds_done <= folds_done + 8'd1;
     end
@@ -2582,7 +2606,7 @@ module systolic_dma_top #(
       if (USE_EXTERNAL_SCHEDULER &&
           job_active &&
           wb_done &&
-          fi_last &&
+          wb_fi_last &&
           !rb_pending &&
           !rb_active) begin
         rb_pending  <= 1'b1;
@@ -2632,7 +2656,7 @@ module systolic_dma_top #(
       if (USE_EXTERNAL_SCHEDULER &&
           job_active &&
           wb_done &&
-          fi_last &&
+          wb_fi_last &&
           !rb_pending &&
           !rb_active)
         external_debug_sticky[1] <= 1'b1;
@@ -2905,19 +2929,49 @@ module systolic_dma_top #(
     // transpose.  Both come from dma_operand_writer, which computes them with
     // the same bit slices systolic_uart_top's rx_count decode uses -- proved
     // equivalent in tb_dma_operand_writer against a golden model of that decode.
+    wire [31:0] a_rdata_0 [0:N-1];
+    wire [31:0] a_rdata_1 [0:N-1];
+    wire [31:0] b_rdata_0 [0:N-1];
+    wire [31:0] b_rdata_1 [0:N-1];
+
     systolic_operand_buffer #(
       .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_a_buf (
-      .clk (ui_clk), .wr (a_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (a_raddr), .rdata (a_rdata)
+    ) u_a_buf_0 (
+      .clk (ui_clk), .wr (a_wr && !fill_bank),
+      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (a_raddr), .rdata (a_rdata_0)
     );
 
     systolic_operand_buffer #(
       .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_b_buf (
-      .clk (ui_clk), .wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (b_raddr), .rdata (b_rdata)
+    ) u_a_buf_1 (
+      .clk (ui_clk), .wr (a_wr && fill_bank),
+      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (a_raddr), .rdata (a_rdata_1)
     );
+
+    systolic_operand_buffer #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
+    ) u_b_buf_0 (
+      .clk (ui_clk), .wr (b_wr && !fill_bank),
+      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (b_raddr), .rdata (b_rdata_0)
+    );
+
+    systolic_operand_buffer #(
+      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
+    ) u_b_buf_1 (
+      .clk (ui_clk), .wr (b_wr && fill_bank),
+      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .raddr (b_raddr), .rdata (b_rdata_1)
+    );
+
+    for (genvar pp = 0; pp < N; pp = pp + 1) begin : PP_READ_MUX
+      assign a_rdata[pp] =
+          compute_bank ? a_rdata_1[pp] : a_rdata_0[pp];
+      assign b_rdata[pp] =
+          compute_bank ? b_rdata_1[pp] : b_rdata_0[pp];
+    end
   end else begin : OP_V2
     wire                  a_wr, b_wr;
     wire [LANE_W-1:0]     wsel;
