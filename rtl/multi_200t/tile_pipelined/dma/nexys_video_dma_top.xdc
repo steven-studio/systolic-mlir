@@ -1,5 +1,31 @@
 # -----------------------------------------------------------------------------
 # nexys_video_dma_top.xdc -- pins for systolic_dma_top (bring-up step 3b).
+
+# ============================================================================
+# Nexys Video FT2232H DPTI
+#
+# DPTI is the USB-to-FPGA synchronous FIFO interface exposed by the FT2232H.
+# These are the official Nexys Video FT2232H DPTI pins.
+# ============================================================================
+
+set_property -dict { PACKAGE_PIN U20 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[0] }]
+set_property -dict { PACKAGE_PIN P14 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[1] }]
+set_property -dict { PACKAGE_PIN P15 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[2] }]
+set_property -dict { PACKAGE_PIN U17 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[3] }]
+set_property -dict { PACKAGE_PIN R17 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[4] }]
+set_property -dict { PACKAGE_PIN P16 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[5] }]
+set_property -dict { PACKAGE_PIN R18 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[6] }]
+set_property -dict { PACKAGE_PIN N14 IOSTANDARD LVCMOS33 } [get_ports { dpti_d[7] }]
+
+set_property -dict { PACKAGE_PIN N17 IOSTANDARD LVCMOS33 } [get_ports { dpti_rxf_n }]
+set_property -dict { PACKAGE_PIN Y19 IOSTANDARD LVCMOS33 } [get_ports { dpti_txe_n }]
+set_property -dict { PACKAGE_PIN P19 IOSTANDARD LVCMOS33 } [get_ports { dpti_rd_n }]
+set_property -dict { PACKAGE_PIN R19 IOSTANDARD LVCMOS33 } [get_ports { dpti_wr_n }]
+set_property -dict { PACKAGE_PIN V17 IOSTANDARD LVCMOS33 } [get_ports { dpti_oe_n }]
+set_property -dict { PACKAGE_PIN P17 IOSTANDARD LVCMOS33 } [get_ports { dpti_siwun }]
+set_property -dict { PACKAGE_PIN Y18 IOSTANDARD LVCMOS33 } [get_ports { dpti_clkout }]
+
+#
 #
 # This is nexys_video_bringup.xdc with two more LEDs.  There is no UART in this
 # design -- systolic_dma_top instantiates the array directly rather than through

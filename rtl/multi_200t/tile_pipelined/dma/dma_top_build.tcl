@@ -48,16 +48,30 @@ set PROJ_NAME  systolic_dma
 set TOP        systolic_dma_top
 set JOBS       8
 
-# ---- arguments: mode [variant] [K_MAX] [n_inv] --------------------------
-# n_inv is how many invocations the RUN makes, not anything about the build:
-# one bitstream serves every count, because systolic_dma_top takes the number
-# from vio_0's output probe.  'read' sets it and re-runs; 'sweep' walks
-# 1..n_inv and writes one CSV row per point.  The build ignores it.
-set MODE    [lindex $argv 0]
-set VARIANT [lindex $argv 1]
-set KARG    [lindex $argv 2]
-set NARG    [lindex $argv 3]
-if {$NARG eq ""} { set NARG 1 }
+# ---- arguments: mode [variant] [K_MAX] [n_inv] [NUM_8X8] [NUM_4X4] ----
+# n_inv is a run-time invocation count and does not change the synthesized
+# fleet.  NUM_8X8 and NUM_4X4 are build-time fleet parameters: changing them
+# changes how many physical accelerator instances are synthesized.
+set MODE     [lindex $argv 0]
+set VARIANT  [lindex $argv 1]
+set KARG     [lindex $argv 2]
+set NARG     [lindex $argv 3]
+set NUM_8X8  [lindex $argv 4]
+set NUM_4X4  [lindex $argv 5]
+
+if {$NARG eq ""}    { set NARG 1 }
+if {$NUM_8X8 eq ""} { set NUM_8X8 1 }
+if {$NUM_4X4 eq ""} { set NUM_4X4 3 }
+
+if {![string is integer -strict $NUM_8X8] || $NUM_8X8 < 0} {
+    error "NUM_8X8 must be a non-negative integer, got '$NUM_8X8'"
+}
+if {![string is integer -strict $NUM_4X4] || $NUM_4X4 < 0} {
+    error "NUM_4X4 must be a non-negative integer, got '$NUM_4X4'"
+}
+if {$NUM_8X8 + $NUM_4X4 < 1} {
+    error "fleet must contain at least one accelerator"
+}
 if {![string is integer -strict $NARG] || $NARG < 1 || $NARG > 15} {
     error "n_inv must be 1..15 (the probe is four bits), got '$NARG'"
 }
@@ -103,7 +117,7 @@ lassign $GOLDEN($KMAX) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
 # One project per (variant, K_MAX) so bitstreams coexist and 'read' cannot open
 # the wrong one.  The pre-Sep-10 3b build lives in plain systolic_dma/ and is
 # left alone.
-set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma_${VARIANT}_k${KMAX}
+set PROJ_DIR   $::env(HOME)/work/vivado/systolic_dma_${VARIANT}_k${KMAX}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
 
 # Where the result tile is written back.  One page clear of the operand image,
 # which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16, 16 KiB at 256), so that
@@ -144,6 +158,24 @@ set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 # build made from a different set of sources is not exercising the same array.
 set SRC [list \
     $SCRIPT_DIR/systolic_dma_top.sv \
+    $SCRIPT_DIR/dpti_host_rx.sv \
+    $SCRIPT_DIR/dpti_byte_rx.sv \
+    $SCRIPT_DIR/dpti_write32_decoder.sv \
+    $SCRIPT_DIR/dpti_mem_write_decoder.sv \
+    $SCRIPT_DIR/dpti_command_frontend.sv \
+    $SCRIPT_DIR/dpti_async_fifo.sv \
+    $SCRIPT_DIR/dpti_output_cdc.sv \
+    $SCRIPT_DIR/dpti_beat_to_byte.sv \
+    $SCRIPT_DIR/dpti_byte_tx.sv \
+    $SCRIPT_DIR/dpti_mem_write_cdc.sv \
+    $SCRIPT_DIR/dpti_mem_write_engine.sv \
+    $SCRIPT_DIR/dpti_mem_write_cdc_engine.sv \
+    $SCRIPT_DIR/dpti_cmd_async_fifo.sv \
+    $SCRIPT_DIR/dpti_axi4lite_master.sv \
+    $SCRIPT_DIR/axi4lite_dpti_bridge.sv \
+    $SCRIPT_DIR/dpti_descriptor_bridge.sv \
+    $SCRIPT_DIR/../scheduler/systolic_job_ingress.sv \
+    $SCRIPT_DIR/systolic_dma_core.sv \
     $SCRIPT_DIR/dma_engine.sv \
     $SCRIPT_DIR/dma_seed_writer.sv \
     $SCRIPT_DIR/dma_operand_writer.sv \
@@ -159,7 +191,9 @@ set SRC [list \
     $ROOT/core/systolic_array.sv \
     $ROOT/core/tile_feeder.sv \
     $ROOT/core/operand_buffer.sv \
-    $ROOT/core/operand_buffer_v2.sv ]
+    $ROOT/core/operand_buffer_v2.sv \
+    $ROOT/scheduler/systolic_hw_scheduler.sv \
+    $ROOT/scheduler/systolic_hw_scheduler_adapter.sv ]
 
 # -----------------------------------------------------------------------------
 proc build {} {
@@ -199,6 +233,8 @@ proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
     global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
     global WB_BASE USE_V2 VARIANT
+    global NUM_8X8 NUM_4X4
+    global SCRIPT_DIR
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -261,8 +297,8 @@ proc build_body {} {
     # request.  n_inv's INIT is 1, so a freshly programmed board runs exactly
     # what it ran before the invocation loop existed -- the single-invocation
     # numbers in the paper are reproducible without touching a probe.
-    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {17} CONFIG.C_NUM_PROBE_OUT {2}]
-    for {set i 0} {$i < 17} {incr i} {
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {20} CONFIG.C_NUM_PROBE_OUT {2}]
+    for {set i 0} {$i < 20} {incr i} {
         lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
     }
     lappend vio_cfg CONFIG.C_PROBE_OUT0_WIDTH {4} CONFIG.C_PROBE_OUT0_INIT_VAL {0x1}
@@ -278,6 +314,7 @@ proc build_body {} {
     # itself, so those are not generics here -- they are structural.
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
+        NUM_8X8=$NUM_8X8 NUM_4X4=$NUM_4X4 \
         USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
@@ -294,6 +331,12 @@ proc build_body {} {
     if {![file exists $HOLD_TCL]} { error "missing: $HOLD_TCL" }
     add_files -fileset utils_1 -norecurse $HOLD_TCL
     set_property STEPS.PLACE_DESIGN.TCL.PRE $HOLD_TCL [get_runs impl_1]
+
+    # Scheduler/debug handshake outputs are intentionally not physical board pins.
+    set DRC_TCL $SCRIPT_DIR/allow_internal_scheduler_ports.tcl
+    if {![file exists $DRC_TCL]} { error "missing: $DRC_TCL" }
+    add_files -fileset utils_1 -norecurse $DRC_TCL
+    set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
 
     launch_runs impl_1 -to_step write_bitstream -jobs $JOBS
     wait_on_run impl_1
