@@ -901,15 +901,33 @@ module systolic_pe #(
         end
     end
 
+    // Predecode the reduction completion condition one cycle early.
+    // This register is intended to localize the accumulator output enable.
+    (* DONT_TOUCH = "true" *) logic acc_commit_q;
+
+    wire final_reduction_complete =
+        (red_state == RED_RUN) &&
+        (reduce_todo == 0) &&
+        (reduce_add_busy == 0) &&
+        !reduce_read_valid &&
+        (reduce_stride == ACC_SEL_W'(1));
+
+    always_ff @(posedge clk) begin
+        if (rst)
+            acc_commit_q <= 1'b0;
+        else
+            acc_commit_q <= final_reduction_complete;
+    end
+
     always_ff @(posedge clk) begin
         if (rst) begin
             acc_valid_out <= 1'b0;
             acc_out       <= '0;
         end
         else begin
-            acc_valid_out <= (red_state == RED_DONE);
+            acc_valid_out <= acc_commit_q;
 
-            if (red_state == RED_DONE)
+            if (acc_commit_q)
                 acc_out <= final_reduce_result;
         end
     end

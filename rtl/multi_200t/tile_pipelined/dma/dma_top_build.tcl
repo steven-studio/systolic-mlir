@@ -315,6 +315,8 @@ proc build_body {} {
     set_property generic [list \
         N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
         NUM_8X8=$NUM_8X8 NUM_4X4=$NUM_4X4 \
+        USE_EXTERNAL_SCHEDULER=1'b1 \
+        USE_LEGACY_JOB_PORTS=1'b0 \
         USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
@@ -576,10 +578,11 @@ proc read_vio {} {
     set wbstv   [pval $all_probes UNSIGNED wb_src_starve_cycles probe_in13]
 
     # the invocation loop's three (probe_in14..16)
-    set tspan [pval $all_probes UNSIGNED t_span     probe_in14]
-    set ctot  [pval $all_probes UNSIGNED cyc_total  probe_in15]
-    set nrun  [pval $all_probes UNSIGNED n_inv]
-    set fdone [pval $all_probes UNSIGNED folds_done]
+    set tspan  [pval $all_probes UNSIGNED t_span                 probe_in14]
+    set ctot   [pval $all_probes UNSIGNED cyc_total              probe_in15]
+    set nrun   [pval $all_probes UNSIGNED n_inv]
+    set fdone  [pval $all_probes UNSIGNED folds_done]
+    set extdbg [pval $all_probes HEX      external_debug_sticky  probe_in17]
     if {$nrun eq "" || $nrun == 0} { set nrun 1 }
 
     if {$wchk eq "" || $cyc eq ""} {
@@ -619,6 +622,7 @@ proc read_vio {} {
     puts "  chk_wr  0x$wchk     expected 0x$want_wchk    operands ($nrun x 0x$EXPECT_WR_CHK)"
     puts "  chk_c   0x$cchk     expected 0x$want_cchk    result   ($nrun x 0x$EXPECT_C_CHK)"
     puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
+    puts "  external debug     = 0x$extdbg"
     puts ""
     puts "  any error latched   = $er"
     puts ""
