@@ -703,6 +703,11 @@ module systolic_dma_top #(
 
   logic [31:0] job_id_reg;
   logic [31:0] job_device_id_reg;
+
+  // Predecoded physical-device selection.
+  // Captured together with job_device_id_reg at job acceptance.
+  logic select_8x8_reg;
+  logic select_4x4_reg;
   logic [31:0] job_m_reg;
   logic [31:0] job_n_reg;
   logic [31:0] job_k_reg;
@@ -725,12 +730,10 @@ module systolic_dma_top #(
   // All three 4x4 instances share the same geometry but retain distinct
   // scheduler-visible device IDs.
   // ----------------------------------------------------------
-  wire select_8x8 =
-      (job_device_id_reg < NUM_8X8);
-
-  wire select_4x4 =
-      (job_device_id_reg >= NUM_8X8) &&
-      (job_device_id_reg < NUM_ACCEL);
+  // Registered selection removes the wide ID comparisons
+  // from the writeback FIFO -> AXI control path.
+  wire select_8x8 = select_8x8_reg;
+  wire select_4x4 = select_4x4_reg;
 
   wire [31:0] selected_8x8_idx = job_device_id_reg;
   wire [31:0] selected_4x4_idx = job_device_id_reg - NUM_8X8;
@@ -1717,6 +1720,13 @@ module systolic_dma_top #(
       job_active     <= 1'b0;
       job_id_reg     <= 32'd0;
       job_device_id_reg <= 32'd0;
+
+      // Preserve the original reset-time decode of device ID 0.
+      select_8x8_reg <= (32'd0 < NUM_8X8);
+      select_4x4_reg <=
+          (32'd0 >= NUM_8X8) &&
+          (32'd0 < NUM_ACCEL);
+
       job_m_reg      <= 32'd0;
       job_n_reg      <= 32'd0;
       job_k_reg      <= 32'd0;
@@ -1747,6 +1757,16 @@ module systolic_dma_top #(
 
         job_id_reg     <= effective_job_id;
         job_device_id_reg <= effective_job_device_id;
+
+        // Decode the incoming ID, not the previous registered ID.
+        // Both selectors become valid on the same acceptance edge.
+        select_8x8_reg <=
+            (effective_job_device_id < NUM_8X8);
+
+        select_4x4_reg <=
+            (effective_job_device_id >= NUM_8X8) &&
+            (effective_job_device_id < NUM_ACCEL);
+
         job_m_reg      <= effective_job_m;
         job_n_reg      <= effective_job_n;
         job_k_reg      <= effective_job_k;
