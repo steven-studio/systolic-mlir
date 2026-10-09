@@ -2035,15 +2035,16 @@ systolic_hw_scheduler #(
       wb_done &&
       wb_fi_last;
 
-  // The next tile of the same job becomes schedulable once the current
-  // tile has been written back and tiles remain.  The scheduler is idle by
-  // then (it consumed this tile's accelerator_done at c_valid), so the
-  // level is normally accepted on the next cycle; it is held regardless.
+  // The next tile of the same job becomes schedulable as soon as the current
+  // tile has been handed to the write-back stage and tiles remain -- not
+  // after its write-back, which is what the overlap is.  The scheduler is
+  // idle by then (it consumed this tile's accelerator_done at c_valid), so
+  // the level is normally accepted on the next cycle; it is held regardless.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear)
       inv_pending <= 1'b0;
     else if (USE_EXTERNAL_SCHEDULER && job_active &&
-             (phase == P_WB) && wb_done && !wb_fi_last)
+             tile_handoff && !compute_fi_last)
       inv_pending <= 1'b1;
     else if (inv_pending && scheduler_desc_ready)
       inv_pending <= 1'b0;
@@ -2269,28 +2270,46 @@ systolic_hw_scheduler #(
   // cycle of P_FOLD, so that cycle is cleared too.
   logic c_done_fold;
 
+  // -------------------------------------------------------------------------
+  // Compute / write-back overlap.
+  //
+  // The outer FSM owns the compute side only (P_READ / P_GO / P_FOLD).  The
+  // scan and the write-back of a finished tile run in a separate stage,
+  // wb_phase, so tile N's fold overlaps tile N-1's scan + write-back.  The
+  // two meet at one hand-off, tile_handoff: P_FOLD may leave only when the
+  // write-back stage is idle, so the stage holds at most one tile and the
+  // two result banks suffice -- tile N+1 publishes into bank (N+1)%2 =
+  // (N-1)%2, which the stage released before tile N could be handed off.
+  // For the last tile the FSM waits in P_WB for the stage to drain, so
+  // P_DONE keeps its meaning: everything of this run is in memory.
+  // -------------------------------------------------------------------------
+  typedef enum logic [1:0] { W_IDLE, W_SCAN, W_WB } wb_phase_t;
+  wb_phase_t wb_phase;
+  logic      wb_bank;                 // result bank owned by the stage
+
+  wire compute_fi_last = (compute_fi == n_inv - 4'd1);
+  wire tile_handoff    = (phase == P_FOLD) && !fold_start && c_done_fold &&
+                         (wb_phase == W_IDLE);
+
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       phase         <= P_CALIB;
       n_inv         <= 4'd1;
       fi            <= 4'd0;
-      wb_fi         <= 4'd0;
       seed_start    <= 1'b0;
       desc_valid    <= 1'b0;
       fsm_fold_start    <= 1'b0;
-      wb_desc_valid <= 1'b0;
-      scan_c        <= '0;
     end else begin
       seed_start    <= 1'b0;
       desc_valid    <= 1'b0;
       fsm_fold_start    <= 1'b0;
-      wb_desc_valid <= 1'b0;
+      // fi keeps counting written-back tiles, as it did in P_WB.
+      if (wb_done && !wb_fi_last) fi <= fi + 4'd1;
       case (phase)
         P_CALIB: if (init_calib_complete &&
                        (!USE_EXTERNAL_SCHEDULER || job_active)) begin
                    n_inv      <= n_inv_next;
                    fi         <= 4'd0;
-                   wb_fi      <= 4'd0;
 
                    // Legacy bring-up owns synthetic operand generation.
                    // External/compiler jobs consume operand slabs already
@@ -2342,37 +2361,27 @@ systolic_hw_scheduler #(
                      phase <= P_FOLD;
                    end
                  end
-        P_FOLD:  if (!fold_start && c_done_fold) begin
-                   // fold_start is the transaction boundary and clears
-                   // completion state.  Do not consume a stale c_done_fold
-                   // from the previous transaction on that same clock edge.
+        // fold_start is the transaction boundary and clears completion
+        // state, so a stale c_done_fold from the previous transaction is
+        // never consumed on that same clock edge.  The finished tile is
+        // handed to the write-back stage (which scans and writes it back
+        // from its snapshot bank) and the compute side moves on at once:
+        // the next tile's fold overlaps this tile's scan + write-back.
+        P_FOLD:  if (tile_handoff) begin
                    $display("CDBG C00=%h C01=%h C10=%h C77=%h",
                             C[0][0], C[0][1], C[1][0], C[N-1][N-1]);
-                   scan_c <= '0;
-                   phase  <= P_SCAN;
+                   if (compute_fi_last)
+                     phase <= P_WB;
+                   // The next operand tile may already have landed while
+                   // this tile was computing.
+                   else if (compute_ready || fill_complete)
+                     phase <= P_GO;
+                   else
+                     phase <= P_READ;
                  end
-        P_SCAN:  if (scan_c_last) phase <= P_WB;
-                 else             scan_c <= scan_c + 1'b1;
-        // The tile goes to memory only after chk_c has been taken off the
-        // register file, so a write-back fault can never be mistaken for a
-        // compute fault: by the time anything is written, led[5] has settled.
-        P_WB:    begin
-                   if (!wb_desc_started) wb_desc_valid <= 1'b1;
-                   if (wb_done) begin
-                     if (wb_fi_last) phase <= P_DONE;
-                     else begin
-                       fi    <= fi + 4'd1;
-                       wb_fi <= wb_fi + 4'd1;
-
-                       // The next operand tile may already have landed while
-                       // this tile was computing or writing back.
-                       if (compute_ready || fill_complete)
-                         phase <= P_GO;
-                       else
-                         phase <= P_READ;
-                     end
-                   end
-                 end
+        // The last tile has been handed off; wait for the write-back stage
+        // to drain so that P_DONE still means "every tile is in memory".
+        P_WB:    if (wb_phase == W_IDLE) phase <= P_DONE;
         P_DONE:  begin
                    // Legacy bring-up can explicitly request another run.
                    //
@@ -2384,7 +2393,6 @@ systolic_hw_scheduler #(
                    if (rerun_pulse ||
                        (USE_EXTERNAL_SCHEDULER && job_fire)) begin
                      fi         <= 4'd0;
-                     wb_fi      <= 4'd0;
                      phase      <= P_CALIB;
                    end
                  end
@@ -2400,6 +2408,42 @@ systolic_hw_scheduler #(
           !compute_ready &&
           !reads_complete)
         desc_valid <= 1'b1;
+    end
+  end
+
+  // ---- write-back stage ---------------------------------------------------
+  // Takes one finished tile at tile_handoff and owns it until its last write
+  // response: W_SCAN takes chk_c off the snapshot bank (one entry per cycle,
+  // as before), W_WB issues the descriptor and waits for wb_done.  The tile
+  // goes to memory only after chk_c has been taken, so a write-back fault can
+  // never be mistaken for a compute fault.  wb_fi names the tile in the
+  // stage; it advances when that tile's write-back completes.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear) begin
+      wb_phase      <= W_IDLE;
+      wb_bank       <= 1'b0;
+      wb_fi         <= 4'd0;
+      scan_c        <= '0;
+      wb_desc_valid <= 1'b0;
+    end else begin
+      wb_desc_valid <= 1'b0;
+      case (wb_phase)
+        W_IDLE: if (tile_handoff) begin
+                  wb_bank  <= compute_fi[0];
+                  scan_c   <= '0;
+                  wb_phase <= W_SCAN;
+                end
+        W_SCAN: if (scan_c_last) wb_phase <= W_WB;
+                else             scan_c   <= scan_c + 1'b1;
+        W_WB:   begin
+                  if (!wb_desc_started) wb_desc_valid <= 1'b1;
+                  if (wb_done) begin
+                    if (!wb_fi_last) wb_fi <= wb_fi + 4'd1;
+                    wb_phase <= W_IDLE;
+                  end
+                end
+        default: wb_phase <= W_IDLE;
+      endcase
     end
   end
 
@@ -2480,7 +2524,7 @@ systolic_hw_scheduler #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n)                           wb_desc_started <= 1'b0;
-    else if (phase != P_WB)                  wb_desc_started <= 1'b0;
+    else if (wb_phase != W_WB)               wb_desc_started <= 1'b0;
     else if (wb_desc_valid && wb_desc_ready) wb_desc_started <= 1'b1;
   end
 
@@ -2537,7 +2581,7 @@ systolic_hw_scheduler #(
   // wrong master.  Within a run the hand-over is still one-way.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear) wb_owns_w <= 1'b0;
-    else if (phase == P_WB)     wb_owns_w <= 1'b1;
+    else if (wb_phase == W_WB)  wb_owns_w <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -3711,16 +3755,15 @@ systolic_hw_scheduler #(
   // overwrite C, so writeback must consume an immutable snapshot instead.
   //
   // Bank ownership:
-  //   result_bank_toggle : bank used by the next completed compute
-  //   wb_result_bank     : bank currently owned by writeback
+  //   tile i publishes into bank i%2 (compute_fi[0], stable for the fold);
+  //   the write-back stage latches that index at tile_handoff (wb_bank) and
+  //   reads only its own bank until wb_done.  Bank i%2 is rewritten by tile
+  //   i+2 at the earliest, whose fold cannot start before tile i+1 has been
+  //   handed off, i.e. before tile i's write-back has completed.
   //
-  // The two banks are intentionally independent from C.  This is the first
-  // step toward compute/writeback overlap; timing/FSM overlap is added later.
+  // The two banks are intentionally independent from C.
   // -------------------------------------------------------------------------
   logic [31:0] result_bank [0:1][0:N-1][0:N-1];
-  logic        result_bank_valid [0:1];
-  logic        wb_result_bank;
-  logic        result_bank_toggle;
 
   integer rr;
   integer cc;
@@ -3728,10 +3771,6 @@ systolic_hw_scheduler #(
   always_ff @(posedge ui_clk) begin
     if (rst_i) begin
       c_done               <= 1'b0;
-      result_bank_valid[0] <= 1'b0;
-      result_bank_valid[1] <= 1'b0;
-      wb_result_bank       <= 1'b0;
-      result_bank_toggle   <= 1'b0;
     end
     else begin
       // New transaction starts.
@@ -3758,12 +3797,8 @@ systolic_hw_scheduler #(
         // can overwrite the live C register image.
         for (rr = 0; rr < N; rr = rr + 1)
           for (cc = 0; cc < N; cc = cc + 1)
-            result_bank[result_bank_toggle][rr][cc]
+            result_bank[compute_fi[0]][rr][cc]
               <= c_out_8x8[selected_8x8_idx][rr][cc];
-
-        result_bank_valid[result_bank_toggle] <= 1'b1;
-        wb_result_bank <= result_bank_toggle;
-        result_bank_toggle <= ~result_bank_toggle;
 
         c_done <= 1'b1;
       end
@@ -3784,12 +3819,8 @@ systolic_hw_scheduler #(
         // portion of the common result bank is meaningful for this device.
         for (rr = 0; rr < 4; rr = rr + 1)
           for (cc = 0; cc < 4; cc = cc + 1)
-            result_bank[result_bank_toggle][rr][cc]
+            result_bank[compute_fi[0]][rr][cc]
               <= c_out_4x4[selected_4x4_idx][rr][cc];
-
-        result_bank_valid[result_bank_toggle] <= 1'b1;
-        wb_result_bank <= result_bank_toggle;
-        result_bank_toggle <= ~result_bank_toggle;
 
         c_done <= 1'b1;
       end
@@ -3909,7 +3940,7 @@ systolic_hw_scheduler #(
     for (wb_r = 0; wb_r < N; wb_r = wb_r + 1) begin : GEN_CWB_R
       for (wb_c = 0; wb_c < N; wb_c = wb_c + 1) begin : GEN_CWB_C
         assign C_wb[wb_r][wb_c] =
-            result_bank[wb_result_bank][wb_r][wb_c];
+            result_bank[wb_bank][wb_r][wb_c];
       end
     end
   endgenerate
@@ -3921,7 +3952,7 @@ systolic_hw_scheduler #(
     for (c4_r = 0; c4_r < 4; c4_r = c4_r + 1) begin : GEN_C4_R
       for (c4_c = 0; c4_c < 4; c4_c = c4_c + 1) begin : GEN_C4_C
         assign C_4x4[c4_r][c4_c] =
-            result_bank[wb_result_bank][c4_r][c4_c];
+            result_bank[wb_bank][c4_r][c4_c];
       end
     end
   endgenerate
@@ -3942,7 +3973,7 @@ systolic_hw_scheduler #(
   wire                     rdr8_done;
 
   wire wb_rd_start_8x8 =
-      (phase == P_WB) && select_8x8;
+      (wb_phase == W_WB) && select_8x8;
 
   dma_result_reader #(
     .N          (8),
@@ -3986,7 +4017,7 @@ systolic_hw_scheduler #(
   wire                     rdr4_done;
 
   wire wb_rd_start_4x4 =
-      (phase == P_WB) && select_4x4;
+      (wb_phase == W_WB) && select_4x4;
 
   dma_result_reader #(
     .N          (4),
@@ -4102,10 +4133,10 @@ systolic_hw_scheduler #(
       c_rd       <= '0;
       chk_c      <= '0;
     end else begin
-      scan_val_d <= (phase == P_SCAN) && !scan_c_last;
+      scan_val_d <= (wb_phase == W_SCAN) && !scan_c_last;
       scan_r_d   <= scan_r_i;
       scan_c_d   <= scan_c_i;
-      c_rd       <= C[scan_r_i][scan_c_i];
+      c_rd       <= result_bank[wb_bank][scan_r_i][scan_c_i];
       if (phase == P_CALIB)  chk_c <= '0;
       else if (scan_val_d)   chk_c <= chk_c + (c_rd ^ cpos);
     end
@@ -4156,7 +4187,7 @@ systolic_hw_scheduler #(
     end else begin
       if (fill_complete)
         want_wr <= want_wr + active_expected_wr_chk;
-      if ((phase == P_SCAN) && scan_c_last)
+      if ((wb_phase == W_SCAN) && scan_c_last)
         want_c  <= want_c + EXPECT_C_CHK;
     end
   end
