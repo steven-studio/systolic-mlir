@@ -120,7 +120,7 @@ module systolic_hw_scheduler #(
             // Accelerator completion is a pulse at the hardware boundary.
             // Capture it independently of the scheduler FSM state so a
             // one-cycle pulse cannot be lost.
-            if (busy && |accelerator_done)
+            if (busy && accelerator_done[active_accelerator_id])
                 accelerator_done_seen <= 1'b1;
 
             case (state)

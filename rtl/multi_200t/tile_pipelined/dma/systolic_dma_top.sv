@@ -621,10 +621,24 @@ module systolic_dma_top #(
 wire scheduler_start_window =
     (phase == P_GO) && compute_ready;
 
-wire [1:0] scheduler_accelerator_ready = {
-    scheduler_start_window,
-    scheduler_start_window
-};
+// One shared datapath, so every physical accelerator's readiness is the
+// same window.  Width follows the fleet: a narrower vector would leave the
+// upper device IDs permanently not-ready.
+wire [NUM_ACCEL-1:0] scheduler_accelerator_ready =
+    {NUM_ACCEL{scheduler_start_window}};
+
+// -------------------------------------------------------------------------
+// Per-tile scheduler handshake.
+//
+// The scheduler owns every tile transaction, not only the first one of a
+// job: the accepted job's first tile is presented at job_fire, every later
+// tile (invocation wb_fi+1, once tile wb_fi has been written back) is
+// presented through inv_pending.  Both carry the job's own device ID and
+// schedule fields -- the registered copies, never the ingress buffer, which
+// may already hold the next job's descriptor.  inv_pending is a level held
+// until the scheduler accepts it, so no release can be dropped.
+// -------------------------------------------------------------------------
+logic inv_pending;
 
 systolic_hw_scheduler #(
     .NUM_ACCEL (NUM_ACCEL),
@@ -634,12 +648,15 @@ systolic_hw_scheduler #(
     .clk                    (ui_clk),
     .rst                    (!ui_rst_n),
 
-    .desc_valid             (job_fire),
+    .desc_valid             (job_fire || inv_pending),
     .desc_ready             (scheduler_desc_ready),
 
-    .desc_accelerator_id    (effective_job_device_id[1:0]),
-    .desc_start_cycle       (effective_job_start_cycle),
-    .desc_compute_cycles    (effective_job_est_cycles),
+    .desc_accelerator_id    (job_fire ? effective_job_device_id[ACC_ID_W-1:0]
+                                      : job_device_id_reg[ACC_ID_W-1:0]),
+    .desc_start_cycle       (job_fire ? effective_job_start_cycle
+                                      : job_start_cycle_reg),
+    .desc_compute_cycles    (job_fire ? effective_job_est_cycles
+                                      : job_est_cycles_reg),
 
     .accelerator_start      (scheduler_accelerator_start),
     .accelerator_done       (scheduler_accelerator_done),
@@ -763,12 +780,17 @@ systolic_hw_scheduler #(
   //   K * N * 4 + K * N * 4 = K * N * 8 bytes.
   //
   // K_MAX is the physical buffer capacity; JOB_K is the
-  // reduction length of this particular job.
-  // The operand image is physically laid out at K_MAX capacity.
-  // JOB_K controls how many reduction entries the array consumes;
-  // it does not change the DMA payload layout or operand-buffer decode.
+  // reduction length of this particular job.  The payload is the first
+  // JOB_K depths of the K_MAX-capacity image, in the operand writer's
+  // layout, so JOB_K sizes the DMA transfer without changing the decode.
+  //
+  // Legacy bring-up has no job descriptor (job_k_reg stays 0, and a
+  // zero-beat descriptor is ignored by dma_engine); its reduction length is
+  // the K_DIM parameter, so the same K-depths-of-the-image rule applies.
   wire [31:0] job_rx_bytes =
-      job_k_reg * N * 8;
+      USE_EXTERNAL_SCHEDULER
+          ? (job_k_reg * N * 8)
+          : (K_DIM * N * 8);
 
   wire [31:0] job_n_beats =
       job_rx_bytes / (AXI_DATA_W / 8);
@@ -1942,11 +1964,11 @@ systolic_hw_scheduler #(
   // words_written is cumulative (the writer's clear is tied low), so the
   // finishing line moves one slab per invocation: invocation fi is full when
   // the (fi+1)-th slab has landed.  At n_inv = 1 this is the old comparison.
+  // A slab is job_rx_words -- what the descriptor fetched, from the LATCHED
+  // job_k_reg -- for both device classes: the operand writer is the shared
+  // N-lane writer, so a 4x4 job's payload is still job_k * 2N words.
   wire [31:0] words_want =
-      USE_EXTERNAL_SCHEDULER
-          ? (ingress_job_k *
-             (ingress_job_device_id == 32'd0 ? 32'd16 : 32'd8))
-          : RX_BYTES / 4;
+      (32'(read_fi) + 32'd1) * job_rx_words;
   wire fill_complete = read_done_fold && (words_written == words_want);
 
   localparam integer C_N = N * N;
@@ -2013,6 +2035,20 @@ systolic_hw_scheduler #(
       wb_done &&
       wb_fi_last;
 
+  // The next tile of the same job becomes schedulable once the current
+  // tile has been written back and tiles remain.  The scheduler is idle by
+  // then (it consumed this tile's accelerator_done at c_valid), so the
+  // level is normally accepted on the next cycle; it is held regardless.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n || run_clear)
+      inv_pending <= 1'b0;
+    else if (USE_EXTERNAL_SCHEDULER && job_active &&
+             (phase == P_WB) && wb_done && !wb_fi_last)
+      inv_pending <= 1'b1;
+    else if (inv_pending && scheduler_desc_ready)
+      inv_pending <= 1'b0;
+  end
+
   // ----------------------------------------------------------
   // Job-aware DMA address generation.
   //
@@ -2024,7 +2060,12 @@ systolic_hw_scheduler #(
   //   job_a_base_reg -> operand/read region
   //   job_c_base_reg -> result/write-back region
   //
-  // fi is still the invocation index within this accepted job.
+  // An external descriptor names exactly ONE operand payload: A and B of
+  // depth job_k at job_a_base.  n_inv in this mode repeats that tile
+  // transaction -- every invocation re-reads the same payload and writes
+  // its own result tile (wb_fi strides the result region) -- so the read
+  // address does not move with read_fi.  Splitting a deeper reduction is
+  // the compiler's job, one descriptor per slab, not this loop's.
   //
   // job_b_base_reg is latched but intentionally unused here.
   // The current operand path consumes one combined slab; separating
@@ -2040,8 +2081,7 @@ systolic_hw_scheduler #(
 
   wire [AXI_ADDR_W-1:0] read_slab_addr =
       USE_EXTERNAL_SCHEDULER
-          ? AXI_ADDR_W'(job_a_base_reg) +
-            (AXI_ADDR_W'(read_fi) << RX_SHIFT)
+          ? AXI_ADDR_W'(job_a_base_reg)
           : AXI_ADDR_W'(BASE_ADDR) +
             (AXI_ADDR_W'(read_fi) << RX_SHIFT);
 
@@ -2278,9 +2318,12 @@ systolic_hw_scheduler #(
                    end
                  end
         P_READ:  begin
-                   if (compute_ready || (words_written == words_want && !read_active))
-                     if (reads_complete)
-                       phase <= P_GO;
+                   // A completely landed operand tile is waiting for compute.
+                   // This is the per-tile condition; reads_complete (all of
+                   // the job's slabs landed) is NOT required here -- the last
+                   // slab's descriptor is only issued once compute has taken
+                   // the previous tile, so gating on it would wait forever.
+                   if (compute_ready) phase <= P_GO;
                  end
         P_GO:    begin
                    if (USE_EXTERNAL_SCHEDULER) begin
@@ -2423,8 +2466,7 @@ systolic_hw_scheduler #(
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear)             desc_started <= 1'b0;
     else if (fill_complete)                 desc_started <= 1'b0;
-    else if (eng_desc_valid && eng_desc_ready)
-      desc_started <= 1'b1;
+    else if (desc_valid && desc_ready)      desc_started <= 1'b1;
   end
 
   // Operand-read transaction ownership is independent of the outer phase.
