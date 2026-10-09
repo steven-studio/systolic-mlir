@@ -610,7 +610,23 @@ module systolic_dma_top #(
   wire [31:0] scheduler_active_compute_cycles;
   wire [1:0]  scheduler_active_accelerator_id;
 
-  systolic_hw_scheduler #(
+  // The scheduler start pulse is only meaningful once the outer FSM has
+// entered P_GO.  compute_ready may already be high during P_READ, but
+// fold_start is intentionally suppressed there.  Therefore using only
+// compute_ready here allows the scheduler to enter ST_RUN one phase too
+// early and wait forever for accelerator_done.
+//
+// P_GO is the actual boundary at which scheduler_start_pending is replayed
+// into fold_start.
+wire scheduler_start_window =
+    (phase == P_GO) && compute_ready;
+
+wire [1:0] scheduler_accelerator_ready = {
+    scheduler_start_window,
+    scheduler_start_window
+};
+
+systolic_hw_scheduler #(
     .NUM_ACCEL (NUM_ACCEL),
     .CYCLE_W   (32),
     .ACC_W     (ACC_ID_W)
@@ -627,6 +643,7 @@ module systolic_dma_top #(
 
     .accelerator_start      (scheduler_accelerator_start),
     .accelerator_done       (scheduler_accelerator_done),
+    .accelerator_ready    (scheduler_accelerator_ready),
 
     .busy                   (scheduler_busy),
     .schedule_done          (scheduler_schedule_done),
@@ -1926,7 +1943,10 @@ module systolic_dma_top #(
   // finishing line moves one slab per invocation: invocation fi is full when
   // the (fi+1)-th slab has landed.  At n_inv = 1 this is the old comparison.
   wire [31:0] words_want =
-      (32'(read_fi) + 32'd1) * job_rx_words;
+      USE_EXTERNAL_SCHEDULER
+          ? (ingress_job_k *
+             (ingress_job_device_id == 32'd0 ? 32'd16 : 32'd8))
+          : RX_BYTES / 4;
   wire fill_complete = read_done_fold && (words_written == words_want);
 
   localparam integer C_N = N * N;
@@ -2258,7 +2278,9 @@ module systolic_dma_top #(
                    end
                  end
         P_READ:  begin
-                   if (fill_complete) phase <= P_GO;
+                   if (compute_ready || (words_written == words_want && !read_active))
+                     if (reads_complete)
+                       phase <= P_GO;
                  end
         P_GO:    begin
                    if (USE_EXTERNAL_SCHEDULER) begin
@@ -2401,7 +2423,8 @@ module systolic_dma_top #(
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear)             desc_started <= 1'b0;
     else if (fill_complete)                 desc_started <= 1'b0;
-    else if (desc_valid && desc_ready)      desc_started <= 1'b1;
+    else if (eng_desc_valid && eng_desc_ready)
+      desc_started <= 1'b1;
   end
 
   // Operand-read transaction ownership is independent of the outer phase.
@@ -3532,9 +3555,68 @@ module systolic_dma_top #(
 
 
   // -------------------------------------------------------------------------
+  // DEBUG: trace the selected 8x8 PE(0,0) result publication.
+  // Observation only: no functional signal is modified.
+  //
+  // Hierarchy:
+  //   ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe
+  //
+  // This distinguishes:
+  //   reduction result -> PE commit -> acc_out -> array c_out
+  // -------------------------------------------------------------------------
+  always_ff @(posedge ui_clk) begin
+    if (!rst_i) begin
+      if (select_8x8 &&
+          (c_valid_out_8x8_selected ||
+           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.reduce_add_valid ||
+           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_commit_q ||
+           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_valid_out)) begin
+        $display(
+          "PE00TOPDBG t=%0t sel=%b cvalid=%b | redV=%b final=%h commit=%b accV=%b acc=%h | pe_acc=%h c_out=%h",
+          $time,
+          select_8x8,
+          c_valid_out_8x8_selected,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.reduce_add_valid,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.final_reduce_result,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_commit_q,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_valid_out,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_out,
+          ACC_8X8[0].u_acc.ROW[0].COL[0].pe_acc[0][0],
+          c_out_8x8[0][0][0]
+        );
+      end
+    end
+  end
+
+
+  // -------------------------------------------------------------------------
   // DEBUG: observe array-side transaction boundary.
   // Observation only: no functional signal is modified.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // DEBUG: verify selected physical 8x8 dispatch.
+  // Observation only: no functional signal is modified.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge ui_clk) begin
+    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(8)) begin
+      $display(
+        "DISPATCHDBG t=%0t ft=%0d sel8=%0d sel4=%0d | a_in0=%h av_in0=%b | a_to_sel0=%b b_to_sel0=%b | cvalid8_sel=%b",
+        $time,
+        feed_t,
+        selected_8x8_idx,
+        selected_4x4_idx,
+        a_in[0],
+        a_valid_in[0],
+        a_valid_to_8x8[selected_8x8_idx][0],
+        b_valid_to_8x8[selected_8x8_idx][0],
+        c_valid_out_8x8_selected
+      );
+    end
+  end
+
+
   always_ff @(posedge ui_clk) begin
     if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(3)) begin
       $display(
@@ -3580,12 +3662,34 @@ module systolic_dma_top #(
   //
   logic [31:0] C [0:N-1][0:N-1];
 
+  // -------------------------------------------------------------------------
+  // Result snapshot ping-pong.
+  //
+  // C is the live accelerator result image.  A later compute invocation may
+  // overwrite C, so writeback must consume an immutable snapshot instead.
+  //
+  // Bank ownership:
+  //   result_bank_toggle : bank used by the next completed compute
+  //   wb_result_bank     : bank currently owned by writeback
+  //
+  // The two banks are intentionally independent from C.  This is the first
+  // step toward compute/writeback overlap; timing/FSM overlap is added later.
+  // -------------------------------------------------------------------------
+  logic [31:0] result_bank [0:1][0:N-1][0:N-1];
+  logic        result_bank_valid [0:1];
+  logic        wb_result_bank;
+  logic        result_bank_toggle;
+
   integer rr;
   integer cc;
 
   always_ff @(posedge ui_clk) begin
     if (rst_i) begin
-      c_done <= 1'b0;
+      c_done               <= 1'b0;
+      result_bank_valid[0] <= 1'b0;
+      result_bank_valid[1] <= 1'b0;
+      wb_result_bank       <= 1'b0;
+      result_bank_toggle   <= 1'b0;
     end
     else begin
       // New transaction starts.
@@ -3608,6 +3712,17 @@ module systolic_dma_top #(
           c_out_8x8[selected_8x8_idx][N-1][N-1]
         );
 
+        // Snapshot the completed result before a later compute invocation
+        // can overwrite the live C register image.
+        for (rr = 0; rr < N; rr = rr + 1)
+          for (cc = 0; cc < N; cc = cc + 1)
+            result_bank[result_bank_toggle][rr][cc]
+              <= c_out_8x8[selected_8x8_idx][rr][cc];
+
+        result_bank_valid[result_bank_toggle] <= 1'b1;
+        wb_result_bank <= result_bank_toggle;
+        result_bank_toggle <= ~result_bank_toggle;
+
         c_done <= 1'b1;
       end
 
@@ -3622,6 +3737,17 @@ module systolic_dma_top #(
         for (rr = 0; rr < 4; rr = rr + 1)
           for (cc = 0; cc < 4; cc = cc + 1)
             C[rr][cc] <= c_out_4x4[selected_4x4_idx][rr][cc];
+
+        // Snapshot the physical 4x4 result.  Only the upper-left 4x4
+        // portion of the common result bank is meaningful for this device.
+        for (rr = 0; rr < 4; rr = rr + 1)
+          for (cc = 0; cc < 4; cc = cc + 1)
+            result_bank[result_bank_toggle][rr][cc]
+              <= c_out_4x4[selected_4x4_idx][rr][cc];
+
+        result_bank_valid[result_bank_toggle] <= 1'b1;
+        wb_result_bank <= result_bank_toggle;
+        result_bank_toggle <= ~result_bank_toggle;
 
         c_done <= 1'b1;
       end
@@ -3731,12 +3857,29 @@ module systolic_dma_top #(
   // The 4x4 accelerator writes its result into C[0:3][0:3].
   // Keep this as an explicit 4x4 array because dma_result_reader's
   // N parameter determines the unpacked array port shape.
+  //
+  // Writeback consumes the immutable result snapshot selected by
+  // wb_result_bank, never the live accelerator result image C[][].
+  wire [31:0] C_wb [0:N-1][0:N-1];
+
+  genvar wb_r, wb_c;
+  generate
+    for (wb_r = 0; wb_r < N; wb_r = wb_r + 1) begin : GEN_CWB_R
+      for (wb_c = 0; wb_c < N; wb_c = wb_c + 1) begin : GEN_CWB_C
+        assign C_wb[wb_r][wb_c] =
+            result_bank[wb_result_bank][wb_r][wb_c];
+      end
+    end
+  endgenerate
+
   wire [31:0] C_4x4 [0:3][0:3];
 
+  genvar c4_r, c4_c;
   generate
-    for (genvar c4_r = 0; c4_r < 4; c4_r = c4_r + 1) begin : C4_VIEW_R
-      for (genvar c4_c = 0; c4_c < 4; c4_c = c4_c + 1) begin : C4_VIEW_C
-        assign C_4x4[c4_r][c4_c] = C[c4_r][c4_c];
+    for (c4_r = 0; c4_r < 4; c4_r = c4_r + 1) begin : GEN_C4_R
+      for (c4_c = 0; c4_c < 4; c4_c = c4_c + 1) begin : GEN_C4_C
+        assign C_4x4[c4_r][c4_c] =
+            result_bank[wb_result_bank][c4_r][c4_c];
       end
     end
   endgenerate
@@ -3767,7 +3910,7 @@ module systolic_dma_top #(
     .rst     (rst_i),
     .start   (wb_rd_start_8x8),
     .done    (rdr8_done),
-    .C       (C),
+    .C       (C_wb),
     .wr_en   (rdr8_wr_en),
     .wr_data (rdr8_wr_data),
     .wfull   (rdr8_wfull)

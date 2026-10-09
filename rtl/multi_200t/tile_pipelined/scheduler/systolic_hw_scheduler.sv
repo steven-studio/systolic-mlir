@@ -53,6 +53,14 @@ module systolic_hw_scheduler #(
     // ------------------------------------------------------------------------
     input  wire [NUM_ACCEL-1:0]     accelerator_done,
 
+    // Accelerator/datapath readiness.
+    //
+    // The scheduler must not consume its one-cycle accelerator_start pulse
+    // until the datapath is actually ready to accept the invocation.
+    // Otherwise the start pulse can be emitted during P_READ and lost.
+    // ------------------------------------------------------------------------
+    input  wire [NUM_ACCEL-1:0]     accelerator_ready,
+
     // ------------------------------------------------------------------------
     // Scheduler status.
     // ------------------------------------------------------------------------
@@ -74,6 +82,11 @@ module systolic_hw_scheduler #(
 
     state_t state;
 
+    // Accelerator completion may be a one-cycle pulse.  Keep it latched
+    // until the scheduler consumes it in ST_RUN, so completion cannot be
+    // lost at the ST_IDLE/ST_WAIT -> ST_RUN boundary.
+    logic accelerator_done_seen;
+
     assign desc_ready = (state == ST_IDLE) && !busy;
 
     always_ff @(posedge clk) begin
@@ -90,6 +103,8 @@ module systolic_hw_scheduler #(
             active_start_cycle     <= '0;
             active_compute_cycles  <= '0;
             active_accelerator_id  <= '0;
+
+            accelerator_done_seen  <= 1'b0;
         end
         else begin
             // Start pulses are always one cycle.
@@ -101,6 +116,12 @@ module systolic_hw_scheduler #(
             // Global schedule clock.
             if (busy)
                 cycle_counter <= cycle_counter + 1'b1;
+
+            // Accelerator completion is a pulse at the hardware boundary.
+            // Capture it independently of the scheduler FSM state so a
+            // one-cycle pulse cannot be lost.
+            if (busy && |accelerator_done)
+                accelerator_done_seen <= 1'b1;
 
             case (state)
 
@@ -115,9 +136,13 @@ module systolic_hw_scheduler #(
                         active_compute_cycles <= desc_compute_cycles;
                         active_accelerator_id <= desc_accelerator_id;
 
+                        // Start a fresh completion window for this job.
+                        accelerator_done_seen <= 1'b0;
+
                         busy <= 1'b1;
 
-                        if (cycle_counter >= desc_start_cycle) begin
+                        if ((cycle_counter >= desc_start_cycle) &&
+                            accelerator_ready[desc_accelerator_id]) begin
                             accelerator_start[desc_accelerator_id] <= 1'b1;
                             state <= ST_RUN;
                         end
@@ -136,7 +161,8 @@ module systolic_hw_scheduler #(
                     // value is cycle_counter + 1.  Fire the start pulse
                     // when that next cycle reaches the requested
                     // compiler schedule cycle.
-                    if ((cycle_counter + 1'b1) >= active_start_cycle) begin
+                    if (((cycle_counter + 1'b1) >= active_start_cycle) &&
+                        accelerator_ready[active_accelerator_id]) begin
                         accelerator_start[active_accelerator_id] <= 1'b1;
                         state <= ST_RUN;
                     end
@@ -150,7 +176,8 @@ module systolic_hw_scheduler #(
                 // than assuming the analytical cost is exact.
                 // ------------------------------------------------------------
                 ST_RUN: begin
-                    if (accelerator_done[active_accelerator_id]) begin
+                    if (accelerator_done_seen ||
+                        accelerator_done[active_accelerator_id]) begin
                         $display(
                             "SCHEDDONE t=%0t state=%0d active_dev=%0d accelerator_done=%b busy=%0b",
                             $time,
