@@ -142,6 +142,23 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
     }
 
     /*
+     * Diagnostic: inspect FTDI latency timer before SYNC FIFO mode.
+     */
+    unsigned char latency_ms = 0;
+
+    if (ftdi_get_latency_timer(ftdi, &latency_ms) < 0) {
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] failed to read latency timer: %s\n",
+            ftdi_get_error_string(ftdi));
+    } else {
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] initial latency timer: %u ms\n",
+            static_cast<unsigned>(latency_ms));
+    }
+
+    /*
      * Enter synchronous FIFO mode once for the entire descriptor
      * submission session.
      */
@@ -323,6 +340,42 @@ extern "C" int dpti_ftdi_read_exact_session(
                 "[DPTI FTDI] read timeout: got %u / %u bytes\n",
                 off,
                 length);
+
+            // Diagnostic only: wait up to 10 more seconds
+            // for the remaining bytes before returning failure.
+            const auto tail_deadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds(10);
+
+            while (off < length &&
+                   std::chrono::steady_clock::now() < tail_deadline) {
+                const int tail_rc = ftdi_read_data(
+                    session->transport.ftdi,
+                    out + off,
+                    static_cast<int>(length - off));
+
+                if (tail_rc < 0) {
+                    std::fprintf(stderr,
+                        "[DPTI TAIL] read error: %s\n",
+                        ftdi_get_error_string(
+                            session->transport.ftdi));
+                    break;
+                }
+
+                if (tail_rc > 0) {
+                    off += static_cast<uint32_t>(tail_rc);
+                    std::fprintf(stderr,
+                        "[DPTI TAIL] recovered: %u / %u bytes\n",
+                        off, length);
+                } else {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(1));
+                }
+            }
+
+            std::fprintf(stderr,
+                "[DPTI TAIL] final: %u / %u bytes\n",
+                off, length);
 
             return -4;
         }

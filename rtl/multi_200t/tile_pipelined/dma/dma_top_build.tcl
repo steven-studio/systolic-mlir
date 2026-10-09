@@ -340,6 +340,22 @@ proc build_body {} {
     add_files -fileset utils_1 -norecurse $DRC_TCL
     set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
 
+    # -------------------------------------------------------------------------
+    # Reproducibility gate.
+    #
+    # Do not allow implementation to start until the synthesized design proves
+    # that the repository XDC made dpti_clkout and clk_pll_i asynchronous.
+    launch_runs synth_1 -jobs $JOBS
+    wait_on_run synth_1
+
+    if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
+        error "synth_1 failed -- implementation is forbidden"
+    }
+
+    open_run synth_1
+    verify_clock_groups_before_impl
+    close_design
+
     launch_runs impl_1 -to_step write_bitstream -jobs $JOBS
     wait_on_run impl_1
 
@@ -458,6 +474,60 @@ proc pick_device {} {
 # latches n_inv on the way out of P_CALIB and clears every counter there, so the
 # order matters: write n_inv first, then edge the re-run probe.  The request is
 # only honoured in P_DONE, which is where a finished board sits.
+# -----------------------------------------------------------------------------
+# Reproducibility gate: verify the repository XDC clock-domain constraint
+# after synthesis and BEFORE allowing implementation to start.
+#
+# Implementation is forbidden unless Vivado itself reports both directions
+# between dpti_clkout and clk_pll_i as Asynchronous Groups.
+proc verify_clock_groups_before_impl {} {
+    puts ""
+    puts "============================================================"
+    puts "=== PRE-IMPLEMENTATION CLOCK CONSTRAINT CHECK ==="
+    puts "============================================================"
+
+    set dpti [get_clocks -quiet dpti_clkout]
+    set pll  [get_clocks -quiet clk_pll_i]
+
+    if {[llength $dpti] != 1} {
+        error "REPRODUCIBILITY CHECK FAILED: dpti_clkout clock not found"
+    }
+
+    if {[llength $pll] != 1} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i clock not found"
+    }
+
+    puts "dpti_clkout = $dpti"
+    puts "clk_pll_i   = $pll"
+
+    set report_fwd [report_clock_interaction \
+        -return_string \
+        -from $dpti \
+        -to $pll]
+
+    puts $report_fwd
+
+    if {![string match "*Asynchronous Groups*" $report_fwd]} {
+        error "REPRODUCIBILITY CHECK FAILED: dpti_clkout -> clk_pll_i is NOT Asynchronous Groups"
+    }
+
+    set report_rev [report_clock_interaction \
+        -return_string \
+        -from $pll \
+        -to $dpti]
+
+    puts $report_rev
+
+    if {![string match "*Asynchronous Groups*" $report_rev]} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i -> dpti_clkout is NOT Asynchronous Groups"
+    }
+
+    puts ""
+    puts "CLOCK CONSTRAINT CHECK PASSED."
+    puts "Implementation is allowed to proceed."
+    puts ""
+}
+
 proc arm_run {v n} {
     set pn [get_hw_probes -of_objects $v -quiet]
     set probe_n ""
@@ -583,6 +653,8 @@ proc read_vio {} {
     set nrun   [pval $all_probes UNSIGNED n_inv]
     set fdone  [pval $all_probes UNSIGNED folds_done]
     set extdbg [pval $all_probes HEX      external_debug_sticky  probe_in17]
+    set phydbg [pval $all_probes HEX      dpti_phy_debug_sync  probe_in18]
+    set clkact [pval $all_probes HEX      dpti_clk_activity_sync probe_in19]
     if {$nrun eq "" || $nrun == 0} { set nrun 1 }
 
     if {$wchk eq "" || $cyc eq ""} {
@@ -623,6 +695,8 @@ proc read_vio {} {
     puts "  chk_c   0x$cchk     expected 0x$want_cchk    result   ($nrun x 0x$EXPECT_C_CHK)"
     puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
     puts "  external debug     = 0x$extdbg"
+    puts "  DPTI physical debug = 0x$phydbg"
+    puts "  DPTI clock activity = 0x$clkact"
     puts ""
     puts "  any error latched   = $er"
     puts ""

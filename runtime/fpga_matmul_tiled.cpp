@@ -1,3 +1,5 @@
+#include <thread>
+#include <chrono>
 #include "fpga_matmul_tiled.h"
 #include "fpga_matmul4x4.h"
 #include "systolic_runtime.h"
@@ -335,6 +337,10 @@ int fpga_matmul_tiled_auto_scheduled(
 
     if (mem_rc != 0)
         return mem_rc;
+
+    // Diagnostic only: allow MEM_WRITE to settle before Submit.
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(1));
 
     dpti_job_t physical_job = {};
 

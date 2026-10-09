@@ -25,6 +25,11 @@ set_property -dict { PACKAGE_PIN V17 IOSTANDARD LVCMOS33 } [get_ports { dpti_oe_
 set_property -dict { PACKAGE_PIN P17 IOSTANDARD LVCMOS33 } [get_ports { dpti_siwun }]
 set_property -dict { PACKAGE_PIN Y18 IOSTANDARD LVCMOS33 } [get_ports { dpti_clkout }]
 
+# FT2232H synchronous FIFO interface clock.
+# CLKOUT is a 60 MHz source clock for the DPTI interface.
+create_clock -add -name dpti_clkout -period 16.667 \
+  -waveform {0 8.3335} [get_ports { dpti_clkout }]
+
 #
 #
 # This is nexys_video_bringup.xdc with two more LEDs.  There is no UART in this
@@ -42,6 +47,13 @@ set_property -dict { PACKAGE_PIN Y18 IOSTANDARD LVCMOS33 } [get_ports { dpti_clk
 ## 100 MHz system oscillator                    Sch=sysclk
 set_property -dict { PACKAGE_PIN R4  IOSTANDARD LVCMOS33 } [get_ports { sys_clk_pin }]
 create_clock -add -name sys_clk_pin -period 10.000 -waveform {0 5} [get_ports { sys_clk_pin }]
+
+# DPTI clock and the MIG ui_clk-derived clock are independent clock domains.
+# CDC between them is handled explicitly by dpti_mem_write_cdc /
+# dpti_async_fifo.  Do not time these paths as synchronous inter-clock paths.
+set_clock_groups -asynchronous \
+  -group [get_clocks dpti_clkout] \
+  -group [get_clocks clk_pll_i]
 
 ## reset button, active low                     Sch=cpu_resetn
 set_property -dict { PACKAGE_PIN G4  IOSTANDARD LVCMOS15 } [get_ports { cpu_resetn }]
