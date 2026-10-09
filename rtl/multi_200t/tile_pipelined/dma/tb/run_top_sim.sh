@@ -33,12 +33,23 @@ ROOT="$(dirname "$DMA")"                               # .../tile_pipelined
 VARIANT="${1:-v1}"
 KMAX="${2:-16}"
 NINV="${3:-1}"
+SCHED="${4:-0}"
+KMAX_8X8="${5:-32}"
+KMAX_4X4="${6:-16}"
 case "$VARIANT" in
-  v1) GEN="-GUSE_V2=0 -GK_MAX=$KMAX" ;;
-  v2) GEN="-GUSE_V2=1 -GK_MAX=$KMAX" ;;
-  *)  echo "usage: $0 [v1|v2] [K_MAX]"; exit 2 ;;
+  v1) GEN="-GUSE_V2=0 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
+  v2) GEN="-GUSE_V2=1 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
+  *)  echo "usage: $0 [v1|v2] [K_MAX] [NINV] [SCHED] [K_MAX_8X8] [K_MAX_4X4]"; exit 2 ;;
 esac
-OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}"
+
+case "$SCHED" in
+  0|1) ;;
+  *)  echo "SCHED must be 0 or 1"; exit 2 ;;
+esac
+
+GEN="$GEN -GUSE_EXTERNAL_SCHEDULER=$SCHED"
+
+OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}_sched${SCHED}"
 
 command -v verilator >/dev/null 2>&1 || {
     echo "verilator not found."
@@ -47,6 +58,9 @@ command -v verilator >/dev/null 2>&1 || {
 }
 
 rm -rf "$OUT"
+
+echo "== build: variant=$VARIANT K_MAX=$KMAX n_inv=$NINV external_scheduler=$SCHED K_MAX_8X8=$KMAX_8X8 K_MAX_4X4=$KMAX_4X4 =="
+
 verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     --top-module tb_systolic_dma_top -o tbrun --Mdir "$OUT" \
     "$HERE/tb_systolic_dma_top.sv" \
@@ -89,4 +103,10 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/core/operand_buffer_v2.sv" \
     > "$HERE/build_top_${VARIANT}_k${KMAX}.log" 2>&1 || { tail -30 "$HERE/build_top_${VARIANT}_k${KMAX}.log"; exit 1; }
 
-"$OUT/tbrun" +n_inv=$NINV +wb_region=$((NINV * KMAX * 8 * 8 + 4096))
+if [ "$SCHED" -eq 1 ]; then
+    WB_REGION=4096
+else
+    WB_REGION=$((NINV * KMAX * 8 * 8 + 4096))
+fi
+
+"$OUT/tbrun" +n_inv=$NINV +wb_region=$WB_REGION

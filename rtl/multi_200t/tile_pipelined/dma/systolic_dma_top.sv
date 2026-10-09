@@ -98,8 +98,11 @@ module systolic_dma_top #(
   // K_MAX = 16 for the first 3b build: the geometry whose golden was confirmed
   // on hardware, a 1 KiB payload, and a build measured in minutes.  3b is a
   // correctness step; K_MAX = 256 belongs to 3c, where bandwidth is the point.
-  parameter integer K_MAX = 16,
-  parameter integer K_DIM = 16,             // runtime reduction length, <= K_MAX
+  parameter integer K_MAX_8X8 = 32,
+
+  parameter integer K_MAX_4X4 = 16,
+
+  parameter integer K_DIM     = 16,             // runtime reduction length, <= K_MAX
 
   // Both printed by:  python3 tools/seed_ref.py --mode 1 --kmax 16
   parameter logic [31:0] EXPECT_WR_CHK = 32'h3F88_0780,   // "EXPECT_CHK"
@@ -747,7 +750,8 @@ module systolic_dma_top #(
   // The operand image is physically laid out at K_MAX capacity.
   // JOB_K controls how many reduction entries the array consumes;
   // it does not change the DMA payload layout or operand-buffer decode.
-  wire [31:0] job_rx_bytes = RX_BYTES;
+  wire [31:0] job_rx_bytes =
+      job_k_reg * N * 8;
 
   wire [31:0] job_n_beats =
       job_rx_bytes / (AXI_DATA_W / 8);
@@ -2425,6 +2429,31 @@ module systolic_dma_top #(
     else if (read_done)                read_done_fold <= 1'b1;
   end
 
+  always_ff @(posedge ui_clk) begin
+    if (USE_EXTERNAL_SCHEDULER &&
+        (desc_valid || desc_ready || read_done ||
+         read_done_fold || fill_complete ||
+         (words_written == words_want))) begin
+      $display(
+        "READTRACE t=%0t phase=%0d desc_valid=%0b desc_ready=%0b desc_fire=%0b read_done=%0b read_done_fold=%0b words_written=%0d words_want=%0d fill_complete=%0b read_active=%0b desc_started=%0b compute_ready=%0b reads_complete=%0b",
+        $time,
+        phase,
+        desc_valid,
+        desc_ready,
+        desc_valid && desc_ready,
+        read_done,
+        read_done_fold,
+        words_written,
+        words_want,
+        fill_complete,
+        read_active,
+        desc_started,
+        compute_ready,
+        reads_complete
+      );
+    end
+  end
+
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n)                             c_done_fold <= 1'b0;
     else if ((phase == P_GO) || fold_start)    c_done_fold <= 1'b0;
@@ -2689,12 +2718,69 @@ module systolic_dma_top #(
     .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (run_clear)
   );
 
+  // -----------------------------------------------------------------------
+  // DEBUG: observe the raw DMA-engine completion before read_done filtering.
+  // Diagnostic only; no functional signal is modified.
+  // -----------------------------------------------------------------------
+  always_ff @(posedge ui_clk) begin
+    if (USE_EXTERNAL_SCHEDULER && eng_done_valid) begin
+      $display(
+        "ENGDONE t=%0t phase=%0d valid=%0b tag=%02h operand_tag=%02h operand=%0b words_written=%0d words_want=%0d",
+        $time,
+        phase,
+        eng_done_valid,
+        eng_done_tag,
+        DMA_TAG_OPERAND,
+        (eng_done_tag == DMA_TAG_OPERAND),
+        words_written,
+        words_want
+      );
+    end
+  end
+
   // Completion visible to the existing P_READ FSM only for an operand
   // descriptor.  A future readback completion must not satisfy fill_complete
   // or advance the compute FSM.
   assign read_done =
       eng_done_valid &&
       (eng_done_tag == DMA_TAG_OPERAND);
+
+  // Shared physical operand-buffer capacity.
+  localparam integer K_MAX =
+      (K_MAX_8X8 > K_MAX_4X4) ? K_MAX_8X8 : K_MAX_4X4;
+
+  // -------------------------------------------------------------------------
+  // DMA operand-path checkpoint.
+  //
+  // Trace the actual descriptor handshake and the engine completion pulse.
+  // This is intentionally placed next to the eng_* interface so that the
+  // trace observes the real DMA engine signals rather than only the outer FSM.
+  // -------------------------------------------------------------------------
+  always_ff @(posedge ui_clk) begin
+    if (USE_EXTERNAL_SCHEDULER &&
+        ((eng_desc_valid && eng_desc_ready) ||
+         eng_done_valid ||
+         read_done ||
+         fill_complete)) begin
+      $display(
+        "DMATRACE t=%0t phase=%0d eng_desc_valid=%0b eng_desc_ready=%0b desc_fire=%0b eng_desc_tag=%02h eng_desc_addr=%h eng_desc_beats=%0d eng_done_valid=%0b eng_done_tag=%02h read_done=%0b words_written=%0d words_want=%0d fill_complete=%0b",
+        $time,
+        phase,
+        eng_desc_valid,
+        eng_desc_ready,
+        eng_desc_valid && eng_desc_ready,
+        eng_desc_tag,
+        eng_desc_addr,
+        eng_desc_beats,
+        eng_done_valid,
+        eng_done_tag,
+        read_done,
+        words_written,
+        words_want,
+        fill_complete
+      );
+    end
+  end
 
   // -----------------------------------------------------------------------
   // First result-readback integration checkpoint.
@@ -2919,6 +3005,66 @@ module systolic_dma_top #(
 
       if (state == ST_FEED)
         external_debug_sticky[31] <= 1'b1;
+    end
+  end
+
+  // Observation-only readback backpressure trace.
+  //
+  // This does not alter any datapath or control signal.  It records the
+  // source-side CDC FIFO readiness and AXI R-channel handshake so a stalled
+  // readback can be distinguished from a DMA completion problem.
+  always_ff @(posedge ui_clk) begin
+    if (ui_rst_n &&
+        (rb_pending || rb_active ||
+         rb_dst_wr_en ||
+         !rb_cdc_src_ready ||
+         (rvalid && !rready) ||
+         (rvalid && rready && rlast))) begin
+      $display(
+        "RBFLOW t=%0t phase=%0d rb_pending=%0b rb_active=%0b " ,
+        $time,
+        phase,
+        rb_pending,
+        rb_active
+      );
+      $display(
+        "RBFLOW_CDC src_ready=%0b dst_valid=%0b dst_ready=%0b dst_wr_en=%0b dst_beat=%0d",
+        rb_cdc_src_ready,
+        rb_cdc_dst_valid,
+        rb_cdc_dst_ready,
+        rb_dst_wr_en,
+        dst_wr_beat
+      );
+      $display(
+        "RBFLOW_AXI rvalid=%0b rready=%0b rlast=%0b r_fire=%0b dst_full=%0b",
+        rvalid,
+        rready,
+        rlast,
+        rvalid && rready,
+        dst_full
+      );
+    end
+  end
+
+  // Readback CDC/reset observation.
+  always_ff @(posedge ui_clk) begin
+    if (ui_rst_n &&
+        (rb_active || rb_pending || eng_done_valid ||
+         (rvalid && rb_active) || !rb_cdc_src_ready || rb_cdc_dst_valid)) begin
+      $display(
+        "RBCDC t=%0t phase=%0d dpti_rst=%0b rb_pending=%0b rb_active=%0b src_ready=%0b dst_valid=%0b dst_ready=%0b rvalid=%0b rready=%0b rlast=%0b",
+        $time,
+        phase,
+        dpti_rst,
+        rb_pending,
+        rb_active,
+        rb_cdc_src_ready,
+        rb_cdc_dst_valid,
+        rb_cdc_dst_ready,
+        rvalid,
+        rready,
+        rlast
+      );
     end
   end
 
@@ -3789,6 +3935,32 @@ module systolic_dma_top #(
   // 32-bit wrapping addition, the same arithmetic the hardware does.  At
   // n_inv = 1 this is the old comparison against the tabulated constant.
   logic [31:0] want_wr, want_c;
+
+  // Runtime operand checksum for an externally scheduled job.
+  //
+  // The checksum belongs to the actual K-sized operand payload, not to the
+  // physical accelerator geometry.  Therefore 8x8 and 4x4 use the same
+  // expected value when they receive the same K.
+  //
+  // These values are generated by tools/seed_ref.py and are the currently
+  // verified runtime-K cases.
+  function automatic logic [31:0] expected_wr_chk_for_k(
+      input logic [31:0] k
+  );
+    begin
+      case (k)
+        32'd16: expected_wr_chk_for_k = 32'h3F88_0780;
+        32'd32: expected_wr_chk_for_k = 32'h805C_1F00;
+        default: expected_wr_chk_for_k = 32'h0;
+      endcase
+    end
+  endfunction
+
+  wire [31:0] active_expected_wr_chk =
+      USE_EXTERNAL_SCHEDULER
+          ? expected_wr_chk_for_k(job_k_reg)
+          : EXPECT_WR_CHK;
+
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       want_wr <= '0;
@@ -3797,8 +3969,10 @@ module systolic_dma_top #(
       want_wr <= '0;
       want_c  <= '0;
     end else begin
-      if (fill_complete) want_wr <= want_wr + EXPECT_WR_CHK;
-      if ((phase == P_SCAN) && scan_c_last)   want_c  <= want_c  + EXPECT_C_CHK;
+      if (fill_complete)
+        want_wr <= want_wr + active_expected_wr_chk;
+      if ((phase == P_SCAN) && scan_c_last)
+        want_c  <= want_c + EXPECT_C_CHK;
     end
   end
 
@@ -3903,8 +4077,15 @@ module systolic_dma_top #(
     // job_k_reg is zero before the first accepted job, so only validate it
     // after the scheduler has actually accepted a descriptor.
     if (USE_EXTERNAL_SCHEDULER && job_k_reg != 0 &&
-        (job_k_reg > K_MAX || job_k_reg < 1))
-      $fatal(1, "scheduler ingress_job_k %0d is outside 1..%0d", job_k_reg, K_MAX);
+        ((job_device_id_reg < NUM_8X8 &&
+          job_k_reg > K_MAX_8X8) ||
+         (job_device_id_reg >= NUM_8X8 &&
+          job_device_id_reg < NUM_8X8 + NUM_4X4 &&
+          job_k_reg > K_MAX_4X4) ||
+         (job_device_id_reg >= NUM_8X8 + NUM_4X4) ||
+         (job_k_reg < 1)))
+      $fatal(1, "scheduler job device_id=%0d k=%0d is invalid",
+             job_device_id_reg, job_k_reg);
     // The slab and tile strides are shifted, not multiplied.  If either stride
     // stopped being a power of two the shift would silently address the wrong
     // slab, so it is checked here rather than assumed in a comment.
