@@ -369,7 +369,21 @@ module systolic_accel_context #(
   // received: the v1 writer takes four cycles to unpack a beat.  words_written
   // is cumulative over the run, so the finishing line moves one slab per
   // invocation; a slab is what the descriptor fetched.
-  wire [31:0] words_want = (32'(read_fi) + 32'd1) * job_rx_words;
+  //
+  // words_want is a multiply (it maps to DSP48s), so it is registered rather
+  // than sitting in series with the 32-bit compare and fill_complete's fan-out.
+  // The register lags its inputs by one cycle, and that cycle is never
+  // observed: read_fi changes only on fill_complete or run_clear, job_k_reg
+  // only on job_fire, and in every one of those cases read_done_fold is 0 in
+  // the following cycle (fill_complete and run_clear clear it; at job_fire
+  // the previous fill has long completed and no new descriptor has been
+  // accepted yet).  read_done_fold can only be set again by a later
+  // descriptor's read_done, by which time the register holds the new value.
+  logic [31:0] words_want;
+  always_ff @(posedge clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) words_want <= 32'd0;
+    else           words_want <= (32'(read_fi) + 32'd1) * job_rx_words;
+  end
   wire fill_complete = read_done_fold && (words_written == words_want);
 
   // =========================================================================

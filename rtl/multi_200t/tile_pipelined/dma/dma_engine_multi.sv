@@ -13,7 +13,9 @@
 // This engine keeps one descriptor per slot in flight at the same time and
 // shares the single AXI read channel between them.
 //
-// Kept from dma_engine, cycle for cycle while only one slot is active:
+// Kept from dma_engine while only one slot is active (cycle for cycle, except
+// that the AR channel is now driven from a register -- see "AR output
+// register" below -- so a burst reaches the bus one cycle after it is decided):
 //   - burst splitting (BURST_LEN, beats left, the 4 KiB page), credits counted
 //     in bursts, in-order returns on a single ID, rready = ~dst_full, the
 //     destination write stream (beat index within the descriptor + tag), the
@@ -173,7 +175,6 @@ module dma_engine_multi #(
   // Stall the data channel rather than dropping beats (dma_engine's rule).
   assign m_axi_rready  = ~dst_full;
 
-  wire ar_fire = m_axi_arvalid & m_axi_arready;
   wire r_fire  = m_axi_rvalid  & m_axi_rready & ~q_empty;
 
   // A slot takes a descriptor while it has none in flight.
@@ -231,14 +232,60 @@ module dma_engine_multi #(
     end
   end
 
-  wire [31:0] g_len = next_len(s_addr[grant],
-                               {{(32-BEAT_W){1'b0}}, s_issue_left[grant]},
-                               burst_lim);
-
+  // ---- next burst, per slot, in parallel with the arbiter -----------------------
+  // Every slot works out its own next burst (length, the address and the beat
+  // count it leaves behind) from its own registers.  The arbiter decides WHO
+  // goes and this decides WHAT it sends; the two cones meet only at the final
+  // select, instead of the length arithmetic hanging off the grant mux.  Same
+  // values as before -- next_len of the granted slot's own state.
+  logic [31:0]           sl_len      [0:NUM_SLOTS-1];
+  logic [7:0]            sl_arlen    [0:NUM_SLOTS-1];   // beats - 1
+  logic [AXI_ADDR_W-1:0] sl_addr_nxt [0:NUM_SLOTS-1];
+  logic [BEAT_W-1:0]     sl_left_nxt [0:NUM_SLOTS-1];
   always_comb begin
-    m_axi_arvalid = grant_valid && !q_full;
-    m_axi_araddr  = s_addr[grant];
-    m_axi_arlen   = 8'(g_len - 32'd1);
+    for (int k = 0; k < NUM_SLOTS; k++) begin
+      sl_len[k]      = next_len(s_addr[k], {{(32-BEAT_W){1'b0}}, s_issue_left[k]}, burst_lim);
+      sl_arlen[k]    = 8'(sl_len[k] - 32'd1);
+      sl_addr_nxt[k] = s_addr[k] + AXI_ADDR_W'(sl_len[k] << LSB);
+      sl_left_nxt[k] = s_issue_left[k] - BEAT_W'(sl_len[k]);
+    end
+  end
+
+  // ---- AR output register ---------------------------------------------------------
+  // The read-address channel is driven from registers.  A burst is committed
+  // the cycle it enters this register: its slot advances and its owner joins
+  // the return queue right then, so the next grant already sees the advanced
+  // state and bursts go out back to back whenever MIG keeps arready high.
+  // The register refills in the same cycle MIG drains it (ar_q_free), so the
+  // sustained rate is still one AR per cycle; a burst leaving an idle channel
+  // appears on the bus one cycle later than it used to.  ARADDR/ARLEN now hold
+  // still while ARVALID waits for ARREADY, which the AXI protocol requires and
+  // the combinational version only happened to satisfy.
+  logic                  ar_q_valid;
+  logic [AXI_ADDR_W-1:0] ar_q_addr;
+  logic [7:0]            ar_q_len;
+
+  wire ar_q_free = !ar_q_valid || m_axi_arready;       // empty, or drained this cycle
+  wire ar_issue  = grant_valid && !q_full && ar_q_free; // a burst is committed now
+
+  assign m_axi_arvalid = ar_q_valid;
+  assign m_axi_araddr  = ar_q_addr;
+  assign m_axi_arlen   = ar_q_len;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      ar_q_valid <= 1'b0;
+      ar_q_addr  <= '0;
+      ar_q_len   <= '0;
+    end else begin
+      if (ar_issue) begin
+        ar_q_valid <= 1'b1;
+        ar_q_addr  <= s_addr[grant];
+        ar_q_len   <= sl_arlen[grant];
+      end else if (m_axi_arready) begin
+        ar_q_valid <= 1'b0;
+      end
+    end
   end
 
   // ---- state ------------------------------------------------------------------
@@ -282,10 +329,10 @@ module dma_engine_multi #(
         end
       end
 
-      // One burst requested: advance its slot, remember its owner.
-      if (ar_fire) begin
-        s_addr[grant]       <= s_addr[grant] + AXI_ADDR_W'(g_len << LSB);
-        s_issue_left[grant] <= s_issue_left[grant] - BEAT_W'(g_len);
+      // One burst committed to the AR register: advance its slot, remember its owner.
+      if (ar_issue) begin
+        s_addr[grant]       <= sl_addr_nxt[grant];
+        s_issue_left[grant] <= sl_left_nxt[grant];
         q_slot[q_tail]      <= grant;
         q_tail              <= q_tail + 1'b1;
         rr_ptr              <= (int'(grant) == NUM_SLOTS - 1) ? '0 : grant + 1'b1;
@@ -305,9 +352,10 @@ module dma_engine_multi #(
         end
       end
 
-      // Bursts in flight: one per accepted AR, one back per rlast.
-      if (ar_fire && !(r_fire && m_axi_rlast))      q_count <= q_count + 1'b1;
-      else if (!ar_fire && (r_fire && m_axi_rlast)) q_count <= q_count - 1'b1;
+      // Bursts in flight (the one in the AR register included): one per
+      // committed AR, one back per rlast.
+      if (ar_issue && !(r_fire && m_axi_rlast))      q_count <= q_count + 1'b1;
+      else if (!ar_issue && (r_fire && m_axi_rlast)) q_count <= q_count - 1'b1;
     end
   end
 
