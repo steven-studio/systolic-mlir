@@ -298,6 +298,240 @@ wire        dpti_oe_n;
     end
   endtask
 
+  // ==========================================================================
+  // Heterogeneous concurrent-execution acceptance test  (+hetero_concurrent)
+  //
+  // Selected at run time by  run_top_sim.sh <v> <K> <n_inv> 1 <K8> <K4>
+  // hetero_concurrent.  The four regression invocations never pass the
+  // plusarg, so nothing below changes what they do.
+  //
+  // Workload: job 0 -> device 0 (the 8x8), job 1 -> device 1 (4x4 #0), both
+  // through the real external-scheduler path, submitted back to back: job 1
+  // is presented one cycle after job 0 is accepted, and the hardware alone
+  // decides when it is taken.  Nothing here waits for job 0's compute or
+  // completion before offering job 1.
+  //
+  // What is asserted is COMPUTE overlap of the two physical arrays, measured
+  // on the arrays' own boundary signals:
+  //
+  //   start_i = first cycle an operand valid enters array i
+  //             (a_valid_to_*[i][0] / b_valid_to_*[i][0] -- the nets bound to
+  //              ACC_*[i].u_acc.a_valid_in / b_valid_in)
+  //   done_i  = array i's own c_valid_out pulse (ACC_*[i].u_acc.c_valid_out)
+  //
+  //   PASS  iff  start8 < start4 < done8   or   start4 < start8 < done4
+  //
+  // Descriptor acceptance, adapter fold_start, scheduler start/done and job
+  // completion are recorded and printed for the record; none of them is the
+  // overlap criterion, and "both jobs finished" is not either.
+  // ==========================================================================
+  localparam logic [63:0] HC_C_BASE_8X8 = 64'h0000_1000;
+  localparam logic [63:0] HC_C_BASE_4X4 = 64'h0000_2000;
+
+  // Same handshake as submit_job, with the result region chosen per job so
+  // that both tiles can be checked in memory afterwards.
+  task automatic submit_job_at(
+    input [31:0] id,
+    input [31:0] device_id,
+    input [31:0] k,
+    input [63:0] c_base
+  );
+    begin
+      @(posedge clk);
+      job_id          <= id;
+      job_device_id   <= device_id;
+      job_m           <= N;
+      job_n           <= N;
+      job_k           <= k;
+      job_start_cycle <= 32'd0;
+      job_est_cycles  <= 32'd0;
+      job_a_base      <= EXT_JOB_A_BASE;
+      job_b_base      <= EXT_JOB_A_BASE;
+      job_c_base      <= c_base;
+      job_valid       <= 1'b1;
+      while (!job_ready)
+        @(posedge clk);
+      @(posedge clk);
+      job_valid <= 1'b0;
+    end
+  endtask
+
+  // ---- passive timestamp capture: cycles of clk, -1 = never observed ------
+  integer hc_cyc = 0;
+  integer hc_start8 = -1, hc_done8 = -1, hc_fs8 = -1;   // ACC_8X8[0]
+  integer hc_start4 [0:2];                              // ACC_4X4[i] compute
+  integer hc_done4  [0:2];
+  integer hc_fs4    [0:2];                              // adapter fold_start
+  integer hc_sched_start [0:3];                         // u_hw_scheduler
+  integer hc_sched_done  [0:3];
+  integer hc_accept     [0:1];                          // job_fire, in order
+  integer hc_accept_dev [0:1];
+  integer hc_jobdone    [0:1];                          // job_done, in order
+  integer hc_words      [0:1];                          // at each P_DONE
+  integer hc_chk        [0:1];
+  integer hc_dev_at_done[0:1];
+  integer hc_n_accept = 0, hc_n_jobdone = 0, hc_n_pdone = 0;
+
+  initial begin
+    for (int q = 0; q < 3; q++) begin
+      hc_start4[q] = -1; hc_done4[q] = -1; hc_fs4[q] = -1;
+    end
+    for (int q = 0; q < 4; q++) begin
+      hc_sched_start[q] = -1; hc_sched_done[q] = -1;
+    end
+    for (int q = 0; q < 2; q++) begin
+      hc_accept[q] = -1; hc_accept_dev[q] = -1; hc_jobdone[q] = -1;
+      hc_words[q] = -1; hc_chk[q] = 0; hc_dev_at_done[q] = -1;
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    hc_cyc <= hc_cyc + 1;
+    if (rstn) begin
+      if (hc_start8 < 0 && (dut.a_valid_to_8x8[0][0] || dut.b_valid_to_8x8[0][0]))
+        hc_start8 <= hc_cyc;
+      if (hc_done8 < 0 && dut.c_valid_out_8x8[0])          hc_done8 <= hc_cyc;
+      if (hc_fs8   < 0 && dut.scheduler_fold_start_8x8[0]) hc_fs8   <= hc_cyc;
+      for (int q = 0; q < 3; q++) begin
+        if (hc_start4[q] < 0 && (dut.a_valid_to_4x4[q][0] || dut.b_valid_to_4x4[q][0]))
+          hc_start4[q] <= hc_cyc;
+        if (hc_done4[q] < 0 && dut.c_valid_out_4x4[q])          hc_done4[q] <= hc_cyc;
+        if (hc_fs4[q]   < 0 && dut.scheduler_fold_start_4x4[q]) hc_fs4[q]   <= hc_cyc;
+      end
+      for (int q = 0; q < 4; q++) begin
+        if (hc_sched_start[q] < 0 && dut.u_hw_scheduler.accelerator_start[q])
+          hc_sched_start[q] <= hc_cyc;
+        if (hc_sched_done[q] < 0 && dut.u_hw_scheduler.accelerator_done[q])
+          hc_sched_done[q] <= hc_cyc;
+      end
+      if (dut.job_fire && hc_n_accept < 2) begin
+        hc_accept[hc_n_accept]     <= hc_cyc;
+        hc_accept_dev[hc_n_accept] <= dut.effective_job_device_id;
+        hc_n_accept                <= hc_n_accept + 1;
+      end
+      if (dut.job_done && hc_n_jobdone < 2) begin
+        hc_jobdone[hc_n_jobdone] <= hc_cyc;
+        hc_n_jobdone             <= hc_n_jobdone + 1;
+      end
+      if (dut.phase == 4'd7 && phase_d == 4'd6 && hc_n_pdone < 2) begin
+        hc_words[hc_n_pdone]       <= dut.words_written;
+        hc_chk[hc_n_pdone]         <= dut.chk_wr;
+        hc_dev_at_done[hc_n_pdone] <= dut.job_device_id_reg;
+        hc_n_pdone                 <= hc_n_pdone + 1;
+      end
+    end
+  end
+
+  task automatic run_hetero_concurrent();
+    integer k8, k4, ov_lo, ov_hi;
+    logic   overlap;
+    begin
+      k8 = job_k;
+      k4 = (job_k > K_MAX_4X4) ? K_MAX_4X4 : job_k;   // within the 4x4's own K_MAX
+      $display("== hetero_concurrent: job 0 -> device 0 (8x8, k=%0d, C @0x%0h); job 1 -> device 1 (4x4 #0, k=%0d, C @0x%0h); back to back ==",
+               k8, HC_C_BASE_8X8, k4, HC_C_BASE_4X4);
+
+      submit_job_at(32'd0, 32'd0, k8, HC_C_BASE_8X8);
+      // Offered immediately -- no wait for job 0's compute or completion.
+      submit_job_at(32'd1, 32'd1, k4, HC_C_BASE_4X4);
+
+      // Deterministic termination: both jobs closed and the datapath idle.
+      waited = 0;
+      while (!(hc_n_jobdone == 2 && dut.phase == 4'd7) && waited < MAX_CYC) begin
+        @(posedge clk);
+        waited = waited + 1;
+      end
+      repeat (20) @(posedge clk);
+
+      // ---- closure: accepted, dispatched, computed, completed -------------
+      if (hc_n_jobdone != 2 || dut.phase !== 4'd7) begin
+        $display("  FAIL: not both jobs completed after %0d cycles (job_done seen %0d, phase %0d)",
+                 MAX_CYC, hc_n_jobdone, dut.phase);
+        errors = errors + 1;
+      end
+      if (hc_n_accept != 2 || hc_accept_dev[0] != 0 || hc_accept_dev[1] != 1) begin
+        $display("  FAIL: descriptor acceptance: %0d accepted, devices %0d / %0d (want 0 then 1)",
+                 hc_n_accept, hc_accept_dev[0], hc_accept_dev[1]);
+        errors = errors + 1;
+      end
+      if (hc_start8 < 0 || hc_done8 <= hc_start8) begin
+        $display("  FAIL: 8x8 array never computed (start %0d done %0d)", hc_start8, hc_done8);
+        errors = errors + 1;
+      end
+      if (hc_start4[0] < 0 || hc_done4[0] <= hc_start4[0]) begin
+        $display("  FAIL: 4x4 #0 never computed (start %0d done %0d)", hc_start4[0], hc_done4[0]);
+        errors = errors + 1;
+      end
+      if (hc_start4[1] >= 0 || hc_start4[2] >= 0 || hc_fs4[1] >= 0 || hc_fs4[2] >= 0) begin
+        $display("  FAIL: an un-scheduled 4x4 instance was fed (#1 start %0d, #2 start %0d)",
+                 hc_start4[1], hc_start4[2]);
+        errors = errors + 1;
+      end
+      if (hc_sched_done[0] < 0 || hc_sched_done[1] < 0 ||
+          hc_sched_done[2] >= 0 || hc_sched_done[3] >= 0) begin
+        $display("  FAIL: scheduler completions on accelerators {%0d,%0d,%0d,%0d} (want 0 and 1 only)",
+                 hc_sched_done[0], hc_sched_done[1], hc_sched_done[2], hc_sched_done[3]);
+        errors = errors + 1;
+      end
+      // Each job consumed its own real operand payload: words and checksum
+      // of that job's K, taken at that job's P_DONE.
+      if (hc_n_pdone != 2 ||
+          hc_dev_at_done[0] != 0 || hc_words[0] != k8 * 2 * N ||
+          hc_chk[0] != expected_wr_chk(k8) ||
+          hc_dev_at_done[1] != 1 || hc_words[1] != k4 * 2 * N ||
+          hc_chk[1] != expected_wr_chk(k4)) begin
+        $display("  FAIL: per-job operand path: job0 dev %0d words %0d chk %h (want %0d %h); job1 dev %0d words %0d chk %h (want %0d %h)",
+                 hc_dev_at_done[0], hc_words[0], hc_chk[0], k8 * 2 * N, expected_wr_chk(k8),
+                 hc_dev_at_done[1], hc_words[1], hc_chk[1], k4 * 2 * N, expected_wr_chk(k4));
+        errors = errors + 1;
+      end
+      // Each tile landed in its own region, equal to the producing array's
+      // own output registers (c_out holds the last published tile).
+      for (i = 0; i < 64; i = i + 1) begin
+        got  = dut.u_mig_7series_0.mem[(HC_C_BASE_8X8 / 4) + i];
+        want = dut.c_out_8x8[0][i / 8][i % 8];
+        if (got !== want) begin
+          if (errors < 8) $display("  FAIL: 8x8 tile word %0d: memory %h, array %h", i, got, want);
+          errors = errors + 1;
+        end
+      end
+      for (i = 0; i < 16; i = i + 1) begin
+        got  = dut.u_mig_7series_0.mem[(HC_C_BASE_4X4 / 4) + i];
+        want = dut.c_out_4x4[0][i / 4][i % 4];
+        if (got !== want) begin
+          if (errors < 8) $display("  FAIL: 4x4 tile word %0d: memory %h, array %h", i, got, want);
+          errors = errors + 1;
+        end
+      end
+      if (dut.err_w_owner !== 1'b0 || dut.any_err !== 1'b0 || dut.u_mig_7series_0.errors != 0) begin
+        $display("  FAIL: err_w_owner %0b any_err %0b memory-model errors %0d",
+                 dut.err_w_owner, dut.any_err, dut.u_mig_7series_0.errors);
+        errors = errors + 1;
+      end
+
+      // ---- the record (cycles of clk; t = cycle * 10 ns) -----------------
+      $display("  HETERO 8x8   : accept=%0d  sched_start=%0d  fold_start=%0d  COMPUTE=[%0d, %0d]  sched_done=%0d  job_done=%0d",
+               hc_accept[0], hc_sched_start[0], hc_fs8, hc_start8, hc_done8, hc_sched_done[0], hc_jobdone[0]);
+      $display("  HETERO 4x4#0 : accept=%0d  sched_start=%0d  fold_start=%0d  COMPUTE=[%0d, %0d]  sched_done=%0d  job_done=%0d",
+               hc_accept[1], hc_sched_start[1], hc_fs4[0], hc_start4[0], hc_done4[0], hc_sched_done[1], hc_jobdone[1]);
+
+      // ---- the concurrency assertion -------------------------------------
+      overlap = (hc_start8 >= 0 && hc_start4[0] >= 0) &&
+                ((hc_start8 < hc_start4[0] && hc_start4[0] < hc_done8) ||
+                 (hc_start4[0] < hc_start8 && hc_start8 < hc_done4[0]));
+      ov_lo = (hc_start8 > hc_start4[0]) ? hc_start8 : hc_start4[0];
+      ov_hi = (hc_done8  < hc_done4[0])  ? hc_done8  : hc_done4[0];
+      if (overlap)
+        $display("  HETERO overlap: [%0d, %0d] = %0d cycles -> CONCURRENT", ov_lo, ov_hi, ov_hi - ov_lo);
+      else begin
+        $display("  HETERO overlap: none (4x4 compute starts %0d cycles after the 8x8 published) -> SERIALIZED",
+                 hc_start4[0] - hc_done8);
+        $display("  FAIL: no COMPUTE overlap: need start8 < start4 < done8 or start4 < start8 < done4");
+        errors = errors + 1;
+      end
+    end
+  endtask
+
   initial begin
 
     if (!$value$plusargs("job_k=%d", job_k))
@@ -341,6 +575,15 @@ wire        dpti_oe_n;
              n_inv, K_MAX, job_k, wb_base);
     repeat (20) @(posedge clk);
     rstn = 1'b1;
+
+    // Heterogeneous concurrent-execution test: its own workload, checks and
+    // verdict; nothing of the regression flow below runs in this mode.
+    if (USE_EXTERNAL_SCHEDULER && $test$plusargs("hetero_concurrent")) begin
+      run_hetero_concurrent();
+      $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);
+      if (errors != 0) $fatal(1);
+      $finish;
+    end
 
     // Scheduler E2E smoke test:
     //
