@@ -90,6 +90,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$HERE/mig_axi_model.sv" \
     "$ROOT/tb/fp_model.sv" \
     "$DMA/systolic_dma_top.sv" \
+    "$DMA/systolic_accel_context.sv" \
     "$DMA/dpti_host_rx.sv" \
     "$DMA/dpti_byte_tx.sv" \
     "$DMA/dpti_write32_decoder.sv" \
@@ -110,6 +111,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/scheduler/systolic_hw_scheduler_adapter.sv" \
     "$ROOT/scheduler/systolic_job_ingress.sv" \
     "$DMA/dma_engine.sv" \
+    "$DMA/dma_engine_multi.sv" \
     "$DMA/dma_seed_writer.sv" \
     "$DMA/dma_operand_writer.sv" \
     "$DMA/dma_operand_writer_v2.sv" \

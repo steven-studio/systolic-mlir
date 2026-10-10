@@ -366,11 +366,14 @@ wire        dpti_oe_n;
   integer hc_sched_done  [0:3];
   integer hc_accept     [0:1];                          // job_fire, in order
   integer hc_accept_dev [0:1];
-  integer hc_jobdone    [0:1];                          // job_done, in order
-  integer hc_words      [0:1];                          // at each P_DONE
-  integer hc_chk        [0:1];
-  integer hc_dev_at_done[0:1];
-  integer hc_n_accept = 0, hc_n_jobdone = 0, hc_n_pdone = 0;
+  // Per CONTEXT (= device): its job's completion cycle and the counters of
+  // that context at that moment.  Contexts run concurrently, so completion
+  // order is not a key; the device is.
+  integer hc_jobdone    [0:3];                          // ctx_job_done[i]
+  integer hc_words      [0:3];                          // ctx_words_written[i]
+  integer hc_chk        [0:3];                          // ctx_chk_wr[i]
+  integer hc_dev_at_done[0:3];                          // ctx_job_device_id[i]
+  integer hc_n_accept = 0, hc_n_jobdone = 0;
 
   initial begin
     for (int q = 0; q < 3; q++) begin
@@ -380,8 +383,10 @@ wire        dpti_oe_n;
       hc_sched_start[q] = -1; hc_sched_done[q] = -1;
     end
     for (int q = 0; q < 2; q++) begin
-      hc_accept[q] = -1; hc_accept_dev[q] = -1; hc_jobdone[q] = -1;
-      hc_words[q] = -1; hc_chk[q] = 0; hc_dev_at_done[q] = -1;
+      hc_accept[q] = -1; hc_accept_dev[q] = -1;
+    end
+    for (int q = 0; q < 4; q++) begin
+      hc_jobdone[q] = -1; hc_words[q] = -1; hc_chk[q] = 0; hc_dev_at_done[q] = -1;
     end
   end
 
@@ -409,15 +414,20 @@ wire        dpti_oe_n;
         hc_accept_dev[hc_n_accept] <= dut.effective_job_device_id;
         hc_n_accept                <= hc_n_accept + 1;
       end
-      if (dut.job_done && hc_n_jobdone < 2) begin
-        hc_jobdone[hc_n_jobdone] <= hc_cyc;
-        hc_n_jobdone             <= hc_n_jobdone + 1;
-      end
-      if (dut.phase == 4'd7 && phase_d == 4'd6 && hc_n_pdone < 2) begin
-        hc_words[hc_n_pdone]       <= dut.words_written;
-        hc_chk[hc_n_pdone]         <= dut.chk_wr;
-        hc_dev_at_done[hc_n_pdone] <= dut.job_device_id_reg;
-        hc_n_pdone                 <= hc_n_pdone + 1;
+      // Each context reports its own job's completion; two contexts may
+      // complete on the same cycle, so count with a local accumulator.
+      begin
+        automatic integer n = hc_n_jobdone;
+        for (int q = 0; q < 4; q++) begin
+          if (dut.ctx_job_done[q] && hc_jobdone[q] < 0) begin
+            hc_jobdone[q]     <= hc_cyc;
+            hc_words[q]       <= dut.ctx_words_written[q];
+            hc_chk[q]         <= dut.ctx_chk_wr[q];
+            hc_dev_at_done[q] <= dut.ctx_job_device_id[q];
+            n = n + 1;
+          end
+        end
+        hc_n_jobdone <= n;
       end
     end
   end
@@ -435,18 +445,19 @@ wire        dpti_oe_n;
       // Offered immediately -- no wait for job 0's compute or completion.
       submit_job_at(32'd1, 32'd1, k4, HC_C_BASE_4X4);
 
-      // Deterministic termination: both jobs closed and the datapath idle.
+      // Deterministic termination: both jobs closed and both contexts idle.
       waited = 0;
-      while (!(hc_n_jobdone == 2 && dut.phase == 4'd7) && waited < MAX_CYC) begin
+      while (!(hc_n_jobdone == 2 && dut.ctx_phase[0] == 4'd7 && dut.ctx_phase[1] == 4'd7) &&
+             waited < MAX_CYC) begin
         @(posedge clk);
         waited = waited + 1;
       end
       repeat (20) @(posedge clk);
 
       // ---- closure: accepted, dispatched, computed, completed -------------
-      if (hc_n_jobdone != 2 || dut.phase !== 4'd7) begin
-        $display("  FAIL: not both jobs completed after %0d cycles (job_done seen %0d, phase %0d)",
-                 MAX_CYC, hc_n_jobdone, dut.phase);
+      if (hc_n_jobdone != 2 || dut.ctx_phase[0] !== 4'd7 || dut.ctx_phase[1] !== 4'd7) begin
+        $display("  FAIL: not both jobs completed after %0d cycles (job_done seen %0d, ctx phases %0d / %0d)",
+                 MAX_CYC, hc_n_jobdone, dut.ctx_phase[0], dut.ctx_phase[1]);
         errors = errors + 1;
       end
       if (hc_n_accept != 2 || hc_accept_dev[0] != 0 || hc_accept_dev[1] != 1) begin
@@ -474,8 +485,9 @@ wire        dpti_oe_n;
         errors = errors + 1;
       end
       // Each job consumed its own real operand payload: words and checksum
-      // of that job's K, taken at that job's P_DONE.
-      if (hc_n_pdone != 2 ||
+      // of that job's K, taken from its context at its job_done.
+      if (hc_jobdone[0] < 0 || hc_jobdone[1] < 0 ||
+          hc_jobdone[2] >= 0 || hc_jobdone[3] >= 0 ||
           hc_dev_at_done[0] != 0 || hc_words[0] != k8 * 2 * N ||
           hc_chk[0] != expected_wr_chk(k8) ||
           hc_dev_at_done[1] != 1 || hc_words[1] != k4 * 2 * N ||

@@ -89,6 +89,42 @@
 //   write-back engine's busy / aw_stall / w_stall / src_starve.  Nothing in
 //   the copied core changed; cyc_latched is still the equivalence check, on
 //   both versions.
+//
+// PER-ACCELERATOR CONTEXTS (Oct 2026)
+//   The per-job / per-tile control that this file used to hold once -- for
+//   whichever device the accepted job named -- now lives in
+//   systolic_accel_context.sv and is instantiated once per physical
+//   accelerator: one 8x8 context (K_MAX_8X8 deep) and NUM_4X4 4x4 contexts
+//   (K_MAX_4X4 deep), each with its own feeder, operand ping-pong buffers,
+//   result snapshot banks, phase FSM, write-back stage and counters.  The
+//   hardware scheduler likewise keeps one execution context per accelerator.
+//   So a job on device 0 and a job on device 1 are accepted, filled, computed
+//   and written back independently; the 8x8 and a 4x4 COMPUTE at the same
+//   time.  What stays single is what is physically single: one AXI read
+//   master, one AXI write master, the seeder, the ingress, MIG.  Those move
+//   bytes one channel at a time; they do not serialize the computing:
+//
+//   - The read engine (dma_engine_multi) holds one operand descriptor per
+//     context in flight at once and shares the read channel between them
+//     beat by beat, so two fills proceed together instead of one after the
+//     other.  With the v1 writer (one word per cycle per context) that is what
+//     lets the second array's operands land while the first array is still
+//     being filled -- a single-descriptor engine made the 4x4 wait ~257
+//     cycles for the 8x8's payload before its own fill could even begin, and
+//     its fold then started after the 8x8's had ended.
+//   - The write-back engine takes one tile at a time (a few beats each); a
+//     context whose tile waits keeps computing.
+//
+//   The compiler-facing acceptance (job_valid / job_ready) is per device:
+//   a descriptor is taken when the context it names is free, whatever the
+//   other contexts are doing.  job_ready is the registered decision for the
+//   descriptor presented the cycle before, so it is a function of the
+//   design's own state only, never of the payload the producer is changing
+//   in the same cycle.
+//
+//   Context 0 (the 8x8) carries the legacy bring-up: the seeder, the VIO
+//   n_inv / re-run probes, and the counters the bench and the board scripts
+//   read, which are exposed under their old names as context 0's.
 // -----------------------------------------------------------------------------
 
 `default_nettype none
@@ -262,18 +298,14 @@ module systolic_dma_top #(
   localparam integer NUM_ACCEL = NUM_8X8 + NUM_4X4;
   localparam integer NUM_8X8_STORAGE = (NUM_8X8 > 0) ? NUM_8X8 : 1;
   localparam integer NUM_4X4_STORAGE = (NUM_4X4 > 0) ? NUM_4X4 : 1;
+  localparam integer ACC_ID_W = (NUM_ACCEL <= 1) ? 1 : $clog2(NUM_ACCEL);
 
   localparam integer AXI_DATA_W = 128;
   localparam integer AXI_ADDR_W = 29;
-  localparam integer RX_BYTES   = K_MAX * 8 * N;
-  localparam integer RX_WORDS   = RX_BYTES / 4;
+  // The legacy bring-up (seeder, VIO n_inv, the bench's counters) runs on
+  // context 0, the 8x8, whose slab is K_MAX_8X8 deep.
+  localparam integer RX_BYTES   = K_MAX_8X8 * 8 * N;
   localparam integer N_BEATS    = RX_BYTES / (AXI_DATA_W/8);
-
-  // ---- geometry, derived exactly as systolic_uart_top derives it ----------
-  localparam int K_W       = $clog2(K_MAX);
-  localparam int LANE_W    = $clog2(N);
-  localparam int FEED_LAST = K_MAX + N - 2;
-  localparam int FEED_W    = $clog2(FEED_LAST + 1);
 
   // ---- clocking: identical to dma_bringup_top / ddr3_bw_top ---------------
   // The array runs on ui_clk.  MIG's 4:1 PHY ratio against 800 Mbps DDR3 makes
@@ -427,256 +459,77 @@ module systolic_dma_top #(
   wire [127:0] rdata_axi; wire [1:0] rresp; wire rlast, rvalid, rready;
 
   // =========================================================================
-  // Bring-up sequencer
+  // Hardware scheduler: one execution context per physical accelerator.
   //
-  //   P_CALIB  wait for DDR3, latch n_inv
-  //   P_SEED   write the known image -- once per slab, all n_inv of them
-  //   P_READ   pull slab fi back through the DMA into the operand buffers
-  //   P_GO     one pulse to start the fold
-  //   P_FOLD   wait for the array
-  //   P_SCAN   read C back, one entry per cycle
-  //   P_WB     push the same C out to DRAM through the write-back engine,
-  //            then back to P_READ for slab fi+1 until fi = n_inv-1
-  //
-  // The loop is the whole point of the n_inv > 1 build: a GEMM of depth
-  // K = n_inv * K_MAX run as n_inv invocations of depth K_MAX, each paying
-  // 2(N-1) + H and its own write-back, which is the split the cost model
-  // prices against one invocation of depth K.  All seeding happens before the
-  // first read so the AXI write channel changes hands exactly once.
+  // Each accelerator context (below) raises its own tile request; the
+  // scheduler's context for that accelerator takes it when idle, waits for
+  // the compiler's start cycle and for the datapath window
+  // (accelerator_ready = that context in P_GO with a landed tile), pulses
+  // accelerator_start[i] into adapter i, and waits for accelerator_done[i]
+  // from that adapter -- which is driven by that array's own c_valid_out.
+  // Nothing in here is shared between accelerators except the schedule clock.
   // =========================================================================
-  typedef enum logic [3:0] {
-    P_CALIB, P_SEED, P_READ, P_GO, P_FOLD, P_SCAN, P_WB, P_DONE
-  } phase_t;
-  phase_t phase;
-
-  // -------------------------------------------------------------------------
-  // DEBUG: top-level transaction FSM transition trace.
-  //
-  // -------------------------------------------------------------------------
-  phase_t phase_prev;
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      phase_prev <= P_CALIB;
-    end
-    else if (phase != phase_prev) begin
-      $display(
-        "FSMTRANS t=%0t %0d->%0d fi=%0d | fill=%0b c_done_fold=%0b scan_last=%0b | wb_desc_valid=%0b wb_desc_ready=%0b wb_done=%0b | select8=%0b select4=%0b",
-        $time,
-        phase_prev,
-        phase,
-        fi,
-        fill_complete,
-        c_done_fold,
-        scan_c_last,
-        wb_desc_valid,
-        wb_desc_ready,
-        wb_done,
-        select_8x8,
-        select_4x4
-      );
-      phase_prev <= phase;
-    end
-  end
-
-  logic          seed_start;
-  wire           seed_busy, seed_done, seed_err_align, seed_err_resp;
-
-  logic          desc_valid;
-  wire           desc_ready, read_done;
-  wire           eng_err_align, eng_err_resp, wr_err_range;
-  wire [31:0]    words_written;
-  logic          desc_started;
-  logic          seed_done_sticky, read_done_sticky, fold_done_sticky;
-
-  logic          fsm_fold_start;     // fold_start generated by the bring-up FSM
-  logic          c_done;              // declared here, driven by the copied block
-
-  // -------------------------------------------------------------------------
-  // Hardware scheduler integration.
-  //
-  // The existing job ABI supplies the physical device ID and memory region.
-  // The scheduler additionally owns the temporal release of the selected
-  // accelerator.  The current ABI does not yet carry start_cycle or
-  // compute_cycles, so the first integration stage uses:
-  //
-  //   start_cycle   = 0
-  //   compute_cycles = 0
-  //
-  // This stage validates the control/dataflow boundary only.  Analytical
-  // scheduling cost remains a compiler-side responsibility.
-  // -------------------------------------------------------------------------
-
   wire [NUM_ACCEL-1:0] scheduler_accelerator_start;
   wire [NUM_ACCEL-1:0] scheduler_accelerator_done;
+  wire [NUM_ACCEL-1:0] scheduler_accelerator_ready;
+  wire [NUM_ACCEL-1:0] scheduler_req_valid;
+  wire [NUM_ACCEL-1:0] scheduler_req_ready;
+  wire [NUM_ACCEL-1:0] scheduler_req_ack;
+  wire [31:0]          scheduler_req_start_cycle    [0:NUM_ACCEL-1];
+  wire [31:0]          scheduler_req_compute_cycles [0:NUM_ACCEL-1];
+  wire [NUM_ACCEL-1:0] scheduler_busy;
+  wire [NUM_ACCEL-1:0] scheduler_schedule_done;
+  wire [31:0]          scheduler_cycle_counter;
+  wire [31:0]          scheduler_active_start_cycle    [0:NUM_ACCEL-1];
+  wire [31:0]          scheduler_active_compute_cycles [0:NUM_ACCEL-1];
 
-  // -------------------------------------------------------------------------
-  // Scheduler start pulse capture
-  //
-  // The hardware scheduler emits accelerator_start as a one-cycle pulse.
-  // The existing accelerator FSM accepts fold_start only while phase == P_GO.
-  //
-  // Therefore an early accelerator_start is remembered here and replayed
-  // through the normal scheduler adapter once P_GO is reached.
-  // -------------------------------------------------------------------------
-
+  // The adapters' releases, one per physical array.
   wire scheduler_fold_start_8x8 [0:NUM_8X8_STORAGE-1];
   wire scheduler_fold_start_4x4 [0:NUM_4X4_STORAGE-1];
 
-  localparam integer ACC_ID_W =
-      (NUM_ACCEL <= 1) ? 1 : $clog2(NUM_ACCEL);
-
-  logic                scheduler_start_pending;
-  logic [ACC_ID_W-1:0] scheduler_start_pending_id;
-
-  // Registered one-cycle replay pulse.
-  //
-  // This is intentionally separate from the pending bit:
-  //
-  //   pending = remembered scheduler release
-  //   replay  = actual one-cycle protocol event sent to the adapter
-  //
-  // Keeping replay registered avoids relying on a combinational
-  // phase/P_GO transition at the same clock edge.
-  logic scheduler_start_replay;
-
-  wire scheduler_start_request =
-      |scheduler_accelerator_start;
-
-  // -------------------------------------------------------------------------
-  // Single scheduler-release capture.
-  //
-  // The hardware scheduler emits accelerator_start as a one-cycle pulse.
-  // DMA may still be in P_CALIB/P_READ at that time, so the pulse cannot be
-  // connected directly to the existing accelerator adapter.
-  //
-  // Remember the release until P_GO.  The pending bit is the single source
-  // of truth for both:
-  //
-  //   1. deciding that P_GO may advance to P_FOLD
-  //   2. replaying accelerator_start into the adapter
-  //
-  // Do NOT maintain a second independent pending bit.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      scheduler_start_pending    <= 1'b0;
-      scheduler_start_pending_id <= '0;
-      scheduler_start_replay     <= 1'b0;
-    end
-    else begin
-      // replay is always a one-cycle pulse.
-      scheduler_start_replay <= 1'b0;
-
-      // Capture the scheduler's one-cycle release.
-      if (scheduler_start_request) begin
-        scheduler_start_pending <= 1'b1;
-
-        for (integer start_i = 0; start_i < NUM_ACCEL; start_i = start_i + 1) begin
-          if (scheduler_accelerator_start[start_i])
-            scheduler_start_pending_id <= ACC_ID_W'(start_i);
-        end
-      end
-
-      // When P_GO is reached, convert the remembered scheduler event
-      // into an explicit registered pulse for the adapter.
-      //
-      // The replay pulse becomes visible AFTER this clock edge and
-      // therefore remains stable for the following adapter sampling edge.
-      else if (phase == P_GO && scheduler_start_pending) begin
-        scheduler_start_replay  <= 1'b1;
-        scheduler_start_pending <= 1'b0;
-      end
-    end
-  end
-
-  // The adapter consumes the explicit replay pulse.
-  //
-  // A live scheduler pulse is also allowed while P_GO is active, although
-  // the normal external-scheduler path should normally use the replay pulse.
-  wire [NUM_ACCEL-1:0] scheduler_accelerator_start_delayed =
-      scheduler_start_replay
-        ? ({{(NUM_ACCEL-1){1'b0}}, 1'b1} << scheduler_start_pending_id)
-        : ((phase == P_GO)
-            ? scheduler_accelerator_start
-            : {NUM_ACCEL{1'b0}});
-
-  wire scheduler_busy;
-  wire scheduler_schedule_done;
-  wire scheduler_desc_ready;
-
-  wire [31:0] scheduler_cycle_counter;
-  wire [31:0] scheduler_active_start_cycle;
-  wire [31:0] scheduler_active_compute_cycles;
-  wire [1:0]  scheduler_active_accelerator_id;
-
-  // The scheduler start pulse is only meaningful once the outer FSM has
-// entered P_GO.  compute_ready may already be high during P_READ, but
-// fold_start is intentionally suppressed there.  Therefore using only
-// compute_ready here allows the scheduler to enter ST_RUN one phase too
-// early and wait forever for accelerator_done.
-//
-// P_GO is the actual boundary at which scheduler_start_pending is replayed
-// into fold_start.
-wire scheduler_start_window =
-    (phase == P_GO) && compute_ready;
-
-// One shared datapath, so every physical accelerator's readiness is the
-// same window.  Width follows the fleet: a narrower vector would leave the
-// upper device IDs permanently not-ready.
-wire [NUM_ACCEL-1:0] scheduler_accelerator_ready =
-    {NUM_ACCEL{scheduler_start_window}};
-
-// -------------------------------------------------------------------------
-// Per-tile scheduler handshake.
-//
-// The scheduler owns every tile transaction, not only the first one of a
-// job: the accepted job's first tile is presented at job_fire, every later
-// tile (invocation wb_fi+1, once tile wb_fi has been written back) is
-// presented through inv_pending.  Both carry the job's own device ID and
-// schedule fields -- the registered copies, never the ingress buffer, which
-// may already hold the next job's descriptor.  inv_pending is a level held
-// until the scheduler accepts it, so no release can be dropped.
-// -------------------------------------------------------------------------
-logic inv_pending;
-
-systolic_hw_scheduler #(
+  systolic_hw_scheduler #(
     .NUM_ACCEL (NUM_ACCEL),
-    .CYCLE_W   (32),
-    .ACC_W     (ACC_ID_W)
+    .CYCLE_W   (32)
   ) u_hw_scheduler (
     .clk                    (ui_clk),
     .rst                    (!ui_rst_n),
-
-    .desc_valid             (job_fire || inv_pending),
-    .desc_ready             (scheduler_desc_ready),
-
-    .desc_accelerator_id    (job_fire ? effective_job_device_id[ACC_ID_W-1:0]
-                                      : job_device_id_reg[ACC_ID_W-1:0]),
-    .desc_start_cycle       (job_fire ? effective_job_start_cycle
-                                      : job_start_cycle_reg),
-    .desc_compute_cycles    (job_fire ? effective_job_est_cycles
-                                      : job_est_cycles_reg),
-
+    .req_valid              (scheduler_req_valid),
+    .req_ready              (scheduler_req_ready),
+    .req_ack                (scheduler_req_ack),
+    .req_start_cycle        (scheduler_req_start_cycle),
+    .req_compute_cycles     (scheduler_req_compute_cycles),
+    .accelerator_ready      (scheduler_accelerator_ready),
     .accelerator_start      (scheduler_accelerator_start),
     .accelerator_done       (scheduler_accelerator_done),
-    .accelerator_ready    (scheduler_accelerator_ready),
-
     .busy                   (scheduler_busy),
     .schedule_done          (scheduler_schedule_done),
-
     .cycle_counter          (scheduler_cycle_counter),
-
     .active_start_cycle     (scheduler_active_start_cycle),
-    .active_compute_cycles  (scheduler_active_compute_cycles),
-    .active_accelerator_id  (scheduler_active_accelerator_id)
+    .active_compute_cycles  (scheduler_active_compute_cycles)
   );
+
+  // Array-side nets.  These names are the ones the bench observes: the
+  // valids are exactly the arrays' a_valid_in / b_valid_in ports, the
+  // c_valid_out_* their publish pulses.
+  logic [31:0] a_in_8x8        [0:NUM_8X8_STORAGE-1][0:N-1];
+  logic [31:0] b_in_8x8        [0:NUM_8X8_STORAGE-1][0:N-1];
+  logic        a_valid_to_8x8  [0:NUM_8X8_STORAGE-1][0:N-1];
+  logic        b_valid_to_8x8  [0:NUM_8X8_STORAGE-1][0:N-1];
+  logic        c_valid_out_8x8 [0:NUM_8X8_STORAGE-1];
+  logic [31:0] c_out_8x8       [0:NUM_8X8_STORAGE-1][0:N-1][0:N-1];
+
+  logic [31:0] a_in_4x4        [0:NUM_4X4_STORAGE-1][0:3];
+  logic [31:0] b_in_4x4        [0:NUM_4X4_STORAGE-1][0:3];
+  logic        a_valid_to_4x4  [0:NUM_4X4_STORAGE-1][0:3];
+  logic        b_valid_to_4x4  [0:NUM_4X4_STORAGE-1][0:3];
+  logic        c_valid_out_4x4 [0:NUM_4X4_STORAGE-1];
+  logic [31:0] c_out_4x4       [0:NUM_4X4_STORAGE-1][0:3][0:3];
 
   generate
     for (genvar i = 0; i < NUM_8X8; i++) begin : SCHED_8X8
       systolic_hw_scheduler_adapter #(.CYCLE_W(32)) u_adapter (
         .clk(ui_clk), .rst(!ui_rst_n),
-        .accelerator_start(scheduler_accelerator_start_delayed[i]),
+        .accelerator_start(scheduler_accelerator_start[i]),
         .accelerator_done(scheduler_accelerator_done[i]),
         .fold_start(scheduler_fold_start_8x8[i]),
         .c_done(c_valid_out_8x8[i])
@@ -686,7 +539,7 @@ systolic_hw_scheduler #(
     for (genvar i = 0; i < NUM_4X4; i++) begin : SCHED_4X4
       systolic_hw_scheduler_adapter #(.CYCLE_W(32)) u_adapter (
         .clk(ui_clk), .rst(!ui_rst_n),
-        .accelerator_start(scheduler_accelerator_start_delayed[NUM_8X8+i]),
+        .accelerator_start(scheduler_accelerator_start[NUM_8X8+i]),
         .accelerator_done(scheduler_accelerator_done[NUM_8X8+i]),
         .fold_start(scheduler_fold_start_4x4[i]),
         .c_done(c_valid_out_4x4[i])
@@ -694,132 +547,127 @@ systolic_hw_scheduler #(
     end
   endgenerate
 
-  wire scheduler_fold_start_selected =
-      select_8x8 ? scheduler_fold_start_8x8[selected_8x8_idx] :
-      select_4x4 ? scheduler_fold_start_4x4[selected_4x4_idx] :
-                   1'b0;
+  // =========================================================================
+  // Per-context state, indexed by physical accelerator (device ID):
+  //   0 .. NUM_8X8-1            the 8x8 contexts
+  //   NUM_8X8 .. NUM_ACCEL-1    the 4x4 contexts
+  // =========================================================================
+  wire [3:0]  ctx_phase            [0:NUM_ACCEL-1];
+  wire        ctx_job_busy         [0:NUM_ACCEL-1];
+  wire        ctx_job_active       [0:NUM_ACCEL-1];
+  wire        ctx_job_done         [0:NUM_ACCEL-1];
+  wire        ctx_job_fire         [0:NUM_ACCEL-1];
+  wire [31:0] ctx_job_id           [0:NUM_ACCEL-1];
+  wire [31:0] ctx_job_device_id    [0:NUM_ACCEL-1];
+  wire [31:0] ctx_job_k            [0:NUM_ACCEL-1];
+  wire [63:0] ctx_job_c_base       [0:NUM_ACCEL-1];
+  wire        ctx_scheduler_c_done [0:NUM_ACCEL-1];
+  wire        ctx_run_clear        [0:NUM_ACCEL-1];
+  wire [31:0] ctx_words_written    [0:NUM_ACCEL-1];
+  wire [31:0] ctx_chk_wr           [0:NUM_ACCEL-1];
+  wire [31:0] ctx_want_wr          [0:NUM_ACCEL-1];
+  wire [31:0] ctx_chk_c            [0:NUM_ACCEL-1];
+  wire [31:0] ctx_want_c           [0:NUM_ACCEL-1];
+  wire [7:0]  ctx_folds_done       [0:NUM_ACCEL-1];
+  wire [3:0]  ctx_n_inv            [0:NUM_ACCEL-1];
+  wire [31:0] ctx_cyc_latched      [0:NUM_ACCEL-1];
+  wire [31:0] ctx_cyc_total        [0:NUM_ACCEL-1];
+  wire [31:0] ctx_fill_cycles      [0:NUM_ACCEL-1];
+  wire [31:0] ctx_wb_cycles        [0:NUM_ACCEL-1];
+  wire [31:0] ctx_t_span           [0:NUM_ACCEL-1];
+  wire        ctx_seed_done_sticky [0:NUM_ACCEL-1];
+  wire        ctx_read_done_sticky [0:NUM_ACCEL-1];
+  wire        ctx_fold_done_sticky [0:NUM_ACCEL-1];
+  wire        ctx_wb_done_sticky   [0:NUM_ACCEL-1];
+  wire        ctx_wr_match         [0:NUM_ACCEL-1];
+  wire        ctx_c_match          [0:NUM_ACCEL-1];
+  wire        ctx_wr_err_range     [0:NUM_ACCEL-1];
+  wire [AXI_ADDR_W-1:0] ctx_wb_region_base [0:NUM_ACCEL-1];
 
-  // Selected accelerator start signal.
-  //
-  // Normal bring-up:
-  //   FSM -> fsm_fold_start -> fold_start
-  //
-  // Scheduler mode:
-  //   scheduler adapter -> fold_start
-  //
-  // The existing accelerator consumes only fold_start.
-  wire fold_start =
-      USE_EXTERNAL_SCHEDULER
-          ? scheduler_fold_start_selected
-          : fsm_fold_start;
+  // shared DMA read engine, per requester
+  wire                   ctx_op_desc_valid  [0:NUM_ACCEL-1];
+  wire [AXI_ADDR_W-1:0]  ctx_op_desc_addr   [0:NUM_ACCEL-1];
+  wire [15:0]            ctx_op_desc_beats  [0:NUM_ACCEL-1];
+  wire                   ctx_op_desc_ready  [0:NUM_ACCEL-1];
+  wire                   ctx_dst_wr_en      [0:NUM_ACCEL-1];
+  wire                   ctx_dst_full       [0:NUM_ACCEL-1];
+  wire                   ctx_dst_almost_full[0:NUM_ACCEL-1];
+  wire                   ctx_read_done      [0:NUM_ACCEL-1];
+
+  // shared write-back engine, per requester
+  wire                   ctx_wb_desc_valid  [0:NUM_ACCEL-1];
+  wire [AXI_ADDR_W-1:0]  ctx_wb_desc_addr   [0:NUM_ACCEL-1];
+  wire [15:0]            ctx_wb_desc_beats  [0:NUM_ACCEL-1];
+  wire                   ctx_wb_desc_ready  [0:NUM_ACCEL-1];
+  wire                   ctx_wb_done        [0:NUM_ACCEL-1];
+  wire                   ctx_src_valid      [0:NUM_ACCEL-1];
+  wire [AXI_DATA_W-1:0]  ctx_src_data       [0:NUM_ACCEL-1];
+  wire                   ctx_src_ready      [0:NUM_ACCEL-1];
+  wire                   ctx_wb_active      [0:NUM_ACCEL-1];
+
+  // seeder (legacy; only context 0 ever pulses it)
+  wire                   ctx_seed_start     [0:NUM_ACCEL-1];
+  wire [AXI_ADDR_W-1:0]  ctx_seed_slab_addr [0:NUM_ACCEL-1];
+
+  logic [31:0] C_8x8 [0:NUM_8X8_STORAGE-1][0:N-1][0:N-1];
+  logic [31:0] C_4x4 [0:NUM_4X4_STORAGE-1][0:3][0:3];
+
+  // ---- the legacy run's knobs (context 0) ---------------------------------
+  wire  [3:0] n_inv_probe;
+  wire        rerun_probe;
+  logic       rerun_d;
+  wire        rerun_pulse = rerun_probe & ~rerun_d;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) rerun_d <= 1'b0;
+    else           rerun_d <= rerun_probe;
+  end
+
+  wire seed_busy, seed_done, seed_err_align, seed_err_resp;
+  wire eng_err_align, eng_err_resp;
+  wire wb_err_align, wb_err_resp;
+  logic err_w_owner;
+
+  // the shared read engine's destination stream (routed to contexts by tag)
+  wire          dst_wr_en;
+  wire [15:0]   dst_wr_beat;
+  wire [127:0]  dst_wr_data;
+  wire [7:0]    dst_wr_tag;
+  wire          dst_full;
+  // Result-output CDC backpressure.  The CDC itself sits with the DPTI path.
+  wire          rb_cdc_src_ready;
+
 
   // ==========================================================
-  // Scheduler job boundary.
+  // Job acceptance.
   //
-  // For now a job is accepted only when the accelerator is idle
-  // with respect to an externally scheduled transaction.
-  //
-  // The descriptor is latched exactly once per accepted job.
-  // The legacy scheduler_fold_start path remains available for
-  // compatibility while the job interface is being integrated.
+  // A descriptor is accepted when the context of the device it names is
+  // free: that context has no job in flight, its result readback (if any)
+  // has drained, and its FSM is at a run boundary.  Another context's job
+  // being in flight does not matter -- that is the point.
   // ==========================================================
+  wire [31:0] effective_job_device_id;             // defined with the ingress
+  wire        target_valid = (effective_job_device_id < NUM_ACCEL);
+  wire [ACC_ID_W-1:0] target_idx =
+      target_valid ? effective_job_device_id[ACC_ID_W-1:0] : '0;
 
-  logic        job_busy;
+  // A completed job may still own the shared DMA read engine while its
+  // result tile is read back; its context takes no new job until then.
+  wire result_readback_busy [0:NUM_ACCEL-1];
 
-  // ----------------------------------------------------------
-  // Scheduler job lifetime.
-  //
-  // job_fire  : job boundary / acceptance
-  // job_active: exactly one accepted job is in flight
-  // job_done  : completion belonging to that accepted job
-  //
-  // scheduler_fold_start is NOT the job boundary.  It starts
-  // computation inside the already accepted job.
-  // ----------------------------------------------------------
-  logic        job_active;
-
-  logic [31:0] job_id_reg;
-  logic [31:0] job_device_id_reg;
-
-  // Predecoded physical-device selection.
-  // Captured together with job_device_id_reg at job acceptance.
-  logic select_8x8_reg;
-  logic select_4x4_reg;
-  logic [31:0] job_m_reg;
-  logic [31:0] job_n_reg;
-  logic [31:0] job_k_reg;
-  logic [31:0] job_start_cycle_reg;
-  logic [31:0] job_est_cycles_reg;
-
-  // ----------------------------------------------------------
-  // Physical device selection.
-  //
-  // device_id is an opaque physical-instance identifier.
-  // Geometry is NOT encoded into the scheduler protocol.
-  //
-  // These IDs describe the 1x8x8 + 3x4x4 physical fleet:
-  //   0 -> 8x8 instance 0
-  //   1 -> 4x4 instance 0
-  //   2 -> 4x4 instance 1
-  //   3 -> 4x4 instance 2
-  //
-  // Geometry and physical-instance identity are deliberately separate.
-  // All three 4x4 instances share the same geometry but retain distinct
-  // scheduler-visible device IDs.
-  // ----------------------------------------------------------
-  // Registered selection removes the wide ID comparisons
-  // from the writeback FIFO -> AXI control path.
-  wire select_8x8 = select_8x8_reg;
-  wire select_4x4 = select_4x4_reg;
-
-  wire [31:0] selected_8x8_idx = job_device_id_reg;
-  wire [31:0] selected_4x4_idx = job_device_id_reg - NUM_8X8;
-
-  // Runtime transfer size for an externally scheduled job.
-  // One invocation contains A[K,N] + B[K,N], both FP32:
-  //   K * N * 4 + K * N * 4 = K * N * 8 bytes.
-  //
-  // K_MAX is the physical buffer capacity; JOB_K is the
-  // reduction length of this particular job.  The payload is the first
-  // JOB_K depths of the K_MAX-capacity image, in the operand writer's
-  // layout, so JOB_K sizes the DMA transfer without changing the decode.
-  //
-  // Legacy bring-up has no job descriptor (job_k_reg stays 0, and a
-  // zero-beat descriptor is ignored by dma_engine); its reduction length is
-  // the K_DIM parameter, so the same K-depths-of-the-image rule applies.
-  wire [31:0] job_rx_bytes =
-      USE_EXTERNAL_SCHEDULER
-          ? (job_k_reg * N * 8)
-          : (K_DIM * N * 8);
-
-  wire [31:0] job_n_beats =
-      job_rx_bytes / (AXI_DATA_W / 8);
-
-  wire [31:0] job_rx_words =
-      job_rx_bytes / 4;
-  logic [63:0] job_a_base_reg;
-  logic [63:0] job_b_base_reg;
-  logic [63:0] job_c_base_reg;
-
-  // A job can be accepted when no external job is currently in flight.
-  // P_DONE is the natural idle point for the externally driven path.
-  // External jobs must be accepted before P_CALIB launches the seed.
-  // Otherwise slab_addr still comes from the reset value of job_a_base_reg
-  // and the seed writer would write the operand image to address 0.
-  wire core_job_ready;
-
-  // A completed compute/writeback job may still own the shared DMA read
-  // engine while its result tile is being read back.  Do not accept the next
-  // external descriptor until that readback has completely drained.
-  wire result_readback_busy;
-
-  assign core_job_ready =
+  wire core_job_ready =
       USE_EXTERNAL_SCHEDULER &&
       ui_rst_n &&
-      !job_busy &&
       !hs_busy &&
-      !result_readback_busy &&
-      (phase == P_CALIB || phase == P_READ || phase == P_DONE);
+      target_valid &&
+      !ctx_job_busy[target_idx] &&
+      !result_readback_busy[target_idx] &&
+      (ctx_phase[target_idx] == 4'd0 ||    // P_CALIB
+       ctx_phase[target_idx] == 4'd2 ||    // P_READ
+       ctx_phase[target_idx] == 4'd7);     // P_DONE
+
+  // The scheduler's context for the target must be idle as well.
+  wire scheduler_desc_ready = target_valid && scheduler_req_ready[target_idx];
 
   // ----------------------------------------------------------
   // DPTI descriptor bridge.
@@ -1390,7 +1238,6 @@ systolic_hw_scheduler #(
 
   wire        effective_job_valid;
   wire [31:0] effective_job_id;
-  wire [31:0] effective_job_device_id;
 
   wire [31:0] effective_job_m;
   wire [31:0] effective_job_n;
@@ -1403,10 +1250,13 @@ systolic_hw_scheduler #(
   wire [63:0] effective_job_b_base;
   wire [63:0] effective_job_c_base;
 
-  // Downstream acceptance boundary.
+  // Downstream acceptance boundary -- see "Acceptance" below.  This is the
+  // registered decision for the descriptor on the bus; target_ready_now is
+  // the readiness of the context that descriptor names, this cycle.
   wire descriptor_downstream_ready;
+  wire target_ready_now;
 
-  assign descriptor_downstream_ready =
+  assign target_ready_now =
       ingress_job_ready &&
       core_job_ready &&
       scheduler_desc_ready;
@@ -1526,16 +1376,57 @@ systolic_hw_scheduler #(
     .job_c_base       (ingress_job_c_base)
   );
 
-  // External producer handshake must reflect the complete acceptance
-  // boundary. A descriptor is not accepted by the compiler-facing
-  // interface unless both the DMA core and hardware scheduler can
-  // consume it.
-  // External producer acceptance is the job ownership boundary.
+  // ---- Acceptance ------------------------------------------------------------
   //
-  // The compiler-facing descriptor is accepted only when the core and
-  // hardware scheduler are both ready.  Do not derive job_fire from the
-  // registered ingress output: that output may still contain the descriptor
-  // of the job that just completed.
+  // External producer acceptance is the job ownership boundary: a descriptor
+  // is accepted by the compiler-facing interface only when the context of the
+  // device it names, and that context's scheduler slot, can take it.  Do not
+  // derive job_fire from the registered ingress output: that output may still
+  // contain the descriptor of the job that just completed.
+  //
+  // The readiness is per device, so it depends on which device the descriptor
+  // on the bus names.  It is therefore REGISTERED: the decision for the
+  // descriptor presented in cycle n is published as job_ready in cycle n+1,
+  // together with the device id it was made for, and the transfer happens at
+  // the first edge where the producer still presents that descriptor.  So
+  // job_ready is a function of the design's registered state alone, never of
+  // the payload the producer may be changing in the same cycle, and the value
+  // the producer samples at an edge is the value this design uses at that
+  // edge: the edge at which the producer sees job_ready high is exactly the
+  // edge at which the design takes the descriptor -- in any simulator and on
+  // the board.  (A combinational ready that depended on job_device_id was
+  // evaluated by the design from the new device id while the producer, which
+  // had just driven it, was still looking at the ready of the old one; the
+  // design took the descriptor at an edge the producer did not recognise, the
+  // producer held job_valid, and the same descriptor was accepted twice.)
+  //
+  // accept_q is dropped the cycle after a transfer, so a producer that keeps
+  // job_valid high for one more cycle does not transfer again.
+  logic        accept_q;
+  logic [31:0] accept_dev_q;
+  logic        accept_dpti_q;
+
+  wire job_fire;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      accept_q      <= 1'b0;
+      accept_dev_q  <= 32'd0;
+      accept_dpti_q <= 1'b0;
+    end else begin
+      accept_q      <= effective_job_valid && target_ready_now && !job_fire;
+      accept_dev_q  <= effective_job_device_id;
+      accept_dpti_q <= dpti_job_valid;
+    end
+  end
+
+  // The published decision applies to the descriptor it was made for: same
+  // source (DPTI has priority over the legacy ports) and same device.
+  assign descriptor_downstream_ready =
+      accept_q &&
+      (accept_dev_q  == effective_job_device_id) &&
+      (accept_dpti_q == dpti_job_valid);
+
   // Legacy external producer readiness.
   //
   // If a DPTI descriptor is pending, the legacy producer is not
@@ -1546,1042 +1437,254 @@ systolic_hw_scheduler #(
       descriptor_downstream_ready;
 
   // A descriptor is accepted at the common downstream boundary.
-  wire job_fire =
+  assign job_fire =
       effective_job_valid &&
       descriptor_downstream_ready;
 
   // The scheduler accepts exactly the same accepted descriptor.
-  wire scheduler_desc_fire =
-      job_fire;
 
+  // Route the accepted descriptor to the context of the device it names.
+  generate
+    for (genvar i = 0; i < NUM_ACCEL; i++) begin : JOB_ROUTE
+      assign ctx_job_fire[i] = job_fire && (effective_job_device_id == i);
+    end
+  endgenerate
 
-  // --------------------------------------------------------------------------
-  // --------------------------------------------------------------------------
-  // DEBUG: trace every actual job_fire together with the complete readiness
-  // seam. Diagnostic only; no functional signal is modified.
+  always_ff @(posedge ui_clk) begin
+    if (USE_EXTERNAL_SCHEDULER && job_fire)
+      $display("JOBACCEPT t=%0t job=%0d -> device %0d k=%0d a=0x%08h c=0x%08h",
+               $time, effective_job_id, effective_job_device_id, effective_job_k,
+               effective_job_a_base, effective_job_c_base);
+  end
+
+  // =========================================================================
+  // The accelerators: one context + one array each.
   //
-  // This captures the descriptor handshake boundary so we can determine
-  // whether the ingress descriptor is duplicated, advanced too late, or
-  // accepted at an unexpected job boundary.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_fire ||
-         ingress_job_valid ||
-         ingress_job_ready ||
-         job_ready)) begin
+  // ACC_8X8[i].u_acc / ACC_4X4[i].u_acc keep their names; the context that
+  // feeds each array sits next to it as u_ctx.
+  // =========================================================================
+  generate
+    for (genvar i = 0; i < NUM_8X8; i++) begin : ACC_8X8
+      systolic_accel_context #(
+        .N_ARRAY (N), .N_WIRE (N), .K_MAX (K_MAX_8X8), .K_DIM (K_DIM),
+        .DEVICE_ID (i),
+        .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
+        .LEGACY_RUN (i == 0),
+        .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
+        .EXPECT_WR_CHK (EXPECT_WR_CHK), .EXPECT_C_CHK (EXPECT_C_CHK),
+        .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .BEAT_W (16)
+      ) u_ctx (
+        .clk (ui_clk), .ui_rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
+        .n_inv_probe (n_inv_probe), .rerun_pulse (rerun_pulse),
+        .job_fire (ctx_job_fire[i]),
+        .in_job_id (effective_job_id), .in_device_id (effective_job_device_id),
+        .in_k (effective_job_k), .in_start_cycle (effective_job_start_cycle),
+        .in_est_cycles (effective_job_est_cycles),
+        .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
+        .in_c_base (effective_job_c_base),
+        .job_busy (ctx_job_busy[i]), .job_active (ctx_job_active[i]),
+        .job_done (ctx_job_done[i]),
+        .job_id_reg (ctx_job_id[i]), .job_device_id_reg (ctx_job_device_id[i]),
+        .job_k_reg (ctx_job_k[i]),
+        .job_start_cycle_reg (scheduler_req_start_cycle[i]),
+        .job_est_cycles_reg (scheduler_req_compute_cycles[i]),
+        .job_c_base_reg (ctx_job_c_base[i]),
+        .tile_req (scheduler_req_valid[i]), .tile_ack (scheduler_req_ack[i]),
+        .accelerator_ready (scheduler_accelerator_ready[i]),
+        .fold_start_ext (scheduler_fold_start_8x8[i]),
+        .scheduler_c_done (ctx_scheduler_c_done[i]),
+        .a_in (a_in_8x8[i]), .b_in (b_in_8x8[i]),
+        .a_valid_in (a_valid_to_8x8[i]), .b_valid_in (b_valid_to_8x8[i]),
+        .c_valid_out (c_valid_out_8x8[i]), .c_out (c_out_8x8[i]),
+        .op_desc_valid (ctx_op_desc_valid[i]), .op_desc_addr (ctx_op_desc_addr[i]),
+        .op_desc_beats (ctx_op_desc_beats[i]), .op_desc_ready (ctx_op_desc_ready[i]),
+        .dst_wr_en (ctx_dst_wr_en[i]), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+        .dst_full (ctx_dst_full[i]), .dst_almost_full (ctx_dst_almost_full[i]),
+        .read_done (ctx_read_done[i]),
+        .wb_desc_valid (ctx_wb_desc_valid[i]), .wb_desc_addr (ctx_wb_desc_addr[i]),
+        .wb_desc_beats (ctx_wb_desc_beats[i]), .wb_desc_ready (ctx_wb_desc_ready[i]),
+        .wb_done (ctx_wb_done[i]),
+        .src_valid (ctx_src_valid[i]), .src_data (ctx_src_data[i]), .src_ready (ctx_src_ready[i]),
+        .wb_active (ctx_wb_active[i]),
+        .seed_start (ctx_seed_start[i]), .seed_slab_addr (ctx_seed_slab_addr[i]),
+        .seed_done (seed_done),
+        .phase_o (ctx_phase[i]), .run_clear (ctx_run_clear[i]),
+        .words_written (ctx_words_written[i]), .chk_wr (ctx_chk_wr[i]),
+        .want_wr (ctx_want_wr[i]), .chk_c (ctx_chk_c[i]), .want_c (ctx_want_c[i]),
+        .folds_done (ctx_folds_done[i]), .n_inv (ctx_n_inv[i]),
+        .cyc_latched (ctx_cyc_latched[i]), .cyc_total (ctx_cyc_total[i]),
+        .fill_cycles (ctx_fill_cycles[i]), .wb_cycles (ctx_wb_cycles[i]),
+        .t_span (ctx_t_span[i]),
+        .seed_done_sticky (ctx_seed_done_sticky[i]), .read_done_sticky (ctx_read_done_sticky[i]),
+        .fold_done_sticky (ctx_fold_done_sticky[i]), .wb_done_sticky (ctx_wb_done_sticky[i]),
+        .wr_match (ctx_wr_match[i]), .c_match (ctx_c_match[i]),
+        .wr_err_range (ctx_wr_err_range[i]), .wb_region_base (ctx_wb_region_base[i]),
+        .C (C_8x8[i])
+      );
 
-      $display(
-        "JOBFIREDBG t=%0t phase=%0d active=%0b busy=%0b job_reg=%0d ingress_id=%0d in_valid=%0b in_ready=%0b job_ready=%0b core_ready=%0b sched_ready=%0b fire=%0b same_id=%0b",
-        $time,
-        phase,
-        job_active,
-        job_busy,
-        job_id_reg,
-        ingress_job_id,
-        ingress_job_valid,
-        ingress_job_ready,
-        job_ready,
-        core_job_ready,
-        scheduler_desc_ready,
-        job_fire,
-        (ingress_job_id == job_id_reg)
+      (* keep_hierarchy = "yes" *)
+      systolic_array #(
+        .N      (N),
+        .DATA_W (32)
+      ) u_acc (
+        .clk         (ui_clk),
+        .rst         (rst_i),
+        .a_in        (a_in_8x8[i]),
+        .b_in        (b_in_8x8[i]),
+        .a_valid_in  (a_valid_to_8x8[i]),
+        .b_valid_in  (b_valid_to_8x8[i]),
+        .c_valid_out (c_valid_out_8x8[i]),
+        .c_out       (c_out_8x8[i])
       );
     end
-  end
+  endgenerate
 
-  // --------------------------------------------------------------------------
-  // DEBUG: observe compiler -> scheduler descriptor handshake.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_fire || scheduler_desc_fire || scheduler_desc_ready || scheduler_busy)) begin
-      $display(
-        "SCHEDHS t=%0t phase=%0d job_fire=%0b sched_fire=%0b desc_valid=%0b desc_ready=%0b state=%0d busy=%0b ing_id=%0d ing_dev=%0d ing_start=%0d ing_est=%0d ing_C=0x%08h",
-        $time,
-        phase,
-        job_fire,
-        scheduler_desc_fire,
-        ingress_job_valid,
-        scheduler_desc_ready,
-        u_hw_scheduler.state,
-        scheduler_busy,
-        ingress_job_id,
-        ingress_job_device_id,
-        ingress_job_start_cycle,
-        ingress_job_est_cycles,
-        ingress_job_c_base
+  generate
+    for (genvar i = 0; i < NUM_4X4; i++) begin : ACC_4X4
+      localparam integer CTX = NUM_8X8 + i;
+      systolic_accel_context #(
+        .N_ARRAY (4), .N_WIRE (N), .K_MAX (K_MAX_4X4),
+        .K_DIM ((K_DIM < K_MAX_4X4) ? K_DIM : K_MAX_4X4),
+        .DEVICE_ID (CTX),
+        .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
+        .LEGACY_RUN (1'b0),
+        .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
+        .EXPECT_WR_CHK (EXPECT_WR_CHK), .EXPECT_C_CHK (32'h0),
+        .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .BEAT_W (16)
+      ) u_ctx (
+        .clk (ui_clk), .ui_rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
+        .n_inv_probe (n_inv_probe), .rerun_pulse (1'b0),
+        .job_fire (ctx_job_fire[CTX]),
+        .in_job_id (effective_job_id), .in_device_id (effective_job_device_id),
+        .in_k (effective_job_k), .in_start_cycle (effective_job_start_cycle),
+        .in_est_cycles (effective_job_est_cycles),
+        .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
+        .in_c_base (effective_job_c_base),
+        .job_busy (ctx_job_busy[CTX]), .job_active (ctx_job_active[CTX]),
+        .job_done (ctx_job_done[CTX]),
+        .job_id_reg (ctx_job_id[CTX]), .job_device_id_reg (ctx_job_device_id[CTX]),
+        .job_k_reg (ctx_job_k[CTX]),
+        .job_start_cycle_reg (scheduler_req_start_cycle[CTX]),
+        .job_est_cycles_reg (scheduler_req_compute_cycles[CTX]),
+        .job_c_base_reg (ctx_job_c_base[CTX]),
+        .tile_req (scheduler_req_valid[CTX]), .tile_ack (scheduler_req_ack[CTX]),
+        .accelerator_ready (scheduler_accelerator_ready[CTX]),
+        .fold_start_ext (scheduler_fold_start_4x4[i]),
+        .scheduler_c_done (ctx_scheduler_c_done[CTX]),
+        .a_in (a_in_4x4[i]), .b_in (b_in_4x4[i]),
+        .a_valid_in (a_valid_to_4x4[i]), .b_valid_in (b_valid_to_4x4[i]),
+        .c_valid_out (c_valid_out_4x4[i]), .c_out (c_out_4x4[i]),
+        .op_desc_valid (ctx_op_desc_valid[CTX]), .op_desc_addr (ctx_op_desc_addr[CTX]),
+        .op_desc_beats (ctx_op_desc_beats[CTX]), .op_desc_ready (ctx_op_desc_ready[CTX]),
+        .dst_wr_en (ctx_dst_wr_en[CTX]), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
+        .dst_full (ctx_dst_full[CTX]), .dst_almost_full (ctx_dst_almost_full[CTX]),
+        .read_done (ctx_read_done[CTX]),
+        .wb_desc_valid (ctx_wb_desc_valid[CTX]), .wb_desc_addr (ctx_wb_desc_addr[CTX]),
+        .wb_desc_beats (ctx_wb_desc_beats[CTX]), .wb_desc_ready (ctx_wb_desc_ready[CTX]),
+        .wb_done (ctx_wb_done[CTX]),
+        .src_valid (ctx_src_valid[CTX]), .src_data (ctx_src_data[CTX]), .src_ready (ctx_src_ready[CTX]),
+        .wb_active (ctx_wb_active[CTX]),
+        .seed_start (ctx_seed_start[CTX]), .seed_slab_addr (ctx_seed_slab_addr[CTX]),
+        .seed_done (1'b0),
+        .phase_o (ctx_phase[CTX]), .run_clear (ctx_run_clear[CTX]),
+        .words_written (ctx_words_written[CTX]), .chk_wr (ctx_chk_wr[CTX]),
+        .want_wr (ctx_want_wr[CTX]), .chk_c (ctx_chk_c[CTX]), .want_c (ctx_want_c[CTX]),
+        .folds_done (ctx_folds_done[CTX]), .n_inv (ctx_n_inv[CTX]),
+        .cyc_latched (ctx_cyc_latched[CTX]), .cyc_total (ctx_cyc_total[CTX]),
+        .fill_cycles (ctx_fill_cycles[CTX]), .wb_cycles (ctx_wb_cycles[CTX]),
+        .t_span (ctx_t_span[CTX]),
+        .seed_done_sticky (ctx_seed_done_sticky[CTX]), .read_done_sticky (ctx_read_done_sticky[CTX]),
+        .fold_done_sticky (ctx_fold_done_sticky[CTX]), .wb_done_sticky (ctx_wb_done_sticky[CTX]),
+        .wr_match (ctx_wr_match[CTX]), .c_match (ctx_c_match[CTX]),
+        .wr_err_range (ctx_wr_err_range[CTX]), .wb_region_base (ctx_wb_region_base[CTX]),
+        .C (C_4x4[i])
+      );
+
+      (* keep_hierarchy = "yes" *)
+      systolic_array #(
+        .N        (4),
+        .DATA_W   (32),
+        .ACC_BANKS(16)
+      ) u_acc (
+        .clk         (ui_clk),
+        .rst         (rst_i),
+        .a_in        (a_in_4x4[i]),
+        .b_in        (b_in_4x4[i]),
+        .a_valid_in  (a_valid_to_4x4[i]),
+        .b_valid_in  (b_valid_to_4x4[i]),
+        .c_valid_out (c_valid_out_4x4[i]),
+        .c_out       (c_out_4x4[i])
       );
     end
-  end
+  endgenerate
 
-  // --------------------------------------------------------------------------
-  // DEBUG: print the memory bases of every externally accepted compiler job.
-  // This is diagnostic only; it does not affect RTL behavior.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER && job_fire) begin
-      $display(
-        "JOBADDRDBG accept: ingress_job_id=%0d a_base=0x%08h b_base=0x%08h c_base=0x%08h",
-        ingress_job_id,
-        ingress_job_a_base,
-        ingress_job_b_base,
-        ingress_job_c_base
-      );
-    end
-  end
-
-  // --------------------------------------------------------------------------
-  // DEBUG: scheduler protocol trace.
-  //
-  // This trace follows one descriptor from compiler acceptance through
-  // scheduler start and accelerator completion.  It is diagnostic only.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_fire ||
-         scheduler_desc_ready ||
-         scheduler_busy ||
-         scheduler_accelerator_start != 0 ||
-         scheduler_c_done ||
-         scheduler_schedule_done ||
-         scheduler_start_pending ||
-         scheduler_accelerator_start_delayed != 0)) begin
-
-      $display(
-        "SCHTRACE t=%0t phase=%0d fire=%0b desc_ready=%0b sched_state=%0d sched_busy=%0b sched_cyc=%0d active_start=%0d active_est=%0d active_dev=%0d start=%b pending=%0b pending_id=%0d delayed=%b fold_start=%0b c_done=%0b c_armed=%0b c_seen=%0b sched_c_done=%0b sched_done=%0b",
-        $time,
-        phase,
-        job_fire,
-        scheduler_desc_ready,
-        u_hw_scheduler.state,
-        scheduler_busy,
-        scheduler_cycle_counter,
-        scheduler_active_start_cycle,
-        scheduler_active_compute_cycles,
-        scheduler_active_accelerator_id,
-        scheduler_accelerator_start,
-        scheduler_start_pending,
-        scheduler_start_pending_id,
-        scheduler_accelerator_start_delayed,
-        fold_start,
-        c_done,
-        c_done_armed,
-        c_done_seen,
-        scheduler_c_done,
-        scheduler_schedule_done
-      );
-    end
-  end
-
-
-  // --------------------------------------------------------------------------
-  // DEBUG: first-failure scheduler -> datapath ownership seam.
-  //
-  // Goal:
-  //   Determine whether an accelerator/fold transaction for a newly
-  //   presented ingress job starts before job_fire latches that job's
-  //   descriptor into the job_*_reg registers.
-  //
-  // Diagnostic only. No functional signal is modified.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_fire ||
-         fold_start ||
-         scheduler_accelerator_start != 0 ||
-         wb_desc_valid)) begin
-
-      $display(
-        "FIRSTFAIL_SEAM t=%0t phase=%0d job_fire=%0b job_active=%0b job_id_reg=%0d ingress_job_id=%0d ingress_c_base=0x%08h job_c_base_reg=0x%08h fold_start=%0b sched_start=%b sched_busy=%0b sched_state=%0d wb_valid=%0b wb_ready=%0b wb_tile_addr=0x%08h",
-        $time,
-        phase,
-        job_fire,
-        job_active,
-        job_id_reg,
-        ingress_job_id,
-        ingress_job_c_base,
-        job_c_base_reg,
-        fold_start,
-        scheduler_accelerator_start,
-        scheduler_busy,
-        u_hw_scheduler.state,
-        wb_desc_valid,
-        wb_desc_ready,
-        wb_tile_addr
-      );
-    end
-  end
-
-  // --------------------------------------------------------------------------
-  // DEBUG: observe the complete external job handshake.
-  //
-  // Diagnostic only. No functional signal is modified.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_valid || ingress_job_valid || job_fire)) begin
-      $display("JOBHS t=%0t phase=%0d busy=%0b in_valid=%0b in_ready=%0b ing_valid=%0b ing_ready=%0b core_ready=%0b sched_ready=%0b fire=%0b in_id=%0d ing_id=%0d dev=%0d",
-        $time,
-        phase,
-        job_busy,
-        job_valid,
-        ingress_job_ready,
-        ingress_job_valid,
-        ingress_job_ready,
-        core_job_ready,
-        scheduler_desc_ready,
-        job_fire,
-        job_id,
-        ingress_job_id,
-        ingress_job_device_id
-      );
-    end
-  end
-
-  // Job-level completion is defined later, after the write-back
-  // completion signal and final-invocation predicate are available.
-  wire job_done;
-
-  // DEBUG: observe the exact job completion condition.
-  always_ff @(posedge ui_clk) begin
-    if (job_active && scheduler_c_done) begin
-      $display(
-        "JOBDONE_DBG t=%0t job_active=%0b scheduler_c_done=%0b job_done=%0b job_id=%0d",
-        $time,
-        job_active,
-        scheduler_c_done,
-        job_done,
-        job_id_reg
-      );
-    end
-  end
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      job_busy       <= 1'b0;
-      job_active     <= 1'b0;
-      job_id_reg     <= 32'd0;
-      job_device_id_reg <= 32'd0;
-
-      // Preserve the original reset-time decode of device ID 0.
-      select_8x8_reg <= (32'd0 < NUM_8X8);
-      select_4x4_reg <=
-          (32'd0 >= NUM_8X8) &&
-          (32'd0 < NUM_ACCEL);
-
-      job_m_reg      <= 32'd0;
-      job_n_reg      <= 32'd0;
-      job_k_reg      <= 32'd0;
-      job_start_cycle_reg <= 32'd0;
-      job_est_cycles_reg  <= 32'd0;
-      job_a_base_reg <= 64'd0;
-      job_b_base_reg <= 64'd0;
-      job_c_base_reg <= 64'd0;
-    end
-    else begin
-      if (job_fire || job_done) begin
-        $display(
-          "JOBEDGE_DBG t=%0t job_fire=%0b job_done=%0b job_active=%0b job_busy=%0b job_id_reg=%0d ingress_job_id=%0d",
-          $time,
-          job_fire,
-          job_done,
-          job_active,
-          job_busy,
-          job_id_reg,
-          ingress_job_id
-        );
-      end
-
-      if (job_fire) begin
-        // Acceptance is the job boundary.
-        job_busy       <= 1'b1;
-        job_active     <= 1'b1;
-
-        job_id_reg     <= effective_job_id;
-        job_device_id_reg <= effective_job_device_id;
-
-        // Decode the incoming ID, not the previous registered ID.
-        // Both selectors become valid on the same acceptance edge.
-        select_8x8_reg <=
-            (effective_job_device_id < NUM_8X8);
-
-        select_4x4_reg <=
-            (effective_job_device_id >= NUM_8X8) &&
-            (effective_job_device_id < NUM_ACCEL);
-
-        job_m_reg      <= effective_job_m;
-        job_n_reg      <= effective_job_n;
-        job_k_reg      <= effective_job_k;
-        job_start_cycle_reg <= effective_job_start_cycle;
-        job_est_cycles_reg  <= effective_job_est_cycles;
-        job_a_base_reg <= effective_job_a_base;
-        job_b_base_reg <= effective_job_b_base;
-        if (ingress_job_id == 32'd102) begin
-          $display(
-            "JOB2_CBASECAP t=%0t job_fire=%0b ingress_job_id=%0d ingress_c_base=0x%08h c_base_reg_before=0x%08h",
-            $time,
-            job_fire,
-            ingress_job_id,
-            ingress_job_c_base,
-            job_c_base_reg
-          );
-        end
-        job_c_base_reg <= effective_job_c_base;
-      end
-
-      // Completion closes exactly the job that was accepted.
-      if (job_done) begin
-        $display(
-          "JOBCLOSE_DBG t=%0t job_id=%0d job_done=%0b job_active=%0b job_busy=%0b",
-          $time,
-          job_id_reg,
-          job_done,
-          job_active,
-          job_busy
-        );
-
-        job_busy   <= 1'b0;
-        job_active <= 1'b0;
+  // =========================================================================
+  // Context 0's view under the names the bench, the board scripts and the
+  // LEDs have always read.  Every regression job is a device-0 job, so these
+  // mean exactly what they meant.
+  // =========================================================================
+  wire [3:0]  phase            = ctx_phase[0];
+  wire [31:0] words_written    = ctx_words_written[0];
+  wire [31:0] chk_wr           = ctx_chk_wr[0];
+  wire [31:0] want_wr          = ctx_want_wr[0];
+  wire [31:0] chk_c            = ctx_chk_c[0];
+  wire [31:0] want_c           = ctx_want_c[0];
+  wire [7:0]  folds_done       = ctx_folds_done[0];
+  wire [3:0]  n_inv            = ctx_n_inv[0];
+  wire [31:0] cyc_latched      = ctx_cyc_latched[0];
+  wire [31:0] cyc_total        = ctx_cyc_total[0];
+  wire [31:0] fill_cycles      = ctx_fill_cycles[0];
+  wire [31:0] wb_cycles        = ctx_wb_cycles[0];
+  wire [31:0] t_span           = ctx_t_span[0];
+  wire        seed_done_sticky = ctx_seed_done_sticky[0];
+  wire        read_done_sticky = ctx_read_done_sticky[0];
+  wire        fold_done_sticky = ctx_fold_done_sticky[0];
+  wire        wb_done_sticky   = ctx_wb_done_sticky[0];
+  wire        wr_match         = ctx_wr_match[0];
+  wire        c_match          = ctx_c_match[0];
+  wire        run_clear        = ctx_run_clear[0];
+  wire [31:0] job_id_reg        = ctx_job_id[0];
+  wire [31:0] job_device_id_reg = ctx_job_device_id[0];
+  wire [31:0] job_k_reg         = ctx_job_k[0];
+  wire [AXI_ADDR_W-1:0] wb_region_base = ctx_wb_region_base[0];
+  wire [31:0] C [0:N-1][0:N-1];
+  generate
+    for (genvar r_ = 0; r_ < N; r_++) begin : C_ALIAS_R
+      for (genvar c_ = 0; c_ < N; c_++) begin : C_ALIAS_C
+        assign C[r_][c_] = C_8x8[0][r_][c_];
       end
     end
-  end
+  endgenerate
 
-  // Scheduler-facing completion is a JOB event, not the raw c_done level.
-  //
-  // c_done is sticky until the next fold_start.  Therefore exposing c_done
-  // directly would allow a stale completion from the previous job to look
-  // like completion of the next job.
-  //
-  // c_done_seen is cleared when a new job is accepted and set after the first
-  // completion belonging to that job.
-  logic        c_done_seen;
-  logic        c_done_armed;
+  // the legacy seeder is context 0's
+  wire                  seed_start     = ctx_seed_start[0];
+  wire [AXI_ADDR_W-1:0] seed_slab_addr = ctx_seed_slab_addr[0];
 
-  // Scheduler-facing completion is a one-cycle event.
-  //
-  // c_done itself is sticky until the next fold_start, so do not expose the
-  // raw level to the scheduler.  Arm completion only after the real
-  // accelerator transaction has started, then consume the first c_done.
-  assign scheduler_c_done =
-      USE_EXTERNAL_SCHEDULER &&
-      job_active &&
-      c_done_armed &&
-      c_done &&
-      !c_done_seen;
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      c_done_seen  <= 1'b0;
-      c_done_armed <= 1'b0;
-    end
-    else begin
-      // A new job invalidates any completion state from the previous job.
-      if (job_fire) begin
-        c_done_seen  <= 1'b0;
-        c_done_armed <= 1'b0;
-      end
-
-      // fold_start is the actual accelerator transaction boundary.
-      else if (fold_start) begin
-        c_done_seen  <= 1'b0;
-        c_done_armed <= 1'b1;
-      end
-
-      // Consume exactly one completion event.
-      else if (job_active &&
-               c_done_armed &&
-               c_done &&
-               !c_done_seen) begin
-        c_done_seen  <= 1'b1;
-        c_done_armed <= 1'b0;
-      end
+  // fleet-wide events
+  logic job_done, job_busy, job_active, wr_err_range, scheduler_c_done_any;
+  logic any_wb_active;
+  always_comb begin
+    job_done = 1'b0; job_busy = 1'b0; job_active = 1'b0;
+    wr_err_range = 1'b0; scheduler_c_done_any = 1'b0; any_wb_active = 1'b0;
+    for (int k = 0; k < NUM_ACCEL; k++) begin
+      job_done             = job_done | ctx_job_done[k];
+      job_busy             = job_busy | ctx_job_busy[k];
+      job_active           = job_active | ctx_job_active[k];
+      wr_err_range         = wr_err_range | ctx_wr_err_range[k];
+      scheduler_c_done_any = scheduler_c_done_any | ctx_scheduler_c_done[k];
+      any_wb_active        = any_wb_active | ctx_wb_active[k];
     end
   end
+  assign scheduler_c_done = scheduler_c_done_any;
 
-  // ---- write-back control -------------------------------------------------
-  logic          wb_desc_valid;
-  wire           wb_desc_ready, wb_done;
-  wire           wb_err_align, wb_err_resp;
-  logic          wb_desc_started, wb_done_sticky;
-  logic          err_w_owner;
-  // ----------------------------------------------------------
-  // Device-selected result geometry.
-  //
-  // IMPORTANT:
-  //   ingress_job_device_id remains an opaque physical-instance ID.
-  //   Geometry is a property of the selected device, not of the
-  //   scheduler ABI.
-  //
-  // Current prototype device table:
-  //
-  //   DEVICE_ID_8X8   -> 64 result words -> 256 bytes -> 16 AXI beats
-  //   DEVICE_ID_4X4_0 -> 16 result words ->  64 bytes ->  4 AXI beats
-  //   DEVICE_ID_4X4_1 -> 16 result words ->  64 bytes ->  4 AXI beats
-  //   DEVICE_ID_4X4_2 -> 16 result words ->  64 bytes ->  4 AXI beats
-  //
-  // These are device properties.  The scheduler only supplies
-  // device_id; it does not supply "use_4x4".
-  // ----------------------------------------------------------
-
-  localparam integer WB_BEATS_8X8      = (8 * 8) / (AXI_DATA_W / 32);
-  localparam integer WB_TILE_BYTES_8X8 = 8 * 8 * 4;
-
-  localparam integer WB_BEATS_4X4      = (4 * 4) / (AXI_DATA_W / 32);
-  localparam integer WB_TILE_BYTES_4X4 = 4 * 4 * 4;
-
-  wire [31:0] selected_result_words =
-      select_8x8 ? 32'd64 :
-      select_4x4 ? 32'd16 :
-                   32'd0;
-
-  wire [31:0] selected_result_bytes =
-      select_8x8 ? 32'd256 :
-      select_4x4 ? 32'd64 :
-                   32'd0;
-
-  wire [31:0] selected_wb_beats =
-      select_8x8 ? 32'd16 :
-      select_4x4 ? 32'd4 :
-                   32'd0;
-
-  // Both supported geometries have power-of-two tile sizes.
-  // Keep separate shifts so the address calculation remains
-  // compile-time simple rather than introducing a runtime shift.
-  localparam int WBT_SHIFT_8X8 = $clog2(WB_TILE_BYTES_8X8);
-  localparam int WBT_SHIFT_4X4 = $clog2(WB_TILE_BYTES_4X4);
-
-  localparam int RX_SHIFT  = $clog2(RX_BYTES);
-  localparam int RXW_SHIFT = $clog2(RX_WORDS);
-
-  // P_READ ends when the last word has LANDED, not when the last beat has been
-  // received.  dma_operand_writer takes four cycles to unpack a 128-bit beat
-  // into the single 32-bit buffer write port, so read_done leads the final
-  // write by up to three cycles.  Starting the fold on read_done would race the
-  // last three operands into the array -- intermittently, and only at the tail
-  // of the payload, which is the worst kind of bug to hunt on a board.
-  // words_written is exact.
-  // words_written is cumulative (the writer's clear is tied low), so the
-  // finishing line moves one slab per invocation: invocation fi is full when
-  // the (fi+1)-th slab has landed.  At n_inv = 1 this is the old comparison.
-  // A slab is job_rx_words -- what the descriptor fetched, from the LATCHED
-  // job_k_reg -- for both device classes: the operand writer is the shared
-  // N-lane writer, so a 4x4 job's payload is still job_k * 2N words.
-  wire [31:0] words_want =
-      (32'(read_fi) + 32'd1) * job_rx_words;
-  wire fill_complete = read_done_fold && (words_written == words_want);
-
-  localparam integer C_N = N * N;
-  logic [2*LANE_W:0] scan_c;
-  wire scan_c_last = (scan_c == (2*LANE_W+1)'(C_N));
-
-  // ---- how many invocations this run makes --------------------------------
-  // K > K_MAX is a scheduling quantity, not a hardware capacity: the operand
-  // buffers are indexed by absolute k and no fold count appears in them.
-  // uart/build_kmax.tcl says why a top-level NFOLD generic was the wrong
-  // abstraction and asks that it not come back under another name, so the count
-  // arrives from OUTSIDE the RTL at run time -- vio_0's one output probe -- and
-  // ONE bitstream measures the whole sweep n_inv = 1..8.  What the sweep buys
-  // over a single point is the slope: the per-descriptor start-up inside the
-  // fill is measured rather than inferred from a single fill's excess.
-  //
-  // Latched on the way out of P_CALIB.  A probe written mid-run would move the
-  // finishing line under a measurement, and every counter below is defined over
-  // "this run".  0 reads as 1: an unset probe must not produce a run that does
-  // nothing and reports it as a total.
-  wire  [3:0] n_inv_probe;
-  wire  [3:0] n_inv_next = (n_inv_probe == 4'd0) ? 4'd1 : n_inv_probe;
-  // The second output probe re-runs the design from P_CALIB without a reset, so
-  // the whole n_inv sweep is one script instead of eight presses of BTNC with a
-  // project re-opened between them.  A rising edge, not a level: a level would
-  // re-run for as long as JTAG left it high.  It is honoured only in P_DONE --
-  // there is no way to interrupt a run in flight, which is the point.
-  //
-  // Everything a run measures is therefore cleared in P_CALIB rather than by
-  // ui_rst_n alone: the counters below, both engines' own counters (stat_clear),
-  // the writer's word count, the checksums and their expectations, and the four
-  // done flags.  The rule is "P_CALIB is the start of a run"; a counter that
-  // does not obey it would report the sum of every run since power-on and look
-  // like a slow run.  err flags are the deliberate exception -- an alignment or
-  // response fault is a property of the bitstream, not of one run, and stays
-  // latched until reset.
-  wire        rerun_probe;
-  logic       rerun_d;
-  wire        rerun_pulse = rerun_probe & ~rerun_d;
-  logic [3:0] n_inv;
-  logic [3:0] fi;                     // legacy serial invocation index
-
-  // Stage-local tile ownership.
-  // These remain lockstep with fi until the tile pipeline is enabled.
-  logic [3:0] read_fi;
-  logic [3:0] compute_fi;
-  logic [3:0] wb_fi;
-
-  // Ping-pong operand-buffer ownership.
-  wire fill_bank    = read_fi[0];
-  wire compute_bank = compute_fi[0];
-
-  wire        run_clear;              // = (phase == P_CALIB), assigned below
-  wire        fi_last      = (fi      == n_inv - 4'd1);
-  wire        read_fi_last = (read_fi == n_inv - 4'd1);
-  wire        wb_fi_last   = (wb_fi   == n_inv - 4'd1);
-
-  // A scheduler job is complete only after the final invocation has made
-  // its result memory-visible.  Accelerator completion alone is too early:
-  // P_SCAN and P_WB still have to execute after the array finishes.
-  assign job_done =
-      USE_EXTERNAL_SCHEDULER &&
-      job_active &&
-      wb_done &&
-      wb_fi_last;
-
-  // The next tile of the same job becomes schedulable as soon as the current
-  // tile has been handed to the write-back stage and tiles remain -- not
-  // after its write-back, which is what the overlap is.  The scheduler is
-  // idle by then (it consumed this tile's accelerator_done at c_valid), so
-  // the level is normally accepted on the next cycle; it is held regardless.
+  // ---- AXI write-channel ownership ------------------------------------------
+  // The seeder writes the operand image before the first read; the write-back
+  // engine owns the channel from the first result tile on.  Within a run the
+  // hand-over is one-way; a legacy re-run seeds again, so context 0's run
+  // boundary hands the channel back.  External jobs never seed.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)
-      inv_pending <= 1'b0;
-    else if (USE_EXTERNAL_SCHEDULER && job_active &&
-             tile_handoff && !compute_fi_last)
-      inv_pending <= 1'b1;
-    else if (inv_pending && scheduler_desc_ready)
-      inv_pending <= 1'b0;
-  end
-
-  // ----------------------------------------------------------
-  // Job-aware DMA address generation.
-  //
-  // Legacy mode keeps the original BASE_ADDR-based addressing.
-  //
-  // External scheduler mode makes the accepted job descriptor
-  // the owner of the memory region:
-  //
-  //   job_a_base_reg -> operand/read region
-  //   job_c_base_reg -> result/write-back region
-  //
-  // An external descriptor names exactly ONE operand payload: A and B of
-  // depth job_k at job_a_base.  n_inv in this mode repeats that tile
-  // transaction -- every invocation re-reads the same payload and writes
-  // its own result tile (wb_fi strides the result region) -- so the read
-  // address does not move with read_fi.  Splitting a deeper reduction is
-  // the compiler's job, one descriptor per slab, not this loop's.
-  //
-  // job_b_base_reg is latched but intentionally unused here.
-  // The current operand path consumes one combined slab; separating
-  // independent A/B streams is a later datapath change.
-  // ----------------------------------------------------------
-
-  wire [AXI_ADDR_W-1:0] seed_slab_addr =
-      USE_EXTERNAL_SCHEDULER
-          ? AXI_ADDR_W'(job_a_base_reg) +
-            (AXI_ADDR_W'(fi) << RX_SHIFT)
-          : AXI_ADDR_W'(BASE_ADDR) +
-            (AXI_ADDR_W'(fi) << RX_SHIFT);
-
-  wire [AXI_ADDR_W-1:0] read_slab_addr =
-      USE_EXTERNAL_SCHEDULER
-          ? AXI_ADDR_W'(job_a_base_reg)
-          : AXI_ADDR_W'(BASE_ADDR) +
-            (AXI_ADDR_W'(read_fi) << RX_SHIFT);
-
-  // --------------------------------------------------------------------------
-  // DEBUG: observe the actual AXI read addresses issued by dma_engine.
-  // Diagnostic only; no datapath/state modification.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER && arvalid && arready) begin
-      $display(
-        "ARDBG: ingress_job_id=%0d araddr=0x%08h arlen=%0d",
-        job_id_reg,
-        araddr,
-        arlen + 1
-      );
-    end
-  end
-
-  wire [AXI_ADDR_W-1:0] wb_region_base =
-      USE_EXTERNAL_SCHEDULER
-          ? AXI_ADDR_W'(job_c_base_reg)
-          : AXI_ADDR_W'(BASE_ADDR) +
-            (AXI_ADDR_W'(n_inv) << RX_SHIFT) +
-            AXI_ADDR_W'(WB_GAP_BYTES);
-
-  // Result tile stride belongs to the selected physical device.
-  //
-  // 8x8 device: one result tile = 256 bytes.
-  // 4x4 device: one result tile = 64 bytes.
-  //
-  // The scheduler still supplies only the opaque device ID.
-  wire [AXI_ADDR_W-1:0] wb_tile_addr =
-      select_8x8
-          ? wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT_8X8)
-          : select_4x4
-              ? wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT_4X4)
-              : wb_region_base;
-
-  // --------------------------------------------------------------------------
-  // DEBUG: first-failure writeback address diagnostic.
-  //
-  // Only print when the WB descriptor is actually accepted.
-  // This captures the exact state used for the transaction:
-  //
-  //   job_id_reg
-  //   ingress_job_id
-  //   job_c_base_reg
-  //   wb_region_base
-  //   fi
-  //   wb_tile_addr
-  //
-  // Diagnostic only; no functional signal is modified.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        wb_desc_valid && wb_desc_ready) begin
-      $display(
-        "WB_FIRE_DBG t=%0t job_reg=%0d ingress_job=%0d job_c_base_reg=0x%08h wb_region_base=0x%08h fi=%0d select8=%0b select4=%0b wb_tile_addr=0x%08h wb_beats=%0d",
-        $time,
-        job_id_reg,
-        ingress_job_id,
-        job_c_base_reg,
-        wb_region_base,
-        fi,
-        select_8x8,
-        select_4x4,
-        wb_tile_addr,
-        selected_wb_beats
-      );
-    end
-  end
-
-
-  // --------------------------------------------------------------------------
-  // DEBUG: JOB1 writeback descriptor lifecycle.
-  //
-  // This isolates duplicate descriptor issuance for ingress job id 101.
-  // We intentionally trace only the descriptor/control seam:
-  //
-  //   phase
-  //   job_id_reg
-  //   fi
-  //   job_active
-  //   job_done
-  //   wb_desc_valid
-  //   wb_desc_ready
-  //   wb_desc_started
-  //   wb_done
-  //
-  // Diagnostic only; no functional signal is modified.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (job_id_reg == 32'd101) &&
-        (phase == P_WB ||
-         wb_desc_valid ||
-         wb_desc_ready ||
-         wb_done ||
-         job_done)) begin
-
-      $display(
-        "JOB1WBTRACE t=%0t phase=%0d fi=%0d job_id=%0d active=%0b done=%0b wb_valid=%0b wb_ready=%0b wb_fire=%0b wb_started=%0b wb_done=%0b c_base=0x%08h tile_addr=0x%08h",
-        $time,
-        phase,
-        fi,
-        job_id_reg,
-        job_active,
-        job_done,
-        wb_desc_valid,
-        wb_desc_ready,
-        wb_desc_valid && wb_desc_ready,
-        wb_desc_started,
-        wb_done,
-        job_c_base_reg,
-        wb_tile_addr
-      );
-    end
-  end
-
-  // --------------------------------------------------------------------------
-  // DEBUG: trace WB descriptor generation for the external-job path.
-  //
-  // The current failure shows a WB transaction for job_reg=101 occurring
-  // before job 102 is accepted.  This diagnostic distinguishes:
-  //
-  //   1. phase entering P_WB
-  //   2. wb_desc_valid being asserted
-  //   3. wb_desc_started state
-  //   4. actual descriptor handshake
-  //
-  // Diagnostic only; no functional signal is modified.
-  // --------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (phase == P_WB ||
-         wb_desc_valid ||
-         wb_desc_started ||
-         (wb_desc_valid && wb_desc_ready))) begin
-      $display(
-        "WBSEAM_DBG t=%0t phase=%0d fi=%0d job_active=%0b job_id_reg=%0d ingress_job_id=%0d job_fire=%0b wb_valid=%0b wb_ready=%0b wb_started=%0b wb_done=%0b c_base_reg=0x%08h tile_addr=0x%08h",
-        $time,
-        phase,
-        fi,
-        job_active,
-        job_id_reg,
-        ingress_job_id,
-        job_fire,
-        wb_desc_valid,
-        wb_desc_ready,
-        wb_desc_started,
-        wb_done,
-        job_c_base_reg,
-        wb_tile_addr
-      );
-    end
-  end
-
-  // The engine's completion, re-armed per invocation.  read_done_sticky stays
-  // what it was -- a run-level flag for led[2] and probe_in4.
-  logic read_done_fold;
-
-  // Independent ownership of the operand-read transaction.
-  // Initially this mirrors P_READ; later it may remain active while compute
-  // advances independently.
-  logic read_active;
-  logic read_pipeline_started;
-  logic reads_complete;
-
-  // Completed operand tile waiting to be consumed by compute.
-  logic       compute_ready;
-  logic [3:0] filled_fi;
-
-  // Compute transaction ownership; maintained by the cycle counter below.
-  logic cyc_running;
-
-  // And the array's.  c_done is a LEVEL: it goes high when the array publishes
-  // C and stays high until the next fold_start clears it, which was sound when
-  // there was only ever one fold.  On invocation 2 and after it is still high
-  // from the previous invocation at the moment P_FOLD is entered, so the FSM
-  // would leave P_FOLD at once and scan the previous C -- a run that looks
-  // right (the operands are identical, so the tile is identical) and is
-  // 147 cycles too fast.  This latch holds only the completion that belongs to
-  // the invocation in flight.  The clear covers two cycles because fold_start
-  // is registered: P_GO sets it, and it does not reach c_done until the first
-  // cycle of P_FOLD, so that cycle is cleared too.
-  logic c_done_fold;
-
-  // -------------------------------------------------------------------------
-  // Compute / write-back overlap.
-  //
-  // The outer FSM owns the compute side only (P_READ / P_GO / P_FOLD).  The
-  // scan and the write-back of a finished tile run in a separate stage,
-  // wb_phase, so tile N's fold overlaps tile N-1's scan + write-back.  The
-  // two meet at one hand-off, tile_handoff: P_FOLD may leave only when the
-  // write-back stage is idle, so the stage holds at most one tile and the
-  // two result banks suffice -- tile N+1 publishes into bank (N+1)%2 =
-  // (N-1)%2, which the stage released before tile N could be handed off.
-  // For the last tile the FSM waits in P_WB for the stage to drain, so
-  // P_DONE keeps its meaning: everything of this run is in memory.
-  // -------------------------------------------------------------------------
-  typedef enum logic [1:0] { W_IDLE, W_SCAN, W_WB } wb_phase_t;
-  wb_phase_t wb_phase;
-  logic      wb_bank;                 // result bank owned by the stage
-
-  wire compute_fi_last = (compute_fi == n_inv - 4'd1);
-  wire tile_handoff    = (phase == P_FOLD) && !fold_start && c_done_fold &&
-                         (wb_phase == W_IDLE);
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      phase         <= P_CALIB;
-      n_inv         <= 4'd1;
-      fi            <= 4'd0;
-      seed_start    <= 1'b0;
-      desc_valid    <= 1'b0;
-      fsm_fold_start    <= 1'b0;
-    end else begin
-      seed_start    <= 1'b0;
-      desc_valid    <= 1'b0;
-      fsm_fold_start    <= 1'b0;
-      // fi keeps counting written-back tiles, as it did in P_WB.
-      if (wb_done && !wb_fi_last) fi <= fi + 4'd1;
-      case (phase)
-        P_CALIB: if (init_calib_complete &&
-                       (!USE_EXTERNAL_SCHEDULER || job_active)) begin
-                   n_inv      <= n_inv_next;
-                   fi         <= 4'd0;
-
-                   // Legacy bring-up owns synthetic operand generation.
-                   // External/compiler jobs consume operand slabs already
-                   // resident in DDR, so they must bypass the seed writer.
-                   if (USE_EXTERNAL_SCHEDULER) begin
-                     phase <= P_READ;
-                   end else begin
-                     seed_start <= 1'b1;
-                     phase      <= P_SEED;
-                   end
-                 end
-
-        // One seed pass per slab.  seed_start is registered, so the next pulse
-        // lands the cycle AFTER seed_done, by which time dma_seed_writer is
-        // back in S_IDLE and will take it.  Every slab carries the same pattern
-        // (the writer restarts beat_idx and vbase on each start), which is what
-        // makes the expected checksums n_inv times the tabulated ones.
-        P_SEED:  if (seed_done) begin
-                   if (fi_last) begin
-                     fi    <= 4'd0;
-                     phase <= P_READ;
-                   end else begin
-                     fi         <= fi + 4'd1;
-                     seed_start <= 1'b1;
-                   end
-                 end
-        P_READ:  begin
-                   // A completely landed operand tile is waiting for compute.
-                   // This is the per-tile condition; reads_complete (all of
-                   // the job's slabs landed) is NOT required here -- the last
-                   // slab's descriptor is only issued once compute has taken
-                   // the previous tile, so gating on it would wait forever.
-                   if (compute_ready) phase <= P_GO;
-                 end
-        P_GO:    begin
-                   if (USE_EXTERNAL_SCHEDULER) begin
-                     // External scheduler owns the accelerator release.
-                     //
-                     // The scheduler release may have happened before DMA
-                     // reached P_GO.  Accept either:
-                     //   1. the live one-cycle release pulse, or
-                     //   2. an early release captured in the pending bit.
-                     if (scheduler_start_pending ||
-                         scheduler_fold_start_selected)
-                       phase <= P_FOLD;
-                   end
-                   else begin
-                     fsm_fold_start <= 1'b1;
-                     phase <= P_FOLD;
-                   end
-                 end
-        // fold_start is the transaction boundary and clears completion
-        // state, so a stale c_done_fold from the previous transaction is
-        // never consumed on that same clock edge.  The finished tile is
-        // handed to the write-back stage (which scans and writes it back
-        // from its snapshot bank) and the compute side moves on at once:
-        // the next tile's fold overlaps this tile's scan + write-back.
-        P_FOLD:  if (tile_handoff) begin
-                   $display("CDBG C00=%h C01=%h C10=%h C77=%h",
-                            C[0][0], C[0][1], C[1][0], C[N-1][N-1]);
-                   if (compute_fi_last)
-                     phase <= P_WB;
-                   // The next operand tile may already have landed while
-                   // this tile was computing.
-                   else if (compute_ready || fill_complete)
-                     phase <= P_GO;
-                   else
-                     phase <= P_READ;
-                 end
-        // The last tile has been handed off; wait for the write-back stage
-        // to drain so that P_DONE still means "every tile is in memory".
-        P_WB:    if (wb_phase == W_IDLE) phase <= P_DONE;
-        P_DONE:  begin
-                   // Legacy bring-up can explicitly request another run.
-                   //
-                   // In external-scheduler mode, accepting a new job is also
-                   // a new run boundary.  The descriptor has already been
-                   // latched by job_fire, so restart the datapath from
-                   // P_CALIB and let the normal seed/read/compute/writeback
-                   // sequence execute for the newly accepted job.
-                   if (rerun_pulse ||
-                       (USE_EXTERNAL_SCHEDULER && job_fire)) begin
-                     fi         <= 4'd0;
-                     phase      <= P_CALIB;
-                   end
-                 end
-        default: ;
-      endcase
-
-      // After the first read phase, operand filling runs independently of the
-      // outer compute/writeback phase.  Keep at most one completely filled
-      // tile waiting for compute, and stop permanently after the final fill.
-      if ((phase == P_READ || read_pipeline_started) &&
-          !desc_started &&
-          !read_active &&
-          !compute_ready &&
-          !reads_complete)
-        desc_valid <= 1'b1;
-    end
-  end
-
-  // ---- write-back stage ---------------------------------------------------
-  // Takes one finished tile at tile_handoff and owns it until its last write
-  // response: W_SCAN takes chk_c off the snapshot bank (one entry per cycle,
-  // as before), W_WB issues the descriptor and waits for wb_done.  The tile
-  // goes to memory only after chk_c has been taken, so a write-back fault can
-  // never be mistaken for a compute fault.  wb_fi names the tile in the
-  // stage; it advances when that tile's write-back completes.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear) begin
-      wb_phase      <= W_IDLE;
-      wb_bank       <= 1'b0;
-      wb_fi         <= 4'd0;
-      scan_c        <= '0;
-      wb_desc_valid <= 1'b0;
-    end else begin
-      wb_desc_valid <= 1'b0;
-      case (wb_phase)
-        W_IDLE: if (tile_handoff) begin
-                  wb_bank  <= compute_fi[0];
-                  scan_c   <= '0;
-                  wb_phase <= W_SCAN;
-                end
-        W_SCAN: if (scan_c_last) wb_phase <= W_WB;
-                else             scan_c   <= scan_c + 1'b1;
-        W_WB:   begin
-                  if (!wb_desc_started) wb_desc_valid <= 1'b1;
-                  if (wb_done) begin
-                    if (!wb_fi_last) wb_fi <= wb_fi + 4'd1;
-                    wb_phase <= W_IDLE;
-                  end
-                end
-        default: wb_phase <= W_IDLE;
-      endcase
-    end
-  end
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) rerun_d <= 1'b0;
-    else           rerun_d <= rerun_probe;
-  end
-
-  assign run_clear = (phase == P_CALIB);
-
-  // Once the first read phase is reached, the read pipeline may operate
-  // independently of the outer compute/writeback phases for the rest of the run.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)
-      read_pipeline_started <= 1'b0;
-    else if (phase == P_READ)
-      read_pipeline_started <= 1'b1;
-  end
-
-  // The final operand slab has completely landed.  Keep this asserted for
-  // the rest of the run so the last descriptor cannot be issued again.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)
-      reads_complete <= 1'b0;
-    else if (fill_complete && read_fi_last)
-      reads_complete <= 1'b1;
-  end
-
-  // Read ownership advances when the current operand slab has completely
-  // landed, independently of the later compute/writeback stages.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)
-      read_fi <= 4'd0;
-    else if (fill_complete && !read_fi_last)
-      read_fi <= read_fi + 4'd1;
-  end
-
-  // Compute takes ownership only when the accelerator actually starts.
-  // filled_fi names the completely landed operand tile selected for this fold.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)
-      compute_fi <= 4'd0;
-    else if (fold_start)
-      compute_fi <= filled_fi;
-  end
-
-  // Capture the tile index while read_fi still names the slab that just
-  // completed.  fold_start will later transfer this ownership to compute.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear) begin
-      compute_ready <= 1'b0;
-      filled_fi     <= 4'd0;
-    end else if (fill_complete) begin
-      compute_ready <= 1'b1;
-      filled_fi     <= read_fi;
-    end else if (fold_start) begin
-      compute_ready <= 1'b0;
-    end
-  end
-
-  // Remember that the current operand descriptor was accepted.  Ownership is
-  // transaction-local rather than phase-local so it can remain armed after the
-  // outer FSM advances beyond P_READ.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)             desc_started <= 1'b0;
-    else if (fill_complete)                 desc_started <= 1'b0;
-    else if (desc_valid && desc_ready)      desc_started <= 1'b1;
-  end
-
-  // Operand-read transaction ownership is independent of the outer phase.
-  // It begins when the descriptor is accepted and ends only after the final
-  // operand word has landed in the selected ping-pong buffer.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)             read_active <= 1'b0;
-    else if (fill_complete)                 read_active <= 1'b0;
-    else if (desc_valid && desc_ready)      read_active <= 1'b1;
-  end
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)                           wb_desc_started <= 1'b0;
-    else if (wb_phase != W_WB)               wb_desc_started <= 1'b0;
-    else if (wb_desc_valid && wb_desc_ready) wb_desc_started <= 1'b1;
-  end
-
-  // The read engine's completion belongs to the accepted operand transaction,
-  // not to the outer phase.  Re-arm it when a new descriptor is accepted and
-  // hold it until that transaction's final operand word has landed.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear)        read_done_fold <= 1'b0;
-    else if (fill_complete)            read_done_fold <= 1'b0;
-    else if (desc_valid && desc_ready) read_done_fold <= 1'b0;
-    else if (read_done)                read_done_fold <= 1'b1;
-  end
-
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        (desc_valid || desc_ready || read_done ||
-         read_done_fold || fill_complete ||
-         (words_written == words_want))) begin
-      $display(
-        "READTRACE t=%0t phase=%0d desc_valid=%0b desc_ready=%0b desc_fire=%0b read_done=%0b read_done_fold=%0b words_written=%0d words_want=%0d fill_complete=%0b read_active=%0b desc_started=%0b compute_ready=%0b reads_complete=%0b",
-        $time,
-        phase,
-        desc_valid,
-        desc_ready,
-        desc_valid && desc_ready,
-        read_done,
-        read_done_fold,
-        words_written,
-        words_want,
-        fill_complete,
-        read_active,
-        desc_started,
-        compute_ready,
-        reads_complete
-      );
-    end
-  end
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)                             c_done_fold <= 1'b0;
-    else if ((phase == P_GO) || fold_start)    c_done_fold <= 1'b0;
-    else if (c_done)                           c_done_fold <= 1'b1;
-  end
-
-  // Ownership is registered from the phase, so it is already settled one cycle
-  // before the engine can raise awvalid: the descriptor it needs is itself a
-  // registered pulse, and the engine issues no address in the cycle it accepts
-  // one.  Ownership is never handed back, and the loop does not change that:
-  // all n_inv slabs are seeded in P_SEED, before the first descriptor, so the
-  // seeder has finished for good by the time the first P_WB takes the channel.
-  // Handed back at the start of a run, not never: a re-run seeds again, and a
-  // seeder writing into a channel the write-back engine still owns is a hang
-  // (its AW never reaches the controller) plus an err_w_owner that blames the
-  // wrong master.  Within a run the hand-over is still one-way.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear) wb_owns_w <= 1'b0;
-    else if (wb_phase == W_WB)  wb_owns_w <= 1'b1;
+    if (!ui_rst_n || (!USE_EXTERNAL_SCHEDULER && run_clear)) wb_owns_w <= 1'b0;
+    else if (any_wb_active)                                   wb_owns_w <= 1'b1;
   end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
@@ -2600,98 +1703,8 @@ systolic_hw_scheduler #(
     end
   end
 
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      seed_done_sticky <= 1'b0;
-      read_done_sticky <= 1'b0;
-      fold_done_sticky <= 1'b0;
-      wb_done_sticky   <= 1'b0;
-    end else if (run_clear) begin
-      seed_done_sticky <= 1'b0;
-      read_done_sticky <= 1'b0;
-      fold_done_sticky <= 1'b0;
-      wb_done_sticky   <= 1'b0;
-    end else begin
-      if (seed_done) seed_done_sticky <= 1'b1;
-      if (read_done) read_done_sticky <= 1'b1;
-      if (c_done)    fold_done_sticky <= 1'b1;
-      if (wb_done)   wb_done_sticky   <= 1'b1;
-    end
-  end
-
-  // ---- the operand path, counted ------------------------------------------
-  // The paper's Table 4 row "DMA v1/v2 [measured]" is three numbers: fill,
-  // compute (cyc_latched, below, unchanged), write-back.  Both new counters are
-  // inclusive: they start at 1 on the cycle the descriptor is accepted and stop
-  // on the cycle the phase's completion condition is first true.
-  //
-  //   fill_cycles   desc accepted -> fill_complete (last word LANDED, not the
-  //                 last beat received -- the same distinction P_READ makes).
-  //                 v1 at N=8, k=256: ~4096 + startup, the port-bound number;
-  //                 v2: ~1129, the controller-bound one.  The engine's own
-  //                 r_stall_cycles (rvalid && !rready) says where the difference
-  //                 went: ~3/4 of fill on v1, ~0 on v2.
-  //   wb_cycles     wb descriptor accepted -> wb_done (the last B response).
-  logic [31:0] fill_cycles, wb_cycles;
-  logic        fill_running, wb_running;
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear) begin
-      fill_cycles  <= '0;
-      fill_running <= 1'b0;
-      wb_cycles    <= '0;
-      wb_running   <= 1'b0;
-    end else begin
-      if (desc_valid && desc_ready) begin
-        fill_running <= 1'b1;
-        fill_cycles  <= fill_cycles + 32'd1;   // summed over invocations
-      end else if (fill_running) begin
-        fill_cycles <= fill_cycles + 1'b1;
-        if (fill_complete) fill_running <= 1'b0;
-      end
-
-      if (wb_desc_valid && wb_desc_ready) begin
-        wb_running <= 1'b1;
-        wb_cycles  <= wb_cycles + 32'd1;       // summed over invocations
-      end else if (wb_running) begin
-        wb_cycles <= wb_cycles + 1'b1;
-        if (wb_done) wb_running <= 1'b0;
-      end
-    end
-  end
-
-  // ---- the run, end to end ------------------------------------------------
-  // fill + compute + write-back is what the paper's per-invocation table adds
-  // up, and it is a sum of three phases, not a wall clock: P_GO, the hand-offs
-  // and the whole of P_SCAN sit between them.  t_span is the wall clock --
-  // first descriptor accepted to the last write response -- so the difference
-  // between the two says exactly how much of the run is instrumentation rather
-  // than leaving it to be argued.  Neither number is the other's estimate.
-  logic [31:0] t_span;
-  logic [7:0]  folds_done;
-  logic        t_running;
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || run_clear) begin
-      t_span     <= '0;
-      t_running  <= 1'b0;
-      folds_done <= '0;
-    end else begin
-      if (desc_valid && desc_ready && !t_running && (t_span == 32'd0)) begin
-        t_running <= 1'b1;
-        t_span    <= 32'd1;
-      end else if (t_running) begin
-        t_span <= t_span + 1'b1;
-        if (wb_done && wb_fi_last) t_running <= 1'b0;
-      end
-      if (wb_done) folds_done <= folds_done + 8'd1;
-    end
-  end
-
-  // The engines' own counters, previously left unconnected.  They count from
-  // reset (stat_clear is tied low) across every descriptor the run issues, so
-  // at n_inv = 1 they are per-descriptor totals and above it they are run
-  // totals -- the same quantity fill_cycles and wb_cycles report.
+  // The engines' own counters count from reset (stat_clear follows context
+  // 0's run boundary, as before) across every descriptor of every context.
   wire [31:0] eng_busy_cycles, eng_rdy_stall_cycles, eng_r_stall_cycles;
   wire [31:0] wb_busy_cycles, wb_aw_stall_cycles, wb_w_stall_cycles, wb_src_starve_cycles;
 
@@ -2718,100 +1731,156 @@ systolic_hw_scheduler #(
 
   // ---- read engine --------------------------------------------------------
   //
-  // One AXI read engine serves two descriptor classes:
+  // One AXI read master serves every context's operand descriptors and the
+  // result readbacks, through dma_engine_multi: one descriptor slot per
+  // context plus one for the readback, all in flight at the same time, the
+  // read channel shared between them.  The slot's tag names the owner, so the
+  // returned beats are routed, and the completion credited, to the context
+  // that asked -- no owner register, the tag travels with the data.
   //
-  //   8'h3B : normal operand fetch
-  //   8'h3C : result readback
+  //   8'h30 + i : operand fetch for context i   (slot i)
+  //   8'h3C     : result readback               (slot NUM_ACCEL)
   //
-  // Result readback is not enabled yet; rb_req_valid is held low below.
-  // Introducing the mux first lets the existing operand path regress
-  // unchanged before the readback producer and output CDC are connected.
+  // Why a multi-slot engine and not an arbiter in front of the old one: the
+  // v1 writer takes a beat every four cycles and nothing queues in front of
+  // it, so a descriptor's bursts hold the channel for the whole fill.  Two
+  // contexts filling through a single-descriptor engine filled one after the
+  // other (~257 cycles each at k=16) and their arrays computed one after the
+  // other.  With a slot per context the engine interleaves the two streams
+  // beat by beat under contention (SHARED_BURST_LEN = 1 for v1; the beat-wide
+  // v2 writer takes a beat per cycle, so its bursts stay long), and the two
+  // payloads land together at the writers' combined rate.  Alone on the
+  // channel a slot behaves exactly as dma_engine did.
   //
-  localparam logic [7:0] DMA_TAG_OPERAND  = 8'h3B;
-  localparam logic [7:0] DMA_TAG_READBACK = 8'h3C;
+  // The readback slot is STRICT_GATE: its destination is the DPTI output
+  // FIFO, drained at the host's byte rate, so it is given a burst only when
+  // the FIFO has room for it -- a slow host does not hold the channel against
+  // the other contexts' operand streams.
+  localparam logic [7:0] DMA_TAG_OPERAND_BASE = 8'h30;
+  localparam logic [7:0] DMA_TAG_READBACK     = 8'h3C;
 
-  wire          dst_wr_en;
-  wire [15:0]   dst_wr_beat;
-  wire [127:0]  dst_wr_data;
-  wire [7:0]    dst_wr_tag;
-  // Destination backpressure is selected according to the descriptor
-  // currently using the shared read engine.
-  wire          dst_full, dst_almost_full;
-  wire          op_dst_full, op_dst_almost_full;
+  localparam integer RD_SLOTS   = NUM_ACCEL + 1;
+  localparam integer RD_SLOT_RB = NUM_ACCEL;
 
-  // Result-output CDC backpressure.  The CDC itself is connected below.
-  wire          rb_cdc_src_ready;
+  wire [RD_SLOTS-1:0]   rd_desc_valid;
+  wire [RD_SLOTS-1:0]   rd_desc_ready;
+  wire [AXI_ADDR_W-1:0] rd_desc_addr  [0:RD_SLOTS-1];
+  wire [15:0]           rd_desc_beats [0:RD_SLOTS-1];
+  wire [7:0]            rd_desc_tag   [0:RD_SLOTS-1];
+  wire [RD_SLOTS-1:0]   rd_dst_almost_full;
+  wire [RD_SLOTS-1:0]   rd_slot_active;
+  wire                  rd_shared;
 
-  // Existing operand descriptor source.
-  wire                    op_desc_valid = desc_valid;
-  wire [AXI_ADDR_W-1:0]   op_desc_addr  = read_slab_addr;
-  wire [15:0]             op_desc_beats = 16'(job_n_beats);
+  wire                  eng_done_valid;
+  wire [7:0]            eng_done_tag;
 
-  // Result-readback descriptor source.
-  //
-  // For the first integration checkpoint, automatically read back the
-  // completed external 4x4 result tile after its final DDR write response.
-  //
-  // A 4x4 FP32 tile is 16 words = 64 bytes = four 128-bit beats.
-  logic                   rb_pending;
-  logic                   rb_active;
-  logic [AXI_ADDR_W-1:0]  rb_addr_reg;
+  // ---- result readback, one request per context, one slot ---------------------
+  // Armed when a context's job completes (its last tile's write response);
+  // the result is in DDR before the read descriptor can be accepted.  The
+  // lowest-numbered pending context is granted the readback slot when it is
+  // free.
+  logic [NUM_ACCEL-1:0]  rb_pending;
+  logic                  rb_active;
+  logic [ACC_ID_W-1:0]   rb_owner;
+  logic [AXI_ADDR_W-1:0] rb_addr [0:NUM_ACCEL-1];
 
-  assign result_readback_busy = rb_pending || rb_active;
+  generate
+    for (genvar i = 0; i < NUM_ACCEL; i++) begin : RB_BUSY
+      assign result_readback_busy[i] =
+          rb_pending[i] || (rb_active && (rb_owner == ACC_ID_W'(i)));
+    end
+  endgenerate
 
-  // Backpressure presented to the shared read engine.
-  //
-  // Operand descriptors retain the existing operand-writer behavior.
-  // During result readback, the output CDC FIFO is the destination.
-  //
-  // rb_active remains asserted for the lifetime of an accepted readback
-  // descriptor, so it is the correct selector after rb_pending is cleared.
-  assign dst_full =
-      (rb_pending || rb_active)
-          ? !rb_cdc_src_ready
-          : op_dst_full;
+  function automatic logic [15:0] rb_beats_of(input logic [ACC_ID_W-1:0] ctx);
+    rb_beats_of = (integer'(ctx) < NUM_8X8) ? 16'd16 : 16'd4;   // 8x8: 64 words; 4x4: 16 words
+  endfunction
 
-  // The output FIFO exposes only ready/full, not an almost-full threshold.
-  // Full is sufficient for this four-beat result stream.
-  assign dst_almost_full =
-      (rb_pending || rb_active)
-          ? !rb_cdc_src_ready
-          : op_dst_almost_full;
+  logic                rb_any;
+  logic [ACC_ID_W-1:0] rb_grant;
 
-  wire                    rb_req_valid = rb_pending;
-  wire [AXI_ADDR_W-1:0]   rb_req_addr  = rb_addr_reg;
-  wire [15:0]             rb_req_beats = selected_wb_beats[15:0];
+  always_comb begin
+    rb_any   = 1'b0;
+    rb_grant = '0;
+    for (int k = NUM_ACCEL-1; k >= 0; k--) begin
+      if (rb_pending[k]) begin
+        rb_any   = 1'b1;
+        rb_grant = ACC_ID_W'(k);
+      end
+    end
+  end
 
-  // Readback owns the descriptor input while pending.
-  wire                    eng_desc_is_readback = rb_req_valid;
+  assign rd_desc_valid[RD_SLOT_RB]      = rb_any && !rb_active;
+  assign rd_desc_addr[RD_SLOT_RB]       = rb_addr[rb_grant];
+  assign rd_desc_beats[RD_SLOT_RB]      = rb_beats_of(rb_grant);
+  assign rd_desc_tag[RD_SLOT_RB]        = DMA_TAG_READBACK;
+  assign rd_dst_almost_full[RD_SLOT_RB] = !rb_cdc_src_ready;
 
-  wire                    eng_desc_valid =
-      eng_desc_is_readback ? rb_req_valid : op_desc_valid;
+  wire rb_accept = rd_desc_valid[RD_SLOT_RB] && rd_desc_ready[RD_SLOT_RB];
+  wire rb_done   = eng_done_valid && (eng_done_tag == DMA_TAG_READBACK);
 
-  wire [AXI_ADDR_W-1:0]   eng_desc_addr =
-      eng_desc_is_readback ? rb_req_addr : op_desc_addr;
+  // ---- operand slots: context i's descriptor port is slot i -------------------
+  // The owner of the beats now returning: the tag the engine attached.
+  wire                 dst_tag_is_rb  = (dst_wr_tag == DMA_TAG_READBACK);
+  wire [ACC_ID_W-1:0]  dst_tag_ctx    = dst_wr_tag[ACC_ID_W-1:0];
 
-  wire [15:0]             eng_desc_beats =
-      eng_desc_is_readback ? rb_req_beats : op_desc_beats;
+  generate
+    for (genvar i = 0; i < NUM_ACCEL; i++) begin : ENG_ROUTE
+      assign rd_desc_valid[i]      = ctx_op_desc_valid[i];
+      assign rd_desc_addr[i]       = ctx_op_desc_addr[i];
+      assign rd_desc_beats[i]      = ctx_op_desc_beats[i];
+      assign rd_desc_tag[i]        = DMA_TAG_OPERAND_BASE + 8'(i);
+      assign rd_dst_almost_full[i] = ctx_dst_almost_full[i];
+      assign ctx_op_desc_ready[i]  = rd_desc_ready[i];
+      assign ctx_dst_wr_en[i] =
+          dst_wr_en && (dst_wr_tag == DMA_TAG_OPERAND_BASE + 8'(i));
+      assign ctx_read_done[i] =
+          eng_done_valid && (eng_done_tag == DMA_TAG_OPERAND_BASE + 8'(i));
+    end
+  endgenerate
 
-  wire [7:0]              eng_desc_tag =
-      eng_desc_is_readback ? DMA_TAG_READBACK : DMA_TAG_OPERAND;
+  // The data channel stalls on the destination of the beat being returned.
+  assign dst_full = dst_tag_is_rb ? !rb_cdc_src_ready : ctx_dst_full[dst_tag_ctx];
 
-  wire                    eng_desc_ready;
-  wire                    eng_done_valid;
-  wire [7:0]              eng_done_tag;
+  wire rb_dst_wr_en = dst_wr_en && dst_tag_is_rb;
 
-  // Preserve the existing operand-side handshake semantics.
-  assign desc_ready = !eng_desc_is_readback && eng_desc_ready;
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      rb_pending <= '0;
+      rb_active  <= 1'b0;
+      rb_owner   <= '0;
+      for (int k = 0; k < NUM_ACCEL; k++) rb_addr[k] <= '0;
+    end
+    else begin
+      for (int k = 0; k < NUM_ACCEL; k++) begin
+        if (USE_EXTERNAL_SCHEDULER && ctx_job_done[k] && !rb_pending[k]) begin
+          rb_pending[k] <= 1'b1;
+          rb_addr[k]    <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
+        end
+      end
+      // A readback may be accepted in the very cycle the previous one's
+      // completion pulse is visible; the new owner wins.
+      if (rb_accept) begin
+        rb_pending[rb_grant] <= 1'b0;
+        rb_active            <= 1'b1;
+        rb_owner             <= rb_grant;
+      end
+      else if (rb_done) begin
+        rb_active <= 1'b0;
+      end
+    end
+  end
 
-  dma_engine #(
+  dma_engine_multi #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
-    .BEAT_W (16), .BURST_LEN (16), .MAX_OUTSTANDING (8)
+    .BEAT_W (16), .BURST_LEN (16),
+    .SHARED_BURST_LEN (USE_V2 ? 16 : 1),
+    .MAX_OUTSTANDING (8),
+    .NUM_SLOTS (RD_SLOTS),
+    .STRICT_GATE (RD_SLOTS'(1) << RD_SLOT_RB)
   ) u_eng (
     .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
-    .desc_valid (eng_desc_valid), .desc_ready (eng_desc_ready),
-    .desc_addr (eng_desc_addr), .desc_beats (eng_desc_beats),
-    .desc_tag (eng_desc_tag),
+    .desc_valid (rd_desc_valid), .desc_ready (rd_desc_ready),
+    .desc_addr (rd_desc_addr), .desc_beats (rd_desc_beats), .desc_tag (rd_desc_tag),
     .done_valid (eng_done_valid), .done_tag (eng_done_tag),
     .m_axi_arid (arid), .m_axi_araddr (araddr), .m_axi_arlen (arlen),
     .m_axi_arsize (arsize), .m_axi_arburst (arburst), .m_axi_arlock (arlock),
@@ -2819,1275 +1888,186 @@ systolic_hw_scheduler #(
     .m_axi_arvalid (arvalid), .m_axi_arready (arready),
     .m_axi_rid (2'b0), .m_axi_rdata (rdata_axi), .m_axi_rresp (rresp),
     .m_axi_rlast (rlast), .m_axi_rvalid (rvalid), .m_axi_rready (rready),
-    .dst_almost_full (dst_almost_full), .dst_full (dst_full),
+    .dst_almost_full (rd_dst_almost_full), .dst_full (dst_full),
     .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat),
     .dst_wr_data (dst_wr_data), .dst_wr_tag (dst_wr_tag),
+    .slot_active (rd_slot_active), .shared (rd_shared),
     .busy_cycles (eng_busy_cycles), .rdy_stall_cycles (eng_rdy_stall_cycles),
     .r_stall_cycles (eng_r_stall_cycles),
     .err_align (eng_err_align), .err_resp (eng_err_resp), .stat_clear (run_clear)
   );
 
-  // -----------------------------------------------------------------------
-  // DEBUG: observe the raw DMA-engine completion before read_done filtering.
-  // Diagnostic only; no functional signal is modified.
-  // -----------------------------------------------------------------------
   always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER && eng_done_valid) begin
-      $display(
-        "ENGDONE t=%0t phase=%0d valid=%0b tag=%02h operand_tag=%02h operand=%0b words_written=%0d words_want=%0d",
-        $time,
-        phase,
-        eng_done_valid,
-        eng_done_tag,
-        DMA_TAG_OPERAND,
-        (eng_done_tag == DMA_TAG_OPERAND),
-        words_written,
-        words_want
-      );
+    for (int k = 0; k < RD_SLOTS; k++) begin
+      if (ui_rst_n && rd_desc_valid[k] && rd_desc_ready[k])
+        $display("DMATRACE t=%0t grant=%s ctx=%0d addr=0x%08h beats=%0d tag=%02h",
+                 $time, (k == RD_SLOT_RB) ? "readback" : "operand",
+                 (k == RD_SLOT_RB) ? integer'(rb_grant) : k,
+                 rd_desc_addr[k], rd_desc_beats[k], rd_desc_tag[k]);
     end
-  end
-
-  // Completion visible to the existing P_READ FSM only for an operand
-  // descriptor.  A future readback completion must not satisfy fill_complete
-  // or advance the compute FSM.
-  assign read_done =
-      eng_done_valid &&
-      (eng_done_tag == DMA_TAG_OPERAND);
-
-  // Shared physical operand-buffer capacity.
-  localparam integer K_MAX =
-      (K_MAX_8X8 > K_MAX_4X4) ? K_MAX_8X8 : K_MAX_4X4;
-
-  // -------------------------------------------------------------------------
-  // DMA operand-path checkpoint.
-  //
-  // Trace the actual descriptor handshake and the engine completion pulse.
-  // This is intentionally placed next to the eng_* interface so that the
-  // trace observes the real DMA engine signals rather than only the outer FSM.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (USE_EXTERNAL_SCHEDULER &&
-        ((eng_desc_valid && eng_desc_ready) ||
-         eng_done_valid ||
-         read_done ||
-         fill_complete)) begin
-      $display(
-        "DMATRACE t=%0t phase=%0d eng_desc_valid=%0b eng_desc_ready=%0b desc_fire=%0b eng_desc_tag=%02h eng_desc_addr=%h eng_desc_beats=%0d eng_done_valid=%0b eng_done_tag=%02h read_done=%0b words_written=%0d words_want=%0d fill_complete=%0b",
-        $time,
-        phase,
-        eng_desc_valid,
-        eng_desc_ready,
-        eng_desc_valid && eng_desc_ready,
-        eng_desc_tag,
-        eng_desc_addr,
-        eng_desc_beats,
-        eng_done_valid,
-        eng_done_tag,
-        read_done,
-        words_written,
-        words_want,
-        fill_complete
-      );
-    end
+    if (ui_rst_n && rb_dst_wr_en)
+      $display("RB_BEAT beat=%0d tag=%02h data=%032h", dst_wr_beat, dst_wr_tag, dst_wr_data);
+    if (ui_rst_n && rb_done)
+      $display("RB_DONE tag=%02h", eng_done_tag);
   end
 
   // -----------------------------------------------------------------------
-  // First result-readback integration checkpoint.
-  //
-  // Arm exactly once when the final result writeback receives its final
-  // response.  The result is therefore already resident in DDR before the
-  // read descriptor can be accepted.
-  //
-  // rb_active remains asserted for the lifetime of the readback descriptor
-  // and clears only on the matching completion tag.
-  // -----------------------------------------------------------------------
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      rb_pending  <= 1'b0;
-      rb_active   <= 1'b0;
-      rb_addr_reg <= '0;
-    end
-    else begin
-      // Final result writeback completed.
-      if (USE_EXTERNAL_SCHEDULER &&
-          job_active &&
-          wb_done &&
-          wb_fi_last &&
-          !rb_pending &&
-          !rb_active) begin
-        rb_pending  <= 1'b1;
-        rb_addr_reg <= job_c_base_reg[AXI_ADDR_W-1:0];
-      end
-
-      // Readback descriptor accepted by the shared read engine.
-      if (rb_pending && eng_desc_ready) begin
-        rb_pending <= 1'b0;
-        rb_active  <= 1'b1;
-      end
-
-      // Matching readback descriptor completely returned.
-      if (eng_done_valid &&
-          (eng_done_tag == DMA_TAG_READBACK)) begin
-        rb_active <= 1'b0;
-      end
-    end
-  end
-
-  wire rb_dst_wr_en =
-      dst_wr_en &&
-      (dst_wr_tag == DMA_TAG_READBACK);
-
-  // -----------------------------------------------------------------------
-  // External-job / result-readback hardware debug.
-  //
-  // Sticky event bits survive after the short handshakes themselves have
-  // disappeared, allowing the completed path to be inspected later.
+  // External-job / result-readback hardware debug (sticky, read over JTAG).
   //
   //   bit 0 : external job accepted
-  //   bit 1 : result readback armed after final writeback
+  //   bit 1 : result readback armed after a job's final writeback
   //   bit 2 : readback descriptor accepted
   //   bit 3 : at least one readback data beat returned
   //   bit 4 : JOB0 readback data mismatch observed
+  //   bit 5 : a write-back beat differed from the JOB0 signature
+  //   bits 6..19 : host-command ingress checkpoints (unchanged)
+  //   bit20..22  : context 0 observed in P_CALIB / P_READ / P_DONE
+  //   bit23 : host staging writer observed busy
+  //   bit24 : any context observed busy
+  //   bit25 : any context observed active
+  //   bit26 : core_job_ready observed high
+  //   bit27 : context 0 reached P_GO
+  //   bit28 : (unused since the per-context scheduler; was: replayed start)
+  //   bit29 : any scheduler start pulse
+  //   bit30 : any 4x4 adapter emitted fold_start
+  //   bit31 : any 4x4 array published a result
   // -----------------------------------------------------------------------
   logic [31:0] external_debug_sticky;
+
+  logic any_4x4_fold_start, any_4x4_c_valid;
+  always_comb begin
+    any_4x4_fold_start = 1'b0;
+    any_4x4_c_valid    = 1'b0;
+    for (int k = 0; k < NUM_4X4; k++) begin
+      any_4x4_fold_start = any_4x4_fold_start | scheduler_fold_start_4x4[k];
+      any_4x4_c_valid    = any_4x4_c_valid    | c_valid_out_4x4[k];
+    end
+  end
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       external_debug_sticky <= 32'd0;
     end
     else begin
-      if (job_fire)
-        external_debug_sticky[0] <= 1'b1;
-
-      if (USE_EXTERNAL_SCHEDULER &&
-          job_active &&
-          wb_done &&
-          wb_fi_last &&
-          !rb_pending &&
-          !rb_active)
-        external_debug_sticky[1] <= 1'b1;
-
-      if (rb_pending && eng_desc_ready)
-        external_debug_sticky[2] <= 1'b1;
-
-      if (rb_dst_wr_en)
-        external_debug_sticky[3] <= 1'b1;
-
-      // JOB0 numerical readback signature check.
-      // For the current smoke test, every 128-bit C beat must contain
-      // four FP32 values {8.0, 4.0, 2.0, 1.0}.
+      if (job_fire)                              external_debug_sticky[0]  <= 1'b1;
+      if (USE_EXTERNAL_SCHEDULER && job_done)    external_debug_sticky[1]  <= 1'b1;
+      if (rb_accept)                             external_debug_sticky[2]  <= 1'b1;
+      if (rb_dst_wr_en)                          external_debug_sticky[3]  <= 1'b1;
       if (rb_dst_wr_en &&
           (dst_wr_data != 128'h4100000040800000400000003f800000))
-        external_debug_sticky[4] <= 1'b1;
-
-      // Host-command ingress checkpoints.
-      //
-      // bit 5: frontend emitted and downstream accepted a WRITE32 command
-      // bit 6: command crossed the async FIFO into ui_clk
-      // bit 7: AXI4-Lite master accepted the command
-      // bit 8: register write reached and was accepted by descriptor bridge
-      // bit 9: submit write (CONTROL 0x00, bit 0 = 1) reached the bridge
-      // bit10: descriptor bridge asserted a pending job
-      // bit11: DMA core was ready for an external job
-      // bit12: hardware scheduler was ready for a descriptor
-      // JOB0 numerical writeback signature check.
-      //
-      // bit5 is temporarily repurposed from the command-ingress checkpoint.
-      // A writeback beat is checked only when it is actually accepted by the
-      // shared DDR write interface.
-      if (wb_wvalid &&
-          wb_wready &&
-          (wb_wdata !=
-           128'h4100000040800000400000003f800000))
-        external_debug_sticky[5] <= 1'b1;
-
-      if (dpti_fifo_rd_valid && dpti_fifo_rd_ready)
-        external_debug_sticky[6] <= 1'b1;
-
-      if (dpti_axi_cmd_valid && dpti_axi_cmd_ready)
-        external_debug_sticky[7] <= 1'b1;
-
-      if (axi_dpti_wr_valid && axi_dpti_wr_ready)
-        external_debug_sticky[8] <= 1'b1;
-
-      if (axi_dpti_wr_valid &&
-          axi_dpti_wr_ready &&
-          (axi_dpti_wr_addr == 8'h00) &&
-          axi_dpti_wr_data[0])
-        external_debug_sticky[9] <= 1'b1;
-
-      if (dpti_job_valid)
-        external_debug_sticky[10] <= 1'b1;
-
-      if (core_job_ready)
-        external_debug_sticky[11] <= 1'b1;
-
-      if (scheduler_desc_ready)
-        external_debug_sticky[12] <= 1'b1;
-
-      // Physical-input / MEM_WRITE checkpoints.
-      //
-      // bit13: at least one input byte accepted by the frontend
-      // bit14: MEM_WRITE opcode 0x02 accepted while starting a command
-      // bit15: MEM_WRITE header accepted and staging started
-      // bit16: at least one complete payload beat accepted downstream
-      // bit17: complete MEM_WRITE payload finished
-      // bit18: frontend/decoder error observed
-      // bit19: WRITE32 opcode 0x01 accepted while starting a command
-      if (dpti_byte_valid && dpti_byte_ready)
-        external_debug_sticky[13] <= 1'b1;
-
-      if (dpti_byte_valid &&
-          dpti_byte_ready &&
-          (dpti_byte_data == 8'h02))
-        external_debug_sticky[14] <= 1'b1;
-
-      if (dpti_mem_start)
-        external_debug_sticky[15] <= 1'b1;
-
-      if (dpti_mem_valid && dpti_mem_ready)
-        external_debug_sticky[16] <= 1'b1;
-
-      if (dpti_mem_done)
-        external_debug_sticky[17] <= 1'b1;
-
-      if (dpti_frontend_err_opcode ||
-          dpti_frontend_err_write32_opcode ||
-          dpti_frontend_err_mem_opcode ||
-          dpti_frontend_err_mem_length)
-        external_debug_sticky[18] <= 1'b1;
-
-      if (dpti_byte_valid &&
-          dpti_byte_ready &&
-          (dpti_byte_data == 8'h01))
-        external_debug_sticky[19] <= 1'b1;
-
-      // Core-readiness diagnosis.
-      //
-      // bit20: transaction FSM observed in P_CALIB
-      // bit21: transaction FSM observed in P_READ
-      // bit22: transaction FSM observed in P_DONE
-      // bit23: host staging writer observed busy
-      // bit24: external job lifetime observed busy
-      // bit25: external job observed active
-      // bit26: core_job_ready observed high
-      if (phase == P_CALIB)
-        external_debug_sticky[20] <= 1'b1;
-
-      if (phase == P_READ)
-        external_debug_sticky[21] <= 1'b1;
-
-      if (phase == P_DONE)
-        external_debug_sticky[22] <= 1'b1;
-
-      if (hs_busy)
-        external_debug_sticky[23] <= 1'b1;
-
-      if (job_busy)
-        external_debug_sticky[24] <= 1'b1;
-
-      if (job_active)
-        external_debug_sticky[25] <= 1'b1;
-
-      if (core_job_ready)
-        external_debug_sticky[26] <= 1'b1;
-
-      // External scheduler -> feeder diagnosis.
-      //
-      // bit27: transaction FSM reached P_GO
-      // bit28: remembered scheduler release was replayed
-      // bit29: any delayed scheduler start reached an adapter
-      // bit30: 4x4 adapter emitted fold_start
-      // bit31: common feeder entered ST_FEED
-      if (phase == P_GO)
-        external_debug_sticky[27] <= 1'b1;
-
-      if (scheduler_start_replay)
-        external_debug_sticky[28] <= 1'b1;
-
-      if (|scheduler_accelerator_start_delayed)
-        external_debug_sticky[29] <= 1'b1;
-
-      // bit30: any physical 4x4 instance received its fold-start event
-      if (select_4x4 && scheduler_fold_start_selected)
-        external_debug_sticky[30] <= 1'b1;
-
-      if (state == ST_FEED)
-        external_debug_sticky[31] <= 1'b1;
-    end
-  end
-
-  // Observation-only readback backpressure trace.
-  //
-  // This does not alter any datapath or control signal.  It records the
-  // source-side CDC FIFO readiness and AXI R-channel handshake so a stalled
-  // readback can be distinguished from a DMA completion problem.
-  always_ff @(posedge ui_clk) begin
-    if (ui_rst_n &&
-        (rb_pending || rb_active ||
-         rb_dst_wr_en ||
-         !rb_cdc_src_ready ||
-         (rvalid && !rready) ||
-         (rvalid && rready && rlast))) begin
-      $display(
-        "RBFLOW t=%0t phase=%0d rb_pending=%0b rb_active=%0b " ,
-        $time,
-        phase,
-        rb_pending,
-        rb_active
-      );
-      $display(
-        "RBFLOW_CDC src_ready=%0b dst_valid=%0b dst_ready=%0b dst_wr_en=%0b dst_beat=%0d",
-        rb_cdc_src_ready,
-        rb_cdc_dst_valid,
-        rb_cdc_dst_ready,
-        rb_dst_wr_en,
-        dst_wr_beat
-      );
-      $display(
-        "RBFLOW_AXI rvalid=%0b rready=%0b rlast=%0b r_fire=%0b dst_full=%0b",
-        rvalid,
-        rready,
-        rlast,
-        rvalid && rready,
-        dst_full
-      );
-    end
-  end
-
-  // Readback CDC/reset observation.
-  always_ff @(posedge ui_clk) begin
-    if (ui_rst_n &&
-        (rb_active || rb_pending || eng_done_valid ||
-         (rvalid && rb_active) || !rb_cdc_src_ready || rb_cdc_dst_valid)) begin
-      $display(
-        "RBCDC t=%0t phase=%0d dpti_rst=%0b rb_pending=%0b rb_active=%0b src_ready=%0b dst_valid=%0b dst_ready=%0b rvalid=%0b rready=%0b rlast=%0b",
-        $time,
-        phase,
-        dpti_rst,
-        rb_pending,
-        rb_active,
-        rb_cdc_src_ready,
-        rb_cdc_dst_valid,
-        rb_cdc_dst_ready,
-        rvalid,
-        rready,
-        rlast
-      );
-    end
-  end
-
-  // Observation-only readback trace.
-  always_ff @(posedge ui_clk) begin
-    if (ui_rst_n && rb_dst_wr_en) begin
-      $display(
-        "RB_BEAT beat=%0d tag=%02h data=%032h",
-        dst_wr_beat,
-        dst_wr_tag,
-        dst_wr_data
-      );
-    end
-
-    if (ui_rst_n &&
-        eng_done_valid &&
-        (eng_done_tag == DMA_TAG_READBACK)) begin
-      $display("RB_DONE tag=%02h", eng_done_tag);
-    end
-  end
-
-  wire op_dst_wr_en =
-      dst_wr_en &&
-      (dst_wr_tag == DMA_TAG_OPERAND);
-
-  // ---- operand writer + checksum 1 + operand memories ---------------------
-  // The one place the two operand-path versions differ.  Selected by USE_V2 at
-  // elaboration; see the parameter's comment.  The operand memories' READ
-  // side -- a_raddr/b_raddr in, a_rdata/b_rdata out one cycle later -- is the
-  // same in both versions and is what the copied core below is wired to.
-  //
-  // checksum 1, the write stream: seed_ref.py's formula, accumulated as the
-  // words go past rather than by reading the buffers back.  The read ports
-  // belong to the feeder; taking them for a scan would mean muxing the array's
-  // own datapath in order to observe it.  The order differs from seed_ref's --
-  // payload order, not (k, bank) order -- and that is fine: 32-bit wrapping
-  // addition is commutative and associative, so the total is identical.  It is
-  // the same constant 3a compared against, and it stays the same constant on
-  // v2, where four terms are added per cycle instead of one.
-  logic [31:0]    chk_wr;
-  logic [K_W-1:0] a_raddr [0:N-1];
-  logic [K_W-1:0] b_raddr [0:N-1];
-  wire  [31:0]    a_rdata [0:N-1];
-  wire  [31:0]    b_rdata [0:N-1];
-
-  generate
-  if (!USE_V2) begin : OP_V1
-    wire              a_wr, b_wr;
-    wire [LANE_W-1:0] wsel;
-    wire [K_W-1:0]    waddr;
-    wire [31:0]       wdata_buf;
-
-    dma_operand_writer #(
-      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
-    ) u_wr (
-      .clk (ui_clk), .rst_n (ui_rst_n),
-      .dst_wr_en (op_dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
-      .dst_full (op_dst_full), .dst_almost_full (op_dst_almost_full),
-      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
-    );
-
-    wire [15:0] k16   = 16'(waddr);
-    wire [7:0]  bank8 = 8'(wsel);
-    wire [31:0] wpos  = {8'd0, bank8, k16};
-
-    // Diagnostic checksum only.
-    //
-    // chk_wr is synchronously cleared during P_CALIB, so it does not need
-    // an asynchronous reset event here.  Keeping this block on ui_clk only
-    // also avoids Vivado treating this debug-only event control as an
-    // ambiguous clock/reset structure during synthesis.
-    always_ff @(posedge ui_clk) begin
-      if (phase == P_CALIB)      chk_wr <= '0;
-      else if (a_wr)             chk_wr <= chk_wr + (wdata_buf ^ wpos);
-      else if (b_wr)             chk_wr <= chk_wr + (wdata_buf ^ (32'h8000_0000 | wpos));
-
-      if ((a_wr || b_wr) && (words_written < 8))
-        $display("CHKDBG %s wsel=%0d waddr=%0d data=%h wpos=%h",
-                 a_wr ? "A" : "B", wsel, waddr, wdata_buf, wpos);
-    end
-
-    // -------------------------------------------------------------------------
-    // DEBUG: observe B-side operand writes.
-    // Observation only; no functional signal is modified.
-    // This avoids hierarchical probing of the operand-buffer memory.
-    // -------------------------------------------------------------------------
-    integer b_dbg_count;
-
-    initial begin
-      b_dbg_count = 0;
-    end
-
-    always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-      if (!ui_rst_n) begin
-        b_dbg_count <= 0;
-      end
-      else if (b_wr && b_dbg_count < 16) begin
-        $display(
-          "BWRDBG #%0d beat=%0d dst=%h wsel=%0d waddr=%0d data=%h",
-          b_dbg_count,
-          dst_wr_beat,
-          dst_wr_data,
-          wsel,
-          waddr,
-          wdata_buf
-        );
-        b_dbg_count <= b_dbg_count + 1;
-      end
-    end
-
-    // One write port and one synchronous read port each, which is the shape
-    // block RAM wants.  The read is SYNCHRONOUS: the address issued on beat t
-    // returns data on t+1, and the feeder already delays valid to match.  That
-    // one cycle is why the cost is k + 2(N-1) + H rather than one less.
-    //
-    // A and B are the same hardware; the only difference is which field
-    // selects the bank and which forms the address, and that swap is the A/B
-    // transpose.  Both come from dma_operand_writer, which computes them with
-    // the same bit slices systolic_uart_top's rx_count decode uses -- proved
-    // equivalent in tb_dma_operand_writer against a golden model of that decode.
-    wire [31:0] a_rdata_0 [0:N-1];
-    wire [31:0] a_rdata_1 [0:N-1];
-    wire [31:0] b_rdata_0 [0:N-1];
-    wire [31:0] b_rdata_1 [0:N-1];
-
-    systolic_operand_buffer #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_a_buf_0 (
-      .clk (ui_clk), .wr (a_wr && !fill_bank),
-      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (a_raddr), .rdata (a_rdata_0)
-    );
-
-    systolic_operand_buffer #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_a_buf_1 (
-      .clk (ui_clk), .wr (a_wr && fill_bank),
-      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (a_raddr), .rdata (a_rdata_1)
-    );
-
-    systolic_operand_buffer #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_b_buf_0 (
-      .clk (ui_clk), .wr (b_wr && !fill_bank),
-      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (b_raddr), .rdata (b_rdata_0)
-    );
-
-    systolic_operand_buffer #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N)
-    ) u_b_buf_1 (
-      .clk (ui_clk), .wr (b_wr && fill_bank),
-      .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (b_raddr), .rdata (b_rdata_1)
-    );
-
-    for (genvar pp = 0; pp < N; pp = pp + 1) begin : PP_READ_MUX
-      assign a_rdata[pp] =
-          compute_bank ? a_rdata_1[pp] : a_rdata_0[pp];
-      assign b_rdata[pp] =
-          compute_bank ? b_rdata_1[pp] : b_rdata_0[pp];
-    end
-  end else begin : OP_V2
-    wire                  a_wr, b_wr;
-    wire [LANE_W-1:0]     wsel;
-    wire [K_W-1:0]        waddr;
-    wire [AXI_DATA_W-1:0] wdata_buf;       // the whole beat, word j at [32j +: 32]
-
-    dma_operand_writer_v2 #(
-      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W), .BEAT_W (16)
-    ) u_wr (
-      .clk (ui_clk), .rst_n (ui_rst_n),
-      .dst_wr_en (op_dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
-      .dst_full (op_dst_full), .dst_almost_full (op_dst_almost_full),
-      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
-    );
-
-    dma_wr_checksum_v2 #(
-      .N (N), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W)
-    ) u_chk_wr (
-      .clk (ui_clk), .rst_n (ui_rst_n), .clear (phase == P_CALIB),
-      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .chk (chk_wr)
-    );
-
-    // Same read side as v1; the write side takes a beat.  A is the cyclic
-    // layout (a beat is four depths of one bank), B the block layout (a beat
-    // is four banks at one depth) -- the wire format decides which is which.
-    // Proven against v1's image at N = 4/8/16 in tb_dma_path_v2.
-    systolic_operand_buffer_v2 #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N), .LAYOUT_CYCLIC (1'b1)
-    ) u_a_buf (
-      .clk (ui_clk), .wr (a_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (a_raddr), .rdata (a_rdata)
-    );
-
-    systolic_operand_buffer_v2 #(
-      .K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N), .LAYOUT_CYCLIC (1'b0)
-    ) u_b_buf (
-      .clk (ui_clk), .wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .raddr (b_raddr), .rdata (b_rdata)
-    );
-  end
-  endgenerate
-
-  // =========================================================================
-  // FROM HERE TO THE MIG INSTANCE, EVERYTHING IS systolic_uart_top's COMPUTE
-  // CORE, COPIED.  Do not "clean it up".  Any edit here is an edit to the
-  // thing 3b is trying to hold constant, and the 125-cycle check is the only
-  // thing standing between a faithful copy and a subtly different one.
-  // =========================================================================
-
-  // ---- operand memories ---------------------------------------------------
-  // Instantiated above, inside the USE_V2 generate, because the write side is
-  // what the two versions differ in.  What the copied core sees is unchanged:
-  // a_raddr/b_raddr in, a_rdata/b_rdata out one cycle later, from block RAM
-  // with one synchronous read port per bank.  That one cycle is why the cost
-  // is k + 2(N-1) + H rather than one less, and cyc_latched below is the check
-  // that neither version has moved it.
-
-  // ---- array interface ----------------------------------------------------
-  logic [31:0] a_in [0:N-1];
-  logic [31:0] b_in [0:N-1];
-  logic        a_valid_in [0:N-1];
-  logic        b_valid_in [0:N-1];
-  logic        c_valid_out_8x8 [0:NUM_8X8_STORAGE-1];
-  logic [31:0] c_out_8x8 [0:NUM_8X8_STORAGE-1][0:N-1][0:N-1];
-
-  // k_dim is a constant here rather than a register written by a frame header:
-  // there is no host in this design.  It keeps the width systolic_uart_top gives
-  // it so the feeder is parameterised identically.
-  // Runtime reduction length.
-  //
-  // Legacy mode keeps the original compile-time K_DIM.
-  //
-  // External-scheduler mode takes K from the accepted job descriptor.
-  // job_k_reg is latched at job_valid && job_ready, so the feeder sees
-  // a stable K for the lifetime of the transaction.
-  wire [FEED_W-1:0] k_dim =
-      USE_EXTERNAL_SCHEDULER
-          ? FEED_W'(job_k_reg)
-          : FEED_W'(K_DIM);
-
-  // ---- control FSM --------------------------------------------------------
-  // systolic_uart_top's four states with ST_SEND replaced by ST_DONE: there is
-  // nothing to transmit.  The encoding is written out explicitly there because
-  // systolic_status keeps a copy; no status block here, but the values are kept
-  // the same anyway so a waveform from either design reads alike.
-  typedef enum logic [2:0] {
-    ST_IDLE        = 3'd0,
-    ST_FEED        = 3'd1,
-    ST_WAIT_RESULT = 3'd2,
-    ST_DONE        = 3'd3
-  } state_t;
-
-  state_t state;
-  logic [FEED_W-1:0] feed_t;
-
-  // systolic_uart_top writes these two as $bits(feed_t) and $bits(k_dim).  Both
-  // of those signals are [FEED_W-1:0] there and here, so FEED_W is the same
-  // number -- written out because $bits() in a parameter override is a place
-  // simulators disagree, and the widths of the feeder's ports are not something
-  // to leave to a tool's mood.
-  systolic_tile_feeder #(
-    .N      (N),
-    .K_W    (K_W),
-    .FEED_W (FEED_W),
-    .KDIM_W (FEED_W)
-  ) u_feeder (
-    .clk            (ui_clk),
-    .rst            (rst_i),
-    .enable         (state == ST_FEED),
-
-    .feed_t         (feed_t),
-    .k_dim          (k_dim),
-
-    .a_rdata        (a_rdata),
-    .b_rdata        (b_rdata),
-
-    .a_raddr        (a_raddr),
-    .b_raddr        (b_raddr),
-
-    .a_in           (a_in),
-    .b_in           (b_in),
-
-    .a_valid_in     (a_valid_in),
-    .b_valid_in     (b_valid_in)
-  );
-
-  // -------------------------------------------------------------------------
-  // DEBUG: first few feeder cycles of every fold
-  // This is observation-only; no functional signal is modified.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(3)) begin
-      $display(
-        "FEEDDBG t=%0t feed_t=%0d aV0=%b bV0=%b a0=%h b0=%h ar0=%0d br0=%0d",
-        $time,
-        feed_t,
-        a_valid_in[0],
-        b_valid_in[0],
-        a_in[0],
-        b_in[0],
-        a_raddr[0],
-        b_raddr[0]
-      );
-    end
-  end
-
-
-
-  // -------------------------------------------------------------------------
-  // DEBUG: first four common-feeder lanes.
-  // Observation only; no functional signal is modified.
-  //
-  // The physical 4x4 device consumes exactly lanes 0..3 of this N=8 feeder.
-  // Trace addresses, returned data, and delayed valids together so that
-  // per-lane K alignment can be checked directly.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(8)) begin
-      $display(
-        "FEED4DBG t=%0t ft=%0d | L0 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L1 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L2 ar=%0d av=%b a=%h br=%0d bv=%b b=%h | L3 ar=%0d av=%b a=%h br=%0d bv=%b b=%h",
-        $time, feed_t,
-        a_raddr[0], a_valid_in[0], a_in[0],
-        b_raddr[0], b_valid_in[0], b_in[0],
-        a_raddr[1], a_valid_in[1], a_in[1],
-        b_raddr[1], b_valid_in[1], b_in[1],
-        a_raddr[2], a_valid_in[2], a_in[2],
-        b_raddr[2], b_valid_in[2], b_in[2],
-        a_raddr[3], a_valid_in[3], a_in[3],
-        b_raddr[3], b_valid_in[3], b_in[3]
-      );
-    end
-  end
-
-
-  // -------------------------------------------------------------------------
-  // ----------------------------------------------------------
-  // Three independent physical 4x4 accelerator instances.
-  //
-  // All three instances share the same geometry and input data buses,
-  // but device selection gates their valid signals independently.
-  // Physical-instance identity therefore remains distinct from geometry.
-  // ----------------------------------------------------------
-  logic [31:0] a_in_4x4 [0:3];
-  logic [31:0] b_in_4x4 [0:3];
-
-  generate
-    for (genvar d = 0; d < 4; d = d + 1) begin : CONNECT_4X4_DEVICE
-      assign a_in_4x4[d] = a_in[d];
-      assign b_in_4x4[d] = b_in[d];
-    end
-  endgenerate
-
-  logic a_valid_to_8x8 [0:NUM_8X8_STORAGE-1][0:N-1];
-  logic b_valid_to_8x8 [0:NUM_8X8_STORAGE-1][0:N-1];
-
-  logic a_valid_to_4x4 [0:NUM_4X4_STORAGE-1][0:3];
-  logic b_valid_to_4x4 [0:NUM_4X4_STORAGE-1][0:3];
-
-  logic        c_valid_out_4x4 [0:NUM_4X4_STORAGE-1];
-  logic [31:0] c_out_4x4 [0:NUM_4X4_STORAGE-1][0:3][0:3];
-
-  generate
-    for (genvar ai = 0; ai < NUM_8X8; ai++) begin : DISPATCH_8X8_INSTANCE
-      for (genvar d = 0; d < N; d++) begin : DISPATCH_8X8_LANE
-        assign a_valid_to_8x8[ai][d] =
-            a_valid_in[d] && select_8x8 &&
-            (selected_8x8_idx == ai);
-        assign b_valid_to_8x8[ai][d] =
-            b_valid_in[d] && select_8x8 &&
-            (selected_8x8_idx == ai);
-      end
-    end
-  endgenerate
-
-  generate
-    for (genvar ai = 0; ai < NUM_4X4; ai++) begin : DISPATCH_4X4_INSTANCE
-      for (genvar d = 0; d < 4; d++) begin : DISPATCH_4X4_LANE
-        assign a_valid_to_4x4[ai][d] =
-            a_valid_in[d] && select_4x4 &&
-            (selected_4x4_idx == ai);
-        assign b_valid_to_4x4[ai][d] =
-            b_valid_in[d] && select_4x4 &&
-            (selected_4x4_idx == ai);
-      end
-    end
-  endgenerate
-
-  generate
-    for (genvar i = 0; i < NUM_4X4; i++) begin : ACC_4X4
-      (* keep_hierarchy = "yes" *)
-      systolic_array #(
-        .N        (4),
-        .DATA_W   (32),
-        .ACC_BANKS(16)
-      ) u_acc (
-        .clk         (ui_clk),
-        .rst         (rst_i),
-        .a_in        (a_in_4x4),
-        .b_in        (b_in_4x4),
-        .a_valid_in  (a_valid_to_4x4[i]),
-        .b_valid_in  (b_valid_to_4x4[i]),
-        .c_valid_out (c_valid_out_4x4[i]),
-        .c_out       (c_out_4x4[i])
-      );
-    end
-  endgenerate
-
-  generate
-    for (genvar i = 0; i < NUM_8X8; i++) begin : ACC_8X8
-      (* keep_hierarchy = "yes" *)
-      systolic_array #(
-        .N      (N),
-        .DATA_W (32)
-      ) u_acc (
-        .clk         (ui_clk),
-        .rst         (rst_i),
-        .a_in        (a_in),
-        .b_in        (b_in),
-        .a_valid_in  (a_valid_to_8x8[i]),
-        .b_valid_in  (b_valid_to_8x8[i]),
-        .c_valid_out (c_valid_out_8x8[i]),
-        .c_out       (c_out_8x8[i])
-      );
-    end
-  endgenerate
-
-  // -------------------------------------------------------------------------
-  // Device-selected accelerator completion.
-  //
-  // The scheduler selects a physical accelerator by opaque device ID.
-  // Do NOT encode geometry into the scheduler protocol.
-  //
-  // 8x8 device:
-  //   c_valid_selected = c_valid_out
-  //   selected geometry = 8x8
-  //
-  // 4x4 devices:
-  //   c_valid_selected = completion of the selected 4x4 instance
-  //   selected geometry = 4x4
-  //
-  // The C data itself is intentionally NOT flattened into the 8x8 result
-  // buffer here.  The writeback path must become device-aware because a
-  // 4x4 invocation produces 16 words, while an 8x8 invocation produces
-  // 64 words.
-  // -------------------------------------------------------------------------
-
-  logic c_valid_selected;
-
-  wire c_valid_out_4x4_selected =
-      select_4x4 ? c_valid_out_4x4[selected_4x4_idx] : 1'b0;
-
-  wire c_valid_out_8x8_selected =
-      select_8x8 ? c_valid_out_8x8[selected_8x8_idx] : 1'b0;
-
-  assign c_valid_selected =
-      select_8x8 ? c_valid_out_8x8_selected :
-      select_4x4 ? c_valid_out_4x4_selected :
-                   1'b0;
-
-
-  // -------------------------------------------------------------------------
-  // DEBUG: trace the selected 8x8 PE(0,0) result publication.
-  // Observation only: no functional signal is modified.
-  //
-  // Hierarchy:
-  //   ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe
-  //
-  // This distinguishes:
-  //   reduction result -> PE commit -> acc_out -> array c_out
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i) begin
-      if (select_8x8 &&
-          (c_valid_out_8x8_selected ||
-           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.reduce_add_valid ||
-           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_commit_q ||
-           ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_valid_out)) begin
-        $display(
-          "PE00TOPDBG t=%0t sel=%b cvalid=%b | redV=%b final=%h commit=%b accV=%b acc=%h | pe_acc=%h c_out=%h",
-          $time,
-          select_8x8,
-          c_valid_out_8x8_selected,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.reduce_add_valid,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.final_reduce_result,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_commit_q,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_valid_out,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].u_pe.acc_out,
-          ACC_8X8[0].u_acc.ROW[0].COL[0].pe_acc[0][0],
-          c_out_8x8[0][0][0]
-        );
-      end
-    end
-  end
-
-
-  // -------------------------------------------------------------------------
-  // DEBUG: observe array-side transaction boundary.
-  // Observation only: no functional signal is modified.
-  // -------------------------------------------------------------------------
-  // -------------------------------------------------------------------------
-  // -------------------------------------------------------------------------
-  // -------------------------------------------------------------------------
-  // DEBUG: verify selected physical 8x8 dispatch.
-  // Observation only: no functional signal is modified.
-  // -------------------------------------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(8)) begin
-      $display(
-        "DISPATCHDBG t=%0t ft=%0d sel8=%0d sel4=%0d | a_in0=%h av_in0=%b | a_to_sel0=%b b_to_sel0=%b | cvalid8_sel=%b",
-        $time,
-        feed_t,
-        selected_8x8_idx,
-        selected_4x4_idx,
-        a_in[0],
-        a_valid_in[0],
-        a_valid_to_8x8[selected_8x8_idx][0],
-        b_valid_to_8x8[selected_8x8_idx][0],
-        c_valid_out_8x8_selected
-      );
-    end
-  end
-
-
-  always_ff @(posedge ui_clk) begin
-    if (!rst_i && state == ST_FEED && feed_t <= FEED_W'(3)) begin
-      $display(
-        "ARRAYINDBG t=%0t feed_t=%0d rst=%b aV0=%b bV0=%b a0=%h b0=%h",
-        $time,
-        feed_t,
-        rst_i,
-        a_valid_in[0],
-        b_valid_in[0],
-        a_in[0],
-        b_in[0]
-      );
-    end
-
-    if (!rst_i && select_8x8 && c_valid_out_8x8_selected) begin
-      $display(
-        "ARRAYOUTDBG t=%0t c_valid=1 c00=%h c01=%h c10=%h c77=%h",
-        $time,
-        c_out_8x8[selected_8x8_idx][0][0],
-        c_out_8x8[selected_8x8_idx][0][1],
-        c_out_8x8[selected_8x8_idx][1][0],
-        c_out_8x8[selected_8x8_idx][N-1][N-1]
-      );
-    end
-  end
-
-
-  // ---- store final results ------------------------------------------------
-  //
-  // C is kept as an N x N backing store because the existing writeback path
-  // is still being migrated to device-aware result sizes.
-  //
-  // The producer, however, is selected by ingress_job_device_id:
-  //
-  //   DEVICE_ID_8X8   -> u_acc_8x8   -> N x N results
-  //   DEVICE_ID_4X4_0 -> u_acc_4x4_0 -> 4 x 4 results
-  //   DEVICE_ID_4X4_1 -> u_acc_4x4_1 -> 4 x 4 results
-  //   DEVICE_ID_4X4_2 -> u_acc_4x4_2 -> 4 x 4 results
-  //
-  // Do not let the 8x8 storage shape imply the physical device shape.
-  // The next writeback step will use the selected device geometry to decide
-  // how many words are emitted to DDR.
-  //
-  logic [31:0] C [0:N-1][0:N-1];
-
-  // -------------------------------------------------------------------------
-  // Result snapshot ping-pong.
-  //
-  // C is the live accelerator result image.  A later compute invocation may
-  // overwrite C, so writeback must consume an immutable snapshot instead.
-  //
-  // Bank ownership:
-  //   tile i publishes into bank i%2 (compute_fi[0], stable for the fold);
-  //   the write-back stage latches that index at tile_handoff (wb_bank) and
-  //   reads only its own bank until wb_done.  Bank i%2 is rewritten by tile
-  //   i+2 at the earliest, whose fold cannot start before tile i+1 has been
-  //   handed off, i.e. before tile i's write-back has completed.
-  //
-  // The two banks are intentionally independent from C.
-  // -------------------------------------------------------------------------
-  logic [31:0] result_bank [0:1][0:N-1][0:N-1];
-
-  integer rr;
-  integer cc;
-
-  always_ff @(posedge ui_clk) begin
-    if (rst_i) begin
-      c_done               <= 1'b0;
-    end
-    else begin
-      // New transaction starts.
-      if (fold_start)
-        c_done <= 1'b0;
-
-      // ----------------------------------------------------------
-      // 8x8 physical device result.
-      // ----------------------------------------------------------
-      if (select_8x8 && c_valid_out_8x8_selected) begin
-        for (rr = 0; rr < N; rr = rr + 1)
-          for (cc = 0; cc < N; cc = cc + 1)
-            C[rr][cc] <= c_out_8x8[selected_8x8_idx][rr][cc];
-
-        $display(
-          "CDBG_RAW device=8x8 C00=%h C01=%h C10=%h C77=%h",
-          c_out_8x8[selected_8x8_idx][0][0],
-          c_out_8x8[selected_8x8_idx][0][1],
-          c_out_8x8[selected_8x8_idx][1][0],
-          c_out_8x8[selected_8x8_idx][N-1][N-1]
-        );
-
-        // Snapshot the completed result before a later compute invocation
-        // can overwrite the live C register image.
-        for (rr = 0; rr < N; rr = rr + 1)
-          for (cc = 0; cc < N; cc = cc + 1)
-            result_bank[compute_fi[0]][rr][cc]
-              <= c_out_8x8[selected_8x8_idx][rr][cc];
-
-        c_done <= 1'b1;
-      end
-
-      // ----------------------------------------------------------
-      // 4x4 physical device result.
-      //
-      // Store the 4x4 result in the upper-left portion of the
-      // common C backing store.  Physical result size / placement
-      // in DDR is handled by the device-aware writeback stage.
-      // ----------------------------------------------------------
-      else if (select_4x4 && c_valid_out_4x4_selected) begin
-        for (rr = 0; rr < 4; rr = rr + 1)
-          for (cc = 0; cc < 4; cc = cc + 1)
-            C[rr][cc] <= c_out_4x4[selected_4x4_idx][rr][cc];
-
-        // Snapshot the physical 4x4 result.  Only the upper-left 4x4
-        // portion of the common result bank is meaningful for this device.
-        for (rr = 0; rr < 4; rr = rr + 1)
-          for (cc = 0; cc < 4; cc = cc + 1)
-            result_bank[compute_fi[0]][rr][cc]
-              <= c_out_4x4[selected_4x4_idx][rr][cc];
-
-        c_done <= 1'b1;
-      end
-    end
-  end
-
-  // ---- main state progression ---------------------------------------------
-  always_ff @(posedge ui_clk) begin
-    if (rst_i) begin
-      state  <= ST_IDLE;
-      feed_t <= '0;
-    end
-    else begin
-      case (state)
-
-        ST_IDLE: begin
-          feed_t <= '0;
-          if (fold_start) begin
-            state  <= ST_FEED;
-            feed_t <= '0;
-          end
-        end
-
-        ST_FEED: begin
-          if (feed_t == k_dim + FEED_W'(N - 2)) begin
-            state <= ST_WAIT_RESULT;
-          end
-          else begin
-            feed_t <= feed_t + 1'b1;
-          end
-        end
-
-        ST_WAIT_RESULT: begin
-          // No hard-coded drain count: wait for the accelerator itself to
-          // report that the reduced result matrix exists.
-          if (c_done) state <= ST_DONE;
-        end
-
-        ST_DONE: begin
-          // Back to idle, so invocation fi+1's fold_start finds the machine
-          // invocation fi found.  The accumulators need no help: systolic_pe
-          // clears the reduced set's bank valids at RED_DONE, so nothing of
-          // invocation fi survives into fi+1 and each one is an independent
-          // k-deep GEMM whose C is written back on its own.
-          state <= ST_IDLE;
-        end
-
-        default: state <= ST_IDLE;
-
-      endcase
-    end
-  end
-
-  // ---- transaction cycle counter ------------------------------------------
-  // Start: the first beat of ST_FEED (feed_t == 0).  End: the result is
-  // published (c_valid_out).  Both ends inclusive -- the same interval
-  // systolic_uart_top measures, which is what makes 125 comparable.
-  logic [31:0] cyc_count;
-  logic [31:0] cyc_latched;    // the LAST invocation's, so the golden still checks
-  logic [31:0] cyc_total;      // summed over the run's invocations
-
-  always_ff @(posedge ui_clk) begin
-    if (rst_i || run_clear) begin
-      cyc_count   <= '0;
-      cyc_latched <= '0;
-      cyc_total   <= '0;
-      cyc_running <= 1'b0;
-    end
-    else begin
-      if (state == ST_FEED && feed_t == '0 && !cyc_running) begin
-        cyc_running <= 1'b1;
-        cyc_count   <= 32'd1;
-      end
-      else if (cyc_running) begin
-        cyc_count <= cyc_count + 1'b1;
-        if (c_valid_selected) begin
-          cyc_running <= 1'b0;
-          cyc_latched <= cyc_count + 1'b1;
-          cyc_total   <= cyc_total + cyc_count + 32'd1;
-        end
-      end
+                                                 external_debug_sticky[4]  <= 1'b1;
+      if (wb_wvalid && wb_wready &&
+          (wb_wdata != 128'h4100000040800000400000003f800000))
+                                                 external_debug_sticky[5]  <= 1'b1;
+      if (dpti_fifo_rd_valid && dpti_fifo_rd_ready)  external_debug_sticky[6]  <= 1'b1;
+      if (dpti_axi_cmd_valid && dpti_axi_cmd_ready)  external_debug_sticky[7]  <= 1'b1;
+      if (axi_dpti_wr_valid && axi_dpti_wr_ready)    external_debug_sticky[8]  <= 1'b1;
+      if (axi_dpti_wr_valid && axi_dpti_wr_ready &&
+          (axi_dpti_wr_addr == 8'h00) && axi_dpti_wr_data[0])
+                                                 external_debug_sticky[9]  <= 1'b1;
+      if (dpti_job_valid)                        external_debug_sticky[10] <= 1'b1;
+      if (core_job_ready)                        external_debug_sticky[11] <= 1'b1;
+      if (scheduler_desc_ready)                  external_debug_sticky[12] <= 1'b1;
+      if (dpti_byte_valid && dpti_byte_ready)    external_debug_sticky[13] <= 1'b1;
+      if (dpti_byte_valid && dpti_byte_ready && (dpti_byte_data == 8'h02))
+                                                 external_debug_sticky[14] <= 1'b1;
+      if (dpti_mem_start)                        external_debug_sticky[15] <= 1'b1;
+      if (dpti_mem_valid && dpti_mem_ready)      external_debug_sticky[16] <= 1'b1;
+      if (dpti_mem_done)                         external_debug_sticky[17] <= 1'b1;
+      if (dpti_frontend_err_opcode || dpti_frontend_err_write32_opcode ||
+          dpti_frontend_err_mem_opcode || dpti_frontend_err_mem_length)
+                                                 external_debug_sticky[18] <= 1'b1;
+      if (dpti_byte_valid && dpti_byte_ready && (dpti_byte_data == 8'h01))
+                                                 external_debug_sticky[19] <= 1'b1;
+      if (phase == 4'd0)                         external_debug_sticky[20] <= 1'b1;
+      if (phase == 4'd2)                         external_debug_sticky[21] <= 1'b1;
+      if (phase == 4'd7)                         external_debug_sticky[22] <= 1'b1;
+      if (hs_busy)                               external_debug_sticky[23] <= 1'b1;
+      if (job_busy)                              external_debug_sticky[24] <= 1'b1;
+      if (job_active)                            external_debug_sticky[25] <= 1'b1;
+      if (core_job_ready)                        external_debug_sticky[26] <= 1'b1;
+      if (phase == 4'd3)                         external_debug_sticky[27] <= 1'b1;
+      if (|scheduler_accelerator_start)          external_debug_sticky[29] <= 1'b1;
+      if (any_4x4_fold_start)                    external_debug_sticky[30] <= 1'b1;
+      if (any_4x4_c_valid)                       external_debug_sticky[31] <= 1'b1;
     end
   end
 
   // =========================================================================
-  // End of the copied core.
+  // Write-back engine: one AXI write master, one owner at a time.
+  //
+  // The lowest-numbered context with a descriptor up is granted when the
+  // engine is idle and nothing is in flight; it owns the engine -- the
+  // descriptor, the result stream and the completion -- until its last write
+  // response.  Another context's tile waits its turn here (bytes are moved
+  // one tile at a time) while its array keeps computing.
   // =========================================================================
+  logic                wb_inflight;
+  logic [ACC_ID_W-1:0] wb_owner;
+  logic                wb_any_req;
+  logic [ACC_ID_W-1:0] wb_grant_idx;
 
-  // ---- write-back: C -> DRAM ----------------------------------------------
-  //
-  // Device-aware result path.
-  //
-  // Both parameterized readers exist physically:
-  //
-  //   u_rdr_8x8 : N=8 -> 64 result words -> 16 AXI beats
-  //   u_rdr_4x4 : N=4 -> 16 result words ->  4 AXI beats
-  //
-  // ingress_job_device_id is the runtime selector.  It does NOT become a
-  // runtime parameter N.
-  //
-  // The selected reader is the only reader started for the current
-  // P_WB phase, and its FIFO is the only FIFO consumed by u_wb.
-  // -------------------------------------------------------------------------
-
-  // 4x4 reader view of the common C backing store.
-  //
-  // The 4x4 accelerator writes its result into C[0:3][0:3].
-  // Keep this as an explicit 4x4 array because dma_result_reader's
-  // N parameter determines the unpacked array port shape.
-  //
-  // Writeback consumes the immutable result snapshot selected by
-  // wb_result_bank, never the live accelerator result image C[][].
-  wire [31:0] C_wb [0:N-1][0:N-1];
-
-  genvar wb_r, wb_c;
-  generate
-    for (wb_r = 0; wb_r < N; wb_r = wb_r + 1) begin : GEN_CWB_R
-      for (wb_c = 0; wb_c < N; wb_c = wb_c + 1) begin : GEN_CWB_C
-        assign C_wb[wb_r][wb_c] =
-            result_bank[wb_bank][wb_r][wb_c];
+  always_comb begin
+    wb_any_req   = 1'b0;
+    wb_grant_idx = '0;
+    for (int k = NUM_ACCEL-1; k >= 0; k--) begin
+      if (ctx_wb_desc_valid[k]) begin
+        wb_any_req   = 1'b1;
+        wb_grant_idx = ACC_ID_W'(k);
       end
     end
-  endgenerate
+  end
 
-  wire [31:0] C_4x4 [0:3][0:3];
+  wire                  wb_eng_desc_ready;
+  wire                  wb_eng_done;
+  wire                  wb_eng_desc_valid = wb_any_req && !wb_inflight;
+  wire                  wb_eng_accept     = wb_eng_desc_valid && wb_eng_desc_ready;
+  wire [AXI_ADDR_W-1:0] wb_tile_addr      = ctx_wb_desc_addr[wb_grant_idx];
+  wire [15:0]           wb_tile_beats     = ctx_wb_desc_beats[wb_grant_idx];
 
-  genvar c4_r, c4_c;
-  generate
-    for (c4_r = 0; c4_r < 4; c4_r = c4_r + 1) begin : GEN_C4_R
-      for (c4_c = 0; c4_c < 4; c4_c = c4_c + 1) begin : GEN_C4_C
-        assign C_4x4[c4_r][c4_c] =
-            result_bank[wb_bank][c4_r][c4_c];
-      end
-    end
-  endgenerate
-
-  wire                  wb8_rempty;
-  wire                  wb4_rempty;
-  wire [AXI_DATA_W-1:0] wb8_rd_data;
-  wire [AXI_DATA_W-1:0] wb4_rd_data;
-  wire                  wb8_rd_en;
-  wire                  wb4_rd_en;
-
-  // ----------------------------------------------------------
-  // 8x8 result reader
-  // ----------------------------------------------------------
-  wire                     rdr8_wr_en;
-  wire [AXI_DATA_W-1:0]    rdr8_wr_data;
-  wire                     rdr8_wfull;
-  wire                     rdr8_done;
-
-  wire wb_rd_start_8x8 =
-      (wb_phase == W_WB) && select_8x8;
-
-  dma_result_reader #(
-    .N          (8),
-    .AXI_DATA_W (AXI_DATA_W)
-  ) u_rdr_8x8 (
-    .clk     (ui_clk),
-    .rst     (rst_i),
-    .start   (wb_rd_start_8x8),
-    .done    (rdr8_done),
-    .C       (C_wb),
-    .wr_en   (rdr8_wr_en),
-    .wr_data (rdr8_wr_data),
-    .wfull   (rdr8_wfull)
-  );
-
-  dma_cdc_fifo #(
-    .DW        (AXI_DATA_W),
-    .AW        (5),
-    .AF_MARGIN (8)
-  ) u_wb_fifo_8x8 (
-    .wclk        (ui_clk),
-    .wrst_n      (ui_rst_n),
-    .wr_en       (rdr8_wr_en),
-    .wr_data     (rdr8_wr_data),
-    .wfull       (rdr8_wfull),
-    .walmost_full(),
-
-    .rclk        (ui_clk),
-    .rrst_n      (ui_rst_n),
-    .rd_en       (wb8_rd_en),
-    .rd_data     (wb8_rd_data),
-    .rempty      (wb8_rempty)
-  );
-
-  // ----------------------------------------------------------
-  // 4x4 result reader
-  // ----------------------------------------------------------
-  wire                     rdr4_wr_en;
-  wire [AXI_DATA_W-1:0]    rdr4_wr_data;
-  wire                     rdr4_wfull;
-  wire                     rdr4_done;
-
-  wire wb_rd_start_4x4 =
-      (wb_phase == W_WB) && select_4x4;
-
-  dma_result_reader #(
-    .N          (4),
-    .AXI_DATA_W (AXI_DATA_W)
-  ) u_rdr_4x4 (
-    .clk     (ui_clk),
-    .rst     (rst_i),
-    .start   (wb_rd_start_4x4),
-    .done    (rdr4_done),
-    .C       (C_4x4),
-    .wr_en   (rdr4_wr_en),
-    .wr_data (rdr4_wr_data),
-    .wfull   (rdr4_wfull)
-  );
-
-  dma_cdc_fifo #(
-    .DW        (AXI_DATA_W),
-    .AW        (5),
-    .AF_MARGIN (8)
-  ) u_wb_fifo_4x4 (
-    .wclk        (ui_clk),
-    .wrst_n      (ui_rst_n),
-    .wr_en       (rdr4_wr_en),
-    .wr_data     (rdr4_wr_data),
-    .wfull       (rdr4_wfull),
-    .walmost_full(),
-
-    .rclk        (ui_clk),
-    .rrst_n      (ui_rst_n),
-    .rd_en       (wb4_rd_en),
-    .rd_data     (wb4_rd_data),
-    .rempty      (wb4_rempty)
-  );
-
-  // ----------------------------------------------------------
-  // Runtime device selection at the FIFO boundary.
-  //
-  // Only the selected physical result stream is exposed to the
-  // common writeback engine.
-  // ----------------------------------------------------------
   wire                  wb_src_valid;
   wire [AXI_DATA_W-1:0] wb_src_data;
   wire                  wb_src_ready;
 
-  assign wb_src_valid =
-      select_8x8 ? !wb8_rempty :
-      select_4x4 ? !wb4_rempty :
-                   1'b0;
+  assign wb_src_valid = wb_inflight ? ctx_src_valid[wb_owner] : 1'b0;
+  assign wb_src_data  = ctx_src_data[wb_owner];
 
-  assign wb_src_data =
-      select_8x8 ? wb8_rd_data :
-      select_4x4 ? wb4_rd_data :
-                   '0;
+  generate
+    for (genvar i = 0; i < NUM_ACCEL; i++) begin : WB_ROUTE
+      assign ctx_wb_desc_ready[i] =
+          wb_eng_desc_ready && !wb_inflight && wb_any_req &&
+          (wb_grant_idx == ACC_ID_W'(i));
+      assign ctx_wb_done[i]  = wb_eng_done && wb_inflight && (wb_owner == ACC_ID_W'(i));
+      assign ctx_src_ready[i] = wb_inflight && (wb_owner == ACC_ID_W'(i)) && wb_src_ready;
+    end
+  endgenerate
 
-  assign wb8_rd_en =
-      select_8x8 && wb_src_valid && wb_src_ready;
-
-  assign wb4_rd_en =
-      select_4x4 && wb_src_valid && wb_src_ready;
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      wb_inflight <= 1'b0;
+      wb_owner    <= '0;
+    end
+    else begin
+      if (wb_eng_accept) begin
+        wb_inflight <= 1'b1;
+        wb_owner    <= wb_grant_idx;
+      end
+      else if (wb_eng_done) begin
+        wb_inflight <= 1'b0;
+      end
+    end
+  end
 
   dma_writeback_engine #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
     .BEAT_W (16), .BURST_LEN (16), .MAX_OUTSTANDING (4)
   ) u_wb (
     .clk (ui_clk), .rst_n (ui_rst_n), .init_calib_complete (init_calib_complete),
-    .desc_valid (wb_desc_valid), .desc_ready (wb_desc_ready),
+    .desc_valid (wb_eng_desc_valid), .desc_ready (wb_eng_desc_ready),
     .desc_addr (wb_tile_addr),
-    .desc_beats (16'(selected_wb_beats)),
-    .desc_tag (8'h3C),
-    .done_valid (wb_done), .done_tag (),
+    .desc_beats (wb_tile_beats),
+    .desc_tag (8'h40 + 8'(wb_grant_idx)),
+    .done_valid (wb_eng_done), .done_tag (),
     .m_axi_awid (wb_awid), .m_axi_awaddr (wb_awaddr), .m_axi_awlen (wb_awlen),
     .m_axi_awsize (wb_awsize), .m_axi_awburst (wb_awburst),
     .m_axi_awlock (wb_awlock), .m_axi_awcache (wb_awcache),
@@ -4103,97 +2083,11 @@ systolic_hw_scheduler #(
     .err_align (wb_err_align), .err_resp (wb_err_resp), .stat_clear (run_clear)
   );
 
-  // ---- checksum 2: the result matrix --------------------------------------
-  // One entry per cycle, not sixty-four in one.  3a's first bitstream missed
-  // timing by 1.011 ns doing sixteen 32-bit adds in a cycle, and every failing
-  // path was in the measurement rather than in anything being measured.  An
-  // instrument that cannot meet timing casts doubt on every number it reports,
-  // even when the number turns out to be right.
-  //
-  // The read is registered, so the index issued on cycle t is accumulated on
-  // t+1 -- the same one-cycle skew the operand buffers have, handled the same
-  // way.
-  wire [LANE_W-1:0] scan_r_i = scan_c[2*LANE_W-1:LANE_W];
-  wire [LANE_W-1:0] scan_c_i = scan_c[LANE_W-1:0];
+  // The bench's and the LEDs' view of the write-back descriptor handshake.
+  wire wb_desc_valid = wb_eng_desc_valid;
+  wire wb_desc_ready = wb_eng_desc_ready;
+  wire wb_done       = wb_eng_done;
 
-  logic              scan_val_d;
-  logic [LANE_W-1:0] scan_r_d, scan_c_d;
-  logic [31:0]       c_rd;
-  logic [31:0]       chk_c;
-
-  wire [7:0]  c_row8  = 8'(scan_r_d);
-  wire [15:0] c_col16 = 16'(scan_c_d);
-  wire [31:0] cpos    = {8'd0, c_row8, c_col16};
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      scan_val_d <= 1'b0;
-      scan_r_d   <= '0;
-      scan_c_d   <= '0;
-      c_rd       <= '0;
-      chk_c      <= '0;
-    end else begin
-      scan_val_d <= (wb_phase == W_SCAN) && !scan_c_last;
-      scan_r_d   <= scan_r_i;
-      scan_c_d   <= scan_c_i;
-      c_rd       <= result_bank[wb_bank][scan_r_i][scan_c_i];
-      if (phase == P_CALIB)  chk_c <= '0;
-      else if (scan_val_d)   chk_c <= chk_c + (c_rd ^ cpos);
-    end
-  end
-
-  // chk_wr and chk_c are RUN totals: both are cleared in P_CALIB and both
-  // accumulate across the run's invocations, so the constant they are compared
-  // against has to grow with the run or led[4] and led[5] would go dark on a
-  // correct 8-invocation run.  Every slab carries the same pattern and every
-  // invocation therefore produces the same C, so the expected total is the
-  // tabulated per-invocation constant added once per completed invocation --
-  // 32-bit wrapping addition, the same arithmetic the hardware does.  At
-  // n_inv = 1 this is the old comparison against the tabulated constant.
-  logic [31:0] want_wr, want_c;
-
-  // Runtime operand checksum for an externally scheduled job.
-  //
-  // The checksum belongs to the actual K-sized operand payload, not to the
-  // physical accelerator geometry.  Therefore 8x8 and 4x4 use the same
-  // expected value when they receive the same K.
-  //
-  // These values are generated by tools/seed_ref.py and are the currently
-  // verified runtime-K cases.
-  function automatic logic [31:0] expected_wr_chk_for_k(
-      input logic [31:0] k
-  );
-    begin
-      case (k)
-        32'd16: expected_wr_chk_for_k = 32'h3F88_0780;
-        32'd32: expected_wr_chk_for_k = 32'h805C_1F00;
-        default: expected_wr_chk_for_k = 32'h0;
-      endcase
-    end
-  endfunction
-
-  wire [31:0] active_expected_wr_chk =
-      USE_EXTERNAL_SCHEDULER
-          ? expected_wr_chk_for_k(job_k_reg)
-          : EXPECT_WR_CHK;
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      want_wr <= '0;
-      want_c  <= '0;
-    end else if (phase == P_CALIB) begin
-      want_wr <= '0;
-      want_c  <= '0;
-    end else begin
-      if (fill_complete)
-        want_wr <= want_wr + active_expected_wr_chk;
-      if ((wb_phase == W_SCAN) && scan_c_last)
-        want_c  <= want_c + EXPECT_C_CHK;
-    end
-  end
-
-  wire wr_match = read_done_sticky && (want_wr != 32'd0) && (chk_wr == want_wr);
-  wire c_match  = (phase == P_DONE)  && (chk_c  == want_c);
   wire any_err  = seed_err_align | seed_err_resp
                 | eng_err_align  | eng_err_resp | wr_err_range
                 | wb_err_align   | wb_err_resp  | err_w_owner;
@@ -4285,35 +2179,19 @@ systolic_hw_scheduler #(
                  init_calib_complete };
 
 `ifndef SYNTHESIS
+  // Each context checks its own geometry (K_DIM <= K_MAX, power-of-two slab
+  // and tile strides, the accepted job's K within its K_MAX).  The fleet-level
+  // check is that a descriptor names a physical accelerator at all: the
+  // acceptance logic never takes an out-of-range device, so the producer would
+  // hang instead of being told.
+  always_ff @(posedge ui_clk) begin
+    if (ui_rst_n && USE_EXTERNAL_SCHEDULER && effective_job_valid && !target_valid)
+      $fatal(1, "descriptor names device %0d; the fleet has %0d accelerators (0..%0d)",
+             effective_job_device_id, NUM_ACCEL, NUM_ACCEL-1);
+  end
   initial begin
-    if (K_DIM > K_MAX)
-      $fatal(1, "K_DIM %0d exceeds K_MAX %0d -- the golden would not match", K_DIM, K_MAX);
-
-    // External jobs must stay within the physical operand-buffer capacity.
-    // job_k_reg is zero before the first accepted job, so only validate it
-    // after the scheduler has actually accepted a descriptor.
-    if (USE_EXTERNAL_SCHEDULER && job_k_reg != 0 &&
-        ((job_device_id_reg < NUM_8X8 &&
-          job_k_reg > K_MAX_8X8) ||
-         (job_device_id_reg >= NUM_8X8 &&
-          job_device_id_reg < NUM_8X8 + NUM_4X4 &&
-          job_k_reg > K_MAX_4X4) ||
-         (job_device_id_reg >= NUM_8X8 + NUM_4X4) ||
-         (job_k_reg < 1)))
-      $fatal(1, "scheduler job device_id=%0d k=%0d is invalid",
-             job_device_id_reg, job_k_reg);
-    // The slab and tile strides are shifted, not multiplied.  If either stride
-    // stopped being a power of two the shift would silently address the wrong
-    // slab, so it is checked here rather than assumed in a comment.
-    if ((1 << RX_SHIFT) != RX_BYTES)
-      $fatal(1, "RX_BYTES %0d is not a power of two -- slab_addr shifts", RX_BYTES);
-    if ((1 << RXW_SHIFT) != RX_WORDS)
-      $fatal(1, "RX_WORDS %0d is not a power of two -- words_want shifts", RX_WORDS);
-    if ((1 << WBT_SHIFT_8X8) != WB_TILE_BYTES_8X8)
-      $fatal(1, "WB_TILE_BYTES_8X8 is not a power of two");
-
-    if ((1 << WBT_SHIFT_4X4) != WB_TILE_BYTES_4X4)
-      $fatal(1, "WB_TILE_BYTES_4X4 is not a power of two");
+    if ((N_BEATS % 16) != 0)
+      $fatal(1, "N_BEATS %0d is not a multiple of the seeder's burst", N_BEATS);
   end
 `endif
 

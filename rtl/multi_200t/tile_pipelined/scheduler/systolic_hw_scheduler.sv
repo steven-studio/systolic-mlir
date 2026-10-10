@@ -1,10 +1,12 @@
 // ============================================================================
 // systolic_hw_scheduler.sv
 //
-// Minimal hardware schedule controller.
+// Minimal hardware schedule controller, one execution context per physical
+// accelerator.
 //
-// The compiler supplies an already-decided schedule:
-//   - accelerator ID
+// The compiler supplies an already-decided schedule per tile:
+//   - which accelerator (implicit: the request arrives on that accelerator's
+//     own request line)
 //   - start cycle
 //   - expected compute duration
 //
@@ -18,60 +20,59 @@
 //
 // Those decisions belong to the compiler.
 //
-// Hardware responsibility:
-//   descriptor -> start pulse -> wait for done
+// Hardware responsibility, per accelerator:
+//   request -> (wait for the start cycle and for the datapath to be ready)
+//           -> one-cycle start pulse -> wait for that accelerator's done
+//
+// The contexts are independent: accelerator i's request, start, run and
+// completion never touch accelerator j's.  There is no shared "active
+// accelerator" -- that single slot is what used to serialize the fleet.  The
+// only shared state is cycle_counter, the schedule clock the start cycles are
+// measured against; it runs while any accelerator is busy.
 // ============================================================================
 
 module systolic_hw_scheduler #(
-    parameter integer NUM_ACCEL = 2,
-    parameter integer CYCLE_W   = 32,
-    parameter integer ACC_W     = (NUM_ACCEL <= 1) ? 1 : $clog2(NUM_ACCEL)
+    parameter integer NUM_ACCEL = 4,
+    parameter integer CYCLE_W   = 32
 )(
     input  wire                     clk,
     input  wire                     rst,
 
     // ------------------------------------------------------------------------
-    // Schedule descriptor interface.
+    // Per-accelerator tile requests.
     //
-    // A descriptor is accepted when desc_valid && desc_ready.
+    // req_valid[i] is a level held by accelerator i's context; it is taken
+    // (req_ack[i]) when context i here is idle, and the schedule fields are
+    // latched at that moment.
     // ------------------------------------------------------------------------
-    input  wire                     desc_valid,
-    output wire                     desc_ready,
-
-    input  wire [ACC_W-1:0]         desc_accelerator_id,
-    input  wire [CYCLE_W-1:0]       desc_start_cycle,
-    input  wire [CYCLE_W-1:0]       desc_compute_cycles,
+    input  wire [NUM_ACCEL-1:0]     req_valid,
+    output wire [NUM_ACCEL-1:0]     req_ready,
+    output wire [NUM_ACCEL-1:0]     req_ack,
+    input  wire [CYCLE_W-1:0]       req_start_cycle    [0:NUM_ACCEL-1],
+    input  wire [CYCLE_W-1:0]       req_compute_cycles [0:NUM_ACCEL-1],
 
     // ------------------------------------------------------------------------
-    // One-cycle start pulse for each physical accelerator.
-    // ------------------------------------------------------------------------
-    output reg  [NUM_ACCEL-1:0]     accelerator_start,
-
-    // Accelerator completion inputs.
+    // Accelerator/datapath readiness, per accelerator.
     //
-    // accelerator_done[i] corresponds to accelerator i.
-    // ------------------------------------------------------------------------
-    input  wire [NUM_ACCEL-1:0]     accelerator_done,
-
-    // Accelerator/datapath readiness.
-    //
-    // The scheduler must not consume its one-cycle accelerator_start pulse
-    // until the datapath is actually ready to accept the invocation.
-    // Otherwise the start pulse can be emitted during P_READ and lost.
+    // The start pulse is consumed only while the datapath is actually ready
+    // to accept the invocation; otherwise a one-cycle pulse could be lost.
     // ------------------------------------------------------------------------
     input  wire [NUM_ACCEL-1:0]     accelerator_ready,
 
-    // ------------------------------------------------------------------------
-    // Scheduler status.
-    // ------------------------------------------------------------------------
-    output reg                      busy,
-    output reg                      schedule_done,
+    // One-cycle start pulse for each physical accelerator.
+    output wire [NUM_ACCEL-1:0]     accelerator_start,
 
-    output reg [CYCLE_W-1:0]        cycle_counter,
+    // Completion inputs; accelerator_done[i] belongs to accelerator i only.
+    input  wire [NUM_ACCEL-1:0]     accelerator_done,
 
-    output reg [CYCLE_W-1:0]        active_start_cycle,
-    output reg [CYCLE_W-1:0]        active_compute_cycles,
-    output reg [ACC_W-1:0]          active_accelerator_id
+    // ------------------------------------------------------------------------
+    // Status, per accelerator, plus the shared schedule clock.
+    // ------------------------------------------------------------------------
+    output wire [NUM_ACCEL-1:0]     busy,
+    output wire [NUM_ACCEL-1:0]     schedule_done,
+    output reg  [CYCLE_W-1:0]       cycle_counter,
+    output wire [CYCLE_W-1:0]       active_start_cycle    [0:NUM_ACCEL-1],
+    output wire [CYCLE_W-1:0]       active_compute_cycles [0:NUM_ACCEL-1]
 );
 
     typedef enum logic [1:0] {
@@ -80,126 +81,109 @@ module systolic_hw_scheduler #(
         ST_RUN   = 2'd2
     } state_t;
 
-    state_t state;
-
-    // Accelerator completion may be a one-cycle pulse.  Keep it latched
-    // until the scheduler consumes it in ST_RUN, so completion cannot be
-    // lost at the ST_IDLE/ST_WAIT -> ST_RUN boundary.
-    logic accelerator_done_seen;
-
-    assign desc_ready = (state == ST_IDLE) && !busy;
-
+    // Global schedule clock: advances while any accelerator is busy.
     always_ff @(posedge clk) begin
-        if (rst) begin
-            state                  <= ST_IDLE;
+        if (rst)        cycle_counter <= '0;
+        else if (|busy) cycle_counter <= cycle_counter + 1'b1;
+    end
 
-            accelerator_start      <= '0;
+    genvar g;
+    generate
+    for (g = 0; g < NUM_ACCEL; g++) begin : CTX
+        state_t             state;
+        logic               busy_q;
+        logic               start_q;
+        logic               sched_done_q;
+        // Completion may be a one-cycle pulse; keep it until consumed in ST_RUN.
+        logic               done_seen;
+        logic [CYCLE_W-1:0] start_cycle_q;
+        logic [CYCLE_W-1:0] compute_cycles_q;
 
-            busy                   <= 1'b0;
-            schedule_done          <= 1'b0;
+        assign req_ready[g]             = (state == ST_IDLE);
+        assign req_ack[g]               = req_valid[g] && req_ready[g];
+        assign busy[g]                  = busy_q;
+        assign accelerator_start[g]     = start_q;
+        assign schedule_done[g]         = sched_done_q;
+        assign active_start_cycle[g]    = start_cycle_q;
+        assign active_compute_cycles[g] = compute_cycles_q;
 
-            cycle_counter          <= '0;
+        always_ff @(posedge clk) begin
+            if (rst) begin
+                state            <= ST_IDLE;
+                busy_q           <= 1'b0;
+                done_seen        <= 1'b0;
+                start_q          <= 1'b0;
+                sched_done_q     <= 1'b0;
+                start_cycle_q    <= '0;
+                compute_cycles_q <= '0;
+            end
+            else begin
+                // Start pulses and schedule_done are always one cycle.
+                start_q      <= 1'b0;
+                sched_done_q <= 1'b0;
 
-            active_start_cycle     <= '0;
-            active_compute_cycles  <= '0;
-            active_accelerator_id  <= '0;
+                // Capture this accelerator's completion independently of the
+                // FSM so a one-cycle pulse cannot be lost.
+                if (busy_q && accelerator_done[g])
+                    done_seen <= 1'b1;
 
-            accelerator_done_seen  <= 1'b0;
-        end
-        else begin
-            // Start pulses are always one cycle.
-            accelerator_start <= '0;
+                case (state)
+                    // --------------------------------------------------------
+                    // Take this accelerator's next tile.
+                    // --------------------------------------------------------
+                    ST_IDLE: begin
+                        if (req_ack[g]) begin
+                            start_cycle_q    <= req_start_cycle[g];
+                            compute_cycles_q <= req_compute_cycles[g];
+                            busy_q           <= 1'b1;
+                            done_seen        <= 1'b0;
 
-            // schedule_done is also a pulse.
-            schedule_done <= 1'b0;
-
-            // Global schedule clock.
-            if (busy)
-                cycle_counter <= cycle_counter + 1'b1;
-
-            // Accelerator completion is a pulse at the hardware boundary.
-            // Capture it independently of the scheduler FSM state so a
-            // one-cycle pulse cannot be lost.
-            if (busy && accelerator_done[active_accelerator_id])
-                accelerator_done_seen <= 1'b1;
-
-            case (state)
-
-                // ------------------------------------------------------------
-                // Accept a compiler-generated descriptor.
-                // ------------------------------------------------------------
-                ST_IDLE: begin
-                    busy <= 1'b0;
-
-                    if (desc_valid && desc_ready) begin
-                        active_start_cycle    <= desc_start_cycle;
-                        active_compute_cycles <= desc_compute_cycles;
-                        active_accelerator_id <= desc_accelerator_id;
-
-                        // Start a fresh completion window for this job.
-                        accelerator_done_seen <= 1'b0;
-
-                        busy <= 1'b1;
-
-                        if ((cycle_counter >= desc_start_cycle) &&
-                            accelerator_ready[desc_accelerator_id]) begin
-                            accelerator_start[desc_accelerator_id] <= 1'b1;
-                            state <= ST_RUN;
+                            if ((cycle_counter >= req_start_cycle[g]) &&
+                                accelerator_ready[g]) begin
+                                start_q <= 1'b1;
+                                state   <= ST_RUN;
+                            end
+                            else begin
+                                state <= ST_WAIT;
+                            end
                         end
-                        else begin
-                            state <= ST_WAIT;
+                    end
+
+                    // --------------------------------------------------------
+                    // Wait for the scheduled start cycle and for the datapath.
+                    // cycle_counter advances on this same edge, so the next
+                    // visible value is cycle_counter + 1.
+                    // --------------------------------------------------------
+                    ST_WAIT: begin
+                        if (((cycle_counter + 1'b1) >= start_cycle_q) &&
+                            accelerator_ready[g]) begin
+                            start_q <= 1'b1;
+                            state   <= ST_RUN;
                         end
                     end
-                end
 
-                // ------------------------------------------------------------
-                // Wait until the scheduled start cycle.
-                // ------------------------------------------------------------
-                ST_WAIT: begin
-                    // cycle_counter is incremented in the same clock edge
-                    // while busy.  Therefore, the next visible counter
-                    // value is cycle_counter + 1.  Fire the start pulse
-                    // when that next cycle reaches the requested
-                    // compiler schedule cycle.
-                    if (((cycle_counter + 1'b1) >= active_start_cycle) &&
-                        accelerator_ready[active_accelerator_id]) begin
-                        accelerator_start[active_accelerator_id] <= 1'b1;
-                        state <= ST_RUN;
+                    // --------------------------------------------------------
+                    // This accelerator is executing.  Completion comes from
+                    // the hardware; the analytical cost is not assumed exact.
+                    // --------------------------------------------------------
+                    ST_RUN: begin
+                        if (done_seen || accelerator_done[g]) begin
+                            $display("SCHEDDONE t=%0t accel=%0d accelerator_done=%b",
+                                     $time, g, accelerator_done);
+                            busy_q       <= 1'b0;
+                            sched_done_q <= 1'b1;
+                            state        <= ST_IDLE;
+                        end
                     end
-                end
 
-                // ------------------------------------------------------------
-                // Accelerator is executing.
-                //
-                // Completion comes from the actual hardware accelerator.
-                // We intentionally trust the hardware done signal rather
-                // than assuming the analytical cost is exact.
-                // ------------------------------------------------------------
-                ST_RUN: begin
-                    if (accelerator_done_seen ||
-                        accelerator_done[active_accelerator_id]) begin
-                        $display(
-                            "SCHEDDONE t=%0t state=%0d active_dev=%0d accelerator_done=%b busy=%0b",
-                            $time,
-                            state,
-                            active_accelerator_id,
-                            accelerator_done,
-                            busy
-                        );
-
-                        busy          <= 1'b0;
-                        schedule_done <= 1'b1;
-                        state         <= ST_IDLE;
+                    default: begin
+                        state  <= ST_IDLE;
+                        busy_q <= 1'b0;
                     end
-                end
-
-                default: begin
-                    state <= ST_IDLE;
-                    busy  <= 1'b0;
-                end
-
-            endcase
+                endcase
+            end
         end
     end
+    endgenerate
 
 endmodule
