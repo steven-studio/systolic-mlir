@@ -1,18 +1,21 @@
 # -----------------------------------------------------------------------------
 # dma_top_build.tcl -- build and program systolic_dma_top (bring-up step 3b).
 #
-#   vivado -mode batch -source dma_top_build.tcl -tclargs build   [v1|v2] [K_MAX]
-#   vivado -mode batch -source dma_top_build.tcl -tclargs program [v1|v2] [K_MAX]
-#   vivado -mode batch -source dma_top_build.tcl -tclargs all     [v1|v2] [K_MAX]   (both)
-#   vivado -mode batch -source dma_top_build.tcl -tclargs read    [v1|v2] [K_MAX]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs build   [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs program [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
+#   vivado -mode batch -source dma_top_build.tcl -tclargs all     [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]   (both)
+#   vivado -mode batch -source dma_top_build.tcl -tclargs read    [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
 #
 #   v1 (default) is the four-cycle operand writer into the single-port buffer;
-#   v2 the beat-wide path (USE_V2=1 in systolic_dma_top).  K_MAX defaults to
-#   16 (the 3b geometry); 256 is the paper's.  Each (variant, K_MAX) pair gets
-#   its own project directory, so the v1 and v2 bitstreams of one geometry
-#   coexist and 'read' opens the one you name.  The golden constants for each
-#   K_MAX are tabulated below; add a row from seed_ref.py before building a
-#   new one.
+#   v2 the beat-wide path (USE_V2=1 in systolic_dma_top).  K8 is K_MAX_8X8,
+#   the operand depth of every 8x8 context; K4 is K_MAX_4X4, the operand depth
+#   of every 4x4 context.  They are independent generics and are never folded
+#   back into one K_MAX.  Both default to 16 (the 3b geometry); 256 is the
+#   paper's.  Each (variant, K8, K4, fleet) tuple gets its own project
+#   directory, so bitstreams of different geometries coexist and 'read' opens
+#   the one you name.  The golden constants are tabulated below per K8 (the
+#   payload depth the 8x8 context runs); add a row from seed_ref.py before
+#   building a new K8.
 #
 # This is bringup_build.tcl (3a) with the array added: the MIG and the DMA read
 # path from that script, plus the floating-point IP and the thirteen RTL files
@@ -48,16 +51,23 @@ set PROJ_NAME  systolic_dma
 set TOP        systolic_dma_top
 set JOBS       8
 
-# ---- arguments: mode [variant] [K_MAX] [n_inv] [NUM_8X8] [NUM_4X4] ----
-# n_inv is a run-time invocation count and does not change the synthesized
-# fleet.  NUM_8X8 and NUM_4X4 are build-time fleet parameters: changing them
-# changes how many physical accelerator instances are synthesized.
+# ---- arguments: mode [variant] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4] ----
+# K8 = K_MAX_8X8 and K4 = K_MAX_4X4 are build-time operand depths, one per
+# accelerator geometry; each goes only to its own contexts (see the generic
+# list in build_body).  n_inv is a run-time invocation count and does not
+# change the synthesized fleet.  NUM_8X8 and NUM_4X4 are build-time fleet
+# parameters: changing them changes how many physical accelerator instances
+# are synthesized.
+#
+# Old syntax (one K_MAX for every context):  mode variant KMAX n_inv NUM_8X8 NUM_4X4
+# New syntax:                                mode variant K8 K4 n_inv NUM_8X8 NUM_4X4
 set MODE     [lindex $argv 0]
 set VARIANT  [lindex $argv 1]
-set KARG     [lindex $argv 2]
-set NARG     [lindex $argv 3]
-set NUM_8X8  [lindex $argv 4]
-set NUM_4X4  [lindex $argv 5]
+set K8ARG    [lindex $argv 2]
+set K4ARG    [lindex $argv 3]
+set NARG     [lindex $argv 4]
+set NUM_8X8  [lindex $argv 5]
+set NUM_4X4  [lindex $argv 6]
 
 if {$NARG eq ""}    { set NARG 1 }
 if {$NUM_8X8 eq ""} { set NUM_8X8 1 }
@@ -82,21 +92,55 @@ if {$VARIANT ne "v1" && $VARIANT ne "v2"} {
 }
 set USE_V2 [expr {$VARIANT eq "v2" ? 1 : 0}]
 
-# Geometry.  K_MAX = 16 is the 3b geometry: the golden confirmed on the board
-# over UART, a 1 KiB payload, a build measured in minutes.  K_MAX = 256 is the
-# paper's: 16 KiB, 1024 beats, the geometry every Table 4 number is quoted at.
-# K_DIM = K_MAX: one fold of the full depth.
+# Geometry.  K8 = K_MAX_8X8 (the 8x8 contexts' operand depth), K4 = K_MAX_4X4
+# (every 4x4 context's operand depth).  16 is the 3b geometry: the golden
+# confirmed on the board over UART, a 1 KiB payload, a build measured in
+# minutes.  256 is the paper's: 16 KiB, 1024 beats, the geometry every Table 4
+# number is quoted at.  K_DIM = K8: one fold of the 8x8's full depth (the
+# legacy run and every counter 'read' reports belong to context 0, the 8x8;
+# systolic_dma_top clamps K_DIM to K4 for the 4x4 contexts itself).
+#
+# The RTL's own limits on either value -- a power of two, at least 16 -- are
+# checked by the simulation benches, not here; this script passes the numbers
+# through unchanged.
 set NARR   8
-set KMAX   [expr {$KARG eq "" ? 16 : $KARG}]
-set KDIM   $KMAX
+set K8     [expr {$K8ARG eq "" ? 16 : $K8ARG}]
+set K4     [expr {$K4ARG eq "" ? 16 : $K4ARG}]
+if {![string is integer -strict $K8] || $K8 < 1} {
+    error "K8 (K_MAX_8X8) must be a positive integer, got '$K8'"
+}
+if {![string is integer -strict $K4] || $K4 < 1} {
+    error "K4 (K_MAX_4X4) must be a positive integer, got '$K4'"
+}
+set KDIM   $K8
 
-# From:  python3 tools/seed_ref.py --mode 1 --kmax <K_MAX>
+# From:  python3 tools/seed_ref.py --mode 1 --kmax <K8>
 # Passed down as generics so this script is the single source of truth; the
 # defaults in systolic_dma_top.sv agree for 16, but only one place should
 # decide.  These are folded constants in hardware with no net behind them, so
 # they are NOT probed -- 'read' prints them from here.  3a shipped a bitstream
 # that printed "expected 0x" because that lesson had not been learned yet.
 # EXPECT_CYC = K_DIM + 2(N-1) + H with H = 95 measured on paper-hw-v1.
+#
+# ONE GOLDEN ROW PER BUILD, INDEXED BY K8.  The table was written for a single
+# K_MAX and that assumption is kept, not hidden.  What each constant does in
+# THIS build (USE_EXTERNAL_SCHEDULER=1'b1, every job's k is a run-time field):
+#   EXPECT_WR_CHK  reaches every context as a generic, but with the external
+#                  scheduler a context derives want_wr from its own per-k table
+#                  (systolic_accel_context: expected_wr_chk_for_k, k = 16 or
+#                  32, 0 otherwise) -- the generic is inert here and only
+#                  drives the legacy (USE_EXTERNAL_SCHEDULER=0) path.
+#   EXPECT_C_CHK   drives want_c in the 8x8 contexts only (the top hands the
+#                  4x4 contexts 0), so led[5] / c_match is the 8x8's and is
+#                  right only when the 8x8's jobs have k = K8.
+#   EXPECT_CYC     is 'read''s expectation for cyc_latched, context 0's: again
+#                  k = K8.
+# So the run checks 'read' makes -- chk_wr, chk_c, cycles, all read from
+# context 0 -- are the 8x8's at a job depth of K8.  Nothing here checks a 4x4
+# tile, and the RTL's per-k table means wr_match on the board can only be
+# observed for k = 16 or 32 jobs.  A per-geometry golden would need a second
+# EXPECT_C_CHK generic in systolic_dma_top, i.e. an RTL change, which this
+# script does not make.
 array set GOLDEN {
     16  {3f880780 c74b2660 125}
     32  {805c1f00 e906e560 141}
@@ -109,31 +153,35 @@ array set GOLDEN {
 # invocations, mod 2^32.  seed_ref.py's own mode-0 self-check only reproduces
 # the board's 0x387fdc00 at --kmax 16, where that constant was measured; a
 # "self-check FAILED" line from any other geometry says nothing about this row.
-if {![info exists GOLDEN($KMAX)]} {
-    error "no golden constants tabulated for K_MAX=$KMAX -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $KMAX\nand add a GOLDEN row"
+if {![info exists GOLDEN($K8)]} {
+    error "no golden constants tabulated for K8 = K_MAX_8X8 = $K8 -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $K8\nand add a GOLDEN row"
 }
-lassign $GOLDEN($KMAX) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
 
-# One project per (variant, K_MAX) so bitstreams coexist and 'read' cannot open
-# the wrong one.  The pre-Sep-10 3b build lives in plain systolic_dma/ and is
-# left alone.
-set PROJ_DIR   $::env(HOME)/work/vivado/tile_pipelined/systolic_dma_${VARIANT}_k${KMAX}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
+# One project per (variant, K8, K4, NUM_8X8, NUM_4X4) so bitstreams of
+# different geometries coexist and 'read' cannot open the wrong one; K8 and K4
+# are both in the name, so (32,16) and (16,32) never overwrite each other.
+# The pre-Sep-10 3b build lives in plain systolic_dma/ and is left alone; the
+# single-K_MAX projects of the earlier syntax (systolic_dma_v1_k16_...) are
+# left alone as well.
+set PROJ_DIR   $::env(HOME)/work/vivado/tile_pipelined/systolic_dma_${VARIANT}_k8_${K8}_k4_${K4}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
 
 # Where the result tile is written back.  One page clear of the operand image,
-# which is K_MAX*8*N bytes long (1 KiB at K_MAX = 16, 16 KiB at 256), so that
-# an address error in either direction shows up as a wrong image rather than
-# as one quietly overwriting the other.  4096 was fine for 3b; at K_MAX = 256
-# it would land INSIDE the operand image, so it is computed from the geometry.
+# which is K_MAX_8X8*8*N bytes long (1 KiB at K8 = 16, 16 KiB at 256; the top's
+# RX_BYTES is sized by K_MAX_8X8), so that an address error in either direction
+# shows up as a wrong image rather than as one quietly overwriting the other.
+# 4096 was fine for 3b; at K8 = 256 it would land INSIDE the operand image, so
+# it is computed from the geometry.
 #
 # It is no longer a generic.  The operand image is n_inv slabs long and n_inv is
 # a run-time number, so systolic_dma_top computes the base from the n_inv it
 # latched and this is only what the script PRINTS -- one place decides, and it
 # is the one that knows how many slabs were seeded.
 proc wb_base {n} {
-    global KMAX NARR
-    expr {$n * $KMAX * 8 * $NARR + 4096}
+    global K8 NARR
+    expr {$n * $K8 * 8 * $NARR + 4096}
 }
-set WB_BASE       [expr {$KMAX * 8 * $NARR + 4096}]
+set WB_BASE       [expr {$K8 * 8 * $NARR + 4096}]
 
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../tile_pipelined
@@ -158,6 +206,8 @@ set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 # build made from a different set of sources is not exercising the same array.
 set SRC [list \
     $SCRIPT_DIR/systolic_dma_top.sv \
+    $SCRIPT_DIR/systolic_accel_context.sv \
+    $SCRIPT_DIR/dma_engine_multi.sv \
     $SCRIPT_DIR/dpti_host_rx.sv \
     $SCRIPT_DIR/dpti_byte_rx.sv \
     $SCRIPT_DIR/dpti_write32_decoder.sv \
@@ -231,7 +281,7 @@ proc build {} {
 
 proc build_body {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
-    global FP_DIR FP_IPS HOLD_TCL NARR KMAX KDIM EXPECT_WR_CHK EXPECT_C_CHK
+    global FP_DIR FP_IPS HOLD_TCL NARR K8 K4 KDIM EXPECT_WR_CHK EXPECT_C_CHK
     global WB_BASE USE_V2 VARIANT
     global NUM_8X8 NUM_4X4
     global SCRIPT_DIR
@@ -309,18 +359,24 @@ proc build_body {} {
     add_files -fileset constrs_1 -norecurse $XDC
     set_property top $TOP [current_fileset]
 
-    # Geometry and the golden constants come from this script.  systolic_dma_top
-    # passes DMA_PORT / CYCLE_COUNTER / DEBUG_MARKERS down to systolic_uart_top
-    # itself, so those are not generics here -- they are structural.
+    # Geometry and the golden constants come from this script.  K_MAX_8X8 reaches
+    # only the ACC_8X8 contexts and K_MAX_4X4 only the ACC_4X4 contexts: the top
+    # instantiates systolic_accel_context with .K_MAX(K_MAX_8X8) in ACC_8X8 and
+    # .K_MAX(K_MAX_4X4) in ACC_4X4, and nothing recombines them.  There is no
+    # K_MAX generic on the top any more.
     set_property generic [list \
-        N=$NARR K_MAX=$KMAX K_DIM=$KDIM \
+        N=$NARR K_MAX_8X8=$K8 K_MAX_4X4=$K4 K_DIM=$KDIM \
         NUM_8X8=$NUM_8X8 NUM_4X4=$NUM_4X4 \
         USE_EXTERNAL_SCHEDULER=1'b1 \
         USE_LEGACY_JOB_PORTS=1'b0 \
         USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
         EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
-    puts "building $VARIANT at N=$NARR K_MAX=$KMAX K_DIM=$KDIM (USE_V2=$USE_V2), project $PROJ_DIR"
+    puts "building $VARIANT at N=$NARR (USE_V2=$USE_V2), fleet ${NUM_8X8}x8x8 + ${NUM_4X4}x4x4, project $PROJ_DIR"
+    puts "K_MAX_8X8=$K8"
+    puts "K_MAX_4X4=$K4"
+    puts "K_DIM=$KDIM  (= K8: one fold of the 8x8's full depth; the top clamps it to K4 for the 4x4s)"
+    puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC"
 
     generate_target all [get_ips]
     update_compile_order -fileset sources_1
@@ -370,7 +426,7 @@ proc build_body {} {
     set wns  [get_property STATS.WNS [get_runs impl_1]]
     set whs  [get_property STATS.WHS [get_runs impl_1]]
     puts "\n=== bitstream ================================================="
-    puts "  $VARIANT  N=$NARR K_MAX=$KMAX"
+    puts "  $VARIANT  N=$NARR  K_MAX_8X8=$K8  K_MAX_4X4=$K4  fleet ${NUM_8X8}x8x8+${NUM_4X4}x4x4"
     foreach b [glob -nocomplain $dir/*.bit] { puts "  $b" }
     puts "  WNS = $wns ns"
     puts "  WHS = $whs ns   (already includes 0.150 ns of forced hold pessimism)"
@@ -386,7 +442,7 @@ proc build_body {} {
 
 # -----------------------------------------------------------------------------
 proc program {} {
-    global PROJ_DIR PROJ_NAME VARIANT KMAX
+    global PROJ_DIR PROJ_NAME VARIANT K8 K4 NARG NUM_8X8 NUM_4X4
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
     # harmless here (nothing is regenerated) but is exactly the kind of warning
@@ -428,7 +484,7 @@ proc program {} {
     puts "  led\[6\] like any other fault."
     puts ""
     puts "  Then:"
-    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $KMAX"
+    puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $K8 $K4 $NARG $NUM_8X8 $NUM_4X4"
     puts ""
     puts "  This bitstream has NO UART -- uart_check.py will time out against it."
     puts "  The independent reference lives in its own bitstream: program a"
@@ -565,7 +621,7 @@ proc arm_run {v n} {
 }
 
 proc read_vio {} {
-    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC KMAX NARR KDIM
+    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC K8 K4 NARR KDIM
     global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
@@ -665,8 +721,9 @@ proc read_vio {} {
     }
 
     # Every expectation below is a RUN total: $nrun invocations, each seeding
-    # and reading the same slab pattern into the same buffers.
-    set want_words [expr {$nrun * $KMAX * 2 * $NARR}]
+    # and reading the same slab pattern into the same buffers.  The probes are
+    # context 0's -- the 8x8 -- so the payload depth is K8 (= K_DIM).
+    set want_words [expr {$nrun * $K8 * 2 * $NARR}]
     # 0x$VAR does not substitute inside a braced expr -- Tcl parses the
     # expression before the variable is there.  Make the string first.
     set wr_hex 0x$EXPECT_WR_CHK
@@ -675,7 +732,7 @@ proc read_vio {} {
     set want_cchk  [format %08x [expr {($nrun * $c_hex)  & 0xffffffff}]]
 
     puts "\n=== bring-up step 3b =========================================="
-    puts "  $VARIANT operand path   N = $NARR   K_MAX = $KMAX   k_dim = $KDIM"
+    puts "  $VARIANT operand path   N = $NARR   K_MAX_8X8 = $K8   K_MAX_4X4 = $K4   k_dim = $KDIM   (probes read context 0, the 8x8)"
     puts ""
     puts "  init_calib_complete = $calib     memory alive"
     puts "  seed written        = $sd"
@@ -687,7 +744,7 @@ proc read_vio {} {
     puts "     tb/run_top_sim.sh; reading the image back on the board is the"
     puts "     next step and is not in this bitstream.)"
     puts "  invocations         = $nrun     (folds_done $fdone)"
-    puts "  words written       = $wrds     (expect $want_words = n_inv*K_MAX*2*N)"
+    puts "  words written       = $wrds     (expect $want_words = n_inv*K_MAX_8X8*2*N)"
     puts ""
     set cyc_ok [expr {$cyc ne "" && $cyc == $EXPECT_CYC}]
 
@@ -795,9 +852,9 @@ proc read_vio {} {
     global CSV
     set csv [open $CSV a]
     if {[file size $CSV] == 0} {
-        puts $csv "variant,k_max,k_dim,n_inv,fill,compute,wb,total,t_span,eng_busy,rdy_stall,r_stall,chk_wr,chk_c,wr_match,c_match,any_err"
+        puts $csv "variant,k_max_8x8,k_max_4x4,k_dim,n_inv,fill,compute,wb,total,t_span,eng_busy,rdy_stall,r_stall,chk_wr,chk_c,wr_match,c_match,any_err"
     }
-    puts $csv "$VARIANT,$KMAX,$KDIM,$nrun,$fill,$ctot,$wbcyc,[expr {$fill+$ctot+$wbcyc}],$tspan,$ebusy,$erdy,$erst,$wchk,$cchk,$wm,$cm,$er"
+    puts $csv "$VARIANT,$K8,$K4,$KDIM,$nrun,$fill,$ctot,$wbcyc,[expr {$fill+$ctot+$wbcyc}],$tspan,$ebusy,$erdy,$erst,$wchk,$cchk,$wm,$cm,$er"
     close $csv
     puts "  appended to $CSV"
 
