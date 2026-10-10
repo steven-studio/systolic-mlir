@@ -544,6 +544,267 @@ wire        dpti_oe_n;
     end
   endtask
 
+  // ==========================================================================
+  // Full-fleet concurrent-execution acceptance test  (+hetero_full_concurrent)
+  //
+  // Selected at run time by  run_top_sim.sh <v> <K> <n_inv> 1 <K8> <K4>
+  // hetero_full_concurrent.  Nothing below runs in any other mode.
+  //
+  // Workload: job q -> device q for q = 0..3 (the 8x8 and all three 4x4s),
+  // every job through the real external-scheduler path, submitted back to
+  // back with only the job_valid/job_ready handshake between them: job q+1
+  // is presented the cycle after job q is accepted, never after anything q
+  // computes or completes.  Each job writes its own C region.
+  //
+  // The COMPUTE interval of array q is measured on the same boundary signals
+  // as the two-way test: start = the first operand valid into that array
+  // (a_valid_to_*[q][0] / b_valid_to_*[q][0], the feeder's a_valid_in /
+  // b_valid_in into ACC_*[q].u_acc, driven only while the feeder is in
+  // ST_FEED after that array's fold_start), done = that array's own
+  // c_valid_out publish pulse.  Neither is touched by the DMA fill (which
+  // writes the operand buffers through a_wr/b_wr), by descriptor acceptance
+  // (job_fire) or by the write-back (wb_desc_valid / src_valid).
+  //
+  //   overlap_start = max(start8, start40, start41, start42)
+  //   overlap_end   = min(done8,  done40,  done41,  done42)
+  //   PASS  iff  overlap_start < overlap_end      (all four arrays computing
+  //                                                at the same time)
+  //
+  // Also asserted: every device accepted exactly once, in order, with its
+  // own job id; one scheduler start/done, one adapter fold_start and one
+  // c_valid_out per array (no duplicate dispatch); each context completed its
+  // own job (device and job id read from that context); each job's operand
+  // words and chk_wr; one write-back per context, to that job's own C region;
+  // each tile in memory equal to the producing array's own C registers; and
+  // the three 4x4 tiles equal to the top-left 4x4 block of the 8x8 tile,
+  // which the same operands make them.
+  // ==========================================================================
+  localparam logic [63:0] HF_C_BASE [0:3] = '{64'h0000_1000, 64'h0000_2000,
+                                             64'h0000_3000, 64'h0000_4000};
+
+  // ---- passive capture for the full-fleet test: counts and identities -----
+  integer      hf_n_fire = 0;                 // every job_fire, uncapped
+  integer      hf_accept      [0:3];          // cycle of the n-th acceptance
+  integer      hf_accept_dev  [0:3];          // effective_job_device_id then
+  integer      hf_accept_job  [0:3];          // effective_job_id then
+  integer      hf_n_sstart    [0:3];          // scheduler accelerator_start pulses
+  integer      hf_n_sdone     [0:3];          // scheduler accelerator_done pulses
+  integer      hf_n_fs        [0:3];          // adapter fold_start pulses, by device
+  integer      hf_n_cv        [0:3];          // c_valid_out pulses, by device
+  integer      hf_n_jobdone   [0:3];          // ctx_job_done pulses, by context
+  integer      hf_jobid_at_done [0:3];        // ctx_job_id at that context's job_done
+  integer      hf_n_wb        [0:3];          // write-back descriptors granted, by owner
+  integer      hf_wb_cyc      [0:3];          // cycle of that grant
+  logic [31:0] hf_wb_addr     [0:3];          // tile address of that grant
+
+  initial begin
+    for (int q = 0; q < 4; q++) begin
+      hf_accept[q] = -1; hf_accept_dev[q] = -1; hf_accept_job[q] = -1;
+      hf_n_sstart[q] = 0; hf_n_sdone[q] = 0; hf_n_fs[q] = 0; hf_n_cv[q] = 0;
+      hf_n_jobdone[q] = 0; hf_jobid_at_done[q] = -1;
+      hf_n_wb[q] = 0; hf_wb_cyc[q] = -1; hf_wb_addr[q] = 32'hFFFF_FFFF;
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    if (rstn) begin
+      if (dut.job_fire) begin
+        hf_n_fire <= hf_n_fire + 1;
+        if (hf_n_fire < 4) begin
+          hf_accept[hf_n_fire]     <= hc_cyc;
+          hf_accept_dev[hf_n_fire] <= dut.effective_job_device_id;
+          hf_accept_job[hf_n_fire] <= dut.effective_job_id;
+        end
+      end
+      for (int q = 0; q < 4; q++) begin
+        if (dut.u_hw_scheduler.accelerator_start[q]) hf_n_sstart[q] <= hf_n_sstart[q] + 1;
+        if (dut.u_hw_scheduler.accelerator_done[q])  hf_n_sdone[q]  <= hf_n_sdone[q] + 1;
+        if (dut.ctx_job_done[q]) begin
+          hf_n_jobdone[q]     <= hf_n_jobdone[q] + 1;
+          hf_jobid_at_done[q] <= dut.ctx_job_id[q];
+        end
+      end
+      if (dut.scheduler_fold_start_8x8[0]) hf_n_fs[0] <= hf_n_fs[0] + 1;
+      if (dut.c_valid_out_8x8[0])          hf_n_cv[0] <= hf_n_cv[0] + 1;
+      for (int q = 0; q < 3; q++) begin
+        if (dut.scheduler_fold_start_4x4[q]) hf_n_fs[1+q] <= hf_n_fs[1+q] + 1;
+        if (dut.c_valid_out_4x4[q])          hf_n_cv[1+q] <= hf_n_cv[1+q] + 1;
+      end
+      // The write-back arbiter's grant: owner and the tile address it moves.
+      if (dut.wb_eng_accept) begin
+        hf_n_wb[dut.wb_grant_idx]   <= hf_n_wb[dut.wb_grant_idx] + 1;
+        hf_wb_cyc[dut.wb_grant_idx] <= hc_cyc;
+        hf_wb_addr[dut.wb_grant_idx] <= 32'(dut.wb_tile_addr);
+      end
+    end
+  end
+
+  task automatic run_hetero_full_concurrent();
+    integer k8, k4, kq, ov_lo, ov_hi, tile_words, n_err_before;
+    integer st [0:3];
+    integer dn [0:3];
+    logic   overlap;
+    begin
+      k8 = job_k;
+      k4 = (job_k > K_MAX_4X4) ? K_MAX_4X4 : job_k;   // within the 4x4s' own K_MAX
+      $display("== hetero_full_concurrent: job q -> device q, q = 0..3 (8x8 k=%0d; 4x4 #0/#1/#2 k=%0d); C @0x%0h 0x%0h 0x%0h 0x%0h; all four back to back ==",
+               k8, k4, HF_C_BASE[0], HF_C_BASE[1], HF_C_BASE[2], HF_C_BASE[3]);
+
+      // Four submissions, only the valid/ready handshake between them.
+      submit_job_at(32'd0, 32'd0, k8, HF_C_BASE[0]);
+      submit_job_at(32'd1, 32'd1, k4, HF_C_BASE[1]);
+      submit_job_at(32'd2, 32'd2, k4, HF_C_BASE[2]);
+      submit_job_at(32'd3, 32'd3, k4, HF_C_BASE[3]);
+
+      // Deterministic termination: all four jobs closed and all four
+      // contexts back in P_DONE.
+      waited = 0;
+      while (!(hc_n_jobdone == 4 &&
+               dut.ctx_phase[0] == 4'd7 && dut.ctx_phase[1] == 4'd7 &&
+               dut.ctx_phase[2] == 4'd7 && dut.ctx_phase[3] == 4'd7) &&
+             waited < MAX_CYC) begin
+        @(posedge clk);
+        waited = waited + 1;
+      end
+      repeat (20) @(posedge clk);
+
+      st[0] = hc_start8;  dn[0] = hc_done8;
+      for (int q = 0; q < 3; q++) begin
+        st[1+q] = hc_start4[q];  dn[1+q] = hc_done4[q];
+      end
+
+      // ---- closure --------------------------------------------------------
+      for (int q = 0; q < 4; q++) begin
+        if (hc_jobdone[q] < 0 || dut.ctx_phase[q] !== 4'd7) begin
+          $display("  FAIL: device %0d did not complete within %0d cycles (job_done %0d, phase %0d)",
+                   q, MAX_CYC, hc_jobdone[q], dut.ctx_phase[q]);
+          errors = errors + 1;
+        end
+      end
+
+      // ---- acceptance: four descriptors, in order, each to its own device --
+      if (hf_n_fire != 4) begin
+        $display("  FAIL: %0d descriptors accepted, want exactly 4", hf_n_fire);
+        errors = errors + 1;
+      end
+      for (int q = 0; q < 4; q++) begin
+        if (hf_accept[q] < 0 || hf_accept_dev[q] != q || hf_accept_job[q] != q) begin
+          $display("  FAIL: acceptance %0d: cycle %0d device %0d job %0d (want device %0d job %0d)",
+                   q, hf_accept[q], hf_accept_dev[q], hf_accept_job[q], q, q);
+          errors = errors + 1;
+        end
+      end
+
+      // ---- dispatch: one scheduler start/done, one fold_start, one publish
+      //      per accelerator -- every array used, none used twice ------------
+      for (int q = 0; q < 4; q++) begin
+        if (hc_sched_start[q] < 0 || hc_sched_done[q] < 0 ||
+            hf_n_sstart[q] != 1 || hf_n_sdone[q] != 1 ||
+            hf_n_fs[q] != 1 || hf_n_cv[q] != 1) begin
+          $display("  FAIL: accelerator %0d: sched_start %0d (x%0d) sched_done %0d (x%0d) fold_start x%0d c_valid_out x%0d (want one of each)",
+                   q, hc_sched_start[q], hf_n_sstart[q], hc_sched_done[q], hf_n_sdone[q],
+                   hf_n_fs[q], hf_n_cv[q]);
+          errors = errors + 1;
+        end
+      end
+
+      // ---- compute intervals ----------------------------------------------
+      for (int q = 0; q < 4; q++) begin
+        if (st[q] < 0 || dn[q] <= st[q]) begin
+          $display("  FAIL: array %0d never computed (start %0d done %0d)", q, st[q], dn[q]);
+          errors = errors + 1;
+        end
+      end
+
+      // ---- each job in its own context, with its own operand payload -------
+      for (int q = 0; q < 4; q++) begin
+        kq = (q == 0) ? k8 : k4;
+        if (hf_n_jobdone[q] != 1 || hc_dev_at_done[q] != q || hf_jobid_at_done[q] != q ||
+            hc_words[q] != kq * 2 * N || hc_chk[q] != expected_wr_chk(kq)) begin
+          $display("  FAIL: context %0d: job_done x%0d, device %0d job %0d at completion, words %0d chk %h (want device %0d job %0d, %0d words, chk %h)",
+                   q, hf_n_jobdone[q], hc_dev_at_done[q], hf_jobid_at_done[q], hc_words[q], hc_chk[q],
+                   q, q, kq * 2 * N, expected_wr_chk(kq));
+          errors = errors + 1;
+        end
+      end
+
+      // ---- write-back: one tile per context, to that job's own region -----
+      for (int q = 0; q < 4; q++) begin
+        if (hf_n_wb[q] != 1 || hf_wb_addr[q] != HF_C_BASE[q][31:0]) begin
+          $display("  FAIL: context %0d wrote back x%0d, last tile at 0x%0h (want one tile at 0x%0h)",
+                   q, hf_n_wb[q], hf_wb_addr[q], HF_C_BASE[q]);
+          errors = errors + 1;
+        end
+      end
+
+      // ---- results: each tile in memory equals its array's own C registers
+      for (i = 0; i < 64; i = i + 1) begin
+        got  = dut.u_mig_7series_0.mem[(HF_C_BASE[0] / 4) + i];
+        want = dut.c_out_8x8[0][i / 8][i % 8];
+        if (got !== want) begin
+          if (errors < 12) $display("  FAIL: 8x8 tile word %0d: memory %h, array %h", i, got, want);
+          errors = errors + 1;
+        end
+      end
+      for (int q = 0; q < 3; q++) begin
+        for (i = 0; i < 16; i = i + 1) begin
+          got  = dut.u_mig_7series_0.mem[(HF_C_BASE[1+q] / 4) + i];
+          want = dut.c_out_4x4[q][i / 4][i % 4];
+          if (got !== want) begin
+            if (errors < 12) $display("  FAIL: 4x4 #%0d tile word %0d: memory %h, array %h", q, i, got, want);
+            errors = errors + 1;
+          end
+        end
+      end
+      // The same operands went to every array (lanes 0..3 of the same
+      // image), so each 4x4 tile must equal the top-left 4x4 of the 8x8 tile.
+      n_err_before = errors;
+      for (int q = 0; q < 3; q++) begin
+        for (i = 0; i < 16; i = i + 1) begin
+          got  = dut.u_mig_7series_0.mem[(HF_C_BASE[1+q] / 4) + i];
+          want = dut.u_mig_7series_0.mem[(HF_C_BASE[0] / 4) + (i / 4) * 8 + (i % 4)];
+          if (got !== want) begin
+            if (errors < 12) $display("  FAIL: 4x4 #%0d C[%0d][%0d] = %h, the 8x8's C[%0d][%0d] = %h",
+                                      q, i / 4, i % 4, got, i / 4, i % 4, want);
+            errors = errors + 1;
+          end
+        end
+      end
+      if (errors == n_err_before)
+        $display("  all three 4x4 tiles equal the top-left 4x4 block of the 8x8 tile");
+
+      if (dut.err_w_owner !== 1'b0 || dut.any_err !== 1'b0 || dut.u_mig_7series_0.errors != 0) begin
+        $display("  FAIL: err_w_owner %0b any_err %0b memory-model errors %0d",
+                 dut.err_w_owner, dut.any_err, dut.u_mig_7series_0.errors);
+        errors = errors + 1;
+      end
+
+      // ---- the record (cycles of clk; t = cycle * 10 ns) -----------------
+      $display("  HETERO-FULL 8x8   (dev 0): accept=%0d  sched_start=%0d  fold_start=%0d  COMPUTE=[%0d, %0d]  sched_done=%0d  wb=%0d@0x%0h  job_done=%0d",
+               hf_accept[0], hc_sched_start[0], hc_fs8, st[0], dn[0], hc_sched_done[0], hf_wb_cyc[0], hf_wb_addr[0], hc_jobdone[0]);
+      for (int q = 0; q < 3; q++)
+        $display("  HETERO-FULL 4x4#%0d (dev %0d): accept=%0d  sched_start=%0d  fold_start=%0d  COMPUTE=[%0d, %0d]  sched_done=%0d  wb=%0d@0x%0h  job_done=%0d",
+                 q, 1 + q, hf_accept[1+q], hc_sched_start[1+q], hc_fs4[q], st[1+q], dn[1+q], hc_sched_done[1+q],
+                 hf_wb_cyc[1+q], hf_wb_addr[1+q], hc_jobdone[1+q]);
+
+      // ---- the four-way concurrency assertion -----------------------------
+      ov_lo = st[0];  ov_hi = dn[0];
+      for (int q = 1; q < 4; q++) begin
+        if (st[q] > ov_lo) ov_lo = st[q];
+        if (dn[q] < ov_hi) ov_hi = dn[q];
+      end
+      overlap = (st[0] >= 0 && st[1] >= 0 && st[2] >= 0 && st[3] >= 0) && (ov_lo < ov_hi);
+      $display("  HETERO-FULL overlap_start = max(starts) = %0d   overlap_end = min(dones) = %0d", ov_lo, ov_hi);
+      if (overlap)
+        $display("  HETERO-FULL overlap: [%0d, %0d] = %0d cycles -> FOUR-WAY CONCURRENT", ov_lo, ov_hi, ov_hi - ov_lo);
+      else begin
+        $display("  HETERO-FULL overlap: none (max(starts) %0d >= min(dones) %0d) -> NOT four-way concurrent", ov_lo, ov_hi);
+        $display("  FAIL: no four-way COMPUTE overlap: need max(start8,start40,start41,start42) < min(done8,done40,done41,done42)");
+        errors = errors + 1;
+      end
+    end
+  endtask
+
   initial begin
 
     if (!$value$plusargs("job_k=%d", job_k))
@@ -592,6 +853,15 @@ wire        dpti_oe_n;
     // verdict; nothing of the regression flow below runs in this mode.
     if (USE_EXTERNAL_SCHEDULER && $test$plusargs("hetero_concurrent")) begin
       run_hetero_concurrent();
+      $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);
+      if (errors != 0) $fatal(1);
+      $finish;
+    end
+
+    // Full-fleet concurrent-execution test: all four accelerators, its own
+    // workload, checks and verdict; nothing of the regression flow below runs.
+    if (USE_EXTERNAL_SCHEDULER && $test$plusargs("hetero_full_concurrent")) begin
+      run_hetero_full_concurrent();
       $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);
       if (errors != 0) $fatal(1);
       $finish;

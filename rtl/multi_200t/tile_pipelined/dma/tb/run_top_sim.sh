@@ -13,10 +13,16 @@
 #                                 # (device 1) back to back through the
 #                                 # external scheduler; PASS only if the two
 #                                 # arrays' COMPUTE intervals overlap in time
+#   ./run_top_sim.sh v1 16 1 1 32 16 hetero_full_concurrent
+#                                 # full-fleet test: job q -> device q for
+#                                 # q = 0..3 (the 8x8 and all three 4x4s),
+#                                 # back to back; PASS only if
+#                                 # max(starts) < min(dones) over all four
+#                                 # arrays' COMPUTE intervals
 #
 # The seventh argument selects the test: "regress" (default -- the existing
-# flow, unchanged) or "hetero_concurrent".  It is a run-time plusarg to the
-# same bench; the build is identical.
+# flow, unchanged), "hetero_concurrent" or "hetero_full_concurrent".  It is a
+# run-time plusarg to the same bench; the build is identical.
 #
 # The third argument is the invocation count.  It is not a generic: the design
 # takes it from vio_0's output probe, which xil_stubs drives from +n_inv, for
@@ -51,7 +57,7 @@ TEST="${7:-regress}"
 case "$VARIANT" in
   v1) GEN="-GUSE_V2=0 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
   v2) GEN="-GUSE_V2=1 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
-  *)  echo "usage: $0 [v1|v2] [K_MAX] [NINV] [SCHED] [K_MAX_8X8] [K_MAX_4X4] [regress|hetero_concurrent]"; exit 2 ;;
+  *)  echo "usage: $0 [v1|v2] [K_MAX] [NINV] [SCHED] [K_MAX_8X8] [K_MAX_4X4] [regress|hetero_concurrent|hetero_full_concurrent]"; exit 2 ;;
 esac
 
 case "$SCHED" in
@@ -60,12 +66,14 @@ case "$SCHED" in
 esac
 
 # The test selector: the default adds nothing, so the regression invocations
-# run exactly as before.  hetero_concurrent needs the external scheduler.
+# run exactly as before.  The concurrency tests need the external scheduler.
 case "$TEST" in
-  regress)           TEST_ARGS="" ;;
-  hetero_concurrent) TEST_ARGS="+hetero_concurrent"
-                     [ "$SCHED" -eq 1 ] || { echo "hetero_concurrent requires SCHED=1"; exit 2; } ;;
-  *)  echo "TEST must be regress or hetero_concurrent"; exit 2 ;;
+  regress)                TEST_ARGS="" ;;
+  hetero_concurrent)      TEST_ARGS="+hetero_concurrent"
+                          [ "$SCHED" -eq 1 ] || { echo "hetero_concurrent requires SCHED=1"; exit 2; } ;;
+  hetero_full_concurrent) TEST_ARGS="+hetero_full_concurrent"
+                          [ "$SCHED" -eq 1 ] || { echo "hetero_full_concurrent requires SCHED=1"; exit 2; } ;;
+  *)  echo "TEST must be regress, hetero_concurrent or hetero_full_concurrent"; exit 2 ;;
 esac
 
 GEN="$GEN -GUSE_EXTERNAL_SCHEDULER=$SCHED"
