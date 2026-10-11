@@ -19,14 +19,20 @@ extern "C" {
 // submitted as one DPTI descriptor, and the array's result tile is read
 // back and added into C -- so invocations chained through C accumulate.
 //
-// Returns 0, or:
+// Returns 0, or, with nothing sent on the link:
 //   -10  K outside 1..16          -11  device_id unknown / tile too large
 //   -12  null pointer             -13  slab packing failed
-//   -14  the DPTI session could not be opened, or an earlier MEM_WRITE /
-//        descriptor / read failed on it; nothing more is attempted until
-//        fpga_runtime_close()
-//    -3  DPTI session could not be opened
-//   other negative values         DPTI MEM_WRITE / submit / read failure
+//   -15  est_cycles is 0 (a descriptor needs a positive estimate)
+// or a link failure, after which nothing more is attempted on the session
+// until fpga_runtime_close():
+//    -3  the DPTI session could not be opened
+//    -4  the operand slab's MEM_WRITE failed
+//    -5  the descriptor was not accepted for submission
+//    -6  a descriptor WRITE32 failed; the rest of it, CONTROL = submit
+//        included, was not sent
+//    -7  reading the result tile failed
+//    -8  the result tile did not arrive within SYSTOLIC_DPTI_TIMEOUT_MS
+//   -14  refused: an earlier call on this session failed with -3 .. -8
 int fpga_matmul_tiled_auto_scheduled(
     int M, int K, int N,
     const float *A, const float *B, float *C,

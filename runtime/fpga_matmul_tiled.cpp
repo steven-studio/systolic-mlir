@@ -216,6 +216,11 @@ int scheduled_invocation(
     if (!A || !B || !C)
         return -12;
 
+    // dpti_job_validate() would refuse a zero estimate after the slab was
+    // already on the link; refuse it before anything is sent.
+    if (est_cycles == 0)
+        return -15;
+
     ScheduledRuntime &rt = runtime_state();
 
     if (rt.link_failed)
@@ -251,7 +256,7 @@ int scheduled_invocation(
 
     if (mem_rc != 0) {
         rt.link_failed = true;
-        return mem_rc;
+        return -4;
     }
 
     // Kept from the board-verified sequence: let MEM_WRITE settle.
@@ -290,7 +295,7 @@ int scheduled_invocation(
 
     if (submit_rc != 0) {
         rt.link_failed = true;
-        return submit_rc;
+        return submit_rc == -6 ? -6 : -5;
     }
 
     const uint32_t result_bytes_len =
@@ -308,7 +313,7 @@ int scheduled_invocation(
 
     if (read_rc != 0) {
         rt.link_failed = true;
-        return read_rc;
+        return read_rc == -4 ? -8 : -7;
     }
 
     /*
