@@ -1,11 +1,17 @@
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 
+#include "llvm/Config/llvm-config.h"
+
 #include "mlir/Conversion/Passes.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#if LLVM_VERSION_MAJOR >= 24
+// LLVM 24 moved the bufferization dialect's own BufferizableOpInterface
+// models out of the dialect into an external-model registration.
 #include "mlir/Dialect/Bufferization/Transforms/BufferizableOpInterfaceImpl.h"
+#endif
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -30,7 +36,9 @@ int main(int argc, char **argv) {
                    mlir::LLVM::LLVMDialect>();
 
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+#if LLVM_VERSION_MAJOR >= 24
   mlir::bufferization::registerBufferizableOpInterfaceExternalModels(registry);
+#endif
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
 

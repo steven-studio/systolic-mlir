@@ -5,7 +5,9 @@ import lit.formats
 from lit.llvm import llvm_config
 
 config.name = "SYSTOLIC"
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+# lit >= 23 removes the external-shell option; the internal shell runs these
+# RUN lines (plain pipes) identically everywhere.
+config.test_format = lit.formats.ShTest()
 config.suffixes = [".mlir"]
 
 config.test_source_root = os.path.dirname(__file__)

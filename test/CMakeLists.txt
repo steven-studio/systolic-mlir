@@ -13,10 +13,18 @@ configure_lit_site_cfg(
 )
 
 set(SYSTOLIC_TEST_DEPENDS
-  FileCheck count not
   systolic-opt
   systolic-translate
 )
+
+# An LLVM built in-tree (or the Debian llvm-*-tools packages) exports
+# FileCheck/count/not as CMake targets; a plain installed toolchain does not,
+# and then lit simply finds them on PATH. Depend on them only when they exist.
+foreach(util FileCheck count not)
+  if(TARGET ${util})
+    list(APPEND SYSTOLIC_TEST_DEPENDS ${util})
+  endif()
+endforeach()
 
 add_lit_testsuite(check-systolic "Running the systolic regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
