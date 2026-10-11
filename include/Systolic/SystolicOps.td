@@ -35,11 +35,19 @@ def Systolic_DataflowAttr : EnumAttr<Systolic_Dialect, Systolic_DataflowKind, "d
 // systolic.device -- hardware description of one accelerator instance
 //===----------------------------------------------------------------------===//
 
+// LLVM 24 split the Symbol interface's default accessors into the
+// SymbolName / SymbolVisibility traits; LLVM <= 23 has no such traits and the
+// interface alone provides them. include/Systolic/CMakeLists.txt defines
+// SYSTOLIC_MLIR_SYMBOL_TRAITS for mlir-tblgen when the LLVM in use is >= 24.
+#ifdef SYSTOLIC_MLIR_SYMBOL_TRAITS
 def Systolic_DeviceOp : Systolic_Op<"device", [
   Symbol,
   SymbolName,
   SymbolVisibility
 ]> {
+#else
+def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
+#endif
   let summary = "Declares one heterogeneous accelerator instance and its "
                 "fixed hardware geometry.";
   let description = [{

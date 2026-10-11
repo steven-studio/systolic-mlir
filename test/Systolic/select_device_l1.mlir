@@ -40,7 +40,7 @@ module {
   func.func @big(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
                  %c: tensor<64x64xf32>) -> tensor<64x64xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 64 : i64, n = 64 : i64, k = 64 : i64}
+         m = 64 n = 64 k = 64
          : (tensor<64x64xf32>, tensor<64x64xf32>, tensor<64x64xf32>)
            -> tensor<64x64xf32>
     return %0 : tensor<64x64xf32>
@@ -62,7 +62,7 @@ module {
   func.func @small(%a: tensor<32x32xf32>, %b: tensor<32x32xf32>,
                    %c: tensor<32x32xf32>) -> tensor<32x32xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 32 : i64, n = 32 : i64, k = 32 : i64}
+         m = 32 n = 32 k = 32
          : (tensor<32x32xf32>, tensor<32x32xf32>, tensor<32x32xf32>)
            -> tensor<32x32xf32>
     return %0 : tensor<32x32xf32>

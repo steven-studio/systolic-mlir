@@ -2,16 +2,10 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulToSystolic.cpp
   AffineMatmulAnalysis.cpp
   AffineMatmulPartitioning.cpp
-  SystolicTiling.cpp
-  SystolicComputeCost.cpp
   SystolicScheduling.cpp
-  SystolicSchedulingDP.cpp
-  SystolicSchedulingCountAllocation.cpp
   SystolicOptimizer.cpp
-  SystolicDecompositionDP.cpp
   SystolicMaterializeSchedulePass.cpp
   SystolicBinarySearchTileMatmulPass.cpp
-  SystolicJobCodegen.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp
@@ -21,8 +15,8 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicCostAnalysisPass.cpp
   SystolicSelectDevicePass.cpp
   SystolicTileMatmulPass.cpp
-  SystolicTileToFpga.cpp
   SystolicScheduleOverlapPass.cpp
+  SystolicPipelines.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic
@@ -43,4 +37,21 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   MLIRLLVMDialect
   MLIRPass
   MLIRTransformUtils
+
+  # SystolicPipelines.cpp: bufferization + conversion to the LLVM dialect.
+  MLIRBufferizationTransforms
+  MLIRBufferizationPipelines
+  MLIRBufferizationToMemRef
+  MLIRFuncTransforms
+  MLIRTensorTransforms
+  MLIRMemRefTransforms
+  MLIRControlFlowDialect
+  MLIRMemRefToLLVM
+  MLIRArithToLLVM
+  MLIRIndexToLLVM
+  MLIRFuncToLLVM
+  MLIRAffineToStandard
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRReconcileUnrealizedCasts
 )

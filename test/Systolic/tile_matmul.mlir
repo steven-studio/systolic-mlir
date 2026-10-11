@@ -12,7 +12,7 @@ module {
   // CHECK-LABEL: func.func @big_matmul
   // CHECK: tensor.extract_slice
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: k = 4 : i64, m = 4 : i64, n = 4 : i64
+  // CHECK-SAME: m = 4 n = 4 k = 4{{ }}
   // CHECK-COUNT-63: systolic.matmul_tile
   // CHECK-NOT: linalg.matmul
   func.func @big_matmul(%A: tensor<16x16xf32>, %B: tensor<16x16xf32>, %C: tensor<16x16xf32>) -> tensor<16x16xf32> {

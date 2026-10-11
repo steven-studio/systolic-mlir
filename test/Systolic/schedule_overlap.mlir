@@ -11,12 +11,12 @@ module {
   // times advance by exactly that, offset by the initial DMA.
   // CHECK-LABEL: func.func @big_matmul
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: est_cycles = 28 : i64
-  // CHECK-SAME: start_cycle = 16 : i64
+  // CHECK-SAME: est_cycles = 28{{ }}
+  // CHECK-SAME: start_cycle = 16{{ }}
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: start_cycle = 44 : i64
+  // CHECK-SAME: start_cycle = 44{{ }}
   // CHECK: systolic.matmul_tile
-  // CHECK-SAME: start_cycle = 72 : i64
+  // CHECK-SAME: start_cycle = 72{{ }}
   // CHECK-NOT: linalg.matmul
   func.func @big_matmul(%A: tensor<16x16xf32>, %B: tensor<16x16xf32>, %C: tensor<16x16xf32>) -> tensor<16x16xf32> {
     %result = linalg.matmul ins(%A, %B : tensor<16x16xf32>, tensor<16x16xf32>)

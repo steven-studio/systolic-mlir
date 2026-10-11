@@ -29,8 +29,8 @@ module {
   // CHECK-SAME: est_cycles = 16
   func.func @tile_4x4x4(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>,
                         %c: tensor<4x4xf32>) -> tensor<4x4xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4
-         {m = 4 : i64, n = 4 : i64, k = 4 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 4 n = 4 k = 4 on @acc_4x4
          : (tensor<4x4xf32>, tensor<4x4xf32>, tensor<4x4xf32>)
            -> tensor<4x4xf32>
     return %0 : tensor<4x4xf32>
@@ -42,8 +42,8 @@ module {
   // CHECK-SAME: est_cycles = 28
   func.func @tile_8x8x8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                         %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_8x8
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @acc_8x8
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -58,8 +58,8 @@ module {
   // CHECK-SAME: est_cycles = 46
   func.func @tile_32x2x8(%a: tensor<32x8xf32>, %b: tensor<8x2xf32>,
                          %c: tensor<32x2xf32>) -> tensor<32x2xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_32x2
-         {m = 32 : i64, n = 2 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 32 n = 2 k = 8 on @acc_32x2
          : (tensor<32x8xf32>, tensor<8x2xf32>, tensor<32x2xf32>)
            -> tensor<32x2xf32>
     return %0 : tensor<32x2xf32>
@@ -74,8 +74,8 @@ module {
   // CHECK-SAME: est_cycles = 128
   func.func @multi_tile(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                         %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @acc_4x4
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -94,8 +94,8 @@ module {
   // CHECK-SAME: est_cycles = 116
   func.func @ragged(%a: tensor<5x5xf32>, %b: tensor<5x5xf32>,
                     %c: tensor<5x5xf32>) -> tensor<5x5xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4
-         {m = 5 : i64, n = 5 : i64, k = 5 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 5 n = 5 k = 5 on @acc_4x4
          : (tensor<5x5xf32>, tensor<5x5xf32>, tensor<5x5xf32>)
            -> tensor<5x5xf32>
     return %0 : tensor<5x5xf32>

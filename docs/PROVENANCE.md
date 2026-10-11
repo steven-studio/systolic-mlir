@@ -214,75 +214,59 @@ Input：`test/Systolic/schedule_overlap.mlir`
 - compiler 有計算 overlap-aware schedule；
 - schedule 以 `start_cycle` attribute 寫回 IR。
 
-這**還不等於** runtime/FPGA 已按照這些 cycle 發射工作。目前
-`SystolicTileToFpga.cpp` 沒有消費 `start_cycle`；因此在 runtime 真正 enforce
-它以前，應稱為 compiler schedule metadata/model output，而不是 hardware-enforced
-launch timing。
+這**還不等於** runtime/FPGA 已按照這些 cycle 發射工作。
+`--lower-systolic-matmul-tile-to-fpga` 會把 `start_cycle`／`est_cycles` 帶進
+runtime 寫給板子的 job descriptor（暫存器 0x18／0x1C），但 runtime 一次只送一個
+invocation、等結果回來才送下一個；因此它仍應稱為 compiler schedule
+metadata/model output，而不是 hardware-enforced launch timing。
 
-### 2.7 Scheduled tile -> LLVM dialect runtime call
+### 2.7 Scheduled tile -> FPGA runtime call
 
-Implementation：`lib/Systolic/Transforms/SystolicTileToFpga.cpp`
+Implementation：`lib/Systolic/Transforms/TileMatmulForFpga.cpp`
+（pass `--lower-systolic-matmul-tile-to-fpga`）
 
-Pass：
+每個已指派 device、已排程的 `systolic.matmul_tile` 變成一次
+`fpga_matmul_tiled_auto_scheduled(m, k, n, A, B, C, device_id, start_cycle,
+est_cycles)`（`runtime/fpga_matmul_tiled.cpp`）。device symbol 對應 bitstream
+的實體 ID：`@acc_8x8_0` → 0、`@acc_4x4_0..2` → 1..3。一個 tile 就是該 device
+的一次 invocation，所以 pass 檢查 `m <= rows`、`n <= cols`、`1 <= k <= k_max`；
+K 更深的 tile 已由 `--systolic-binary-search-tile-matmul` 依 `k_max` 折開、用
+`c_in` 串起來。regression：`test/Systolic/systolic_to_fpga.mlir`、
+`bad_fpga_lowering.mlir`。
 
-```text
---systolic-tile-to-fpga
-```
+（原本的 `--systolic-tile-to-fpga` 已刪除：它呼叫的
+`systolic_dispatch_matmul4x4_dev` 在任何 runtime 都不存在，產物連結不起來。）
 
-這個 rewrite 會 match `systolic.matmul_tile`、要求已有 device assignment，
-把 device symbol 映射成整數 `device_id`，準備/pad operand，並以
-`LLVM::CallOp` 產生 external runtime calls。textual MLIR 中對應 `llvm.call`。
+### 2.8 端到端（2026-10-11）
 
-目前它宣告/呼叫：
-
-```text
-systolic_dispatch_open()
-systolic_dispatch_matmul4x4_dev(handle, device_id, A, B, C_init, C_out)
-```
-
-而且 executable lowering 目前只接受 `m,n,k <= 4`。
-
-### 2.8 目前尚未閉合的 compiler/runtime interface
-
-新版 runtime contract `runtime/lib/dispatch/systolic_dispatch_new.h` 定義的是：
-
-```c
-#define SYS_DISPATCH_R      8
-#define SYS_DISPATCH_C      8
-#define SYS_DISPATCH_K_MAX  64
-
-int systolic_dispatch_open(void);
-int systolic_dispatch_matmul(int handle, int K,
-                             const float *A, const float *B,
-                             const float *C_init, float *C_out);
-```
-
-也就是說，目前 repo 中至少存在兩個 interface generation：
+compiler 與 runtime 這一段已接成單一路徑，同一份輸入一路留下：
 
 ```text
-scheduling lowering:
-  systolic.matmul_tile
-    -> systolic_dispatch_matmul4x4_dev(...)
-
-new 8x8 runtime:
-  systolic_dispatch_matmul(handle, K, ...)
+00-linalg.mlir     linalg.matmul + 1x8x8 + 3x4x4 fleet
+10-systolic.mlir   systolic.matmul_tile（binary search、K 依 k_max 折）
+20-fpga.mlir       llvm.call @fpga_matmul_tiled_auto_scheduled
+30-llvm.mlir       LLVM dialect
+40-llvm.ll         JIT 實際編譯的 LLVM IR
 ```
 
-在兩者真正接起來並跑過 end-to-end regression 前，不應把它們寫成「已經完全
-閉合的單一路徑」。
+執行檔 `./build/bin/systolic-matmul`（stdin 讀 M N K、A、B，與整數 CPU
+reference 逐元素比對），regression `test/e2e/run_e2e.sh`（36 組）。細節見
+`docs/E2E.md`。
 
-理想的最終 reproducibility artifact 應從同一份 input 一路留下：
+**證據的層級，照實寫：**
 
-```text
-00-input.mlir
-10-tiled.mlir
-20-selected.mlir
-30-scheduled.mlir
-40-runtime-call.mlir
-```
-
-最後再連到**目前實際使用的 8x8 runtime ABI、bitstream 與 bit-exact board run**。
-
+- 在 RTL co-simulation 上通過：Verilator 跑 tag
+  `tile-pipelined-1x8x8-3x4x4-20261009`（封存 bitstream 的來源）的
+  `systolic_dma_top`，只換掉 Xilinx IP（FP IP 換成 binary32 RNE、denormal
+  flush 的模型），runtime 不改、只在 libftdi 那層換成 socket。36/36 PASS；
+  每個 session runtime 計的送出 byte 數等於 RTL 用 RD# 讀走的、收到的等於
+  RTL 用 WR# 送出的；另有一次注入的寫入失敗，必須回報成 FPGA dispatch
+  失敗（RTL 只收到 MEM_WRITE 與 4 個 WRITE32，沒有 submit、沒有結果）。
+- 8x8x16、4x4x16 這兩種整塊 tile，新 runtime 送上線的 byte 與 tag
+  `tile-pipelined-1x8x8-3x4x4-20261009` 那份 runtime（`main` 上未改動）
+  **逐 byte 相同**（co-sim 擷取後 `cmp`）。
+- **板測尚未做。** 在板上跑完 `run_e2e.sh --backend board` 以前，不應寫成
+  「已在 FPGA 上驗證」。
 
 ---
 

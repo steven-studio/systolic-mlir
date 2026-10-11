@@ -48,8 +48,8 @@ module {
   // CHECK-SAME: est_cycles = 117
   func.func @fold_8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                     %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @fold_k256
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -61,8 +61,8 @@ module {
   // CHECK-SAME: est_cycles = 125
   func.func @fold_16(%a: tensor<8x16xf32>, %b: tensor<16x8xf32>,
                      %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 16 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 16 on @fold_k256
          : (tensor<8x16xf32>, tensor<16x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -74,8 +74,8 @@ module {
   // CHECK-SAME: est_cycles = 141
   func.func @fold_32(%a: tensor<8x32xf32>, %b: tensor<32x8xf32>,
                      %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 32 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 32 on @fold_k256
          : (tensor<8x32xf32>, tensor<32x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -87,8 +87,8 @@ module {
   // CHECK-SAME: est_cycles = 173
   func.func @fold_64(%a: tensor<8x64xf32>, %b: tensor<64x8xf32>,
                      %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 64 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 64 on @fold_k256
          : (tensor<8x64xf32>, tensor<64x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -100,8 +100,8 @@ module {
   // CHECK-SAME: est_cycles = 205
   func.func @fold_96(%a: tensor<8x96xf32>, %b: tensor<96x8xf32>,
                      %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 96 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 96 on @fold_k256
          : (tensor<8x96xf32>, tensor<96x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -113,8 +113,8 @@ module {
   // CHECK-SAME: est_cycles = 237
   func.func @fold_128(%a: tensor<8x128xf32>, %b: tensor<128x8xf32>,
                       %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 128 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 128 on @fold_k256
          : (tensor<8x128xf32>, tensor<128x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -126,8 +126,8 @@ module {
   // CHECK-SAME: est_cycles = 301
   func.func @fold_192(%a: tensor<8x192xf32>, %b: tensor<192x8xf32>,
                       %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 192 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 192 on @fold_k256
          : (tensor<8x192xf32>, tensor<192x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -139,8 +139,8 @@ module {
   // CHECK-SAME: est_cycles = 365
   func.func @fold_256(%a: tensor<8x256xf32>, %b: tensor<256x8xf32>,
                       %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 256 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 256 on @fold_k256
          : (tensor<8x256xf32>, tensor<256x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -153,8 +153,8 @@ module {
   // CHECK-SAME: est_cycles = 621
   func.func @fold_512(%a: tensor<8x512xf32>, %b: tensor<512x8xf32>,
                       %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k512
-         {m = 8 : i64, n = 8 : i64, k = 512 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 512 on @fold_k512
          : (tensor<8x512xf32>, tensor<512x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -166,8 +166,8 @@ module {
   // CHECK-SAME: est_cycles = 1133
   func.func @fold_1024(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
                        %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k1024
-         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1024 on @fold_k1024
          : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -187,8 +187,8 @@ module {
   // CHECK-SAME: est_cycles = 2768
   func.func @fold_1024_k64(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
                            %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k64
-         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1024 on @fold_k64
          : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -200,8 +200,8 @@ module {
   // CHECK-SAME: est_cycles = 1242
   func.func @fold_1024_k512(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
                             %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k512
-         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1024 on @fold_k512
          : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -214,8 +214,8 @@ module {
   // CHECK-SAME: est_cycles = 1133
   func.func @fold_1024_k2048(%a: tensor<8x1024xf32>, %b: tensor<1024x8xf32>,
                              %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k2048
-         {m = 8 : i64, n = 8 : i64, k = 1024 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1024 on @fold_k2048
          : (tensor<8x1024xf32>, tensor<1024x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -236,8 +236,8 @@ module {
   // CHECK-SAME: est_cycles = 903
   func.func @fold_576_k256(%a: tensor<8x576xf32>, %b: tensor<576x8xf32>,
                            %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 576 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 576 on @fold_k256
          : (tensor<8x576xf32>, tensor<576x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -251,8 +251,8 @@ module {
   // CHECK-SAME: est_cycles = 685
   func.func @fold_576_k1024(%a: tensor<8x576xf32>, %b: tensor<576x8xf32>,
                             %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k1024
-         {m = 8 : i64, n = 8 : i64, k = 576 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 576 on @fold_k1024
          : (tensor<8x576xf32>, tensor<576x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -264,8 +264,8 @@ module {
   // CHECK-SAME: est_cycles = 2491
   func.func @fold_1728_k256(%a: tensor<8x1728xf32>, %b: tensor<1728x8xf32>,
                             %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256
-         {m = 8 : i64, n = 8 : i64, k = 1728 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1728 on @fold_k256
          : (tensor<8x1728xf32>, tensor<1728x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -277,8 +277,8 @@ module {
   // CHECK-SAME: est_cycles = 1837
   func.func @fold_1728_k2048(%a: tensor<8x1728xf32>, %b: tensor<1728x8xf32>,
                              %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k2048
-         {m = 8 : i64, n = 8 : i64, k = 1728 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 1728 on @fold_k2048
          : (tensor<8x1728xf32>, tensor<1728x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -301,8 +301,8 @@ module {
   // CHECK-SAME: est_cycles = 146
   func.func @b32_8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                    %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @fold_k256_b32
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -314,8 +314,8 @@ module {
   // CHECK-SAME: est_cycles = 202
   func.func @b32_64(%a: tensor<8x64xf32>, %b: tensor<64x8xf32>,
                     %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
-         {m = 8 : i64, n = 8 : i64, k = 64 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 64 on @fold_k256_b32
          : (tensor<8x64xf32>, tensor<64x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -327,8 +327,8 @@ module {
   // CHECK-SAME: est_cycles = 394
   func.func @b32_256(%a: tensor<8x256xf32>, %b: tensor<256x8xf32>,
                      %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @fold_k256_b32
-         {m = 8 : i64, n = 8 : i64, k = 256 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 256 on @fold_k256_b32
          : (tensor<8x256xf32>, tensor<256x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -348,8 +348,8 @@ module {
   // CHECK-SAME: est_cycles = 28
   func.func @hls_8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                    %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @hls_k8
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @hls_k8
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>
@@ -366,8 +366,8 @@ module {
   // CHECK-SAME: est_cycles = 22
   func.func @geom_8(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                     %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @geom_k8
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @geom_k8
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>

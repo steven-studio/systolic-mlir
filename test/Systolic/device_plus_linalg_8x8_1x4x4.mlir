@@ -1,4 +1,4 @@
-// RUN: %systolic_opt --systolic-binary-search-tile-matmul %s | FileCheck %s
+// RUN: systolic-opt --systolic-binary-search-tile-matmul %s | FileCheck %s
 
 // The 16x16 output is materialized as:
 //   3 x 8x8 tiles

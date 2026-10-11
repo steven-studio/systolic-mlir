@@ -39,7 +39,7 @@ module {
   func.func @big(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
                  %c: tensor<64x64xf32>) -> tensor<64x64xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 64 : i64, n = 64 : i64, k = 64 : i64}
+         m = 64 n = 64 k = 64
          : (tensor<64x64xf32>, tensor<64x64xf32>, tensor<64x64xf32>)
            -> tensor<64x64xf32>
     return %0 : tensor<64x64xf32>
@@ -59,7 +59,7 @@ module {
   func.func @big2(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
                   %c: tensor<64x64xf32>) -> tensor<64x64xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 64 : i64, n = 64 : i64, k = 64 : i64}
+         m = 64 n = 64 k = 64
          : (tensor<64x64xf32>, tensor<64x64xf32>, tensor<64x64xf32>)
            -> tensor<64x64xf32>
     return %0 : tensor<64x64xf32>
@@ -78,7 +78,7 @@ module {
   func.func @medium(%a: tensor<32x32xf32>, %b: tensor<32x32xf32>,
                     %c: tensor<32x32xf32>) -> tensor<32x32xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 32 : i64, n = 32 : i64, k = 32 : i64}
+         m = 32 n = 32 k = 32
          : (tensor<32x32xf32>, tensor<32x32xf32>, tensor<32x32xf32>)
            -> tensor<32x32xf32>
     return %0 : tensor<32x32xf32>
@@ -94,7 +94,7 @@ module {
   func.func @small(%a: tensor<16x16xf32>, %b: tensor<16x16xf32>,
                    %c: tensor<16x16xf32>) -> tensor<16x16xf32> {
     %0 = systolic.matmul_tile %a, %b, %c
-         {m = 16 : i64, n = 16 : i64, k = 16 : i64}
+         m = 16 n = 16 k = 16
          : (tensor<16x16xf32>, tensor<16x16xf32>, tensor<16x16xf32>)
            -> tensor<16x16xf32>
     return %0 : tensor<16x16xf32>
@@ -109,8 +109,8 @@ module {
   // CHECK-NOT: est_cycles
   func.func @preassigned(%a: tensor<8x8xf32>, %b: tensor<8x8xf32>,
                          %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_8x8
-         {m = 8 : i64, n = 8 : i64, k = 8 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 8 n = 8 k = 8 on @acc_8x8
          : (tensor<8x8xf32>, tensor<8x8xf32>, tensor<8x8xf32>)
            -> tensor<8x8xf32>
     return %0 : tensor<8x8xf32>

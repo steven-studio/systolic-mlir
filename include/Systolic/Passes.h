@@ -4,6 +4,9 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
+class DialectRegistry;
+class OpPassManager;
+
 namespace systolic {
 
 //===----------------------------------------------------------------------===//
@@ -38,8 +41,6 @@ void registerSystolicBinarySearchTileMatmulPass();
 std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
 void registerSystolicMaterializeSchedulePass();
 
-void registerSystolicJobCodegenPass();
-
 std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
 void registerAffineMatmulToSystolicPass();
 
@@ -66,9 +67,11 @@ std::unique_ptr<Pass> createExpandPEArrayToMacPass();
 void registerExpandPEArrayToMacPass();
 
 //===----------------------------------------------------------------------===//
-// Stage 4: FPGA tiling (fixed 4x4 runtime, no new hardware)
-//   把任意静态形状的 linalg.matmul lowering 成呼叫已烧录好的 4x4 FPGA
-//   runtime(fpga_matmul_tiled_auto)。
+// Stage 4: FPGA lowering (--lower-systolic-matmul-tile-to-fpga)
+//   把已指派 device、已排程的 systolic.matmul_tile(一个 tile = 该 device
+//   的一次 invocation:m<=rows、n<=cols、k<=k_max)lowering 成呼叫
+//   runtime/fpga_matmul_tiled.cpp 的 fpga_matmul_tiled_auto_scheduled,
+//   device symbol 对应 1x8x8 + 3x4x4 bitstream 的实体 device id。
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<Pass> createTileMatmulForFpgaPass();
@@ -88,16 +91,26 @@ void registerConv2DToFpgaPass();
 // Registration entry point (called once from systolic-opt's main)
 //===----------------------------------------------------------------------===//
 
-//===----------------------------------------------------------------------===//
-// Stage 6: Executable scheduling output
-//   - TileToFpga: 把已排程(帶 device 屬性)的 systolic.matmul_tile lowering
-//                 成 dispatch runtime 呼叫,device 映射為 device id。
-//===----------------------------------------------------------------------===//
-
-std::unique_ptr<Pass> createSystolicTileToFpgaPass();
-void registerSystolicTileToFpgaPass();
-
 void registerTestAffineMatmulDiscoveryPass();
+
+//===----------------------------------------------------------------------===//
+// The Linalg -> FPGA pipeline (SystolicPipelines.cpp), shared by systolic-opt
+// and systolic-matmul:
+//
+//   --systolic-fpga-pipeline   = --systolic-binary-search-tile-matmul
+//                                --lower-systolic-matmul-tile-to-fpga
+//                                --systolic-runtime-to-llvm
+//   --systolic-runtime-to-llvm = one-shot bufferization across the function
+//                                boundary (identity layouts) + conversion of
+//                                memref/arith/index/cf/func to LLVM
+//===----------------------------------------------------------------------===//
+
+void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
+void buildSystolicFpgaPipeline(OpPassManager &pm);
+void registerSystolicPipelines();
+
+/// Dialects and bufferization external models the pipeline needs.
+void registerSystolicPipelineDialects(DialectRegistry &registry);
 
 void registerSystolicPasses();
 

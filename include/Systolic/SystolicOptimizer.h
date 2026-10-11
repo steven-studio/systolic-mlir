@@ -1,9 +1,9 @@
 #ifndef SYSTOLIC_OPTIMIZER_H
 #define SYSTOLIC_OPTIMIZER_H
 
-#include "Systolic/SystolicComputeCost.h"
-#include "Systolic/SystolicScheduling.h"
 #include "Systolic/SystolicTiling.h"
+
+#include "mlir/Support/LogicalResult.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
@@ -25,38 +25,6 @@ struct ExactSystolicOptimizationResult {
   /// Completion time of the final scheduled task.
   int64_t makespan;
 };
-
-/// Result of the end-to-end DP optimizer.
-///
-/// Unlike ExactSystolicOptimizationResult, this first DP result does not
-/// contain a reconstructed schedule. The scheduling DP currently computes
-/// only the exact minimum makespan.
-struct SystolicDPOptimizationResult {
-  llvm::SmallVector<SystolicExecutionTask> decomposition;
-  int64_t makespan;
-};
-
-/// Greedy end-to-end systolic optimization.
-///
-/// The optimizer performs exactly three stages:
-///
-///   1. greedy spatial decomposition
-///   2. geometry-based compute-cost construction
-///   3. physical accelerator scheduling
-///
-/// The decomposition is unique: this function does not enumerate
-/// alternative decompositions and does not perform DP/backtracking.
-///
-/// For the current analytical model:
-///
-///   C(g) = 2g - 2
-///
-/// where g is the systolic-array geometry.
-FailureOr<ExactSystolicOptimizationResult>
-optimizeSystolicGreedy(
-    int64_t rows,
-    int64_t columns,
-    llvm::ArrayRef<SystolicArrayResource> fleet);
 
 /// Exact deadline-search systolic optimization.
 ///

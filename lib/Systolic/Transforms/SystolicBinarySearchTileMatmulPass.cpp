@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::systolic;
@@ -54,6 +55,10 @@ struct SystolicBinarySearchTileMatmulPass
     SmallVector<SystolicArrayResource> fleet;
     SmallVector<FlatSymbolRefAttr> acceleratorSymbols;
 
+    // k_max of each accelerator, indexed like acceleratorSymbols; 0 when
+    // the device does not declare one.
+    SmallVector<int64_t> acceleratorKMax;
+
     int64_t nextAcceleratorId = 0;
 
     module.walk([&](DeviceOp device) {
@@ -80,10 +85,28 @@ struct SystolicBinarySearchTileMatmulPass
         }
       }
 
+      // Reduction capacity of one invocation. A device that declares
+      // k_max gets every tile's reduction folded into ceil(K / k_max)
+      // invocations below; a device that does not keeps K whole, which
+      // is exactly what this pass emitted before folding existed.
+      int64_t kMax = 0;
+
+      if (IntegerAttr attr = device.getKMaxAttr()) {
+        kMax = attr.getInt();
+
+        if (kMax <= 0) {
+          device.emitError()
+              << "k_max must be positive";
+          signalPassFailure();
+          return;
+        }
+      }
+
       SystolicArrayResource resource;
       resource.arraySize = rows;
       resource.acceleratorId = nextAcceleratorId++;
       resource.tileOverhead = tileOverhead;
+      acceleratorKMax.push_back(kMax);
 
       auto symName =
           device->getAttrOfType<StringAttr>("sym_name");
@@ -129,6 +152,18 @@ struct SystolicBinarySearchTileMatmulPass
       if (matmul->getNumResults() != 1)
         continue;
 
+      // The decomposition below slices A as M x K and B as K x N, which is
+      // what the default indexing maps C(m, n) += A(m, k) * B(k, n) mean.
+      // indexing_maps can transpose an operand (A^T B, A B^T); lowering such
+      // a matmul by the default reading would compute a different product.
+      if (matmul.hasUserDefinedMaps()) {
+        matmul.emitError()
+            << "linalg.matmul with user-defined indexing_maps is not "
+               "supported; only C(m, n) += A(m, k) * B(k, n) is lowered";
+        signalPassFailure();
+        return;
+      }
+
       auto aTy =
           dyn_cast<RankedTensorType>(
               matmul.getDpsInputs()[0].getType());
@@ -165,14 +200,11 @@ struct SystolicBinarySearchTileMatmulPass
       const int64_t BK = bTy.getDimSize(0);
       const int64_t N = bTy.getDimSize(1);
 
-      if (M != N) {
-        matmul.emitError()
-            << "current binary-search systolic decomposition "
-               "requires a square spatial domain, got "
-            << M << "x" << N;
-        signalPassFailure();
-        return;
-      }
+      // M and N need not be equal. optimizeSystolicBinarySearch takes
+      // (rows, columns) separately, pads each to a multiple of the
+      // smallest geometry on its own, and covers only the original
+      // rows x columns cells; this pass used to reject M != N before
+      // ever asking it.
 
       if (K != BK) {
         matmul.emitError()
@@ -185,6 +217,16 @@ struct SystolicBinarySearchTileMatmulPass
           cTy.getDimSize(1) != N) {
         matmul.emitError()
             << "C shape does not match M x N";
+        signalPassFailure();
+        return;
+      }
+
+      // An empty dimension leaves nothing to run on an array, and the
+      // K-folding below divides by the number of invocations.
+      if (M < 1 || N < 1 || K < 1) {
+        matmul.emitError()
+            << "requires non-empty M, N and K, got "
+            << M << "x" << N << "x" << K;
         signalPassFailure();
         return;
       }
@@ -231,15 +273,15 @@ struct SystolicBinarySearchTileMatmulPass
       // --------------------------------------------------------
       // Materialize exactly the optimizer's spatial decomposition.
       //
-      // K is currently kept as one complete reduction dimension.
-      // The resulting matmul_tile therefore represents:
+      // Each spatial task covers a tileM x tileN block of C. Its
+      // reduction is folded by the assigned device's k_max (see the
+      // K-folding block below), so the resulting matmul_tiles are
       //
-      //   tileM x K
-      //   K x tileN
-      //   tileM x tileN
+      //   tileM x k_j  @  k_j x tileN  ->  tileM x tileN
       //
-      // K-folding can be introduced later without changing the
-      // spatial decomposition interface.
+      // with sum_j k_j = K, chained through c_in. The spatial
+      // decomposition and its device assignment are the optimizer's,
+      // unchanged; folding only splits each task's reduction.
       // --------------------------------------------------------
 
       for (const SystolicExecutionTask &task :
@@ -348,42 +390,52 @@ struct SystolicBinarySearchTileMatmulPass
         const int64_t startCycle =
             scheduledTile->startCycle;
 
+        // ------------------------------------------------------
+        // K-folding.
+        //
+        // One systolic.matmul_tile is one invocation of its device:
+        // the operand buffers hold at most k_max reduction steps, so
+        // a tile whose reduction is longer runs as
+        //
+        //   I = ceil(K / k_max)
+        //
+        // invocations, invocation j covering
+        // [j * k_max, min(K, (j + 1) * k_max)), chained through c_in
+        // -- the chaining --systolic-tile-matmul uses for its K tiles.
+        // A device without k_max keeps K whole (I = 1).
+        //
+        // The optimizer bills one invocation of cost C(g) per spatial
+        // tile and starts it at round * C(g). Every invocation of a
+        // folded tile is billed the same C(g), so each device's
+        // timeline is stretched by I: invocation j of the tile the
+        // optimizer started at round * C(g) starts at
+        // (round * I + j) * C(g) = startCycle * I + j * C(g).
+        // Order and non-overlap on every device are preserved.
+        // ------------------------------------------------------
+
+        const int64_t kMax =
+            acceleratorKMax[task.acceleratorId];
+
+        const int64_t kStep = kMax > 0 ? kMax : K;
+
+        const int64_t numInvocations =
+            (K + kStep - 1) / kStep;
+
+        if (startCycle >
+                (std::numeric_limits<int64_t>::max() -
+                 numInvocations * estCycles) /
+                    numInvocations) {
+          matmul.emitError()
+              << "folded schedule overflows int64 for tile ("
+              << task.row << ", " << task.column << ")";
+          signalPassFailure();
+          return;
+        }
+
         OpFoldResult offM =
             builder.getIndexAttr(task.row);
         OpFoldResult offN =
             builder.getIndexAttr(task.column);
-
-        SmallVector<OpFoldResult> aOff{
-            offM,
-            builder.getIndexAttr(0)};
-
-        SmallVector<OpFoldResult> aSize{
-            builder.getIndexAttr(m),
-            builder.getIndexAttr(K)};
-
-        Value aTile =
-            builder.create<tensor::ExtractSliceOp>(
-                loc,
-                A,
-                aOff,
-                aSize,
-                strides);
-
-        SmallVector<OpFoldResult> bOff{
-            builder.getIndexAttr(0),
-            offN};
-
-        SmallVector<OpFoldResult> bSize{
-            builder.getIndexAttr(K),
-            builder.getIndexAttr(n)};
-
-        Value bTile =
-            builder.create<tensor::ExtractSliceOp>(
-                loc,
-                B,
-                bOff,
-                bSize,
-                strides);
 
         SmallVector<OpFoldResult> cOff{
             offM,
@@ -406,22 +458,62 @@ struct SystolicBinarySearchTileMatmulPass
                 {m, n},
                 aTy.getElementType());
 
-        cTile =
-            builder.create<MatmulTileOp>(
-                loc,
-                tileTy,
-                aTile,
-                bTile,
-                cTile,
-                builder.getI64IntegerAttr(m),
-                builder.getI64IntegerAttr(n),
-                builder.getI64IntegerAttr(K),
-                /*device=*/acceleratorSymbols[
-                    task.acceleratorId],
-                /*est_cycles=*/
-                builder.getI64IntegerAttr(estCycles),
-                /*start_cycle=*/
-                builder.getI64IntegerAttr(startCycle));
+        for (int64_t j = 0; j < numInvocations; ++j) {
+          const int64_t k0 = j * kStep;
+          const int64_t kc = std::min<int64_t>(kStep, K - k0);
+
+          SmallVector<OpFoldResult> aOff{
+              offM,
+              builder.getIndexAttr(k0)};
+
+          SmallVector<OpFoldResult> aSize{
+              builder.getIndexAttr(m),
+              builder.getIndexAttr(kc)};
+
+          Value aTile =
+              builder.create<tensor::ExtractSliceOp>(
+                  loc,
+                  A,
+                  aOff,
+                  aSize,
+                  strides);
+
+          SmallVector<OpFoldResult> bOff{
+              builder.getIndexAttr(k0),
+              offN};
+
+          SmallVector<OpFoldResult> bSize{
+              builder.getIndexAttr(kc),
+              builder.getIndexAttr(n)};
+
+          Value bTile =
+              builder.create<tensor::ExtractSliceOp>(
+                  loc,
+                  B,
+                  bOff,
+                  bSize,
+                  strides);
+
+          const int64_t invocationStart =
+              startCycle * numInvocations + j * estCycles;
+
+          cTile =
+              builder.create<MatmulTileOp>(
+                  loc,
+                  tileTy,
+                  aTile,
+                  bTile,
+                  cTile,
+                  builder.getI64IntegerAttr(m),
+                  builder.getI64IntegerAttr(n),
+                  builder.getI64IntegerAttr(kc),
+                  /*device=*/acceleratorSymbols[
+                      task.acceleratorId],
+                  /*est_cycles=*/
+                  builder.getI64IntegerAttr(estCycles),
+                  /*start_cycle=*/
+                  builder.getI64IntegerAttr(invocationStart));
+        }
 
         result =
             builder.create<tensor::InsertSliceOp>(
