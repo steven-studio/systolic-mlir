@@ -49,6 +49,7 @@
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 
+#include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/ExecutionEngine/Orc/Mangling.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Error.h"
@@ -68,8 +69,10 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include <pthread.h>
 #include <unistd.h>
 
 using namespace mlir;
@@ -91,7 +94,14 @@ constexpr const char *kFleet =
     "  systolic.device @acc_4x4_2 rows = 4 cols = 4 dataflow = "
     "output_stationary k_max = 16 tile_overhead = 95\n";
 
-constexpr int64_t kMaxDim = 4096;
+// Limits that keep one run practical. The binary-search decomposition of a
+// 512 x 512 output takes about 20 s and grows steeply beyond it. Every FPGA
+// invocation is one DPTI round trip (about a millisecond on the board) and
+// costs about 2.5 ms and 120 KB to compile and JIT (16786 invocations,
+// 256x256x112: 40 s, 2.1 GB).
+constexpr int64_t kMaxMN = 512;
+constexpr int64_t kMaxK = 4096;
+constexpr int64_t kMaxInvocations = 16384;
 
 // The FPGA computes in IEEE binary32, which holds every integer up to 2^24
 // in magnitude exactly and only some beyond. Inputs are kept to that range,
@@ -127,7 +137,8 @@ struct TileInfo {
                "  A: M rows of K integers\n"
                "  B: K rows of N integers\n"
                "(integers in -16777216..16777216, the range binary32 holds\n"
-               "exactly)\n"
+               "exactly; M, N <= 512, K <= 4096, at most 16384 FPGA\n"
+               "invocations)\n"
                "and computes C = A x B on the 1x8x8 + 3x4x4 FPGA through\n"
                "Linalg -> Systolic -> FPGA lowering -> runtime -> DPTI,\n"
                "then checks C against an exact CPU reference.\n"
@@ -230,15 +241,28 @@ Problem readProblem() {
   p.M = rd.next("M");
   p.N = rd.next("N");
   p.K = rd.next("K");
-  for (auto [name, v] : {std::pair<const char *, int64_t>{"M", p.M},
-                         {"N", p.N},
-                         {"K", p.K}}) {
-    if (v < 1 || v > kMaxDim) {
+  for (auto [name, v, max] :
+       {std::tuple<const char *, int64_t, int64_t>{"M", p.M, kMaxMN},
+        {"N", p.N, kMaxMN},
+        {"K", p.K, kMaxK}}) {
+    if (v < 1 || v > max) {
       std::fprintf(stderr, "systolic-matmul: %s = %" PRId64
                            " is outside 1..%" PRId64 "\n",
-                   name, v, kMaxDim);
+                   name, v, max);
       std::exit(2);
     }
+  }
+
+  // One invocation covers at most 8 x 8 outputs and 16 reduction steps.
+  const int64_t atLeast =
+      (p.M * p.N + 63) / 64 * ((p.K + 15) / 16);
+  if (atLeast > kMaxInvocations) {
+    std::fprintf(stderr,
+                 "systolic-matmul: %" PRId64 "x%" PRId64 "x%" PRId64
+                 " needs at least %" PRId64 " FPGA invocations; this tool "
+                 "runs at most %" PRId64 "\n",
+                 p.M, p.N, p.K, atLeast, kMaxInvocations);
+    std::exit(2);
   }
 
   p.A.resize(static_cast<size_t>(p.M * p.K));
@@ -430,6 +454,42 @@ using MatmulFn = void (*)(StridedMemRefType<float, 2> *,
                           StridedMemRefType<float, 2> *,
                           StridedMemRefType<float, 2> *);
 
+// The compiled entry point is one straight line of code per invocation, and
+// unoptimized code generation gives every value its own stack slot: the
+// frame grows by roughly 330 bytes per invocation and passes the main
+// thread's 8 MB at about 25 000. It runs on a thread whose stack is sized
+// for the invocations it makes.
+struct CompiledCall {
+  MatmulFn fn;
+  StridedMemRefType<float, 2> *result, *a, *b, *c;
+};
+
+bool runOnOwnStack(MatmulFn fn, StridedMemRefType<float, 2> *result,
+                   StridedMemRefType<float, 2> *a,
+                   StridedMemRefType<float, 2> *b,
+                   StridedMemRefType<float, 2> *c, size_t invocations) {
+  CompiledCall call{fn, result, a, b, c};
+  pthread_attr_t attr;
+  if (pthread_attr_init(&attr) != 0)
+    return false;
+  const size_t stackBytes = (size_t{16} << 20) + invocations * 1024;
+  pthread_t thread;
+  const bool started =
+      pthread_attr_setstacksize(&attr, stackBytes) == 0 &&
+      pthread_create(
+          &thread, &attr,
+          [](void *arg) -> void * {
+            auto *call = static_cast<CompiledCall *>(arg);
+            call->fn(call->result, call->a, call->b, call->c);
+            return nullptr;
+          },
+          &call) == 0;
+  pthread_attr_destroy(&attr);
+  if (!started)
+    return false;
+  return pthread_join(thread, nullptr) == 0;
+}
+
 StridedMemRefType<float, 2> describe(float *data, int64_t rows,
                                      int64_t cols) {
   StridedMemRefType<float, 2> d;
@@ -519,6 +579,14 @@ int main(int argc, char **argv) {
     return 3;
   dumpStage(opts, "10-systolic.mlir", module->getOperation());
   report.tiles = collectTiles(*module);
+  if (static_cast<int64_t>(report.tiles.size()) > kMaxInvocations) {
+    std::fprintf(stderr,
+                 "systolic-matmul: the decomposition of %" PRId64 "x%" PRId64
+                 "x%" PRId64 " is %zu FPGA invocations; this tool runs at "
+                 "most %" PRId64 "\n",
+                 M, N, K, report.tiles.size(), kMaxInvocations);
+    return 2;
+  }
 
   if (failed(runStage(*module, "Systolic -> FPGA runtime lowering",
                       [](OpPassManager &pm) {
@@ -567,7 +635,13 @@ int main(int argc, char **argv) {
 
   std::string llPath =
       opts.dumpDir.empty() ? std::string() : opts.dumpDir + "/40-llvm.ll";
-  auto optimize = makeOptimizingTransformer(/*optLevel=*/2, /*sizeLevel=*/0,
+  // The compiled function is one straight line of runtime calls and tile
+  // copies; every invocation then waits on the FPGA link for milliseconds.
+  // Nothing in it is worth optimizing, and LLVM's -O2 pipeline and codegen
+  // grow faster than linearly on a single block of thousands of calls
+  // (128x128x128, 4784 invocations: about 70 s at -O2), so it is compiled
+  // without optimization.
+  auto optimize = makeOptimizingTransformer(/*optLevel=*/0, /*sizeLevel=*/0,
                                             /*targetMachine=*/nullptr);
   auto transformer = [&](llvm::Module *m) -> llvm::Error {
     if (llvm::Error err = optimize(m))
@@ -583,7 +657,27 @@ int main(int argc, char **argv) {
 
   ExecutionEngineOptions engineOptions;
   engineOptions.transformer = transformer;
-  auto maybeEngine = ExecutionEngine::create(*module, engineOptions);
+  engineOptions.jitCodeGenOptLevel = llvm::CodeGenOptLevel::None;
+
+  // MLIR 23's ExecutionEngine applies jitCodeGenOptLevel to a target
+  // machine builder it then does not use, so the code generator's level is
+  // set on the target machine handed to it as well.
+  auto tmBuilder = llvm::orc::JITTargetMachineBuilder::detectHost();
+  if (!tmBuilder) {
+    std::string msg = llvm::toString(tmBuilder.takeError());
+    std::fprintf(stderr, "systolic-matmul: no JIT target: %s\n", msg.c_str());
+    return 3;
+  }
+  tmBuilder->setCodeGenOptLevel(llvm::CodeGenOptLevel::None);
+  auto targetMachine = tmBuilder->createTargetMachine();
+  if (!targetMachine) {
+    std::string msg = llvm::toString(targetMachine.takeError());
+    std::fprintf(stderr, "systolic-matmul: no JIT target: %s\n", msg.c_str());
+    return 3;
+  }
+
+  auto maybeEngine = ExecutionEngine::create(*module, engineOptions,
+                                             std::move(*targetMachine));
   if (!maybeEngine) {
     std::string msg = llvm::toString(maybeEngine.takeError());
     std::fprintf(stderr, "systolic-matmul: JIT compilation failed: %s\n",
@@ -626,7 +720,11 @@ int main(int argc, char **argv) {
 
   fpga_runtime_reset_stats();
   const auto t0 = std::chrono::steady_clock::now();
-  fn(&mR, &mA, &mB, &mC);
+  if (!runOnOwnStack(fn, &mR, &mA, &mB, &mC, report.runtimeCalls)) {
+    std::fprintf(stderr, "systolic-matmul: cannot start the thread that "
+                         "runs the compiled code\n");
+    return 4;
+  }
   const auto t1 = std::chrono::steady_clock::now();
   report.fpgaSeconds = std::chrono::duration<double>(t1 - t0).count();
   fpga_runtime_get_stats(&report.stats);
