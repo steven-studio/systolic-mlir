@@ -159,12 +159,13 @@ struct ScheduledRuntime {
     unsigned              next_job_id = 0;
 
     /*
-     * A MEM_WRITE, descriptor or result read failed on this session. The
-     * link may be mid-packet, or a late result may still arrive and be read
-     * as the next invocation's, so nothing more is sent on it until
-     * fpga_runtime_close(); the next session starts purged.
+     * The session could not be opened, or a MEM_WRITE, descriptor or result
+     * read failed on it. The link may be mid-packet, or a late result may
+     * still arrive and be read as the next invocation's, so nothing more is
+     * sent until fpga_runtime_close(); the next session starts purged.
      */
     bool                  link_failed = false;
+    bool                  refusal_reported = false;
 
     fpga_runtime_stats_t  stats{};
 };
@@ -223,8 +224,12 @@ int scheduled_invocation(
     if (!rt.session) {
         rt.session = dpti_ftdi_open();
 
-        if (!rt.session)
+        if (!rt.session) {
+            // No board (or no permission): retrying for every invocation
+            // only repeats the same failure.
+            rt.link_failed = true;
             return -3;
+        }
     }
 
     std::array<unsigned char, 1024> slab{};
@@ -378,11 +383,20 @@ int fpga_matmul_tiled_auto_scheduled(
         if (stats.first_error == 0)
             stats.first_error = rc;
 
-        std::fprintf(
-            stderr,
-            "[fpga-runtime] invocation on device %u (tile %dx%d, k=%d) "
-            "failed: rc=%d\n",
-            device_id, M, N, K, rc);
+        if (rc != -14) {
+            std::fprintf(
+                stderr,
+                "[fpga-runtime] invocation on device %u (tile %dx%d, k=%d) "
+                "failed: rc=%d\n",
+                device_id, M, N, K, rc);
+        } else if (!rt.refusal_reported) {
+            rt.refusal_reported = true;
+            std::fprintf(
+                stderr,
+                "[fpga-runtime] the DPTI link failed earlier in this "
+                "session; this and every further invocation is refused "
+                "(rc=-14)\n");
+        }
     }
 
     return rc;
@@ -404,4 +418,5 @@ void fpga_runtime_close(void) {
         rt.session = nullptr;
     }
     rt.link_failed = false;
+    rt.refusal_reported = false;
 }
