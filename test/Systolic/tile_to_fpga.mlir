@@ -17,8 +17,8 @@ module {
       %a: tensor<4x4xf32>,
       %b: tensor<4x4xf32>,
       %c: tensor<4x4xf32>) -> tensor<4x4xf32> {
-    %0 = systolic.matmul_tile %a, %b, %c on @acc_4x4
-         {m = 4 : i64, n = 4 : i64, k = 4 : i64}
+    %0 = systolic.matmul_tile %a, %b, %c
+         m = 4 n = 4 k = 4 on @acc_4x4
          : (tensor<4x4xf32>, tensor<4x4xf32>, tensor<4x4xf32>)
            -> tensor<4x4xf32>
     return %0 : tensor<4x4xf32>
