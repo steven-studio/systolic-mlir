@@ -580,7 +580,23 @@ module systolic_dma_core #(
   // The operand image is physically laid out at K_MAX capacity.
   // JOB_K controls how many reduction entries the array consumes;
   // it does not change the DMA payload layout or operand-buffer decode.
-  wire [31:0] job_rx_bytes = RX_BYTES;
+  // Runtime payload size for an externally scheduled job.
+  //
+  // Each invocation contains:
+  //   A[K,N] + B[K,N]
+  // with FP32 elements, so the payload is:
+  //
+  //   K * N * 4 * 2 = K * N * 8 bytes.
+  //
+  // The old RX_BYTES value is sized for the physical K_MAX image and
+  // therefore causes a K=16 job to request 512 words even though only
+  // 256 words are actually transferred.
+  wire [31:0] job_rx_bytes =
+      USE_EXTERNAL_SCHEDULER
+          ? (select_8x8 ? (job_k_reg * 32'd8 * 32'd8) :
+             select_4x4 ? (job_k_reg * 32'd4 * 32'd8) :
+                          RX_BYTES)
+          : RX_BYTES;
 
   wire [31:0] job_n_beats =
       job_rx_bytes / (AXI_DATA_W / 8);
@@ -658,8 +674,15 @@ module systolic_dma_core #(
   // directly would allow a stale completion from the previous job to look
   // like completion of the next job.
   //
-  // c_done_seen is cleared when a new job is accepted and set after the first
-  // completion belonging to that job.
+  // c_done_seen re-arms for each invocation.
+  //
+  // A scheduler job may contain multiple invocations, and each invocation
+  // must produce exactly one scheduler_c_done event.
+  //
+  // job_fire starts the first invocation's completion epoch.
+  // fold_start starts every subsequent invocation's completion epoch.
+  // c_done_seen suppresses repeated observation of the sticky c_done level
+  // within the same invocation.
   logic        c_done_seen;
 
   assign scheduler_c_done =
@@ -675,6 +698,8 @@ module systolic_dma_core #(
     end
     else begin
       if (job_fire)
+        c_done_seen <= 1'b0;
+      else if (fold_start)
         c_done_seen <= 1'b0;
       else if (job_active && c_done)
         c_done_seen <= 1'b1;

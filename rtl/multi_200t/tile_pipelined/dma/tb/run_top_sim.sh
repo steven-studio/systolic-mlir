@@ -7,6 +7,23 @@
 #   ./run_top_sim.sh v1 256       # the paper's geometry, either variant
 #   ./run_top_sim.sh v2 32 8      # eight invocations of k=32: the k_max split
 #
+#   ./run_top_sim.sh v1 16 1 1 32 16 hetero_concurrent
+#                                 # heterogeneous concurrent-execution test:
+#                                 # one 8x8 job (device 0) + one 4x4 job
+#                                 # (device 1) back to back through the
+#                                 # external scheduler; PASS only if the two
+#                                 # arrays' COMPUTE intervals overlap in time
+#   ./run_top_sim.sh v1 16 1 1 32 16 hetero_full_concurrent
+#                                 # full-fleet test: job q -> device q for
+#                                 # q = 0..3 (the 8x8 and all three 4x4s),
+#                                 # back to back; PASS only if
+#                                 # max(starts) < min(dones) over all four
+#                                 # arrays' COMPUTE intervals
+#
+# The seventh argument selects the test: "regress" (default -- the existing
+# flow, unchanged), "hetero_concurrent" or "hetero_full_concurrent".  It is a
+# run-time plusarg to the same bench; the build is identical.
+#
 # The third argument is the invocation count.  It is not a generic: the design
 # takes it from vio_0's output probe, which xil_stubs drives from +n_inv, for
 # the same reason the board takes it from JTAG -- the fold count is a
@@ -33,12 +50,36 @@ ROOT="$(dirname "$DMA")"                               # .../tile_pipelined
 VARIANT="${1:-v1}"
 KMAX="${2:-16}"
 NINV="${3:-1}"
+SCHED="${4:-0}"
+KMAX_8X8="${5:-32}"
+KMAX_4X4="${6:-16}"
+TEST="${7:-regress}"
 case "$VARIANT" in
-  v1) GEN="-GUSE_V2=0 -GK_MAX=$KMAX" ;;
-  v2) GEN="-GUSE_V2=1 -GK_MAX=$KMAX" ;;
-  *)  echo "usage: $0 [v1|v2] [K_MAX]"; exit 2 ;;
+  v1) GEN="-GUSE_V2=0 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
+  v2) GEN="-GUSE_V2=1 -GK_MAX_8X8=$KMAX_8X8 -GK_MAX_4X4=$KMAX_4X4 -GK_DIM=$KMAX" ;;
+  *)  echo "usage: $0 [v1|v2] [K_MAX] [NINV] [SCHED] [K_MAX_8X8] [K_MAX_4X4] [regress|hetero_concurrent|hetero_full_concurrent]"; exit 2 ;;
 esac
-OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}"
+
+case "$SCHED" in
+  0|1) ;;
+  *)  echo "SCHED must be 0 or 1"; exit 2 ;;
+esac
+
+# The test selector: the default adds nothing, so the regression invocations
+# run exactly as before.  The concurrency tests need the external scheduler.
+case "$TEST" in
+  regress)                TEST_ARGS="" ;;
+  hetero_concurrent)      TEST_ARGS="+hetero_concurrent"
+                          [ "$SCHED" -eq 1 ] || { echo "hetero_concurrent requires SCHED=1"; exit 2; } ;;
+  hetero_full_concurrent) TEST_ARGS="+hetero_full_concurrent"
+                          [ "$SCHED" -eq 1 ] || { echo "hetero_full_concurrent requires SCHED=1"; exit 2; } ;;
+  *)  echo "TEST must be regress, hetero_concurrent or hetero_full_concurrent"; exit 2 ;;
+esac
+
+GEN="$GEN -GUSE_EXTERNAL_SCHEDULER=$SCHED"
+
+OUT="$HERE/sim_out_top_${VARIANT}_k${KMAX}_n${NINV}_sched${SCHED}"
+[ "$TEST" = "regress" ] || OUT="${OUT}_${TEST}"
 
 command -v verilator >/dev/null 2>&1 || {
     echo "verilator not found."
@@ -47,6 +88,9 @@ command -v verilator >/dev/null 2>&1 || {
 }
 
 rm -rf "$OUT"
+
+echo "== build: variant=$VARIANT K_MAX=$KMAX n_inv=$NINV external_scheduler=$SCHED K_MAX_8X8=$KMAX_8X8 K_MAX_4X4=$KMAX_4X4 test=$TEST =="
+
 verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     --top-module tb_systolic_dma_top -o tbrun --Mdir "$OUT" \
     "$HERE/tb_systolic_dma_top.sv" \
@@ -54,6 +98,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$HERE/mig_axi_model.sv" \
     "$ROOT/tb/fp_model.sv" \
     "$DMA/systolic_dma_top.sv" \
+    "$DMA/systolic_accel_context.sv" \
     "$DMA/dpti_host_rx.sv" \
     "$DMA/dpti_byte_tx.sv" \
     "$DMA/dpti_write32_decoder.sv" \
@@ -74,6 +119,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/scheduler/systolic_hw_scheduler_adapter.sv" \
     "$ROOT/scheduler/systolic_job_ingress.sv" \
     "$DMA/dma_engine.sv" \
+    "$DMA/dma_engine_multi.sv" \
     "$DMA/dma_seed_writer.sv" \
     "$DMA/dma_operand_writer.sv" \
     "$DMA/dma_operand_writer_v2.sv" \
@@ -89,4 +135,10 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$ROOT/core/operand_buffer_v2.sv" \
     > "$HERE/build_top_${VARIANT}_k${KMAX}.log" 2>&1 || { tail -30 "$HERE/build_top_${VARIANT}_k${KMAX}.log"; exit 1; }
 
-"$OUT/tbrun" +n_inv=$NINV +wb_region=$((NINV * KMAX * 8 * 8 + 4096))
+if [ "$SCHED" -eq 1 ]; then
+    WB_REGION=4096
+else
+    WB_REGION=$((NINV * KMAX * 8 * 8 + 4096))
+fi
+
+"$OUT/tbrun" +n_inv=$NINV +wb_region=$WB_REGION $TEST_ARGS

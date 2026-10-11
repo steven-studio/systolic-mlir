@@ -1,0 +1,127 @@
+model: T_compute = k + 2(N-1) + H,  T_DMA = 2*lanes*k/beta,  T_invocation = max(.,.),  H = 95
+payload: rtl  ->  N=8 moves 8 lanes, N=4 moves 8 lanes   (the current RTL: N_WIRE = 8 for every context)
+betas: [0.99, 3.51, 3.627, 11.2] words/cycle -- 3.51 / 3.627 measured on the N=8 path, declared aggregate sensitivity parameters for N=4; 0.99 declared v1 fill; 11.2 demand case
+time columns: overlapped_cycles = sum max(T_compute, T_DMA) (the requested model); pipelined_time = first fill + last compute exposed (supplementary)
+Pareto screen: overlapped_cycles at K in [16, 64, 256, 1024]  vs  operand_words
+
+=== N = 8  (payload rtl: 8 lanes moved per invocation; T_compute = k + 14 + 95 = k + 109) ===
+
+  beta = 0.99   [declared_v1_fill_limit]  k* = 7.2
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      2000    4137.4     4137.4    4262.4  transport       512       32
+      32   256     8      1128    4137.4     4137.4    4278.4  transport      1024       32
+      64   256     4       692    4137.4     4137.4    4310.4  transport      2048       32
+     128   256     2       474    4137.4     4137.4    4374.4  transport      4096       32
+     256   256     1       365    4137.4     4137.4    4502.4  transport      8192       32
+     512   256     1       365    4137.4     4137.4    4502.4  transport     16384       32
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16
+
+  beta = 3.51   [measured_N8_path]  k* = 30.6
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      2000    1167.0       2000    2072.9  compute         512       32
+      32   256     8      1128    1167.0     1167.0    1308.0  transport      1024       32
+      64   256     4       692    1167.0     1167.0    1340.0  transport      2048       32
+     128   256     2       474    1167.0     1167.0    1404.0  transport      4096       32
+     256   256     1       365    1167.0     1167.0    1532.0  transport      8192       32
+     512   256     1       365    1167.0     1167.0    1532.0  transport     16384       32
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32
+
+  beta = 3.627  [measured_N8_path]  k* = 32.0
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      2000    1129.3       2000    2070.6  compute         512       32
+      32   256     8      1128    1129.3     1129.3    1270.3  balanced       1024       32
+      64   256     4       692    1129.3     1129.3    1302.3  transport      2048       32
+     128   256     2       474    1129.3     1129.3    1366.3  transport      4096       32
+     256   256     1       365    1129.3     1129.3    1494.3  transport      8192       32
+     512   256     1       365    1129.3     1129.3    1494.3  transport     16384       32
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32
+
+  beta = 11.2   [demand_sensitivity_case]  k* = 254.3
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      2000     365.7       2000    2022.9  compute         512       32
+      32   256     8      1128     365.7       1128    1173.7  compute        1024       32
+      64   256     4       692     365.7        692     783.4  compute        2048       32
+     128   256     2       474     365.7        474     656.9  compute        4096       32
+     256   256     1       365     365.7      365.7     730.7  balanced       8192       32
+     512   256     1       365     365.7      365.7     730.7  balanced      16384       32
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32, 64, 128, 256
+
+=== N = 4  (payload rtl: 8 lanes moved per invocation; T_compute = k + 6 + 95 = k + 101) ===
+
+  beta = 0.99   [declared_v1_fill_limit]  k* = 6.7
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      1872    4137.4     4137.4    4254.4  transport       256       16
+      32   256     8      1064    4137.4     4137.4    4270.4  transport       512       16
+      64   256     4       660    4137.4     4137.4    4302.4  transport      1024       16
+     128   256     2       458    4137.4     4137.4    4366.4  transport      2048       16
+     256   256     1       357    4137.4     4137.4    4494.4  transport      4096       16
+     512   256     1       357    4137.4     4137.4    4494.4  transport      8192       16
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16
+
+  beta = 3.51   [declared_for_N4_(N8_measurement_reused)]  k* = 28.4
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      1872    1167.0       1872    1944.9  compute         256       16
+      32   256     8      1064    1167.0     1167.0    1300.0  transport       512       16
+      64   256     4       660    1167.0     1167.0    1332.0  transport      1024       16
+     128   256     2       458    1167.0     1167.0    1396.0  transport      2048       16
+     256   256     1       357    1167.0     1167.0    1524.0  transport      4096       16
+     512   256     1       357    1167.0     1167.0    1524.0  transport      8192       16
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32
+
+  beta = 3.627  [declared_for_N4_(N8_measurement_reused)]  k* = 29.6
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      1872    1129.3       1872    1942.6  compute         256       16
+      32   256     8      1064    1129.3     1129.3    1262.3  transport       512       16
+      64   256     4       660    1129.3     1129.3    1294.3  transport      1024       16
+     128   256     2       458    1129.3     1129.3    1358.3  transport      2048       16
+     256   256     1       357    1129.3     1129.3    1486.3  transport      4096       16
+     512   256     1       357    1129.3     1129.3    1486.3  transport      8192       16
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32
+
+  beta = 11.2   [demand_sensitivity_case]  k* = 235.7
+   K_MAX     K n_inv   compute       dma overlapped pipelined  bottleneck op_words bram18k~
+      16   256    16      1872     365.7       1872    1894.9  compute         256       16
+      32   256     8      1064     365.7       1064    1109.7  compute         512       16
+      64   256     4       660     365.7        660     751.4  compute        1024       16
+     128   256     2       458     365.7        458     640.9  compute        2048       16
+     256   256     1       357     365.7      365.7     722.7  transport      4096       16
+     512   256     1       357     365.7      365.7     722.7  transport      8192       16
+  potentially Pareto-optimal K_MAX (overlapped_cycles at K in [16, 64, 256, 1024] vs operand_words): 16, 32, 64, 128, 256
+
+=== fleet 1x8x8 + 3x4x4: per-context beta under concurrent DMA ===
+    ANALYTICAL CONTENTION ASSUMPTION, not a measured per-context beta:
+    beta_ctx = min(writer_cap, beta_aggregate / n_active); k* evaluated at beta_ctx
+    (equal split = dma_engine_multi round-robin single-beat bursts, matches the ideal-channel simulation; aggregate values = N=8 single-stream measurements reused)
+  writer   cap beta_agg n_act beta_ctx   k*_8x8   k*_4x4  limited_by
+  v1      0.99     0.99     1    0.990      7.2      6.7  writer_cap
+  v1      0.99     0.99     2    0.495      3.5      3.2  memory_system_share
+  v1      0.99     0.99     4    0.247      1.7      1.6  memory_system_share
+  v1      0.99     3.51     1    0.990      7.2      6.7  writer_cap
+  v1      0.99     3.51     2    0.990      7.2      6.7  writer_cap
+  v1      0.99     3.51     4    0.877      6.3      5.9  memory_system_share
+  v1      0.99    3.627     1    0.990      7.2      6.7  writer_cap
+  v1      0.99    3.627     2    0.990      7.2      6.7  writer_cap
+  v1      0.99    3.627     4    0.907      6.5      6.1  memory_system_share
+  v1      0.99     11.2     1    0.990      7.2      6.7  writer_cap
+  v1      0.99     11.2     2    0.990      7.2      6.7  writer_cap
+  v1      0.99     11.2     4    0.990      7.2      6.7  writer_cap
+  v2       4.0     0.99     1    0.990      7.2      6.7  memory_system_share
+  v2       4.0     0.99     2    0.495      3.5      3.2  memory_system_share
+  v2       4.0     0.99     4    0.247      1.7      1.6  memory_system_share
+  v2       4.0     3.51     1    3.510     30.6     28.4  memory_system_share
+  v2       4.0     3.51     2    1.755     13.4     12.4  memory_system_share
+  v2       4.0     3.51     4    0.877      6.3      5.9  memory_system_share
+  v2       4.0    3.627     1    3.627     32.0     29.6  memory_system_share
+  v2       4.0    3.627     2    1.813     13.9     12.9  memory_system_share
+  v2       4.0    3.627     4    0.907      6.5      6.1  memory_system_share
+  v2       4.0     11.2     1    4.000     36.3     33.7  writer_cap
+  v2       4.0     11.2     2    4.000     36.3     33.7  writer_cap
+  v2       4.0     11.2     4    2.800     23.1     21.4  memory_system_share
+
+=== sweep plan: 6 (K8, K4) pairs, analytical columns at K_rep = 256 ===
+  (16,16), (32,16), (32,32), (128,128), (256,256), (512,512)   (+ optional 1024:1024 BRAM-cliff experiment with --bram-cliff)
+  sweep_plan.csv: 48 rows = 6 pairs x 4 betas x 2 geometries
+  schema: K8,K4,beta,geometry,k_star,BRAM,LUT,FF,DSP,WNS,TNS,WHS,THS,invocation_count,compute_cycles,dma_cycles,overlapped_cycles,status,payload_model,payload_lanes,beta_basis
+
+written: out/analysis.csv  pareto.csv  fleet.csv  sweep_plan.csv
+Vivado was NOT launched; this phase is analytical only.
