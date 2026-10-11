@@ -62,47 +62,6 @@ int dpti_submit(
     void *ctx);
 
 /* ============================================================
- * Physical FPGA bring-up API
- *
- * This is the existing smoke-test path.
- * ============================================================ */
-
-typedef struct {
-    int fd;
-    uint32_t device_id;
-} DptiDevice;
-
-typedef struct {
-    uint32_t job_id;
-    uint32_t device_id;
-
-    uint32_t m;
-    uint32_t n;
-    uint32_t k;
-
-    uint32_t start_cycle;
-    uint32_t est_cycles;
-
-    uint64_t a_base;
-    uint64_t b_base;
-    uint64_t c_base;
-} DptiJob;
-
-int dpti_device_open(
-    DptiDevice *dev,
-    const char *port);
-
-void dpti_device_close(
-    DptiDevice *dev);
-
-int dpti_execute_matmul(
-    DptiDevice *dev,
-    const DptiJob *job,
-    const float *A,
-    const float *B,
-    float *C);
-
-/* ============================================================
  * Physical DPTI descriptor transport.
  *
  * Persistent sessions are used when submitting multiple jobs that
@@ -156,18 +115,6 @@ unsigned long long dpti_ftdi_bytes_written(
 
 unsigned long long dpti_ftdi_bytes_read(
     const DptiFtdiSession *session);
-
-/*
- * Convenience single-job API retained for existing smoke tests.
- *
- * Equivalent to:
- *
- *   session = dpti_ftdi_open();
- *   dpti_ftdi_submit_session(session, job);
- *   dpti_ftdi_close(session);
- */
-int dpti_ftdi_submit(
-    const dpti_job_t *job);
 
 #ifdef __cplusplus
 }

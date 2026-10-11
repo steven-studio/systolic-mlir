@@ -464,28 +464,3 @@ extern "C" unsigned long long dpti_ftdi_bytes_read(
 {
     return session ? session->transport.bytes_read : 0;
 }
-
-extern "C" int dpti_ftdi_submit(
-    const dpti_job_t *job)
-{
-    if (!job)
-        return -1;
-
-    if (dpti_job_validate(job) != 0)
-        return -2;
-
-    DptiFtdiSession *session =
-        dpti_ftdi_open();
-
-    if (!session)
-        return -3;
-
-    const int rc =
-        dpti_ftdi_submit_session(
-            session,
-            job);
-
-    dpti_ftdi_close(session);
-
-    return rc;
-}
