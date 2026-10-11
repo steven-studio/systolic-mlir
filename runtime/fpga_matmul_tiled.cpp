@@ -157,6 +157,15 @@ int physical_geometry(unsigned device_id) {
 struct ScheduledRuntime {
     DptiFtdiSession      *session = nullptr;
     unsigned              next_job_id = 0;
+
+    /*
+     * A MEM_WRITE, descriptor or result read failed on this session. The
+     * link may be mid-packet, or a late result may still arrive and be read
+     * as the next invocation's, so nothing more is sent on it until
+     * fpga_runtime_close(); the next session starts purged.
+     */
+    bool                  link_failed = false;
+
     fpga_runtime_stats_t  stats{};
 };
 
@@ -208,6 +217,9 @@ int scheduled_invocation(
 
     ScheduledRuntime &rt = runtime_state();
 
+    if (rt.link_failed)
+        return -14;
+
     if (!rt.session) {
         rt.session = dpti_ftdi_open();
 
@@ -232,8 +244,10 @@ int scheduled_invocation(
             slab.data(),
             static_cast<uint32_t>(slab.size()));
 
-    if (mem_rc != 0)
+    if (mem_rc != 0) {
+        rt.link_failed = true;
         return mem_rc;
+    }
 
     // Kept from the board-verified sequence: let MEM_WRITE settle.
     std::this_thread::sleep_for(
@@ -269,8 +283,10 @@ int scheduled_invocation(
             rt.session,
             &job);
 
-    if (submit_rc != 0)
+    if (submit_rc != 0) {
+        rt.link_failed = true;
         return submit_rc;
+    }
 
     const uint32_t result_bytes_len =
         static_cast<uint32_t>(P * P * sizeof(float));
@@ -285,8 +301,10 @@ int scheduled_invocation(
             result_bytes_len,
             read_timeout_ms());
 
-    if (read_rc != 0)
+    if (read_rc != 0) {
+        rt.link_failed = true;
         return read_rc;
+    }
 
     /*
      * C_out = C_in + A x B: the FPGA computed this invocation's product;
@@ -374,4 +392,5 @@ void fpga_runtime_close(void) {
         dpti_ftdi_close(rt.session);
         rt.session = nullptr;
     }
+    rt.link_failed = false;
 }

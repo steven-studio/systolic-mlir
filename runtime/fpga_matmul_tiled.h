@@ -22,6 +22,8 @@ extern "C" {
 // Returns 0, or:
 //   -10  K outside 1..16          -11  device_id unknown / tile too large
 //   -12  null pointer             -13  slab packing failed
+//   -14  an earlier MEM_WRITE / descriptor / read failed on this DPTI
+//        session; nothing more is sent on it until fpga_runtime_close()
 //    -3  DPTI session could not be opened
 //   other negative values         DPTI MEM_WRITE / submit / read failure
 int fpga_matmul_tiled_auto_scheduled(

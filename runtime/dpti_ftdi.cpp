@@ -17,6 +17,12 @@ struct FtdiTransportState {
     // Every byte that crossed the FT2232H, either way.
     unsigned long long bytes_written = 0;
     unsigned long long bytes_read = 0;
+
+    // Set by the first WRITE32 of a descriptor that did not go out. The
+    // write32 callback cannot return an error to dpti_submit(), so the
+    // rest of that descriptor -- CONTROL = submit above all -- is skipped
+    // and dpti_ftdi_submit_session() reports the failure.
+    bool write32_failed = false;
 };
 
 /*
@@ -79,6 +85,9 @@ static void ftdi_write32(
     auto *state =
         static_cast<FtdiTransportState *>(ctx);
 
+    if (state->write32_failed)
+        return;
+
     unsigned char packet[6];
 
     packet[0] = 0x01; // WRITE32
@@ -100,9 +109,12 @@ static void ftdi_write32(
             state,
             packet,
             sizeof(packet)) != 0) {
+        state->write32_failed = true;
         std::fprintf(
             stderr,
-            "[DPTI FTDI] WRITE32 transport failure\n");
+            "[DPTI FTDI] WRITE32 addr=0x%02x transport failure; "
+            "the rest of the descriptor is not sent\n",
+            addr);
     }
 }
 
@@ -246,6 +258,8 @@ extern "C" int dpti_ftdi_submit_session(
     if (validate_rc != 0)
         return -3;
 
+    session->transport.write32_failed = false;
+
     const int rc =
         dpti_submit(
             job,
@@ -257,9 +271,19 @@ extern "C" int dpti_ftdi_submit_session(
             stderr,
             "[DPTI FTDI] dpti_submit failed rc=%d\n",
             rc);
+        return rc;
     }
 
-    return rc;
+    if (session->transport.write32_failed) {
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] job %u not submitted: a descriptor WRITE32 "
+            "failed\n",
+            job->job_id);
+        return -6;
+    }
+
+    return 0;
 }
 
 extern "C" int dpti_ftdi_mem_write_session(

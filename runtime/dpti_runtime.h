@@ -72,6 +72,11 @@ typedef struct DptiFtdiSession DptiFtdiSession;
 
 DptiFtdiSession *dpti_ftdi_open(void);
 
+/*
+ * Write one descriptor, CONTROL = submit last. Returns 0, -1 no session,
+ * -2 no job, -3 invalid job, or -6 when a WRITE32 did not go out (the rest
+ * of the descriptor, the submit included, is then not sent).
+ */
 int dpti_ftdi_submit_session(
     DptiFtdiSession *session,
     const dpti_job_t *job);
