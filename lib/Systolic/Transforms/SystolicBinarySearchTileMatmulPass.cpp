@@ -152,6 +152,18 @@ struct SystolicBinarySearchTileMatmulPass
       if (matmul->getNumResults() != 1)
         continue;
 
+      // The decomposition below slices A as M x K and B as K x N, which is
+      // what the default indexing maps C(m, n) += A(m, k) * B(k, n) mean.
+      // indexing_maps can transpose an operand (A^T B, A B^T); lowering such
+      // a matmul by the default reading would compute a different product.
+      if (matmul.hasUserDefinedMaps()) {
+        matmul.emitError()
+            << "linalg.matmul with user-defined indexing_maps is not "
+               "supported; only C(m, n) += A(m, k) * B(k, n) is lowered";
+        signalPassFailure();
+        return;
+      }
+
       auto aTy =
           dyn_cast<RankedTensorType>(
               matmul.getDpsInputs()[0].getType());
@@ -205,6 +217,16 @@ struct SystolicBinarySearchTileMatmulPass
           cTy.getDimSize(1) != N) {
         matmul.emitError()
             << "C shape does not match M x N";
+        signalPassFailure();
+        return;
+      }
+
+      // An empty dimension leaves nothing to run on an array, and the
+      // K-folding below divides by the number of invocations.
+      if (M < 1 || N < 1 || K < 1) {
+        matmul.emitError()
+            << "requires non-empty M, N and K, got "
+            << M << "x" << N << "x" << K;
         signalPassFailure();
         return;
       }
