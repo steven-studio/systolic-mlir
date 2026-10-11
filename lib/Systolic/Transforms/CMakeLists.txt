@@ -11,7 +11,6 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicDecompositionDP.cpp
   SystolicMaterializeSchedulePass.cpp
   SystolicBinarySearchTileMatmulPass.cpp
-  SystolicJobCodegen.cpp
   TestAffineMatmulDiscovery.cpp
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp

@@ -41,8 +41,6 @@ void registerSystolicBinarySearchTileMatmulPass();
 std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
 void registerSystolicMaterializeSchedulePass();
 
-void registerSystolicJobCodegenPass();
-
 std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
 void registerAffineMatmulToSystolicPass();
 
