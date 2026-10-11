@@ -237,7 +237,7 @@ set SRC [list \
     $ROOT/core/fp_mul.sv \
     $ROOT/core/fp_add.sv \
     $ROOT/core/fp_reduce16.sv \
-    $ROOT/core/systolic_pe_bram.sv \
+    $ROOT/core/systolic_pe.sv \
     $ROOT/core/systolic_array.sv \
     $ROOT/core/tile_feeder.sv \
     $ROOT/core/operand_buffer.sv \
