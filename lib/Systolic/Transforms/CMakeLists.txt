@@ -2,13 +2,8 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulToSystolic.cpp
   AffineMatmulAnalysis.cpp
   AffineMatmulPartitioning.cpp
-  SystolicTiling.cpp
-  SystolicComputeCost.cpp
   SystolicScheduling.cpp
-  SystolicSchedulingDP.cpp
-  SystolicSchedulingCountAllocation.cpp
   SystolicOptimizer.cpp
-  SystolicDecompositionDP.cpp
   SystolicMaterializeSchedulePass.cpp
   SystolicBinarySearchTileMatmulPass.cpp
   TestAffineMatmulDiscovery.cpp
