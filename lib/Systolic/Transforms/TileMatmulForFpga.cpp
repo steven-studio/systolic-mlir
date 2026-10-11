@@ -284,18 +284,27 @@ static tensor::ExtractSliceOp stageableSlice(Value operand) {
 //
 // So the tiles are staged at the buffer level instead: a block of A or B is
 // copied straight out of its source's buffer into a contiguous scratch
-// tile; an output block of C, when nothing but its chain uses %R, %c or any
-// %t_j, is copied into a scratch tile once, accumulated there by all its
-// invocations, and copied back, and %R2 becomes a to_tensor of %R's buffer.
-// The scratch tiles are three stack buffers per function sized for the
-// largest array; the runtime is synchronous, so every invocation reuses
-// them. Anything else goes through bufferization as a plain tensor.
+// tile; an output block of C is copied into a scratch tile once,
+// accumulated there by all its invocations, and copied back, and %R2
+// becomes a to_tensor of %R's buffer. That last step asserts that nothing
+// else can reach %R's buffer, so a block is staged this way only when
+// nothing but its chain uses %R, %c or any %t_j, %R is a function argument
+// or the previous staged block's result, and the block does not interleave
+// with another (see runOnOperation). The scratch tiles are three stack
+// buffers per function sized for the largest array; the runtime is
+// synchronous, so every invocation reuses them. Anything else goes through
+// bufferization as a plain tensor.
 // -----------------------------------------------------------------------
 
 struct OutputBlock {
   tensor::ExtractSliceOp extract;
   SmallVector<unsigned> tiles; // indices into the pass's tile list, in order
   tensor::InsertSliceOp insert;
+
+  // Where %R comes from: an argument of the function, or the insert_slice
+  // of an earlier block of the same chain.
+  bool rootIsArgument = false;
+  Operation *previousInsert = nullptr;
 };
 
 static std::optional<OutputBlock>
@@ -337,7 +346,46 @@ matchOutputBlock(unsigned head, ArrayRef<MatmulTileOp> tiles,
       block.insert.getStaticOffsets() != extract.getStaticOffsets() ||
       block.insert.getStaticSizes() != extract.getStaticSizes())
     return std::nullopt;
+
+  if (auto arg = dyn_cast<BlockArgument>(r))
+    block.rootIsArgument =
+        arg.getOwner()->isEntryBlock() &&
+        isa<FunctionOpInterface>(arg.getOwner()->getParentOp());
+  else
+    block.previousInsert = r.getDefiningOp<tensor::InsertSliceOp>();
+  if (!block.rootIsArgument && !block.previousInsert)
+    return std::nullopt;
   return block;
+}
+
+/// Blocks whose extract .. insert ranges interleave with another block's
+/// ops (nested regions included). They would share the one C scratch tile.
+static SmallVector<bool> findInterleavedBlocks(ArrayRef<OutputBlock> blocks,
+                                               ArrayRef<MatmulTileOp> tiles) {
+  DenseMap<Operation *, unsigned> owner;
+  for (auto [i, block] : llvm::enumerate(blocks)) {
+    owner[block.extract] = i;
+    owner[block.insert] = i;
+    for (unsigned idx : block.tiles)
+      owner[tiles[idx]] = i;
+  }
+
+  SmallVector<bool> interleaved(blocks.size(), false);
+  for (auto [i, block] : llvm::enumerate(blocks)) {
+    Operation *last = block.insert;
+    for (Operation *op = block.extract;; op = op->getNextNode()) {
+      op->walk([&](Operation *nested) {
+        auto it = owner.find(nested);
+        if (it != owner.end() && it->second != i) {
+          interleaved[i] = true;
+          interleaved[it->second] = true;
+        }
+      });
+      if (op == last)
+        break;
+    }
+  }
+  return interleaved;
 }
 
 class RuntimeCallLowering {
@@ -576,18 +624,43 @@ struct LowerSystolicMatmulTileToFpgaPass
     for (auto [i, op] : llvm::enumerate(tiles))
       tileIndex[op] = i;
 
-    SmallVector<OutputBlock> blocks;
-    SmallVector<bool> inBlock(tiles.size(), false);
+    SmallVector<OutputBlock> candidates;
+    SmallVector<bool> claimed(tiles.size(), false);
     for (unsigned i = 0; i < tiles.size(); ++i) {
-      if (inBlock[i])
+      if (claimed[i])
         continue;
       std::optional<OutputBlock> block =
           matchOutputBlock(i, tiles, tileIndex);
       if (!block)
         continue;
       for (unsigned idx : block->tiles)
+        claimed[idx] = true;
+      candidates.push_back(std::move(*block));
+    }
+
+    // A block is staged only if
+    //  - %R is a buffer nothing else reaches: a function argument that only
+    //    this chain uses, or the result of the previous *staged* block of
+    //    the chain. Any other tensor (tensor.empty, linalg.fill, a loop-
+    //    carried value, ...) can share its buffer in place with tensors
+    //    that the restrict to_tensor would hide from bufferization;
+    //  - it does not interleave with another block, since all blocks of a
+    //    function accumulate in the same C scratch tile.
+    // Everything else goes through bufferization as tensors.
+    SmallVector<bool> interleaved = findInterleavedBlocks(candidates, tiles);
+    SmallVector<OutputBlock> blocks;
+    SmallVector<bool> inBlock(tiles.size(), false);
+    llvm::DenseSet<Operation *> stagedInserts;
+    for (auto [block, overlaps] : llvm::zip_equal(candidates, interleaved)) {
+      const bool safeRoot =
+          block.rootIsArgument ||
+          (block.previousInsert && stagedInserts.contains(block.previousInsert));
+      if (overlaps || !safeRoot)
+        continue;
+      stagedInserts.insert(block.insert);
+      for (unsigned idx : block.tiles)
         inBlock[idx] = true;
-      blocks.push_back(std::move(*block));
+      blocks.push_back(block);
     }
 
     IRRewriter rewriter(module.getContext());
