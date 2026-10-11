@@ -50,8 +50,8 @@ but it is not the compiler selected by this configuration.
 
 A successful run should end with:
 
-    Total Discovered Tests: 16
-      Passed: 16 (100.00%)
+    Total Discovered Tests: 21
+      Passed: 21 (100.00%)
 
 The canonical compiler binary used below is:
 
@@ -184,10 +184,10 @@ The regression fixture checks:
     start_cycle = 72
 
 `start_cycle` is compiler-generated scheduling metadata.
-
-It should not currently be interpreted as hardware-enforced launch
-timing because the runtime lowering does not yet consume this
-attribute.
+`--lower-systolic-matmul-tile-to-fpga` passes it, with `est_cycles`, into
+the job descriptor the runtime writes (registers 0x18 / 0x1C). The runtime
+submits one invocation at a time and waits for its result, so the value
+should still not be read as hardware-enforced launch timing.
 
 Machine-checkable regression:
 
@@ -199,99 +199,61 @@ Machine-checkable regression:
       /usr/lib/llvm-18/bin/FileCheck test/Systolic/schedule_overlap.mlir
 
 
-## 7. Reproduce runtime-call lowering
+## 7. Reproduce Linalg -> Systolic -> FPGA runtime calls
 
-Input:
+The pipeline that runs on the FPGA starts from `linalg.matmul` and a
+`systolic.device` fleet. For the board's bitstream (one 8x8 and three 4x4
+arrays, `k_max = 16`, `tile_overhead = 95`):
 
-    test/Systolic/tile_to_fpga.mlir
+    ./build/bin/systolic-opt --systolic-binary-search-tile-matmul \
+      test/Systolic/linalg_to_systolic_shapes.mlir
 
-Run:
+decomposes every GEMM into `systolic.matmul_tile` ops, each one invocation
+of one device (`on @acc_8x8_0` / `@acc_4x4_0..2`) with its schedule
+(`est_cycles`, `start_cycle`). M and N need not be equal; K is folded by the
+device's `k_max` into invocations chained through `c_in`.
 
-    ./build/bin/systolic-opt \
-      --systolic-tile-to-fpga \
-      test/Systolic/tile_to_fpga.mlir
+    ./build/bin/systolic-opt --systolic-binary-search-tile-matmul \
+      --lower-systolic-matmul-tile-to-fpga test/Systolic/systolic_to_fpga.mlir
 
-The input contains one assigned 4x4 `systolic.matmul_tile`. The
-lowering emits declarations and calls for the current dispatch-runtime
-ABI:
+turns each tile into one call of the runtime entry point
+`fpga_matmul_tiled_auto_scheduled(m, k, n, A, B, C, device_id,
+start_cycle, est_cycles)` (`runtime/fpga_matmul_tiled.cpp`), with the
+device symbol mapped onto the bitstream's physical IDs (`@acc_8x8_0` -> 0,
+`@acc_4x4_0..2` -> 1..3). `--systolic-fpga-pipeline` runs both and then
+bufferizes and lowers to the LLVM dialect.
 
-    llvm.func @systolic_dispatch_open
-    llvm.func @systolic_dispatch_matmul4x4_dev
-    llvm.call @systolic_dispatch_open
-    llvm.call @systolic_dispatch_matmul4x4_dev
+Machine-checkable regressions (all part of `check-systolic`):
 
-After successful lowering, no `systolic.matmul_tile` remains.
-
-The implementation of this pass is:
-
-    lib/Systolic/Transforms/SystolicTileToFpga.cpp
-
-In the C++ MLIR implementation the calls are represented by
-`LLVM::CallOp`; textual LLVM-dialect MLIR prints them as `llvm.call`.
-
-Machine-checkable regression:
-
-    ./build/bin/systolic-opt \
-      --systolic-tile-to-fpga \
-      test/Systolic/tile_to_fpga.mlir | \
-      /usr/lib/llvm-18/bin/FileCheck test/Systolic/tile_to_fpga.mlir
+    test/Systolic/linalg_to_systolic_4x4x4.mlir
+    test/Systolic/linalg_to_systolic_shapes.mlir
+    test/Systolic/systolic_to_fpga.mlir
+    test/Systolic/bad_fpga_lowering.mlir
 
 
-## 8. Current end-to-end limitation
+## 8. End to end: `./build/bin/systolic-matmul`
 
-This repository currently contains two distinct FPGA-oriented lowering
-paths.
+`systolic-matmul` reads `M N K`, `A[M][K]` and `B[K][N]` from stdin, builds
+the `linalg.matmul` module for that shape, runs the pipeline of Section 7,
+JIT-compiles the result, executes it -- the runtime stages each invocation
+over DPTI into DDR, submits its descriptor and reads the result tile back --
+and checks C element by element against an exact integer CPU reference:
 
-The scheduled-tile path reproduced in Section 7 lowers:
+    printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
+      | ./build/bin/systolic-matmul --dump-ir=/tmp/e2e
 
-    systolic.matmul_tile
-      -> systolic_dispatch_matmul4x4_dev(...)
+`--dump-ir` keeps `00-linalg.mlir`, `10-systolic.mlir`, `20-fpga.mlir`,
+`30-llvm.mlir` and `40-llvm.ll`. The regression over 36 cases (the shapes
+1x1x1, 2x3x4, 4x4x4, 8x8x8, 8x4x16, 16x8x4, 16x8x40, 17x9x33, 32x32x32,
+each with zero / positive / negative / mixed integers):
 
-through:
+    test/e2e/run_e2e.sh --backend board     # the programmed Nexys Video
+    test/e2e/run_e2e.sh --backend cosim     # RTL co-simulation, no board
 
-    --systolic-tile-to-fpga
-
-This path is regression-tested by:
-
-    test/Systolic/tile_to_fpga.mlir
-
-A separate pass:
-
-    --tile-matmul-for-fpga
-
-lowers `linalg.matmul` toward the newer runtime entry point:
-
-    systolic_dispatch_matmul(handle, K, ...)
-
-whose current runtime interface defines:
-
-    SYS_DISPATCH_R = 8
-    SYS_DISPATCH_C = 8
-    SYS_DISPATCH_K_MAX = 64
-
-The two lowering paths should not be treated as one integrated
-scheduling-to-board pipeline. In particular, the
-`--systolic-tile-to-fpga` implementation does not consume the
-`start_cycle` metadata produced by `--systolic-schedule-overlap`, and
-the separate `--tile-matmul-for-fpga` path is not currently covered by
-the Systolic regression fixtures in `test/Systolic`.
-
-Therefore the compiler-side stages reproduced in this document are
-verified through runtime-call lowering, but this document does not
-claim a single regression-tested chain from overlap scheduling through
-the newer 8x8 runtime interface to FPGA execution and a bit-exact
-hardware result.
-
-The intended fully integrated chain is:
-
-    00-input.mlir
-      -> 10-tiled.mlir
-      -> 20-selected.mlir
-      -> 30-scheduled.mlir
-      -> 40-runtime-call.mlir
-      -> runtime
-      -> FPGA
-      -> bit-exact result
+The co-simulation (`test/e2e/cosim/build.sh`, Verilator) runs the RTL of the
+bitstream's tag `tile-pipelined-1x8x8-3x4x4-20261009`, with only the Xilinx
+IP replaced, behind the unmodified runtime. It is a simulation: a board run
+is the only evidence about the board. See `docs/E2E.md`.
 
 
 ## 9. Full regression suite
@@ -306,8 +268,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 16
-      Passed: 16 (100.00%)
+    Total Discovered Tests: 21
+      Passed: 21 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

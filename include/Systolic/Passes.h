@@ -67,9 +67,11 @@ std::unique_ptr<Pass> createExpandPEArrayToMacPass();
 void registerExpandPEArrayToMacPass();
 
 //===----------------------------------------------------------------------===//
-// Stage 4: FPGA tiling (fixed 4x4 runtime, no new hardware)
-//   把任意静态形状的 linalg.matmul lowering 成呼叫已烧录好的 4x4 FPGA
-//   runtime(fpga_matmul_tiled_auto)。
+// Stage 4: FPGA lowering (--lower-systolic-matmul-tile-to-fpga)
+//   把已指派 device、已排程的 systolic.matmul_tile(一个 tile = 该 device
+//   的一次 invocation:m<=rows、n<=cols、k<=k_max)lowering 成呼叫
+//   runtime/fpga_matmul_tiled.cpp 的 fpga_matmul_tiled_auto_scheduled,
+//   device symbol 对应 1x8x8 + 3x4x4 bitstream 的实体 device id。
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<Pass> createTileMatmulForFpgaPass();

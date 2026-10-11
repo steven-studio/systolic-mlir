@@ -1,9 +1,13 @@
 # runtime/Makefile
 #
-# lib/ is the only part the compiler links against: Conv2DToFpga and
-# TileMatmulForFpga emit LLVM calls into these symbols, so this set has to
-# stay buildable as a unit independently of anything under tests/ or attic/.
-# Everything else here is host-side tooling.
+# lib/ is the UART runtime of the HLS / fold bitstreams: Conv2DToFpga emits
+# LLVM calls into these symbols, so this set has to stay buildable as a unit
+# independently of anything under tests/ or attic/. Everything else here is
+# host-side tooling.
+#
+# The runtime of the 1x8x8 + 3x4x4 DPTI bitstream, which
+# --lower-systolic-matmul-tile-to-fpga targets, is not built here: it is the
+# CMake library systolic_fpga_runtime (runtime/CMakeLists.txt).
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra

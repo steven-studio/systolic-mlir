@@ -9,6 +9,19 @@ Systolic array 加速器的 MLIR 編譯器基礎設施。支援兩條互補的 l
 編譯出執行檔,透過 UART 驅動真實 FPGA,算出正確結果,並且驗證過一個真實
 的 `torch.nn.Conv2d`(經由 torch-mlir 匯出)可以直接跑在這條路徑上。
 
+## 端到端：`./build/bin/systolic-matmul`（1x8x8 + 3x4x4 FPGA）
+
+```bash
+cmake --build build
+printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
+  | ./build/bin/systolic-matmul          # stdin: M N K, A[M][K], B[K][N]
+```
+
+輸入的矩陣走完 `linalg.matmul` → `systolic.matmul_tile`（binary-search 分解、
+device 指派、schedule、K 依 `k_max` 折）→ FPGA runtime 呼叫 → JIT → DPTI → FPGA，
+結果與整數 CPU reference 逐元素比對。regression：`test/e2e/run_e2e.sh
+--backend board|cosim`（36 組）。說明與限制見 [`docs/E2E.md`](docs/E2E.md)。
+
 > **分支說明**:`main` 分支是投稿用的穩定版本(matmul + conv2d NHWC 兩條路徑),
 > torch-mlir 整合、conv2d NCHW 支援、`batch_matmul` 支援目前在
 > `torch-mlir-integration` 分支上,尚未併回 `main`。
@@ -17,11 +30,11 @@ Systolic array 加速器的 MLIR 編譯器基礎設施。支援兩條互補的 l
 
 |  | 硬體生成路徑 | Runtime offload 路徑 |
 |---|---|---|
-| Pass | `--convert-matmul-to-systolic` | `--tile-matmul-for-fpga` / `--conv2d-to-fpga` / `--conv2d-nchw-to-fpga`\* / `--batch-matmul-to-fpga`\* |
+| Pass | `--convert-matmul-to-systolic` | matmul：`--systolic-binary-search-tile-matmul` + `--lower-systolic-matmul-tile-to-fpga`；`--conv2d-to-fpga` / `--conv2d-nchw-to-fpga`\* / `--batch-matmul-to-fpga`\* |
 | 輸入形狀限制 | 必須剛好等於 `rows x cols` 陣列大小 | 任意靜態形狀 |
 | 輸出 | `systolic` dialect → HLS C → bitstream | `llvm.call` 呼叫外部 C runtime |
 | 用途 | 設計新硬體 | 使用已存在的硬體 |
-| 是否依賴 systolic dialect | 是 | 否 |
+| 是否依賴 systolic dialect | 是 | matmul 是（`systolic.matmul_tile`）；conv2d 否 |
 
 \* 標記 `*` 的 pass 目前只在 `torch-mlir-integration` 分支上,尚未併回 `main`。
 
@@ -97,17 +110,17 @@ ninja systolic-opt
 ### Runtime offload 路徑:任意形狀 matmul → 驅動既有硬體
 
 ```bash
-./build/tools/systolic-opt/systolic-opt \
-  --tile-matmul-for-fpga \
-  /tmp/test_tile_fpga.mlir
+./build/bin/systolic-opt --systolic-fpga-pipeline input.mlir
 ```
 
-任意靜態形狀的 `linalg.matmul` 都會被轉成一個 `llvm.call
-@fpga_matmul_tiled_auto(M, K, N, A*, B*, C*)`,實際的 4x4 tile 分解與
-zero-padding 全部在執行期由 `runtime/fpga_matmul_tiled.c` 完成。要編譯
-成能實際驅動硬體的執行檔,需要走完整的 bufferization + LLVM lowering +
-`mlir-translate` + 連結 `runtime/` 的流程(細節見論文 Implementation
-章節的 Compilation Toolchain 小節)。
+`linalg.matmul` 先由 `--systolic-binary-search-tile-matmul` 依模組裡的
+`systolic.device` fleet 分解成 `systolic.matmul_tile`（每個 tile 是一顆 device
+的一次 invocation），再由 `--lower-systolic-matmul-tile-to-fpga` 變成
+`llvm.call @fpga_matmul_tiled_auto_scheduled(m, k, n, A*, B*, C*, device,
+start_cycle, est_cycles)`（`runtime/fpga_matmul_tiled.cpp`，DPTI 驅動
+1x8x8 + 3x4x4 bitstream），最後 bufferize 並 lower 到 LLVM dialect。
+`./build/bin/systolic-matmul` 把這條路徑連同 JIT 與執行包成一個執行檔。
+（舊的 `--tile-matmul-for-fpga` → `fpga_matmul_tiled_auto` 4x4 UART 路徑已被取代。）
 
 ### Runtime offload 路徑:conv2d(NHWC)→ 重用同一顆 matmul 加速器
 
