@@ -149,6 +149,15 @@ void dpti_ftdi_close(
     DptiFtdiSession *session);
 
 /*
+ * Bytes written to / read from the FT2232H on this session so far.
+ */
+unsigned long long dpti_ftdi_bytes_written(
+    const DptiFtdiSession *session);
+
+unsigned long long dpti_ftdi_bytes_read(
+    const DptiFtdiSession *session);
+
+/*
  * Convenience single-job API retained for existing smoke tests.
  *
  * Equivalent to:

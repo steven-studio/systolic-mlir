@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <thread>
@@ -12,13 +13,34 @@ namespace {
 
 struct FtdiTransportState {
     struct ftdi_context *ftdi = nullptr;
+
+    // Every byte that crossed the FT2232H, either way.
+    unsigned long long bytes_written = 0;
+    unsigned long long bytes_read = 0;
 };
 
+/*
+ * Per-packet logging (every WRITE32, every MEM_WRITE, session open/close)
+ * is off unless SYSTOLIC_DPTI_TRACE is set; failures are always reported.
+ */
+static bool dpti_trace()
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *v = std::getenv("SYSTOLIC_DPTI_TRACE");
+        enabled = (v && *v && std::strcmp(v, "0") != 0) ? 1 : 0;
+    }
+
+    return enabled == 1;
+}
+
 static int write_all(
-    struct ftdi_context *ftdi,
+    FtdiTransportState *state,
     const unsigned char *buf,
     int len)
 {
+    struct ftdi_context *ftdi = state->ftdi;
     int off = 0;
 
     while (off < len) {
@@ -43,6 +65,7 @@ static int write_all(
         }
 
         off += rc;
+        state->bytes_written += static_cast<unsigned long long>(rc);
     }
 
     return 0;
@@ -66,14 +89,15 @@ static void ftdi_write32(
     packet[4] = static_cast<unsigned char>(data >> 16);
     packet[5] = static_cast<unsigned char>(data >> 24);
 
-    std::fprintf(
-        stderr,
-        "[DPTI FTDI] WRITE32 addr=0x%02x data=0x%08x\n",
-        addr,
-        data);
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] WRITE32 addr=0x%02x data=0x%08x\n",
+            addr,
+            data);
 
     if (write_all(
-            state->ftdi,
+            state,
             packet,
             sizeof(packet)) != 0) {
         std::fprintf(
@@ -151,7 +175,7 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
             stderr,
             "[DPTI FTDI] failed to read latency timer: %s\n",
             ftdi_get_error_string(ftdi));
-    } else {
+    } else if (dpti_trace()) {
         std::fprintf(
             stderr,
             "[DPTI FTDI] initial latency timer: %u ms\n",
@@ -198,9 +222,10 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
         return nullptr;
     }
 
-    std::fprintf(
-        stderr,
-        "[DPTI FTDI] persistent session opened: FT2232 0403:6010\n");
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] persistent session opened: FT2232 0403:6010\n");
 
     return session;
 }
@@ -270,20 +295,21 @@ extern "C" int dpti_ftdi_mem_write_session(
     header[7] = static_cast<unsigned char>(length >> 16);
     header[8] = static_cast<unsigned char>(length >> 24);
 
-    std::fprintf(
-        stderr,
-        "[DPTI FTDI] MEM_WRITE addr=0x%08x bytes=%u\n",
-        address,
-        length);
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] MEM_WRITE addr=0x%08x bytes=%u\n",
+            address,
+            length);
 
     if (write_all(
-            session->transport.ftdi,
+            &session->transport,
             header,
             sizeof(header)) != 0)
         return -4;
 
     if (write_all(
-            session->transport.ftdi,
+            &session->transport,
             static_cast<const unsigned char *>(data),
             static_cast<int>(length)) != 0)
         return -5;
@@ -331,6 +357,8 @@ extern "C" int dpti_ftdi_read_exact_session(
 
         if (rc > 0) {
             off += static_cast<uint32_t>(rc);
+            session->transport.bytes_read +=
+                static_cast<unsigned long long>(rc);
             continue;
         }
 
@@ -364,6 +392,8 @@ extern "C" int dpti_ftdi_read_exact_session(
 
                 if (tail_rc > 0) {
                     off += static_cast<uint32_t>(tail_rc);
+                    session->transport.bytes_read +=
+                        static_cast<unsigned long long>(tail_rc);
                     std::fprintf(stderr,
                         "[DPTI TAIL] recovered: %u / %u bytes\n",
                         off, length);
@@ -384,11 +414,12 @@ extern "C" int dpti_ftdi_read_exact_session(
             std::chrono::milliseconds(1));
     }
 
-    std::fprintf(
-        stderr,
-        "[DPTI FTDI] read complete: %u / %u bytes\n",
-        off,
-        length);
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] read complete: %u / %u bytes\n",
+            off,
+            length);
 
     return 0;
 }
@@ -414,11 +445,24 @@ extern "C" void dpti_ftdi_close(
         session->transport.ftdi = nullptr;
     }
 
-    std::fprintf(
-        stderr,
-        "[DPTI FTDI] persistent session closed\n");
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] persistent session closed\n");
 
     delete session;
+}
+
+extern "C" unsigned long long dpti_ftdi_bytes_written(
+    const DptiFtdiSession *session)
+{
+    return session ? session->transport.bytes_written : 0;
+}
+
+extern "C" unsigned long long dpti_ftdi_bytes_read(
+    const DptiFtdiSession *session)
+{
+    return session ? session->transport.bytes_read : 0;
 }
 
 extern "C" int dpti_ftdi_submit(

@@ -36,3 +36,5 @@ add_lit_testsuites(SYSTOLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   DEPENDS ${SYSTOLIC_TEST_DEPENDS}
 )
+
+add_subdirectory(e2e)
