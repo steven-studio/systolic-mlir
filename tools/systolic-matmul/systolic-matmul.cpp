@@ -57,6 +57,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -92,6 +93,12 @@ constexpr const char *kFleet =
 
 constexpr int64_t kMaxDim = 4096;
 
+// The FPGA computes in IEEE binary32, which holds every integer up to 2^24
+// in magnitude exactly and only some beyond. Inputs are kept to that range,
+// so the matrix the FPGA sees is the matrix that was typed; it also bounds
+// the reference: |C_ref| <= K * 2^48 <= 2^60, exact in int64.
+constexpr int64_t kMaxValue = int64_t{1} << 24;
+
 struct Options {
   std::string dumpDir;
   bool quiet = false;
@@ -119,6 +126,8 @@ struct TileInfo {
                "  M N K\n"
                "  A: M rows of K integers\n"
                "  B: K rows of N integers\n"
+               "(integers in -16777216..16777216, the range binary32 holds\n"
+               "exactly)\n"
                "and computes C = A x B on the 1x8x8 + 3x4x4 FPGA through\n"
                "Linalg -> Systolic -> FPGA lowering -> runtime -> DPTI,\n"
                "then checks C against an exact CPU reference.\n"
@@ -173,10 +182,30 @@ public:
     errno = 0;
     char *end = nullptr;
     const long long v = std::strtoll(tok.c_str(), &end, 10);
+    if (errno == ERANGE && end != tok.c_str() && *end == '\0') {
+      std::fprintf(stderr,
+                   "systolic-matmul: %s = %s is out of range\n",
+                   what.c_str(), tok.c_str());
+      std::exit(2);
+    }
     if (errno != 0 || end == tok.c_str() || *end != '\0') {
       std::fprintf(stderr,
                    "systolic-matmul: %s must be an integer, got '%s'\n",
                    what.c_str(), tok.c_str());
+      std::exit(2);
+    }
+    return v;
+  }
+
+  // Reads one matrix element: an integer binary32 holds exactly.
+  int64_t nextValue(const std::string &what) {
+    const int64_t v = next(what);
+    if (v < -kMaxValue || v > kMaxValue) {
+      std::fprintf(stderr,
+                   "systolic-matmul: %s = %" PRId64 " is outside -%" PRId64
+                   "..%" PRId64 "; the FPGA computes in binary32, which "
+                   "holds integers exactly only up to 2^24\n",
+                   what.c_str(), v, kMaxValue, kMaxValue);
       std::exit(2);
     }
     return v;
@@ -220,16 +249,16 @@ Problem readProblem() {
                  p.M, p.K);
   for (int64_t i = 0; i < p.M; ++i)
     for (int64_t k = 0; k < p.K; ++k)
-      p.A[i * p.K + k] = rd.next("A[" + std::to_string(i) + "][" +
-                                 std::to_string(k) + "]");
+      p.A[i * p.K + k] = rd.nextValue("A[" + std::to_string(i) + "][" +
+                                      std::to_string(k) + "]");
 
   if (tty)
     std::fprintf(stderr, "B (%" PRId64 " rows of %" PRId64 " integers):\n",
                  p.K, p.N);
   for (int64_t k = 0; k < p.K; ++k)
     for (int64_t j = 0; j < p.N; ++j)
-      p.B[k * p.N + j] = rd.next("B[" + std::to_string(k) + "][" +
-                                 std::to_string(j) + "]");
+      p.B[k * p.N + j] = rd.nextValue("B[" + std::to_string(k) + "][" +
+                                      std::to_string(j) + "]");
 
   if (!tty && !rd.atEnd())
     std::fprintf(stderr, "systolic-matmul: warning: ignoring input after "
@@ -240,25 +269,57 @@ Problem readProblem() {
 
 // --------------------------------------------------------------- output
 
+// An FPGA result: a binary32 value, held exactly in a double. Integral
+// values print as integers, digit for digit, so they line up with the
+// reference; anything else as %.9g.
+std::string formatFpga(double v) {
+  char buf[64];
+  if (std::isfinite(v) && v == std::trunc(v) && std::fabs(v) < 1e18)
+    std::snprintf(buf, sizeof buf, "%.0f", v);
+  else
+    std::snprintf(buf, sizeof buf, "%.9g", v);
+  return buf;
+}
+
+std::vector<std::string> cellsOf(const std::vector<int64_t> &v) {
+  std::vector<std::string> cells;
+  cells.reserve(v.size());
+  for (int64_t x : v)
+    cells.push_back(std::to_string(x));
+  return cells;
+}
+
+std::vector<std::string> cellsOf(const std::vector<double> &v) {
+  std::vector<std::string> cells;
+  cells.reserve(v.size());
+  for (double x : v)
+    cells.push_back(formatFpga(x));
+  return cells;
+}
+
 void printMatrix(const char *title, int64_t rows, int64_t cols,
-                 const std::vector<double> &v) {
-  int width = 1;
-  for (double x : v) {
-    char buf[64];
-    width = std::max(width, std::snprintf(buf, sizeof buf, "%.9g", x));
-  }
+                 const std::vector<std::string> &cells) {
+  size_t width = 1;
+  for (const std::string &c : cells)
+    width = std::max(width, c.size());
   std::printf("%s\n", title);
   for (int64_t i = 0; i < rows; ++i) {
     std::printf(" ");
     for (int64_t j = 0; j < cols; ++j)
-      std::printf(" %*.9g", width, v[i * cols + j]);
+      std::printf(" %*s", static_cast<int>(width),
+                  cells[i * cols + j].c_str());
     std::printf("\n");
   }
 }
 
-template <typename T>
-std::vector<double> asDouble(const std::vector<T> &v) {
-  return std::vector<double>(v.begin(), v.end());
+// Whether the FPGA's binary32 result is exactly the integer reference. A
+// double compare would round a reference beyond 2^53 and could call two
+// different values equal; this converts the (exact) FPGA value instead.
+bool sameValue(double fpga, int64_t ref) {
+  if (!std::isfinite(fpga) || fpga != std::trunc(fpga) ||
+      std::fabs(fpga) > 0x1p62)
+    return false;
+  return static_cast<int64_t>(fpga) == ref;
 }
 
 // ------------------------------------------------------------- compiler
@@ -398,12 +459,12 @@ int main(int argc, char **argv) {
   for (int64_t v : prob.A) maxA = std::max<int64_t>(maxA, std::llabs(v));
   for (int64_t v : prob.B) maxB = std::max<int64_t>(maxB, std::llabs(v));
   // Every input, product and partial sum is an integer of magnitude
-  // <= K * maxA * maxB; below 2^24 each is exact in binary32 whatever order
+  // <= K * maxA * maxB; up to 2^24 each is exact in binary32 whatever order
   // the array adds them in, so the FPGA must equal the integer reference.
+  // (readProblem keeps every input within 2^24.)
   const long double bound =
       static_cast<long double>(K) * maxA * maxB;
-  const bool exact = maxA <= (1 << 24) && maxB <= (1 << 24) &&
-                     bound <= static_cast<long double>(1 << 24);
+  const bool exact = bound <= static_cast<long double>(kMaxValue);
 
   std::vector<float> A(prob.A.begin(), prob.A.end());
   std::vector<float> B(prob.B.begin(), prob.B.end());
@@ -419,10 +480,10 @@ int main(int argc, char **argv) {
                 M, N, M, K, K, N);
     printMatrix(("A[" + std::to_string(M) + "][" + std::to_string(K) + "]")
                     .c_str(),
-                M, K, asDouble(prob.A));
+                M, K, cellsOf(prob.A));
     printMatrix(("B[" + std::to_string(K) + "][" + std::to_string(N) + "]")
                     .c_str(),
-                K, N, asDouble(prob.B));
+                K, N, cellsOf(prob.B));
     std::printf("\n");
     if (!exact)
       std::printf("warning: K*max|A|*max|B| = %.0Lf exceeds 2^24; binary32 "
@@ -616,7 +677,7 @@ int main(int argc, char **argv) {
   int64_t firstI = -1, firstJ = -1;
   for (int64_t i = 0; i < M; ++i)
     for (int64_t j = 0; j < N; ++j)
-      if (fpga[i * N + j] != static_cast<double>(ref[i * N + j])) {
+      if (!sameValue(fpga[i * N + j], ref[i * N + j])) {
         if (mismatches == 0) {
           firstI = i;
           firstJ = j;
@@ -628,11 +689,11 @@ int main(int argc, char **argv) {
     printMatrix(("FPGA result C[" + std::to_string(M) + "][" +
                  std::to_string(N) + "]")
                     .c_str(),
-                M, N, fpga);
+                M, N, cellsOf(fpga));
     printMatrix(("CPU reference C_ref[" + std::to_string(M) + "][" +
                  std::to_string(N) + "]")
                     .c_str(),
-                M, N, asDouble(ref));
+                M, N, cellsOf(ref));
     std::printf("\n");
   }
 
@@ -645,8 +706,8 @@ int main(int argc, char **argv) {
     return 0;
   }
   std::printf("first mismatch: i=%" PRId64 " j=%" PRId64
-              "  FPGA=%.9g  CPU=%" PRId64 "\n",
-              firstI, firstJ, fpga[firstI * N + firstJ],
+              "  FPGA=%s  CPU=%" PRId64 "\n",
+              firstI, firstJ, formatFpga(fpga[firstI * N + firstJ]).c_str(),
               ref[firstI * N + firstJ]);
   std::printf("Verification: FAIL\n");
   return 1;
