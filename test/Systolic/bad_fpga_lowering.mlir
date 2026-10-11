@@ -73,3 +73,17 @@ module {
     return %0 : tensor<8x8xf32>
   }
 }
+
+// -----
+
+// k_max is the IR's declaration; one invocation of the bitstream's arrays
+// holds 16 reduction steps whatever the declaration says.
+module {
+  systolic.device @acc_8x8_0 rows = 8 cols = 8 dataflow = output_stationary k_max = 32 tile_overhead = 95
+  func.func @deeper_than_bitstream(%a: tensor<8x32xf32>, %b: tensor<32x8xf32>, %c: tensor<8x8xf32>) -> tensor<8x8xf32> {
+    // expected-error @+1 {{tile reduction depth k = 32 exceeds the 16 reduction steps one invocation of @acc_8x8_0 holds in the bitstream; declare k_max <= 16}}
+    %0 = systolic.matmul_tile %a, %b, %c m = 8 n = 8 k = 32 on @acc_8x8_0 est_cycles = 109 start_cycle = 0
+         : (tensor<8x32xf32>, tensor<32x8xf32>, tensor<8x8xf32>) -> tensor<8x8xf32>
+    return %0 : tensor<8x8xf32>
+  }
+}

@@ -41,30 +41,41 @@ namespace {
 //                           的实体几何,只写回有效的 m x n
 //   1 <= k <= k_max         operand buffer 的容量;更深的 reduction 应该
 //                           已经被 binary-search pass 依 k_max 折开
+//   k <= 16                 bitstream 一次 invocation 的 slab 深度(K_MAX),
+//                           不论 IR 宣告的 k_max 是多少
 //
 // Runtime 的语意是 C_out = C_in + A x B(linalg.matmul / matmul_tile 的
 // 语意):一次 invocation 的乘积由 FPGA 算,runtime 把它加回 C 所在的
 // buffer,所以依 c_in 串起来的 K invocation 会正确累加。
 // -----------------------------------------------------------------------
 
-// Physical device IDs of the 1x8x8 + 3x4x4 bitstream (tag
-// tile-pipelined-1x8x8-3x4x4-20261009, systolic_dma_top's device table).
-// The compiler-visible systolic.device symbol is mapped one-to-one onto
-// the RTL's physical instance.
-static int64_t lookupPhysicalDeviceId(StringRef name, int64_t rows,
-                                      int64_t cols) {
-  const bool is8x8 = rows == 8 && cols == 8;
-  const bool is4x4 = rows == 4 && cols == 4;
+// The arrays of the 1x8x8 + 3x4x4 bitstream (tag
+// tile-pipelined-1x8x8-3x4x4-20261009): systolic_dma_top's device table,
+// and K_MAX = 16 from dma_top_build.tcl -- the reduction depth one
+// invocation's operand slab holds, whatever k_max the IR declares. The
+// compiler-visible systolic.device symbol is mapped one-to-one onto the
+// RTL's physical instance.
+struct PhysicalDevice {
+  StringLiteral symbol;
+  int64_t id;
+  int64_t rows, cols;
+  int64_t kDepth;
+};
 
-  if (name == "acc_8x8_0" && is8x8)
-    return 0;
-  if (name == "acc_4x4_0" && is4x4)
-    return 1;
-  if (name == "acc_4x4_1" && is4x4)
-    return 2;
-  if (name == "acc_4x4_2" && is4x4)
-    return 3;
-  return -1;
+static constexpr PhysicalDevice kBitstreamDevices[] = {
+    {"acc_8x8_0", 0, 8, 8, 16},
+    {"acc_4x4_0", 1, 4, 4, 16},
+    {"acc_4x4_1", 2, 4, 4, 16},
+    {"acc_4x4_2", 3, 4, 4, 16},
+};
+
+static const PhysicalDevice *lookupPhysicalDevice(StringRef name,
+                                                  int64_t rows,
+                                                  int64_t cols) {
+  for (const PhysicalDevice &dev : kBitstreamDevices)
+    if (name == dev.symbol && rows == dev.rows && cols == dev.cols)
+      return &dev;
+  return nullptr;
 }
 
 static Value tensorToMemref(OpBuilder &builder, Location loc,
@@ -129,12 +140,14 @@ static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
   const int64_t rows = device.getRows();
   const int64_t cols = device.getCols();
 
-  inv.deviceId = lookupPhysicalDeviceId(device.getSymName(), rows, cols);
-  if (inv.deviceId < 0)
+  const PhysicalDevice *phys =
+      lookupPhysicalDevice(device.getSymName(), rows, cols);
+  if (!phys)
     return op.emitError("systolic.device @")
            << device.getSymName() << " (" << rows << "x" << cols
            << ") has no physical FPGA device ID; the bitstream provides "
               "@acc_8x8_0 (8x8) and @acc_4x4_0..2 (4x4)";
+  inv.deviceId = phys->id;
 
   if (inv.m < 1 || inv.n < 1 || inv.m > rows || inv.n > cols)
     return op.emitError("tile ")
@@ -154,6 +167,16 @@ static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
            << device.getSymName()
            << "; fold K before lowering (--systolic-binary-search-tile-matmul "
               "folds by the device's k_max)";
+
+  // k_max is what the IR declares; the slab depth is what the bitstream
+  // has. A fleet declaring more than the hardware holds would fold K too
+  // coarsely and every such invocation would fail in the runtime.
+  if (inv.k > phys->kDepth)
+    return op.emitError("tile reduction depth k = ")
+           << inv.k << " exceeds the " << phys->kDepth
+           << " reduction steps one invocation of @" << device.getSymName()
+           << " holds in the bitstream; declare k_max <= " << phys->kDepth
+           << " on the systolic.device";
 
   inv.aTy = dyn_cast<RankedTensorType>(op.getA().getType());
   inv.bTy = dyn_cast<RankedTensorType>(op.getB().getType());
