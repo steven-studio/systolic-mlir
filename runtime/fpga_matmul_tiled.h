@@ -33,8 +33,9 @@ int fpga_matmul_tiled_auto_scheduled(
     unsigned start_cycle,
     unsigned est_cycles);
 
-// What the scheduled entry point has done since the last reset. The bytes
-// are counted at the FTDI layer, so they are what crossed the wire.
+// What the scheduled entry point has done since the last reset (or since
+// the program started). The bytes are counted at the FTDI layer, so they
+// are what crossed the wire, including the bytes of calls that failed.
 typedef struct {
     unsigned long long invocations;                /* results received */
     unsigned long long invocations_per_device[4];  /* by physical device id */

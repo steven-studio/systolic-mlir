@@ -324,8 +324,6 @@ int scheduled_invocation(
 
     rt.stats.invocations++;
     rt.stats.invocations_per_device[device_id]++;
-    rt.stats.bytes_to_fpga = dpti_ftdi_bytes_written(rt.session);
-    rt.stats.bytes_from_fpga = dpti_ftdi_bytes_read(rt.session);
 
     if (env_flag("SYSTOLIC_RUNTIME_TRACE")) {
         std::fprintf(
@@ -349,13 +347,31 @@ int fpga_matmul_tiled_auto_scheduled(
     unsigned start_cycle,
     unsigned est_cycles) {
 
+    ScheduledRuntime &rt = runtime_state();
+
+    /*
+     * The bytes this call puts on / takes off the link, failed calls
+     * included. A session the call opens starts counting at zero.
+     */
+    const unsigned long long written_before =
+        rt.session ? dpti_ftdi_bytes_written(rt.session) : 0;
+    const unsigned long long read_before =
+        rt.session ? dpti_ftdi_bytes_read(rt.session) : 0;
+
     const int rc =
         scheduled_invocation(
             M, K, N, A, B, C,
             device_id, start_cycle, est_cycles);
 
+    if (rt.session) {
+        rt.stats.bytes_to_fpga +=
+            dpti_ftdi_bytes_written(rt.session) - written_before;
+        rt.stats.bytes_from_fpga +=
+            dpti_ftdi_bytes_read(rt.session) - read_before;
+    }
+
     if (rc != 0) {
-        fpga_runtime_stats_t &stats = runtime_state().stats;
+        fpga_runtime_stats_t &stats = rt.stats;
 
         stats.failed_calls++;
 
@@ -378,12 +394,7 @@ void fpga_runtime_get_stats(fpga_runtime_stats_t *out) {
 }
 
 void fpga_runtime_reset_stats(void) {
-    ScheduledRuntime &rt = runtime_state();
-    rt.stats = fpga_runtime_stats_t{};
-    if (rt.session) {
-        rt.stats.bytes_to_fpga = dpti_ftdi_bytes_written(rt.session);
-        rt.stats.bytes_from_fpga = dpti_ftdi_bytes_read(rt.session);
-    }
+    runtime_state().stats = fpga_runtime_stats_t{};
 }
 
 void fpga_runtime_close(void) {
