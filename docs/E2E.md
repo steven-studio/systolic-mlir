@@ -45,7 +45,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 | A、B 的元素 | −16777216..16777216（±2^24） | FPGA 用 binary32，這是它能精確表示的整數；CPU reference 因此也不會溢位（\|C\| ≤ K·2^48） |
 | M、N | 1..512 | binary-search 分解 512x512 約 20 s，再大增長很快 |
 | K | 1..4096 | |
-| FPGA invocation 數 | ≤ 16384 | 每次 invocation 在板子上是一次約 1 ms 的 DPTI 往返，編譯＋JIT 約 2.5 ms、120 KB；編譯前先用下限 `ceil(M·N/64)·ceil(K/16)` 擋，Linalg → Systolic 之後再用實際數擋 |
+| FPGA invocation 數 | ≤ 16384 | 每次 invocation 在板子上是一次 DPTI 往返（runtime 在 MEM_WRITE 後就固定等 1 ms，再加 USB 的來回），編譯＋JIT 約 2.5 ms、120 KB；編譯前先用下限 `ceil(M·N/64)·ceil(K/16)` 擋，Linalg → Systolic 之後再用實際數擋 |
 
 | 選項 | 作用 |
 |---|---|
@@ -65,7 +65,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 不經過 double（double 會把超過 2^53 的 reference 捨入，可能把不同的值當成相等）。
 
 JIT 不做最佳化（IR 與 codegen 都是 -O0）：編出來的函式是一長串 runtime 呼叫與 tile
-複製，每次呼叫都要等一次 DPTI 往返（板上約 1 ms），最佳化沒有好處，而 -O2 在上千個呼叫的單一 basic
+複製，每次呼叫都要等一次 DPTI 往返（至少 1 ms），最佳化沒有好處，而 -O2 在上千個呼叫的單一 basic
 block 上遠超過線性（128x128x128：74 s → 8.7 s）。-O0 的 stack frame 隨 invocation
 數成長（約 330 B／次），所以編出來的函式在一條依 invocation 數配置 stack 的 thread
 上執行。

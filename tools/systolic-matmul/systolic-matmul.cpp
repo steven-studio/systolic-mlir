@@ -96,9 +96,9 @@ constexpr const char *kFleet =
 
 // Limits that keep one run practical. The binary-search decomposition of a
 // 512 x 512 output takes about 20 s and grows steeply beyond it. Every FPGA
-// invocation is one DPTI round trip (about a millisecond on the board) and
-// costs about 2.5 ms and 120 KB to compile and JIT (16786 invocations,
-// 256x256x112: 40 s, 2.1 GB).
+// invocation is one DPTI round trip -- at least the runtime's 1 ms settle
+// wait after MEM_WRITE, plus the USB transfers -- and costs about 2.5 ms and
+// 120 KB to compile and JIT (16786 invocations, 256x256x112: 40 s, 2.1 GB).
 constexpr int64_t kMaxMN = 512;
 constexpr int64_t kMaxK = 4096;
 constexpr int64_t kMaxInvocations = 16384;
@@ -636,7 +636,7 @@ int main(int argc, char **argv) {
   std::string llPath =
       opts.dumpDir.empty() ? std::string() : opts.dumpDir + "/40-llvm.ll";
   // The compiled function is one straight line of runtime calls and tile
-  // copies; every invocation then waits on the FPGA link for milliseconds.
+  // copies; every invocation then waits at least 1 ms on the FPGA link.
   // Nothing in it is worth optimizing, and LLVM's -O2 pipeline and codegen
   // grow faster than linearly on a single block of thousands of calls
   // (128x128x128, 4784 invocations: about 70 s at -O2), so it is compiled
