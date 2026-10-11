@@ -200,8 +200,6 @@ module dma_engine_multi #(
     end
   endfunction
 
-  wire [31:0] burst_lim = shared ? 32'(SHARED_BURST_LEN) : 32'(BURST_LEN);
-
   // ---- issue side: who may request, and whose turn it is ---------------------
   logic [NUM_SLOTS-1:0] eligible;
   always_comb begin
@@ -242,9 +240,17 @@ module dma_engine_multi #(
   logic [7:0]            sl_arlen    [0:NUM_SLOTS-1];   // beats - 1
   logic [AXI_ADDR_W-1:0] sl_addr_nxt [0:NUM_SLOTS-1];
   logic [BEAT_W-1:0]     sl_left_nxt [0:NUM_SLOTS-1];
+  // Timing: the burst limit is one of two constants (SHARED_BURST_LEN when
+  // `shared`, BURST_LEN otherwise), so each slot clamps against both constants
+  // (LUT-only compares, no carry chain behind `shared`) and the popcount-derived
+  // `shared` picks the result at the end.  Same value as next_len(.., limit).
+  logic [31:0] sl_len_one  [0:NUM_SLOTS-1];
+  logic [31:0] sl_len_full [0:NUM_SLOTS-1];
   always_comb begin
     for (int k = 0; k < NUM_SLOTS; k++) begin
-      sl_len[k]      = next_len(s_addr[k], {{(32-BEAT_W){1'b0}}, s_issue_left[k]}, burst_lim);
+      sl_len_one[k]  = next_len(s_addr[k], {{(32-BEAT_W){1'b0}}, s_issue_left[k]}, 32'(SHARED_BURST_LEN));
+      sl_len_full[k] = next_len(s_addr[k], {{(32-BEAT_W){1'b0}}, s_issue_left[k]}, 32'(BURST_LEN));
+      sl_len[k]      = shared ? sl_len_one[k] : sl_len_full[k];
       sl_arlen[k]    = 8'(sl_len[k] - 32'd1);
       sl_addr_nxt[k] = s_addr[k] + AXI_ADDR_W'(sl_len[k] << LSB);
       sl_left_nxt[k] = s_issue_left[k] - BEAT_W'(sl_len[k]);
