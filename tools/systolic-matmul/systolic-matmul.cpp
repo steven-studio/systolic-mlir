@@ -385,6 +385,10 @@ StridedMemRefType<float, 2> describe(float *data, int64_t rows,
 } // namespace
 
 int main(int argc, char **argv) {
+  // Line-buffered, so the report interleaves sanely with the runtime's and
+  // the transport's messages on stderr when both go to one file.
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
   const Options opts = parseArgs(argc, argv);
   const Problem prob = readProblem();
   const int64_t M = prob.M, N = prob.N, K = prob.K;
