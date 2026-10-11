@@ -130,4 +130,5 @@ void mlir::systolic::registerSystolicPasses() {
   registerSystolicScheduleOverlapPass();
   registerSystolicTileToFpgaPass();
   registerTestAffineMatmulDiscoveryPass();
+  registerSystolicPipelines();
 }

@@ -4,6 +4,9 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
+class DialectRegistry;
+class OpPassManager;
+
 namespace systolic {
 
 //===----------------------------------------------------------------------===//
@@ -98,6 +101,25 @@ std::unique_ptr<Pass> createSystolicTileToFpgaPass();
 void registerSystolicTileToFpgaPass();
 
 void registerTestAffineMatmulDiscoveryPass();
+
+//===----------------------------------------------------------------------===//
+// The Linalg -> FPGA pipeline (SystolicPipelines.cpp), shared by systolic-opt
+// and systolic-matmul:
+//
+//   --systolic-fpga-pipeline   = --systolic-binary-search-tile-matmul
+//                                --lower-systolic-matmul-tile-to-fpga
+//                                --systolic-runtime-to-llvm
+//   --systolic-runtime-to-llvm = one-shot bufferization across the function
+//                                boundary (identity layouts) + conversion of
+//                                memref/arith/index/cf/func to LLVM
+//===----------------------------------------------------------------------===//
+
+void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
+void buildSystolicFpgaPipeline(OpPassManager &pm);
+void registerSystolicPipelines();
+
+/// Dialects and bufferization external models the pipeline needs.
+void registerSystolicPipelineDialects(DialectRegistry &registry);
 
 void registerSystolicPasses();
 

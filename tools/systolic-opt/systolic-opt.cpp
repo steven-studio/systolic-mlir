@@ -1,48 +1,23 @@
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 
-#include "llvm/Config/llvm-config.h"
-
 #include "mlir/Conversion/Passes.h"
 
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#if LLVM_VERSION_MAJOR >= 24
-// LLVM 24 moved the bufferization dialect's own BufferizableOpInterface
-// models out of the dialect into an external-model registration.
-#include "mlir/Dialect/Bufferization/Transforms/BufferizableOpInterfaceImpl.h"
-#endif
-#include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
-  registry.insert<mlir::systolic::SystolicDialect, mlir::func::FuncDialect,
-                   mlir::linalg::LinalgDialect, mlir::arith::ArithDialect,
-                   mlir::tensor::TensorDialect, mlir::scf::SCFDialect,
-                   mlir::affine::AffineDialect, mlir::memref::MemRefDialect,
-                   mlir::bufferization::BufferizationDialect,
-                   mlir::LLVM::LLVMDialect>();
-
-  mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
-#if LLVM_VERSION_MAJOR >= 24
-  mlir::bufferization::registerBufferizableOpInterfaceExternalModels(registry);
-#endif
-  mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
-      registry);
+  // The same dialects and bufferization models systolic-matmul uses, so a
+  // pipeline that runs here runs there.
+  mlir::systolic::registerSystolicPipelineDialects(registry);
 
   mlir::systolic::registerSystolicPasses();
+
+  // Upstream passes, so each stage of --systolic-runtime-to-llvm can also be
+  // run on its own from the command line.
   mlir::bufferization::registerBufferizationPasses();
   mlir::memref::registerExpandOpsPass();
   mlir::memref::registerExpandStridedMetadataPass();

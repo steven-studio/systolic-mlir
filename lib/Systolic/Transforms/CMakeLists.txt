@@ -23,6 +23,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicTileMatmulPass.cpp
   SystolicTileToFpga.cpp
   SystolicScheduleOverlapPass.cpp
+  SystolicPipelines.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/Systolic
@@ -43,4 +44,21 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   MLIRLLVMDialect
   MLIRPass
   MLIRTransformUtils
+
+  # SystolicPipelines.cpp: bufferization + conversion to the LLVM dialect.
+  MLIRBufferizationTransforms
+  MLIRBufferizationPipelines
+  MLIRBufferizationToMemRef
+  MLIRFuncTransforms
+  MLIRTensorTransforms
+  MLIRMemRefTransforms
+  MLIRControlFlowDialect
+  MLIRMemRefToLLVM
+  MLIRArithToLLVM
+  MLIRIndexToLLVM
+  MLIRFuncToLLVM
+  MLIRAffineToStandard
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRReconcileUnrealizedCasts
 )
