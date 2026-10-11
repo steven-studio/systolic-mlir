@@ -65,16 +65,19 @@ void mlir::systolic::registerSystolicPipelineDialects(
 void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
   // The entry point takes and returns tensors, so bufferization has to
   // cross the function boundary. Identity layouts keep the arguments plain
-  // contiguous row-major memrefs, which is what a C caller passes. Tile
-  // operands that are strided slices are copied into contiguous buffers
-  // here, because the runtime takes raw row-major pointers.
+  // contiguous row-major memrefs, which is what a C caller passes. The FPGA
+  // lowering has already staged the tiles of A, B and C through scratch
+  // tiles (TileMatmulForFpga.cpp); what is left to bufferize is the function
+  // boundary and any operand that lowering could not stage.
   bufferization::OneShotBufferizePassOptions bufferize;
   bufferize.bufferizeFunctionBoundaries = true;
   bufferize.functionBoundaryTypeConversion =
       bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufferize));
 
-  // Free the contiguous staging copies once their tile has been dispatched.
+  // Free what bufferization allocated -- copies of operands that were not
+  // staged -- at the end of the function; the result handed back to the
+  // caller is the caller's to free.
   bufferization::buildBufferDeallocationPipeline(pm);
   pm.addPass(createConvertBufferizationToMemRefPass());
 
