@@ -25,7 +25,7 @@ user input (stdin, 整數)
 
 ```bash
 ./configure.sh --build                 # 或 cmake --build build
-cmake --build build --target check-systolic        # 21 個 lit test
+cmake --build build --target check-systolic        # 23 個 lit test
 
 printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
   | ./build/bin/systolic-matmul --dump-ir=/tmp/e2e
@@ -38,6 +38,15 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 輸入格式：先 `M N K`，再 M 列各 K 個整數（A），再 K 列各 N 個整數（B），以空白分隔，
 換行不計。從終端機輸入時會提示。
 
+輸入的範圍（超出時以 2 結束並說明原因）：
+
+| 項目 | 範圍 | 為什麼 |
+|---|---|---|
+| A、B 的元素 | −16777216..16777216（±2^24） | FPGA 用 binary32，這是它能精確表示的整數；CPU reference 因此也不會溢位（\|C\| ≤ K·2^48） |
+| M、N | 1..512 | binary-search 分解 512x512 約 20 s，再大增長很快 |
+| K | 1..4096 | |
+| FPGA invocation 數 | ≤ 16384 | 每次 invocation 在板子上是一次約 1 ms 的 DPTI 往返，編譯＋JIT 約 2.5 ms、120 KB；編譯前先用下限 `ceil(M·N/64)·ceil(K/16)` 擋，Linalg → Systolic 之後再用實際數擋 |
+
 | 選項 | 作用 |
 |---|---|
 | `--dump-ir=DIR` | 每一層的 IR：`00-linalg.mlir` `10-systolic.mlir` `20-fpga.mlir` `30-llvm.mlir` `40-llvm.ll` |
@@ -49,8 +58,17 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 | `SYSTOLIC_DPTI_TRACE=1` | 每個 DPTI 封包（MEM_WRITE、每個 WRITE32） |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
 
-結束碼：0 PASS、1 FAIL（不相等）、2 輸入錯、3 編譯失敗、4 FPGA／runtime 錯誤。
-runtime 呼叫失敗時直接回報 4，不會把沒算完的 C 當結果比。
+結束碼：0 PASS、1 FAIL（不相等）、2 輸入錯或超出範圍、3 編譯失敗、4 FPGA／runtime
+錯誤。runtime 呼叫失敗時直接回報 4，不會把沒算完的 C 當結果比。
+
+比對是整數對整數：FPGA 的 binary32 結果先確認是整數、再轉成 int64 和 reference 比，
+不經過 double（double 會把超過 2^53 的 reference 捨入，可能把不同的值當成相等）。
+
+JIT 不做最佳化（IR 與 codegen 都是 -O0）：編出來的函式是一長串 runtime 呼叫與 tile
+複製，每次呼叫都要等一次 DPTI 往返（板上約 1 ms），最佳化沒有好處，而 -O2 在上千個呼叫的單一 basic
+block 上遠超過線性（128x128x128：74 s → 8.7 s）。-O0 的 stack frame 隨 invocation
+數成長（約 330 B／次），所以編出來的函式在一條依 invocation 數配置 stack 的 thread
+上執行。
 
 輸出會列出：輸入、每個 `systolic.matmul_tile`（C 的區塊、k 範圍、device、
 start_cycle／est_cycles）、runtime 呼叫數、每個 device 的 FPGA invocation 數、在
@@ -79,9 +97,20 @@ FTDI 那層計到的 DPTI byte 數，然後 FPGA 結果與 CPU reference 並排�
 
 每個 tile 變成一次
 `fpga_matmul_tiled_auto_scheduled(m, k, n, A, B, C, device_id, start_cycle, est_cycles)`。
-合法條件：已指派 device、已排程、`m <= rows`、`n <= cols`、`1 <= k <= k_max`、fp32。
+合法條件：已指派 device、已排程、`m <= rows`、`n <= cols`、`1 <= k <= k_max`、
+`k <= 16`（bitstream 一次 invocation 的 slab 深度，不論 IR 宣告的 `k_max`）、fp32。
 任何一個 tile 不合法就整個 pass 失敗、每個 tile 一條 diagnostic，不會留下半 lower 的
-module。device symbol 對應 bitstream 的實體 ID：
+module。
+
+runtime 吃連續、row-major 的 `m x k`、`k x n`、`m x n` tile。lowering 自己在 buffer
+層準備：A、B 的 tile 從整個矩陣的 buffer 複製到 scratch tile（只被切成 tile 的函式參數
+整個函式共用一個 `to_buffer`）；C 的每個輸出區塊複製到 scratch tile 一次、它所有的 K
+invocation 在上面累加、最後複製回去。scratch 是每個函式三塊 stack buffer（8x16、
+16x8、8x8），runtime 同步，所以所有 invocation 輪流用。這樣 bufferization 沒有一長串
+互相 alias 的 tensor 要分析，成本跟 invocation 數成線性（原本 96x96x16 要 34 s、
+128x128x16 要 208 s；現在 0.4 s、0.7 s），invocation 也不在 heap 上配置任何東西。
+
+device symbol 對應 bitstream 的實體 ID：
 
 | symbol | device_id | 實體 |
 |---|---|---|
@@ -105,6 +134,12 @@ module。device symbol 對應 bitstream 的實體 ID：
 
 descriptor 只送板子跑過的形狀（P x P x 16）；邏輯上的 m、n、k 都在補零裡。
 runtime 同步執行：一次一個 invocation，結果回來才送下一個。
+
+失敗時：任一個 WRITE32 沒送出去，該 descriptor 剩下的部分（包括 CONTROL = submit）都
+不送，回傳 -6。session 開不起來（-3），或 MEM_WRITE／descriptor／讀回失敗之後，同一個
+session 不再送任何東西，之後的呼叫都回傳 -14（只印一次），直到 `fpga_runtime_close()`
+——鏈路可能停在封包中間，晚到的結果也可能被當成下一次的。`fpga_runtime_get_stats()` 的
+byte 數從上一次 reset 起算，失敗的呼叫送出的 byte 也算。
 
 ### 2.4 FPGA
 
@@ -170,7 +205,7 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 |---|---|---|
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 101 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
-| lit | `cmake --build build --target check-systolic` | 21/21 |
+| lit | `cmake --build build --target check-systolic` | 23/23 |
 | runtime → FPGA | `build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
 | E2E | `test/e2e/run_e2e.sh --backend board` | `E2E cases: 36/36 PASS` |
 
@@ -180,7 +215,11 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   runtime 也同步送）。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的發射時間。
 - 每次 invocation 都是完整的 P x P x 16 slab：小 tile 也付整塊的傳輸。
 - 跨 invocation 的累加在 host（bitstream 沒有 C-in）。
-- 輸入只收整數；值域見第 1 節。
+- 輸入只收整數；值域與大小限制見第 1 節。
+- pipeline 只 lower `linalg.matmul`（預設 indexing maps、靜態形狀的 f32 tensor）。
+  帶 `indexing_maps` 的轉置 matmul、空的 M／N／K 會被拒絕並給 diagnostic。module 裡
+  其他的 linalg op（例如把輸出歸零的 `linalg.fill`）不會被編成 CPU 程式碼——沒有 CPU
+  fallback，bufferization 會以 `op was not bufferized` 失敗；C 要從函式參數傳進來。
 - `est_cycles` 用的是 binary search 的每次 invocation 成本 `2g - 2 + H`，不含 k 項；
   那是 optimizer 原本的模型，沒動。
 - device symbol 名稱是固定的（第 2.2 節的表）。

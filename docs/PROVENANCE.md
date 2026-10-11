@@ -259,7 +259,9 @@ reference 逐元素比對），regression `test/e2e/run_e2e.sh`（36 組）。�
   `tile-pipelined-1x8x8-3x4x4-20261009`（封存 bitstream 的來源）的
   `systolic_dma_top`，只換掉 Xilinx IP（FP IP 換成 binary32 RNE、denormal
   flush 的模型），runtime 不改、只在 libftdi 那層換成 socket。36/36 PASS；
-  每個 session runtime 計的 byte 數與 RTL 端收到／送出的相同。
+  每個 session runtime 計的送出 byte 數等於 RTL 用 RD# 讀走的、收到的等於
+  RTL 用 WR# 送出的；另有一次注入的寫入失敗，必須回報成 FPGA dispatch
+  失敗（RTL 只收到 MEM_WRITE 與 4 個 WRITE32，沒有 submit、沒有結果）。
 - 8x8x16、4x4x16 這兩種整塊 tile，新 runtime 送上線的 byte 與 tag
   `tile-pipelined-1x8x8-3x4x4-20261009` 那份 runtime（`main` 上未改動）
   **逐 byte 相同**（co-sim 擷取後 `cmp`）。

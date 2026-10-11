@@ -5,7 +5,7 @@
 // without the compiler in front of it. Each case is one invocation on one
 // physical device of the 1x8x8 + 3x4x4 bitstream, checked element by element
 // against an integer CPU reference. Run it against the board, or against the
-// RTL co-simulation (test/e2e/run_e2e.sh --backend cosim --runtime-only).
+// RTL co-simulation; test/e2e/run_e2e.sh runs it first on either backend.
 //
 // The full tiles (8x8x16 on device 0, 4x4x16 on device 1) are the shapes the
 // 2026-10-09 board run sent; the edge tiles exercise the zero padding, and the

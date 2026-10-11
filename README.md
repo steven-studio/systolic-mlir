@@ -212,9 +212,11 @@ torch-mlir 匯出的 conv2d 會用它把輸出 buffer 歸零),順序寫反會導
   只處理形狀剛好對上陣列大小的 matmul
 - ✅ 階段 3:HLS C codegen(`systolic-translate`)+ Vitis HLS/Vivado 合成 +
   真實硬體燒錄驗證(4x4 陣列,Arty A7-35T)
-- ✅ 階段 4:任意形狀自動映射——`--tile-matmul-for-fpga`(4x4 tiling +
-  zero-padding)與 `--conv2d-to-fpga`(im2col,支援 batch/stride/dilation),
-  全部端到端硬體驗證通過
+- ✅ 階段 4:任意形狀自動映射——原本是 `--tile-matmul-for-fpga`(4x4 tiling +
+  zero-padding,4x4 UART 板)與 `--conv2d-to-fpga`(im2col,支援
+  batch/stride/dilation),當時端到端硬體驗證通過;matmul 現在走
+  `--systolic-binary-search-tile-matmul` + `--lower-systolic-matmul-tile-to-fpga`
+  到 1x8x8 + 3x4x4 bitstream(見上方「端到端」)
 - 🔶 階段 5(`torch-mlir-integration` 分支,尚未併回 `main`):
   - `--conv2d-nchw-to-fpga`:支援 PyTorch 預設 NCHW/FCHW layout,已對真實
     `torch.nn.Conv2d` 端到端驗證

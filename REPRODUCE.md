@@ -50,8 +50,8 @@ but it is not the compiler selected by this configuration.
 
 A successful run should end with:
 
-    Total Discovered Tests: 21
-      Passed: 21 (100.00%)
+    Total Discovered Tests: 23
+      Passed: 23 (100.00%)
 
 The canonical compiler binary used below is:
 
@@ -227,8 +227,17 @@ Machine-checkable regressions (all part of `check-systolic`):
 
     test/Systolic/linalg_to_systolic_4x4x4.mlir
     test/Systolic/linalg_to_systolic_shapes.mlir
+    test/Systolic/bad_linalg_to_systolic.mlir
     test/Systolic/systolic_to_fpga.mlir
+    test/Systolic/fpga_operand_staging.mlir
     test/Systolic/bad_fpga_lowering.mlir
+
+`bad_linalg_to_systolic.mlir` checks that a matmul with user-defined
+`indexing_maps` (a transposed operand) or an empty M, N or K is refused
+rather than lowered as the default product. `fpga_operand_staging.mlir`
+checks how the lowering hands contiguous tiles to the runtime (scratch
+tiles staged from the whole matrices' buffers), which keeps bufferization
+linear in the number of invocations.
 
 
 ## 8. End to end: `./build/bin/systolic-matmul`
@@ -243,7 +252,9 @@ and checks C element by element against an exact integer CPU reference:
       | ./build/bin/systolic-matmul --dump-ir=/tmp/e2e
 
 `--dump-ir` keeps `00-linalg.mlir`, `10-systolic.mlir`, `20-fpga.mlir`,
-`30-llvm.mlir` and `40-llvm.ll`. The regression over 36 cases (the shapes
+`30-llvm.mlir` and `40-llvm.ll`. Matrix elements must be integers within
++-2^24 (exact in binary32); M and N are limited to 512, K to 4096, and a
+run to 16384 FPGA invocations (`docs/E2E.md`, Section 1). The regression over 36 cases (the shapes
 1x1x1, 2x3x4, 4x4x4, 8x8x8, 8x4x16, 16x8x4, 16x8x40, 17x9x33, 32x32x32,
 each with zero / positive / negative / mixed integers):
 
@@ -268,8 +279,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 21
-      Passed: 21 (100.00%)
+    Total Discovered Tests: 23
+      Passed: 23 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:
