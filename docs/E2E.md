@@ -130,9 +130,15 @@ test/e2e/run_e2e.sh --backend cosim --quick   # 只跑六個必要形狀
    每組都走 `systolic-matmul` 全程。
 
 一組 PASS 的條件：`systolic-matmul` 驗證 PASS；每個 `systolic.matmul_tile` 都恰好
-變成一次 FPGA invocation；在 co-sim 上，runtime 在 FTDI 那層計的 byte 數等於 RTL
-那端在該 session 收到／送出的 byte 數。每組的輸入、輸出與五層 IR 都留在
+變成一次 FPGA invocation；在 co-sim 上，runtime 在 FTDI 那層計的送出 byte 數等於
+RTL 真正讀走（RD#）的 byte 數，host 送出的每個 byte 都被讀走，runtime 收到的 byte 數
+等於 RTL 送出（WR#）的 byte 數。每組的輸入、輸出與五層 IR 都留在
 `build/e2e/<backend>/<case>/`，總表在 `build/e2e/<backend>/summary.txt`。
+
+3. 只在 co-sim：故意弄壞一次傳輸。session 的第 7 次 write（第一個 descriptor 的
+   第 5 個 WRITE32）失敗時，`systolic-matmul` 必須以 4 結束、runtime 回報
+   `first error -6`，RTL 只收到並讀走 MEM_WRITE 與 4 個 WRITE32（1057 B）——沒有
+   submit，所以也沒有任何結果送回。
 
 ## 4. RTL co-simulation（沒有板子時）
 
@@ -150,6 +156,11 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 - `tb_dpti_cosim.sv` 模擬 FT2232H 的 sync FIFO（60 MHz）。host 端是**同一個**
   `systolic-matmul` 執行檔，只用 `LD_PRELOAD=libftdi_cosim.so` 把 libftdi 的
   write/read 接到 UNIX socket；opcode、descriptor、DDR staging、結果讀回全由 RTL 做。
+- 每個 session 記三個數：從 host 收到的、RTL 用 RD# 讀走的、RTL 用 WR# 送出的
+  byte 數。host 關閉時，它已經寫出的 byte 仍照 RTL 讀取的速度交給 RTL（最多
+  2^20 個 FIFO clock）：板子比這個模擬快約千倍，host 走到 close 之前早就讀完了。
+- `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>` 讓 session 的第 n 次 `ftdi_write_data()`
+  像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查用它）。
 - 這是模擬，不是板子：證明的是 compiler、runtime、wire protocol 與這份 RTL 的邏輯
   一致；時序收斂、FT2232H 的真實行為、DDR3 的真實延遲都不在其中。
 

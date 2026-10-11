@@ -29,6 +29,12 @@ static int g_sock = -1;
  * so two runtimes can be compared byte for byte. */
 static FILE *g_capture = NULL;
 
+/* SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>: the n-th ftdi_write_data() of a
+ * session (from 1) fails as a USB write error would, sending nothing -- to
+ * check that the runtime reports a broken link instead of carrying on. */
+static long g_fail_write_at = 0;
+static long g_writes = 0;
+
 static int fail(struct ftdi_context *ftdi, int code, const char *msg) {
   if (ftdi)
     ftdi->error_str = msg;
@@ -75,6 +81,9 @@ int ftdi_usb_open(struct ftdi_context *ftdi, int vendor, int product) {
       const char *cap = getenv("SYSTOLIC_DPTI_COSIM_CAPTURE");
       if (cap && *cap)
         g_capture = fopen(cap, "ab");
+      const char *fail_at = getenv("SYSTOLIC_DPTI_COSIM_FAIL_WRITE");
+      g_fail_write_at = (fail_at && *fail_at) ? strtol(fail_at, NULL, 10) : 0;
+      g_writes = 0;
       fprintf(stderr, "[libftdi_cosim] connected to RTL co-simulation at %s\n",
               path);
       return 0;
@@ -123,6 +132,12 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf,
                     int size) {
   if (g_sock < 0)
     return fail(ftdi, -666, "libftdi_cosim: not open");
+
+  if (++g_writes == g_fail_write_at) {
+    fprintf(stderr, "[libftdi_cosim] injected failure of write #%ld (%d B)\n",
+            g_writes, size);
+    return fail(ftdi, -1, "libftdi_cosim: injected write failure");
+  }
 
   int off = 0;
   while (off < size) {

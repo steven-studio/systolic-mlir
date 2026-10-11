@@ -16,8 +16,11 @@
 #   --cases a,b,...   only these cases (names as gen_cases.py prints them)
 #
 # Each case leaves build/e2e/<backend>/<case>/{input.txt,output.txt,ir/}; the
-# summary is build/e2e/<backend>/summary.txt. Exit status 0 only if the
-# runtime check and every case pass.
+# summary is build/e2e/<backend>/summary.txt. On the co-simulation every
+# case's DPTI bytes are also checked against the bytes the RTL consumed and
+# sent, and one run with an injected write failure must be reported as an
+# FPGA dispatch failure. Exit status 0 only if the runtime check, every case
+# and (co-simulation) the failure check pass.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +36,7 @@ while [ $# -gt 0 ]; do
         --build-dir) BUILD="$(cd "$2" && pwd)"; shift 2 ;;
         --quick)     QUICK=1; shift ;;
         --cases)     ONLY="$2"; shift 2 ;;
-        -h|--help)   sed -n '3,20p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '3,23p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -89,9 +92,12 @@ settle_sessions() {
     done
     return 1
 }
-cosim_bytes() {  # session -> "to back", as the RTL side counted them
+# session -> "received consumed sent": the bytes the simulated FT2232H got
+# from the host, the bytes the RTL took from it (RD# strobes), and the bytes
+# the RTL sent back (WR# strobes).
+cosim_bytes() {
     grep -m1 "^cosim: session $1 closed" "$OUT/cosim.log" 2>/dev/null \
-        | sed -E 's/.*host->fpga ([0-9]+) B, fpga->host ([0-9]+) B.*/\1 \2/'
+        | sed -E 's/.*host->fpga ([0-9]+) B received, ([0-9]+) B consumed by the RTL, fpga->host ([0-9]+) B.*/\1 \2 \3/'
 }
 
 # ---- 1. the runtime layer on its own ---------------------------------------
@@ -135,13 +141,15 @@ while read -r name; do
         verdict=FAIL; note="tiles $tiles != invocations ${inv:-0}"
     fi
     if [ "$BACKEND" = cosim ] && [ "$verdict" = PASS ]; then
-        # The runtime's byte counts must be the bytes the RTL received/sent.
+        # Every byte the runtime counted out must have been consumed by the
+        # RTL, and every byte it counted in must have been sent by the RTL.
         if settle_sessions && [ "$(sessions_opened)" -eq $((before + 1)) ]; then
-            read -r cto cback < <(cosim_bytes "$((before + 1))")
-            if [ "$cto" != "$to" ] || [ "$cback" != "$back" ]; then
-                verdict=FAIL; note="runtime counted $to/$back B, RTL saw $cto/$cback B"
+            read -r crecv ccons csent < <(cosim_bytes "$((before + 1))")
+            if [ "$ccons" != "$to" ] || [ "$crecv" != "$ccons" ] || [ "$csent" != "$back" ]; then
+                verdict=FAIL
+                note="runtime counted $to/$back B; RTL received $crecv, consumed $ccons, sent $csent B"
             else
-                note="RTL saw the same $cto/$cback B (session $((before + 1)))"
+                note="RTL consumed $ccons B, sent $csent B (session $((before + 1)))"
             fi
         else
             verdict=FAIL; note="expected exactly one co-simulation session"
@@ -153,7 +161,37 @@ while read -r name; do
 done < "$OUT/case_list.txt"
 
 echo | tee -a "$OUT/summary.txt"
+
+# ---- 3. a broken link is reported, not computed around (co-simulation) ---
+# The co-simulation's libftdi fails write #7 of the session: the 5th WRITE32
+# of the first of five descriptors (16x8x4). The MEM_WRITE (9 + 1024 B) and
+# four WRITE32s (4 x 6 B) are all that may reach the RTL -- no submit, so no
+# result -- and systolic-matmul must exit 4 with the runtime's error.
+df_ok=1
+if [ "$BACKEND" = cosim ]; then
+    echo "== dispatch failure: write #7 of the session fails (5th WRITE32 of the first descriptor)"
+    d="$OUT/dispatch_failure"
+    mkdir -p "$d"
+    cp "$OUT/cases/16x8x4_mixed.txt" "$d/input.txt"
+    before=$(sessions_opened)
+    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" < "$d/input.txt" > "$d/output.txt" 2>&1
+    frc=$?
+    settle_sessions
+    read -r frecv fcons fsent < <(cosim_bytes "$((before + 1))")
+    sed -n -E 's/^ *(DPTI: .*)/   runtime: \1/p; s/^(FPGA dispatch: .*)/   \1/p' "$d/output.txt"
+    echo "   exit $frc; RTL received ${frecv:--} B, consumed ${fcons:--} B, sent ${fsent:--} B"
+    if [ $frc -eq 4 ] &&
+       grep -q '^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error -6)' "$d/output.txt" &&
+       grep -q 'DPTI: 1057 B to the FPGA, 0 B back' "$d/output.txt" &&
+       [ "$frecv" = 1057 ] && [ "$fcons" = 1057 ] && [ "$fsent" = 0 ]; then
+        df=PASS
+    else
+        df=FAIL; df_ok=0
+    fi
+    echo "dispatch failure reported: $df" | tee -a "$OUT/summary.txt"
+fi
+
 if [ $rt_rc -eq 0 ]; then rt=PASS; else rt=FAIL; fi
 echo "runtime layer: $rt" | tee -a "$OUT/summary.txt"
 echo "E2E cases: $pass/$total PASS on backend $BACKEND" | tee -a "$OUT/summary.txt"
-[ $rt_rc -eq 0 ] && [ $fail -eq 0 ] && [ $total -gt 0 ]
+[ $rt_rc -eq 0 ] && [ $fail -eq 0 ] && [ $total -gt 0 ] && [ $df_ok -eq 1 ]

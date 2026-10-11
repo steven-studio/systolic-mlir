@@ -9,6 +9,13 @@
 //      waits in accept(), so simulated time does not run while no host is
 //      attached.
 //
+//      When the host closes, the bytes it already wrote are still delivered
+//      to the RTL as it reads them (for at most kDrainCycles FIFO clocks),
+//      as the board, ~1000x faster than this simulation, would have taken
+//      them before the host got to its close. Each session logs the bytes
+//      received from the host, the bytes the RTL consumed (RD# strobes) and
+//      the bytes the RTL sent (WR# strobes).
+//
 //   2. The arithmetic of the Floating-Point Operator IP for fp_ieee.sv:
 //      binary32 multiply and add, round to nearest even, denormals flushed to
 //      signed zero on input and output. C float arithmetic on x86-64/AArch64
@@ -41,10 +48,17 @@ bool g_done = false;
 std::deque<uint8_t> g_rx;    // host -> FPGA, the FT2232H receive FIFO
 std::vector<uint8_t> g_tx;   // FPGA -> host, not yet sent
 
-unsigned long long g_session_rx = 0;
-unsigned long long g_session_tx = 0;
+unsigned long long g_session_rx = 0;        // received from the host
+unsigned long long g_session_consumed = 0;  // taken by the RTL (RD#)
+unsigned long long g_session_tx = 0;        // sent by the RTL (WR#)
 
-void close_session(const char *why) {
+// The host has gone; g_rx is still being delivered to the RTL.
+bool g_draining = false;
+const char *g_drain_why = "";
+long g_drain_cycles = 0;
+constexpr long kDrainCycles = 1L << 20;  // ~17 ms of the 60 MHz FIFO clock
+
+void finish_session(const char *why) {
   if (g_conn >= 0) {
     // Hand back whatever the FPGA produced before the host went away.
     if (!g_tx.empty())
@@ -53,18 +67,33 @@ void close_session(const char *why) {
     g_conn = -1;
   }
   std::fprintf(stdout,
-               "cosim: session %d closed (%s): host->fpga %llu B, "
-               "fpga->host %llu B\n",
-               g_sessions, why, g_session_rx, g_session_tx);
+               "cosim: session %d closed (%s): host->fpga %llu B received, "
+               "%llu B consumed by the RTL, fpga->host %llu B\n",
+               g_sessions, why, g_session_rx, g_session_consumed,
+               g_session_tx);
   std::fflush(stdout);
 
   // A new session starts from purged FIFOs, as ftdi_usb_purge_buffers()
   // leaves them on the board.
   g_rx.clear();
   g_tx.clear();
+  g_draining = false;
 
   if (g_max_sessions > 0 && g_sessions >= g_max_sessions)
     g_done = true;
+}
+
+// The host closed (or vanished): stop talking to it, keep feeding the RTL
+// what it had written.
+void host_gone(const char *why) {
+  if (g_conn >= 0) {
+    close(g_conn);
+    g_conn = -1;
+  }
+  g_tx.clear();
+  g_draining = true;
+  g_drain_why = why;
+  g_drain_cycles = 0;
 }
 
 void accept_session() {
@@ -75,6 +104,7 @@ void accept_session() {
       g_conn = fd;
       g_sessions++;
       g_session_rx = 0;
+      g_session_consumed = 0;
       g_session_tx = 0;
       std::fprintf(stdout, "cosim: session %d opened\n", g_sessions);
       std::fflush(stdout);
@@ -141,6 +171,12 @@ int cosim_service() {
   if (g_done)
     return 1;
 
+  if (g_draining) {
+    if (g_rx.empty() || ++g_drain_cycles > kDrainCycles)
+      finish_session(g_drain_why);
+    return g_done ? 1 : 0;
+  }
+
   if (g_conn < 0)
     accept_session();
 
@@ -153,8 +189,8 @@ int cosim_service() {
     }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
       break;
-    close_session("host gone while sending");
-    return g_done ? 1 : 0;
+    host_gone("host gone while sending");
+    return 0;
   }
 
   uint8_t buf[4096];
@@ -163,12 +199,12 @@ int cosim_service() {
     g_rx.insert(g_rx.end(), buf, buf + n);
     g_session_rx += static_cast<unsigned long long>(n);
   } else if (n == 0) {
-    close_session("host closed");
+    host_gone("host closed");
   } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-    close_session("receive error");
+    host_gone("receive error");
   }
 
-  return g_done ? 1 : 0;
+  return 0;
 }
 
 int cosim_rx_count() { return static_cast<int>(g_rx.size()); }
@@ -176,12 +212,17 @@ int cosim_rx_count() { return static_cast<int>(g_rx.size()); }
 int cosim_rx_peek() { return g_rx.empty() ? 0 : g_rx.front(); }
 
 void cosim_rx_pop() {
-  if (!g_rx.empty())
+  if (!g_rx.empty()) {
     g_rx.pop_front();
+    g_session_consumed++;
+  }
 }
 
 void cosim_tx_push(int b) {
-  g_tx.push_back(static_cast<uint8_t>(b));
+  // While draining the host is gone: the byte is counted as sent by the
+  // RTL but has nowhere to go.
+  if (!g_draining)
+    g_tx.push_back(static_cast<uint8_t>(b));
   g_session_tx++;
 }
 
