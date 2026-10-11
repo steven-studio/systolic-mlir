@@ -21,7 +21,6 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicCostAnalysisPass.cpp
   SystolicSelectDevicePass.cpp
   SystolicTileMatmulPass.cpp
-  SystolicTileToFpga.cpp
   SystolicScheduleOverlapPass.cpp
   SystolicPipelines.cpp
 
