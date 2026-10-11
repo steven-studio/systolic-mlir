@@ -25,7 +25,7 @@ user input (stdin, 整數)
 
 ```bash
 ./configure.sh --build                 # 或 cmake --build build
-cmake --build build --target check-systolic        # 23 個 lit test
+cmake --build build --target check-systolic        # 24 個 lit test
 
 printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
   | ./build/bin/systolic-matmul --dump-ir=/tmp/e2e
@@ -105,10 +105,18 @@ module。
 runtime 吃連續、row-major 的 `m x k`、`k x n`、`m x n` tile。lowering 自己在 buffer
 層準備：A、B 的 tile 從整個矩陣的 buffer 複製到 scratch tile（只被切成 tile 的函式參數
 整個函式共用一個 `to_buffer`）；C 的每個輸出區塊複製到 scratch tile 一次、它所有的 K
-invocation 在上面累加、最後複製回去。scratch 是每個函式三塊 stack buffer（8x16、
-16x8、8x8），runtime 同步，所以所有 invocation 輪流用。這樣 bufferization 沒有一長串
-互相 alias 的 tensor 要分析，成本跟 invocation 數成線性（原本 96x96x16 要 34 s、
-128x128x16 要 208 s；現在 0.4 s、0.7 s），invocation 也不在 heap 上配置任何東西。
+invocation 在上面累加、最後複製回去，`insert_slice` 換成 C buffer 的
+`to_tensor ... restrict`。scratch 是每個函式三塊 stack buffer（8x16、16x8、8x8），
+runtime 同步，所以所有 invocation 輪流用。這樣 bufferization 沒有一長串互相 alias 的
+tensor 要分析，成本跟 invocation 數成線性（原本 96x96x16 要 34 s、128x128x16 要
+208 s；現在 0.3 s、0.7 s），invocation 也不在 heap 上配置任何東西。
+
+`restrict` 等於宣稱沒有別的 tensor 碰得到這塊 buffer，所以 C 的區塊只有在下列條件都成立
+時才這樣做：C（`%R`）是只被這條 chain 用到的函式參數，或是同一條 chain 前一個已這樣處理
+的區塊的結果；這個區塊的 extract 到 insert 之間沒有夾著別的區塊。其他情況（`%R` 來自
+`tensor.empty`／`linalg.fill`、迴圈帶的值、交錯的區塊……）照原本的 tensor 方式 lower，由
+bufferization 看見所有 alias（`test/Systolic/fpga_operand_staging_fallback.mlir`）。
+`systolic-matmul` 產生的 module 是前一種。
 
 device symbol 對應 bitstream 的實體 ID：
 
@@ -135,11 +143,13 @@ device symbol 對應 bitstream 的實體 ID：
 descriptor 只送板子跑過的形狀（P x P x 16）；邏輯上的 m、n、k 都在補零裡。
 runtime 同步執行：一次一個 invocation，結果回來才送下一個。
 
-失敗時：任一個 WRITE32 沒送出去，該 descriptor 剩下的部分（包括 CONTROL = submit）都
-不送，回傳 -6。session 開不起來（-3），或 MEM_WRITE／descriptor／讀回失敗之後，同一個
-session 不再送任何東西，之後的呼叫都回傳 -14（只印一次），直到 `fpga_runtime_close()`
-——鏈路可能停在封包中間，晚到的結果也可能被當成下一次的。`fpga_runtime_get_stats()` 的
-byte 數從上一次 reset 起算，失敗的呼叫送出的 byte 也算。
+失敗時（`runtime/fpga_matmul_tiled.h`）：參數錯誤在送出任何東西之前就回傳
+（-10 K、-11 device／tile、-12 null、-13 打包、-15 `est_cycles = 0`），不影響鏈路。
+鏈路錯誤依階段回傳：-3 session 開不起來、-4 MEM_WRITE 失敗、-5 descriptor 不被接受、
+-6 某個 WRITE32 沒送出去（該 descriptor 剩下的部分，包括 CONTROL = submit，都不送）、
+-7 讀回失敗、-8 讀回逾時。之後同一個 session 不再送任何東西，呼叫都回傳 -14（只印一次），
+直到 `fpga_runtime_close()`——鏈路可能停在封包中間，晚到的結果也可能被當成下一次的。
+`fpga_runtime_get_stats()` 的 byte 數從上一次 reset 起算，失敗的呼叫送出的 byte 也算。
 
 ### 2.4 FPGA
 
@@ -192,8 +202,11 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   `systolic-matmul` 執行檔，只用 `LD_PRELOAD=libftdi_cosim.so` 把 libftdi 的
   write/read 接到 UNIX socket；opcode、descriptor、DDR staging、結果讀回全由 RTL 做。
 - 每個 session 記三個數：從 host 收到的、RTL 用 RD# 讀走的、RTL 用 WR# 送出的
-  byte 數。host 關閉時，它已經寫出的 byte 仍照 RTL 讀取的速度交給 RTL（最多
-  2^20 個 FIFO clock）：板子比這個模擬快約千倍，host 走到 close 之前早就讀完了。
+  byte 數。host 關閉之後，模擬的板子照常跑，直到 RTL 讀完 host 寫出的每個 byte、送完
+  host 已 submit 的每個 job 的結果（最多 2^22 個 FIFO clock），這段送出的東西丟掉——
+  板子上，下一個 session 的 `ftdi_usb_purge_buffers()` 也會把它丟掉。板子比這個模擬快
+  約千倍：不這樣做的話，帶著未完成 job 離開的 host 會把那個 job 的結果留給下一個
+  session。
 - `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>` 讓 session 的第 n 次 `ftdi_write_data()`
   像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查用它）。
 - 這是模擬，不是板子：證明的是 compiler、runtime、wire protocol 與這份 RTL 的邏輯
@@ -205,7 +218,7 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 |---|---|---|
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 101 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
-| lit | `cmake --build build --target check-systolic` | 23/23 |
+| lit | `cmake --build build --target check-systolic` | 24/24 |
 | runtime → FPGA | `build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
 | E2E | `test/e2e/run_e2e.sh --backend board` | `E2E cases: 36/36 PASS` |
 

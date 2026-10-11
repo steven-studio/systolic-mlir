@@ -50,8 +50,8 @@ but it is not the compiler selected by this configuration.
 
 A successful run should end with:
 
-    Total Discovered Tests: 23
-      Passed: 23 (100.00%)
+    Total Discovered Tests: 24
+      Passed: 24 (100.00%)
 
 The canonical compiler binary used below is:
 
@@ -230,6 +230,7 @@ Machine-checkable regressions (all part of `check-systolic`):
     test/Systolic/bad_linalg_to_systolic.mlir
     test/Systolic/systolic_to_fpga.mlir
     test/Systolic/fpga_operand_staging.mlir
+    test/Systolic/fpga_operand_staging_fallback.mlir
     test/Systolic/bad_fpga_lowering.mlir
 
 `bad_linalg_to_systolic.mlir` checks that a matmul with user-defined
@@ -237,7 +238,9 @@ Machine-checkable regressions (all part of `check-systolic`):
 rather than lowered as the default product. `fpga_operand_staging.mlir`
 checks how the lowering hands contiguous tiles to the runtime (scratch
 tiles staged from the whole matrices' buffers), which keeps bufferization
-linear in the number of invocations.
+linear in the number of invocations; `fpga_operand_staging_fallback.mlir`
+checks the cases where it must not (C rooted in a `tensor.empty`,
+loop-carried C, interleaved output blocks) and lowers tensors instead.
 
 
 ## 8. End to end: `./build/bin/systolic-matmul`
@@ -279,8 +282,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 23
-      Passed: 23 (100.00%)
+    Total Discovered Tests: 24
+      Passed: 24 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:
