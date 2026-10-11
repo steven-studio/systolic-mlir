@@ -111,7 +111,7 @@ runtime 同步執行：一次一個 invocation，結果回來才送下一個。
 封存的 bitstream：`artifacts/fpga/tile_pipelined/1x8x8-3x4x4/`，tag
 `tile-pipelined-1x8x8-3x4x4-20261009`（commit 22027c4），WNS +0.079 ns，
 `systolic_dma_top_1x8x8_3x4x4.bit` 的 sha256 是
-`b9087bad05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0`。
+`b9087bade05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0`。
 `rtl/` 在之後的 branch 上仍在改（per-accelerator context 等），那些版本不是這顆
 bitstream。
 

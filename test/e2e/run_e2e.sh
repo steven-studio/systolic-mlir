@@ -76,7 +76,7 @@ if [ "$BACKEND" = cosim ]; then
 else
     echo "backend: FPGA board over DPTI (FT2232H 0403:6010)"
     echo "         expects artifacts/fpga/tile_pipelined/1x8x8-3x4x4/systolic_dma_top_1x8x8_3x4x4.bit"
-    echo "         (sha256 b9087bad05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0) on the board"
+    echo "         (sha256 b9087bade05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0) on the board"
 fi
 echo
 
