@@ -456,9 +456,10 @@ using MatmulFn = void (*)(StridedMemRefType<float, 2> *,
 
 // The compiled entry point is one straight line of code per invocation, and
 // unoptimized code generation gives every value its own stack slot: the
-// frame grows by roughly 330 bytes per invocation and passes the main
-// thread's 8 MB at about 25 000. It runs on a thread whose stack is sized
-// for the invocations it makes.
+// frame grows by a few hundred bytes per invocation (measured 323 B with
+// K folds, 457 B for 512x512x16) and passes the main thread's 8 MB at
+// some 20 000 invocations. It runs on a thread whose stack is sized for
+// the invocations it makes, with room to spare (1 KB each, plus 16 MB).
 struct CompiledCall {
   MatmulFn fn;
   StridedMemRefType<float, 2> *result, *a, *b, *c;

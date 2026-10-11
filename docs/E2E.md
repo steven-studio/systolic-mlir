@@ -67,7 +67,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 JIT 不做最佳化（IR 與 codegen 都是 -O0）：編出來的函式是一長串 runtime 呼叫與 tile
 複製，每次呼叫都要等一次 DPTI 往返（至少 1 ms），最佳化沒有好處，而 -O2 在上千個呼叫的單一 basic
 block 上遠超過線性（128x128x128：74 s → 8.7 s）。-O0 的 stack frame 隨 invocation
-數成長（約 330 B／次），所以編出來的函式在一條依 invocation 數配置 stack 的 thread
+數成長（每次幾百 byte，量到 323–457 B），所以編出來的函式在一條依 invocation 數配置 stack（每次 1 KB 再加 16 MB）的 thread
 上執行。
 
 輸出會列出：輸入、每個 `systolic.matmul_tile`（C 的區塊、k 範圍、device、
