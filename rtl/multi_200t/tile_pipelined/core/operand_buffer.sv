@@ -34,8 +34,10 @@ module systolic_operand_buffer #(
     parameter int K_MAX = 256,
 
     /* 預設由 K_MAX 導出,呼叫端漏傳也不會兩者脫鉤。
-     * 舊版預設寫死 9,而 $clog2(256) 是 8 —— 那個預設本身就是錯的。 */
-    parameter int K_W   = $clog2(K_MAX),
+     * 舊版預設寫死 9,而 $clog2(256) 是 8 —— 那個預設本身就是錯的。
+     * K_MAX 可以是任何正整數(不必是 2 的冪);K_MAX = 1 時 $clog2 是 0,
+     * 位址仍需 1 bit,所以下限是 1。 */
+    parameter int K_W   = (K_MAX > 1) ? $clog2(K_MAX) : 1,
 
     /* Bank 數 = 陣列邊長 N(每列/每行一個 bank)。這是幾何參數,
      * 與位址寬度 K_W 無關 -- 上面那段「曾寫成 K_W-1」的事故正是
@@ -85,5 +87,22 @@ module systolic_operand_buffer #(
         end
 
     endgenerate
+
+`ifndef SYNTHESIS
+    /* 深度不是 2 的冪時,K_W 位元的位址可以表示 >= K_MAX 的值,而
+     * mem[0:K_MAX-1] 沒有那些格子。呼叫端(systolic_accel_context)在寫入
+     * 前就丟掉 >= K_MAX 的 slab 補零格,feeder 也只讀 k < k_dim <= K_MAX;
+     * 這裡在每一次模擬裡確認兩者都成立,而不是讓越界寫入在模擬器裡
+     * 被默默忽略、在硬體上落到哪裡算哪裡。 */
+    always_ff @(posedge clk) begin
+        if (wr && (int'(waddr) >= K_MAX))
+            $fatal(1, "systolic_operand_buffer: write to depth %0d of a %0d-deep buffer",
+                   waddr, K_MAX);
+        for (int bi = 0; bi < N_BANKS; bi++)
+            if (int'(raddr[bi]) >= K_MAX)
+                $fatal(1, "systolic_operand_buffer: bank %0d reads depth %0d of a %0d-deep buffer",
+                       bi, raddr[bi], K_MAX);
+    end
+`endif
 
 endmodule

@@ -84,7 +84,9 @@ int dpti_ftdi_submit_session(
 /*
  * Stage one complete operand slab into FPGA DDR.
  *
- * Current RTL MEM_WRITE protocol accepts exactly 1024 payload bytes:
+ * The RTL's MEM_WRITE accepts exactly the payload length its build fixed --
+ * the deepest geometry's slab, ceil(K_MAX / 8) * 512 bytes (1024 at
+ * K_MAX_8X8 = K_MAX_4X4 = 16); length must be a positive multiple of 16:
  *
  *   byte 0      = 0x02
  *   byte 1..4   = DDR byte address, little-endian

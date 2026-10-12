@@ -34,6 +34,12 @@ struct SystolicArrayResource {
   // H = 0 means the pure geometric model.
   int64_t tileOverhead = 0;
 
+  // Invocations one spatial tile of the GEMM being decomposed needs on this
+  // accelerator: ceil(K / k_max) for the accelerator's own k_max, 1 when it
+  // declares none. It depends on the GEMM's K, so the caller sets it per
+  // GEMM. The binary-search optimizer bills a tile invocationsPerTile x C(g)
+  // and keeps one tile's invocations back to back on its accelerator.
+  int64_t invocationsPerTile = 1;
 };
 
 /// A square tile assigned to one systolic array.

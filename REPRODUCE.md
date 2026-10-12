@@ -50,8 +50,8 @@ but it is not the compiler selected by this configuration.
 
 A successful run should end with:
 
-    Total Discovered Tests: 24
-      Passed: 24 (100.00%)
+    Total Discovered Tests: 31
+      Passed: 31 (100.00%)
 
 The canonical compiler binary used below is:
 
@@ -203,7 +203,10 @@ Machine-checkable regression:
 
 The pipeline that runs on the FPGA starts from `linalg.matmul` and a
 `systolic.device` fleet. For the board's bitstream (one 8x8 and three 4x4
-arrays, `k_max = 16`, `tile_overhead = 95`):
+arrays, `k_max = 16`, `tile_overhead = 95`; a bitstream built with other
+K_MAX_8X8 / K_MAX_4X4 declares those as the devices' `k_max` and passes
+them to the lowering as `phys-k-max-8x8=` / `phys-k-max-4x4=`, see
+`docs/KMAX.md`):
 
     ./build/bin/systolic-opt --systolic-binary-search-tile-matmul \
       test/Systolic/linalg_to_systolic_shapes.mlir
@@ -232,6 +235,19 @@ Machine-checkable regressions (all part of `check-systolic`):
     test/Systolic/fpga_operand_staging.mlir
     test/Systolic/fpga_operand_staging_fallback.mlir
     test/Systolic/bad_fpga_lowering.mlir
+    test/Systolic/kmax_heterogeneous.mlir
+    test/Systolic/kmax_fpga_lowering.mlir
+    test/Systolic/bad_kmax_device.mlir
+    test/Systolic/bad_kmax_fleet.mlir
+    test/Systolic/bad_kmax_lowering.mlir
+    test/Systolic/cost_kmax.mlir
+    test/Systolic/select_device_kmax.mlir
+
+The `kmax_*`, `bad_kmax_*`, `cost_kmax` and `select_device_kmax` tests
+cover independent K_MAX_8X8 / K_MAX_4X4 (folding K by each device's own
+k_max, the cost of a tile on each geometry, the lowering's check of the
+declared k_max against the bitstream's, and the refusals); see
+`docs/KMAX.md`.
 
 `bad_linalg_to_systolic.mlir` checks that a matmul with user-defined
 `indexing_maps` (a transposed operand) or an empty M, N or K is refused
@@ -282,8 +298,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 24
-      Passed: 24 (100.00%)
+    Total Discovered Tests: 31
+      Passed: 31 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

@@ -125,6 +125,20 @@
 //   Context 0 (the 8x8) carries the legacy bring-up: the seeder, the VIO
 //   n_inv / re-run probes, and the counters the bench and the board scripts
 //   read, which are exposed under their old names as context 0's.
+//
+// TWO INDEPENDENT K_MAX (Oct 2026)
+//   K_MAX_8X8 is the 8x8 contexts' operand depth and K_MAX_4X4 every 4x4
+//   context's.  They are independent, and each is any positive integer the
+//   descriptor's 16-bit beat count can carry (K <= 16376; the BRAM budget is
+//   the practical bound): nothing below folds them into one value or assumes
+//   a power of two.  What they decide here:
+//     - the host's MEM_WRITE payload (HOST_SLAB_BYTES): one operand slab of
+//       the DEEPEST geometry, ceil(K_MAX / 8) whole 8-step windows, so a slab
+//       for any accelerator fits it -- 1024 bytes at 16 / 16, as before;
+//     - which descriptors are accepted: a job's k must be 1..K_MAX of the
+//       device it names.  Any other k is refused (never accepted, err_job_k
+//       latched into any_err / led[6]) instead of being run past the end of
+//       that context's buffers.
 // -----------------------------------------------------------------------------
 
 `default_nettype none
@@ -302,10 +316,23 @@ module systolic_dma_top #(
 
   localparam integer AXI_DATA_W = 128;
   localparam integer AXI_ADDR_W = 29;
+  // A slab carries whole 8-step windows: a K_MAX-deep context reads
+  // ceil(K_MAX / 8) of them (systolic_accel_context, dma_operand_writer).
+  localparam integer SLAB_K_8X8 = ((K_MAX_8X8 + 7) / 8) * 8;
+  localparam integer SLAB_K_4X4 = ((K_MAX_4X4 + 7) / 8) * 8;
   // The legacy bring-up (seeder, VIO n_inv, the bench's counters) runs on
-  // context 0, the 8x8, whose slab is K_MAX_8X8 deep.
-  localparam integer RX_BYTES   = K_MAX_8X8 * 8 * N;
+  // context 0, the 8x8, whose slab is SLAB_K_8X8 deep.
+  localparam integer RX_BYTES   = SLAB_K_8X8 * 8 * N;
   localparam integer N_BEATS    = RX_BYTES / (AXI_DATA_W/8);
+  // The host stages each invocation's operands with one MEM_WRITE of a fixed
+  // length: the deepest slab of any geometry present, so that every
+  // accelerator's slab fits in it whichever of K_MAX_8X8 / K_MAX_4X4 is larger.
+  localparam integer HOST_SLAB_K =
+      (NUM_8X8 == 0)                                  ? SLAB_K_4X4 :
+      (NUM_4X4 == 0 || SLAB_K_8X8 >= SLAB_K_4X4)      ? SLAB_K_8X8 :
+                                                        SLAB_K_4X4;
+  localparam integer HOST_SLAB_BYTES = HOST_SLAB_K * 8 * N;
+  localparam integer HOST_SLAB_BEATS = HOST_SLAB_BYTES / (AXI_DATA_W/8);
 
   // ---- clocking: identical to dma_bringup_top / ddr3_bw_top ---------------
   // The array runs on ui_clk.  MIG's 4:1 PHY ratio against 800 Mbps DDR3 makes
@@ -651,6 +678,18 @@ module systolic_dma_top #(
   wire [ACC_ID_W-1:0] target_idx =
       target_valid ? effective_job_device_id[ACC_ID_W-1:0] : '0;
 
+  // The job's k must fit the operand buffers of the accelerator it names:
+  // 1..K_MAX_8X8 for an 8x8, 1..K_MAX_4X4 for a 4x4.  A descriptor outside
+  // that is refused (never accepted, like one naming no accelerator) and
+  // latched in err_job_k; accepting it would run the feeder past the end of
+  // that context's buffers.
+  wire [31:0] effective_job_k;                     // defined with the ingress
+  wire        target_is_8x8 = (effective_job_device_id < NUM_8X8);
+  wire        job_k_ok =
+      (effective_job_k != 32'd0) &&
+      (effective_job_k <= (target_is_8x8 ? 32'(K_MAX_8X8) : 32'(K_MAX_4X4)));
+  logic       err_job_k;
+
   // A completed job may still own the shared DMA read engine while its
   // result tile is read back; its context takes no new job until then.
   wire result_readback_busy [0:NUM_ACCEL-1];
@@ -660,6 +699,7 @@ module systolic_dma_top #(
       ui_rst_n &&
       !hs_busy &&
       target_valid &&
+      job_k_ok &&
       !ctx_job_busy[target_idx] &&
       !result_readback_busy[target_idx] &&
       (ctx_phase[target_idx] == 4'd0 ||    // P_CALIB
@@ -955,7 +995,7 @@ module systolic_dma_top #(
     .ADDR_W        (8),
     .MEM_ADDR_W    (AXI_ADDR_W),
     .MEM_DATA_W    (AXI_DATA_W),
-    .PAYLOAD_BYTES (RX_BYTES)
+    .PAYLOAD_BYTES (HOST_SLAB_BYTES)
   ) u_dpti_command_frontend (
     .clk                (dpti_clkout),
     .rst                (dpti_rst),
@@ -989,7 +1029,7 @@ module systolic_dma_top #(
     .AXI_ID_W    (2),
     .FIFO_DEPTH  (8),
     .BURST_LEN   (16),
-    .TOTAL_BEATS (N_BEATS)
+    .TOTAL_BEATS (HOST_SLAB_BEATS)
   ) u_dpti_mem_write_cdc_engine (
     .src_clk       (dpti_clkout),
     .src_rst       (dpti_rst),
@@ -1241,7 +1281,6 @@ module systolic_dma_top #(
 
   wire [31:0] effective_job_m;
   wire [31:0] effective_job_n;
-  wire [31:0] effective_job_k;
 
   wire [31:0] effective_job_start_cycle;
   wire [31:0] effective_job_est_cycles;
@@ -2088,9 +2127,20 @@ module systolic_dma_top #(
   wire wb_desc_ready = wb_eng_desc_ready;
   wire wb_done       = wb_eng_done;
 
+  // A refused descriptor (its k outside the named accelerator's 1..K_MAX) is
+  // a host error the board must show: it sits in the descriptor bridge, so
+  // nothing after it is taken either.
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n)
+      err_job_k <= 1'b0;
+    else if (USE_EXTERNAL_SCHEDULER && effective_job_valid && target_valid && !job_k_ok)
+      err_job_k <= 1'b1;
+  end
+
   wire any_err  = seed_err_align | seed_err_resp
                 | eng_err_align  | eng_err_resp | wr_err_range
-                | wb_err_align   | wb_err_resp  | err_w_owner;
+                | wb_err_align   | wb_err_resp  | err_w_owner
+                | err_job_k;
 
   // ---- MIG ----------------------------------------------------------------
   mig_7series_0 u_mig_7series_0 (
@@ -2179,19 +2229,34 @@ module systolic_dma_top #(
                  init_calib_complete };
 
 `ifndef SYNTHESIS
-  // Each context checks its own geometry (K_DIM <= K_MAX, power-of-two slab
-  // and tile strides, the accepted job's K within its K_MAX).  The fleet-level
-  // check is that a descriptor names a physical accelerator at all: the
-  // acceptance logic never takes an out-of-range device, so the producer would
-  // hang instead of being told.
+  // Each context checks its own geometry (K_DIM <= K_MAX, the slab's beats
+  // within the descriptor's count, the accepted job's K within its K_MAX).
+  // The fleet-level check is that a descriptor names a physical accelerator
+  // at all: the acceptance logic never takes an out-of-range device, so the
+  // producer would hang instead of being told.
   always_ff @(posedge ui_clk) begin
     if (ui_rst_n && USE_EXTERNAL_SCHEDULER && effective_job_valid && !target_valid)
       $fatal(1, "descriptor names device %0d; the fleet has %0d accelerators (0..%0d)",
              effective_job_device_id, NUM_ACCEL, NUM_ACCEL-1);
   end
+  // A k outside the named accelerator's capacity is refused by the acceptance
+  // logic and latched in err_job_k (any_err); say so once, without stopping --
+  // a bench may present it on purpose to check the refusal.
+  logic err_job_k_reported = 1'b0;
+  always_ff @(posedge ui_clk) begin
+    if (ui_rst_n && err_job_k && !err_job_k_reported) begin
+      err_job_k_reported <= 1'b1;
+      $display("JOBREFUSED t=%0t device %0d k=%0d: outside 1..%0d (K_MAX_8X8=%0d, K_MAX_4X4=%0d); descriptor refused, err_job_k set",
+               $time, effective_job_device_id, effective_job_k,
+               target_is_8x8 ? K_MAX_8X8 : K_MAX_4X4, K_MAX_8X8, K_MAX_4X4);
+    end
+  end
+  // Both write engines move whole 16-beat bursts.
   initial begin
     if ((N_BEATS % 16) != 0)
       $fatal(1, "N_BEATS %0d is not a multiple of the seeder's burst", N_BEATS);
+    if ((HOST_SLAB_BEATS % 16) != 0)
+      $fatal(1, "HOST_SLAB_BEATS %0d is not a multiple of the MEM_WRITE burst", HOST_SLAB_BEATS);
   end
 `endif
 

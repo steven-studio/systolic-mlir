@@ -8,29 +8,35 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <thread>
+#include <vector>
 
 /*
- * Physical 4x4 accelerator operand slab.
+ * Operand slab: the wire format dma_operand_writer decodes.
  *
- * For K=16 the hardware consumes one 1024-byte combined A+B slab:
+ * The reduction is carried in windows of 8 steps. Window w is 128 words:
  *
- *   window 0:
- *     words   0..63   A
- *     words  64..127  B
+ *     words w*128 +   0 .. w*128 +  63   A: lane (row) r, step koff at
+ *                                           r*8 + koff
+ *     words w*128 +  64 .. w*128 + 127   B: step koff, lane (col) c at
+ *                                           64 + koff*8 + c
  *
- *   window 1:
- *     words 128..191  A
- *     words 192..255  B
- *
- * A is a row-major 4x16 logical tile.
- * B is a row-major 16x4 logical tile.
+ * eight lanes wide whatever the array (a 4x4 reads lanes 0..3). A slab of
+ * depth K_MAX is ceil(K_MAX / 8) windows: at K_MAX = 16 the 1024-byte slab
+ * of the original bitstream, at K_MAX = 17 three windows (1536 bytes), the
+ * last one carrying step 16 and seven steps of padding. Window and offset
+ * are k / 8 and k % 8 for ANY k; nothing here assumes a power of two.
  */
 static int scheduled_payload_index_a(int k, int row) {
     const int win  = k / 8;
@@ -54,7 +60,7 @@ static int scheduled_payload_index_b(int k, int col) {
 }
 
 static void scheduled_store_f32(
-    std::array<unsigned char, 1024>& slab,
+    std::vector<unsigned char>& slab,
     int word_index,
     float value) {
 
@@ -78,35 +84,41 @@ static void scheduled_store_f32(
 }
 
 /*
- * Pack one invocation into the 1024-byte slab.
+ * Pack one invocation into the operand slab.
  *
- * The layout is the K = 16 image of the 8x8 geometry; a 4x4 array reads
- * lanes 0..3 of it. A full 8x8x16 or 4x4x16 tile therefore packs to exactly
- * the bytes the board run of 2026-10-09 sent. A smaller tile -- m < P,
- * n < P or k < 16 for the P x P array of the selected device -- leaves the
- * rest of the slab zero: zero rows of A and zero columns of B give zero rows
- * and columns of the product, and a zero reduction step adds +0.0, so the
- * m x n block of the P x P result is the m x k by k x n product.
+ * The layout is the 8-lane image above; a 4x4 array reads lanes 0..3 of it.
+ * A full 8x8x16 or 4x4x16 tile at K_MAX = 16 therefore packs to exactly the
+ * bytes the board run of 2026-10-09 sent. A smaller tile -- m < P, n < P or
+ * k < K_MAX for the P x P array of the selected device -- leaves the rest of
+ * the slab zero: zero rows of A and zero columns of B give zero rows and
+ * columns of the product, and a zero reduction step adds a zero product, so
+ * the m x n block of the P x P result is the m x k by k x n product.
  */
 static int build_scheduled_operand_slab(
     int M,
     int K,
     int N,
     int P,
+    int k_max,
     const float *A,
     const float *B,
-    std::array<unsigned char, 1024>& slab) {
+    std::vector<unsigned char>& slab) {
 
     if (!A || !B)
         return -1;
 
-    if (K < 1 || K > 16)
+    if (K < 1 || K > k_max)
         return -2;
 
     if (M < 1 || N < 1 || M > P || N > P)
         return -3;
 
-    slab.fill(0);
+    // Every window step K - 1 lands in must lie inside the slab.
+    const size_t windows = static_cast<size_t>((K + 7) / 8);
+    if (slab.size() < windows * 128 * 4)
+        return -4;
+
+    std::fill(slab.begin(), slab.end(), static_cast<unsigned char>(0));
 
     for (int k = 0; k < K; ++k) {
         for (int row = 0; row < M; ++row) {
@@ -130,18 +142,19 @@ static int build_scheduled_operand_slab(
 namespace {
 
 /*
- * The 1x8x8 + 3x4x4 bitstream (tag tile-pipelined-1x8x8-3x4x4-20261009):
+ * The 1x8x8 + 3x4x4 bitstream:
  *
- *   device_id 0: 8x8 instance 0
- *   device_id 1: 4x4 instance 0
- *   device_id 2: 4x4 instance 1
- *   device_id 3: 4x4 instance 2
+ *   device_id 0: 8x8 instance 0     K_MAX_8X8 reduction steps
+ *   device_id 1: 4x4 instance 0     K_MAX_4X4
+ *   device_id 2: 4x4 instance 1     K_MAX_4X4
+ *   device_id 3: 4x4 instance 2     K_MAX_4X4
  *
- * Every invocation is one 1024-byte operand slab of depth 16 at
- * OPERAND_BASE; the result tile is written back at RESULT_BASE and streamed
- * back over DPTI, P x P fp32 row-major for the P x P array.
+ * Every invocation is one operand slab at OPERAND_BASE, written by one
+ * MEM_WRITE of the bitstream's fixed payload length (config slab_bytes: the
+ * deepest geometry's slab, so any device's slab fits); the result tile is
+ * written back at RESULT_BASE and streamed back over DPTI, P x P fp32
+ * row-major for the P x P array.
  */
-constexpr int      SCHED_K_MAX   = 16;
 constexpr uint32_t OPERAND_BASE  = 0x00010000u;
 constexpr uint32_t RESULT_BASE   = 0x00003000u;
 constexpr int      SCHED_DEVICES = 4;
@@ -151,6 +164,139 @@ int physical_geometry(unsigned device_id) {
         return 8;
     if (device_id >= 1 && device_id < SCHED_DEVICES)
         return 4;
+    return 0;
+}
+
+/* ceil(k / 8) windows of 8 steps x 8 lanes x (A word + B word). */
+unsigned slab_bytes_for(unsigned k_max) {
+    return (k_max + 7u) / 8u * 8u * 8u * 8u;
+}
+
+/*
+ * The bitstream configuration: SYSTOLIC_FPGA_CONFIG, or the archived
+ * bitstream's 16 / 16. Loaded once.
+ */
+struct LoadedConfig {
+    bool                  loaded = false;
+    int                   rc = 0;
+    fpga_runtime_config_t cfg{};
+};
+
+void set_text(char *dst, size_t n, const std::string &text) {
+    std::snprintf(dst, n, "%s", text.c_str());
+}
+
+std::string trim(const std::string &s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+/* A decimal integer in 1..max, the whole string, without a sign or leading
+ * zeros: the build scripts that write and read the same file do arithmetic
+ * in bash and Tcl, where a leading 0 means octal, so "016" is refused rather
+ * than read as 16 here and as 14 there. */
+bool parse_count(const std::string &text, unsigned max, unsigned &out) {
+    if (text.empty() || text.size() > 10 || text[0] == '0')
+        return false;
+    for (char c : text)
+        if (c < '0' || c > '9')
+            return false;
+    const unsigned long v = std::strtoul(text.c_str(), nullptr, 10);
+    if (v < 1 || v > max)
+        return false;
+    out = static_cast<unsigned>(v);
+    return true;
+}
+
+int load_config(fpga_runtime_config_t &cfg) {
+    cfg = fpga_runtime_config_t{};
+    cfg.k_max_8x8 = 16;
+    cfg.k_max_4x4 = 16;
+
+    const char *path = std::getenv("SYSTOLIC_FPGA_CONFIG");
+    if (!path || !*path) {
+        set_text(cfg.source, sizeof cfg.source,
+                 "built-in default (artifacts/fpga/tile_pipelined/"
+                 "1x8x8-3x4x4: K_MAX_8X8 = K_MAX_4X4 = 16)");
+        cfg.slab_bytes = slab_bytes_for(16);
+        return 0;
+    }
+    set_text(cfg.source, sizeof cfg.source, path);
+
+    auto fail = [&](const std::string &why) {
+        set_text(cfg.error, sizeof cfg.error,
+                 std::string("SYSTOLIC_FPGA_CONFIG=") + path + ": " + why);
+        cfg.k_max_8x8 = cfg.k_max_4x4 = cfg.slab_bytes = 0;
+        return -16;
+    };
+
+    std::ifstream in(path);
+    if (!in)
+        return fail(std::string("cannot open (") + std::strerror(errno) + ")");
+
+    bool have8 = false, have4 = false;
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        ++lineno;
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line.resize(hash);
+        line = trim(line);
+        if (line.empty())
+            continue;
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            return fail("line " + std::to_string(lineno) +
+                        ": expected KEY=VALUE");
+        const std::string key = trim(line.substr(0, eq));
+        const std::string val = trim(line.substr(eq + 1));
+        unsigned v = 0;
+        if (key == "K_MAX_8X8" || key == "K_MAX_4X4") {
+            if (!parse_count(val, FPGA_K_MAX_LIMIT, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1.." +
+                            std::to_string(FPGA_K_MAX_LIMIT) +
+                            " (no sign, no leading zeros)");
+            if (key == "K_MAX_8X8") { cfg.k_max_8x8 = v; have8 = true; }
+            else                    { cfg.k_max_4x4 = v; have4 = true; }
+        } else if (key == "N" || key == "NUM_8X8" || key == "NUM_4X4") {
+            // This runtime drives the 1x8x8 + 3x4x4 device map; a bitstream
+            // built with another fleet is not something it can address.
+            const unsigned want = key == "N" ? 8u : key == "NUM_8X8" ? 1u : 3u;
+            if (!parse_count(val, 1u << 16, v) || v != want)
+                return fail(key + " = '" + val + "', but this runtime drives "
+                            "the 1x8x8 + 3x4x4 fleet (" + key + " = " +
+                            std::to_string(want) + ")");
+        }
+        // Every other key (bitstream hash, RTL revision, ...) is a record
+        // for people and is not read here.
+    }
+    if (!have8 || !have4)
+        return fail("K_MAX_8X8 and K_MAX_4X4 are both required");
+
+    const unsigned b8 = slab_bytes_for(cfg.k_max_8x8);
+    const unsigned b4 = slab_bytes_for(cfg.k_max_4x4);
+    cfg.slab_bytes = b8 > b4 ? b8 : b4;
+    return 0;
+}
+
+LoadedConfig &config_state() {
+    static LoadedConfig state;
+    if (!state.loaded) {
+        state.rc = load_config(state.cfg);
+        state.loaded = true;
+    }
+    return state;
+}
+
+/* K_MAX of a physical device; 0 for an unknown one. */
+unsigned physical_k_max(const fpga_runtime_config_t &cfg, unsigned device_id) {
+    if (device_id == 0)
+        return cfg.k_max_8x8;
+    if (device_id >= 1 && device_id < SCHED_DEVICES)
+        return cfg.k_max_4x4;
     return 0;
 }
 
@@ -202,12 +348,20 @@ int scheduled_invocation(
     unsigned start_cycle,
     unsigned est_cycles) {
 
+    const LoadedConfig &hw = config_state();
+    if (hw.rc != 0)
+        return -16;
+
     const int P = physical_geometry(device_id);
 
     if (P == 0)
         return -11;
 
-    if (K < 1 || K > SCHED_K_MAX)
+    // This device's own capacity: K_MAX_8X8 or K_MAX_4X4.
+    const int k_max =
+        static_cast<int>(physical_k_max(hw.cfg, device_id));
+
+    if (K < 1 || K > k_max)
         return -10;
 
     if (M < 1 || N < 1 || M > P || N > P)
@@ -237,9 +391,11 @@ int scheduled_invocation(
         }
     }
 
-    std::array<unsigned char, 1024> slab{};
+    // One MEM_WRITE of the bitstream's fixed payload length; this device's
+    // slab is its first ceil(k_max / 8) windows.
+    std::vector<unsigned char> slab(hw.cfg.slab_bytes, 0);
 
-    if (build_scheduled_operand_slab(M, K, N, P, A, B, slab) != 0)
+    if (build_scheduled_operand_slab(M, K, N, P, k_max, A, B, slab) != 0)
         return -13;
 
     /*
@@ -270,12 +426,13 @@ int scheduled_invocation(
 
     /*
      * The descriptor carries the physical invocation: the array's P x P
-     * and the slab depth 16, the only shape the board has run. The logical
-     * m x k x n lives in the zero padding of the slab.
+     * and this device's slab depth K_MAX (16 on the archived bitstream, the
+     * only shape the board has run). The logical m x k x n lives in the
+     * zero padding of the slab.
      */
     job.m = static_cast<uint32_t>(P);
     job.n = static_cast<uint32_t>(P);
-    job.k = static_cast<uint32_t>(SCHED_K_MAX);
+    job.k = static_cast<uint32_t>(k_max);
 
     job.start_cycle = start_cycle;
     job.est_cycles = est_cycles;
@@ -338,11 +495,11 @@ int scheduled_invocation(
     if (env_flag("SYSTOLIC_RUNTIME_TRACE")) {
         std::fprintf(
             stderr,
-            "[fpga-runtime] job %u -> device %u (%dx%d array): "
+            "[fpga-runtime] job %u -> device %u (%dx%d array, K_MAX %d): "
             "tile %dx%d, k=%d (padded to %dx%dx%d), "
-            "start_cycle=%u est_cycles=%u, %u result bytes\n",
-            job.job_id, device_id, P, P, M, N, K, P, SCHED_K_MAX, P,
-            start_cycle, est_cycles, result_bytes_len);
+            "start_cycle=%u est_cycles=%u, %zu-byte slab, %u result bytes\n",
+            job.job_id, device_id, P, P, k_max, M, N, K, P, k_max, P,
+            start_cycle, est_cycles, slab.size(), result_bytes_len);
     }
 
     return 0;
@@ -414,6 +571,13 @@ void fpga_runtime_get_stats(fpga_runtime_stats_t *out) {
 
 void fpga_runtime_reset_stats(void) {
     runtime_state().stats = fpga_runtime_stats_t{};
+}
+
+int fpga_runtime_get_config(fpga_runtime_config_t *out) {
+    const LoadedConfig &hw = config_state();
+    if (out)
+        *out = hw.cfg;
+    return hw.rc;
 }
 
 void fpga_runtime_close(void) {

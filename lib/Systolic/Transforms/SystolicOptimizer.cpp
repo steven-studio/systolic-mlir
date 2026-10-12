@@ -51,11 +51,21 @@ static bool checkedCeilDiv(
   return true;
 }
 
-/// Compute the calibrated execution cost of one invocation.
+/// Compute the calibrated execution cost of one spatial tile.
 ///
-///     C(g) = 2g - 2 + H(g)
+///     C(g)    = 2g - 2 + H(g)          one invocation
+///     cost(g) = I(g) * C(g)            one tile, I(g) = invocationsPerTile
 ///
-/// All physical accelerators of one geometry must agree on H.
+/// I(g) = ceil(K / k_max(g)) is the number of invocations the tile's
+/// reduction is folded into on that geometry. k_max is per accelerator, so
+/// two geometries of one fleet can need different I for the same GEMM;
+/// billing every geometry one invocation (as this function did before I
+/// existed) balanced the rounds as if the 8x8 and a 4x4 with a smaller
+/// k_max finished a tile in the same number of invocations.
+///
+/// All physical accelerators of one geometry must agree on H and on I: the
+/// capacity below is #accelerators(g) * floor(T / cost(g)), one cost per
+/// geometry.
 static bool getBinarySearchGeometryCost(
     int64_t geometry,
     llvm::ArrayRef<SystolicArrayResource> fleet,
@@ -66,22 +76,26 @@ static bool getBinarySearchGeometryCost(
 
   bool found = false;
   int64_t overhead = 0;
+  int64_t invocations = 1;
 
   for (const SystolicArrayResource &resource : fleet) {
 
     if (resource.arraySize != geometry)
       continue;
 
-    if (resource.tileOverhead < 0)
+    if (resource.tileOverhead < 0 ||
+        resource.invocationsPerTile < 1)
       return false;
 
     if (!found) {
       overhead = resource.tileOverhead;
+      invocations = resource.invocationsPerTile;
       found = true;
       continue;
     }
 
-    if (resource.tileOverhead != overhead)
+    if (resource.tileOverhead != overhead ||
+        resource.invocationsPerTile != invocations)
       return false;
   }
 
@@ -99,8 +113,10 @@ static bool getBinarySearchGeometryCost(
       std::numeric_limits<int64_t>::max() - baseCost)
     return false;
 
-  cost = baseCost + overhead;
-  return true;
+  return checkedMultiply(
+      invocations,
+      baseCost + overhead,
+      cost);
 }
 
 /// Check whether the original rows x columns region can be
@@ -516,7 +532,8 @@ optimizeSystolicBinarySearch(
        fleet) {
 
     if (resource.arraySize <= 0 ||
-        resource.tileOverhead < 0)
+        resource.tileOverhead < 0 ||
+        resource.invocationsPerTile < 1)
       return failure();
 
     if (std::find(

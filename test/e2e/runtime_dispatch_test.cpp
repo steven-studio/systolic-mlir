@@ -7,33 +7,33 @@
 // against an integer CPU reference. Run it against the board, or against the
 // RTL co-simulation; test/e2e/run_e2e.sh runs it first on either backend.
 //
-// The full tiles (8x8x16 on device 0, 4x4x16 on device 1) are the shapes the
-// 2026-10-09 board run sent; the edge tiles exercise the zero padding, and the
-// C_in cases the accumulation C += A x B that chained K invocations rely on.
+// The cases follow the bitstream's reduction capacity, K_MAX_8X8 on device 0
+// and K_MAX_4X4 on devices 1..3 (fpga_runtime_get_config: the file in
+// SYSTOLIC_FPGA_CONFIG, 16 and 16 without it). At 16 / 16 the first five are
+// the cases this test always ran: the full tiles (8x8x16 on device 0, 4x4x16
+// on device 1) are the shapes the 2026-10-09 board run sent; the edge tiles
+// exercise the zero padding, and the C_in cases the accumulation C += A x B
+// that chained K invocations rely on. The rest put k at the edges of each
+// device's own capacity -- 1, K_MAX - 1, K_MAX -- and check that k = K_MAX + 1
+// is refused before anything reaches the link.
 
 #include "fpga_matmul_tiled.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace {
 
 struct Case {
-  const char *what;
+  std::string what;
   unsigned device;
   int m, k, n;
   bool nonzero_c_in;
-};
-
-const Case kCases[] = {
-    {"8x8x16 full tile, device 0 (8x8)", 0, 8, 16, 8, false},
-    {"4x4x16 full tile, device 1 (4x4 #0)", 1, 4, 16, 4, false},
-    {"2x5x3 edge tile, device 2 (4x4 #1)", 2, 2, 5, 3, false},
-    {"4x16x4 with C_in != 0, device 3 (4x4 #2)", 3, 4, 16, 4, true},
-    {"5x7x6 edge tile with C_in != 0, device 0 (8x8)", 0, 5, 7, 6, true},
 };
 
 // Small integers, zeros and negatives included: exact in binary32, so the
@@ -44,12 +44,54 @@ int next_value() {
   return static_cast<int>((g_lcg >> 16) % 17) - 8;  // -8 .. 8
 }
 
+std::string shape(int m, int k, int n) {
+  return std::to_string(m) + "x" + std::to_string(k) + "x" + std::to_string(n);
+}
+
+std::vector<Case> make_cases(int k8, int k4) {
+  std::vector<Case> cases = {
+      {shape(8, k8, 8) + " full tile, device 0 (8x8)", 0, 8, k8, 8, false},
+      {shape(4, k4, 4) + " full tile, device 1 (4x4 #0)", 1, 4, k4, 4, false},
+      {shape(2, std::min(5, k4), 3) + " edge tile, device 2 (4x4 #1)", 2, 2,
+       std::min(5, k4), 3, false},
+      {shape(4, k4, 4) + " with C_in != 0, device 3 (4x4 #2)", 3, 4, k4, 4,
+       true},
+      {shape(5, std::min(7, k8), 6) + " edge tile with C_in != 0, device 0 (8x8)",
+       0, 5, std::min(7, k8), 6, true},
+  };
+  // k at the edges of each device's own capacity.
+  for (unsigned dev : {0u, 1u, 3u}) {
+    const int kmax = dev == 0 ? k8 : k4;
+    const int p = dev == 0 ? 8 : 4;
+    const std::string where = ", device " + std::to_string(dev) +
+                              (dev == 0 ? " (8x8)" : " (4x4)");
+    cases.push_back({shape(p, 1, p) + " k = 1" + where, dev, p, 1, p, true});
+    if (kmax > 2)
+      cases.push_back({shape(p - 1, kmax - 1, p) + " k = K_MAX - 1" + where,
+                       dev, p - 1, kmax - 1, p, false});
+    cases.push_back({shape(p, kmax, p - 1) + " k = K_MAX" + where, dev, p,
+                     kmax, p - 1, true});
+  }
+  return cases;
+}
+
 } // namespace
 
 int main() {
+  fpga_runtime_config_t hw{};
+  if (fpga_runtime_get_config(&hw) != 0) {
+    std::printf("%s\nRUNTIME DISPATCH: FAIL\n", hw.error);
+    return 1;
+  }
+  const int k8 = static_cast<int>(hw.k_max_8x8);
+  const int k4 = static_cast<int>(hw.k_max_4x4);
+  std::printf("bitstream: K_MAX_8X8 = %d, K_MAX_4X4 = %d, %u-byte operand slab "
+              "(%s)\n\n",
+              k8, k4, hw.slab_bytes, hw.source);
+
   int failed = 0;
 
-  for (const Case &c : kCases) {
+  for (const Case &c : make_cases(k8, k4)) {
     std::vector<float> A(static_cast<size_t>(c.m) * c.k);
     std::vector<float> B(static_cast<size_t>(c.k) * c.n);
     std::vector<float> C(static_cast<size_t>(c.m) * c.n);
@@ -83,8 +125,8 @@ int main() {
     }
 
     const bool ok = rc == 0 && mismatches == 0;
-    std::printf("%-48s rc=%d  mismatches=%d/%zu  %s\n", c.what, rc, mismatches,
-                C.size(), ok ? "PASS" : "FAIL");
+    std::printf("%-56s rc=%d  mismatches=%d/%zu  %s\n", c.what.c_str(), rc,
+                mismatches, C.size(), ok ? "PASS" : "FAIL");
     if (first >= 0)
       std::printf("    first mismatch C[%d][%d]: FPGA %.9g, CPU %" PRId64 "\n",
                   first / c.n, first % c.n, static_cast<double>(C[first]),
@@ -92,6 +134,31 @@ int main() {
     if (!ok) ++failed;
   }
 
+  // k = K_MAX + 1 on a 4x4 and on the 8x8: refused with -10, nothing sent.
+  fpga_runtime_stats_t before;
+  fpga_runtime_get_stats(&before);
+  for (unsigned dev : {1u, 0u}) {
+    const int k = (dev == 0 ? k8 : k4) + 1;
+    const int p = dev == 0 ? 8 : 4;
+    std::vector<float> A(static_cast<size_t>(p) * k, 1.0f);
+    std::vector<float> B(static_cast<size_t>(k) * p, 1.0f);
+    std::vector<float> C(static_cast<size_t>(p) * p, 0.0f);
+    const int rc = fpga_matmul_tiled_auto_scheduled(
+        p, k, p, A.data(), B.data(), C.data(), dev, 0, 101);
+    fpga_runtime_stats_t after;
+    fpga_runtime_get_stats(&after);
+    const bool ok = rc == -10 && after.bytes_to_fpga == before.bytes_to_fpga &&
+                    after.bytes_from_fpga == before.bytes_from_fpga;
+    std::printf("%-56s rc=%d  %llu B sent  %s\n",
+                (shape(p, k, p) + " k = K_MAX + 1, device " +
+                 std::to_string(dev) + ": refused")
+                    .c_str(),
+                rc, after.bytes_to_fpga - before.bytes_to_fpga,
+                ok ? "PASS" : "FAIL");
+    if (!ok) ++failed;
+  }
+  // The refusals are counted as failed calls; the rest of the report is
+  // about the invocations that ran.
   fpga_runtime_stats_t stats;
   fpga_runtime_get_stats(&stats);
   std::printf("\nruntime: %llu invocation(s) [dev0 %llu, dev1 %llu, dev2 %llu, "

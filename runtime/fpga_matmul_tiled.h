@@ -14,15 +14,20 @@ extern "C" {
 //   C[M][N] += A[M][K] x B[K][N]       all row-major fp32, contiguous
 //
 // on the 1x8x8 + 3x4x4 bitstream: device 0 is the 8x8 (M, N <= 8),
-// devices 1..3 the 4x4s (M, N <= 4), and 1 <= K <= 16. The tile is
-// zero-padded to the array and to depth 16, staged as one 1024-byte slab,
-// submitted as one DPTI descriptor, and the array's result tile is read
-// back and added into C -- so invocations chained through C accumulate.
+// devices 1..3 the 4x4s (M, N <= 4), and 1 <= K <= K_MAX of that device:
+// K_MAX_8X8 for device 0, K_MAX_4X4 for devices 1..3 (see
+// fpga_runtime_get_config). The tile is zero-padded to the array and to
+// the device's K_MAX, staged as one operand slab (fpga_runtime_config_t.
+// slab_bytes), submitted as one DPTI descriptor whose k is the device's
+// K_MAX, and the array's result tile is read back and added into C -- so
+// invocations chained through C accumulate.
 //
 // Returns 0, or, with nothing sent on the link:
-//   -10  K outside 1..16          -11  device_id unknown / tile too large
+//   -10  K outside 1..K_MAX of device_id
+//   -11  device_id unknown / tile too large
 //   -12  null pointer             -13  slab packing failed
 //   -15  est_cycles is 0 (a descriptor needs a positive estimate)
+//   -16  the bitstream configuration (SYSTOLIC_FPGA_CONFIG) is invalid
 // or a link failure, after which nothing more is attempted on the session
 // until fpga_runtime_close():
 //    -3  the DPTI session could not be opened
@@ -54,6 +59,38 @@ typedef struct {
 
 void fpga_runtime_get_stats(fpga_runtime_stats_t *out);
 void fpga_runtime_reset_stats(void);
+
+// The largest K_MAX the DPTI/DMA protocol can carry. One invocation's
+// operand slab is ceil(K_MAX / 8) windows of 8 reduction steps, each window
+// 32 beats of 16 bytes, and the RTL's DMA descriptor counts beats in 16 bits
+// (rtl/multi_200t/tile_pipelined/dma/systolic_accel_context.sv), so
+// ceil(K_MAX / 8) * 32 <= 65535, i.e. K_MAX <= 16376.
+#define FPGA_K_MAX_LIMIT 16376u
+
+// The reduction capacity of the bitstream on the board, per geometry. The
+// two values are independent synthesis parameters (K_MAX_8X8, K_MAX_4X4)
+// and any 1..FPGA_K_MAX_LIMIT; neither has to be a power of two.
+//
+// Read once, on first use, from the file named by SYSTOLIC_FPGA_CONFIG --
+// the fpga_config.txt the bitstream build (dma_top_build.tcl) or the RTL
+// co-simulation build (test/e2e/cosim/build.sh) writes, KEY=VALUE lines:
+//   K_MAX_8X8=<n>  K_MAX_4X4=<n>       required
+//   N=8  NUM_8X8=1  NUM_4X4=3          optional; checked against this
+//                                      runtime's device map if present
+// Without SYSTOLIC_FPGA_CONFIG it is the archived bitstream's
+// (artifacts/fpga/tile_pipelined/1x8x8-3x4x4): K_MAX_8X8 = K_MAX_4X4 = 16.
+typedef struct {
+    unsigned k_max_8x8;     /* device 0 */
+    unsigned k_max_4x4;     /* devices 1..3 */
+    unsigned slab_bytes;    /* one MEM_WRITE: max over geometries of
+                               ceil(K_MAX / 8) * 8 depths * 64 bytes */
+    char     source[512];   /* the file, or the built-in default */
+    char     error[512];    /* why the configuration is invalid, or "" */
+} fpga_runtime_config_t;
+
+// 0, or -16 with out->error saying why (every invocation then fails with
+// -16 before anything is sent).
+int fpga_runtime_get_config(fpga_runtime_config_t *out);
 
 // Close the DPTI session the scheduled entry point opened on first use.
 void fpga_runtime_close(void);

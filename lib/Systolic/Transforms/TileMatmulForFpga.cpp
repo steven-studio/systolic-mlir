@@ -14,6 +14,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringSet.h"
 
 #include <algorithm>
 #include <limits>
@@ -41,38 +42,64 @@ namespace {
 // FPGA backend。
 //
 // 一个 matmul_tile 就是该 device 的一次 invocation,所以这里检查的是
-// 这次 invocation 放不放得进那颗硬体:
+// 这次 invocation 放不放得进那颗硬体。三个 K 是不同的东西:
+//
+//   IR-declared k_max     systolic.device 的 k_max 属性;binary-search
+//                         pass 依它折 K
+//   physical K_MAX        载入的 bitstream 里那颗加速器的 operand buffer
+//                         深度:8x8 是 K_MAX_8X8、三颗 4x4 是 K_MAX_4X4
+//                         (pass option phys-k-max-8x8 / phys-k-max-4x4,
+//                         来自 bitstream 的 fpga_config.txt)
+//   invocation k          这个 matmul_tile 的 k
 //
 //   m <= rows, n <= cols    边界 tile 可以比阵列小;runtime 补零到阵列
 //                           的实体几何,只写回有效的 m x n
-//   1 <= k <= k_max         operand buffer 的容量;更深的 reduction 应该
-//                           已经被 binary-search pass 依 k_max 折开
-//   k <= 16                 bitstream 一次 invocation 的 slab 深度(K_MAX),
-//                           不论 IR 宣告的 k_max 是多少
+//   k_max == physical K_MAX 宣告的容量必须等于硬体的容量。宣告得比硬体
+//                           深,折出来的 invocation 硬体放不下;宣告得比
+//                           硬体浅,IR 描述的就不是载入的那颗 bitstream。
+//                           两者都报错,不默默接受
+//   1 <= k <= k_max         更深的 reduction 应该已经被 binary-search pass
+//                           依 k_max 折开
 //
 // Runtime 的语意是 C_out = C_in + A x B(linalg.matmul / matmul_tile 的
 // 语意):一次 invocation 的乘积由 FPGA 算,runtime 把它加回 C 所在的
 // buffer,所以依 c_in 串起来的 K invocation 会正确累加。
 // -----------------------------------------------------------------------
 
-// The arrays of the 1x8x8 + 3x4x4 bitstream (tag
-// tile-pipelined-1x8x8-3x4x4-20261009): systolic_dma_top's device table,
-// and K_MAX = 16 from dma_top_build.tcl -- the reduction depth one
-// invocation's operand slab holds, whatever k_max the IR declares. The
-// compiler-visible systolic.device symbol is mapped one-to-one onto the
-// RTL's physical instance.
+// The arrays of the 1x8x8 + 3x4x4 bitstream: systolic_dma_top's device
+// table. The compiler-visible systolic.device symbol is mapped one-to-one
+// onto the RTL's physical instance. Their reduction capacity is not here:
+// it is a synthesis parameter of the bitstream (K_MAX_8X8 for the 8x8,
+// K_MAX_4X4 for every 4x4), given to the pass as options.
 struct PhysicalDevice {
   StringLiteral symbol;
   int64_t id;
   int64_t rows, cols;
-  int64_t kDepth;
 };
 
 static constexpr PhysicalDevice kBitstreamDevices[] = {
-    {"acc_8x8_0", 0, 8, 8, 16},
-    {"acc_4x4_0", 1, 4, 4, 16},
-    {"acc_4x4_1", 2, 4, 4, 16},
-    {"acc_4x4_2", 3, 4, 4, 16},
+    {"acc_8x8_0", 0, 8, 8},
+    {"acc_4x4_0", 1, 4, 4},
+    {"acc_4x4_1", 2, 4, 4},
+    {"acc_4x4_2", 3, 4, 4},
+};
+
+// The deepest K_MAX the DMA protocol can move: one invocation's operand slab
+// is ceil(K_MAX / 8) windows of 32 beats, and the read descriptor counts
+// beats in 16 bits (BEAT_W = 16), so ceil(K_MAX / 8) * 32 <= 65535. The same
+// bound as the RTL's elaboration check and the runtime's FPGA_K_MAX_LIMIT.
+static constexpr int64_t kProtocolKMaxLimit = 16376;
+
+// K_MAX_8X8 / K_MAX_4X4 of the loaded bitstream. The defaults are the
+// archived bitstream's (artifacts/fpga/tile_pipelined/1x8x8-3x4x4, K = 16
+// for both geometries).
+struct PhysicalKMax {
+  int64_t kMax8x8 = 16;
+  int64_t kMax4x4 = 16;
+
+  int64_t of(const PhysicalDevice &dev) const {
+    return dev.rows == 8 ? kMax8x8 : kMax4x4;
+  }
 };
 
 // The most elements the m x k, k x n and m x n tiles of one invocation can
@@ -81,16 +108,15 @@ struct TileCapacity {
   int64_t a = 0, b = 0, c = 0;
 };
 
-static constexpr TileCapacity maxTileElements() {
+static TileCapacity maxTileElements(const PhysicalKMax &phys) {
   TileCapacity cap;
   for (const PhysicalDevice &dev : kBitstreamDevices) {
-    cap.a = std::max(cap.a, dev.rows * dev.kDepth);
-    cap.b = std::max(cap.b, dev.kDepth * dev.cols);
+    cap.a = std::max(cap.a, dev.rows * phys.of(dev));
+    cap.b = std::max(cap.b, phys.of(dev) * dev.cols);
     cap.c = std::max(cap.c, dev.rows * dev.cols);
   }
   return cap;
 }
-static constexpr TileCapacity kMaxTile = maxTileElements();
 
 static const PhysicalDevice *lookupPhysicalDevice(StringRef name,
                                                   int64_t rows,
@@ -119,6 +145,51 @@ static Value memrefToLLVMPtr(OpBuilder &builder, Location loc,
   return LLVM::IntToPtrOp::create(builder, loc, ptrTy, idxAsI64);
 }
 
+// k_max is what the IR declares; K_MAX is what the loaded bitstream has.
+// Deeper than the hardware, the fold leaves invocations the hardware cannot
+// hold; shallower, the IR describes another bitstream. Either way the
+// mismatch is reported, never accepted.
+static InFlightDiagnostic emitKMaxMismatch(Operation *at, DeviceOp device,
+                                          int64_t kMax, int64_t physKMax) {
+  const int64_t rows = device.getRows();
+  const int64_t cols = device.getCols();
+  return at->emitError("systolic.device @")
+         << device.getSymName() << " declares k_max = " << kMax
+         << ", but the " << rows << "x" << cols
+         << " accelerators of the loaded bitstream hold K_MAX = " << physKMax
+         << " reduction steps per invocation (phys-k-max-" << rows << "x"
+         << cols << "); declare k_max = " << physKMax
+         << " on the device, or pass phys-k-max-" << rows << "x" << cols
+         << "=" << kMax << " if the bitstream was built with that K_MAX";
+}
+
+static InFlightDiagnostic emitMissingKMax(Operation *at, DeviceOp device) {
+  return at->emitError("FPGA lowering needs the operand-buffer capacity of "
+                       "@")
+         << device.getSymName() << "; declare k_max on the systolic.device";
+}
+
+// A device of the bitstream that no tile runs on still took part in the
+// decomposition -- --systolic-binary-search-tile-matmul costed it with its
+// declared k_max -- so its declaration must describe the loaded bitstream
+// too. (Devices that do run tiles are checked, per invocation, by
+// checkInvocation.) A device that is none of the bitstream's arrays and runs
+// nothing is left alone, as before.
+static LogicalResult checkUnusedDevice(DeviceOp device,
+                                       const PhysicalKMax &physK) {
+  const PhysicalDevice *phys = lookupPhysicalDevice(
+      device.getSymName(), device.getRows(), device.getCols());
+  if (!phys)
+    return success();
+  IntegerAttr kMaxAttr = device.getKMaxAttr();
+  if (!kMaxAttr)
+    return emitMissingKMax(device, device);
+  if (kMaxAttr.getInt() != physK.of(*phys))
+    return emitKMaxMismatch(device, device, kMaxAttr.getInt(),
+                            physK.of(*phys));
+  return success();
+}
+
 /// Everything the runtime call needs, checked before anything is rewritten.
 struct FpgaInvocation {
   int64_t m, n, k;
@@ -128,7 +199,8 @@ struct FpgaInvocation {
 };
 
 static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
-                                                 ModuleOp module) {
+                                                 ModuleOp module,
+                                                 const PhysicalKMax &physK) {
   FlatSymbolRefAttr deviceRef = op.getDeviceAttr();
   if (!deviceRef)
     return op.emitError("FPGA lowering requires an assigned accelerator "
@@ -179,27 +251,19 @@ static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
 
   IntegerAttr kMaxAttr = device.getKMaxAttr();
   if (!kMaxAttr)
-    return op.emitError("FPGA lowering needs the operand-buffer capacity of "
-                        "@")
-           << device.getSymName() << "; declare k_max on the systolic.device";
+    return emitMissingKMax(op, device);
 
   const int64_t kMax = kMaxAttr.getInt();
+  const int64_t physKMax = physK.of(*phys);
+  if (kMax != physKMax)
+    return emitKMaxMismatch(op, device, kMax, physKMax);
+
   if (inv.k < 1 || inv.k > kMax)
     return op.emitError("tile reduction depth k = ")
            << inv.k << " exceeds k_max = " << kMax << " of @"
            << device.getSymName()
            << "; fold K before lowering (--systolic-binary-search-tile-matmul "
               "folds by the device's k_max)";
-
-  // k_max is what the IR declares; the slab depth is what the bitstream
-  // has. A fleet declaring more than the hardware holds would fold K too
-  // coarsely and every such invocation would fail in the runtime.
-  if (inv.k > phys->kDepth)
-    return op.emitError("tile reduction depth k = ")
-           << inv.k << " exceeds the " << phys->kDepth
-           << " reduction steps one invocation of @" << device.getSymName()
-           << " holds in the bitstream; declare k_max <= " << phys->kDepth
-           << " on the systolic.device";
 
   inv.aTy = dyn_cast<RankedTensorType>(op.getA().getType());
   inv.bTy = dyn_cast<RankedTensorType>(op.getB().getType());
@@ -391,8 +455,8 @@ static SmallVector<bool> findInterleavedBlocks(ArrayRef<OutputBlock> blocks,
 class RuntimeCallLowering {
 public:
   RuntimeCallLowering(IRRewriter &rewriter, LLVM::LLVMFuncOp runtimeFn,
-                      ArrayRef<MatmulTileOp> tiles)
-      : rewriter(rewriter), runtimeFn(runtimeFn) {
+                      ArrayRef<MatmulTileOp> tiles, TileCapacity maxTile)
+      : rewriter(rewriter), runtimeFn(runtimeFn), maxTile(maxTile) {
     // A function argument that is only ever sliced into A and B tiles is
     // read through one buffer for the whole function: every one of those
     // slices is staged from it, and nothing writes it. (One to_buffer per
@@ -493,9 +557,9 @@ private:
             rewriter, fn.getLoc(),
             MemRefType::get({elements}, rewriter.getF32Type()));
       };
-      scratch.a = stackBuffer(kMaxTile.a);
-      scratch.b = stackBuffer(kMaxTile.b);
-      scratch.c = stackBuffer(kMaxTile.c);
+      scratch.a = stackBuffer(maxTile.a);
+      scratch.b = stackBuffer(maxTile.b);
+      scratch.c = stackBuffer(maxTile.c);
     }
     return scratch;
   }
@@ -563,6 +627,9 @@ private:
 
   IRRewriter &rewriter;
   LLVM::LLVMFuncOp runtimeFn;
+  // Scratch tile sizes: the largest tiles any accelerator of the bitstream
+  // takes, from its physical K_MAX.
+  TileCapacity maxTile;
   DenseMap<Operation *, Scratch> scratchOf;
   SmallVector<tensor::ExtractSliceOp> stagedSlices;
   llvm::DenseSet<Value> sharedSources;
@@ -574,6 +641,32 @@ struct LowerSystolicMatmulTileToFpgaPass
                          OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
       LowerSystolicMatmulTileToFpgaPass)
+
+  LowerSystolicMatmulTileToFpgaPass() = default;
+  LowerSystolicMatmulTileToFpgaPass(
+      const LowerSystolicMatmulTileToFpgaPass &other)
+      : PassWrapper(other) {
+    copyOptionValuesFrom(&other);
+  }
+  LowerSystolicMatmulTileToFpgaPass(int64_t kMax8x8, int64_t kMax4x4) {
+    physKMax8x8 = kMax8x8;
+    physKMax4x4 = kMax4x4;
+  }
+
+  // The loaded bitstream's reduction capacity per geometry: the synthesis
+  // parameters K_MAX_8X8 and K_MAX_4X4 (dma_top_build.tcl / cosim build.sh;
+  // both are recorded in that build's fpga_config.txt). Independent of each
+  // other, any positive integer.
+  Option<int64_t> physKMax8x8{
+      *this, "phys-k-max-8x8",
+      llvm::cl::desc("K_MAX_8X8 of the loaded bitstream: reduction steps "
+                     "one invocation of the 8x8 accelerator holds"),
+      llvm::cl::init(16)};
+  Option<int64_t> physKMax4x4{
+      *this, "phys-k-max-4x4",
+      llvm::cl::desc("K_MAX_4X4 of the loaded bitstream: reduction steps "
+                     "one invocation of each 4x4 accelerator holds"),
+      llvm::cl::init(16)};
 
   StringRef getArgument() const final {
     return "lower-systolic-matmul-tile-to-fpga";
@@ -592,6 +685,22 @@ struct LowerSystolicMatmulTileToFpgaPass
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
+    PhysicalKMax physK;
+    physK.kMax8x8 = physKMax8x8;
+    physK.kMax4x4 = physKMax4x4;
+    if (physK.kMax8x8 < 1 || physK.kMax4x4 < 1 ||
+        physK.kMax8x8 > kProtocolKMaxLimit ||
+        physK.kMax4x4 > kProtocolKMaxLimit) {
+      module.emitError("phys-k-max-8x8 and phys-k-max-4x4 must be integers in "
+                       "1..")
+          << kProtocolKMaxLimit
+          << " (the DMA descriptor counts an operand slab's beats in 16 "
+             "bits), got "
+          << physK.kMax8x8 << " and " << physK.kMax4x4;
+      signalPassFailure();
+      return;
+    }
+
     SmallVector<MatmulTileOp> tiles;
     module.walk([&](MatmulTileOp op) { tiles.push_back(op); });
 
@@ -599,14 +708,22 @@ struct LowerSystolicMatmulTileToFpgaPass
     // completely or left untouched with one diagnostic per offending tile.
     SmallVector<FpgaInvocation> invocations;
     bool failedAny = false;
+    llvm::StringSet<> usedDevices;
     for (MatmulTileOp op : tiles) {
-      FailureOr<FpgaInvocation> inv = checkInvocation(op, module);
+      if (FlatSymbolRefAttr ref = op.getDeviceAttr())
+        usedDevices.insert(ref.getRootReference().getValue());
+      FailureOr<FpgaInvocation> inv = checkInvocation(op, module, physK);
       if (failed(inv)) {
         failedAny = true;
         continue;
       }
       invocations.push_back(*inv);
     }
+    module.walk([&](DeviceOp device) {
+      if (!usedDevices.contains(device.getSymName()) &&
+          failed(checkUnusedDevice(device, physK)))
+        failedAny = true;
+    });
     if (failedAny) {
       signalPassFailure();
       return;
@@ -664,7 +781,8 @@ struct LowerSystolicMatmulTileToFpgaPass
     }
 
     IRRewriter rewriter(module.getContext());
-    RuntimeCallLowering lowering(rewriter, runtimeFn, tiles);
+    RuntimeCallLowering lowering(rewriter, runtimeFn, tiles,
+                                 maxTileElements(physK));
 
     for (const OutputBlock &block : blocks)
       lowering.lowerOutputBlock(block, tiles, invocations);
@@ -688,6 +806,13 @@ struct LowerSystolicMatmulTileToFpgaPass
 
 std::unique_ptr<Pass> mlir::systolic::createTileMatmulForFpgaPass() {
   return std::make_unique<LowerSystolicMatmulTileToFpgaPass>();
+}
+
+std::unique_ptr<Pass>
+mlir::systolic::createTileMatmulForFpgaPass(int64_t physKMax8x8,
+                                            int64_t physKMax4x4) {
+  return std::make_unique<LowerSystolicMatmulTileToFpgaPass>(physKMax8x8,
+                                                             physKMax4x4);
 }
 
 void mlir::systolic::registerTileMatmulForFpgaPass() {

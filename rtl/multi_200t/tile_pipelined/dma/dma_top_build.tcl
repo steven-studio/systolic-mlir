@@ -14,8 +14,15 @@
 #   paper's.  Each (variant, K8, K4, fleet) tuple gets its own project
 #   directory, so bitstreams of different geometries coexist and 'read' opens
 #   the one you name.  The golden constants are tabulated below per K8 (the
-#   payload depth the 8x8 context runs); add a row from seed_ref.py before
-#   building a new K8.
+#   payload depth the 8x8 context runs); a K8 without a row still builds (see
+#   GOLDEN below) -- the row only feeds the bring-up 'read' self-check.
+#
+#   Every successful build writes fpga_config.txt next to its .bit: the exact
+#   K_MAX_8X8 / K_MAX_4X4 / fleet / variant it was built with, the bitstream's
+#   sha256 and the git revision.  The host side reads that file:
+#     SYSTOLIC_FPGA_CONFIG=<impl dir>/fpga_config.txt build/bin/systolic-matmul
+#   so the compiler's k_max, the FPGA lowering's physical K_MAX and the
+#   runtime's slab all come from the bitstream that is on the board.
 #
 # This is bringup_build.tcl (3a) with the array added: the MIG and the DMA read
 # path from that script, plus the floating-point IP and the thirteen RTL files
@@ -100,17 +107,30 @@ set USE_V2 [expr {$VARIANT eq "v2" ? 1 : 0}]
 # legacy run and every counter 'read' reports belong to context 0, the 8x8;
 # systolic_dma_top clamps K_DIM to K4 for the 4x4 contexts itself).
 #
-# The RTL's own limits on either value -- a power of two, at least 16 -- are
-# checked by the simulation benches, not here; this script passes the numbers
-# through unchanged.
+# Either value is any positive integer up to K_MAX_LIMIT; neither has to be a
+# power of two, and they need not be equal.  The limit is the protocol's: a
+# slab is ceil(K / 8) windows of 32 beats and the DMA descriptor counts beats
+# in 16 bits, so ceil(K / 8) * 32 <= 65535.  The RTL refuses the same values
+# at elaboration (systolic_accel_context), so this check only fails earlier.
+# The practical bound is lower and is Vivado's to report: each context holds
+# 4 * N_ARRAY * K_MAX operand words in BRAM.  v2's beat-wide operand path
+# additionally needs K a multiple of 8 and at least 16 (its writer decodes the
+# window index from $clog2(K) - 3 bits); the v1 path takes any K.  Values are
+# plain decimal: Tcl's expr would read a leading 0 as octal.
 set NARR   8
-set K8     [expr {$K8ARG eq "" ? 16 : $K8ARG}]
-set K4     [expr {$K4ARG eq "" ? 16 : $K4ARG}]
-if {![string is integer -strict $K8] || $K8 < 1} {
-    error "K8 (K_MAX_8X8) must be a positive integer, got '$K8'"
+set K_MAX_LIMIT 16376
+# Taken as written and validated before any expr sees them: expr would turn
+# 016 into 14 without a word.
+if {$K8ARG eq ""} { set K8 16 } else { set K8 $K8ARG }
+if {$K4ARG eq ""} { set K4 16 } else { set K4 $K4ARG }
+if {![regexp {^[1-9][0-9]*$} $K8] || $K8 > $K_MAX_LIMIT} {
+    error "K8 (K_MAX_8X8) must be a decimal integer in 1..$K_MAX_LIMIT without leading zeros, got '$K8'"
 }
-if {![string is integer -strict $K4] || $K4 < 1} {
-    error "K4 (K_MAX_4X4) must be a positive integer, got '$K4'"
+if {![regexp {^[1-9][0-9]*$} $K4] || $K4 > $K_MAX_LIMIT} {
+    error "K4 (K_MAX_4X4) must be a decimal integer in 1..$K_MAX_LIMIT without leading zeros, got '$K4'"
+}
+if {$USE_V2 && (($K8 % 8) != 0 || ($K4 % 8) != 0 || $K8 < 16 || $K4 < 16)} {
+    error "v2 needs K_MAX_8X8 and K_MAX_4X4 to be multiples of 8, at least 16 (got $K8, $K4); build v1 for any other K"
 }
 set KDIM   $K8
 
@@ -153,10 +173,23 @@ array set GOLDEN {
 # invocations, mod 2^32.  seed_ref.py's own mode-0 self-check only reproduces
 # the board's 0x387fdc00 at --kmax 16, where that constant was measured; a
 # "self-check FAILED" line from any other geometry says nothing about this row.
-if {![info exists GOLDEN($K8)]} {
-    error "no golden constants tabulated for K8 = K_MAX_8X8 = $K8 -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $K8\nand add a GOLDEN row"
+#
+# A K8 without a row is NOT refused: the row is the bring-up 'read' self-check
+# of context 0 on the seed pattern, nothing in the datapath.  Such a build gets
+# EXPECT_CYC from the calibrated model (K8 + 2(N-1) + 95) and zero checksum
+# constants, so led[4] / led[5] stay dark and 'read' says there is no golden
+# for this K8 -- the external-scheduler path the host uses is unaffected.
+set HAVE_GOLDEN [info exists GOLDEN($K8)]
+if {$HAVE_GOLDEN} {
+    lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+} else {
+    set EXPECT_WR_CHK 00000000
+    set EXPECT_C_CHK  00000000
+    set EXPECT_CYC    [expr {$K8 + 2 * ($NARR - 1) + 95}]
+    puts "NOTE: no golden row for K8 = K_MAX_8X8 = $K8: the bring-up 'read' self-check"
+    puts "      (led\[4\], led\[5\]) has no checksum constants for this build; add one with"
+    puts "      python3 tools/seed_ref.py --mode 1 --kmax $K8   (K8 a multiple of 8)"
 }
-lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
 
 # One project per (variant, K8, K4, NUM_8X8, NUM_4X4) so bitstreams of
 # different geometries coexist and 'read' cannot open the wrong one; K8 and K4
@@ -284,7 +317,7 @@ proc build_body {} {
     global FP_DIR FP_IPS HOLD_TCL NARR K8 K4 KDIM EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
     global WB_BASE USE_V2 VARIANT
     global NUM_8X8 NUM_4X4
-    global SCRIPT_DIR
+    global SCRIPT_DIR HAVE_GOLDEN
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -376,7 +409,7 @@ proc build_body {} {
     puts "K_MAX_8X8=$K8"
     puts "K_MAX_4X4=$K4"
     puts "K_DIM=$KDIM  (= K8: one fold of the 8x8's full depth; the top clamps it to K4 for the 4x4s)"
-    puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC"
+    puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC[expr {$HAVE_GOLDEN ? {} : {  (none tabulated)}}]"
 
     generate_target all [get_ips]
     update_compile_order -fileset sources_1
@@ -437,7 +470,60 @@ proc build_body {} {
         puts "  number happened to be right, which is not the same as being"
         puts "  trustworthy.  Rebuild before reading."
     }
+    foreach b [glob -nocomplain $dir/*.bit] {
+        set cfg [write_fpga_config $dir/fpga_config.txt $b $wns $whs]
+        puts "  parameters recorded in $cfg"
+        puts "  host side:  export SYSTOLIC_FPGA_CONFIG=$cfg"
+    }
     close_project
+}
+
+# -----------------------------------------------------------------------------
+# fpga_config.txt: the record of what this bitstream was built with, in the
+# KEY=VALUE form the runtime reads (runtime/fpga_matmul_tiled.h,
+# fpga_runtime_get_config).  The runtime reads K_MAX_8X8, K_MAX_4X4, N,
+# NUM_8X8 and NUM_4X4; every other line is for people.
+proc write_fpga_config {path bit wns whs} {
+    global K8 K4 KDIM NARR NUM_8X8 NUM_4X4 VARIANT USE_V2 SCRIPT_DIR
+    set slab8 [expr {($K8 + 7) / 8 * 8}]
+    set slab4 [expr {($K4 + 7) / 8 * 8}]
+    if {$NUM_8X8 == 0} {
+        set slab $slab4
+    } elseif {$NUM_4X4 == 0 || $slab8 >= $slab4} {
+        set slab $slab8
+    } else {
+        set slab $slab4
+    }
+    set sha unknown
+    catch { set sha [lindex [exec sha256sum $bit] 0] }
+    set rev unknown
+    set dirty unknown
+    catch { set rev [exec git -C $SCRIPT_DIR rev-parse HEAD] }
+    catch {
+        set st [exec git -C $SCRIPT_DIR status --porcelain --untracked-files=no -- $SCRIPT_DIR/..]
+        set dirty [expr {$st eq "" ? 0 : 1}]
+    }
+    set f [open $path w]
+    puts $f "# fpga_config.txt -- written by dma_top_build.tcl with this bitstream"
+    puts $f "K_MAX_8X8=$K8"
+    puts $f "K_MAX_4X4=$K4"
+    puts $f "N=$NARR"
+    puts $f "NUM_8X8=$NUM_8X8"
+    puts $f "NUM_4X4=$NUM_4X4"
+    puts $f "K_DIM=$KDIM"
+    puts $f "VARIANT=$VARIANT"
+    puts $f "USE_V2=$USE_V2"
+    puts $f "HOST_SLAB_BYTES=[expr {$slab * 8 * $NARR}]"
+    puts $f "BITSTREAM=$bit"
+    puts $f "BITSTREAM_SHA256=$sha"
+    puts $f "RTL_GIT_REV=$rev"
+    puts $f "RTL_TREE_DIRTY=$dirty"
+    puts $f "WNS_NS=$wns"
+    puts $f "WHS_NS=$whs"
+    puts $f "TIMING_MET=[expr {($wns ne {} && $whs ne {} && $wns >= 0 && $whs >= 0) ? 1 : 0}]"
+    puts $f "BUILT=[clock format [clock seconds] -format {%Y-%m-%dT%H:%M:%S%z}]"
+    close $f
+    return $path
 }
 
 # -----------------------------------------------------------------------------
@@ -482,6 +568,9 @@ proc program {} {
     puts "  renumbering them would invalidate every photograph of a previous"
     puts "  run.  It is in the JTAG flag word; a write-back fault raises"
     puts "  led\[6\] like any other fault."
+    puts ""
+    puts "  Host side (compiler, runtime): this bitstream's parameters --"
+    puts "    export SYSTOLIC_FPGA_CONFIG=$dir/fpga_config.txt"
     puts ""
     puts "  Then:"
     puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $K8 $K4 $NARG $NUM_8X8 $NUM_4X4"
@@ -621,7 +710,7 @@ proc arm_run {v n} {
 }
 
 proc read_vio {} {
-    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC K8 K4 NARR KDIM
+    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC K8 K4 NARR KDIM HAVE_GOLDEN
     global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
@@ -722,8 +811,9 @@ proc read_vio {} {
 
     # Every expectation below is a RUN total: $nrun invocations, each seeding
     # and reading the same slab pattern into the same buffers.  The probes are
-    # context 0's -- the 8x8 -- so the payload depth is K8 (= K_DIM).
-    set want_words [expr {$nrun * $K8 * 2 * $NARR}]
+    # context 0's -- the 8x8 -- so the payload depth is K8 (= K_DIM), moved as
+    # whole 8-step windows: ceil(K8 / 8) * 8 steps of payload per invocation.
+    set want_words [expr {$nrun * (($K8 + 7) / 8 * 8) * 2 * $NARR}]
     # 0x$VAR does not substitute inside a braced expr -- Tcl parses the
     # expression before the variable is there.  Make the string first.
     set wr_hex 0x$EXPECT_WR_CHK
@@ -744,13 +834,17 @@ proc read_vio {} {
     puts "     tb/run_top_sim.sh; reading the image back on the board is the"
     puts "     next step and is not in this bitstream.)"
     puts "  invocations         = $nrun     (folds_done $fdone)"
-    puts "  words written       = $wrds     (expect $want_words = n_inv*K_MAX_8X8*2*N)"
+    puts "  words written       = $wrds     (expect $want_words = n_inv*ceil(K_MAX_8X8/8)*8*2*N)"
     puts ""
     set cyc_ok [expr {$cyc ne "" && $cyc == $EXPECT_CYC}]
 
     puts "  chk_wr  0x$wchk     expected 0x$want_wchk    operands ($nrun x 0x$EXPECT_WR_CHK)"
     puts "  chk_c   0x$cchk     expected 0x$want_cchk    result   ($nrun x 0x$EXPECT_C_CHK)"
     puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
+    if {!$HAVE_GOLDEN} {
+        puts "  (no golden row for K8 = $K8: the two checksum expectations above are"
+        puts "   placeholders, so their MATCH lines below say nothing about this build)"
+    }
     puts "  external debug     = 0x$extdbg"
     puts "  DPTI physical debug = 0x$phydbg"
     puts "  DPTI clock activity = 0x$clkact"

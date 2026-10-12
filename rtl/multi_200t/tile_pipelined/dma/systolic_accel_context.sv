@@ -35,6 +35,14 @@
 // than the wire simply does not store the lanes its array does not have.
 // words_written and chk_wr still count every word of the payload, so the
 // tabulated checksums are unchanged.
+//
+// K_MAX is any positive integer.  The wire carries the reduction in windows
+// of 8 steps, so this context's slab is SLAB_K = ceil(K_MAX / 8) * 8 steps and
+// a job of depth k moves ceil(k / 8) whole windows; slab steps >= K_MAX are
+// padding and are dropped at the buffer, exactly as lanes >= N_ARRAY are.
+// Slab strides are multiplications by the slab size, not shifts, so nothing
+// requires a power of two.  (USE_V2's beat-wide path keeps its own contract,
+// K_MAX a multiple of 8 -- see the generate below.)
 // -----------------------------------------------------------------------------
 
 `default_nettype none
@@ -160,15 +168,20 @@ module systolic_accel_context #(
 );
 
   // ---- geometry -------------------------------------------------------------
-  localparam integer RX_BYTES   = K_MAX * 8 * N_WIRE;    // one physical slab
+  localparam integer WIN_K      = 8;                     // steps per wire window
+  localparam integer SLAB_K     = ((K_MAX + WIN_K - 1) / WIN_K) * WIN_K;
+  localparam integer RX_BYTES   = SLAB_K * 8 * N_WIRE;   // one physical slab
   localparam integer RX_WORDS   = RX_BYTES / 4;
-  localparam int     K_W        = $clog2(K_MAX);
+  // Buffer address: enough bits for 0..K_MAX-1, and at least one (K_MAX = 1).
+  localparam int     K_W        = (K_MAX > 1) ? $clog2(K_MAX) : 1;
+  // The writer's address: a step of the whole slab, 0..SLAB_K-1.
+  localparam int     SLAB_W     = $clog2(SLAB_K);
   localparam int     LANE_W     = $clog2(N_ARRAY);
   localparam int     LANE_W_W   = $clog2(N_WIRE);
   localparam int     FEED_LAST  = K_MAX + N_ARRAY - 2;
   localparam int     FEED_W     = $clog2(FEED_LAST + 1);
-  localparam int     RX_SHIFT   = $clog2(RX_BYTES);
-  localparam int     RXW_SHIFT  = $clog2(RX_WORDS);
+  // Legacy bring-up reads K_DIM steps: that many whole windows.
+  localparam integer K_DIM_SLAB = ((K_DIM + WIN_K - 1) / WIN_K) * WIN_K;
   localparam integer C_N        = N_ARRAY * N_ARRAY;
   localparam integer WB_TILE_BYTES = C_N * 4;
   localparam integer WB_BEATS   = C_N / (AXI_DATA_W / 32);
@@ -210,11 +223,16 @@ module systolic_accel_context #(
 
   // ---- transfer sizes --------------------------------------------------------
   // The payload is the first job_k depths of the K_MAX-capacity image, in the
-  // operand writer's N_WIRE-lane layout.  Legacy bring-up has no descriptor
-  // (job_k_reg stays 0; a zero-beat descriptor is ignored by dma_engine) and
-  // uses K_DIM.
+  // operand writer's N_WIRE-lane layout, moved as whole windows: ceil(k / 8)
+  // of them (job_k_slab_reg, rounded at acceptance).  For k a multiple of 8 --
+  // every k the archived bitstream ran -- that is exactly k * N_WIRE * 8 bytes;
+  // for any other k the last window's padding steps come along, because the
+  // window's B chunk follows its A chunk on the wire.  Legacy bring-up has no
+  // descriptor (job_k_reg stays 0; a zero-beat descriptor is ignored by
+  // dma_engine) and uses K_DIM.
+  logic [31:0] job_k_slab_reg;
   wire [31:0] job_rx_bytes =
-      USE_EXTERNAL_SCHEDULER ? (job_k_reg * N_WIRE * 8) : (K_DIM * N_WIRE * 8);
+      USE_EXTERNAL_SCHEDULER ? (job_k_slab_reg * N_WIRE * 8) : (K_DIM_SLAB * N_WIRE * 8);
   wire [31:0] job_n_beats  = job_rx_bytes / (AXI_DATA_W / 8);
   wire [31:0] job_rx_words = job_rx_bytes / 4;
 
@@ -260,6 +278,7 @@ module systolic_accel_context #(
       job_id_reg          <= 32'd0;
       job_device_id_reg   <= DEVICE_ID;
       job_k_reg           <= 32'd0;
+      job_k_slab_reg      <= 32'd0;
       job_start_cycle_reg <= 32'd0;
       job_est_cycles_reg  <= 32'd0;
       job_a_base_reg      <= 64'd0;
@@ -273,6 +292,7 @@ module systolic_accel_context #(
         job_id_reg          <= in_job_id;
         job_device_id_reg   <= in_device_id;
         job_k_reg           <= in_k;
+        job_k_slab_reg      <= (in_k + 32'(WIN_K - 1)) & ~32'(WIN_K - 1);
         job_start_cycle_reg <= in_start_cycle;
         job_est_cycles_reg  <= in_est_cycles;
         job_a_base_reg      <= in_a_base;
@@ -340,18 +360,21 @@ module systolic_accel_context #(
   // invocation re-reading the same payload and writing its own result tile.
   // Legacy bring-up seeds n_inv slabs and reads slab fi.
   // =========================================================================
+  // Slab i starts i * RX_BYTES on.  A multiplication by the constant slab size,
+  // not a shift: RX_BYTES is a power of two only when SLAB_K is (for those it
+  // synthesizes to the same wiring as the shift it replaces).
   assign seed_slab_addr =
-      AXI_ADDR_W'(BASE_ADDR) + (AXI_ADDR_W'(fi) << RX_SHIFT);
+      AXI_ADDR_W'(BASE_ADDR) + AXI_ADDR_W'(fi) * AXI_ADDR_W'(RX_BYTES);
 
   wire [AXI_ADDR_W-1:0] read_slab_addr =
       USE_EXTERNAL_SCHEDULER
           ? AXI_ADDR_W'(job_a_base_reg)
-          : AXI_ADDR_W'(BASE_ADDR) + (AXI_ADDR_W'(read_fi) << RX_SHIFT);
+          : AXI_ADDR_W'(BASE_ADDR) + AXI_ADDR_W'(read_fi) * AXI_ADDR_W'(RX_BYTES);
 
   assign wb_region_base =
       USE_EXTERNAL_SCHEDULER
           ? AXI_ADDR_W'(job_c_base_reg)
-          : AXI_ADDR_W'(BASE_ADDR) + (AXI_ADDR_W'(n_inv) << RX_SHIFT) +
+          : AXI_ADDR_W'(BASE_ADDR) + AXI_ADDR_W'(n_inv) * AXI_ADDR_W'(RX_BYTES) +
             AXI_ADDR_W'(WB_GAP_BYTES);
 
   // Result tile stride is this array's own tile size.
@@ -670,7 +693,7 @@ module systolic_accel_context #(
   if (!USE_V2) begin : OP_V1
     wire                a_wr, b_wr;
     wire [LANE_W_W-1:0] wsel;
-    wire [K_W-1:0]      waddr;
+    wire [SLAB_W-1:0]   waddr_slab;   // step within the slab, 0..SLAB_K-1
     wire [31:0]         wdata_buf;
 
     dma_operand_writer #(
@@ -679,14 +702,22 @@ module systolic_accel_context #(
       .clk (clk), .rst_n (ui_rst_n),
       .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
       .dst_full (dst_full), .dst_almost_full (dst_almost_full),
-      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
+      .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr_slab), .wdata (wdata_buf),
       .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
     );
 
     wire lane_in_array = (N_ARRAY >= N_WIRE) ? 1'b1 : (wsel < LANE_W_W'(N_ARRAY));
     wire [LANE_W-1:0] wsel_arr = wsel[LANE_W-1:0];
 
-    wire [15:0] k16   = 16'(waddr);
+    // Slab steps >= K_MAX are the last window's padding: dropped here, like
+    // the lanes this array does not have.  The compare is on the full slab
+    // step (truncating first could alias a padding step onto a real one), and
+    // it is constant-true whenever K_MAX is a multiple of 8.
+    wire depth_in_array = (int'(waddr_slab) < K_MAX);
+    wire [K_W-1:0] waddr = K_W'(waddr_slab);
+    wire buf_wr_ok = lane_in_array && depth_in_array;
+
+    wire [15:0] k16   = 16'(waddr_slab);
     wire [7:0]  bank8 = 8'(wsel);
     wire [31:0] wpos  = {8'd0, bank8, k16};
 
@@ -704,16 +735,16 @@ module systolic_accel_context #(
     wire [31:0] b_rdata_1 [0:N_ARRAY-1];
 
     systolic_operand_buffer #(.K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N_ARRAY)) u_a_buf_0 (
-      .clk (clk), .wr (a_wr && lane_in_array && !fill_bank),
+      .clk (clk), .wr (a_wr && buf_wr_ok && !fill_bank),
       .wsel (wsel_arr), .waddr (waddr), .wdata (wdata_buf), .raddr (a_raddr), .rdata (a_rdata_0));
     systolic_operand_buffer #(.K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N_ARRAY)) u_a_buf_1 (
-      .clk (clk), .wr (a_wr && lane_in_array &&  fill_bank),
+      .clk (clk), .wr (a_wr && buf_wr_ok &&  fill_bank),
       .wsel (wsel_arr), .waddr (waddr), .wdata (wdata_buf), .raddr (a_raddr), .rdata (a_rdata_1));
     systolic_operand_buffer #(.K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N_ARRAY)) u_b_buf_0 (
-      .clk (clk), .wr (b_wr && lane_in_array && !fill_bank),
+      .clk (clk), .wr (b_wr && buf_wr_ok && !fill_bank),
       .wsel (wsel_arr), .waddr (waddr), .wdata (wdata_buf), .raddr (b_raddr), .rdata (b_rdata_0));
     systolic_operand_buffer #(.K_MAX (K_MAX), .K_W (K_W), .N_BANKS (N_ARRAY)) u_b_buf_1 (
-      .clk (clk), .wr (b_wr && lane_in_array &&  fill_bank),
+      .clk (clk), .wr (b_wr && buf_wr_ok &&  fill_bank),
       .wsel (wsel_arr), .waddr (waddr), .wdata (wdata_buf), .raddr (b_raddr), .rdata (b_rdata_1));
 
     for (genvar pp = 0; pp < N_ARRAY; pp = pp + 1) begin : PP_READ_MUX
@@ -721,6 +752,15 @@ module systolic_accel_context #(
       assign b_rdata[pp] = compute_bank ? b_rdata_1[pp] : b_rdata_0[pp];
     end
   end else begin : OP_V2
+    // The beat-wide path writes A four steps per beat into a cyclic buffer of
+    // K_MAX / 4 rows and B one step per beat, with no padding-step drop: its
+    // contract is whole windows, K_MAX a multiple of 8 -- and at least two
+    // of them, because dma_operand_writer_v2 takes the window index from
+    // $clog2(K_MAX) - 3 address bits, which is none at K_MAX = 8.  It is not
+    // generalized here (the v1 path above takes any K_MAX); refuse anything
+    // else at elaboration rather than write past the buffers.
+    if ((K_MAX % WIN_K) != 0 || K_MAX < 2 * WIN_K)
+      $error("systolic_accel_context: USE_V2 requires K_MAX to be a multiple of 8 and at least 16 (use the v1 operand path for other K_MAX)");
     wire                  a_wr, b_wr;
     wire [LANE_W_W-1:0]   wsel;
     wire [K_W-1:0]        waddr;
@@ -973,21 +1013,32 @@ module systolic_accel_context #(
   assign wr_match = read_done_sticky && (want_wr != 32'd0) && (chk_wr == want_wr);
   assign c_match  = (phase == P_DONE) && (chk_c == want_c);
 
+  // ---- elaboration-time contract (simulation and synthesis alike) ------------
+  // K_MAX: any positive integer whose slab the descriptor's BEAT_W-bit beat
+  // count can name.  The array edges are powers of two -- the wire's lane
+  // fields are bit slices and the result tile stride is a shift -- which is a
+  // property of the geometry (8 and 4), not of K_MAX.
+  generate
+    if (K_MAX < 1)
+      $error("systolic_accel_context: K_MAX must be a positive integer");
+    if (K_DIM < 1 || K_DIM > K_MAX)
+      $error("systolic_accel_context: K_DIM must be in 1..K_MAX");
+    if (RX_BYTES / (AXI_DATA_W / 8) > (1 << BEAT_W) - 1)
+      $error("systolic_accel_context: the K_MAX slab has more beats than the BEAT_W-bit descriptor counts");
+    if ((1 << LANE_W) != N_ARRAY || (1 << LANE_W_W) != N_WIRE)
+      $error("systolic_accel_context: N_ARRAY and N_WIRE must be powers of two");
+    if (N_ARRAY > N_WIRE)
+      $error("systolic_accel_context: array wider than the operand wire format");
+  endgenerate
+
 `ifndef SYNTHESIS
   initial begin
-    if (K_DIM > K_MAX)
-      $fatal(1, "context %0d: K_DIM %0d exceeds K_MAX %0d", DEVICE_ID, K_DIM, K_MAX);
-    if ((1 << RX_SHIFT) != RX_BYTES)
-      $fatal(1, "context %0d: RX_BYTES %0d is not a power of two", DEVICE_ID, RX_BYTES);
-    if ((1 << RXW_SHIFT) != RX_WORDS)
-      $fatal(1, "context %0d: RX_WORDS %0d is not a power of two", DEVICE_ID, RX_WORDS);
     if ((1 << WBT_SHIFT) != WB_TILE_BYTES)
       $fatal(1, "context %0d: WB_TILE_BYTES is not a power of two", DEVICE_ID);
-    if (N_ARRAY > N_WIRE)
-      $fatal(1, "context %0d: array wider than the operand wire format", DEVICE_ID);
   end
 
-  // An accepted job must fit this accelerator's own K_MAX.
+  // An accepted job must fit this accelerator's own K_MAX.  systolic_dma_top
+  // refuses any other descriptor before it gets here; this checks that it did.
   always_ff @(posedge clk) begin
     if (ui_rst_n && job_fire && (in_k > K_MAX || in_k < 1))
       $fatal(1, "context %0d (device %0d): job %0d k=%0d is outside 1..%0d",

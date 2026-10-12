@@ -16,6 +16,19 @@
 // It must NOT include FRAME_START, the k_dim header or FRAME_END: those are UART
 // framing, and k_dim reaches the array through the control plane instead.
 //
+// ---- ANY K_MAX: THE SLAB IS WHOLE WINDOWS ------------------------------------
+//
+// The wire format moves the reduction in windows of 8 steps (A chunk, then B
+// chunk, 8*N words each), so a payload always holds whole windows: a buffer of
+// depth K_MAX is fed from a slab of SLAB_K = ceil(K_MAX / 8) * 8 steps.  For a
+// K_MAX that is a multiple of 8 the two are the same and nothing below differs
+// from the power-of-two-only version; for any other K_MAX (1, 7, 12, 17, ...)
+// the last window carries SLAB_K - K_MAX steps of padding.  waddr is therefore
+// the step within the SLAB, $clog2(SLAB_K) bits wide, and is not truncated to
+// the buffer's width here: the caller drops the words whose step is >= K_MAX at
+// the buffer (as it drops lanes its array does not have), so a padding word can
+// never alias a real one.  words_written and err_range count the slab.
+//
 // Given that, this module is provably the same decode.  systolic_uart_top writes
 // payload word w on the byte where rx_count = 4w+3, and every field it slices out
 // of rx_count lives at bit 2 or above:
@@ -84,7 +97,8 @@ module dma_operand_writer #(
   output logic                    a_wr,
   output logic                    b_wr,
   output logic [$clog2(N)-1:0]    wsel,
-  output logic [$clog2(K_MAX)-1:0] waddr,
+  // step within the slab, 0 .. SLAB_K-1 (see the header); >= K_MAX is padding
+  output logic [$clog2(((K_MAX + 7) / 8) * 8)-1:0] waddr,
   output logic [31:0]             wdata,
 
   // ---- observability -----------------------------------------------------
@@ -94,14 +108,25 @@ module dma_operand_writer #(
 );
 
   localparam integer LANE_W    = $clog2(N);
-  localparam integer K_W       = $clog2(K_MAX);
+  localparam integer SLAB_K    = ((K_MAX + 7) / 8) * 8;     // whole windows
+  localparam integer WADDR_W   = $clog2(SLAB_K);            // >= 3
   localparam integer CHUNK_W   = 5 + LANE_W;                // $clog2(32*N)
-  localparam integer RX_BYTES  = K_MAX * 8 * N;
-  localparam integer RX_WORDS  = RX_BYTES / 4;              // K_MAX*2*N
-  localparam integer WORD_W    = $clog2(RX_WORDS);          // K_W + 1 + LANE_W
-  localparam integer MAT_W     = WORD_W - (LANE_W + 3);     // K_W - 2
-  localparam integer WIN_W     = MAT_W - 1;                 // K_W - 3
+  localparam integer RX_BYTES  = SLAB_K * 8 * N;
+  localparam integer RX_WORDS  = RX_BYTES / 4;              // SLAB_K*2*N
+  localparam integer WORD_W    = $clog2(RX_WORDS);          // WADDR_W+1+LANE_W at a power of two
+  localparam integer MAT_W     = WORD_W - (LANE_W + 3);     // >= 1: chunk index bits
   localparam integer LAST_BEAT = RX_WORDS / 4 - 1;
+
+  // The decode below is bit slices of the word index, which needs N (lanes per
+  // chunk row) to be a power of two; and the beat index must fit BEAT_W.
+  generate
+    if (K_MAX < 1)
+      $error("dma_operand_writer: K_MAX must be >= 1");
+    if ((1 << LANE_W) != N)
+      $error("dma_operand_writer: N (wire lanes) must be a power of two");
+    if (LAST_BEAT > (1 << BEAT_W) - 1)
+      $error("dma_operand_writer: the K_MAX slab has more beats than BEAT_W bits count");
+  endgenerate
 
   // ---- beat register and the 4-word walk ---------------------------------
   logic                  busy;
@@ -153,7 +178,11 @@ module dma_operand_writer #(
 
   wire [MAT_W-1:0]  mat    = w[WORD_W-1 -: MAT_W];
   wire              is_b   = mat[0];
-  wire [WIN_W-1:0]  win    = mat[MAT_W-1:1];
+  // First step of the chunk's window: window index * 8.  Zero for a one-window
+  // slab (MAT_W = 1, no window bits) -- written as a widening cast and a shift
+  // rather than {win, koff} so that case needs no zero-width vector.  For
+  // SLAB_K a power of two this is exactly the old {win, koff} concatenation.
+  wire [WADDR_W-1:0] win_base = WADDR_W'(mat >> 1) << 3;
 
   wire [LANE_W-1:0] a_lane = w[LANE_W+2:3];
   wire [2:0]        a_koff = w[2:0];
@@ -169,7 +198,7 @@ module dma_operand_writer #(
     a_wr  = busy && in_range && !is_b;
     b_wr  = busy && in_range &&  is_b;
     wsel  = is_b ? b_lane : a_lane;
-    waddr = is_b ? {win, b_koff} : {win, a_koff};
+    waddr = win_base | WADDR_W'(is_b ? b_koff : a_koff);
     wdata = word_sel;
   end
 

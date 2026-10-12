@@ -32,11 +32,15 @@ struct ExactSystolicOptimizationResult {
 ///
 /// For geometry g:
 ///
-///   C(g) = 2g - 2 + H(g)
+///   C(g) = 2g - 2 + H(g)              one invocation
+///   cost(g) = I(g) * C(g)             one spatial tile
 ///
-/// and for m physical accelerators of that geometry:
+/// where I(g) is the resources' invocationsPerTile (ceil(K / k_max(g)) for
+/// the GEMM at hand), and for m physical accelerators of that geometry:
 ///
-///   capacity(T) = m * floor(T / C(g))
+///   capacity(T) = m * floor(T / cost(g))
+///
+/// A scheduled tile's [startCycle, endCycle) spans all I(g) invocations.
 ///
 /// The feasibility test constructs a spatial decomposition using
 /// the largest geometry whose spatial and deadline capacity are

@@ -93,6 +93,22 @@ LogicalResult StreamOp::verify() {
 #include "Systolic/SystolicOps.cpp.inc"
 
 //===----------------------------------------------------------------------===//
+// DeviceOp verifier
+//===----------------------------------------------------------------------===//
+
+// k_max is a reduction capacity: every consumer divides by it (the cost
+// model, the K-folding of the binary-search pass, the FPGA lowering). A
+// non-positive value used to be caught by some of them and silently costed
+// as zero cycles by others, so it is rejected once, here.
+::mlir::LogicalResult mlir::systolic::DeviceOp::verify() {
+  if (::mlir::IntegerAttr kMax = getKMaxAttr())
+    if (kMax.getInt() < 1)
+      return emitOpError("k_max must be a positive integer, got ")
+             << kMax.getInt();
+  return ::mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatmulTileOp verifier
 //===----------------------------------------------------------------------===//
 

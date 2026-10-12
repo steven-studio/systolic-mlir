@@ -299,10 +299,14 @@ extern "C" int dpti_ftdi_mem_write_session(
         return -2;
 
     /*
-     * The current RTL decoder deliberately accepts exactly one
-     * 1024-byte operand slab per MEM_WRITE command.
+     * The RTL decoder accepts exactly one operand slab per MEM_WRITE, of the
+     * length its build fixed (dpti_mem_write_decoder PAYLOAD_BYTES: the
+     * deepest geometry's slab, 1024 bytes at K_MAX_8X8 = K_MAX_4X4 = 16).
+     * Which length that is belongs to the caller, who knows the bitstream
+     * (fpga_runtime_config_t.slab_bytes); here the payload only has to be
+     * whole 16-byte beats, the decoder's unit.
      */
-    if (length != 1024)
+    if (length == 0 || length % 16 != 0)
         return -3;
 
     unsigned char header[9];

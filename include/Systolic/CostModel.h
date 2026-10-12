@@ -8,7 +8,11 @@ namespace systolic {
 struct ArrayConfig {
   int64_t rows = 0;
   int64_t cols = 0;
-  int64_t kMax = 1;               // reduction capacity per invocation
+  int64_t kMax = 0;               // reduction capacity per invocation;
+                                  // 0 = not declared = the whole reduction
+                                  // is one invocation (what
+                                  // --systolic-binary-search-tile-matmul
+                                  // does for such a device)
   int64_t l1Bytes = 0;            // local scratchpad capacity, bytes;
                                   // 0 = not declared = unconstrained
   // Calibration constant. It describes the datapath, not the array shape,

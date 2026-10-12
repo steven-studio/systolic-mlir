@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <string>
 
 using namespace mlir;
 using namespace mlir::systolic;
@@ -134,6 +135,34 @@ struct SystolicBinarySearchTileMatmulPass
       return;
     }
 
+    // k_max is per accelerator and the geometries are independent: the 8x8
+    // and the 4x4s of one fleet may declare different values, and none of
+    // them has to be a power of two. Within ONE geometry they must agree,
+    // for the same reason H must: the optimizer bills one cost per geometry
+    // (I(g) * C(g), I(g) = ceil(K / k_max(g))) and spreads a geometry's
+    // tiles round-robin over its accelerators.
+    for (size_t i = 0; i < fleet.size(); ++i) {
+      for (size_t j = 0; j < i; ++j) {
+        if (fleet[i].arraySize != fleet[j].arraySize ||
+            acceleratorKMax[i] == acceleratorKMax[j])
+          continue;
+        auto describe = [](int64_t kMax) {
+          return kMax > 0 ? std::to_string(kMax) : std::string("none");
+        };
+        module.emitError()
+            << "systolic.device " << acceleratorSymbols[i]
+            << " declares k_max = " << describe(acceleratorKMax[i])
+            << " but " << acceleratorSymbols[j] << " of the same "
+            << fleet[i].arraySize << "x" << fleet[i].arraySize
+            << " geometry declares k_max = " << describe(acceleratorKMax[j])
+            << "; the binary-search decomposition bills one cost per "
+               "geometry, so every accelerator of one geometry must declare "
+               "the same k_max";
+        signalPassFailure();
+        return;
+      }
+    }
+
     // ----------------------------------------------------------
     // Collect linalg.matmul first because the pass erases them.
     // ----------------------------------------------------------
@@ -242,13 +271,31 @@ struct SystolicBinarySearchTileMatmulPass
       // --------------------------------------------------------
       // Ask the already-tested binary-search optimizer for the
       // spatial decomposition.
+      //
+      // Every accelerator folds this GEMM's K by its own k_max,
+      // so one spatial tile costs it I(d) = ceil(K / k_max(d))
+      // invocations (1 without k_max). The optimizer bills a tile
+      // I(d) x C(g): an accelerator with a smaller k_max is
+      // proportionally slower per tile, and the decomposition
+      // balances the geometries accordingly.
       // --------------------------------------------------------
+
+      SmallVector<SystolicArrayResource> gemmFleet(fleet);
+      SmallVector<int64_t> acceleratorInvocations;
+
+      for (size_t i = 0; i < gemmFleet.size(); ++i) {
+        const int64_t kMax = acceleratorKMax[i];
+        const int64_t invocations =
+            kMax > 0 ? (K + kMax - 1) / kMax : 1;
+        gemmFleet[i].invocationsPerTile = invocations;
+        acceleratorInvocations.push_back(invocations);
+      }
 
       auto optimization =
           optimizeSystolicBinarySearch(
               M,
               N,
-              fleet);
+              gemmFleet);
 
       if (failed(optimization)) {
         matmul.emitError()
@@ -383,10 +430,6 @@ struct SystolicBinarySearchTileMatmulPass
           return;
         }
 
-        const int64_t estCycles =
-            scheduledTile->endCycle -
-            scheduledTile->startCycle;
-
         const int64_t startCycle =
             scheduledTile->startCycle;
 
@@ -394,23 +437,25 @@ struct SystolicBinarySearchTileMatmulPass
         // K-folding.
         //
         // One systolic.matmul_tile is one invocation of its device:
-        // the operand buffers hold at most k_max reduction steps, so
-        // a tile whose reduction is longer runs as
+        // the operand buffers of accelerator d hold at most
+        // k_max(d) reduction steps, so a tile whose reduction is
+        // longer runs as
         //
-        //   I = ceil(K / k_max)
+        //   I(d) = ceil(K / k_max(d))
         //
         // invocations, invocation j covering
-        // [j * k_max, min(K, (j + 1) * k_max)), chained through c_in
-        // -- the chaining --systolic-tile-matmul uses for its K tiles.
-        // A device without k_max keeps K whole (I = 1).
+        // [j * k_max(d), min(K, (j + 1) * k_max(d))), so every
+        // invocation has 1 <= k <= k_max(d), chained through c_in
+        // -- the chaining --systolic-tile-matmul uses for its K
+        // tiles. A device without k_max keeps K whole (I = 1).
+        // k_max(d) is the device's own: the 8x8 and the 4x4s fold
+        // the same K independently.
         //
-        // The optimizer bills one invocation of cost C(g) per spatial
-        // tile and starts it at round * C(g). Every invocation of a
-        // folded tile is billed the same C(g), so each device's
-        // timeline is stretched by I: invocation j of the tile the
-        // optimizer started at round * C(g) starts at
-        // (round * I + j) * C(g) = startCycle * I + j * C(g).
-        // Order and non-overlap on every device are preserved.
+        // The optimizer billed the tile I(d) * C(g) and scheduled
+        // it over [startCycle, endCycle) on its device; its I(d)
+        // invocations run back to back inside that interval,
+        // invocation j at startCycle + j * C(g). Order and
+        // non-overlap on every device are preserved.
         // ------------------------------------------------------
 
         const int64_t kMax =
@@ -419,18 +464,27 @@ struct SystolicBinarySearchTileMatmulPass
         const int64_t kStep = kMax > 0 ? kMax : K;
 
         const int64_t numInvocations =
-            (K + kStep - 1) / kStep;
+            acceleratorInvocations[task.acceleratorId];
 
-        if (startCycle >
-                (std::numeric_limits<int64_t>::max() -
-                 numInvocations * estCycles) /
-                    numInvocations) {
+        const int64_t tileCycles =
+            scheduledTile->endCycle -
+            scheduledTile->startCycle;
+
+        if (numInvocations < 1 ||
+            numInvocations != (K + kStep - 1) / kStep ||
+            tileCycles % numInvocations != 0) {
           matmul.emitError()
-              << "folded schedule overflows int64 for tile ("
-              << task.row << ", " << task.column << ")";
+              << "optimizer scheduled tile (" << task.row << ", "
+              << task.column << ") over " << tileCycles
+              << " cycles, which is not " << numInvocations
+              << " equal invocations";
           signalPassFailure();
           return;
         }
+
+        // C(g): the cost of one invocation.
+        const int64_t estCycles =
+            tileCycles / numInvocations;
 
         OpFoldResult offM =
             builder.getIndexAttr(task.row);
@@ -495,7 +549,7 @@ struct SystolicBinarySearchTileMatmulPass
                   strides);
 
           const int64_t invocationStart =
-              startCycle * numInvocations + j * estCycles;
+              startCycle + j * estCycles;
 
           cTile =
               builder.create<MatmulTileOp>(

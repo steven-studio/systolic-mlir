@@ -79,20 +79,27 @@ using namespace mlir;
 
 namespace {
 
-// The fleet of the bitstream on the board (tag
-// tile-pipelined-1x8x8-3x4x4-20261009). The symbols are the ones
+// The fleet of the bitstream on the board. The symbols are the ones
 // --lower-systolic-matmul-tile-to-fpga maps onto the RTL's device IDs 0..3;
-// k_max is its operand-buffer depth, tile_overhead the H measured on the
-// fold RTL (docs/PROVENANCE.md).
-constexpr const char *kFleet =
-    "  systolic.device @acc_8x8_0 rows = 8 cols = 8 dataflow = "
-    "output_stationary k_max = 16 tile_overhead = 95\n"
-    "  systolic.device @acc_4x4_0 rows = 4 cols = 4 dataflow = "
-    "output_stationary k_max = 16 tile_overhead = 95\n"
-    "  systolic.device @acc_4x4_1 rows = 4 cols = 4 dataflow = "
-    "output_stationary k_max = 16 tile_overhead = 95\n"
-    "  systolic.device @acc_4x4_2 rows = 4 cols = 4 dataflow = "
-    "output_stationary k_max = 16 tile_overhead = 95\n";
+// k_max is each accelerator's operand-buffer depth -- K_MAX_8X8 for the 8x8,
+// K_MAX_4X4 for every 4x4, from the bitstream's configuration (the runtime's
+// fpga_runtime_get_config) -- and tile_overhead the H measured on the fold
+// RTL (docs/PROVENANCE.md). The same two values go to the FPGA lowering as
+// the physical capacities, so the IR-declared k_max and the hardware's agree
+// by construction.
+std::string buildFleet(const fpga_runtime_config_t &hw) {
+  std::ostringstream os;
+  auto device = [&](const char *sym, int edge, unsigned kMax) {
+    os << "  systolic.device @" << sym << " rows = " << edge
+       << " cols = " << edge << " dataflow = output_stationary k_max = "
+       << kMax << " tile_overhead = 95\n";
+  };
+  device("acc_8x8_0", 8, hw.k_max_8x8);
+  device("acc_4x4_0", 4, hw.k_max_4x4);
+  device("acc_4x4_1", 4, hw.k_max_4x4);
+  device("acc_4x4_2", 4, hw.k_max_4x4);
+  return os.str();
+}
 
 // Limits that keep one run practical. The binary-search decomposition of a
 // 512 x 512 output takes about 20 s and grows steeply beyond it. Every FPGA
@@ -148,8 +155,10 @@ struct TileInfo {
                "                 30-llvm.mlir 40-llvm.ll\n"
                "  --quiet        print only the verification result\n"
                "\n"
-               "Environment (runtime): SYSTOLIC_RUNTIME_TRACE=1 one line per\n"
-               "FPGA invocation, SYSTOLIC_DPTI_TRACE=1 every DPTI packet,\n"
+               "Environment (runtime): SYSTOLIC_FPGA_CONFIG the bitstream's\n"
+               "fpga_config.txt (K_MAX_8X8, K_MAX_4X4; default 16 and 16),\n"
+               "SYSTOLIC_RUNTIME_TRACE=1 one line per FPGA invocation,\n"
+               "SYSTOLIC_DPTI_TRACE=1 every DPTI packet,\n"
                "SYSTOLIC_DPTI_TIMEOUT_MS result timeout (default 5000).\n"
                "Exit status: 0 PASS, 1 FAIL, 2 bad input, 3 compile error,\n"
                "4 FPGA/runtime error.\n");
@@ -231,7 +240,7 @@ private:
   std::istream &in_;
 };
 
-Problem readProblem() {
+Problem readProblem(const fpga_runtime_config_t &hw) {
   const bool tty = isatty(STDIN_FILENO);
   TokenReader rd(std::cin);
   Problem p;
@@ -253,9 +262,12 @@ Problem readProblem() {
     }
   }
 
-  // One invocation covers at most 8 x 8 outputs and 16 reduction steps.
+  // One invocation covers at most 8 x 8 outputs and as many reduction steps
+  // as the deepest accelerator holds (K_MAX_8X8 or K_MAX_4X4).
+  const int64_t deepest =
+      static_cast<int64_t>(std::max(hw.k_max_8x8, hw.k_max_4x4));
   const int64_t atLeast =
-      (p.M * p.N + 63) / 64 * ((p.K + 15) / 16);
+      (p.M * p.N + 63) / 64 * ((p.K + deepest - 1) / deepest);
   if (atLeast > kMaxInvocations) {
     std::fprintf(stderr,
                  "systolic-matmul: %" PRId64 "x%" PRId64 "x%" PRId64
@@ -348,7 +360,8 @@ bool sameValue(double fpga, int64_t ref) {
 
 // ------------------------------------------------------------- compiler
 
-std::string buildLinalgModule(const Problem &p) {
+std::string buildLinalgModule(const Problem &p,
+                              const fpga_runtime_config_t &hw) {
   const std::string a = std::to_string(p.M) + "x" + std::to_string(p.K);
   const std::string b = std::to_string(p.K) + "x" + std::to_string(p.N);
   const std::string c = std::to_string(p.M) + "x" + std::to_string(p.N);
@@ -356,7 +369,7 @@ std::string buildLinalgModule(const Problem &p) {
   os << "// systolic-matmul input: C[" << p.M << "][" << p.N << "] = A["
      << p.M << "][" << p.K << "] x B[" << p.K << "][" << p.N << "]\n"
      << "module {\n"
-     << kFleet
+     << buildFleet(hw)
      << "  func.func @systolic_matmul(%A: tensor<" << a << "xf32>, %B: tensor<"
      << b << "xf32>, %C: tensor<" << c << "xf32>) -> tensor<" << c
      << "xf32> attributes {llvm.emit_c_interface} {\n"
@@ -384,7 +397,7 @@ void dumpStage(const Options &opts, const char *file, Operation *op) {
 }
 
 LogicalResult runStage(ModuleOp module, const char *what,
-                       void (*build)(OpPassManager &)) {
+                       llvm::function_ref<void(OpPassManager &)> build) {
   PassManager pm(module.getContext());
   build(pm);
   if (failed(pm.run(module))) {
@@ -512,7 +525,17 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
   const Options opts = parseArgs(argc, argv);
-  const Problem prob = readProblem();
+
+  // The bitstream's reduction capacities: the fleet the compiler targets,
+  // the physical K_MAX the FPGA lowering checks it against, and what the
+  // runtime pads every invocation to -- one configuration for all three.
+  fpga_runtime_config_t hw{};
+  if (fpga_runtime_get_config(&hw) != 0) {
+    std::fprintf(stderr, "systolic-matmul: %s\n", hw.error);
+    return 4;
+  }
+
+  const Problem prob = readProblem(hw);
   const int64_t M = prob.M, N = prob.N, K = prob.K;
 
   // ---- user input -> matrix representation (binary32, as the FPGA sees it)
@@ -537,8 +560,9 @@ int main(int argc, char **argv) {
   if (!opts.quiet) {
     std::printf("systolic-matmul: C[%" PRId64 "][%" PRId64 "] = A[%" PRId64
                 "][%" PRId64 "] x B[%" PRId64 "][%" PRId64
-                "] on the 1x8x8 + 3x4x4 FPGA\n\n",
-                M, N, M, K, K, N);
+                "] on the 1x8x8 + 3x4x4 FPGA\n"
+                "  K_MAX_8X8 = %u, K_MAX_4X4 = %u (%s)\n\n",
+                M, N, M, K, K, N, hw.k_max_8x8, hw.k_max_4x4, hw.source);
     printMatrix(("A[" + std::to_string(M) + "][" + std::to_string(K) + "]")
                     .c_str(),
                 M, K, cellsOf(prob.A));
@@ -562,7 +586,7 @@ int main(int argc, char **argv) {
   context.loadAllAvailableDialects();
 
   OwningOpRef<ModuleOp> module =
-      parseSourceString<ModuleOp>(buildLinalgModule(prob), &context);
+      parseSourceString<ModuleOp>(buildLinalgModule(prob, hw), &context);
   if (!module) {
     std::fprintf(stderr, "systolic-matmul: internal error: generated "
                          "linalg module does not parse\n");
@@ -590,8 +614,9 @@ int main(int argc, char **argv) {
   }
 
   if (failed(runStage(*module, "Systolic -> FPGA runtime lowering",
-                      [](OpPassManager &pm) {
-                        pm.addPass(systolic::createTileMatmulForFpgaPass());
+                      [&](OpPassManager &pm) {
+                        pm.addPass(systolic::createTileMatmulForFpgaPass(
+                            hw.k_max_8x8, hw.k_max_4x4));
                       })))
     return 3;
   dumpStage(opts, "20-fpga.mlir", module->getOperation());
@@ -613,8 +638,9 @@ int main(int argc, char **argv) {
                 " * %" PRId64 "x%" PRId64 " -> %" PRId64 "x%" PRId64 "\n",
                 M, K, K, N, M, N);
     std::printf("  [2] Systolic   %zu systolic.matmul_tile (binary-search "
-                "decomposition, K folded by k_max = 16)\n",
-                report.tiles.size());
+                "decomposition, K folded by k_max = %u on the 8x8, %u on "
+                "the 4x4s)\n",
+                report.tiles.size(), hw.k_max_8x8, hw.k_max_4x4);
     for (size_t i = 0; i < report.tiles.size(); ++i) {
       const TileInfo &t = report.tiles[i];
       std::printf("        #%-3zu C[%" PRId64 ":%" PRId64 ", %" PRId64

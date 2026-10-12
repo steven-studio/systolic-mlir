@@ -92,11 +92,27 @@ void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
   pm.addPass(createReconcileUnrealizedCastsPass());
 }
 
-void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm) {
+void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm,
+                                               int64_t physKMax8x8,
+                                               int64_t physKMax4x4) {
   pm.addPass(createSystolicBinarySearchTileMatmulPass());
-  pm.addPass(createTileMatmulForFpgaPass());
+  pm.addPass(createTileMatmulForFpgaPass(physKMax8x8, physKMax4x4));
   buildSystolicRuntimeToLLVMPipeline(pm);
 }
+
+namespace {
+// --systolic-fpga-pipeline="phys-k-max-8x8=N phys-k-max-4x4=M": the loaded
+// bitstream's K_MAX_8X8 and K_MAX_4X4, forwarded to the FPGA lowering.
+struct SystolicFpgaPipelineOptions
+    : public PassPipelineOptions<SystolicFpgaPipelineOptions> {
+  Option<int64_t> physKMax8x8{
+      *this, "phys-k-max-8x8",
+      llvm::cl::desc("K_MAX_8X8 of the loaded bitstream"), llvm::cl::init(16)};
+  Option<int64_t> physKMax4x4{
+      *this, "phys-k-max-4x4",
+      llvm::cl::desc("K_MAX_4X4 of the loaded bitstream"), llvm::cl::init(16)};
+};
+} // namespace
 
 void mlir::systolic::registerSystolicPipelines() {
   PassPipelineRegistration<>(
@@ -104,10 +120,13 @@ void mlir::systolic::registerSystolicPipelines() {
       "Bufferize FPGA-runtime-lowered IR and convert it to the LLVM dialect",
       buildSystolicRuntimeToLLVMPipeline);
 
-  PassPipelineRegistration<>(
+  PassPipelineRegistration<SystolicFpgaPipelineOptions>(
       "systolic-fpga-pipeline",
       "linalg.matmul -> systolic.matmul_tile -> FPGA runtime calls -> LLVM "
       "dialect (binary-search decomposition, K-folding, FPGA lowering, "
       "bufferization)",
-      buildSystolicFpgaPipeline);
+      [](OpPassManager &pm, const SystolicFpgaPipelineOptions &options) {
+        buildSystolicFpgaPipeline(pm, options.physKMax8x8,
+                                  options.physKMax4x4);
+      });
 }

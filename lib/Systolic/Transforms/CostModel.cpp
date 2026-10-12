@@ -13,7 +13,9 @@ static int64_t ceilDiv(int64_t a, int64_t b) {
 
 int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,
                              const ArrayConfig &array, Dataflow /*dataflow*/) {
-  if (array.rows <= 0 || array.cols <= 0 || array.kMax <= 0)
+  // kMax < 0 cannot come from IR (DeviceOp's verifier rejects k_max < 1);
+  // kMax == 0 means the device declares no reduction capacity.
+  if (array.rows <= 0 || array.cols <= 0 || array.kMax < 0)
     return 0;
 
   // One fold is one rows x cols output tile. The reduction is split into
@@ -22,8 +24,16 @@ int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,
   // not at the buffer's capacity. Summing the true depths gives exactly k,
   // so the arithmetic term is k per fold regardless of how it is split, and
   // only the per-invocation costs recur.
+  //
+  // The capacity is the device's own: two accelerators in one fleet may
+  // declare different k_max (K_MAX_8X8 and K_MAX_4X4 are independent
+  // synthesis parameters), and nothing here assumes a power of two. A device
+  // without k_max keeps the reduction whole (one invocation), as the
+  // binary-search decomposition does; it used to be costed as if its
+  // capacity were 1, one invocation per reduction step.
   int64_t folds = ceilDiv(m, array.rows) * ceilDiv(n, array.cols);
-  int64_t invocations = ceilDiv(k, array.kMax);
+  int64_t invocations =
+      array.kMax > 0 ? ceilDiv(k, array.kMax) : (k > 0 ? 1 : 0);
 
   // PE(i,j) performs its k-th MAC on beat i+j+k, so one invocation of depth
   // k_i runs k_i + rows + cols - 2 beats. Every tile pays that fill/drain, not

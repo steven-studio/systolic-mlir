@@ -75,6 +75,10 @@ void registerExpandPEArrayToMacPass();
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<Pass> createTileMatmulForFpgaPass();
+/// The same pass for a bitstream whose 8x8 holds physKMax8x8 and whose 4x4s
+/// hold physKMax4x4 reduction steps per invocation (K_MAX_8X8, K_MAX_4X4).
+std::unique_ptr<Pass> createTileMatmulForFpgaPass(int64_t physKMax8x8,
+                                                  int64_t physKMax4x4);
 void registerTileMatmulForFpgaPass();
 
 //===----------------------------------------------------------------------===//
@@ -106,7 +110,10 @@ void registerTestAffineMatmulDiscoveryPass();
 //===----------------------------------------------------------------------===//
 
 void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
-void buildSystolicFpgaPipeline(OpPassManager &pm);
+/// physKMax8x8 / physKMax4x4: the loaded bitstream's K_MAX_8X8 / K_MAX_4X4
+/// (default 16 / 16, the archived bitstream), handed to the FPGA lowering.
+void buildSystolicFpgaPipeline(OpPassManager &pm, int64_t physKMax8x8 = 16,
+                               int64_t physKMax4x4 = 16);
 void registerSystolicPipelines();
 
 /// Dialects and bufferization external models the pipeline needs.

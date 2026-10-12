@@ -75,6 +75,9 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     // hold in one invocation. This is a synthesis-time parameter of the
     // implementation, not a property of the architecture, and it decides
     // how many times the per-invocation costs recur for a deep reduction.
+    // Any positive integer; each device carries its own, so accelerators of
+    // different geometry may declare different values. A device that does
+    // not declare k_max runs a whole reduction in one invocation.
     // Distinct from l1_bytes, which is a scratchpad capacity read only by
     // the optional capacity check in device selection.
     OptionalAttr<I64Attr>:$k_max,
@@ -119,6 +122,9 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
       "(`tile_overhead` `=` $tile_overhead^)? "
       "(`sym_visibility` `=` $sym_visibility^)? "
       "attr-dict";
+
+  // k_max, when present, must be a positive integer.
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//

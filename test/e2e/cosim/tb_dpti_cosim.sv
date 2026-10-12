@@ -7,9 +7,15 @@
  *
  * systolic_dma_top is built exactly as dma_top_build.tcl builds the
  * 1x8x8 + 3x4x4 bitstream (external scheduler, no legacy job ports, v1
- * operand path, K_MAX = 16); only the Xilinx IP is replaced: the MIG by
+ * operand path); only the Xilinx IP is replaced: the MIG by
  * tb/mig_axi_model.sv, the MMCM/VIO/buffers by tb/xil_stubs.sv, and the
  * floating-point IP by fp_ieee.sv.
+ *
+ * Reduction depth: K_MAX_8X8 and K_MAX_4X4, independent (build.sh passes
+ * them; 16 / 16 by default, the archived bitstream's). A top that predates
+ * the split -- one K_MAX for every context, e.g. the tag
+ * tile-pipelined-1x8x8-3x4x4-20261009 -- is built without
+ * COSIM_SPLIT_KMAX and takes K_MAX = 16, the only value it was built with.
  *
  * The FT2232H is the part this bench adds. In synchronous FIFO mode it
  * clocks the interface at 60 MHz (CLKOUT); on every rising edge
@@ -27,7 +33,9 @@
  */
 
 module tb_dpti_cosim #(
-  parameter bit USE_V2 = 1'b0
+  parameter bit     USE_V2    = 1'b0,
+  parameter integer K_MAX_8X8 = 16,
+  parameter integer K_MAX_4X4 = 16
 );
 
   import "DPI-C" function int  cosim_init(input string path, input int max_sessions);
@@ -62,7 +70,11 @@ module tb_dpti_cosim #(
   assign dpti_d = !dpti_oe_n ? ft_data : 8'bz;
 
   systolic_dma_top #(
+`ifdef COSIM_SPLIT_KMAX
+    .N (8), .K_MAX_8X8 (K_MAX_8X8), .K_MAX_4X4 (K_MAX_4X4), .K_DIM (K_MAX_8X8),
+`else
     .N (8), .K_MAX (16), .K_DIM (16),
+`endif
     .NUM_8X8 (1), .NUM_4X4 (3),
     .USE_EXTERNAL_SCHEDULER (1'b1),
     .USE_LEGACY_JOB_PORTS (1'b0),
@@ -114,8 +126,8 @@ module tb_dpti_cosim #(
     repeat (2000) @(posedge sys_clk);
     if (led[0] !== 1'b1)
       $fatal(1, "cosim: init_calib_complete (led[0]) did not rise");
-    $display("cosim: board up (led=%b), serving the DPTI link on %s",
-             led, socket_path);
+    $display("cosim: board up (led=%b, K_MAX_8X8=%0d K_MAX_4X4=%0d), serving the DPTI link on %s",
+             led, K_MAX_8X8, K_MAX_4X4, socket_path);
     serving = 1'b1;
   end
 
