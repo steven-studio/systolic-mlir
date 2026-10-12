@@ -36,6 +36,10 @@ std::unique_ptr<Pass> createSystolicTileMatmulPass();
 void registerSystolicTileMatmulPass();
 
 std::unique_ptr<Pass> createSystolicBinarySearchTileMatmulPass();
+/// The same pass with shared-read-bytes-per-cycle set: the operand bandwidth
+/// all accelerators' fills share (0: each fills at its own rate).
+std::unique_ptr<Pass>
+createSystolicBinarySearchTileMatmulPass(double sharedReadBytesPerCycle);
 void registerSystolicBinarySearchTileMatmulPass();
 
 std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
@@ -110,10 +114,15 @@ void registerTestAffineMatmulDiscoveryPass();
 //===----------------------------------------------------------------------===//
 
 void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
-/// physKMax8x8 / physKMax4x4: the loaded bitstream's K_MAX_8X8 / K_MAX_4X4
-/// (default 16 / 16, the archived bitstream), handed to the FPGA lowering.
-void buildSystolicFpgaPipeline(OpPassManager &pm, int64_t physKMax8x8 = 16,
-                               int64_t physKMax4x4 = 16);
+/// physKMax8x8 / physKMax4x4: the loaded bitstream's K_MAX_8X8 / K_MAX_4X4,
+/// handed to the FPGA lowering. sharedReadBytesPerCycle: the operand
+/// bandwidth the arrays' fills share, handed to the binary search (0: each
+/// array fills independently). --systolic-fpga-pipeline defaults them to
+/// 16, 16 (the archived bitstream) and the fleet's shared read reference
+/// (Systolic/FpgaFleet.h).
+void buildSystolicFpgaPipeline(OpPassManager &pm, int64_t physKMax8x8,
+                               int64_t physKMax4x4,
+                               double sharedReadBytesPerCycle);
 void registerSystolicPipelines();
 
 /// Dialects and bufferization external models the pipeline needs.

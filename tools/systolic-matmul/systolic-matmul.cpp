@@ -31,6 +31,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Systolic/FpgaFleet.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicOps.h"
 
@@ -83,16 +84,17 @@ namespace {
 // --lower-systolic-matmul-tile-to-fpga maps onto the RTL's device IDs 0..3;
 // k_max is each accelerator's operand-buffer depth -- K_MAX_8X8 for the 8x8,
 // K_MAX_4X4 for every 4x4, from the bitstream's configuration (the runtime's
-// fpga_runtime_get_config) -- and tile_overhead the H measured on the fold
-// RTL (docs/PROVENANCE.md). The same two values go to the FPGA lowering as
-// the physical capacities, so the IR-declared k_max and the hardware's agree
-// by construction.
+// fpga_runtime_get_config). Everything else the cost model prices an
+// invocation with -- H, the operand fill and the result write-back, the
+// slab's 8 lanes and windows of 8; each invocation runs its own depth
+// k_i <= K_MAX (variable-K) -- comes from Systolic/FpgaFleet.h
+// (docs/COSTMODEL.md). The same two K_MAX go to the FPGA lowering as the
+// physical capacities, so the IR-declared k_max and the hardware's agree by
+// construction.
 std::string buildFleet(const fpga_runtime_config_t &hw) {
   std::ostringstream os;
   auto device = [&](const char *sym, int edge, unsigned kMax) {
-    os << "  systolic.device @" << sym << " rows = " << edge
-       << " cols = " << edge << " dataflow = output_stationary k_max = "
-       << kMax << " tile_overhead = 95\n";
+    os << "  " << ::systolic::fpga::deviceDeclaration(sym, edge, kMax) << "\n";
   };
   device("acc_8x8_0", 8, hw.k_max_8x8);
   device("acc_4x4_0", 4, hw.k_max_4x4);
@@ -119,6 +121,9 @@ constexpr int64_t kMaxValue = int64_t{1} << 24;
 struct Options {
   std::string dumpDir;
   bool quiet = false;
+  // Operand words per cycle the four arrays' fills share (the one AXI read
+  // port), for the binary search; 0: every array fills independently.
+  double sharedReadWordsPerCycle = ::systolic::fpga::kSharedReadWordsPerCycle;
 };
 
 struct Problem {
@@ -138,6 +143,7 @@ struct TileInfo {
 [[noreturn]] void usage(int status) {
   std::fprintf(status ? stderr : stdout,
                "usage: systolic-matmul [--dump-ir=DIR] [--quiet]\n"
+               "                       [--shared-read-words-per-cycle=X]\n"
                "\n"
                "Reads from stdin:\n"
                "  M N K\n"
@@ -154,6 +160,11 @@ struct TileInfo {
                "                 00-linalg.mlir 10-systolic.mlir 20-fpga.mlir\n"
                "                 30-llvm.mlir 40-llvm.ll\n"
                "  --quiet        print only the verification result\n"
+               "  --shared-read-words-per-cycle=X\n"
+               "                 operand words per cycle all four arrays'\n"
+               "                 fills share, for the binary search (default\n"
+               "                 3.51, a reference DDR3 supply, not measured\n"
+               "                 on this bitstream; 0: independent fills)\n"
                "\n"
                "Environment (runtime): SYSTOLIC_FPGA_CONFIG the bitstream's\n"
                "fpga_config.txt (K_MAX_8X8, K_MAX_4X4; default 16 and 16),\n"
@@ -175,7 +186,22 @@ Options parseArgs(int argc, char **argv) {
       opts.quiet = true;
     else if (arg.rfind("--dump-ir=", 0) == 0)
       opts.dumpDir = arg.substr(std::strlen("--dump-ir="));
-    else {
+    else if (arg.rfind("--shared-read-words-per-cycle=", 0) == 0) {
+      const std::string text =
+          arg.substr(std::strlen("--shared-read-words-per-cycle="));
+      char *end = nullptr;
+      errno = 0;
+      const double v = std::strtod(text.c_str(), &end);
+      if (text.empty() || errno != 0 || !end || *end != '\0' ||
+          !std::isfinite(v) || v < 0.0) {
+        std::fprintf(stderr,
+                     "systolic-matmul: --shared-read-words-per-cycle needs a "
+                     "finite number >= 0, got '%s'\n\n",
+                     text.c_str());
+        usage(2);
+      }
+      opts.sharedReadWordsPerCycle = v;
+    } else {
       std::fprintf(stderr, "systolic-matmul: unknown argument '%s'\n\n",
                    arg.c_str());
       usage(2);
@@ -418,7 +444,7 @@ int64_t staticOffset(Value v, unsigned dim) {
 
 std::vector<TileInfo> collectTiles(ModuleOp module) {
   std::vector<TileInfo> tiles;
-  module.walk([&](systolic::MatmulTileOp op) {
+  module.walk([&](mlir::systolic::MatmulTileOp op) {
     TileInfo t;
     t.row = staticOffset(op.getA(), 0);
     t.k0 = staticOffset(op.getA(), 1);
@@ -579,7 +605,7 @@ int main(int argc, char **argv) {
 
   // ---- compiler: matrix -> Linalg -> Systolic -> FPGA lowering -> LLVM ---
   DialectRegistry registry;
-  systolic::registerSystolicPipelineDialects(registry);
+  mlir::systolic::registerSystolicPipelineDialects(registry);
   registerBuiltinDialectTranslation(registry);
   registerLLVMDialectTranslation(registry);
   MLIRContext context(registry);
@@ -596,10 +622,13 @@ int main(int argc, char **argv) {
 
   Report report;
 
+  const double sharedReadBytesPerCycle =
+      ::systolic::fpga::sharedReadBytesPerCycle(opts.sharedReadWordsPerCycle);
   if (failed(runStage(*module, "Linalg -> Systolic (binary-search tiling)",
-                      [](OpPassManager &pm) {
-                        pm.addPass(systolic::
-                                       createSystolicBinarySearchTileMatmulPass());
+                      [&](OpPassManager &pm) {
+                        pm.addPass(mlir::systolic::
+                                       createSystolicBinarySearchTileMatmulPass(
+                                           sharedReadBytesPerCycle));
                       })))
     return 3;
   dumpStage(opts, "10-systolic.mlir", module->getOperation());
@@ -615,7 +644,7 @@ int main(int argc, char **argv) {
 
   if (failed(runStage(*module, "Systolic -> FPGA runtime lowering",
                       [&](OpPassManager &pm) {
-                        pm.addPass(systolic::createTileMatmulForFpgaPass(
+                        pm.addPass(mlir::systolic::createTileMatmulForFpgaPass(
                             hw.k_max_8x8, hw.k_max_4x4));
                       })))
     return 3;
@@ -628,7 +657,7 @@ int main(int argc, char **argv) {
   }
 
   if (failed(runStage(*module, "bufferization / LLVM lowering",
-                      systolic::buildSystolicRuntimeToLLVMPipeline)))
+                      mlir::systolic::buildSystolicRuntimeToLLVMPipeline)))
     return 3;
   dumpStage(opts, "30-llvm.mlir", module->getOperation());
 
@@ -641,6 +670,13 @@ int main(int argc, char **argv) {
                 "decomposition, K folded by k_max = %u on the 8x8, %u on "
                 "the 4x4s)\n",
                 report.tiles.size(), hw.k_max_8x8, hw.k_max_4x4);
+    if (opts.sharedReadWordsPerCycle > 0.0)
+      std::printf("        the four arrays' fills share %g operand "
+                  "words/cycle (assumed, not measured on this bitstream)\n",
+                  opts.sharedReadWordsPerCycle);
+    else
+      std::printf("        every array fills at its own rate (no shared "
+                  "read limit)\n");
     for (size_t i = 0; i < report.tiles.size(); ++i) {
       const TileInfo &t = report.tiles[i];
       std::printf("        #%-3zu C[%" PRId64 ":%" PRId64 ", %" PRId64

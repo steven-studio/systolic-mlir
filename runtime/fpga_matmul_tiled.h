@@ -16,11 +16,12 @@ extern "C" {
 // on the 1x8x8 + 3x4x4 bitstream: device 0 is the 8x8 (M, N <= 8),
 // devices 1..3 the 4x4s (M, N <= 4), and 1 <= K <= K_MAX of that device:
 // K_MAX_8X8 for device 0, K_MAX_4X4 for devices 1..3 (see
-// fpga_runtime_get_config). The tile is zero-padded to the array and to
-// the device's K_MAX, staged as one operand slab (fpga_runtime_config_t.
-// slab_bytes), submitted as one DPTI descriptor whose k is the device's
-// K_MAX, and the array's result tile is read back and added into C -- so
-// invocations chained through C accumulate.
+// fpga_runtime_get_config). The tile is staged as one operand slab
+// (fpga_runtime_config_t.slab_bytes, the bitstream's fixed MEM_WRITE length;
+// zero past the tile), submitted as one DPTI descriptor whose k is K -- the
+// array runs exactly K reduction steps; K_MAX is the capacity, not the depth
+// of every invocation -- and the array's result tile is read back and added
+// into C, so invocations chained through C accumulate.
 //
 // Returns 0, or, with nothing sent on the link:
 //   -10  K outside 1..K_MAX of device_id

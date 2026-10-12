@@ -15,6 +15,7 @@ configure_lit_site_cfg(
 set(SYSTOLIC_TEST_DEPENDS
   systolic-opt
   systolic-translate
+  systolic-cost
 )
 
 # An LLVM built in-tree (or the Debian llvm-*-tools packages) exports

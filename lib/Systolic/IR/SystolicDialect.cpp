@@ -4,6 +4,10 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 using namespace mlir;
 using namespace mlir::systolic;
 
@@ -105,6 +109,35 @@ LogicalResult StreamOp::verify() {
     if (kMax.getInt() < 1)
       return emitOpError("k_max must be a positive integer, got ")
              << kMax.getInt();
+
+  // The read / write terms of the cost model (CostModel.h). A bandwidth is
+  // a divisor, a lane count or window a multiplier of the bytes moved, and
+  // a negative overhead would make a transfer cheaper than free.
+  for (auto [name, attr] :
+       {std::make_pair("read_bytes_per_cycle", getReadBytesPerCycleAttr()),
+        std::make_pair("write_bytes_per_cycle", getWriteBytesPerCycleAttr())})
+    if (attr) {
+      const double v = attr.getValueAsDouble();
+      if (!std::isfinite(v) || v <= 0.0)
+        return emitOpError() << name << " must be positive and finite, got "
+                             << v;
+    }
+  for (auto [name, attr] :
+       {std::make_pair("read_overhead", getReadOverheadAttr()),
+        std::make_pair("write_overhead", getWriteOverheadAttr())})
+    if (attr && attr.getInt() < 0)
+      return emitOpError() << name << " must be non-negative, got "
+                           << attr.getInt();
+  if (::mlir::IntegerAttr window = getKWindowAttr())
+    if (window.getInt() < 1)
+      return emitOpError("k_window must be a positive integer, got ")
+             << window.getInt();
+  if (::mlir::IntegerAttr lanes = getOperandLanesAttr()) {
+    const int64_t widest = std::max<int64_t>(getRows(), getCols());
+    if (lanes.getInt() < widest)
+      return emitOpError("operand_lanes must cover the array's ")
+             << widest << " lanes, got " << lanes.getInt();
+  }
   return ::mlir::success();
 }
 

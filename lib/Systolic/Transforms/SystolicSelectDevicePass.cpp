@@ -1,4 +1,5 @@
 #include "Systolic/CostModel.h"
+#include "Systolic/DeviceConfig.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicOps.h"
 
@@ -78,22 +79,7 @@ struct SystolicSelectDevicePass
     llvm::StringMap<::systolic::ArrayConfig> configs;
     SmallVector<std::string> deviceNames;
     module.walk([&](DeviceOp device) {
-      ::systolic::ArrayConfig cfg;
-      cfg.rows = device.getRows();
-      cfg.cols = device.getCols();
-      if (IntegerAttr km = device.getKMaxAttr())
-        cfg.kMax = km.getInt();
-      if (IntegerAttr l1 = device.getL1BytesAttr())
-        cfg.l1Bytes = l1.getInt();
-      if (FloatAttr clk = device.getClockHzAttr())
-        cfg.clockHz = clk.getValueAsDouble();
-      if (FloatAttr bw = device.getDmaBytesPerCycleAttr())
-        cfg.dmaBytesPerCycle = bw.getValueAsDouble();
-      // Calibration is a property of the microarchitecture, not of the
-      // array shape, so it travels on the device op. Leaving the attribute
-      // off keeps the ArrayConfig default (H = 0, the geometric model).
-      if (IntegerAttr to = device.getTileOverheadAttr())
-        cfg.tileOverhead = to.getInt();
+      ::systolic::ArrayConfig cfg = getArrayConfig(device);
       std::string name = device.getSymName().str();
       configs[name] = cfg;
       deviceNames.push_back(name);

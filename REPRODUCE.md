@@ -50,8 +50,8 @@ but it is not the compiler selected by this configuration.
 
 A successful run should end with:
 
-    Total Discovered Tests: 31
-      Passed: 31 (100.00%)
+    Total Discovered Tests: 38
+      Passed: 38 (100.00%)
 
 The canonical compiler binary used below is:
 
@@ -286,6 +286,50 @@ IP replaced, behind the unmodified runtime. It is a simulation: a board run
 is the only evidence about the board. See `docs/E2E.md`.
 
 
+## 8a. Cost model, binary search, K_MAX exploration
+
+The read / compute / write cost of one invocation (`docs/COSTMODEL.md`) and
+the binary-search schedule, from the command line, with exactly the
+compiler's code:
+
+    ./build/bin/systolic-cost invocation --geometry 8 --k-max 32 --k 65
+    ./build/bin/systolic-cost schedule --m 64 --n 64 --k 64 --shared-read-words-per-cycle 3.51 --tiles
+    ./build/bin/systolic-cost check-monotone --m 100 --n 36 --k 147 --k8 24 --k4 12
+
+Invocations are variable-K: the runtime sends each invocation's own depth
+(job.k = k_i <= K_MAX). Model against the RTL in Verilator, with the
+reduction steps every PE executes counted by the bench (calibration set
+K_MAX 24/12; held-out sets K_MAX 32/32, 16/7, 17/24, 1/1, 256/64, 512/512 at
+K = 1, K_MAX - 1, K_MAX, K_MAX + 1 and K-folded K; concurrent waves; about 15
+minutes on two cores):
+
+    python3 eval/cost_model_validation/validate.py --jobs 2
+    python3 eval/cost_model_validation/start_cycle_check.py
+
+The whole pipeline on the co-simulated RTL of the working tree, with the
+runtime's trace and the bench's step counts compared invocation by
+invocation (compiler IR k = runtime job.k = RTL k = steps per PE):
+
+    SYSTOLIC_RUNTIME_TRACE=1 test/e2e/run_kmax_matrix.sh 16:16 32:32 17:7 24:12 1:1
+    SYSTOLIC_RUNTIME_TRACE=1 SKIP_RTL=1 test/e2e/run_kmax_matrix.sh 256:64 512:512
+    python3 test/e2e/check_variable_k.py build/kmax_matrix/e2e/*/* --cost build/bin/systolic-cost
+
+(`run_kmax_matrix.sh`'s RTL step, `run_kmax_sim.sh`, takes K_MAX up to 56, so
+the deeper configurations skip it -- `validate.py` covers them in Verilator;
+each call rewrites `build/kmax_matrix/summary.txt`.) The K-folding cases of
+K_MAX 32/32 through the same pipeline:
+
+    SYSTOLIC_RUNTIME_TRACE=1 SYSTOLIC_FPGA_CONFIG=build/kmax_matrix/cosim/k8_32-k4_32/fpga_config.txt \
+        test/e2e/run_e2e.sh --backend cosim --cosim-dir build/kmax_matrix/cosim/k8_32-k4_32 \
+        --out build/kmax_matrix/e2e/k8_32-k4_32/kfold --kmax-cases --extra-k 7,16,47,64,65
+
+The ResNet-18 / AlexNet GEMM shapes (checked against torchvision v0.19.0
+source when given) and the K_MAX design-space exploration (`docs/KMAX_DSE.md`):
+
+    python3 eval/kmax_dse/layers.py --torchvision-src DIR
+    python3 eval/kmax_dse/dse.py --verify --jobs 2
+
+
 ## 9. Full regression suite
 
 At any time after configuration, run:
@@ -298,8 +342,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 31
-      Passed: 31 (100.00%)
+    Total Discovered Tests: 38
+      Passed: 38 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

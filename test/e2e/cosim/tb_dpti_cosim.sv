@@ -30,6 +30,13 @@
  * Simulation time stops while no host is connected, as an idle board would
  * wait; the design keeps its state across host sessions, as a programmed
  * board does. +max_sessions=<n> ends the run after n sessions (0: never).
+ *
+ * With the split-K_MAX RTL (COSIM_SPLIT_KMAX), every job also prints, when
+ * its result tile is in DDR, the reduction steps the hardware executed for
+ * it -- counted per PE, read-only, by rtl/.../dma/tb/reduction_probe.svh --
+ * next to the descriptor's k:
+ *   COSIM_STEPS dev=<d> job_k=<k> steps_pe_min=.. steps_pe_max=.. macs=..
+ *               feed_a=.. feed_b=.. feed_cycles=.. k_dim=.. fire=.. done=..
  */
 
 module tb_dpti_cosim #(
@@ -105,6 +112,33 @@ module tb_dpti_cosim #(
     .dpti_rd_n (dpti_rd_n), .dpti_wr_n (dpti_wr_n), .dpti_oe_n (dpti_oe_n),
     .dpti_siwun (1'b1)
   );
+
+`ifdef COSIM_SPLIT_KMAX
+  // ---- reduction steps per job (bench-only, nothing here drives the design) --
+  wire clk = sys_clk;   // the array clock: ui_clk is sys_clk in mig_axi_model
+`include "reduction_probe.svh"
+
+  integer cj_cyc = 0;
+  integer cj_k [0:3], cj_fire [0:3];
+  initial for (int d = 0; d < 4; d++) begin cj_k[d] = -1; cj_fire[d] = -1; end
+  always_ff @(posedge sys_clk) begin
+    cj_cyc <= cj_cyc + 1;
+    if (dut.job_fire && dut.effective_job_device_id < 4) begin
+      cj_k[dut.effective_job_device_id]    <= integer'(dut.effective_job_k);
+      cj_fire[dut.effective_job_device_id] <= cj_cyc;
+    end
+  end
+  for (genvar d = 0; d < 4; d++) begin : COSIM_STEPS
+    always @(posedge sys_clk)
+      if (dut.ctx_job_done[d]) begin
+        integer mn, mx, sum;
+        rp_summary(d, mn, mx, sum);
+        $display("COSIM_STEPS dev=%0d job_k=%0d steps_pe_min=%0d steps_pe_max=%0d macs=%0d feed_a=%0d feed_b=%0d feed_cycles=%0d k_dim=%0d fire=%0d done=%0d",
+                 d, cj_k[d], mn, mx, sum, rp_feed_a[d], rp_feed_b[d], rp_feed_cyc[d], rp_kdim[d],
+                 cj_fire[d], cj_cyc);
+      end
+  end
+`endif
 
   string socket_path;
   int    max_sessions;

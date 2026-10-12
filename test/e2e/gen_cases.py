@@ -6,6 +6,9 @@
     python3 gen_cases.py OUT_DIR --kmax K8 K4     only the cases that put K at
                                                   the edges of K_MAX_8X8 = K8
                                                   and K_MAX_4X4 = K4
+    python3 gen_cases.py OUT_DIR --kmax K8 K4 K,K,...
+                                                  the same, plus 12 x 12 x K
+                                                  for each K listed
 
 Every shape the regression runs, with every value class:
 
@@ -27,7 +30,8 @@ is divisible by neither; K = 1 always. The 12 x 12 output puts one tile on
 the 8x8 and the rest on the 4x4s, so every K is folded by both capacities at
 once and the two geometries are scheduled side by side; 4 x 4 x K4 and
 8 x 8 x K8 are single tiles at exactly each device's own capacity. These run
-with the mixed value class only.
+with the mixed value class only. Extra K values (a comma-separated list
+after K8 K4) add 12 x 12 x K cases, e.g. the depths of a K-folding check.
 """
 
 import os
@@ -86,19 +90,20 @@ def main():
             for cls, draw in CLASSES.items():
                 write_case(out, m, n, k, cls, draw)
         return 0
-    if len(args) == 4 and args[1] == "--kmax":
+    if len(args) in (4, 5) and args[1] == "--kmax":
         out = args[0]
         try:
             k8, k4 = int(args[2]), int(args[3])
+            extra = [int(x) for x in args[4].split(",")] if len(args) == 5 else []
         except ValueError:
             print(__doc__)
             return 2
-        if k8 < 1 or k4 < 1:
-            print("K8 and K4 must be positive integers", file=sys.stderr)
+        if k8 < 1 or k4 < 1 or any(k < 1 for k in extra):
+            print("K8, K4 and every extra K must be positive integers", file=sys.stderr)
             return 2
         os.makedirs(out, exist_ok=True)
         seen = set()
-        for (m, n, k) in kmax_shapes(k8, k4):
+        for (m, n, k) in kmax_shapes(k8, k4) + [(12, 12, k) for k in extra]:
             if (m, n, k) in seen:
                 continue
             seen.add((m, n, k))

@@ -88,11 +88,13 @@ static void scheduled_store_f32(
  *
  * The layout is the 8-lane image above; a 4x4 array reads lanes 0..3 of it.
  * A full 8x8x16 or 4x4x16 tile at K_MAX = 16 therefore packs to exactly the
- * bytes the board run of 2026-10-09 sent. A smaller tile -- m < P, n < P or
- * k < K_MAX for the P x P array of the selected device -- leaves the rest of
- * the slab zero: zero rows of A and zero columns of B give zero rows and
- * columns of the product, and a zero reduction step adds a zero product, so
- * the m x n block of the P x P result is the m x k by k x n product.
+ * bytes the board run of 2026-10-09 sent. A smaller tile leaves the rest of
+ * the slab zero. Zero rows of A and zero columns of B (m < P, n < P) give
+ * zero rows and columns of the P x P product, so its m x n block is the
+ * m x k by k x n product. Steps K .. of the slab (k < K_MAX) are storage
+ * only: the descriptor carries k = K, so the array reads ceil(K / 8) windows
+ * and runs exactly K reduction steps; the zeros in the last window's steps
+ * past K are read but never fed.
  */
 static int build_scheduled_operand_slab(
     int M,
@@ -425,14 +427,17 @@ int scheduled_invocation(
     job.device_id = device_id;
 
     /*
-     * The descriptor carries the physical invocation: the array's P x P
-     * and this device's slab depth K_MAX (16 on the archived bitstream, the
-     * only shape the board has run). The logical m x k x n lives in the
-     * zero padding of the slab.
+     * The descriptor carries this invocation: the array's P x P, and K, the
+     * reduction steps it runs (1 <= K <= K_MAX of this device, checked
+     * above). K_MAX is the operand buffer's capacity, not the depth of every
+     * invocation: the RTL reads ceil(K / 8) windows of the slab and feeds
+     * exactly K steps (systolic_accel_context.sv: job_k_reg, k_dim). The
+     * logical m x n lives in the zero rows and columns of the slab -- the
+     * array computes its whole P x P tile in the same time either way.
      */
     job.m = static_cast<uint32_t>(P);
     job.n = static_cast<uint32_t>(P);
-    job.k = static_cast<uint32_t>(k_max);
+    job.k = static_cast<uint32_t>(K);
 
     job.start_cycle = start_cycle;
     job.est_cycles = est_cycles;
@@ -496,9 +501,9 @@ int scheduled_invocation(
         std::fprintf(
             stderr,
             "[fpga-runtime] job %u -> device %u (%dx%d array, K_MAX %d): "
-            "tile %dx%d, k=%d (padded to %dx%dx%d), "
+            "tile %dx%d, job.k=%u, "
             "start_cycle=%u est_cycles=%u, %zu-byte slab, %u result bytes\n",
-            job.job_id, device_id, P, P, k_max, M, N, K, P, k_max, P,
+            job.job_id, device_id, P, P, k_max, M, N, job.k,
             start_cycle, est_cycles, slab.size(), result_bytes_len);
     }
 

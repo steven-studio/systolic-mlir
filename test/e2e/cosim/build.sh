@@ -100,7 +100,8 @@ D="$T/dma"
 # The top's K_MAX parameters: split (K_MAX_8X8 / K_MAX_4X4) or one K_MAX.
 KMAX_DEFS=()
 if grep -q "K_MAX_8X8" "$D/systolic_dma_top.sv"; then
-    KMAX_DEFS=(-DCOSIM_SPLIT_KMAX -GK_MAX_8X8="$K_MAX_8X8" -GK_MAX_4X4="$K_MAX_4X4")
+    KMAX_DEFS=(-DCOSIM_SPLIT_KMAX -GK_MAX_8X8="$K_MAX_8X8" -GK_MAX_4X4="$K_MAX_4X4"
+               -I"$D/tb")   # reduction_probe.svh, the bench's step counters
 elif [ "$K_MAX_8X8" != 16 ] || [ "$K_MAX_4X4" != 16 ]; then
     echo "the RTL in $RTL_DESC has one K_MAX (16); K_MAX_8X8=$K_MAX_8X8 K_MAX_4X4=$K_MAX_4X4 needs an RTL with the split parameters (RTL_DIR=.)" >&2
     exit 2

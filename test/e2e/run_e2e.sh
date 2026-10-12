@@ -21,6 +21,7 @@
 #   --kmax-cases      instead of the fixed shapes, the cases that put K at the
 #                     edges of the bitstream's K_MAX_8X8 and K_MAX_4X4
 #                     (gen_cases.py --kmax)
+#   --extra-k K,K,..  with --kmax-cases, also 12 x 12 x K for each K listed
 #
 # The bitstream's K_MAX_8X8 / K_MAX_4X4 reach the compiler and the runtime
 # through SYSTOLIC_FPGA_CONFIG (runtime/fpga_matmul_tiled.h). On the
@@ -48,6 +49,7 @@ COSIM_DIR=""
 OUT=""
 QUICK=0
 KMAX_CASES=0
+EXTRA_K=""
 ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
         --out)        OUT="$2"; shift 2 ;;
         --quick)      QUICK=1; shift ;;
         --kmax-cases) KMAX_CASES=1; shift ;;
+        --extra-k)    EXTRA_K="$2"; shift 2 ;;
         --cases)      ONLY="$2"; shift 2 ;;
         -h|--help)    sed -n '3,36p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -124,8 +127,11 @@ rm -rf "$OUT"
 mkdir -p "$OUT/cases"
 OUT="$(cd "$OUT" && pwd)"
 : > "$OUT/.run_e2e_out"
+if [ -n "$EXTRA_K" ] && { [ "$KMAX_CASES" != 1 ] || ! [[ "$EXTRA_K" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; }; then
+    echo "--extra-k takes a comma-separated list of positive integers and needs --kmax-cases" >&2; exit 2
+fi
 if [ "$KMAX_CASES" = 1 ]; then
-    python3 "$HERE/gen_cases.py" "$OUT/cases" --kmax "$K8" "$K4" > "$OUT/case_list.txt" || exit 2
+    python3 "$HERE/gen_cases.py" "$OUT/cases" --kmax "$K8" "$K4" ${EXTRA_K:+"$EXTRA_K"} > "$OUT/case_list.txt" || exit 2
 else
     python3 "$HERE/gen_cases.py" "$OUT/cases" > "$OUT/case_list.txt" || exit 2
 fi

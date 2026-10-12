@@ -6,6 +6,8 @@
 // (SystolicOptimizer.h) produces them; --systolic-binary-search-tile-matmul
 // and --systolic-materialize-schedule consume them.
 
+#include "Systolic/CostModel.h"
+
 #include <cstdint>
 
 namespace mlir {
@@ -29,17 +31,12 @@ struct SystolicArrayResource {
   //   8x8 #2 -> arraySize = 8, acceleratorId = 2
   int64_t acceleratorId;
 
-  // Hardware-calibrated fixed implementation overhead per invocation.
-  //
-  // H = 0 means the pure geometric model.
-  int64_t tileOverhead = 0;
-
-  // Invocations one spatial tile of the GEMM being decomposed needs on this
-  // accelerator: ceil(K / k_max) for the accelerator's own k_max, 1 when it
-  // declares none. It depends on the GEMM's K, so the caller sets it per
-  // GEMM. The binary-search optimizer bills a tile invocationsPerTile x C(g)
-  // and keeps one tile's invocations back to back on its accelerator.
-  int64_t invocationsPerTile = 1;
+  // Everything the cost model knows about this accelerator: k_max, H, the
+  // read and write terms, how an invocation's depth is executed
+  // (CostModel.h). The binary-search optimizer prices a spatial tile on it
+  // with ::systolic::estimateTileCost(K, config) -- it keeps no formula of
+  // its own. config.rows and config.cols must equal arraySize.
+  ::systolic::ArrayConfig config;
 };
 
 /// A square tile assigned to one systolic array.
@@ -57,8 +54,10 @@ struct SystolicTile {
 
 /// A tile together with its scheduled execution interval.
 ///
-/// startCycle and endCycle are compute-only cycles.
-/// DMA is intentionally not represented here.
+/// The binary-search optimizer fills startCycle / endCycle on its own
+/// timeline: a tile occupies its accelerator for every invocation's read,
+/// compute and write (CostModel.h); scheduleAssignedSystolicTasks fills them
+/// from the compute cycles it is given.
 struct ScheduledSystolicTile {
   SystolicTile tile;
 

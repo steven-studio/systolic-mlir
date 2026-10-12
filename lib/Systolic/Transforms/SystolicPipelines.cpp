@@ -16,6 +16,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Systolic/FpgaFleet.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 
@@ -94,8 +95,9 @@ void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
 
 void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm,
                                                int64_t physKMax8x8,
-                                               int64_t physKMax4x4) {
-  pm.addPass(createSystolicBinarySearchTileMatmulPass());
+                                               int64_t physKMax4x4,
+                                               double sharedReadBytesPerCycle) {
+  pm.addPass(createSystolicBinarySearchTileMatmulPass(sharedReadBytesPerCycle));
   pm.addPass(createTileMatmulForFpgaPass(physKMax8x8, physKMax4x4));
   buildSystolicRuntimeToLLVMPipeline(pm);
 }
@@ -103,6 +105,10 @@ void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm,
 namespace {
 // --systolic-fpga-pipeline="phys-k-max-8x8=N phys-k-max-4x4=M": the loaded
 // bitstream's K_MAX_8X8 and K_MAX_4X4, forwarded to the FPGA lowering.
+// shared-read-words-per-cycle: the operand words per cycle the four arrays'
+// fills share through the one AXI read port, forwarded to the binary search
+// in bytes; by default the fleet's reference (Systolic/FpgaFleet.h), 0 for
+// independent fills.
 struct SystolicFpgaPipelineOptions
     : public PassPipelineOptions<SystolicFpgaPipelineOptions> {
   Option<int64_t> physKMax8x8{
@@ -111,6 +117,12 @@ struct SystolicFpgaPipelineOptions
   Option<int64_t> physKMax4x4{
       *this, "phys-k-max-4x4",
       llvm::cl::desc("K_MAX_4X4 of the loaded bitstream"), llvm::cl::init(16)};
+  Option<double> sharedReadWordsPerCycle{
+      *this, "shared-read-words-per-cycle",
+      llvm::cl::desc("Operand words (4 B) per cycle all arrays' fills share "
+                     "(default: the fleet's reference, 3.51; 0: each array "
+                     "fills independently)"),
+      llvm::cl::init(::systolic::fpga::kSharedReadWordsPerCycle)};
 };
 } // namespace
 
@@ -126,7 +138,9 @@ void mlir::systolic::registerSystolicPipelines() {
       "dialect (binary-search decomposition, K-folding, FPGA lowering, "
       "bufferization)",
       [](OpPassManager &pm, const SystolicFpgaPipelineOptions &options) {
-        buildSystolicFpgaPipeline(pm, options.physKMax8x8,
-                                  options.physKMax4x4);
+        buildSystolicFpgaPipeline(
+            pm, options.physKMax8x8, options.physKMax4x4,
+            ::systolic::fpga::sharedReadBytesPerCycle(
+                options.sharedReadWordsPerCycle));
       });
 }

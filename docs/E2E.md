@@ -25,7 +25,7 @@ user input (stdin, 整數)
 
 ```bash
 ./configure.sh --build                 # 或 cmake --build build
-cmake --build build --target check-systolic        # 24 個 lit test
+cmake --build build --target check-systolic        # 38 個 lit test
 
 printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
   | ./build/bin/systolic-matmul --dump-ir=/tmp/e2e
@@ -54,7 +54,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 
 | 環境變數 | 作用 |
 |---|---|
-| `SYSTOLIC_RUNTIME_TRACE=1` | 每次 FPGA invocation 一行（device、tile、padding、schedule） |
+| `SYSTOLIC_RUNTIME_TRACE=1` | 每次 FPGA invocation 一行（device、tile、job.k、schedule） |
 | `SYSTOLIC_DPTI_TRACE=1` | 每個 DPTI 封包（MEM_WRITE、每個 WRITE32） |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
 | `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）；沒設就是封存那顆的 16／16 |
@@ -93,12 +93,16 @@ FTDI 那層計到的 DPTI byte 數，然後 FPGA 結果與 CPU reference 並排�
   沒宣告 `k_max` 的 device 維持整個 K（舊行為，舊測試輸出不變）。8x8 與 4x4 的
   `k_max` 可以不同、不必是 2 的冪；同一種幾何的 device 必須宣告相同的 `k_max`
   （optimizer 對一種幾何只算一個成本，跟 H 一樣）。
-- optimizer 對一個 spatial tile 計 `I(d) * C(g)`，`C(g) = 2g - 2 + H` 是一次
-  invocation；tile 的 I(d) 次 invocation 在它被排到的區間裡連續執行，第 j 次從
-  `start + j * C(g)` 開始。所有 device 的 `k_max` 相同時，這和原本的「時間軸拉長
-  I 倍」逐 cycle 相同；不同時，`k_max` 較小的幾何每個 tile 比較慢，分解會照這個
-  平衡（例：K_MAX_8X8 = 17、K_MAX_4X4 = 7 的 8x16x17 全給 8x8；
-  `test/Systolic/kmax_heterogeneous.mlir`）。
+- optimizer 對一個 spatial tile 的成本是 cost model 的
+  `estimateTileCost(K, cfg).sequential()`：I(d) 次 invocation 的
+  read + compute + write 加總（`docs/COSTMODEL.md`）；它自己不再有公式。
+  `k_max` 較小的幾何每個 tile 比較慢，分解會照這個平衡（例：K_MAX_8X8 = 17、
+  K_MAX_4X4 = 7 的 8x16x17 全給 8x8；`test/Systolic/kmax_heterogeneous.mlir`）。
+- IR 裡 `est_cycles` 是該次 invocation 的 compute term（`k_exec + R + C - 2 + H`），
+  `start_cycle` 是同一顆 device 上前面各次 compute term 的加總；invocation 成本
+  不同時（logical 深度的最後一次較短）不平均切分。含 read／write 的 makespan 用
+  `--systolic-binary-search-tile-matmul="report=true"` 的 remark 或
+  `build/bin/systolic-cost` 看。
 
 ### 2.2 Systolic → FPGA：`--lower-systolic-matmul-tile-to-fpga`
 
@@ -141,21 +145,29 @@ device symbol 對應 bitstream 的實體 ID：
 
 一次呼叫 = 一次 invocation：
 
-1. 把 `m x k`、`k x n` 補零到實體 `P x K_MAX(d)`、`K_MAX(d) x P`（P = 8 或 4；
-   device 0 用 K_MAX_8X8、device 1..3 用 K_MAX_4X4），以 8 步一個 window 打包
-   （8 lane 寬；4x4 讀 lane 0..3）。slab 長度是兩種幾何裡最深那個的
-   `ceil(K_MAX/8)·512` byte（16／16 時 1024）。整塊 8x8x16 / 4x4x16 打包出來的
-   byte 與 tag 那份 runtime 逐 byte 相同。
+1. 把 `m x k`、`k x n` 放進實體 `P x K_MAX(d)`、`K_MAX(d) x P` 的 slab（P = 8 或 4；
+   device 0 用 K_MAX_8X8、device 1..3 用 K_MAX_4X4；`m`、`n` 以外的列與行、`k` 以後的
+   step 是 0），以 8 步一個 window 打包（8 lane 寬；4x4 讀 lane 0..3）。slab 長度是兩種
+   幾何裡最深那個的 `ceil(K_MAX/8)·512` byte（16／16 時 1024）——MEM_WRITE 的長度每顆
+   bitstream 固定（`dpti_mem_write_decoder` 只收 `HOST_SLAB_BYTES`），這是保留的 DMA
+   padding。整塊 8x8x16 / 4x4x16 打包出來的 byte 與 tag 那份 runtime 逐 byte 相同。
 2. `MEM_WRITE` 到 DDR 0x10000，等 1 ms（板測時的順序，保留）。
-3. 寫 descriptor（job_id、device_id、m = n = P、k = K_MAX(d)、start、est、a_base =
-   0x10000、b_base = 0、c_base = 0x3000），最後寫 CONTROL = submit。
+3. 寫 descriptor（job_id、device_id、m = n = P、**k = 這次 invocation 的 k**（1..K_MAX(d)）、
+   start、est、a_base = 0x10000、b_base = 0、c_base = 0x3000），最後寫 CONTROL = submit。
 4. 讀回 `P x P x 4` byte 的結果 tile，把有效的 `m x n` **加進** C
    （`C_out = C_in + A x B`，所以 K invocation 串起來會累加）。
 
-descriptor 送的是實體形狀（P x P x K_MAX(d)；封存的 bitstream 上就是板子跑過的
-P x P x 16）；邏輯上的 m、n、k 都在補零裡。K_MAX_8X8／K_MAX_4X4 來自
-`SYSTOLIC_FPGA_CONFIG`（`fpga_runtime_get_config()`），`k > K_MAX(d)` 回傳 -10、
-什麼都不送。
+descriptor 送的是 P x P x k（variable-K）：K_MAX 是 operand buffer 的容量，RTL 讀
+`ceil(k/8)` 個 window、餵 k 步（`systolic_accel_context.sv`：`job_k_slab_reg`、`k_dim`；
+b971b79 的 RTL，Verilator 模擬中每個 PE 的 MAC 次數 = k，`docs/COSTMODEL.md` 第 4 節）。
+邏輯上的 m、n 在補零的列與行裡。K_MAX_8X8／K_MAX_4X4 來自
+`SYSTOLIC_FPGA_CONFIG`（`fpga_runtime_get_config()`），`k < 1` 或 `k > K_MAX(d)` 回傳
+-10、什麼都不送。
+
+**封存的 bitstream 與 variable-K：** 改成 variable-K 之前，runtime 一律送 k = K_MAX(d)，
+封存的 bitstream 在板上只跑過 k = 16。現在 K 不是 16 的倍數時會送 k < 16 的 descriptor；
+這個組合在封存的 bitstream 上**沒有板測、也沒有用它的 RTL 模擬過**（FPGA Board
+Regression：NOT RUN）。
 runtime 同步執行：一次一個 invocation，結果回來才送下一個。
 
 失敗時（`runtime/fpga_matmul_tiled.h`）：參數錯誤在送出任何東西之前就回傳
@@ -240,6 +252,14 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   session。
 - `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>` 讓 session 的第 n 次 `ftdi_write_data()`
   像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查用它）。
+- 有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）建出來的 co-simulation，每個 job
+  的結果寫回 DDR 時印一行 `COSIM_STEPS`：descriptor 的 k、每個 PE 實際做的 MAC 次數、
+  feeder 送進 row 0／column 0 的 operand 數、`k_dim`、job 被接受與結果進 DDR 的 cycle
+  （`rtl/multi_200t/tile_pipelined/dma/tb/reduction_probe.svh`，只讀不驅動）。
+  `SYSTOLIC_RUNTIME_TRACE=1` 跑 `run_e2e.sh` 之後，`test/e2e/check_variable_k.py`
+  逐 invocation 比對 compiler IR 的 k、runtime 送的 job.k、RTL 收到的 k 與每個 PE 的
+  step 數；加 `--cost build/bin/systolic-cost` 時也比對 FPGA 內部 cycle（job 被接受 ->
+  結果在 DDR）與 cost model 的 read + compute + write。
 - 這是模擬，不是板子：證明的是 compiler、runtime、wire protocol 與這份 RTL 的邏輯
   一致；時序收斂、FT2232H 的真實行為、DDR3 的真實延遲都不在其中。
 
@@ -247,9 +267,9 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 
 | Phase | 指令 | 判準 |
 |---|---|---|
-| Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 101 start_cycle = 0` |
+| Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
-| lit | `cmake --build build --target check-systolic` | 31/31 |
+| lit | `cmake --build build --target check-systolic` | 38/38 |
 | runtime → FPGA | `build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
 | E2E | `test/e2e/run_e2e.sh --backend board` | `E2E cases: 36/36 PASS` |
 
@@ -257,15 +277,17 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 
 - 一次一個 invocation：四顆陣列在時間上沒有並行（硬體 scheduler 一次接一個 job，
   runtime 也同步送）。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的發射時間。
-- 每次 invocation 都是完整的 P x P x K_MAX(d) slab：小 tile 也付整塊的傳輸。
+- 每次 invocation 的 MEM_WRITE 都是整塊 slab（`HOST_SLAB_BYTES`，最深幾何的
+  `ceil(K_MAX/8)·512` byte）：小 tile 也付整塊的 USB 傳輸，K_MAX 越深越多。FPGA 端只讀
+  `ceil(k/8)` 個 window。
 - 跨 invocation 的累加在 host（bitstream 沒有 C-in）。
 - 輸入只收整數；值域與大小限制見第 1 節。
 - pipeline 只 lower `linalg.matmul`（預設 indexing maps、靜態形狀的 f32 tensor）。
   帶 `indexing_maps` 的轉置 matmul、空的 M／N／K 會被拒絕並給 diagnostic。module 裡
   其他的 linalg op（例如把輸出歸零的 `linalg.fill`）不會被編成 CPU 程式碼——沒有 CPU
   fallback，bufferization 會以 `op was not bufferized` 失敗；C 要從函式參數傳進來。
-- `est_cycles` 用的是 binary search 的每次 invocation 成本 `2g - 2 + H`，不含 k 項；
-  那是 optimizer 原本的模型，沒動。
+- `est_cycles` 是 cost model 的 compute term（這次 invocation 的 k + R + C - 2 + H）；
+  read／write 由 binary search 拿來做分解，不在 `est_cycles` 裡（`docs/COSTMODEL.md`）。
 - device symbol 名稱是固定的（第 2.2 節的表）。
 
 ## 7. K_MAX_8X8 與 K_MAX_4X4

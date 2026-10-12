@@ -5,14 +5,18 @@
 //   4 x 4x4 tiles on 1 physical 4x4 accelerator instance
 //
 // The test checks physical device identity, not merely geometry.
+//
+// A tile costs its compute term, K + 2g - 2 + 95: 125 on the 8x8, 117 on
+// the 4x4. Three 8x8 tiles (375) and four 4x4 tiles (468) give makespan
+// 468; four 8x8 tiles would end at 500.
 
-// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 109 start_cycle = 0
-// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 109 start_cycle = 109
-// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 109 start_cycle = 218
-// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 101 start_cycle = 0
-// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 101 start_cycle = 101
-// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 101 start_cycle = 202
-// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 101 start_cycle = 303
+// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 125 start_cycle = 0
+// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 125 start_cycle = 125
+// CHECK: systolic.matmul_tile{{.*}} m = 8 n = 8 k = 16 on @acc_8x8_0 est_cycles = 125 start_cycle = 250
+// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 117 start_cycle = 0
+// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 117 start_cycle = 117
+// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 117 start_cycle = 234
+// CHECK: systolic.matmul_tile{{.*}} m = 4 n = 4 k = 16 on @acc_4x4_0 est_cycles = 117 start_cycle = 351
 
 module {
 systolic.device @acc_8x8_0

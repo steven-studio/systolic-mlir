@@ -110,6 +110,33 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     // the calibrated map against the geometric one is therefore a matter
     // of one attribute.
     OptionalAttr<I64Attr>:$tile_overhead,
+
+    // Read / compute / write of one invocation (lib/Systolic/Transforms/
+    // CostModel.cpp, docs/COSTMODEL.md). Every invocation runs its own depth,
+    // min(k_max, K - i * k_max): k_max is a capacity, not the depth every
+    // invocation runs. Without these attributes the model is the
+    // compute-only one: no read or write term -- what every pass computed
+    // before they existed.
+    //
+    //   read_bytes_per_cycle   operand fill of ONE invocation (beta_read).
+    //                          Distinct from dma_bytes_per_cycle, which is the
+    //                          bandwidth of explicit systolic.dma ops and of
+    //                          --systolic-schedule-overlap's separate prefetch.
+    //   write_bytes_per_cycle  result write-back of one invocation
+    //   read_overhead / write_overhead
+    //                          fixed cycles per operand fill / result write
+    //   operand_lanes          lanes per operand moved per reduction step on
+    //                          the operand path (default: rows for A, cols
+    //                          for B); the FPGA's wire is 8 lanes wide for
+    //                          every geometry
+    //   k_window               reduction steps per transfer window: a fill
+    //                          moves whole windows (FPGA: 8)
+    OptionalAttr<F64Attr>:$read_bytes_per_cycle,
+    OptionalAttr<F64Attr>:$write_bytes_per_cycle,
+    OptionalAttr<I64Attr>:$read_overhead,
+    OptionalAttr<I64Attr>:$write_overhead,
+    OptionalAttr<I64Attr>:$operand_lanes,
+    OptionalAttr<I64Attr>:$k_window,
     OptionalAttr<StrAttr>:$sym_visibility
   );
 
@@ -120,10 +147,17 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
       "(`clock_hz` `=` $clock_hz^)? "
       "(`dma_bytes_per_cycle` `=` $dma_bytes_per_cycle^)? "
       "(`tile_overhead` `=` $tile_overhead^)? "
+      "(`read_bytes_per_cycle` `=` $read_bytes_per_cycle^)? "
+      "(`write_bytes_per_cycle` `=` $write_bytes_per_cycle^)? "
+      "(`read_overhead` `=` $read_overhead^)? "
+      "(`write_overhead` `=` $write_overhead^)? "
+      "(`operand_lanes` `=` $operand_lanes^)? "
+      "(`k_window` `=` $k_window^)? "
       "(`sym_visibility` `=` $sym_visibility^)? "
       "attr-dict";
 
-  // k_max, when present, must be a positive integer.
+  // k_max, operand_lanes and k_window, when present, must be positive;
+  // bandwidths positive and finite; overheads non-negative.
   let hasVerifier = 1;
 }
 

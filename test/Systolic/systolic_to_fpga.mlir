@@ -21,33 +21,35 @@ module {
   // CHECK: llvm.func @fpga_matmul_tiled_auto_scheduled(i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
 
   // 16x8x4: the 8x8 (device 0) takes rows 0..7; the bottom half is four 4x4
-  // tiles on devices 1, 2, 3 and then 1 again at start_cycle 101.
+  // tiles on devices 1, 2, 3 and then 1 again at start_cycle 105. est_cycles
+  // is the invocation's compute term (k + 109 on the 8x8, k + 101 on a 4x4:
+  // these devices declare no read or write term).
   // CHECK-LABEL: func.func @mm_16x8x4
   // CHECK: %[[M0:.*]] = arith.constant 8 : i32
   // CHECK-NEXT: %[[K0:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[N0:.*]] = arith.constant 8 : i32
   // CHECK-NEXT: %[[D0:.*]] = arith.constant 0 : i32
   // CHECK-NEXT: %[[S0:.*]] = arith.constant 0 : i32
-  // CHECK-NEXT: %[[E0:.*]] = arith.constant 109 : i32
+  // CHECK-NEXT: %[[E0:.*]] = arith.constant 113 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled(%[[M0]], %[[K0]], %[[N0]], %{{.*}}, %{{.*}}, %{{.*}}, %[[D0]], %[[S0]], %[[E0]])
   // CHECK: %[[M1:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[K1:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[N1:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[D1:.*]] = arith.constant 1 : i32
   // CHECK-NEXT: %[[S1:.*]] = arith.constant 0 : i32
-  // CHECK-NEXT: %[[E1:.*]] = arith.constant 101 : i32
+  // CHECK-NEXT: %[[E1:.*]] = arith.constant 105 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled(%[[M1]], %[[K1]], %[[N1]], %{{.*}}, %{{.*}}, %{{.*}}, %[[D1]], %[[S1]], %[[E1]])
   // CHECK: %[[D2:.*]] = arith.constant 2 : i32
   // CHECK-NEXT: arith.constant 0 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
+  // CHECK-NEXT: arith.constant 105 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled({{.*}}, %[[D2]],
   // CHECK: %[[D3:.*]] = arith.constant 3 : i32
   // CHECK-NEXT: arith.constant 0 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
+  // CHECK-NEXT: arith.constant 105 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled({{.*}}, %[[D3]],
   // CHECK: %[[D4:.*]] = arith.constant 1 : i32
-  // CHECK-NEXT: %[[S4:.*]] = arith.constant 101 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
+  // CHECK-NEXT: %[[S4:.*]] = arith.constant 105 : i32
+  // CHECK-NEXT: arith.constant 105 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled({{.*}}, %[[D4]], %[[S4]],
   // CHECK-NOT: llvm.call @fpga_matmul_tiled_auto_scheduled
   // CHECK-NOT: systolic.matmul_tile
@@ -61,29 +63,30 @@ module {
   }
 
   // 2x3x40: one 4x4 tile clipped to 2x3, folded into k = 16, 16, 8 on
-  // device 1 at start_cycle 0, 101, 202. m and n are the clipped sizes; the
-  // runtime pads them to the array.
+  // device 1, costing 117, 117 and 109 and starting at 0, 117 and 234 -- not
+  // an equal split. m and n are the clipped sizes; the runtime pads them to
+  // the array.
   // CHECK-LABEL: func.func @mm_2x3x40
   // CHECK: %[[MA:.*]] = arith.constant 2 : i32
   // CHECK-NEXT: %[[KA:.*]] = arith.constant 16 : i32
   // CHECK-NEXT: %[[NA:.*]] = arith.constant 3 : i32
   // CHECK-NEXT: %[[DA:.*]] = arith.constant 1 : i32
   // CHECK-NEXT: %[[SA:.*]] = arith.constant 0 : i32
-  // CHECK-NEXT: %[[EA:.*]] = arith.constant 101 : i32
+  // CHECK-NEXT: %[[EA:.*]] = arith.constant 117 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled(%[[MA]], %[[KA]], %[[NA]], %{{.*}}, %{{.*}}, %{{.*}}, %[[DA]], %[[SA]], %[[EA]])
   // CHECK: arith.constant 2 : i32
   // CHECK-NEXT: arith.constant 16 : i32
   // CHECK-NEXT: arith.constant 3 : i32
   // CHECK-NEXT: arith.constant 1 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
+  // CHECK-NEXT: arith.constant 117 : i32
+  // CHECK-NEXT: arith.constant 117 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled
   // CHECK: arith.constant 2 : i32
   // CHECK-NEXT: %[[KC:.*]] = arith.constant 8 : i32
   // CHECK-NEXT: arith.constant 3 : i32
   // CHECK-NEXT: arith.constant 1 : i32
-  // CHECK-NEXT: %[[SC:.*]] = arith.constant 202 : i32
-  // CHECK-NEXT: arith.constant 101 : i32
+  // CHECK-NEXT: %[[SC:.*]] = arith.constant 234 : i32
+  // CHECK-NEXT: arith.constant 109 : i32
   // CHECK-NEXT: llvm.call @fpga_matmul_tiled_auto_scheduled(%{{.*}}, %[[KC]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[SC]],
   // CHECK-NOT: llvm.call @fpga_matmul_tiled_auto_scheduled
   // CHECK: return

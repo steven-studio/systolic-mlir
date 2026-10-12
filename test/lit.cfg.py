@@ -27,6 +27,8 @@ config.excludes = [
     # test/e2e needs the FPGA (the board or the RTL co-simulation) and is
     # run by test/e2e/run_e2e.sh, not by lit.
     "e2e",
+    # Inputs other tests' RUN lines read (%S/Inputs/...); not tests.
+    "Inputs",
 ]
 
 # Inputs for running the affine-GEMM discovery passes by hand
@@ -57,5 +59,5 @@ config.excludes += [
 ]
 
 tool_dirs = [config.systolic_tools_dir, config.llvm_tools_dir]
-tools = ["systolic-opt", "systolic-translate"]
+tools = ["systolic-opt", "systolic-translate", "systolic-cost"]
 llvm_config.add_tool_substitutions(tools, tool_dirs)
