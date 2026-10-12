@@ -250,7 +250,7 @@ compiler 與 runtime 這一段已接成單一路徑，同一份輸入一路留�
 ```
 
 執行檔 `./build/bin/systolic-matmul`（stdin 讀 M N K、A、B，與整數 CPU
-reference 逐元素比對），regression `test/e2e/run_e2e.sh`（36 組）。細節見
+reference 逐元素比對），regression `test/e2e/run_e2e.sh`（36 組固定案例＋K_MAX 邊界案例）。細節見
 `docs/E2E.md`。
 
 **證據的層級，照實寫：**

@@ -20,7 +20,8 @@ printf '2 3 4\n1 2 3 4\n-1 0 2 -3\n1 0 -1\n2 1 0\n0 -2 3\n-1 1 1\n' \
 輸入的矩陣走完 `linalg.matmul` → `systolic.matmul_tile`（binary-search 分解、
 device 指派、schedule、K 依 `k_max` 折）→ FPGA runtime 呼叫 → JIT → DPTI → FPGA，
 結果與整數 CPU reference 逐元素比對。regression：`test/e2e/run_e2e.sh
---backend board|cosim`（36 組）。說明與限制見 [`docs/E2E.md`](docs/E2E.md)。
+--backend board|cosim`（36 組固定案例＋依 K_MAX_8X8／K_MAX_4X4 產生的邊界案例；板子要先指名
+bitstream 的 `fpga_config.txt`）。說明與限制見 [`docs/E2E.md`](docs/E2E.md)。
 
 > **分支說明**:`main` 分支是投稿用的穩定版本(matmul + conv2d NHWC 兩條路徑),
 > torch-mlir 整合、conv2d NCHW 支援、`batch_matmul` 支援目前在

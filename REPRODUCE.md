@@ -273,12 +273,25 @@ and checks C element by element against an exact integer CPU reference:
 `--dump-ir` keeps `00-linalg.mlir`, `10-systolic.mlir`, `20-fpga.mlir`,
 `30-llvm.mlir` and `40-llvm.ll`. Matrix elements must be integers within
 +-2^24 (exact in binary32); M and N are limited to 512, K to 4096, and a
-run to 16384 FPGA invocations (`docs/E2E.md`, Section 1). The regression over 36 cases (the shapes
-1x1x1, 2x3x4, 4x4x4, 8x8x8, 8x4x16, 16x8x4, 16x8x40, 17x9x33, 32x32x32,
-each with zero / positive / negative / mixed integers):
+run to 16384 FPGA invocations (`docs/E2E.md`, Section 1). The regression:
+36 fixed cases (the shapes 1x1x1, 2x3x4, 4x4x4, 8x8x8, 8x4x16, 16x8x4,
+16x8x40, 17x9x33, 32x32x32, each with zero / positive / negative / mixed
+integers) and the cases at the edges of the bitstream's two capacities
+(K = 1, K_MAX - 1, K_MAX, K_MAX + 1 of K_MAX_8X8 and of K_MAX_4X4). The
+harness has no default configuration: on the board, name the programmed
+bitstream's fpga_config.txt, or the archived bitstream's profile:
 
+    export SYSTOLIC_FPGA_CONFIG=<the .bit's directory>/fpga_config.txt
+    test/e2e/run_e2e.sh --backend board --check-config   # host only, sends nothing
     test/e2e/run_e2e.sh --backend board     # the programmed Nexys Video
+    test/e2e/run_e2e.sh --backend board --profile archived-1x8x8-3x4x4
     test/e2e/run_e2e.sh --backend cosim     # RTL co-simulation, no board
+    cmake --build build --target check-e2e-config   # configuration handling, no FPGA
+
+(`--quick`: the six required shapes and one case past each capacity;
+`--fixed-only`: only the 36 fixed cases.) On the board the hardware
+configuration is not independently verified: the FPGA does not report its
+K_MAX.
 
 The co-simulation (`test/e2e/cosim/build.sh`, Verilator) runs the RTL of the
 bitstream's tag `tile-pipelined-1x8x8-3x4x4-20261009`, with only the Xilinx

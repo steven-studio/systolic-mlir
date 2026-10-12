@@ -57,7 +57,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 | `SYSTOLIC_RUNTIME_TRACE=1` | 每次 FPGA invocation 一行（device、tile、job.k、schedule） |
 | `SYSTOLIC_DPTI_TRACE=1` | 每個 DPTI 封包（MEM_WRITE、每個 WRITE32） |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
-| `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）；沒設就是封存那顆的 16／16 |
+| `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）。沒設時 runtime 用封存那顆的 16／16（built-in default，輸出會印出來源）；E2E harness 不接受沒設（第 3 節） |
 
 結束碼：0 PASS、1 FAIL（不相等）、2 輸入錯或超出範圍、3 編譯失敗、4 FPGA／runtime
 錯誤。runtime 呼叫失敗時直接回報 4，不會把沒算完的 C 當結果比。
@@ -184,42 +184,127 @@ runtime 同步執行：一次一個 invocation，結果回來才送下一個。
 封存的 bitstream：`artifacts/fpga/tile_pipelined/1x8x8-3x4x4/`，tag
 `tile-pipelined-1x8x8-3x4x4-20261009`（commit 22027c4），WNS +0.079 ns，
 `systolic_dma_top_1x8x8_3x4x4.bit` 的 sha256 是
-`b9087bade05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0`。
+`71b6847d5b4c30b23fc99c5ff30a24254552161702ddfd1fb79a3d5657edff7d`（repo 裡的檔案與
+`SHA256SUMS`，自 commit 1a22f76 起）。2026-10-12 以前這裡與 `run_e2e.sh` 寫的是
+`b9087bade05bd5efc9cad456736a3c0ebb757e62de64d824de0c79e691e7f3e0`：那是 commit 7d2d28b 的
+`SHA256SUMS`，當時 `.bit` 還沒進 repo；1a22f76 把 `.bit` 加進來並把 `SHA256SUMS` 改成現在的值。
+兩個值為何不同，repo 裡沒有紀錄。它的設定檔是 `test/e2e/profiles/archived-1x8x8-3x4x4.cfg`
+（第 3 節）。
 `rtl/` 在之後的 branch 上仍在改（per-accelerator context 等），那些版本不是這顆
 bitstream。
 
 ## 3. Regression：`test/e2e/run_e2e.sh`
 
+先指名 FPGA 上那顆 bitstream 的設定；harness 沒有預設值。
+
 ```bash
-test/e2e/run_e2e.sh --backend board      # 板子（先燒好上面那顆 bitstream）
-test/e2e/run_e2e.sh --backend cosim      # RTL co-simulation（見第 4 節）
-test/e2e/run_e2e.sh --backend cosim --quick   # 只跑六個必要形狀
-test/e2e/run_e2e.sh --backend cosim --kmax-cases   # 改跑 K 落在 K_MAX 邊界的組（第 7 節）
+# 板子：dma_top_build.tcl 寫在 .bit 旁邊的 fpga_config.txt
+export SYSTOLIC_FPGA_CONFIG=<bitstream 的目錄>/fpga_config.txt
+test/e2e/run_e2e.sh --backend board --check-config   # 只做 host 端：解析、檢查、列出會送的 case；不碰 FPGA
+test/e2e/run_e2e.sh --backend board --quick          # 六個必要形狀 + 8x8x(K8+1)、4x4x(K4+1)
+test/e2e/run_e2e.sh --backend board                  # 36 組固定案例 + K_MAX 邊界案例
+
+# 封存的 bitstream（第 2.4 節）：明確指名它的 profile
+test/e2e/run_e2e.sh --backend board --profile archived-1x8x8-3x4x4
+
+# RTL co-simulation：設定取自 co-sim 自己的 fpga_config.txt（第 4 節）
+test/e2e/run_e2e.sh --backend cosim
+test/e2e/run_e2e.sh --backend cosim --fixed-only     # 只跑 36 組固定案例（2026-10-13 以前的預設）
+test/e2e/run_e2e.sh --backend cosim --kmax-cases     # 只跑 K_MAX 邊界案例
+
+# 設定處理的測試，不需要 FPGA、不啟動 co-sim
+cmake --build build --target check-e2e-config        # 即 test/e2e/test_e2e_config.sh
 ```
 
-`--out DIR` 指定輸出目錄（預設 `build/e2e/<backend>`）；目錄會先清空，所以只接受空的或
-`run_e2e.sh` 自己建的目錄（裡面有 `.run_e2e_out`），指到別的目錄會拒絕、不刪。
+`--out DIR` 指定輸出目錄（預設 `build/e2e/<backend>`，`--check-config` 時
+`build/e2e/check-config-<backend>`）；目錄會先清空，所以只接受空的或 `run_e2e.sh` 自己建的
+目錄（裡面有 `.run_e2e_out`），指到別的目錄會拒絕、不刪。`--cases a,b` 只跑指名的 case，
+`--extra-k K,K` 在邊界案例之外再加 12x12xK。
 
-0. 設定檔檢查：七個壞掉的 `SYSTOLIC_FPGA_CONFIG`（前導零、0、超過 16376、非數字、缺
-   `K_MAX_4X4`、別的 fleet、檔案不存在），`systolic-matmul` 都必須以 4 結束並說出原因，
-   而且不開 FPGA 連線（co-sim 上不得多出 session）。
-1. `runtime-dispatch-test`：只測 runtime 層——每顆 device 一次 invocation，含邊界
-   tile 與 `C_in != 0`。
-2. `gen_cases.py` 的 36 組：形狀 1x1x1、2x3x4、4x4x4、8x8x8、8x4x16、16x8x4，加上
-   K 要折的 16x8x40、17x9x33、32x32x32；每個形狀四種值：全 0、正、負、混合。
-   每組都走 `systolic-matmul` 全程。
+**設定從哪裡來。** K_MAX_8X8、K_MAX_4X4 與 operand slab 一律由 runtime 自己的 parser 解析
+（`runtime-dispatch-test --print-config`，與 `systolic-matmul` 讀同一個檔、同樣的規則），case
+與每一項檢查都由這三個值推出。兩個 K_MAX 各自獨立，沒有任何地方假設它們相等。
 
-一組 PASS 的條件：`systolic-matmul` 驗證 PASS；每個 `systolic.matmul_tile` 都恰好
-變成一次 FPGA invocation；在 co-sim 上，runtime 在 FTDI 那層計的送出 byte 數等於
-RTL 真正讀走（RD#）的 byte 數，host 送出的每個 byte 都被讀走，runtime 收到的 byte 數
-等於 RTL 送出（WR#）的 byte 數。每組的輸入、輸出與五層 IR 都留在
-`build/e2e/<backend>/<case>/`，總表在 `build/e2e/<backend>/summary.txt`。
+- board：`SYSTOLIC_FPGA_CONFIG`，或 `--profile NAME`（`test/e2e/profiles/NAME.cfg`），二選一。
+  兩個都給、都沒給、profile 不存在、檔案打不開、缺 `K_MAX_8X8` 或 `K_MAX_4X4`、格式或範圍不對，
+  都在送出任何東西之前、清空 `--out` 之前以 2 結束（`E2E: FAIL -- CONFIGURATION`）。
+- cosim：co-sim 的 `fpga_config.txt`；另外指名的設定（環境變數或 `--profile`）必須解析成同一組
+  K_MAX_8X8、K_MAX_4X4 與 slab，否則停下。co-sim 沒有 `fpga_config.txt` 時必須另外指名。
+- 同一個檔裡的 metadata 必須與 K_MAX 一致，否則同樣停下：`HOST_SLAB_BYTES` 等於 slab、`K_DIM`
+  等於 K_MAX_8X8（`dma_top_build.tcl` 的定義）、每個 key 只出現一次（runtime 會取最後一個）、
+  `BITSTREAM` 在本機時它的 sha256 等於 `BITSTREAM_SHA256`（相對路徑以設定檔的目錄為準）。
+- 三件事分開印：host 端的設定（runtime 解析的值）、bitstream metadata（檔案記的內容，與本機
+  `.bit` 的比對結果）、實際載入的硬體。FPGA 不回報自己的 K_MAX（DPTI 只有 WRITE32 與
+  MEM_WRITE，沒有讀暫存器），所以板子上一律印 `Hardware configuration not independently
+  verified`；設定與板上的 bitstream 不符時，只會表現成 invocation 失敗或結果錯誤。
+- runtime 本身（直接執行 `systolic-matmul` 時）沒設 `SYSTOLIC_FPGA_CONFIG` 仍用 built-in 的
+  16／16；harness 不依賴它：`runtime-dispatch-test` 沒設就拒絕執行，每組 case 也檢查
+  `systolic-matmul` 讀到的來源與數值。
 
+步驟：
+
+0. 設定檔檢查：十五個壞掉的 `SYSTOLIC_FPGA_CONFIG`（前導零、0、超過 16376、非數字、缺
+   `K_MAX_4X4`、缺 `K_MAX_8X8`、帶正負號、空值、十六進位、別的 fleet（4x4 或 8x8 的數量）、
+   不是 KEY=VALUE、檔案不存在、空檔），`systolic-matmul` 都必須以 4 結束並說出原因。co-sim 上
+   用合法的題目，而且不得多出 session；其他情況用 `M = 0` 的題目，設定就算被誤收，也會在讀
+   題目時停下，不會碰到板子。
+1. `runtime-dispatch-test`：只測 runtime 層，依兩個 K_MAX 各自產生——8x8 與 4x4 的整塊 tile
+   （k = K_MAX）、邊界 tile、`C_in != 0`；device 0、1、3 上 k = 1、K_MAX − 1（K_MAX = 1 時沒有
+   這個 K，列為 n/a）、K_MAX；k = K_MAX + 1 在 device 1 與 0 上必須回傳 -10、什麼都不送。數值是
+   小整數，K_MAX 到 16376 都在 binary32 內精確。它印出的設定必須與上面解析的相同。`--list`
+   只列出會送的 invocation、`--print-config` 只印設定，兩者都不開連線。
+2. 每組 case 走 `systolic-matmul` 全程（`gen_cases.py`）：
+   - 預設：36 組固定案例（形狀 1x1x1、2x3x4、4x4x4、8x8x8、8x4x16、16x8x4、16x8x40、
+     17x9x33、32x32x32，各四種值：全 0、正、負、混合），加上 K_MAX 邊界案例：12x12xK，K = 1、
+     K_MAX − 1、K_MAX、K_MAX + 1（兩個 K_MAX 各一組）、2·max(K8, K4) + 3，以及 4x4xK4、8x8xK8
+     （混合值）。固定形狀不變，它們怎麼折 K 由設定決定（16／16 時 16x8x40 折成 16 + 16 + 8，
+     K_MAX 512 時都不折）；跟著容量走的是邊界案例。
+   - `--quick`：六個必要形狀 x 四種值，加上 8x8x(K8+1)、4x4x(K4+1)。兩個 K_MAX 裡較大的那個
+     比每顆 device 都深，所以任何設定下都至少有一組被折成兩次 invocation（第二次累加到不是零
+     的 C 上）；8x8、4x4、邊界 tile 由六個形狀涵蓋（每次實際用到的見 summary 的 coverage 行）。
+   - `--fixed-only`：只有 36 組固定案例。`--kmax-cases`：只有邊界案例。
+   - K 超過 `systolic-matmul` 的輸入上限（K ≤ 4096，從它的 `--help` 讀）的 case 不跑，列為
+     NOT RUN 並寫明原因。
 3. 只在 co-sim：故意弄壞一次傳輸。session 的第 7 次 write（第一個 descriptor 的
    第 5 個 WRITE32）失敗時，`systolic-matmul` 必須以 4 結束、runtime 回報
-   `first error -6`，RTL 只收到並讀走 MEM_WRITE 與 4 個 WRITE32（`9 + slab + 24`
+   `first error -6`（TRANSPORT），RTL 只收到並讀走 MEM_WRITE 與 4 個 WRITE32（`9 + slab + 24`
    byte，16／16 時 1057 B）——沒有 submit，所以也沒有任何結果送回。16x8x4 要是五次
    invocation 這個檢查才成立，所以 K_MAX_8X8 或 K_MAX_4X4 小於 4 時記為 NOT TESTED。
+
+每組的分類（`test/e2e/e2e_verdict.py`），表中同時保留原始的 exit status（EXIT）與 runtime 的
+回傳碼（RT_RC，第一個錯誤）：
+
+| 分類 | 條件 |
+|---|---|
+| PASS | 結果與 CPU reference 逐元素相等；每個 `systolic.matmul_tile` 恰好一次 invocation；每次 invocation 送出 9 + slab + 84 byte（設定的 slab）；co-sim 上 RTL 讀走（RD#）與送出（WR#）的 byte 數等於 runtime 計的 |
+| MISMATCH | 數值不符（exit 1） |
+| CONFIG | `systolic-matmul` 拒絕設定（exit 4）、runtime -16，或設定沒有原樣到達某一層：runtime 讀到別的值或別的檔（例如 built-in 的 16／16）、compiler 用別的 k_max 折 K、某個 tile 比它的 device 深、K 沒有照該幾何的 K_MAX 折、slab 長度不對 |
+| TRANSPORT | 鏈路失敗：-3、-4、-6、-7、-8（-14 是先前失敗之後被拒絕的呼叫）；co-sim 上 RTL 搬的 byte 數與 runtime 計的不同 |
+| SUBMISSION | runtime 拒絕或無法送出 invocation：-5、-10、-11、-12、-13、-15 |
+| INPUT／COMPILE | `systolic-matmul` 拒絕輸入（exit 2）／編譯失敗（exit 3） |
+| FAIL | 其他（signal、沒有驗證結果、tile 數不等於 invocation 數……） |
+| NOT RUN | 沒有執行：K 超過輸入上限，或 runtime 層已經 TRANSPORT／CONFIG 失敗（`--keep-going` 照跑） |
+
+rc = -6 是傳輸失敗，不是 GEMM 算錯；-14 是先前那次失敗的後果，不另算一個獨立的錯誤。每組的
+輸入、輸出與五層 IR 都留在 `<out>/<case>/`，總表在 `<out>/summary.txt`，最後幾行是：設定、硬體
+是否驗證、`configuration refusal`、`runtime layer`、`E2E cases: P/T PASS on backend B`（加上
+各分類的數量與 NOT RUN）、通過的 case 實際涵蓋了什麼（每顆 device 的 tile 數、邊界 tile、8x8 與
+4x4 是否折 K、是否跑到 k = K_MAX），以及 `E2E: PASS …` 或 `E2E: FAIL -- …`。結束碼：0 全部通過、
+2 設定被拒絕（什麼都沒送）、1 其他。
+
+**換一顆新的 bitstream。** `dma_top_build.tcl -tclargs build v1 <K8> <K4>` 成功後，`.bit` 旁邊
+有 `fpga_config.txt`（K_MAX、fleet、`HOST_SLAB_BYTES`、`BITSTREAM_SHA256`、git revision、
+WNS／WHS）。確認燒進板子的就是這顆 `.bit` 之後：
+
+```bash
+export SYSTOLIC_FPGA_CONFIG=<那個目錄>/fpga_config.txt
+test/e2e/run_e2e.sh --backend board --check-config   # 先看解析出的 K8、K4、slab 與 metadata
+test/e2e/run_e2e.sh --backend board --quick
+test/e2e/run_e2e.sh --backend board
+```
+
+要長期保存的 bitstream，可以把它的設定檔放進 `test/e2e/profiles/<名字>.cfg`（`BITSTREAM` 用
+相對路徑、附 `BITSTREAM_SHA256`），之後用 `--profile <名字>`。
 
 ## 4. RTL co-simulation（沒有板子時）
 
@@ -235,8 +320,8 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   把 slab 放在 0x10000，`ceil(K/8)·512` byte 要放得進 64 KiB——這是模擬環境的限制，
   板子的 DDR 沒有）。build.sh 把這次用的參數寫進 `fpga_config.txt`，
   `run_e2e.sh --backend cosim` 自動把 `SYSTOLIC_FPGA_CONFIG` 指過去，所以 compiler、
-  runtime 與模擬的 RTL 用同一組值；已經 export 的 `SYSTOLIC_FPGA_CONFIG` 若寫的是別的
-  K_MAX，run_e2e.sh 直接停下，不讓 runtime 對著不同的 RTL 送 slab。
+  runtime 與模擬的 RTL 用同一組值；已經 export 的 `SYSTOLIC_FPGA_CONFIG`（或 `--profile`）
+  若寫的是別的 K_MAX 或 slab，run_e2e.sh 直接停下，不讓 runtime 對著不同的 RTL 送 slab。
 - 只換 Xilinx IP：MIG／MMCM／VIO 用既有的 `tb/mig_axi_model.sv`、
   `tb/xil_stubs.sv`；FP IP 用 `test/e2e/cosim/fp_ieee.sv`（binary32、round to
   nearest even、denormal flush、latency 8／11 取自 .xci）。`tb/fp_model.sv` 是整數
@@ -270,8 +355,9 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
 | lit | `cmake --build build --target check-systolic` | 38/38 |
-| runtime → FPGA | `build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
-| E2E | `test/e2e/run_e2e.sh --backend board` | `E2E cases: 36/36 PASS` |
+| E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
+| runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
+| E2E | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> test/e2e/run_e2e.sh --backend board` | `E2E: PASS`（`E2E cases: N/N PASS`；N 依設定而定） |
 
 ## 6. 已知限制
 
@@ -300,7 +386,8 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 |---|---|
 | bitstream | `dma_top_build.tcl -tclargs build v1 <K8> <K4>`；成功後在 `.bit` 旁寫 `fpga_config.txt`（K、fleet、variant、bitstream sha256、git revision、WNS/WHS） |
 | RTL 模擬 | `run_top_sim.sh`（第 5、6 個參數）、`run_kmax_sim.sh <K8> <K4> [v1\|v2]`、`test/e2e/cosim/build.sh`（環境變數，同樣寫 `fpga_config.txt`） |
-| runtime | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt>`；沒設＝16／16 |
+| runtime | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt>`；沒設＝16／16（built-in default） |
+| E2E harness | 同一個檔，由 runtime 的 parser 解析（`runtime-dispatch-test --print-config`）；沒有預設值，board 要 `SYSTOLIC_FPGA_CONFIG` 或 `--profile`（第 3 節） |
 | compiler | `systolic-matmul` 從 runtime 拿同一組值產生 fleet 的 `k_max`，並交給 FPGA lowering 當實體 K_MAX；`systolic-opt` 用 `phys-k-max-8x8=` / `phys-k-max-4x4=` |
 
 全部組態一次跑完（RTL bench、co-sim build、36 組固定案例、K_MAX 邊界案例）：

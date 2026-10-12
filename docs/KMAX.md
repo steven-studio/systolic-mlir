@@ -198,12 +198,16 @@ test/e2e/run_kmax_matrix.sh 24:12           # 只跑一組
 
 # 新的 host 對舊 RTL（16／16）：bitstream tag 的 RTL、golden commit 的 RTL
 COSIM_BUILD_DIR=build/cosim_tag test/e2e/cosim/build.sh
-test/e2e/run_e2e.sh --backend cosim --cosim-dir build/cosim_tag --out build/e2e/compat_tag
+test/e2e/run_e2e.sh --backend cosim --cosim-dir build/cosim_tag --out build/e2e/compat_tag --fixed-only
 COSIM_BUILD_DIR=build/cosim_golden RTL_REV=golden-tile-pipelined-1x8x8-3x4x4 test/e2e/cosim/build.sh
-test/e2e/run_e2e.sh --backend cosim --cosim-dir build/cosim_golden --out build/e2e/compat_golden
+test/e2e/run_e2e.sh --backend cosim --cosim-dir build/cosim_golden --out build/e2e/compat_golden --fixed-only
 
-# 板子（燒好用 K8/K4 build 的 bitstream 之後）
+# E2E harness 的設定處理（只在 host 端，不需要 FPGA）
+cmake --build build --target check-e2e-config
+
+# 板子（燒好用 K8/K4 build 的 bitstream 之後；harness 沒有預設設定，見 docs/E2E.md 第 3 節）
 export SYSTOLIC_FPGA_CONFIG=<impl_1 目錄>/fpga_config.txt
-test/e2e/run_e2e.sh --backend board
-test/e2e/run_e2e.sh --backend board --kmax-cases
+test/e2e/run_e2e.sh --backend board --check-config   # host 端：解析與檢查，不送任何東西
+test/e2e/run_e2e.sh --backend board                  # 36 組固定案例 + K_MAX 邊界案例
+test/e2e/run_e2e.sh --backend board --kmax-cases     # 只跑 K_MAX 邊界案例
 ```

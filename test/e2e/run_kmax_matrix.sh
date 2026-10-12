@@ -16,14 +16,15 @@
 #             k after a deeper one, a three-invocation partial sum, and
 #             descriptors with k outside 1..K_MAX refused
 #   cosim     test/e2e/cosim/build.sh (RTL_DIR=., K_MAX_8X8=K8, K_MAX_4X4=K4)
-#   standard  run_e2e.sh --backend cosim: the 36 fixed cases (nine shapes x
-#             four value classes, K = 1 .. 40) -- systolic-matmul (compiler
-#             with k_max = K8 / K4, FPGA lowering checked against the same
-#             physical K_MAX) -> JIT -> runtime (SYSTOLIC_FPGA_CONFIG = the
-#             co-simulation's fpga_config.txt) -> DPTI -> the RTL, against the
-#             CPU reference; plus the configuration refusals, the runtime
-#             layer on its own (runtime-dispatch-test) and, where it applies,
-#             the broken-link check
+#   standard  run_e2e.sh --backend cosim --fixed-only: the 36 fixed cases
+#             (nine shapes x four value classes, K = 1 .. 40) --
+#             systolic-matmul (compiler with k_max = K8 / K4, FPGA lowering
+#             checked against the same physical K_MAX) -> JIT -> runtime
+#             (SYSTOLIC_FPGA_CONFIG = the co-simulation's fpga_config.txt) ->
+#             DPTI -> the RTL, against the CPU reference; plus the
+#             configuration refusals, the runtime layer on its own
+#             (runtime-dispatch-test) and, where it applies, the broken-link
+#             check
 #   kmax      run_e2e.sh --backend cosim --kmax-cases: the same pipeline for
 #             K = 1, K_MAX - 1, K_MAX, K_MAX + 1 and 2 * max(K8, K4) + 3 of
 #             each capacity, on outputs that use the 8x8 and the 4x4s together
@@ -79,7 +80,7 @@ for cfg in "${CONFIGS[@]}"; do
                 bash "$HERE/cosim/build.sh") > "$OUT/cosim_build_$tag.log" 2>&1; then
             cosim=PASS
             if [ "${SKIP_STANDARD:-0}" != 1 ]; then
-                std=$(e2e "$tag" "$cdir" standard)
+                std=$(e2e "$tag" "$cdir" standard --fixed-only)
                 [ "$std" = PASS ] || all_ok=0
                 note="std: $(grep -E '^E2E cases:' "$OUT/e2e_standard_$tag.log" | tail -1 | sed 's/^E2E cases: //')"
             fi
