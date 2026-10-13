@@ -25,7 +25,9 @@
 #                     K_MAX values all stop (exit 2) before the output
 #                     directory is touched; the cases a run would send follow
 #                     the configuration (quick, full, 1 / 1, K beyond
-#                     systolic-matmul's limit NOT RUN); the archived profile;
+#                     systolic-matmul's limit NOT RUN); --regression is the
+#                     default and --quick cases, each once and unchanged,
+#                     then its seven larger ones; the archived profile;
 #                     the co-simulation's record against a named
 #                     configuration
 #   verdicts          e2e_verdict.py on made-up case directories: PASS,
@@ -217,6 +219,42 @@ check_cases "1 / 1: K = 1, 2 and 5, no K = 0" "$WORK/k1_1.txt" "--kmax-cases" \
 check_cases "16376 / 1: K beyond systolic-matmul's limit is NOT RUN, the 4x4s' boundaries run" "$WORK/k16376_1.txt" "--kmax-cases" \
     +12x12x1_mixed +12x12x2_mixed +4x4x1_mixed '!12x12x16375_mixed' '!12x12x16377_mixed' '!8x8x16376_mixed' '!12x12x32755_mixed'
 check_cases "--extra-k with the boundary cases" "$WORK/k24_12.txt" "--kmax-cases --extra-k 7,48" +12x12x7_mixed +12x12x48_mixed
+
+# --regression: every case of the default run and of --quick, once, with the
+# same name and input file, in that order, then the seven larger ones, which
+# no other mode runs.
+NEW7=(64x64x64_mixed 32x64x32_mixed 16x16x31_mixed 32x32x65_mixed 7x7x16_mixed 15x15x16_mixed 33x33x16_mixed)
+f16=$(cfg k16_16.txt 'K_MAX_8X8=16\nK_MAX_4X4=16\n')
+check_cases "16 / 16, --regression: the default and --quick cases, then the seven larger ones" "$f16" "--regression" \
+    +1x1x1_zero +16x8x4_mixed +32x32x32_zero +32x32x32_mixed +12x12x15_mixed +12x12x35_mixed \
+    +8x8x16_mixed +8x8x17_mixed +4x4x17_mixed "${NEW7[@]/#/+}" -64x64x64_zero -16x16x16_mixed
+check_cases "--extra-k with --regression" "$f16" "--regression --extra-k 7,48" +12x12x7_mixed +12x12x48_mixed +64x64x64_mixed
+reg_ok=1; reg_why=""
+for m in default quick regression; do
+    args=(); [ "$m" = default ] || args=("--$m")
+    SYSTOLIC_FPGA_CONFIG="$f16" bash "$RUN" --backend board --build-dir "$BUILD" --check-config \
+        --out "$WORK/or_$m" ${args[@]+"${args[@]}"} > "$WORK/or_$m.log" 2>&1 \
+        || { reg_ok=0; reg_why="$m --check-config: $(tail -1 "$WORK/or_$m.log")"; }
+done
+if [ "$reg_ok" = 1 ]; then
+    want=$({ cat "$WORK/or_default/case_list.txt" "$WORK/or_quick/case_list.txt"; printf '%s\n' "${NEW7[@]}"; } | awk '!seen[$0]++')
+    [ "$(cat "$WORK/or_regression/case_list.txt")" = "$want" ] \
+        || { reg_ok=0; reg_why="the case list is not the default run's, then --quick's, then the seven, each once"; }
+    for n in "${NEW7[@]}"; do
+        ! grep -qx -- "$n" "$WORK/or_default/case_list.txt" "$WORK/or_quick/case_list.txt" \
+            || { reg_ok=0; reg_why="$n is in the default or --quick run"; }
+    done
+    for m in default quick; do
+        while read -r n; do
+            cmp -s "$WORK/or_$m/cases/$n.txt" "$WORK/or_regression/cases/$n.txt" \
+                || { reg_ok=0; reg_why="$n: the --regression input differs from the $m run's"; }
+        done < "$WORK/or_$m/case_list.txt"
+    done
+fi
+[ "$reg_ok" = 1 ] && ok "16 / 16: --regression = the default and --quick cases (same inputs, each once) + seven no other mode runs" \
+    || bad "16 / 16 --regression case set" "$reg_why"
+out=$(bash "$RUN" --backend board --build-dir "$BUILD" --quick --regression --check-config --out "$WORK/ox" 2>&1); rc=$?
+[ $rc -eq 2 ] && has "$out" "exclude each other" && ok "--quick with --regression: exit 2" || bad "--quick with --regression" "$out"
 
 out=$(SYSTOLIC_FPGA_CONFIG="$WORK/k24_12.txt" bash "$RUN" --backend board --build-dir "$BUILD" --check-config --out "$WORK/o5" 2>&1); rc=$?
 [ $rc -eq 0 ] && has "$out" "K_MAX_8X8 = 24, K_MAX_4X4 = 12, 1536-byte operand slab" \

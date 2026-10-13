@@ -47,6 +47,9 @@
 #                     8x8x(K8 + 1) and 4x4x(K4 + 1)
 #   --fixed-only      only the 36 fixed cases (nine shapes x four classes)
 #   --kmax-cases      only the K_MAX boundary cases
+#   --regression      every default and --quick case once, then larger
+#                     GEMMs with mixed values: 64x64x64, 32x64x32,
+#                     16x16x31, 32x32x65, 7x7x16, 15x15x16, 33x33x16
 #   --extra-k K,K,..  with the boundary cases, also 12 x 12 x K for each K
 #   --cases a,b,...   only these cases (names as gen_cases.py prints them)
 #   --keep-going      run the cases even when the runtime layer could not
@@ -100,6 +103,7 @@ while [ $# -gt 0 ]; do
         --quick)        MODE=quick; MODES=$((MODES + 1)); shift ;;
         --fixed-only)   MODE=fixed; MODES=$((MODES + 1)); shift ;;
         --kmax-cases)   MODE=kmax; MODES=$((MODES + 1)); shift ;;
+        --regression)   MODE=regression; MODES=$((MODES + 1)); shift ;;
         --extra-k)      EXTRA_K="$2"; shift 2 ;;
         --cases)        ONLY="$2"; shift 2 ;;
         --keep-going)   KEEP_GOING=1; shift ;;
@@ -108,10 +112,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$BACKEND" in board|cosim) ;; *) echo "--backend board|cosim" >&2; exit 2 ;; esac
-[ "$MODES" -le 1 ] || { echo "--quick, --fixed-only and --kmax-cases exclude each other" >&2; exit 2; }
+[ "$MODES" -le 1 ] || { echo "--quick, --fixed-only, --kmax-cases and --regression exclude each other" >&2; exit 2; }
 if [ -n "$EXTRA_K" ] && { [ "$MODE" = quick ] || [ "$MODE" = fixed ] ||
                           ! [[ "$EXTRA_K" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; }; then
-    echo "--extra-k takes a comma-separated list of positive integers and goes with the K_MAX boundary cases (the default or --kmax-cases)" >&2
+    echo "--extra-k takes a comma-separated list of positive integers and goes with the K_MAX boundary cases (the default, --kmax-cases or --regression)" >&2
     exit 2
 fi
 
@@ -319,6 +323,7 @@ case "$MODE" in
     quick) GEN+=(--quick "$K8" "$K4") ;;
     kmax)  GEN+=(--kmax "$K8" "$K4") ;;
     full)  GEN+=(--full "$K8" "$K4") ;;
+    regression) GEN+=(--regression "$K8" "$K4") ;;
 esac
 [ -n "$EXTRA_K" ] && GEN+=("$EXTRA_K")
 if [ -n "$KLIM" ]; then

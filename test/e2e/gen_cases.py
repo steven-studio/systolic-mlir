@@ -16,6 +16,9 @@
     python3 gen_cases.py OUT_DIR --quick K8 K4    the six required shapes, then
                                                   8 x 8 x (K8 + 1) and
                                                   4 x 4 x (K4 + 1)
+    python3 gen_cases.py OUT_DIR --regression K8 K4 [K,K,...]
+                                                  every --full and --quick case
+                                                  once, then REGRESSION_SHAPES
 
 K8 and K4 are the bitstream's two capacities, as the runtime resolved them
 (run_e2e.sh passes what runtime-dispatch-test --print-config printed); they
@@ -53,6 +56,10 @@ each capacity, 8 x 8 x (K8 + 1) and 4 x 4 x (K4 + 1), mixed values: whichever
 capacity is the larger, its case is deeper than every device holds, so at
 least one of the two is folded into two chained invocations (the second one
 accumulating onto a C that is no longer zero) on any configuration.
+
+--regression runs every case of --full and of --quick once, under the same
+name and with the same values, then REGRESSION_SHAPES with the mixed value
+class. Extra K values add 12 x 12 x K cases, as with --full.
 """
 
 import os
@@ -76,6 +83,19 @@ SHAPES = REQUIRED + [
     (16, 8, 40),    # every device busy
     (17, 9, 33),    # edge tiles in M and N
     (32, 32, 32),   # several rounds on every device
+]
+
+# --regression only, after every --full and --quick case, mixed values: what
+# the other modes do not reach. How K folds is again the configuration's;
+# at 16 / 16:
+REGRESSION_SHAPES = [
+    (64, 64, 64),   # the largest output; K folds 16 + 16 + 16 + 16
+    (32, 64, 32),   # N > M across many tiles; 16 + 16
+    (16, 16, 31),   # 16 + 15: the last fold K_MAX - 1 deep, not a whole window
+    (32, 32, 65),   # five chained invocations per output tile, the last k = 1
+    (7, 7, 16),     # one tile smaller than the 8x8 in both M and N
+    (15, 15, 16),   # 8x7 on the 8x8; 3x3, 3x4 and 4x3 on the 4x4s
+    (33, 33, 16),   # M = N = 32 + 1: one-wide edge strips along a large output
 ]
 
 CLASSES = {
@@ -137,7 +157,7 @@ def main():
     cases = []
     if mode is None and len(args) == 1:
         cases = [(m, n, k, list(CLASSES)) for (m, n, k) in SHAPES]
-    elif mode in ("--kmax", "--full", "--quick") and len(args) in (4, 5):
+    elif mode in ("--kmax", "--full", "--quick", "--regression") and len(args) in (4, 5):
         k8, k4 = positive(args[2]), positive(args[3])
         extra = []
         if len(args) == 5:
@@ -154,6 +174,14 @@ def main():
             cases = boundary
         elif mode == "--full":
             cases = [(m, n, k, list(CLASSES)) for (m, n, k) in SHAPES] + boundary
+        elif mode == "--regression":
+            # --full's cases, then --quick's, then the larger ones; a case an
+            # earlier list already wrote is skipped below (seen), so each one
+            # keeps the name and values its own mode gives it.
+            cases = [(m, n, k, list(CLASSES)) for (m, n, k) in SHAPES] + boundary
+            cases += [(m, n, k, list(CLASSES)) for (m, n, k) in REQUIRED]
+            cases += [(m, n, k, ["mixed"]) for (m, n, k) in quick_shapes(k8, k4)]
+            cases += [(m, n, k, ["mixed"]) for (m, n, k) in REGRESSION_SHAPES]
         else:
             cases = [(m, n, k, list(CLASSES)) for (m, n, k) in REQUIRED]
             cases += [(m, n, k, ["mixed"]) for (m, n, k) in quick_shapes(k8, k4)]

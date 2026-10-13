@@ -203,6 +203,7 @@ export SYSTOLIC_FPGA_CONFIG=<bitstream 的目錄>/fpga_config.txt
 test/e2e/run_e2e.sh --backend board --check-config   # 只做 host 端：解析、檢查、列出會送的 case；不碰 FPGA
 test/e2e/run_e2e.sh --backend board --quick          # 六個必要形狀 + 8x8x(K8+1)、4x4x(K4+1)
 test/e2e/run_e2e.sh --backend board                  # 36 組固定案例 + K_MAX 邊界案例
+test/e2e/run_e2e.sh --backend board --regression     # 預設與 --quick 的案例各一次，再加 7 組較大的 GEMM
 
 # 封存的 bitstream（第 2.4 節）：明確指名它的 profile
 test/e2e/run_e2e.sh --backend board --profile archived-1x8x8-3x4x4
@@ -263,6 +264,10 @@ cmake --build build --target check-e2e-config        # 即 test/e2e/test_e2e_con
      比每顆 device 都深，所以任何設定下都至少有一組被折成兩次 invocation（第二次累加到不是零
      的 C 上）；8x8、4x4、邊界 tile 由六個形狀涵蓋（每次實際用到的見 summary 的 coverage 行）。
    - `--fixed-only`：只有 36 組固定案例。`--kmax-cases`：只有邊界案例。
+   - `--regression`：預設與 `--quick` 的全部案例各跑一次（名稱與輸入和原模式相同），再加 7 組
+     混合值的案例：64x64x64、32x64x32、16x16x31、32x32x65、7x7x16、15x15x16、33x33x16。
+     16／16 時它們涵蓋其他模式沒有的情況：較大的輸出、4 到 5 段的 K fold、尾段 k = K_MAX − 1
+     的 fold、N > M 的多 tile、8x8 上的部分 tile。與其他模式互斥，可加 `--extra-k`。
    - K 超過 `systolic-matmul` 的輸入上限（K ≤ 4096，從它的 `--help` 讀）的 case 不跑，列為
      NOT RUN 並寫明原因。
 3. 只在 co-sim：故意弄壞一次傳輸。session 的第 7 次 write（第一個 descriptor 的
