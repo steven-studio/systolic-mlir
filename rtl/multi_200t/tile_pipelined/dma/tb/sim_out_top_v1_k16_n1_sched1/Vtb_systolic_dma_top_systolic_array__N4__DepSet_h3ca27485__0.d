@@ -1,3 +1,0 @@
-Vtb_systolic_dma_top_systolic_array__N4__DepSet_h3ca27485__0.o: \
- Vtb_systolic_dma_top_systolic_array__N4__DepSet_h3ca27485__0.cpp \
- Vtb_systolic_dma_top__pch.h Vtb_systolic_dma_top_systolic_array__N4.h
