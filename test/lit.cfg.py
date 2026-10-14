@@ -68,12 +68,12 @@ if config.cfront_clang:
     # output with what systolic-cc made of it.
     config.substitutions.append(("%host-cc", '"%s"' % config.cfront_clang))
     # The driver: the front end, the existing pipeline, the host compile and
-    # the link, with the software runtime model unless a test says
-    # otherwise. The LLVM build is the one llvm_tools_dir belongs to (llc,
+    # the link, with the software runtime model (the driver's own default is
+    # the board) unless a test says otherwise. The LLVM build is the one llvm_tools_dir belongs to (llc,
     # mlir-translate, mlir_c_runner_utils).
     cc = os.path.join(config.systolic_tools_dir, "systolic-cc")
     config.substitutions.append(
-        ("%systolic-cc", '"%s" --clang "%s" --build-dir "%s" '
+        ("%systolic-cc", '"%s" --runtime=soft --clang "%s" --build-dir "%s" '
          '--llvm-build "%s"' % (cc, config.cfront_clang,
                                 config.systolic_obj_root,
                                 os.path.dirname(os.path.realpath(

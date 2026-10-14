@@ -1,10 +1,12 @@
 // REQUIRES: cfront-clang
 //
 // A program with nothing to offload compiles and runs as plain C; the
-// compiler says why each function stays on the host.
+// compiler says why each function stays on the host (--explain). The GEMM
+// it did not recognize reports that the CPU ran it; the axpy loop is not a
+// GEMM and reports nothing.
 //
-// RUN: %systolic-cc %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
-// RUN: %t | FileCheck %s --check-prefix=OUT
+// RUN: %systolic-cc --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %t | FileCheck %s --check-prefix=OUT --match-full-lines
 
 #include <stdio.h>
 
@@ -28,7 +30,9 @@ void dot_gemm(float A[restrict 4][4], float B[restrict 4][4],
 }
 
 // PLAN: wrote {{.*}} (0 function(s) offloaded
-// OUT: 13 12
+// OUT:      [systolic-cc] CPU Executed: GEMM #1
+// OUT-NEXT: 13 12
+// OUT-EMPTY:
 
 int main(void) {
   float y[8] = {1, 1, 1, 1, 1, 1, 1, 1}, x[8] = {0, 1, 2, 3, 4, 5, 6, 7};

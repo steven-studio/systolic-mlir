@@ -4,10 +4,13 @@
 // (AffineMatmulAnalysis.h) whose lowering can be shown correct by
 // systolic.matmul_tile ops on the module's systolic.device fleet.
 //
-//   affine.for (i, j, k in any order) { C[..] = C[..] + A[..] * B[..] }
+//   affine.for (any depth, i, j, k in any order) { C[..] += A[..] * B[..] }
+//     |  hoistRepetitionLoops           loops no access uses repeat the GEMM:
+//     |                                 moved outward when the dependences
+//     |                                 allow (affine::permuteLoops)
 //     |  recognizeLogicalMatmul         logical I, J, K, access maps, domain
-//     |  getDenseLogicalGemm            I, J, K = permutation of the loop
-//     |                                 ordinals (offsets, strides, steps)
+//     |  getDenseLogicalGemm            I, J, K each over one or more loops
+//     |                                 (offsets, strides, steps, tiled nests)
 //     |  planSystolicMatmul             binary-search decomposition over the
 //     |                                 fleet, K-folded, scheduled -- the
 //     |                                 same plan as the linalg path
@@ -41,7 +44,9 @@
 #include "Systolic/SystolicOps.h"
 #include "Systolic/SystolicTilePlan.h"
 
+#include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -159,6 +164,97 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
     }
   }
   return operand;
+}
+
+/// How many times the loops enclosing `op` (up to its function) run it, or
+/// nullopt when one of them has no constant trip count.
+static std::optional<uint64_t> enclosingRepetitions(Operation *op) {
+  uint64_t times = 1;
+  for (auto loop = op->getParentOfType<affine::AffineForOp>(); loop;
+       loop = loop->getParentOfType<affine::AffineForOp>()) {
+    std::optional<uint64_t> trips = affine::getConstantTripCount(loop);
+    if (!trips)
+      return std::nullopt;
+    times *= *trips;
+  }
+  return times;
+}
+
+/// Loops of a perfect nest around a multiply-accumulate whose IV no access
+/// uses repeat the accumulation rather than being GEMM dimensions. The
+/// recognizer takes a GEMM as a perfect chain of loops that are all its
+/// dimensions, with any repeating loops outside it (AffineMatmulAnalysis:
+/// recognizeLogicalMatmul); a repeating loop between the dimensions -- at any
+/// depth -- is moved outward here, ahead of them, keeping the relative order
+/// of both groups, when affine dependence analysis shows the interchange
+/// legal (affine::isValidLoopInterchangePermutation). Otherwise the nest is
+/// left as it is, with a remark.
+///
+/// A repeating loop outside the reduction loop moves out without changing
+/// the order in which any C element accumulates; one inside it would
+/// interleave the repetitions with the reduction, which the dependences on C
+/// forbid -- such a nest stays on the CPU.
+static void hoistRepetitionLoops(ModuleOp module) {
+  SmallVector<affine::AffineForOp> roots;
+  module.walk([&](affine::AffineForOp loop) {
+    auto parent = dyn_cast<affine::AffineForOp>(loop->getParentOp());
+    // The top of a perfect band: not the only operation of a parent loop.
+    if (parent && &parent.getBody()->front() == loop.getOperation() &&
+        std::next(parent.getBody()->begin(), 2) == parent.getBody()->end())
+      return;
+    roots.push_back(loop);
+  });
+
+  for (affine::AffineForOp root : roots) {
+    SmallVector<affine::AffineForOp> band;
+    affine::getPerfectlyNestedLoops(band, root);
+    if (band.size() < 4)
+      continue;
+    // A multiply-accumulate body, rectangular constant bounds (no IV in
+    // another loop's bounds).
+    bool macBody = true;
+    SmallVector<Value> used;
+    for (Operation &op : *band.back().getBody()) {
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+        llvm::append_range(used, load.getIndices());
+      else if (auto store = dyn_cast<affine::AffineStoreOp>(op))
+        llvm::append_range(used, store.getIndices());
+      else if (!isa<arith::MulFOp, arith::AddFOp, affine::AffineYieldOp>(op))
+        macBody = false;
+    }
+    if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
+          return loop.hasConstantLowerBound() && loop.hasConstantUpperBound() &&
+                 loop.getNumResults() == 0;
+        }))
+      continue;
+
+    SmallVector<unsigned> repeating, dimensions;
+    for (auto [index, loop] : llvm::enumerate(band))
+      (llvm::is_contained(used, loop.getInductionVar()) ? dimensions
+                                                         : repeating)
+          .push_back(index);
+    if (repeating.empty() || dimensions.size() < 3)
+      continue;
+    // Already outside every dimension: nothing to move.
+    if (repeating.back() + 1 == repeating.size())
+      continue;
+
+    SmallVector<unsigned> permMap(band.size());
+    unsigned position = 0;
+    for (unsigned index : repeating)
+      permMap[index] = position++;
+    for (unsigned index : dimensions)
+      permMap[index] = position++;
+    if (!affine::isValidLoopInterchangePermutation(band, permMap)) {
+      root->emitRemark()
+          << "affine GEMM not lowered to systolic.matmul_tile: loop "
+          << repeating.back() << " of the nest repeats the accumulation "
+          << "inside it, and moving it outward is not a legal loop "
+          << "interchange (it would reorder dependent iterations)";
+      continue;
+    }
+    affine::permuteLoops(band, permMap);
+  }
 }
 
 struct AffineMatmulToSystolicPass
@@ -351,6 +447,13 @@ struct AffineMatmulToSystolicPass
                << plan->optimization.makespan
                << " cycles (read + compute + write), "
                << plan->blocks.size() << " output block(s)";
+      // Enclosing loops (repeating ones the nest kept or that were moved
+      // out of it) run the tiles more than once per call of the function.
+      std::optional<uint64_t> times = enclosingRepetitions(anchor);
+      if (!times)
+        remark << "; the enclosing loops run it an unknown number of times";
+      else if (*times != 1)
+        remark << "; the enclosing loops run it " << *times << " time(s)";
     }
 
     anchor->erase();
@@ -365,6 +468,8 @@ struct AffineMatmulToSystolicPass
       signalPassFailure();
       return;
     }
+
+    hoistRepetitionLoops(module);
 
     SmallVector<AffineMatmulCandidate> candidates;
     collectAffineMatmulCandidates(module.getOperation(), candidates);

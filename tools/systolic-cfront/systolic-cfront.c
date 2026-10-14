@@ -1318,6 +1318,266 @@ static void function(translator *tr, const json_value *fn) {
   interface(tr, fn, params, nparams, body);
 }
 
+/* ------------------------------------------------------------ GEMM sites */
+
+/* The sites of the GEMM-like loop nests of a function, for labelling only:
+   which loop nests a program's GEMMs are (they get a "GEMM #N" execution
+   report), never what is translated or offloaded -- that is decided by the
+   translation above and by --affine-matmul-to-systolic.
+
+   A site is a multiply-accumulate statement -- L += P, L -= P, L = L + P or
+   L = L - P (either order), where P is a product with at least two array
+   reads among its factors -- whose counters span at least three enclosing
+   loops (for, while, do), at any depth and with other loops between them,
+   one of which is a reduction (its counter is in P but not in L): the
+   outermost of those loops. One loop nest is one site however many loops
+   it has; a matrix-vector product (two loops) or an element-wise nest (no
+   reduction) is none. Loops between the site's and the statement that the
+   statement does not use repeat the accumulation within one execution of
+   the site; loops outside the site run it `executions` times per call of
+   the function (the product of their constant trip counts, -1 when one is
+   not a for loop with constant bounds). */
+
+typedef struct {
+  const json_value *loop;
+  strvec ids;   /* the counters: the for's declared or assigned variable; a
+                   while's / do's condition variables */
+  long long trips;   /* its constant trip count, -1 if not known */
+} loop_frame;
+
+/* The constant trip count of `for (int i = LB; i < UB (or <=); ++i / i++ /
+   i += S / i = i + S)`, else -1. */
+static long long for_trip_count(const json_value *n) {
+  const json_value *init = child(n, 0), *cond = child(n, 2), *inc = child(n, 3);
+  long long lb, ub, step;
+  const json_value *lb_expr = NULL;
+  if (strcmp(kind_of(init), "DeclStmt") == 0 && child_count(init) == 1 &&
+      child_count(child(init, 0)) > 0)
+    lb_expr = child(child(init, 0), 0);
+  else if (strcmp(kind_of(init), "BinaryOperator") == 0 &&
+           strcmp(opcode_of(init), "=") == 0)
+    lb_expr = child(init, 1);
+  if (!lb_expr || !try_int_constant(lb_expr, &lb))
+    return -1;
+  const char *cop = opcode_of(cond);
+  if (strcmp(kind_of(cond), "BinaryOperator") != 0 ||
+      (strcmp(cop, "<") && strcmp(cop, "<=")) ||
+      !try_int_constant(child(cond, 1), &ub))
+    return -1;
+  if (strcmp(cop, "<=") == 0)
+    ++ub;
+  const char *iop = opcode_of(inc);
+  if (strcmp(kind_of(inc), "UnaryOperator") == 0 && strcmp(iop, "++") == 0) {
+    step = 1;
+  } else if (strcmp(kind_of(inc), "CompoundAssignOperator") == 0 &&
+             strcmp(iop, "+=") == 0) {
+    if (!try_int_constant(child(inc, 1), &step))
+      return -1;
+  } else if (strcmp(kind_of(inc), "BinaryOperator") == 0 &&
+             strcmp(iop, "=") == 0) {
+    const json_value *rhs = strip_parens_and_casts(child(inc, 1),
+                                                   kLValueToRValue);
+    if (strcmp(kind_of(rhs), "BinaryOperator") != 0 ||
+        strcmp(opcode_of(rhs), "+") != 0 ||
+        !try_int_constant(child(rhs, 1), &step))
+      return -1;
+  } else {
+    return -1;
+  }
+  if (step <= 0)
+    return -1;
+  return ub > lb ? (ub - lb + step - 1) / step : 0;
+}
+
+static void collect_decl_ids(const json_value *n, strvec *ids) {
+  if (!n || n->kind != JSON_OBJECT)
+    return;
+  if (strcmp(kind_of(n), "DeclRefExpr") == 0) {
+    const char *id = referenced_id(n);
+    if (id && !strvec_contains(ids, id))
+      strvec_push(ids, id);
+  }
+  for (size_t i = 0; i < child_count(n); ++i)
+    collect_decl_ids(child(n, i), ids);
+}
+
+static const json_value *strip_value(const json_value *n) {
+  for (;;) {
+    const char *k = kind_of(n);
+    if (strcmp(k, "ParenExpr") == 0 || strcmp(k, "ImplicitCastExpr") == 0 ||
+        strcmp(k, "CStyleCastExpr") == 0)
+      n = child(n, 0);
+    else
+      return n;
+  }
+}
+
+/* Array reads among the factors of a product. */
+static int product_reads(const json_value *n) {
+  n = strip_value(n);
+  const char *k = kind_of(n);
+  if (strcmp(k, "BinaryOperator") == 0 && strcmp(opcode_of(n), "*") == 0)
+    return product_reads(child(n, 0)) + product_reads(child(n, 1));
+  if (strcmp(k, "ArraySubscriptExpr") == 0)
+    return 1;
+  if (strcmp(k, "UnaryOperator") == 0 && strcmp(opcode_of(n), "*") == 0)
+    return 1;
+  return 0;
+}
+
+static int is_product_of_reads(const json_value *n) {
+  n = strip_value(n);
+  return strcmp(kind_of(n), "BinaryOperator") == 0 &&
+         strcmp(opcode_of(n), "*") == 0 && product_reads(n) >= 2;
+}
+
+/* A multiply-accumulate statement: its target L and its product P. */
+static int mac_parts(const json_value *n, const json_value **lhs,
+                     const json_value **product) {
+  const char *k = kind_of(n), *op = opcode_of(n);
+  *lhs = child(n, 0);
+  if (strcmp(k, "CompoundAssignOperator") == 0 &&
+      (strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0)) {
+    *product = child(n, 1);
+    return is_product_of_reads(*product);
+  }
+  if (strcmp(k, "BinaryOperator") == 0 && strcmp(op, "=") == 0) {
+    const json_value *r = strip_value(child(n, 1));
+    const char *rop = opcode_of(r);
+    if (strcmp(kind_of(r), "BinaryOperator") == 0 &&
+        (strcmp(rop, "+") == 0 || strcmp(rop, "-") == 0)) {
+      for (int side = 0; side < 2; ++side)
+        if (is_product_of_reads(child(r, side))) {
+          *product = child(r, side);
+          return 1;
+        }
+    }
+  }
+  return 0;
+}
+
+typedef struct {
+  const json_value **loops;
+  long long *executions;
+  size_t n, cap;
+} site_set;
+
+static void find_sites(const json_value *n, loop_frame *stack, size_t depth,
+                       site_set *sites) {
+  if (!n || n->kind != JSON_OBJECT)
+    return;
+  const char *k = kind_of(n);
+  int is_loop = strcmp(k, "ForStmt") == 0 || strcmp(k, "WhileStmt") == 0 ||
+                strcmp(k, "DoStmt") == 0;
+  const json_value *lhs, *product;
+  if (depth >= 3 && mac_parts(n, &lhs, &product)) {
+    strvec in_lhs = {0}, in_product = {0};
+    collect_decl_ids(lhs, &in_lhs);
+    collect_decl_ids(product, &in_product);
+    size_t used = 0, top = 0;
+    int reduction = 0;
+    for (size_t d = 0; d < depth; ++d) {
+      int uses = 0, reduces = 0;
+      for (size_t c = 0; c < stack[d].ids.n; ++c) {
+        const char *id = stack[d].ids.items[c];
+        int l = strvec_contains(&in_lhs, id), p = strvec_contains(&in_product, id);
+        uses |= l || p;
+        reduces |= p && !l;
+      }
+      if (uses && used++ == 0)
+        top = d;
+      reduction |= reduces;
+    }
+    if (used >= 3 && reduction) {
+      long long executions = 1;
+      for (size_t d = 0; d < top; ++d)
+        executions = executions < 0 || stack[d].trips < 0
+                         ? -1 : executions * stack[d].trips;
+      int seen = 0;
+      for (size_t s = 0; s < sites->n; ++s)
+        if (sites->loops[s] == stack[top].loop)
+          seen = 1;
+      if (!seen) {
+        if (sites->n == sites->cap) {
+          sites->cap = sites->cap ? 2 * sites->cap : 8;
+          sites->loops = realloc(sites->loops, sites->cap * sizeof *sites->loops);
+          sites->executions = realloc(sites->executions,
+                                      sites->cap * sizeof *sites->executions);
+          if (!sites->loops || !sites->executions) {
+            fprintf(stderr, "systolic-cfront: out of memory\n");
+            exit(2);
+          }
+        }
+        sites->executions[sites->n] = executions;
+        sites->loops[sites->n++] = stack[top].loop;
+      }
+    }
+  }
+  if (is_loop) {
+    if (depth == 256)
+      return;
+    loop_frame *f = &stack[depth];
+    memset(f, 0, sizeof *f);
+    f->loop = n;
+    f->trips = strcmp(k, "ForStmt") == 0 ? for_trip_count(n) : -1;
+    if (strcmp(k, "ForStmt") == 0) {
+      const json_value *init = child(n, 0);
+      if (strcmp(kind_of(init), "DeclStmt") == 0) {
+        for (size_t v = 0; v < child_count(init); ++v) {
+          const char *id = json_string(json_get(child(init, v), "id"), NULL);
+          if (id)
+            strvec_push(&f->ids, id);
+        }
+      } else if (strcmp(kind_of(init), "BinaryOperator") == 0 &&
+                 strcmp(opcode_of(init), "=") == 0) {
+        const json_value *lhs = strip_value(child(init, 0));
+        const char *id = referenced_id(lhs);
+        if (strcmp(kind_of(lhs), "DeclRefExpr") == 0 && id)
+          strvec_push(&f->ids, id);
+      }
+    } else {
+      /* while (cond) / do ... while (cond): the condition's variables */
+      collect_decl_ids(strcmp(k, "WhileStmt") == 0 ? child(n, 0)
+                                                   : child(n, 1), &f->ids);
+    }
+    for (size_t i = 0; i < child_count(n); ++i)
+      find_sites(child(n, i), stack, depth + 1, sites);
+    return;
+  }
+  for (size_t i = 0; i < child_count(n); ++i)
+    find_sites(child(n, i), stack, depth, sites);
+}
+
+/* Appends one function's sites, as JSON objects, to *out. */
+static void write_sites(const json_value *fn, const source_map *sm,
+                        FILE *out, int *first) {
+  static loop_frame stack[257];
+  site_set sites = {0};
+  find_sites(fn, stack, 0, &sites);
+  for (size_t s = 0; s < sites.n; ++s) {
+    const json_value *loop = sites.loops[s];
+    const json_value *rng = json_get(loop, "range");
+    const json_value *b = json_get(rng, "begin"), *e = json_get(rng, "end");
+    int from_macro = json_get(b, "spellingLoc") || json_get(e, "spellingLoc");
+    long long begin = node_offset(loop);
+    const json_value *eloc = json_get(e, "expansionLoc") ? json_get(e, "expansionLoc") : e;
+    long long end = json_int(json_get(eloc, "offset"), -1) +
+                    json_int(json_get(eloc, "tokLen"), 0);
+    long line = 0, col = 0;
+    if (begin >= 0)
+      source_map_line_col(sm, begin, &line, &col);
+    fprintf(out, "%s  {\"function\": ", *first ? "" : ",\n");
+    json_escape(out, json_string(json_get(fn, "name"), ""));
+    fprintf(out, ", \"line\": %ld, \"col\": %ld, \"begin\": %lld, "
+                 "\"end\": %lld, \"from_macro\": %s, \"executions\": %lld}",
+            line, col, begin, end, from_macro ? "true" : "false",
+            sites.executions[s]);
+    *first = 0;
+  }
+  free(sites.loops);
+  free(sites.executions);
+}
+
 /* ------------------------------------------------------------------- main */
 
 /* Runs argv, its stdout into *out (NUL-terminated, length in *outlen), its
@@ -1414,6 +1674,7 @@ static void usage(void) {
           "usage: systolic-cfront --clang CLANG [--clang-major N] "
           "[-DNAME[=VAL]] [-IDIR] [-std=STD] [--function NAME] "
           "[--skip-unsupported] [--symbol-suffix S] [--interface FILE] "
+          "[--gemm-sites FILE] "
           "FILE.c [-o OUT.mlir]\n");
 }
 
@@ -1438,6 +1699,7 @@ static const char *option_value(const char *arg, const char *name, int *i,
 int main(int argc, char **argv) {
   const char *source = NULL, *output = "-", *clang = getenv("SYSTOLIC_CFRONT_CLANG");
   const char *std = "c11", *symbol_suffix = "", *interface_path = NULL;
+  const char *sites_path = NULL;
   long clang_major = 24;
   int skip_unsupported = 0;
   strvec defines = {0}, includes = {0}, only = {0};
@@ -1457,6 +1719,8 @@ int main(int argc, char **argv) {
       symbol_suffix = v;
     } else if ((v = option_value(a, "--interface", &i, argc, argv))) {
       interface_path = v;
+    } else if ((v = option_value(a, "--gemm-sites", &i, argc, argv))) {
+      sites_path = v;
     } else if (strcmp(a, "--skip-unsupported") == 0) {
       skip_unsupported = 1;
     } else if ((v = option_value(a, "--output", &i, argc, argv))) {
@@ -1586,6 +1850,11 @@ int main(int argc, char **argv) {
   /* Top-level declarations of the main file. The dumper names a file only
      when it changes from the previous node's, so track it in order. */
   char current_file[PATH_MAX] = "";
+  /* The GEMM sites of every function defined here, translated or not. */
+  char *sites_buf = NULL;
+  size_t sites_len = 0;
+  FILE *sites_out = sites_path ? open_memstream(&sites_buf, &sites_len) : NULL;
+  int sites_first = 1;
   const json_value *functions[4096];
   size_t nfunctions = 0;
   const json_value *decls = json_get(ast, "inner");
@@ -1610,6 +1879,8 @@ int main(int argc, char **argv) {
     if (!has_body)
       continue;   /* a prototype */
     const char *name = json_string(json_get(decl, "name"), "");
+    if (sites_out)
+      write_sites(decl, &sm, sites_out, &sites_first);
     if (only.n && !strvec_contains(&only, name))
       continue;
     if (nfunctions == sizeof functions / sizeof functions[0]) {
@@ -1689,6 +1960,17 @@ int main(int argc, char **argv) {
             unsupported_message);
   }
   emit(&tr, 0, "}");
+
+  if (sites_out) {
+    fclose(sites_out);
+    FILE *out = fopen(sites_path, "w");
+    if (!out) {
+      fprintf(stderr, "systolic-cfront: cannot write %s\n", sites_path);
+      return 2;
+    }
+    fprintf(out, "{\"sites\": [\n%s\n]}\n", sites_buf ? sites_buf : "");
+    fclose(out);
+  }
 
   if (interface_path) {
     FILE *out = fopen(interface_path, "w");

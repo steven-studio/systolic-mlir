@@ -34,46 +34,71 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
                          " coordinates) is not supported");
 
   const unsigned numSourceDims = norm.domain->getNumDimVars();
-  if (numSourceDims != 3 || norm.logicalOffset.size() != 3)
-    return fail(why, "the iteration domain is not three-dimensional");
+  if (numSourceDims < 3 || norm.logicalOffset.size() != 3)
+    return fail(why, "the iteration domain has fewer than three dimensions");
 
+  // Each loop of the nest drives exactly one logical coordinate (the
+  // recognizer has already required every loop's IV to be used). A
+  // coordinate may be driven by any number of loops -- a tiled or split loop
+  // nest, at any depth -- as long as they enumerate it densely: sorted by
+  // scale, the finest has scale s_0 and each next one the scale of the
+  // previous times its extent (a mixed-radix numbering), so the coordinate
+  // takes the values offset + s_0 * (0 .. product of extents - 1), each once.
   static constexpr const char *kName[] = {"I", "J", "K"};
-  DenseLogicalGemm dense;
-  std::array<bool, 3> used{};
-  for (unsigned d = 0; d < 3; ++d) {
-    int64_t scale = 0;
-    unsigned sourceDim = 0;
-    unsigned nonzero = 0;
-    for (unsigned s = 0; s < numSourceDims; ++s) {
-      if (T[d][s] == 0)
-        continue;
-      ++nonzero;
-      scale = T[d][s];
-      sourceDim = s;
+  SmallVector<int64_t> extentOf(numSourceDims, 0);
+  for (unsigned s = 0; s < numSourceDims; ++s) {
+    unsigned drives = 0;
+    for (unsigned d = 0; d < 3; ++d)
+      drives += T[d][s] != 0;
+    if (drives > 1) {
+      std::string coords;
+      for (unsigned d = 0; d < 3; ++d)
+        if (T[d][s] != 0)
+          coords += (coords.empty() ? "" : " and ") + std::string(kName[d]);
+      return fail(why, "two logical coordinates are driven by the same loop "
+                       "(loop " + llvm::Twine(s) + " drives " + coords + ")");
     }
-    if (nonzero != 1)
-      return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
-                           " depends on " + llvm::Twine(nonzero) +
-                           " loops; only one loop per coordinate is "
-                           "supported");
-    if (scale <= 0)
-      return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
-                           " decreases along its loop");
-    if (used[sourceDim])
-      return fail(why, "two logical coordinates are driven by the same loop");
-    used[sourceDim] = true;
-
+    if (drives == 0)
+      return fail(why, "loop " + llvm::Twine(s) +
+                           " drives no logical coordinate");
     std::optional<int64_t> lb = norm.domain->getConstantBound64(
-        presburger::BoundType::LB, sourceDim);
+        presburger::BoundType::LB, s);
     std::optional<int64_t> ub = norm.domain->getConstantBound64(
-        presburger::BoundType::UB, sourceDim);
+        presburger::BoundType::UB, s);
     if (!lb || !ub || *lb != 0 || *ub < 0)
       return fail(why, "the normalized iteration domain is not a dense box");
+    extentOf[s] = *ub + 1;
+  }
 
-    dense.sourceDim[d] = sourceDim;
-    dense.scale[d] = scale;
+  DenseLogicalGemm dense;
+  for (unsigned d = 0; d < 3; ++d) {
+    SmallVector<unsigned, 2> loops;
+    for (unsigned s = 0; s < numSourceDims; ++s)
+      if (T[d][s] != 0)
+        loops.push_back(s);
+    for (unsigned s : loops)
+      if (T[d][s] < 0)
+        return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                             " decreases along its loop");
+    llvm::stable_sort(loops, [&](unsigned a, unsigned b) {
+      return T[d][a] < T[d][b];
+    });
+    int64_t expected = T[d][loops.front()];
+    int64_t extent = 1;
+    for (unsigned s : loops) {
+      if (T[d][s] != expected)
+        return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                             " is driven by " + llvm::Twine(loops.size()) +
+                             " loops that do not enumerate it densely "
+                             "(scales must grow by the finer loops' extents)");
+      expected *= extentOf[s];
+      extent *= extentOf[s];
+    }
+    dense.sourceDim[d] = loops.front();
+    dense.sourceDims[d] = loops;
+    dense.scale[d] = T[d][loops.front()];
     dense.offset[d] = norm.logicalOffset[d];
-    dense.extent[d] = *ub + 1;
+    dense.extent[d] = extent;
   }
   return dense;
 }
@@ -98,26 +123,37 @@ mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul) {
   return partitions;
 }
 
-/// The source iteration domain restricted to `box`. Normalized ordinal z_s
-/// is source coordinate x_s = origin_s + step_s * z_s, so ordinals
-/// [lo, lo + ext) are x_s in [origin_s + step_s * lo, origin_s + step_s *
-/// (lo + ext)). The x interval is taken half-open on the next region's first
-/// coordinate rather than closed on this region's last one, so consecutive
-/// regions cover x_s without gaps whether or not the source domain encodes
-/// the loop's step.
+/// The source iteration domain restricted to `box`. Logical coordinate
+/// y_d = T_d x + c_d (LogicalMatmul::logicalMapping, in source coordinates
+/// x) takes the values offset_d + scale_d * ordinal, so ordinals [lo, lo +
+/// ext) are y_d in [offset_d + scale_d * lo, offset_d + scale_d * (lo +
+/// ext)): one inequality per side, whether one loop drives the coordinate
+/// or several. The interval is taken half-open on the next region's first
+/// value rather than closed on this region's last one, so consecutive
+/// regions cover y_d without gaps whether or not the source domain encodes
+/// the loops' steps.
 static affine::FlatAffineValueConstraints
 restrictToBox(const LogicalMatmul &matmul, const DenseLogicalGemm &dense,
               const LogicalBox &box) {
   affine::FlatAffineValueConstraints domain = *matmul.sourceDomain;
-  const AffineLogicalNormalization &norm = matmul.normalization;
+  const auto &T = matmul.logicalMapping.transformation;
+  const auto &c = matmul.logicalMapping.offset;
+  const unsigned numDims = domain.getNumDimVars();
+  // y_d is (P*, I, J, K)'s last three rows: no P* in a dense GEMM.
   for (unsigned d = 0; d < 3; ++d) {
-    const unsigned s = dense.sourceDim[d];
-    const int64_t step = norm.sourceTransformation[s][s];
-    const int64_t origin = norm.sourceOffset[s];
-    domain.addBound(presburger::BoundType::LB, s,
-                    origin + step * box.lower[d]);
-    domain.addBound(presburger::BoundType::UB, s,
-                    origin + step * (box.lower[d] + box.extent[d]) - 1);
+    const int64_t first = dense.offset[d] + dense.scale[d] * box.lower[d];
+    const int64_t next =
+        dense.offset[d] + dense.scale[d] * (box.lower[d] + box.extent[d]);
+    SmallVector<int64_t> lower(domain.getNumCols(), 0);
+    SmallVector<int64_t> upper(domain.getNumCols(), 0);
+    for (unsigned s = 0; s < numDims; ++s) {
+      lower[s] = T[d][s];
+      upper[s] = -T[d][s];
+    }
+    lower.back() = c[d] - first;      // y_d - first >= 0
+    upper.back() = next - 1 - c[d];   // next - 1 - y_d >= 0
+    domain.addInequality(lower);
+    domain.addInequality(upper);
   }
   return domain;
 }

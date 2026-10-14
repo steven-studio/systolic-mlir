@@ -53,13 +53,14 @@ func.func @batched(%A: memref<2x4x4xf32> {llvm.noalias},
 
 // -----
 
-// I = i + j: the logical rows are not one loop's ordinals.
+// I = i + j: loop j drives both I and J, so no box of (I, J, K) is a set
+// of whole iterations.
 // CHECK-LABEL: func.func @coupled
 // CHECK-NOT:   systolic.matmul_tile
 func.func @coupled(%A: memref<8x4xf32> {llvm.noalias},
                    %B: memref<4x4xf32> {llvm.noalias},
                    %C: memref<8x4xf32> {llvm.noalias}) {
-  // expected-remark @+1 {{logical coordinate I depends on 2 loops; only one loop per coordinate is supported}}
+  // expected-remark @+1 {{two logical coordinates are driven by the same loop (loop 1 drives I and J)}}
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {
       affine.for %k = 0 to 4 {

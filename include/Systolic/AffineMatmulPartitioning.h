@@ -5,6 +5,7 @@
 
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <array>
 #include <optional>
@@ -26,22 +27,28 @@ struct LogicalBox {
   int64_t volume() const { return extent[0] * extent[1] * extent[2]; }
 };
 
-/// A recognized GEMM whose logical coordinates are a permutation of the
-/// normalized loop ordinals z (LogicalMatmul::normalization), each with a
-/// positive scale:
+/// A recognized GEMM whose logical coordinates are each driven by their own
+/// set of normalized loop ordinals z (LogicalMatmul::normalization), any
+/// number of loops per coordinate, at any depth of the nest:
 ///
-///   y_d = scale[d] * z_{sourceDim[d]} + offset[d],     d in (I, J, K)
+///   y_d = offset[d] + scale[d] * ordinal_d,   ordinal_d = sum over the
+///         loops s of coordinate d of (T[d][s] / scale[d]) * z_s,
 ///
-/// so ordinal z_{sourceDim[d]} is the logical ordinal of coordinate d, and
-/// the logical space is the dense box [0, extent[0]) x [0, extent[1]) x
-/// [0, extent[2]) visited exactly once by the source loops. That is what
-/// lets a box of logical ordinals be executed as a GEMM tile of matrices
-/// whose rows/columns are those ordinals. Loops in any order, steps, nonzero
-/// origins, and access offsets and strides are all of this form; batched
-/// GEMMs (a partition prefix P*) and coupled or singular mappings (I = i+j,
-/// two coordinates on one loop) are not.
+/// where the loops of a coordinate number it densely (mixed radix: sorted by
+/// scale, each scale is the previous one times the previous loop's extent),
+/// so ordinal_d runs over [0, extent[d]) exactly once and the logical space
+/// is the dense box [0, extent[0]) x [0, extent[1]) x [0, extent[2]). That
+/// is what lets a box of logical ordinals be executed as a GEMM tile of
+/// matrices whose rows/columns are those ordinals. Loops in any order,
+/// steps, nonzero origins, access offsets and strides, and coordinates split
+/// over several loops (tiled nests) are all of this form; batched GEMMs (a
+/// partition prefix P*) and coupled or singular mappings (I = i+j, one loop
+/// driving two coordinates) are not.
 struct DenseLogicalGemm {
+  /// The finest (smallest-scale) loop of each coordinate.
   std::array<unsigned, 3> sourceDim{};
+  /// All loops of each coordinate, finest first.
+  std::array<SmallVector<unsigned, 2>, 3> sourceDims{};
   std::array<int64_t, 3> scale{};
   std::array<int64_t, 3> offset{};
   std::array<int64_t, 3> extent{};

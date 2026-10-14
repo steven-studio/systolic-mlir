@@ -31,6 +31,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   MLIRSystolic
   MLIRAffineDialect
   MLIRAffineAnalysis
+  MLIRAffineUtils
   MLIRLinalgDialect
   MLIRSCFDialect
   MLIRTensorDialect

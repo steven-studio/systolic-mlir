@@ -11,3 +11,7 @@ set_target_properties(systolic-cc PROPERTIES C_STANDARD 11
                       C_STANDARD_REQUIRED ON)
 target_compile_options(systolic-cc PRIVATE -Wall -Wextra)
 add_dependencies(systolic-cc systolic-cfront)
+# The clang 24 systolic-cc uses when neither --clang nor SYSTOLIC_CFRONT_CLANG
+# names one: the one this build was configured with (-DSYSTOLIC_CFRONT_CLANG).
+target_compile_definitions(systolic-cc PRIVATE
+  SYSTOLIC_DEFAULT_CLANG="${SYSTOLIC_CFRONT_CLANG}")

@@ -26,6 +26,12 @@
  * return -8 (a transport timeout) without computing; =corrupt makes it return
  * 0 with one element of its result tile off by one -- a wrong result the
  * runtime does not report.
+ *
+ * SOFT_RUNTIME_MOCK_HARDWARE=1 (TESTS ONLY) makes systolic_offload_stats()
+ * report is_hardware = 1, with the backend "MOCK FPGA (software model, test
+ * only)", so that a test can exercise what a program does when the FPGA
+ * succeeds: the GEMMs it offloaded then report "FPGA Executed" although the
+ * software model computed them. Never set it outside tests.
  */
 
 #include "systolic_offload.h"
@@ -113,8 +119,11 @@ int fpga_matmul_tiled_auto_scheduled(int M, int K, int N, const float *A,
 }
 
 void systolic_offload_stats(systolic_offload_stats_t *out) {
-  out->backend = "software runtime model (soft_runtime.c), not the FPGA";
-  out->is_hardware = 0;
+  const char *mock = getenv("SOFT_RUNTIME_MOCK_HARDWARE");
+  out->is_hardware = mock && mock[0] == '1';
+  out->backend = out->is_hardware
+                     ? "MOCK FPGA (software model, test only)"
+                     : "software runtime model (soft_runtime.c), not the FPGA";
   for (int d = 0; d < 4; ++d)
     out->per_device[d] = invocations[d];
   out->failed = failed_calls;

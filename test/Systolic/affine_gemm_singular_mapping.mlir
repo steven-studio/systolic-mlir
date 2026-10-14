@@ -10,7 +10,7 @@
 // CHECK: row extent: unknown
 // CHECK: column extent: unknown
 // CHECK: reduction extent: unknown
-// CHECK: dense logical GEMM: no (logical coordinate I depends on 2 loops; only one loop per coordinate is supported)
+// CHECK: dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 0 drives I and K))
 // CHECK: partition count: 1
 
 func.func @affine_gemm_singular_mapping(

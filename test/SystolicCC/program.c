@@ -3,15 +3,20 @@
 // A C program compiled by systolic-cc: the compiler finds the matrix
 // multiplications it can run on the 1x8x8 + 3x4x4 fleet, offloads those
 // functions, keeps everything else on the host, and the program behaves
-// exactly as the same file compiled by clang alone. Software runtime model
-// (NOT the FPGA): this is a compiler-correctness test.
+// exactly as the same file compiled by clang alone, apart from the lines
+// that say where each GEMM ran. Software runtime model (NOT the FPGA): this
+// is a compiler-correctness test.
 //
-// RUN: %systolic-cc --verify %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: %t > %t.out 2> %t.err
 // RUN: FileCheck %s --check-prefix=VERIFY --input-file=%t.err
+// RUN: FileCheck %s --check-prefix=LABELS --input-file=%t.out
 // RUN: %host-cc -std=c11 %s -o %t.cpu
 // RUN: %t.cpu > %t.cpu.out
-// RUN: diff %t.cpu.out %t.out
+// RUN: grep -v '^\[systolic-cc\]' %t.out | diff %t.cpu.out -
+//
+// Without --explain the compiler says nothing.
+// RUN: %systolic-cc %s -o %t.quiet 2>&1 | count 0
 
 #include <stdio.h>
 
@@ -120,19 +125,29 @@ int main(void) {
 
 // The plan the compiler made, in source order:
 //
-// PLAN-DAG: program.c:70:1: note: 'main' is outside the supported C subset and is not translated: only functions returning void are supported (got 'int')
-// PLAN-DAG: program.c:19:1: note: 'matmul' is offloaded: 10 systolic tile invocation(s)
-// PLAN-DAG: program.c:30:1: note: 'product' is offloaded: 27 systolic tile invocation(s)
-// PLAN-DAG: program.c:42:1: note: 'scale' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: program.c:49:1: note: 'matmul_f64' stays on the host: the FPGA datapath is fp32 and it uses double arrays
-// PLAN-DAG: program.c:58:1: note: 'matmul_alias' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 59: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias)
+// PLAN-DAG: program.c:75:1: note: 'main' is outside the supported C subset and is not translated: only functions returning void are supported (got 'int')
+// PLAN-DAG: program.c:24:1: note: 'matmul' is offloaded: 10 systolic tile invocation(s)
+// PLAN-DAG: program.c:35:1: note: 'product' is offloaded: 27 systolic tile invocation(s)
+// PLAN-DAG: program.c:47:1: note: 'scale' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: program.c:54:1: note: 'matmul_f64' stays on the host: the FPGA datapath is fp32 and it uses double arrays
+// PLAN-DAG: program.c:63:1: note: 'matmul_alias' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 64: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias)
 // PLAN:     wrote {{.*}} (2 function(s) offloaded, runtime: software model, NOT the FPGA
 //
 // Every offloaded call checked against the same function compiled for the
 // CPU: two calls of matmul, one of product.
 //
-// VERIFY:      matmul (program.c:19): verified: 256 elements equal the CPU reference (bitwise); 10 invocations (8x8 2, 4x4 3/3/2) on software runtime model
-// VERIFY-NEXT: matmul (program.c:19): verified: 256 elements equal the CPU reference (bitwise); 10 invocations
-// VERIFY-NEXT: product (program.c:30): verified: 240 elements equal the CPU reference (bitwise); 27 invocations
+// VERIFY:      matmul (program.c:24): verified: 256 elements equal the CPU reference (bitwise)
+// VERIFY-NEXT: matmul (program.c:24): verified: 256 elements equal the CPU reference (bitwise)
+// VERIFY-NEXT: product (program.c:35): verified: 240 elements equal the CPU reference (bitwise)
 // VERIFY-NOT:  MISMATCH
-// VERIFY-NOT:  FAILURE
+//
+// Five GEMM executions, all on the CPU (the software model is not the
+// FPGA): matmul twice, product, matmul_f64, matmul_alias; the clearing loop
+// in product and scale are no GEMMs.
+//
+// LABELS:      [systolic-cc] CPU Executed: GEMM #1
+// LABELS-NEXT: [systolic-cc] CPU Executed: GEMM #2
+// LABELS-NEXT: [systolic-cc] CPU Executed: GEMM #3
+// LABELS-NEXT: [systolic-cc] CPU Executed: GEMM #4
+// LABELS-NEXT: [systolic-cc] CPU Executed: GEMM #5
+// LABELS-NEXT: -2040.5

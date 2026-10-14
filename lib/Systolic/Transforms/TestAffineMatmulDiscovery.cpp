@@ -192,9 +192,17 @@ struct TestAffineMatmulDiscoveryPass
       std::string notDense;
       auto dense = getDenseLogicalGemm(result, &notDense);
       if (succeeded(dense))
-        llvm::errs() << "  dense logical GEMM: yes, I/J/K on loops "
-                     << dense->sourceDim[0] << "/" << dense->sourceDim[1]
-                     << "/" << dense->sourceDim[2] << "\n";
+      {
+        // Each coordinate's loops, outermost first ("0+3" for a split one).
+        llvm::errs() << "  dense logical GEMM: yes, I/J/K on loops ";
+        for (unsigned d = 0; d < 3; ++d) {
+          SmallVector<unsigned, 2> loops(dense->sourceDims[d]);
+          llvm::sort(loops);
+          llvm::errs() << (d ? "/" : "");
+          llvm::interleave(loops, llvm::errs(), "+");
+        }
+        llvm::errs() << "\n";
+      }
       else
         llvm::errs() << "  dense logical GEMM: no (" << notDense << ")\n";
 

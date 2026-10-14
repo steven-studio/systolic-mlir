@@ -3,9 +3,10 @@
 // What a compiled program does when the runtime under an offloaded call
 // fails, and when it returns a wrong result without failing. The software
 // runtime model injects both (SOFT_RUNTIME_FAULT); the two must never be
-// confused: a failed invocation is a RUNTIME FAILURE (exit 3: transport or
-// runtime, the result incomplete), a wrong result is a NUMERICAL MISMATCH
-// (exit 4) and only --verify can see it.
+// confused. A failed invocation is not the end of the program: the call is
+// redone on the CPU from the original C and the result is right. A wrong
+// result the runtime does not report is a NUMERICAL MISMATCH (exit 4), and
+// only --verify can see it.
 //
 // RUN: %systolic-cc --verify %s -o %t.verify > /dev/null 2>&1
 // RUN: %systolic-cc %s -o %t.plain > /dev/null 2>&1
@@ -15,20 +16,27 @@
 // CLEAN: verified: 256 elements equal the CPU reference
 // CLEAN: checksum 5760
 //
-// Invocation 3 fails (rc -8, a transport timeout): reported and the program
-// stops, with or without --verify; never a mismatch.
-// RUN: env SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=3 not %t.verify 2>&1 | FileCheck %s --check-prefix=FAIL
-// RUN: env SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=3 not %t.plain 2>&1 | FileCheck %s --check-prefix=FAIL
-// FAIL:     matmul (faults.c:{{[0-9]+}}): RUNTIME FAILURE: 1 of the FPGA invocations failed (first rc -8) on software runtime model {{.*}} -- a runtime / transport failure, not a numerical result
+// Invocation 3 fails (rc -8, a transport timeout), after three tiles already
+// accumulated into C: the CPU redoes the GEMM from the original C, the
+// program goes on and its result is right, with or without --verify.
+// RUN: env SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=3 %t.verify 2>&1 | FileCheck %s --check-prefix=FAIL
+// RUN: env SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=3 %t.plain 2>&1 | FileCheck %s --check-prefix=FAIL
+// RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=3 %t.plain 2>&1 | FileCheck %s --check-prefix=FAIL
+// FAIL-NOT: FPGA Executed
+// FAIL:     [systolic-cc] CPU Executed: GEMM #1
 // FAIL-NOT: MISMATCH
-// FAIL-NOT: checksum
+// FAIL:     checksum 5760
+//
+// The same program on the (mocked) FPGA without a fault.
+// RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.plain 2>&1 | FileCheck %s --check-prefix=MOCK
+// MOCK: [systolic-cc] FPGA Executed: GEMM #1
+// MOCK: checksum 5760
 //
 // Invocation 5 returns a wrong element without failing: --verify reports a
-// numerical mismatch (not a runtime failure) and stops.
+// numerical mismatch and stops.
 // RUN: env SOFT_RUNTIME_FAULT=corrupt SOFT_RUNTIME_FAULT_AT=5 not %t.verify 2>&1 | FileCheck %s --check-prefix=CORRUPT
-// CORRUPT-NOT: RUNTIME FAILURE
-// CORRUPT:     matmul (faults.c:{{[0-9]+}}): first mismatch C[{{[0-9]+}}]: FPGA path {{.*}}, CPU reference
-// CORRUPT:     matmul (faults.c:{{[0-9]+}}): NUMERICAL MISMATCH: 1 of 256 elements differ from the CPU reference (bitwise; 10 invocations
+// CORRUPT:     matmul (faults.c:{{[0-9]+}}): first mismatch C[{{[0-9]+}}]: result {{.*}}, CPU reference
+// CORRUPT:     matmul (faults.c:{{[0-9]+}}): NUMERICAL MISMATCH: 1 of 256 elements differ from the CPU reference (bitwise)
 // CORRUPT-NOT: checksum
 //
 // Without --verify nothing can see it: the program finishes with the wrong
