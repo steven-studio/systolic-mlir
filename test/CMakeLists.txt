@@ -5,6 +5,13 @@
 # matmul_tile syntax the op never accepted and had therefore never parsed,
 # let alone had their CHECK lines evaluated.
 
+# The clang the C front end (tools/systolic-cfront) parses C with: the
+# project's LLVM 24 clang, e.g. a standalone clang build against the same
+# LLVM (-DSYSTOLIC_CFRONT_CLANG=$HOME/work/clang24-build/bin/clang). Empty:
+# the test/CFront tests are UNSUPPORTED.
+set(SYSTOLIC_CFRONT_CLANG "" CACHE FILEPATH
+    "clang 24 executable for the C front end's tests")
+
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py

@@ -9,7 +9,7 @@ config.name = "SYSTOLIC"
 # lit >= 23 removes the external-shell option; the internal shell runs these
 # RUN lines (plain pipes) identically everywhere.
 config.test_format = lit.formats.ShTest()
-config.suffixes = [".mlir"]
+config.suffixes = [".mlir", ".c"]
 
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.systolic_obj_root, "test")
@@ -52,6 +52,18 @@ config.excludes = [
     "Inputs",
 ]
 
+
+# The C front end (tools/systolic-cfront) runs the clang the build names
+# (-DSYSTOLIC_CFRONT_CLANG=<clang 24>, see test/CMakeLists.txt). Tests that
+# need it say REQUIRES: cfront-clang; without it they are UNSUPPORTED -- no
+# other clang on PATH is picked up in its place.
+if config.cfront_clang:
+    config.available_features.add("cfront-clang")
+    cfront = os.path.join(os.path.dirname(config.test_source_root), "tools",
+                          "systolic-cfront", "systolic-cfront.py")
+    config.substitutions.append(
+        ("%cfront", '"%s" "%s" --clang "%s"' % (sys.executable, cfront,
+                                                config.cfront_clang)))
 
 tool_dirs = [config.systolic_tools_dir, config.llvm_tools_dir]
 tools = ["systolic-opt", "systolic-translate", "systolic-cost"]
