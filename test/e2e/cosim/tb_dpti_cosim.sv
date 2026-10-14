@@ -75,6 +75,21 @@ module tb_dpti_cosim #(
 
   // The FT2232H drives D only while the FPGA holds OE# low.
   assign dpti_d = !dpti_oe_n ? ft_data : 8'bz;
+  wire dpti_rxf_n = ft_rxf_n;
+  wire dpti_txe_n = ft_txe_n;
+
+  // The FT2232H's rules on the strobes (dpti_protocol_check.svh): a bus
+  // fight or a strobe with no data ends the run, because on the board it is
+  // a corrupted byte nobody can attribute afterwards. +dpti_check=0 counts
+  // instead of stopping; +dpti_check_fatal=0 likewise.
+  bit dpc_enabled = 1'b1;
+  bit dpc_fatal   = 1'b1;
+  initial begin
+    int v;
+    if ($value$plusargs("dpti_check=%d", v))       dpc_enabled = (v != 0);
+    if ($value$plusargs("dpti_check_fatal=%d", v)) dpc_fatal   = (v != 0);
+  end
+  `include "dpti_protocol_check.svh"
 
   systolic_dma_top #(
 `ifdef COSIM_SPLIT_KMAX

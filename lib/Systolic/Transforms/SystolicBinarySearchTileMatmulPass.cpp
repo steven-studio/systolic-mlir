@@ -226,11 +226,26 @@ struct SystolicBinarySearchTileMatmulPass
 
     // ----------------------------------------------------------
     // Lower every static tensor linalg.matmul.
+    //
+    // Every matmul_tile this pass emits also carries four discardable
+    // attributes that name its place in the GEMM, for the asynchronous
+    // FPGA lowering (TileMatmulForFpga.cpp, async=true), which hands the
+    // tiles of a GEMM to the runtime without waiting for each one and
+    // needs to know which tiles accumulate into the same output block, and
+    // in what order:
+    //   systolic.gemm     which linalg.matmul of the module (0, 1, ...)
+    //   systolic.tile     which output block of that GEMM (the optimizer's
+    //                     task index)
+    //   systolic.k_index  which K fold of that block (0 .. k_count - 1)
+    //   systolic.k_count  how many K folds the block has
+    // The synchronous lowering ignores them.
     // ----------------------------------------------------------
 
+    int64_t gemmIndex = -1;
     for (linalg::MatmulOp matmul : targets) {
       if (matmul->getNumResults() != 1)
         continue;
+      ++gemmIndex;
 
       // The decomposition below slices A as M x K and B as K x N, which is
       // what the default indexing maps C(m, n) += A(m, k) * B(k, n) mean.
@@ -710,7 +725,7 @@ struct SystolicBinarySearchTileMatmulPass
           const int64_t invocationStart = computeClock;
           computeClock += estCycles;
 
-          cTile =
+          auto tile =
               builder.create<MatmulTileOp>(
                   loc,
                   tileTy,
@@ -726,6 +741,16 @@ struct SystolicBinarySearchTileMatmulPass
                   builder.getI64IntegerAttr(estCycles),
                   /*start_cycle=*/
                   builder.getI64IntegerAttr(invocationStart));
+          tile->setAttr("systolic.gemm",
+                        builder.getI64IntegerAttr(gemmIndex));
+          tile->setAttr("systolic.tile",
+                        builder.getI64IntegerAttr(
+                            static_cast<int64_t>(taskIndex)));
+          tile->setAttr("systolic.k_index",
+                        builder.getI64IntegerAttr(j));
+          tile->setAttr("systolic.k_count",
+                        builder.getI64IntegerAttr(numInvocations));
+          cTile = tile.getResult();
         }
 
         result =

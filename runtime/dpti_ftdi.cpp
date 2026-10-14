@@ -214,6 +214,58 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
     }
 
     /*
+     * SYSTOLIC_DPTI_LATENCY_MS: when set to 1..255, the FT2232H latency
+     * timer is written to that value; unset, the device keeps whatever it
+     * had (16 ms after power-up, which is also the value the board runs of
+     * 2026-10-09..13 used -- the baseline measurements of docs/ASYNC.md
+     * vary it). The timer is the time a partial USB packet (a 64- or
+     * 256-byte result tile is one) waits in the FT2232H before it is sent
+     * to the host.
+     */
+    unsigned latency_set = 0;
+    if (const char *v = std::getenv("SYSTOLIC_DPTI_LATENCY_MS")) {
+        char *end = nullptr;
+        const long t = std::strtol(v, &end, 10);
+        if (!*v || (end && *end) || t < 1 || t > 255) {
+            std::fprintf(
+                stderr,
+                "[DPTI FTDI] SYSTOLIC_DPTI_LATENCY_MS='%s' ignored: "
+                "expected 1..255\n",
+                v);
+        } else if (ftdi_set_latency_timer(ftdi, static_cast<unsigned char>(t)) < 0) {
+            std::fprintf(
+                stderr,
+                "[DPTI FTDI] ftdi_set_latency_timer(%ld) failed: %s\n",
+                t,
+                ftdi_get_error_string(ftdi));
+        } else {
+            latency_set = static_cast<unsigned>(t);
+        }
+    }
+    if (latency_set || dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] latency timer: %u ms (%s)\n",
+            latency_set ? latency_set : static_cast<unsigned>(latency_ms),
+            latency_set ? "SYSTOLIC_DPTI_LATENCY_MS" : "device default");
+
+    /*
+     * SYSTOLIC_DPTI_READ_CHUNK: libftdi's read chunk size in bytes (its
+     * default is 4096). Only set when asked, so the default behaviour is
+     * the board-verified one.
+     */
+    if (const char *v = std::getenv("SYSTOLIC_DPTI_READ_CHUNK")) {
+        const long c = std::strtol(v, nullptr, 10);
+        if (c <= 0 || ftdi_read_data_set_chunksize(ftdi, static_cast<unsigned>(c)) < 0)
+            std::fprintf(
+                stderr,
+                "[DPTI FTDI] SYSTOLIC_DPTI_READ_CHUNK='%s' not applied\n",
+                v);
+        else if (dpti_trace())
+            std::fprintf(stderr, "[DPTI FTDI] read chunk size: %ld bytes\n", c);
+    }
+
+    /*
      * Purge once at session start.  Do not purge between scheduled
      * jobs because they belong to one compiler-generated timeline.
      */
@@ -450,6 +502,44 @@ extern "C" int dpti_ftdi_read_exact_session(
             length);
 
     return 0;
+}
+
+extern "C" int dpti_ftdi_read_some_session(
+    DptiFtdiSession *session,
+    void *data,
+    uint32_t max_length)
+{
+    if (!session || !session->transport.ftdi)
+        return -1;
+
+    if (!data || max_length == 0)
+        return -2;
+
+    const int rc =
+        ftdi_read_data(
+            session->transport.ftdi,
+            static_cast<unsigned char *>(data),
+            static_cast<int>(max_length));
+
+    if (rc < 0) {
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] read failed: %s\n",
+            ftdi_get_error_string(
+                session->transport.ftdi));
+        return -3;
+    }
+
+    session->transport.bytes_read +=
+        static_cast<unsigned long long>(rc);
+
+    if (rc > 0 && dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] read %d byte(s)\n",
+            rc);
+
+    return rc;
 }
 
 extern "C" void dpti_ftdi_close(

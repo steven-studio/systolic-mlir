@@ -38,7 +38,10 @@ extern "C" {
 //        included, was not sent
 //    -7  reading the result tile failed
 //    -8  the result tile did not arrive within SYSTOLIC_DPTI_TIMEOUT_MS
-//   -14  refused: an earlier call on this session failed with -3 .. -8
+//    -9  the completion record did not match this invocation (another
+//        job_id or device, or the bitstream refused the descriptor): the
+//        link is out of step with the host, nothing more is sent
+//   -14  refused: an earlier call on this session failed with -3 .. -9
 int fpga_matmul_tiled_auto_scheduled(
     int M, int K, int N,
     const float *A, const float *B, float *C,
@@ -56,6 +59,19 @@ typedef struct {
     unsigned long long bytes_from_fpga;            /* every byte read */
     unsigned long long failed_calls;
     int                first_error;                /* 0 = none */
+
+    /* Host wall-clock of the successful invocations, in nanoseconds
+     * (std::chrono::steady_clock), from the first byte of the MEM_WRITE to
+     * the last byte of the result tile. The four phases add up to ns_total:
+     * the MEM_WRITE itself, the settle sleep after it (SYSTOLIC_DPTI_SETTLE_US,
+     * 1000 by default), the descriptor's 14 WRITE32 and the result read. */
+    unsigned long long ns_total;
+    unsigned long long ns_min;                     /* over invocations; 0 if none */
+    unsigned long long ns_max;
+    unsigned long long ns_mem_write;
+    unsigned long long ns_settle;
+    unsigned long long ns_submit;
+    unsigned long long ns_read;
 } fpga_runtime_stats_t;
 
 void fpga_runtime_get_stats(fpga_runtime_stats_t *out);
@@ -87,11 +103,61 @@ typedef struct {
                                ceil(K_MAX / 8) * 8 depths * 64 bytes */
     char     source[512];   /* the file, or the built-in default */
     char     error[512];    /* why the configuration is invalid, or "" */
+    /* COMPLETION_HEADER=1 in the file: every result the bitstream sends
+     * back starts with a 16-byte completion record (magic, job_id,
+     * device_id, status, payload bytes, seq) -- bitstreams built from
+     * dma_top_build.tcl after 2026-10-14. 0 (the default, and every older
+     * bitstream): bare tiles, matched by order. */
+    unsigned completion_header;
 } fpga_runtime_config_t;
+
+/* The completion record, as the host reads it off the link (little-endian
+ * fields; FPGA_COMPLETION_BYTES on the wire). */
+#define FPGA_COMPLETION_BYTES 16u
+#define FPGA_COMPLETION_MAGIC 0x59534A43u   /* "CJSY" on the wire */
+#define FPGA_COMPLETION_OK      0u
+#define FPGA_COMPLETION_BAD_K   1u          /* k outside 1..K_MAX of the device */
+#define FPGA_COMPLETION_BAD_DEV 2u          /* no such device */
+typedef struct {
+    unsigned magic;
+    unsigned job_id;
+    unsigned device_id;
+    unsigned status;
+    unsigned payload_bytes;
+    unsigned seq;
+} fpga_completion_t;
 
 // 0, or -16 with out->error saying why (every invocation then fails with
 // -16 before anything is sent).
 int fpga_runtime_get_config(fpga_runtime_config_t *out);
+
+// Read one completion record from the open session (bitstreams with
+// COMPLETION_HEADER=1). 0, or -7 read failed, -8 timed out, -9 no magic
+// where one was expected. The dispatch tests use it; the scheduled entry
+// point reads its own, and the asynchronous runtime (fpga_async_runtime.h)
+// parses records out of its own receive buffer.
+int fpga_runtime_read_completion(fpga_completion_t *out);
+
+// The device table and the slab format, for the asynchronous runtime, which
+// stages the same slabs for the same arrays through its own session.
+//
+// The array of a physical device: 8 for device 0, 4 for devices 1..3,
+// 0 for anything else.
+unsigned fpga_runtime_device_geometry(unsigned device_id);
+
+// K_MAX of a physical device under this configuration; 0 for an unknown one.
+unsigned fpga_runtime_device_k_max(const fpga_runtime_config_t *cfg,
+                                   unsigned device_id);
+
+// Pack one invocation into an operand slab of slab_bytes bytes (the
+// bitstream's fixed MEM_WRITE length, fpga_runtime_config_t.slab_bytes):
+// the m x k A and k x n B tiles, row-major, in the lane image
+// dma_operand_writer decodes, zero elsewhere. P is the array (8 or 4),
+// k_max its capacity. 0, or -12 null pointer, -10 K outside 1..k_max,
+// -11 tile outside 1..P, -13 the slab is too small for K.
+int fpga_runtime_pack_operand_slab(int M, int K, int N, int P, int k_max,
+                                   const float *A, const float *B,
+                                   unsigned char *slab, unsigned slab_bytes);
 
 // Close the DPTI session the scheduled entry point opened on first use.
 void fpga_runtime_close(void);

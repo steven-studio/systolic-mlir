@@ -111,6 +111,22 @@ int dpti_ftdi_read_exact_session(
     uint32_t length,
     uint32_t timeout_ms);
 
+/*
+ * Read whatever the FPGA has sent so far, at most max_length bytes, with
+ * one call into libftdi: the asynchronous runtime's receive side. Returns
+ * the number of bytes stored (0 when nothing was pending), or -1 no session,
+ * -2 bad arguments, -3 the read failed.
+ *
+ * On the FT2232H "nothing pending" costs one latency-timer period (the chip
+ * answers the USB IN request only when it has data or the timer expires,
+ * SYSTOLIC_DPTI_LATENCY_MS), so the caller reads when it expects something,
+ * not in a tight loop. Against the RTL co-simulation it returns at once.
+ */
+int dpti_ftdi_read_some_session(
+    DptiFtdiSession *session,
+    void *data,
+    uint32_t max_length);
+
 void dpti_ftdi_close(
     DptiFtdiSession *session);
 

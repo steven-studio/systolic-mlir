@@ -317,9 +317,11 @@ test/e2e/run_e2e.sh --backend board
 test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_cosim.so
 ```
 
-- RTL 取自 bitstream 的 git revision（預設上面那個 tag，`RTL_REV=` 可改，
-  `RTL_DIR=.` 用 working tree），source list 與 generics 照 `dma_top_build.tcl`
-  （external scheduler、無 legacy job port、v1 operand path）。K_MAX 預設 16／16；
+- RTL 預設取自 working tree（`RTL_REV=<tag 或 commit>` 改成某個 revision，例如
+  bitstream 的 tag；`RTL_DIR=` 指另一棵樹），source list 與 generics 照 `dma_top_build.tcl`
+  （external scheduler、無 legacy job port、v1 operand path；working tree 裡有
+  `dpti_bus_arbiter.sv` 時一併編入並在 `fpga_config.txt` 寫 `COMPLETION_HEADER=1`，
+  `docs/ASYNC.md`）。K_MAX 預設 16／16；
   有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）可用同名環境變數各自設定
   （十進位、不帶前導零；co-sim 的範圍是 1..1024：DDR model 只有 128 KiB，而 runtime
   把 slab 放在 0x10000，`ceil(K/8)·512` byte 要放得進 64 KiB——這是模擬環境的限制，
@@ -359,15 +361,25 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 |---|---|---|
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
-| lit | `cmake --build build --target check-systolic` | 38/38 |
+| Systolic → FPGA（非同步） | `systolic-opt --systolic-fpga-pipeline="async=true" test/Systolic/fpga_lowering_async.mlir` | `llvm.call @fpga_gemm_begin`、每個 tile 一個 `@fpga_tile_submit`、`@fpga_gemm_wait`（`docs/ASYNC.md`） |
+| lit | `cmake --build build --target check-systolic` | 41/41 |
 | E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
 | runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
+| 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V 六個 mode） |
 | E2E | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> test/e2e/run_e2e.sh --backend board` | `E2E: PASS`（`E2E cases: N/N PASS`；N 依設定而定） |
+| E2E（非同步） | 同上加 `--mode async` | `E2E: PASS on backend board, async runtime`；verdict 另外檢查 IR 呼叫的是 `fpga_tile_submit` |
 
 ## 6. 已知限制
 
-- 一次一個 invocation：四顆陣列在時間上沒有並行（硬體 scheduler 一次接一個 job，
-  runtime 也同步送）。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的發射時間。
+- 同步 runtime（預設）一次一個 invocation：四顆陣列在時間上沒有並行，host 每個 job
+  寫 slab、送 descriptor、等結果。`run_e2e.sh --mode async`／`systolic-matmul --async`
+  走非同步 runtime（`runtime/fpga_async_runtime.h`，`docs/ASYNC.md`）：每顆陣列一個
+  descriptor 在飛、下一個 slab 先 stage、四顆同時忙、多個 GEMM 可交錯；要
+  `COMPLETION_HEADER=1` 的 bitstream（每個結果前有 16 byte 的 completion record）。每顆
+  陣列仍只有一個 outstanding descriptor（descriptor bridge 的 head-of-line）。
+  `start_cycle` 有寫進 descriptor，但不能讀成硬體強制的發射時間。
+- `COMPLETION_HEADER=1` 的 bitstream 配同步 runtime 也可以：runtime 讀設定檔知道要先
+  讀 record；舊 bitstream（沒有這個鍵）照舊讀裸 tile。非同步 runtime 只接新 bitstream。
 - 每次 invocation 的 MEM_WRITE 都是整塊 slab（`HOST_SLAB_BYTES`，最深幾何的
   `ceil(K_MAX/8)·512` byte）：小 tile 也付整塊的 USB 傳輸，K_MAX 越深越多。FPGA 端只讀
   `ceil(k/8)` 個 window。

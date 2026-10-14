@@ -294,9 +294,41 @@ configuration is not independently verified: the FPGA does not report its
 K_MAX.
 
 The co-simulation (`test/e2e/cosim/build.sh`, Verilator) runs the RTL of the
-bitstream's tag `tile-pipelined-1x8x8-3x4x4-20261009`, with only the Xilinx
-IP replaced, behind the unmodified runtime. It is a simulation: a board run
-is the only evidence about the board. See `docs/E2E.md`.
+working tree (`RTL_REV=tile-pipelined-1x8x8-3x4x4-20261009` for the archived
+bitstream's), with only the Xilinx IP replaced, behind the unmodified runtime.
+It is a simulation: a board run is the only evidence about the board. See
+`docs/E2E.md`.
+
+## 8b. The asynchronous runtime (`docs/ASYNC.md`)
+
+The branch `experiment/batch-gemm-parallelism` adds a second runtime that
+keeps the four arrays busy at once: one descriptor in flight per array, the
+next operand slab staged behind it, results attributed by the job_id of a
+16-byte completion record the bitstream sends ahead of every tile. It needs
+a bitstream built from this branch's RTL (`dma_top_build.tcl` writes
+`COMPLETION_HEADER=1` into its fpga_config.txt); the co-simulation built by
+`test/e2e/cosim/build.sh` from the working tree has it.
+
+    test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1
+    cmake --build build --target check-systolic           # 41 lit tests, three for the async lowering
+    test/e2e/run_e2e.sh --backend cosim                   # the synchronous runtime, as before
+    test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
+    SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
+
+`runtime-async-test` runs the experiments of `docs/ASYNC.md` as modes
+(A one array, B every array, C with the slab staged behind the running
+job, D two GEMMs interleaved, X the fold order checked bit for bit against
+the synchronous entry point, V the refusals); `--gemm MxNxK` sizes them. The
+RTL changes have their own benches:
+
+    rtl/multi_200t/tile_pipelined/dma/tb/run_top_sim.sh v1 16 1 1          # the six regression gates, as before
+    COMPLETION_HEADER=1 rtl/multi_200t/tile_pipelined/dma/tb/run_dpti_direct.sh all
+    (cd rtl/multi_200t/tile_pipelined/dma/tb && iverilog -g2012 -I ../../../../../test/e2e/cosim \
+        -o /tmp/tb_arb tb_dpti_bus_arbiter.sv ../dpti_bus_arbiter.sv && vvp /tmp/tb_arb)
+
+The co-simulation shows correctness and that the overlap happens (the
+runtime's counters, the RTL's VIO counters); it runs at Verilator's speed, so
+the speed-up itself is a board measurement (`docs/ASYNC.md`, Section 6).
 
 
 ## 8a. Cost model, binary search, K_MAX exploration
@@ -355,8 +387,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 38
-      Passed: 38 (100.00%)
+    Total Discovered Tests: 41
+      Passed: 41 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

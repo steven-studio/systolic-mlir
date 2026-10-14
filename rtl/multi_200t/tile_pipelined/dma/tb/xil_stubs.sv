@@ -55,6 +55,10 @@ module vio_0 (
   input wire [31:0] probe_in17,
   input wire [31:0] probe_in18,
   input wire [31:0] probe_in19,
+  // the asynchronous host's evidence (Oct 2026)
+  input wire [31:0] probe_in20, input wire [31:0] probe_in21,
+  input wire [31:0] probe_in22, input wire [31:0] probe_in23,
+  input wire [31:0] probe_in24,
   // OUTPUT probe.  On the board this is a JTAG-written register; here it is
   // +n_inv=<count> on the simulation command line, which is the same contract
   // -- the invocation count reaches the design from outside it, and the design

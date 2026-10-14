@@ -4,14 +4,17 @@
 #
 #   test/e2e/cosim/build.sh            -> build/cosim/{Vcosim,libftdi_cosim.so}
 #
-# The RTL is taken from the git revision the bitstream on the board was built
-# from, not from the working tree, so the simulated FPGA is the programmed
-# one even while rtl/ moves on:
+# The RTL is the working tree's by default on this branch
+# (experiment/batch-gemm-parallelism changes the DPTI path, so the
+# co-simulation has to follow the tree); a git revision can be named instead,
+# so the simulated FPGA is a programmed bitstream's RTL even while rtl/ moves
+# on:
 #
-#   RTL_REV  (default tile-pipelined-1x8x8-3x4x4-20261009, the tag of
-#            artifacts/fpga/tile_pipelined/1x8x8-3x4x4/, WNS +0.079 ns)
-#   RTL_DIR  a directory holding rtl/multi_200t/tile_pipelined instead
-#            (e.g. RTL_DIR=. for the working tree)
+#   RTL_DIR  a directory holding rtl/multi_200t/tile_pipelined (default: the
+#            repository, i.e. the working tree; ignored when RTL_REV is set)
+#   RTL_REV  a git revision to archive the RTL from instead, e.g.
+#            tile-pipelined-1x8x8-3x4x4-20261009 (the 2026-10-09 bitstream's
+#            tag; its RTL has one K_MAX and no completion record)
 #   COSIM_BUILD_DIR  output directory (default build/cosim)
 #   USE_V2   0 (default, the v1 operand path dma_top_build.tcl defaults to) or 1
 #   K_MAX_8X8, K_MAX_4X4
@@ -38,7 +41,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 OUT="${COSIM_BUILD_DIR:-$ROOT/build/cosim}"
-RTL_REV="${RTL_REV:-tile-pipelined-1x8x8-3x4x4-20261009}"
+RTL_REV="${RTL_REV:-}"
+if [ -z "$RTL_REV" ] && [ -z "${RTL_DIR:-}" ]; then
+    RTL_DIR="$ROOT"
+fi
 USE_V2="${USE_V2:-0}"
 K_MAX_8X8="${K_MAX_8X8:-16}"
 K_MAX_4X4="${K_MAX_4X4:-16}"
@@ -77,7 +83,7 @@ command -v verilator >/dev/null 2>&1 || {
 
 mkdir -p "$OUT"
 
-if [ -n "${RTL_DIR:-}" ]; then
+if [ -z "$RTL_REV" ]; then
     RTL_ROOT="$(cd "$RTL_DIR" && pwd)"
     RTL_DESC="directory $RTL_ROOT"
 else
@@ -112,7 +118,7 @@ fi
 RTL_SRCS=(
     "$D/systolic_dma_top.sv"
 )
-for f in "$D/systolic_accel_context.sv" "$D/dma_engine_multi.sv"; do
+for f in "$D/systolic_accel_context.sv" "$D/dma_engine_multi.sv" "$D/dpti_bus_arbiter.sv"; do
     [ -f "$f" ] && RTL_SRCS+=("$f")
 done
 RTL_SRCS+=(
@@ -162,6 +168,7 @@ echo "$RTL_DESC" > "$OUT/RTL_SOURCE"
 rm -rf "$OUT/obj" "$OUT/fpga_config.txt"
 verilator --binary -Wno-fatal --timing -j "$JOBS" -O3 \
     -GUSE_V2="$USE_V2" ${KMAX_DEFS[@]+"${KMAX_DEFS[@]}"} \
+    -I"$HERE" \
     --top-module tb_dpti_cosim -o Vcosim --Mdir "$OUT/obj" \
     "$HERE/tb_dpti_cosim.sv" "${STANDINS[@]}" "${RTL_SRCS[@]}" \
     "$HERE/dpti_cosim.cpp" \
@@ -188,6 +195,10 @@ HOST_SLAB=$(( (S8 > S4 ? S8 : S4) * 64 ))
     echo "VARIANT=$([ "$USE_V2" = 1 ] && echo v2 || echo v1)"
     echo "USE_V2=$USE_V2"
     echo "HOST_SLAB_BYTES=$HOST_SLAB"
+    # RTL with the DPTI bus arbiter also sends the 16-byte completion record
+    # ahead of every result (systolic_dma_top.sv, Oct 2026); the runtime reads
+    # it only when told so here.
+    echo "COMPLETION_HEADER=$([ -f "$D/dpti_bus_arbiter.sv" ] && echo 1 || echo 0)"
     echo "RTL_SOURCE=$RTL_DESC"
     echo "BUILT=$(date -Iseconds)"
 } > "$OUT/fpga_config.txt"

@@ -376,18 +376,28 @@ module systolic_dma_top #(
   // check is going to mean anything.
   wire rst_i = ~ui_rst_n;
 
-  // ---- AXI write channel: two masters, one at a time ----------------------
-  // The seeder writes the operand image in P_SEED; the write-back engine writes
-  // the result tile in P_WB.  They are never alive at the same time -- the
-  // seeder's done pulses only after its last write response, and P_WB is four
-  // phases later -- so this is an ownership switch at a phase boundary, not an
-  // arbiter.  There is no round-robin, no priority, and nothing to starve.
+  // ---- AXI write channel: three masters, one at a time, at burst boundaries
+  // The host-staging engine (a MEM_WRITE landing in DDR), the write-back
+  // engine (a result tile) and the legacy seeder share the one AXI write
+  // port of the MIG.  Until the asynchronous host (docs/ASYNC.md) this was a
+  // priority mux keyed on hs_busy: the moment a MEM_WRITE started, every
+  // write-channel signal switched to the staging engine -- inside a
+  // write-back burst if that was where the engine happened to be.  The MIG
+  // counts a burst's beats from its AW, so the staging beats landed in the
+  // result tile and the tile's beats in the slab.  A synchronous host never
+  // sends a MEM_WRITE while a tile is being written back, which is the only
+  // reason that mux was ever correct.
   //
-  // The premise is checked rather than asserted.  err_w_owner latches if the
-  // master that does not own the channel ever raises awvalid or wvalid, and it
-  // feeds any_err like every other fault.  An ownership scheme whose premise
-  // lives only in a comment is one more silent mode of the kind this design
-  // keeps running into.
+  // Now a grant: a master gets the channel when it raises awvalid (or wvalid)
+  // while the channel is free, keeps it while it has a burst open (AW
+  // accepted, B not yet returned) or a request pending, and releases it at
+  // that boundary.  Priority at a free channel: host staging, then write-back,
+  // then the seeder.  A master that is not granted sees ready low and holds
+  // its valid, as AXI requires of it, so nothing is lost -- only delayed by
+  // at most the bursts the current owner has in flight.
+  //
+  // err_w_owner is the arbiter's self-check: a handshake on the bus that
+  // no granted master made.  It feeds any_err like every other fault.
   wire [1:0]   awid;   wire [28:0] awaddr;  wire [7:0] awlen;
   wire [2:0]   awsize; wire [1:0]  awburst; wire [0:0] awlock;
   wire [3:0]   awcache; wire [2:0] awprot;  wire [3:0] awqos;
@@ -428,55 +438,83 @@ module systolic_dma_top #(
   wire         hs_err_align;
   wire         hs_err_resp;
 
-  logic        wb_owns_w;
+  // The grant.
+  localparam [1:0] WG_NONE = 2'd0, WG_HS = 2'd1, WG_WB = 2'd2, WG_SD = 2'd3;
+  logic [1:0] w_grant;
+  logic [3:0] w_open;          // bursts the owner has issued whose B is still to come
+  logic       err_w_owner;
 
-  // Host staging has ownership only while its writer is active.
-  // Otherwise preserve the original writeback-versus-seeder selection.
-  assign awid       = hs_busy ? hs_awid
-                              : (wb_owns_w ? wb_awid    : sd_awid);
-  assign awaddr     = hs_busy ? hs_awaddr
-                              : (wb_owns_w ? wb_awaddr  : sd_awaddr);
-  assign awlen      = hs_busy ? hs_awlen
-                              : (wb_owns_w ? wb_awlen   : sd_awlen);
-  assign awsize     = hs_busy ? hs_awsize
-                              : (wb_owns_w ? wb_awsize  : sd_awsize);
-  assign awburst    = hs_busy ? hs_awburst
-                              : (wb_owns_w ? wb_awburst : sd_awburst);
-  assign awlock     = hs_busy ? hs_awlock
-                              : (wb_owns_w ? wb_awlock  : sd_awlock);
-  assign awcache    = hs_busy ? hs_awcache
-                              : (wb_owns_w ? wb_awcache : sd_awcache);
-  assign awprot     = hs_busy ? hs_awprot
-                              : (wb_owns_w ? wb_awprot  : sd_awprot);
-  assign awqos      = hs_busy ? hs_awqos
-                              : (wb_owns_w ? wb_awqos   : sd_awqos);
-  assign awvalid    = hs_busy ? hs_awvalid
-                              : (wb_owns_w ? wb_awvalid : sd_awvalid);
+  wire hs_wants = hs_awvalid || hs_wvalid;
+  wire wb_wants = wb_awvalid || wb_wvalid;
+  wire sd_wants = sd_awvalid || sd_wvalid;
 
-  assign hs_awready = hs_busy && awready;
-  assign sd_awready = !hs_busy && !wb_owns_w && awready;
-  assign wb_awready = !hs_busy &&  wb_owns_w && awready;
+  wire g_hs = (w_grant == WG_HS);
+  wire g_wb = (w_grant == WG_WB);
+  wire g_sd = (w_grant == WG_SD);
 
-  assign wdata_axi  = hs_busy ? hs_wdata
-                              : (wb_owns_w ? wb_wdata  : sd_wdata);
-  assign wstrb      = hs_busy ? hs_wstrb
-                              : (wb_owns_w ? wb_wstrb  : sd_wstrb);
-  assign wlast      = hs_busy ? hs_wlast
-                              : (wb_owns_w ? wb_wlast  : sd_wlast);
-  assign wvalid     = hs_busy ? hs_wvalid
-                              : (wb_owns_w ? wb_wvalid : sd_wvalid);
+  assign awid       = g_hs ? hs_awid    : g_wb ? wb_awid    : sd_awid;
+  assign awaddr     = g_hs ? hs_awaddr  : g_wb ? wb_awaddr  : sd_awaddr;
+  assign awlen      = g_hs ? hs_awlen   : g_wb ? wb_awlen   : sd_awlen;
+  assign awsize     = g_hs ? hs_awsize  : g_wb ? wb_awsize  : sd_awsize;
+  assign awburst    = g_hs ? hs_awburst : g_wb ? wb_awburst : sd_awburst;
+  assign awlock     = g_hs ? hs_awlock  : g_wb ? wb_awlock  : sd_awlock;
+  assign awcache    = g_hs ? hs_awcache : g_wb ? wb_awcache : sd_awcache;
+  assign awprot     = g_hs ? hs_awprot  : g_wb ? wb_awprot  : sd_awprot;
+  assign awqos      = g_hs ? hs_awqos   : g_wb ? wb_awqos   : sd_awqos;
+  assign awvalid    = g_hs ? hs_awvalid : g_wb ? wb_awvalid : g_sd ? sd_awvalid : 1'b0;
 
-  assign hs_wready  = hs_busy && wready;
-  assign sd_wready  = !hs_busy && !wb_owns_w && wready;
-  assign wb_wready  = !hs_busy &&  wb_owns_w && wready;
+  assign hs_awready = g_hs && awready;
+  assign wb_awready = g_wb && awready;
+  assign sd_awready = g_sd && awready;
 
-  // Response is visible only to the selected write master.
-  assign bready     = hs_busy ? hs_bready
-                              : (wb_owns_w ? wb_bready : sd_bready);
+  assign wdata_axi  = g_hs ? hs_wdata  : g_wb ? wb_wdata  : sd_wdata;
+  assign wstrb      = g_hs ? hs_wstrb  : g_wb ? wb_wstrb  : sd_wstrb;
+  assign wlast      = g_hs ? hs_wlast  : g_wb ? wb_wlast  : sd_wlast;
+  assign wvalid     = g_hs ? hs_wvalid : g_wb ? wb_wvalid : g_sd ? sd_wvalid : 1'b0;
 
-  assign hs_bvalid  = hs_busy && bvalid;
-  assign sd_bvalid  = !hs_busy && !wb_owns_w && bvalid;
-  assign wb_bvalid  = !hs_busy &&  wb_owns_w && bvalid;
+  assign hs_wready  = g_hs && wready;
+  assign wb_wready  = g_wb && wready;
+  assign sd_wready  = g_sd && wready;
+
+  // The response goes to the owner only.
+  assign bready     = g_hs ? hs_bready : g_wb ? wb_bready : g_sd ? sd_bready : 1'b1;
+  assign hs_bvalid  = g_hs && bvalid;
+  assign wb_bvalid  = g_wb && bvalid;
+  assign sd_bvalid  = g_sd && bvalid;
+
+  wire aw_hs = awvalid && awready;
+  wire b_hs  = bvalid  && bready;
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      w_grant     <= WG_NONE;
+      w_open      <= 4'd0;
+      err_w_owner <= 1'b0;
+    end
+    else begin
+      // Bursts in flight for the owner: +1 at its AW, -1 at its B.
+      if (aw_hs && !b_hs)      w_open <= w_open + 4'd1;
+      else if (b_hs && !aw_hs) w_open <= w_open - 4'd1;
+
+      case (w_grant)
+        WG_NONE: begin
+          if (hs_wants)      w_grant <= WG_HS;
+          else if (wb_wants) w_grant <= WG_WB;
+          else if (sd_wants) w_grant <= WG_SD;
+        end
+        // Release at a burst boundary: nothing pending, nothing open, and no
+        // handshake in this very cycle.
+        WG_HS: if (!hs_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
+        WG_WB: if (!wb_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
+        WG_SD: if (!sd_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
+        default: w_grant <= WG_NONE;
+      endcase
+
+      // Self-check: a handshake on the bus with no owner.
+      if ((w_grant == WG_NONE) && ((awvalid && awready) || (wvalid && wready) || (bvalid && bready)))
+        err_w_owner <= 1'b1;
+    end
+  end
 
   // ---- AXI read channel: the engine ---------------------------------------
   wire [1:0]   arid;   wire [28:0] araddr;  wire [7:0] arlen;
@@ -653,7 +691,6 @@ module systolic_dma_top #(
   wire seed_busy, seed_done, seed_err_align, seed_err_resp;
   wire eng_err_align, eng_err_resp;
   wire wb_err_align, wb_err_resp;
-  logic err_w_owner;
 
   // the shared read engine's destination stream (routed to contexts by tag)
   wire          dst_wr_en;
@@ -927,6 +964,11 @@ module systolic_dma_top #(
   wire                  rb_tx_byte_valid;
   wire                  rb_tx_byte_ready;
 
+  // The completion record (readback section) goes in ahead of the tile's
+  // DMA beats; the two never overlap, the descriptor is issued after it.
+  wire               rb_hdr_valid;
+  wire [AXI_DATA_W-1:0] rb_hdr_data;
+
   dpti_output_cdc #(
     .DATA_W (AXI_DATA_W),
     .DEPTH  (8)
@@ -934,8 +976,8 @@ module systolic_dma_top #(
     .src_clk   (ui_clk),
     .src_rst   (!ui_rst_n),
 
-    .src_data  (dst_wr_data),
-    .src_valid (rb_dst_wr_en),
+    .src_data  (rb_hdr_valid ? rb_hdr_data : dst_wr_data),
+    .src_valid (rb_hdr_valid | rb_dst_wr_en),
     .src_ready (rb_cdc_src_ready),
 
     .dst_clk   (dpti_clkout),
@@ -961,34 +1003,45 @@ module systolic_dma_top #(
     .byte_ready (rb_tx_byte_ready)
   );
 
-  dpti_byte_tx u_dpti_byte_tx (
-    .clk         (dpti_clkout),
-    .rst         (dpti_rst),
+  // ------------------------------------------------------------------------
+  // The DPTI bus, both directions, one owner at a time (dpti_bus_arbiter).
+  //
+  // dpti_byte_rx and dpti_byte_tx used to sit here side by side, each driving
+  // its own strobes: a bus fight as soon as a result left while a slab was
+  // still coming in. The arbiter keeps the FT2232H's rules (read or write,
+  // never both; OE# a cycle ahead of RD#; an idle cycle at every turnaround)
+  // and alternates the directions in chunks, results first. The byte
+  // handshakes toward dpti_command_frontend and from dpti_beat_to_byte are
+  // the two old modules', unchanged.
+  // ------------------------------------------------------------------------
+  wire [2:0]  dpti_bus_state;
+  wire [31:0] dpti_bus_turnarounds;
 
-    .byte_data   (rb_tx_byte_data),
-    .byte_valid  (rb_tx_byte_valid),
-    .byte_ready  (rb_tx_byte_ready),
+  dpti_bus_arbiter #(
+    .CHUNK_BYTES (64)
+  ) u_dpti_bus (
+    .clk           (dpti_clkout),
+    .rst           (dpti_rst),
 
-    .dpti_txe_n  (dpti_txe_n),
+    .dpti_d_in     (dpti_d),
+    .dpti_rxf_n    (dpti_rxf_n),
+    .dpti_txe_n    (dpti_txe_n),
+    .dpti_rd_n     (dpti_rd_n),
+    .dpti_oe_n     (dpti_oe_n),
+    .dpti_wr_n     (dpti_tx_wr_n),
+    .dpti_d_out    (dpti_tx_data),
+    .dpti_d_oe     (dpti_tx_oe),
 
-    .dpti_d_out  (dpti_tx_data),
-    .dpti_d_oe   (dpti_tx_oe),
-    .dpti_wr_n   (dpti_tx_wr_n)
-  );
+    .rx_byte_data  (dpti_byte_data),
+    .rx_byte_valid (dpti_byte_valid),
+    .rx_byte_ready (dpti_byte_ready),
 
-  dpti_byte_rx u_dpti_byte_rx (
-    .dpti_clkout (dpti_clkout),
-    .rst         (dpti_rst),
+    .tx_byte_data  (rb_tx_byte_data),
+    .tx_byte_valid (rb_tx_byte_valid),
+    .tx_byte_ready (rb_tx_byte_ready),
 
-    .dpti_d_in   (dpti_d),
-    .dpti_rxf_n  (dpti_rxf_n),
-
-    .dpti_rd_n   (dpti_rd_n),
-    .dpti_oe_n   (dpti_oe_n),
-
-    .byte_data   (dpti_byte_data),
-    .byte_valid  (dpti_byte_valid),
-    .byte_ready  (dpti_byte_ready)
+    .state_o       (dpti_bus_state),
+    .turnarounds   (dpti_bus_turnarounds)
   );
 
   dpti_command_frontend #(
@@ -1441,19 +1494,40 @@ module systolic_dma_top #(
   //
   // accept_q is dropped the cycle after a transfer, so a producer that keeps
   // job_valid high for one more cycle does not transfer again.
+  //
+  // REFUSAL (Oct 2026).  A descriptor the fleet cannot run -- its k outside
+  // the named accelerator's 1..K_MAX, or a device id the fleet does not have
+  // -- used to sit in the descriptor bridge for ever: never accepted, so
+  // nothing behind it was taken either, and the host learned of it only by
+  // the link going dead (err_job_k on led[6] if someone was looking).  Now it
+  // is taken at the same boundary as an accepted descriptor, by the refusal
+  // path instead of a context, and reported to the host as a completion
+  // record with status 1 (k) or 2 (device) and no payload -- see the
+  // readback section.  One refusal is held at a time; a second one waits in
+  // the bridge until the record of the first is on its way, like any
+  // descriptor waits for its device.
   logic        accept_q;
+  logic        refuse_q;
   logic [31:0] accept_dev_q;
   logic        accept_dpti_q;
 
   wire job_fire;
+  wire refuse_fire;
+  logic ref_pending;                         // a refusal record waits to be sent
+
+  wire refuse_now =
+      USE_EXTERNAL_SCHEDULER && effective_job_valid &&
+      (!target_valid || !job_k_ok);
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       accept_q      <= 1'b0;
+      refuse_q      <= 1'b0;
       accept_dev_q  <= 32'd0;
       accept_dpti_q <= 1'b0;
     end else begin
       accept_q      <= effective_job_valid && target_ready_now && !job_fire;
+      refuse_q      <= refuse_now && !ref_pending && !refuse_fire && !job_fire;
       accept_dev_q  <= effective_job_device_id;
       accept_dpti_q <= dpti_job_valid;
     end
@@ -1461,10 +1535,12 @@ module systolic_dma_top #(
 
   // The published decision applies to the descriptor it was made for: same
   // source (DPTI has priority over the legacy ports) and same device.
-  assign descriptor_downstream_ready =
-      accept_q &&
+  wire decision_matches =
       (accept_dev_q  == effective_job_device_id) &&
       (accept_dpti_q == dpti_job_valid);
+
+  assign descriptor_downstream_ready =
+      (accept_q || refuse_q) && decision_matches;
 
   // Legacy external producer readiness.
   //
@@ -1475,10 +1551,39 @@ module systolic_dma_top #(
       !dpti_job_valid &&
       descriptor_downstream_ready;
 
-  // A descriptor is accepted at the common downstream boundary.
+  // A descriptor is accepted at the common downstream boundary -- by a
+  // context, or by the refusal path.
   assign job_fire =
       effective_job_valid &&
-      descriptor_downstream_ready;
+      accept_q && decision_matches;
+
+  assign refuse_fire =
+      effective_job_valid &&
+      refuse_q && decision_matches;
+
+  // What the refusal record carries.
+  logic [31:0] ref_job_id;
+  logic [7:0]  ref_dev;
+  logic [7:0]  ref_status;
+  wire         ref_sent;                     // the readback section took it
+
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      ref_pending <= 1'b0;
+      ref_job_id  <= 32'd0;
+      ref_dev     <= 8'd0;
+      ref_status  <= 8'd0;
+    end else begin
+      if (refuse_fire) begin
+        ref_pending <= 1'b1;
+        ref_job_id  <= effective_job_id;
+        ref_dev     <= effective_job_device_id[7:0];
+        ref_status  <= target_valid ? 8'd1 : 8'd2;
+      end else if (ref_sent) begin
+        ref_pending <= 1'b0;
+      end
+    end
+  end
 
   // The scheduler accepts exactly the same accepted descriptor.
 
@@ -1494,6 +1599,11 @@ module systolic_dma_top #(
       $display("JOBACCEPT t=%0t job=%0d -> device %0d k=%0d a=0x%08h c=0x%08h",
                $time, effective_job_id, effective_job_device_id, effective_job_k,
                effective_job_a_base, effective_job_c_base);
+    if (USE_EXTERNAL_SCHEDULER && refuse_fire)
+      $display("JOBREFUSE t=%0t job=%0d device %0d k=%0d: %s; completion record status %0d",
+               $time, effective_job_id, effective_job_device_id, effective_job_k,
+               target_valid ? "k outside 1..K_MAX of that device" : "no such device",
+               target_valid ? 1 : 2);
   end
 
   // =========================================================================
@@ -1717,30 +1827,8 @@ module systolic_dma_top #(
   assign scheduler_c_done = scheduler_c_done_any;
 
   // ---- AXI write-channel ownership ------------------------------------------
-  // The seeder writes the operand image before the first read; the write-back
-  // engine owns the channel from the first result tile on.  Within a run the
-  // hand-over is one-way; a legacy re-run seeds again, so context 0's run
-  // boundary hands the channel back.  External jobs never seed.
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n || (!USE_EXTERNAL_SCHEDULER && run_clear)) wb_owns_w <= 1'b0;
-    else if (any_wb_active)                                   wb_owns_w <= 1'b1;
-  end
-
-  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      err_w_owner <= 1'b0;
-    end
-    else if (
-        (hs_busy &&
-         (sd_awvalid || sd_wvalid || wb_awvalid || wb_wvalid)) ||
-        (!hs_busy && wb_owns_w &&
-         (sd_awvalid || sd_wvalid || hs_awvalid || hs_wvalid)) ||
-        (!hs_busy && !wb_owns_w &&
-         (wb_awvalid || wb_wvalid || hs_awvalid || hs_wvalid))
-    ) begin
-      err_w_owner <= 1'b1;
-    end
-  end
+  // Granted per burst above (w_grant); any_wb_active is kept for the LEDs
+  // and the bench, which read it as "a tile is on its way to memory".
 
   // The engines' own counters count from reset (stat_clear follows context
   // 0's run boundary, as before) across every descriptor of every context.
@@ -1848,9 +1936,37 @@ module systolic_dma_top #(
     end
   end
 
-  assign rd_desc_valid[RD_SLOT_RB]      = rb_any && !rb_active;
-  assign rd_desc_addr[RD_SLOT_RB]       = rb_addr[rb_grant];
-  assign rd_desc_beats[RD_SLOT_RB]      = rb_beats_of(rb_grant);
+  // ---- the completion record ---------------------------------------------
+  // Every result the host reads back starts with one 16-byte record, one
+  // AXI beat pushed into the output FIFO ahead of the tile's DMA beats:
+  //
+  //   bytes  0..3   magic 0x5953_4A43 ("CJSY" on the wire)   bits  31:0
+  //   bytes  4..7   job_id of the completed descriptor         bits  63:32
+  //   byte   8      device_id                                  bits  71:64
+  //   byte   9      status: 0 ok, 1 k refused, 2 device refused bits 79:72
+  //   bytes 10..11  payload bytes that follow: 256, 64 or 0    bits  95:80
+  //   bytes 12..15  seq, this bitstream's completion counter   bits 127:96
+  //
+  // Without it the host saw bare tiles and could attribute them only by
+  // order, which with four contexts completing on their own clocks is no
+  // order at all. The readback descriptor goes to the read engine only once
+  // the record is in the FIFO, so the bytes cannot overtake each other.
+  // job_id is read from the context while it still holds the job: a context
+  // takes no new descriptor until its readback is over.
+  localparam logic [31:0] COMPLETION_MAGIC = 32'h5953_4A43;
+  typedef enum logic [1:0] { RB_IDLE, RB_HDR, RB_DATA } rb_state_t;
+  rb_state_t    rb_state;
+  logic         rb_kind_data;                // RB_HDR: a tile follows (else a refusal)
+  logic [127:0] rb_hdr_beat;
+  logic [31:0]  rb_seq;
+  logic         rb_desc_sent;
+
+  wire rb_hdr_fire = (rb_state == RB_HDR) && rb_cdc_src_ready;
+  assign ref_sent  = rb_hdr_fire && !rb_kind_data;
+
+  assign rd_desc_valid[RD_SLOT_RB]      = (rb_state == RB_DATA) && !rb_desc_sent;
+  assign rd_desc_addr[RD_SLOT_RB]       = rb_addr[rb_owner];
+  assign rd_desc_beats[RD_SLOT_RB]      = rb_beats_of(rb_owner);
   assign rd_desc_tag[RD_SLOT_RB]        = DMA_TAG_READBACK;
   assign rd_dst_almost_full[RD_SLOT_RB] = !rb_cdc_src_ready;
 
@@ -1884,9 +2000,14 @@ module systolic_dma_top #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
-      rb_pending <= '0;
-      rb_active  <= 1'b0;
-      rb_owner   <= '0;
+      rb_pending   <= '0;
+      rb_active    <= 1'b0;
+      rb_owner     <= '0;
+      rb_state     <= RB_IDLE;
+      rb_kind_data <= 1'b0;
+      rb_hdr_beat  <= '0;
+      rb_seq       <= 32'd0;
+      rb_desc_sent <= 1'b0;
       for (int k = 0; k < NUM_ACCEL; k++) rb_addr[k] <= '0;
     end
     else begin
@@ -1896,18 +2017,51 @@ module systolic_dma_top #(
           rb_addr[k]    <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
         end
       end
-      // A readback may be accepted in the very cycle the previous one's
-      // completion pulse is visible; the new owner wins.
-      if (rb_accept) begin
-        rb_pending[rb_grant] <= 1'b0;
-        rb_active            <= 1'b1;
-        rb_owner             <= rb_grant;
-      end
-      else if (rb_done) begin
-        rb_active <= 1'b0;
-      end
+
+      case (rb_state)
+        // A refusal record first (it holds the descriptor path), then the
+        // lowest-numbered context with a result in DDR.
+        RB_IDLE: begin
+          if (ref_pending) begin
+            rb_kind_data <= 1'b0;
+            rb_hdr_beat  <= {rb_seq, 16'd0, ref_status, ref_dev, ref_job_id, COMPLETION_MAGIC};
+            rb_seq       <= rb_seq + 32'd1;
+            rb_state     <= RB_HDR;
+          end
+          else if (rb_any) begin
+            rb_kind_data <= 1'b1;
+            rb_hdr_beat  <= {rb_seq,
+                             16'(rb_beats_of(rb_grant)) * 16'd16,
+                             8'd0, 8'(rb_grant),
+                             ctx_job_id[rb_grant], COMPLETION_MAGIC};
+            rb_seq       <= rb_seq + 32'd1;
+            rb_pending[rb_grant] <= 1'b0;
+            rb_active    <= 1'b1;
+            rb_owner     <= rb_grant;
+            rb_desc_sent <= 1'b0;
+            rb_state     <= RB_HDR;
+          end
+        end
+        // The record enters the output FIFO; only then may the tile's
+        // beats be requested.
+        RB_HDR: begin
+          if (rb_cdc_src_ready)
+            rb_state <= rb_kind_data ? RB_DATA : RB_IDLE;
+        end
+        RB_DATA: begin
+          if (rb_accept) rb_desc_sent <= 1'b1;
+          if (rb_done) begin
+            rb_active <= 1'b0;
+            rb_state  <= RB_IDLE;
+          end
+        end
+        default: rb_state <= RB_IDLE;
+      endcase
     end
   end
+
+  assign rb_hdr_valid = (rb_state == RB_HDR);
+  assign rb_hdr_data  = rb_hdr_beat;
 
   dma_engine_multi #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
@@ -2127,14 +2281,50 @@ module systolic_dma_top #(
   wire wb_desc_ready = wb_eng_desc_ready;
   wire wb_done       = wb_eng_done;
 
-  // A refused descriptor (its k outside the named accelerator's 1..K_MAX) is
-  // a host error the board must show: it sits in the descriptor bridge, so
-  // nothing after it is taken either.
+  // A refused descriptor (its k outside the named accelerator's 1..K_MAX, or
+  // a device the fleet does not have) is a host error the board shows on
+  // led[6] as well as reporting it in the completion record. It no longer
+  // holds up the descriptor path.
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n)
       err_job_k <= 1'b0;
-    else if (USE_EXTERNAL_SCHEDULER && effective_job_valid && target_valid && !job_k_ok)
+    else if (refuse_fire)
       err_job_k <= 1'b1;
+  end
+
+  // ---- concurrency evidence (Oct 2026) ---------------------------------------
+  // What the host cannot see from its clock: how often two or four arrays
+  // were in their fold at the same time, and how long each context sat idle
+  // between finishing a job and being handed the next one (the gap the
+  // host's submission latency leaves; the number that decides whether a
+  // second outstanding job per accelerator is worth building). Counted from
+  // reset, read over JTAG.
+  logic [31:0] overlap2_cycles, overlap4_cycles;
+  logic [31:0] idle_gap_cycles [0:NUM_ACCEL-1];
+  logic        gap_open        [0:NUM_ACCEL-1];
+  logic [3:0]  folds_now;
+  always_comb begin
+    folds_now = 4'd0;
+    for (int k = 0; k < NUM_ACCEL; k++)
+      folds_now = folds_now + ((ctx_phase[k] == 4'd4) ? 4'd1 : 4'd0);   // P_FOLD
+  end
+  always_ff @(posedge ui_clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) begin
+      overlap2_cycles <= 32'd0;
+      overlap4_cycles <= 32'd0;
+      for (int k = 0; k < NUM_ACCEL; k++) begin
+        idle_gap_cycles[k] <= 32'd0;
+        gap_open[k]        <= 1'b0;
+      end
+    end else begin
+      if (folds_now >= 4'd2) overlap2_cycles <= overlap2_cycles + 32'd1;
+      if (folds_now >= 4'd4) overlap4_cycles <= overlap4_cycles + 32'd1;
+      for (int k = 0; k < NUM_ACCEL; k++) begin
+        if (ctx_job_done[k])      gap_open[k] <= 1'b1;
+        else if (ctx_job_fire[k]) gap_open[k] <= 1'b0;
+        if (gap_open[k] && !ctx_job_fire[k]) idle_gap_cycles[k] <= idle_gap_cycles[k] + 32'd1;
+      end
+    end
   end
 
   wire any_err  = seed_err_align | seed_err_resp
@@ -2178,6 +2368,9 @@ module systolic_dma_top #(
   );
 
   // ---- JTAG readout -------------------------------------------------------
+  // (Oct 2026: 25 probes in -- the five below are the asynchronous host's
+  // evidence, appended; dma_top_build.tcl's vio_0 configuration and
+  // tb/xil_stubs.sv's stub carry the same count.)
   // SEVENTEEN probes in, ONE out: 3b's five (four 32-bit values plus an 8-bit
   // flag word), the nine operand-path counters, and the three the invocation
   // loop adds (t_span, cyc_total, and the n_inv/folds_done status word).  The
@@ -2216,6 +2409,13 @@ module systolic_dma_top #(
     .probe_in17 (external_debug_sticky),
     .probe_in18 (dpti_phy_debug_sync),
     .probe_in19 (dpti_clk_activity_sync),
+    // the asynchronous host's evidence (Oct 2026): overlap, idle gaps,
+    // completions issued
+    .probe_in20 (overlap2_cycles),
+    .probe_in21 (overlap4_cycles),
+    .probe_in22 (idle_gap_cycles[0]),
+    .probe_in23 (idle_gap_cycles[(NUM_ACCEL > 1) ? 1 : 0]),
+    .probe_in24 (rb_seq),
     .probe_out0 (n_inv_probe),
     .probe_out1 (rerun_probe)
   );
@@ -2234,10 +2434,14 @@ module systolic_dma_top #(
   // The fleet-level check is that a descriptor names a physical accelerator
   // at all: the acceptance logic never takes an out-of-range device, so the
   // producer would hang instead of being told.
+  logic bad_device_reported = 1'b0;
   always_ff @(posedge ui_clk) begin
-    if (ui_rst_n && USE_EXTERNAL_SCHEDULER && effective_job_valid && !target_valid)
-      $fatal(1, "descriptor names device %0d; the fleet has %0d accelerators (0..%0d)",
-             effective_job_device_id, NUM_ACCEL, NUM_ACCEL-1);
+    if (ui_rst_n && USE_EXTERNAL_SCHEDULER && effective_job_valid && !target_valid &&
+        !bad_device_reported) begin
+      bad_device_reported <= 1'b1;
+      $display("JOBREFUSED t=%0t descriptor names device %0d; the fleet has %0d accelerators (0..%0d); refused with status 2",
+               $time, effective_job_device_id, NUM_ACCEL, NUM_ACCEL-1);
+    end
   end
   // A k outside the named accelerator's capacity is refused by the acceptance
   // logic and latched in err_job_k (any_err); say so once, without stopping --
