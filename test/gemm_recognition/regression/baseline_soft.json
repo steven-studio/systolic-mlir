@@ -1,0 +1,1931 @@
+{
+ "kind": "regression_run",
+ "runtime": "soft",
+ "timestamp": "20261015-014651",
+ "tools": {
+  "build_dir": "/home/claude/systolic-mlir-src/build",
+  "llvm_build": "/home/claude/llvm/build",
+  "clang": "/home/claude/llvm/build/bin/clang",
+  "clang_version": "clang version 24.0.0git (https://github.com/llvm/llvm-project.git 2428c10786f12f8e4e7bffa63b0393c137b031bb)",
+  "compiler_commit": "6e25528",
+  "compiler_dirty": false
+ },
+ "cases": {
+  "case_001": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_002": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_003": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_004": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_005": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_006": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_007": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_008": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_009": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_010": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_011": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_012": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_013": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_014": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_015": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_016": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_017": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_018": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_019": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 10
+   }
+  },
+  "case_020": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 27
+   }
+  },
+  "case_021": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 27
+   }
+  },
+  "case_022": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_023": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_024": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 9
+   }
+  },
+  "case_025": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_026": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_027": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_028": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_029": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_030": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_031": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_032": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_033": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_034": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_035": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_036": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_037": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_038": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_039": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_040": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_041": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_042": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_043": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_044": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_045": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_046": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_047": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_048": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_049": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_050": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 20
+   }
+  },
+  "case_051": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_052": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_053": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_054": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_055": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 3
+   }
+  },
+  "case_056": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_057": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_058": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 3
+   }
+  },
+  "case_059": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_060": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 4
+   }
+  },
+  "case_061": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 6
+   }
+  },
+  "case_062": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_063": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_064": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_065": {
+   "origin": "showcase",
+   "verdict": "known_false_negative",
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [
+    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
+   ],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_066": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_067": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_068": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_069": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_070": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_071": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_072": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_073": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_074": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 74
+   }
+  },
+  "case_075": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 27
+   }
+  },
+  "case_076": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 4
+   }
+  },
+  "case_077": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_078": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_079": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_080": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_081": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_082": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_083": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_084": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_085": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_086": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_087": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_088": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_089": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_090": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_091": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_092": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_093": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_094": {
+   "origin": "showcase",
+   "verdict": "known_false_negative",
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [
+    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
+   ],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_095": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_096": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_097": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_098": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_099": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_100": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_001": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_translated",
+    "recognition": "not_reached",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_002": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_003": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_004": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_005": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_006": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_007": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_008": {
+   "origin": "showcase",
+   "verdict": "known_false_negative",
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [
+    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
+   ],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_009": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "ext_010": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_011": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "ext_012": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 4
+   }
+  },
+  "ext_013": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "ext_014": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "gen_06c950c874b9": {
+   "origin": "corpus",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "gen_55eeb58cd4f7": {
+   "origin": "corpus",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "gen_d55b7b137c7c": {
+   "origin": "corpus",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "discovery (no hoisting) rejects, as expected for a repetition loop inside the nest"
+   ],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 14
+   }
+  }
+ },
+ "issues": {
+  "ISSUE-001": {
+   "repro_passed": 0,
+   "repro_failed": 2,
+   "rc": 0,
+   "status": "still_open"
+  }
+ },
+ "check_systolic": {
+  "rc": 0,
+  "tail": [
+   "[0/1] Running the systolic regression tests",
+   "-- Testing: 74 tests, 2 workers --",
+   "Testing:  0.. 10.. 20.. 30.. 40.. 50.. 60.. 70.. 80.. 90.. ",
+   "",
+   "Testing Time: 2.70s",
+   "",
+   "Total Discovered Tests: 74",
+   "  Passed           : 72 (97.30%)",
+   "  Expectedly Failed:  2 (2.70%)"
+  ]
+ }
+}

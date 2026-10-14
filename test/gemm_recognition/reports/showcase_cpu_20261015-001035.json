@@ -1,0 +1,5606 @@
+{
+ "kind": "showcase_results",
+ "mode": "cpu",
+ "runtime": null,
+ "runtime_is_hardware": false,
+ "timestamp": "20261015-001035",
+ "label": "",
+ "host": "vm",
+ "platform": "Linux-6.18.44-fc-v114-x86_64-with-glibc2.39",
+ "tools": {
+  "cc": "cc"
+ },
+ "manifest_compiler_commit": "6e25528",
+ "cases_selected": 114,
+ "counts": {
+  "pass": 114
+ },
+ "cases": [
+  {
+   "id": "case_001",
+   "name": "basic_ijk",
+   "set": "positive",
+   "category": "basic_gemm",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_001.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_001/cpu",
+      "rc": 0,
+      "seconds": 0.189
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_001/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_002",
+   "name": "order_ikj",
+   "set": "positive",
+   "category": "loop_order",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_002.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_002/cpu",
+      "rc": 0,
+      "seconds": 0.195
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_002/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_003",
+   "name": "order_jik",
+   "set": "positive",
+   "category": "loop_order",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_003.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_003/cpu",
+      "rc": 0,
+      "seconds": 0.176
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_003/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_004",
+   "name": "order_jki",
+   "set": "positive",
+   "category": "loop_order",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_004.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_004/cpu",
+      "rc": 0,
+      "seconds": 0.153
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_004/cpu",
+       "rc": 0,
+       "seconds": 0.006
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_005",
+   "name": "order_kij",
+   "set": "positive",
+   "category": "loop_order",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_005.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_005/cpu",
+      "rc": 0,
+      "seconds": 0.181
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_005/cpu",
+       "rc": 0,
+       "seconds": 0.008
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_006",
+   "name": "order_kji",
+   "set": "positive",
+   "category": "loop_order",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_006.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_006/cpu",
+      "rc": 0,
+      "seconds": 0.174
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_006/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_007",
+   "name": "stmt_c_plus_ab",
+   "set": "positive",
+   "category": "statement_form",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_007.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_007/cpu",
+      "rc": 0,
+      "seconds": 0.162
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_007/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_008",
+   "name": "stmt_ab_plus_c",
+   "set": "positive",
+   "category": "statement_form",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_008.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_008/cpu",
+      "rc": 0,
+      "seconds": 0.137
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_008/cpu",
+       "rc": 0,
+       "seconds": 0.007
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_009",
+   "name": "stmt_b_times_a",
+   "set": "positive",
+   "category": "statement_form",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_009.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_009/cpu",
+      "rc": 0,
+      "seconds": 0.173
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_009/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_010",
+   "name": "bounds_le",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_010.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_010/cpu",
+      "rc": 0,
+      "seconds": 0.147
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_010/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_011",
+   "name": "long_counters_i_eq_i_plus_1",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_011.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_011/cpu",
+      "rc": 0,
+      "seconds": 0.158
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_011/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_012",
+   "name": "post_increment",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_012.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_012/cpu",
+      "rc": 0,
+      "seconds": 0.147
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_012/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_013",
+   "name": "shape_1x1x1",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_013.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_013/cpu",
+      "rc": 0,
+      "seconds": 0.14
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_013/cpu",
+       "rc": 0,
+       "seconds": 0.004
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_014",
+   "name": "shape_m1_1x8x8",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_014.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_014/cpu",
+      "rc": 0,
+      "seconds": 0.136
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_014/cpu",
+       "rc": 0,
+       "seconds": 0.009
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_015",
+   "name": "shape_n1_8x1x8",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_015.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_015/cpu",
+      "rc": 0,
+      "seconds": 0.169
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_015/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_016",
+   "name": "shape_k1_8x8x1",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_016.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_016/cpu",
+      "rc": 0,
+      "seconds": 0.184
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_016/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_017",
+   "name": "shape_2x3x4",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_017.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_017/cpu",
+      "rc": 0,
+      "seconds": 0.166
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_017/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_018",
+   "name": "shape_5x7x3",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_018.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_018/cpu",
+      "rc": 0,
+      "seconds": 0.149
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_018/cpu",
+       "rc": 0,
+       "seconds": 0.007
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_019",
+   "name": "shape_16x16x16",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_019.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_019/cpu",
+      "rc": 0,
+      "seconds": 0.185
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_019/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_020",
+   "name": "shape_20x12x40_kfold",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_020.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_020/cpu",
+      "rc": 0,
+      "seconds": 0.129
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_020/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_021",
+   "name": "shape_9x17x33",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_021.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_021/cpu",
+      "rc": 0,
+      "seconds": 0.172
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_021/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_022",
+   "name": "shape_8x8x17_kmax_plus_1",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_022.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_022/cpu",
+      "rc": 0,
+      "seconds": 0.141
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_022/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_023",
+   "name": "shape_4x4x16_exact_tile",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_023.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_023/cpu",
+      "rc": 0,
+      "seconds": 0.119
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_023/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_024",
+   "name": "shape_12x20x8",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_024.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_024/cpu",
+      "rc": 0,
+      "seconds": 0.163
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_024/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_025",
+   "name": "origin_i_from_2",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_025.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_025/cpu",
+      "rc": 0,
+      "seconds": 0.145
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_025/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_026",
+   "name": "origin_j_from_3",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_026.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_026/cpu",
+      "rc": 0,
+      "seconds": 0.122
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_026/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_027",
+   "name": "origin_k_from_1",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_027.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_027/cpu",
+      "rc": 0,
+      "seconds": 0.15
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_027/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_028",
+   "name": "origin_all_nonzero",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_028.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_028/cpu",
+      "rc": 0,
+      "seconds": 0.225
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_028/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_029",
+   "name": "origin_4_minus_4",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_029.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_029/cpu",
+      "rc": 0,
+      "seconds": 0.149
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_029/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_030",
+   "name": "origin_1_plus_1",
+   "set": "positive",
+   "category": "loop_origin",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_030.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_030/cpu",
+      "rc": 0,
+      "seconds": 0.154
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_030/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_031",
+   "name": "step_i_2",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_031.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_031/cpu",
+      "rc": 0,
+      "seconds": 0.15
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_031/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_032",
+   "name": "step_k_3",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_032.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_032/cpu",
+      "rc": 0,
+      "seconds": 0.133
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_032/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_033",
+   "name": "step_i_2_j_2",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_033.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_033/cpu",
+      "rc": 0,
+      "seconds": 0.144
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_033/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_034",
+   "name": "step_2_origin_1",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_034.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_034/cpu",
+      "rc": 0,
+      "seconds": 0.147
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_034/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_035",
+   "name": "step_2_le_bound",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_035.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_035/cpu",
+      "rc": 0,
+      "seconds": 0.146
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_035/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_036",
+   "name": "offset_i_plus_2",
+   "set": "positive",
+   "category": "access_offset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_036.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_036/cpu",
+      "rc": 0,
+      "seconds": 0.14
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_036/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_037",
+   "name": "offset_j_plus_3",
+   "set": "positive",
+   "category": "access_offset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_037.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_037/cpu",
+      "rc": 0,
+      "seconds": 0.122
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_037/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_038",
+   "name": "offset_k_plus_1",
+   "set": "positive",
+   "category": "access_offset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_038.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_038/cpu",
+      "rc": 0,
+      "seconds": 0.212
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_038/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_039",
+   "name": "offset_all",
+   "set": "positive",
+   "category": "access_offset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_039.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_039/cpu",
+      "rc": 0,
+      "seconds": 0.132
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_039/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_040",
+   "name": "offset_constant_first",
+   "set": "positive",
+   "category": "access_offset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_040.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_040/cpu",
+      "rc": 0,
+      "seconds": 0.162
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_040/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_041",
+   "name": "stride_i_2",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_041.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_041/cpu",
+      "rc": 0,
+      "seconds": 0.165
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_041/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_042",
+   "name": "stride_j_3",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_042.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_042/cpu",
+      "rc": 0,
+      "seconds": 0.166
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_042/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_043",
+   "name": "stride_k_2",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_043.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_043/cpu",
+      "rc": 0,
+      "seconds": 0.138
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_043/cpu",
+       "rc": 0,
+       "seconds": 0.004
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_044",
+   "name": "stride_all",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_044.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_044/cpu",
+      "rc": 0,
+      "seconds": 0.143
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_044/cpu",
+       "rc": 0,
+       "seconds": 0.004
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_045",
+   "name": "stride_and_offset_seed",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_045.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_045/cpu",
+      "rc": 0,
+      "seconds": 0.163
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_045/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_046",
+   "name": "stride_i_times_2_plus_1",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_046.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_046/cpu",
+      "rc": 0,
+      "seconds": 0.105
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_046/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_047",
+   "name": "stride_k_3_plus_2",
+   "set": "positive",
+   "category": "access_stride",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_047.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_047/cpu",
+      "rc": 0,
+      "seconds": 0.142
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_047/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_048",
+   "name": "split_k_8",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_048.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_048/cpu",
+      "rc": 0,
+      "seconds": 0.141
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_048/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_049",
+   "name": "split_i_j_tiled",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_049.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_049/cpu",
+      "rc": 0,
+      "seconds": 0.208
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_049/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_050",
+   "name": "split_all_tiled_16x16x24",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_050.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_050/cpu",
+      "rc": 0,
+      "seconds": 0.185
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_050/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_051",
+   "name": "split_interleaved_i0_k0_j0",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_051.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_051/cpu",
+      "rc": 0,
+      "seconds": 0.189
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_051/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_052",
+   "name": "split_with_offsets",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_052.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_052/cpu",
+      "rc": 0,
+      "seconds": 0.166
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_052/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_053",
+   "name": "split_with_stride",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_053.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_053/cpu",
+      "rc": 0,
+      "seconds": 0.17
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_053/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_054",
+   "name": "split_k_three_levels",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_054.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_054/cpu",
+      "rc": 0,
+      "seconds": 0.174
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_054/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_055",
+   "name": "split_radix_3",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_055.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_055/cpu",
+      "rc": 0,
+      "seconds": 0.144
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_055/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_056",
+   "name": "split_fine_loop_outside",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_056.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_056/cpu",
+      "rc": 0,
+      "seconds": 0.164
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_056/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_057",
+   "name": "repeat_outer_2",
+   "set": "positive",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_057.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_057/cpu",
+      "rc": 0,
+      "seconds": 0.159
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_057/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_058",
+   "name": "repeat_between_i_j",
+   "set": "positive",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_058.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_058/cpu",
+      "rc": 0,
+      "seconds": 0.154
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_058/cpu",
+       "rc": 0,
+       "seconds": 0.006
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_059",
+   "name": "repeat_between_j_k",
+   "set": "positive",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_059.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_059/cpu",
+      "rc": 0,
+      "seconds": 0.094
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_059/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_060",
+   "name": "repeat_two_loops",
+   "set": "positive",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_060.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_060/cpu",
+      "rc": 0,
+      "seconds": 0.243
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_060/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_061",
+   "name": "repeat_with_tiled_nest",
+   "set": "positive",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_061.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_061/cpu",
+      "rc": 0,
+      "seconds": 0.264
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_061/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_062",
+   "name": "subblock_top_left",
+   "set": "positive",
+   "category": "sub_matrix",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_062.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_062/cpu",
+      "rc": 0,
+      "seconds": 0.144
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_062/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_063",
+   "name": "subblock_offsets",
+   "set": "positive",
+   "category": "sub_matrix",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_063.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_063/cpu",
+      "rc": 0,
+      "seconds": 0.126
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_063/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_064",
+   "name": "subblock_strided",
+   "set": "positive",
+   "category": "sub_matrix",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_064.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_064/cpu",
+      "rc": 0,
+      "seconds": 0.137
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_064/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_065",
+   "name": "subblock_c_larger",
+   "set": "positive",
+   "category": "sub_matrix",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_065.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_065/cpu",
+      "rc": 0,
+      "seconds": 0.162
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_065/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_066",
+   "name": "a_times_a",
+   "set": "positive",
+   "category": "shared_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_066.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_066/cpu",
+      "rc": 0,
+      "seconds": 0.141
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_066/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_067",
+   "name": "a_times_a_kij",
+   "set": "positive",
+   "category": "shared_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_067.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_067/cpu",
+      "rc": 0,
+      "seconds": 0.146
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_067/cpu",
+       "rc": 0,
+       "seconds": 0.006
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_068",
+   "name": "small_jki_offsets_3x3x3",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_068.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_068/cpu",
+      "rc": 0,
+      "seconds": 0.145
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_068/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_069",
+   "name": "braces_bodies",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_069.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_069/cpu",
+      "rc": 0,
+      "seconds": 0.21
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_069/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_070",
+   "name": "pointer_to_array_params",
+   "set": "positive",
+   "category": "parameter_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_070.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_070/cpu",
+      "rc": 0,
+      "seconds": 0.16
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_070/cpu",
+       "rc": 0,
+       "seconds": 0.006
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_071",
+   "name": "counter_names_row_col_depth",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_071.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_071/cpu",
+      "rc": 0,
+      "seconds": 0.174
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_071/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_072",
+   "name": "le_bound_step_2_origin_2",
+   "set": "positive",
+   "category": "loop_step",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_072.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_072/cpu",
+      "rc": 0,
+      "seconds": 0.17
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_072/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_073",
+   "name": "split_k_outer_and_inner",
+   "set": "positive",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_073.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_073/cpu",
+      "rc": 0,
+      "seconds": 0.185
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_073/cpu",
+       "rc": 0,
+       "seconds": 0.016
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_074",
+   "name": "shape_32x32x32",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_074.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_074/cpu",
+      "rc": 0,
+      "seconds": 0.138
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_074/cpu",
+       "rc": 0,
+       "seconds": 0.008
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_075",
+   "name": "shape_17x9x33",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_075.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_075/cpu",
+      "rc": 0,
+      "seconds": 0.204
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_075/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_076",
+   "name": "shape_8x8x64_four_folds",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_076.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_076/cpu",
+      "rc": 0,
+      "seconds": 0.148
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_076/cpu",
+       "rc": 0,
+       "seconds": 0.004
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_077",
+   "name": "shape_8x8x5",
+   "set": "positive",
+   "category": "shape",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_077.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_077/cpu",
+      "rc": 0,
+      "seconds": 0.152
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_077/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_078",
+   "name": "increment_plus_equals_1",
+   "set": "positive",
+   "category": "loop_syntax",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_078.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_078/cpu",
+      "rc": 0,
+      "seconds": 0.162
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_078/cpu",
+       "rc": 0,
+       "seconds": 0.007
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_079",
+   "name": "kji_origins_offsets_strides",
+   "set": "positive",
+   "category": "combination",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_079.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_079/cpu",
+      "rc": 0,
+      "seconds": 0.242
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_079/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_080",
+   "name": "full_combination",
+   "set": "positive",
+   "category": "combination",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/positive/case_080.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_080/cpu",
+      "rc": 0,
+      "seconds": 0.133
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_080/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_081",
+   "name": "elementwise_2d_repeated",
+   "set": "negative",
+   "category": "elementwise",
+   "mathematical_class": "elementwise_product",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_081.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_081/cpu",
+      "rc": 0,
+      "seconds": 0.139
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_081/cpu",
+       "rc": 0,
+       "seconds": 0.006
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_082",
+   "name": "elementwise_3d",
+   "set": "negative",
+   "category": "elementwise",
+   "mathematical_class": "elementwise_product",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_082.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_082/cpu",
+      "rc": 0,
+      "seconds": 0.117
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_082/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_083",
+   "name": "matrix_vector",
+   "set": "negative",
+   "category": "matrix_vector",
+   "mathematical_class": "matrix_vector",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_083.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_083/cpu",
+      "rc": 0,
+      "seconds": 0.122
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_083/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_084",
+   "name": "matrix_vector_repeated_4",
+   "set": "negative",
+   "category": "matrix_vector",
+   "mathematical_class": "matrix_vector",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_084.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_084/cpu",
+      "rc": 0,
+      "seconds": 0.097
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_084/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_085",
+   "name": "batched_gemm",
+   "set": "negative",
+   "category": "batched",
+   "mathematical_class": "gemm_batched",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "dense_partition",
+    "reject_reason": "batched GEMM (a partition prefix P* of 1 coordinates) is not supported",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_085.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_085/cpu",
+      "rc": 0,
+      "seconds": 0.17
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_085/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_086",
+   "name": "batched_shared_b",
+   "set": "negative",
+   "category": "batched",
+   "mathematical_class": "gemm_batched",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "A, B and C must have the same number of subscripts (>= 2); they have [3, 2, 3]",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_086.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_086/cpu",
+      "rc": 0,
+      "seconds": 0.146
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_086/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_087",
+   "name": "coupled_i_plus_j",
+   "set": "negative",
+   "category": "coupled_mapping",
+   "mathematical_class": "gemm_nonrectangular_region",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "dense_partition",
+    "reject_reason": "two logical coordinates are driven by the same loop (loop 1 drives I and J)",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_087.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_087/cpu",
+      "rc": 0,
+      "seconds": 0.141
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_087/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_088",
+   "name": "skewed_output_seed",
+   "set": "negative",
+   "category": "coupled_mapping",
+   "mathematical_class": "gemm_values_skewed_placement",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_088.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_088/cpu",
+      "rc": 0,
+      "seconds": 0.119
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_088/cpu",
+       "rc": 0,
+       "seconds": 0.01
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_089",
+   "name": "singular_mapping",
+   "set": "negative",
+   "category": "singular_mapping",
+   "mathematical_class": "singular_mapping",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "dense_partition",
+    "reject_reason": "two logical coordinates are driven by the same loop (loop 0 drives I and K)",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_089.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_089/cpu",
+      "rc": 0,
+      "seconds": 0.163
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_089/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_090",
+   "name": "singular_output_independent_of_i",
+   "set": "negative",
+   "category": "singular_mapping",
+   "mathematical_class": "singular_mapping",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_090.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_090/cpu",
+      "rc": 0,
+      "seconds": 0.086
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_090/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_091",
+   "name": "transposed_a",
+   "set": "negative",
+   "category": "transposed_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_091.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_091/cpu",
+      "rc": 0,
+      "seconds": 0.148
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_091/cpu",
+       "rc": 0,
+       "seconds": 0.004
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_092",
+   "name": "transposed_b",
+   "set": "negative",
+   "category": "transposed_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_092.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_092/cpu",
+      "rc": 0,
+      "seconds": 0.126
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_092/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_093",
+   "name": "transposed_c",
+   "set": "negative",
+   "category": "transposed_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_093.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_093/cpu",
+      "rc": 0,
+      "seconds": 0.157
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_093/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_094",
+   "name": "operand_specific_stride",
+   "set": "negative",
+   "category": "operand_view_mismatch",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_094.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_094/cpu",
+      "rc": 0,
+      "seconds": 0.14
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_094/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_095",
+   "name": "reduction_index_in_output",
+   "set": "negative",
+   "category": "reduction_mismatch",
+   "mathematical_class": "not_gemm_scaled_rows",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_095.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_095/cpu",
+      "rc": 0,
+      "seconds": 0.134
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_095/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_096",
+   "name": "alpha_scaled",
+   "set": "negative",
+   "category": "scaled_product",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "both operands of the product must be affine.load results; a scalar factor or a third factor makes one of them an arith.mulf",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_096.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_096/cpu",
+      "rc": 0,
+      "seconds": 0.153
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_096/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_097",
+   "name": "no_accumulation",
+   "set": "negative",
+   "category": "reduction_mismatch",
+   "mathematical_class": "not_gemm_overwrite",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the stored value must be an arith.addf of the accumulator load and a product; there is no accumulation",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_097.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_097/cpu",
+      "rc": 0,
+      "seconds": 0.133
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_097/cpu",
+       "rc": 0,
+       "seconds": 0.005
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_098",
+   "name": "subtract_product",
+   "set": "negative",
+   "category": "scaled_product",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the stored value is an arith.subf, not an arith.addf",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_098.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_098/cpu",
+      "rc": 0,
+      "seconds": 0.177
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_098/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_099",
+   "name": "init_inside_imperfect_nest",
+   "set": "negative",
+   "category": "imperfect_nest",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the nest is not a perfect chain of affine.for ops around the MAC (C is initialised between the j and k loops)",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_099.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_099/cpu",
+      "rc": 0,
+      "seconds": 0.189
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_099/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "case_100",
+   "name": "double_precision",
+   "set": "negative",
+   "category": "element_type",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "stays_on_host",
+    "reject_stage": "driver",
+    "reject_reason": "the FPGA datapath is fp32 and it uses double arrays",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/negative/case_100.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_100/cpu",
+      "rc": 0,
+      "seconds": 0.165
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/case_100/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_001",
+   "name": "scalar_accumulator",
+   "set": "extended",
+   "category": "frontend_subset",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "rejected",
+    "recognition": "not_reached",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "not_translated",
+    "reject_stage": "frontend",
+    "reject_reason": "local variables are not supported (only for-loop counters)",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_001.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_001/cpu",
+      "rc": 0,
+      "seconds": 0.166
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_001/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_002",
+   "name": "no_restrict_may_alias",
+   "set": "extended",
+   "category": "aliasing",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "driver": "stays_on_host",
+    "reject_stage": "lowering",
+    "reject_reason": "A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_002.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_002/cpu",
+      "rc": 0,
+      "seconds": 0.176
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_002/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_003",
+   "name": "reversed_rows",
+   "set": "extended",
+   "category": "negative_coefficient",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "dense_partition",
+    "reject_reason": "logical coordinate I decreases along its loop",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_003.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_003/cpu",
+      "rc": 0,
+      "seconds": 0.164
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_003/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_004",
+   "name": "repeat_inside_reduction",
+   "set": "extended",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations)",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_004.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_004/cpu",
+      "rc": 0,
+      "seconds": 0.155
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_004/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_005",
+   "name": "triple_product",
+   "set": "extended",
+   "category": "scaled_product",
+   "mathematical_class": "gemm_of_hadamard_operand",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "both operands of the product must be affine.load results; a scalar factor or a third factor makes one of them an arith.mulf",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_005.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_005/cpu",
+      "rc": 0,
+      "seconds": 0.134
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_005/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_006",
+   "name": "sum_not_product",
+   "set": "extended",
+   "category": "not_gemm",
+   "mathematical_class": "not_gemm_sum",
+   "is_valid_gemm": false,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accumulated value must be an arith.mulf of two loads, not an arith.addf",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_006.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_006/cpu",
+      "rc": 0,
+      "seconds": 0.122
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_006/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_007",
+   "name": "a_times_a_different_views",
+   "set": "extended",
+   "category": "shared_operand",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_007.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_007/cpu",
+      "rc": 0,
+      "seconds": 0.149
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_007/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_008",
+   "name": "operand_specific_offset",
+   "set": "extended",
+   "category": "operand_view_mismatch",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_008.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_008/cpu",
+      "rc": 0,
+      "seconds": 0.159
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_008/cpu",
+       "rc": 0,
+       "seconds": 0.003
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_009",
+   "name": "equal_exprs_spelled_differently",
+   "set": "extended",
+   "category": "recognizer_probe",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_009.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_009/cpu",
+      "rc": 0,
+      "seconds": 0.141
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_009/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_010",
+   "name": "mixed_double_a",
+   "set": "extended",
+   "category": "element_type",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "driver": "stays_on_host",
+    "reject_stage": "lowering",
+    "reject_reason": "A, B and C have different element types",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_010.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_010/cpu",
+      "rc": 0,
+      "seconds": 0.153
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_010/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_011",
+   "name": "batched_two_batch_dims",
+   "set": "extended",
+   "category": "batched",
+   "mathematical_class": "gemm_batched",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "dense_partition",
+    "reject_reason": "batched GEMM (a partition prefix P* of 2 coordinates) is not supported",
+    "runtime": "kernel_runs_on_the_cpu_result_must_equal_references"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_011.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_011/cpu",
+      "rc": 0,
+      "seconds": 0.182
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_011/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_012",
+   "name": "eight_loops_tiled_repeated",
+   "set": "extended",
+   "category": "repetition_loop",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_012.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_012/cpu",
+      "rc": 0,
+      "seconds": 0.219
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_012/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_013",
+   "name": "k_step_le_origin_offsets",
+   "set": "extended",
+   "category": "combination",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_013.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_013/cpu",
+      "rc": 0,
+      "seconds": 0.174
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_013/cpu",
+       "rc": 0,
+       "seconds": 0.002
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  },
+  {
+   "id": "ext_014",
+   "name": "stacked_batches_as_one_gemm",
+   "set": "extended",
+   "category": "split_coordinate",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "expected": {
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": "",
+    "runtime": "offloaded_result_must_equal_references_on_every_backend"
+   },
+   "actual": {
+    "cpu": "pass"
+   },
+   "verdict": "pass",
+   "mismatches": [],
+   "notes": [],
+   "stages": {
+    "cpu": {
+     "stage": "cpu",
+     "run": {
+      "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/showcase/extended/ext_014.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_014/cpu",
+      "rc": 0,
+      "seconds": 0.116
+     },
+     "result": "pass",
+     "execute": {
+      "stage": "execute",
+      "run": {
+       "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/cpuwork/ext_014/cpu",
+       "rc": 0,
+       "seconds": 0.001
+      },
+      "result": "pass",
+      "rc": 0,
+      "verified_lines": [],
+      "mismatch_lines": [],
+      "gemm_labels": []
+     }
+    }
+   }
+  }
+ ]
+}

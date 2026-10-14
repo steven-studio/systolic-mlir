@@ -1,0 +1,40 @@
+issue: ISSUE-001
+date: 2026-10-15T01:41:28+08:00   host: vm
+systolic-opt: /home/claude/systolic-mlir-src/build/bin/systolic-opt
+compiler commit: 6e25528
+
+== variants.mlir (discovery pass; one '-----' block per variant, in file order) ==
+unique logical matmul count: 0
+recognition result: failure
+unique logical matmul count: 0
+unique logical matmul count: 1
+recognition result: success
+  dense logical GEMM: yes, I/J/K on loops 0/1/2
+  fleet partition: 1 regions, exact
+recognition result: failure
+unique logical matmul count: 0
+recognition result: failure
+unique logical matmul count: 0
+recognition result: failure
+unique logical matmul count: 0
+recognition result: failure
+unique logical matmul count: 0
+recognition result: failure
+unique logical matmul count: 0
+(the first block is the file's leading comment: 0 candidates)
+
+== repro_case_065.mlir ==
++ /home/claude/systolic-mlir-src/build/bin/systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir -o /dev/null 2>&1    | /home/claude/llvm/build/bin/FileCheck /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir --check-prefix=DISC
+  -> FAILED
+     /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir:20:10: error: DISC: expected string not found in input
+     // DISC: recognition result: success
+              ^
+     <stdin>:1:1: note: scanning from here
++ /home/claude/systolic-mlir-src/build/bin/systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir    | /home/claude/llvm/build/bin/FileCheck /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir --check-prefix=SYS
+  -> FAILED
+     /home/claude/systolic-mlir-src/test/gemm_recognition/failures/issues/ISSUE-001-recognizer-requires-identical-coordinate-expressions/repro_case_065.mlir:29:9: error: SYS: expected string not found in input
+     // SYS: memref.subview %C[8, 16] [8, 8] [1, 1] : memref<?x32xf32>
+             ^
+     <stdin>:6:28: note: scanning from here
+  (marked XFAIL: FAILED above is the open issue reproducing; PASSED would mean it is fixed)
+
