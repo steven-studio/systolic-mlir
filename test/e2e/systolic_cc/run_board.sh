@@ -30,7 +30,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-CC="$ROOT/tools/systolic-cc/systolic-cc.py"
+CC="$ROOT/build/bin/systolic-cc"
 
 MODE="${1:-}"
 case "$MODE" in
@@ -63,7 +63,7 @@ for src in "${PROGRAMS[@]}"; do
   name="$(basename "$src" .c)"
   out="$OUT_ROOT/$name"
   mkdir -p "$out"
-  if ! python3 "$CC" --runtime=board --verify "$src" -o "$out/$name" \
+  if ! "$CC" --runtime=board --verify "$src" -o "$out/$name" \
       > "$out/compile.log" 2>&1; then
     echo "  COMPILE   $name  (see $out/compile.log)"
     status=1

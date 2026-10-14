@@ -4,7 +4,7 @@
 #
 #   gemm.c                                     00-gemm.c (the source compiled)
 #     -> clang -S -emit-llvm                     10-gemm.ll (LLVM IR, kept)
-#     -> C front end: tools/systolic-cfront      20-gemm.affine.mlir
+#     -> C front end: build/bin/systolic-cfront  20-gemm.affine.mlir
 #        (clang 24 -ast-dump=json -> func/affine/arith/memref MLIR),
 #        checked by systolic-opt (LLVM/MLIR 24)
 #          FRONTEND=c (default)    the C source through the front end; needs
@@ -66,7 +66,7 @@ case "$FRONTEND" in
   c|fixture) ;;
   *) echo "FRONTEND must be c or fixture, got '$FRONTEND'" >&2; exit 2 ;;
 esac
-CFRONT="$ROOT/tools/systolic-cfront/systolic-cfront.py"
+CFRONT="$ROOT/build/bin/systolic-cfront"
 case "$BACKEND" in
   soft|board) ;;
   *) echo "BACKEND must be soft or board, got '$BACKEND'" >&2; exit 2 ;;
@@ -213,7 +213,7 @@ if [ "$FRONTEND" = c ]; then
     record "C -> MLIR (systolic-cfront)" "BLOCKED" \
       "SYSTOLIC_CFRONT_CLANG is not set (a clang 24, e.g. ~/work/clang24-build/bin/clang); no other clang is used in its place"
   elif run "C -> MLIR (systolic-cfront)" "$OUT/20-cfront.log" \
-      python3 "$CFRONT" --clang "$SYSTOLIC_CFRONT_CLANG" "${DEFS[@]}" \
+      "$CFRONT" --clang "$SYSTOLIC_CFRONT_CLANG" "${DEFS[@]}" \
       "$OUT/00-gemm.c" -o "$OUT/20-gemm.affine.mlir" &&
     run "C -> MLIR (systolic-cfront)" "$OUT/20-verify.log" \
       "$SYSTOLIC_OPT" "$OUT/20-gemm.affine.mlir" -o /dev/null; then

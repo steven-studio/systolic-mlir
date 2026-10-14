@@ -5,7 +5,7 @@
 # as run.sh, checked element by element against the same loops in C
 # (strided_main.c).
 #
-#   FRONTEND=c (default)  strided_permuted.c through tools/systolic-cfront;
+#   FRONTEND=c (default)  strided_permuted.c through build/bin/systolic-cfront;
 #                         needs SYSTOLIC_CFRONT_CLANG = a clang 24 (no other
 #                         clang is used in its place)
 #   FRONTEND=fixture      strided_permuted.mlir, the same nest by hand
@@ -36,7 +36,7 @@ case "$FRONTEND" in
       exit 1
     fi
     cp "$HERE/strided_permuted.c" "$OUT/00-strided_permuted.c"
-    python3 "$ROOT/tools/systolic-cfront/systolic-cfront.py" \
+    "$ROOT/build/bin/systolic-cfront" \
       --clang "$SYSTOLIC_CFRONT_CLANG" "$OUT/00-strided_permuted.c" \
       -o "$OUT/20-affine.mlir"
     ;;

@@ -23,6 +23,8 @@ set(SYSTOLIC_TEST_DEPENDS
   systolic-opt
   systolic-translate
   systolic-cost
+  systolic-cfront
+  systolic-cc
 )
 
 # An LLVM built in-tree (or the Debian llvm-*-tools packages) exports
@@ -42,6 +44,7 @@ set_target_properties(check-systolic PROPERTIES FOLDER "Tests")
 
 add_lit_testsuites(SYSTOLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
+  BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${SYSTOLIC_TEST_DEPENDS}
 )
 

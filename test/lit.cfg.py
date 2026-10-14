@@ -53,17 +53,17 @@ config.excludes = [
 ]
 
 
-# The C front end (tools/systolic-cfront) runs the clang the build names
+# The C front end (build/bin/systolic-cfront) runs the clang the build names
 # (-DSYSTOLIC_CFRONT_CLANG=<clang 24>, see test/CMakeLists.txt). Tests that
 # need it say REQUIRES: cfront-clang; without it they are UNSUPPORTED -- no
-# other clang on PATH is picked up in its place.
+# other clang on PATH is picked up in its place. Both tools are C programs
+# of this build (tools/systolic-cfront, tools/systolic-cc); lit only runs
+# them.
 if config.cfront_clang:
     config.available_features.add("cfront-clang")
-    cfront = os.path.join(os.path.dirname(config.test_source_root), "tools",
-                          "systolic-cfront", "systolic-cfront.py")
+    cfront = os.path.join(config.systolic_tools_dir, "systolic-cfront")
     config.substitutions.append(
-        ("%cfront", '"%s" "%s" --clang "%s"' % (sys.executable, cfront,
-                                                config.cfront_clang)))
+        ("%cfront", '"%s" --clang "%s"' % (cfront, config.cfront_clang)))
     # A plain C compile with the same clang, for comparing a program's
     # output with what systolic-cc made of it.
     config.substitutions.append(("%host-cc", '"%s"' % config.cfront_clang))
@@ -71,11 +71,10 @@ if config.cfront_clang:
     # the link, with the software runtime model unless a test says
     # otherwise. The LLVM build is the one llvm_tools_dir belongs to (llc,
     # mlir-translate, mlir_c_runner_utils).
-    cc = os.path.join(os.path.dirname(config.test_source_root), "tools",
-                      "systolic-cc", "systolic-cc.py")
+    cc = os.path.join(config.systolic_tools_dir, "systolic-cc")
     config.substitutions.append(
-        ("%systolic-cc", '"%s" "%s" --clang "%s" --build-dir "%s" '
-         '--llvm-build "%s"' % (sys.executable, cc, config.cfront_clang,
+        ("%systolic-cc", '"%s" --clang "%s" --build-dir "%s" '
+         '--llvm-build "%s"' % (cc, config.cfront_clang,
                                 config.systolic_obj_root,
                                 os.path.dirname(os.path.realpath(
                                     config.llvm_tools_dir)))))
