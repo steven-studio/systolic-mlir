@@ -81,6 +81,20 @@ def strip_qualifiers(t):
     return re.sub(r"\b(const|volatile)\b\s*", "", t).strip()
 
 
+def scale_form(form, c):
+    coeffs, const = form
+    return {k: v * c for k, v in coeffs.items() if v * c}, const * c
+
+
+def add_forms(a, b):
+    coeffs = dict(a[0])
+    for k, v in b[0].items():
+        coeffs[k] = coeffs.get(k, 0) + v
+        if coeffs[k] == 0:
+            del coeffs[k]
+    return coeffs, a[1] + b[1]
+
+
 class SourceMap:
     """Byte offset -> (line, column) of the main file."""
 
@@ -136,6 +150,8 @@ class Translator:
         self.lines = []
         self.counter = 0
         self.ssa_names = set()
+        self.symbol_suffix = ""
+        self.interfaces = []
 
     # ---------------------------------------------------------------- helpers
     def loc(self, node):
@@ -181,18 +197,75 @@ class Translator:
 
         self.ssa_names = set()   # SSA names are scoped to the function
         self.counter = 0
-        self.env = {}       # decl id -> ("memref", name, rank, elem) |
-                            #            ("scalar", name, elem) | ("iv", name)
+        self.env = {}       # decl id -> ("memref", name, rank, elem, type) |
+                            #   ("scalar", name, elem) | ("intscalar", name) |
+                            #   ("iv", name, (first, last) or None)
+        self.accesses = {}  # param decl id -> read / written / ranges
         args = []
         for p in params:
             if "name" not in p:
                 raise Unsupported(p, "unnamed parameters are not supported")
             args.append(self.parameter(p))
-        self.emit(1, "func.func @%s(%s) {" % (fn["name"], ", ".join(args)))
+        self.emit(1, "func.func @%s%s(%s) {" % (fn["name"], self.symbol_suffix,
+                                                 ", ".join(args)))
         self.statements(body[0]["inner"] if "inner" in body[0] else [], 2,
                         top_level=True)
         self.emit(2, "func.return %s" % self.loc(body[0]))
         self.emit(1, "} %s" % self.loc(fn))
+        self.interfaces.append(self.interface(fn, params, body[0]))
+
+    def interface(self, fn, params, body):
+        """What a caller-side shim needs to call the translated function
+        from C: the C parameters, the memref shape each becomes (with the
+        exact extent of the dimensions the C type leaves open), which arrays
+        are read and written, and where the definition is in the source."""
+        offset = node_offset(fn)
+        line, col = self.source_map.line_col(offset) if offset is not None \
+            else (0, 0)
+        loc = fn.get("loc", {})
+        rng = fn.get("range", {})
+        out = {
+            "name": fn["name"],
+            "symbol": fn["name"] + self.symbol_suffix,
+            "line": line, "col": col,
+            "end_line": self.source_map.line_col(
+                rng.get("end", {}).get("expansionLoc", rng.get("end", {}))
+                .get("offset", offset or 0))[0],
+            "storage_class": fn.get("storageClass", ""),
+            "inline": bool(fn.get("inline")),
+            # A definition written by a macro cannot be rewritten in place.
+            "from_macro": any("spellingLoc" in x for x in
+                              (loc, rng.get("begin", {}), rng.get("end", {}))),
+            "def_begin": rng.get("begin", {}).get("offset"),
+            "def_end": rng.get("end", {}).get("offset", -1) +
+                       rng.get("end", {}).get("tokLen", 0),
+            "name_offset": loc.get("offset"),
+            "name_length": loc.get("tokLen"),
+            "body_begin": node_offset(body),
+            "params": [],
+        }
+        for p in params:
+            entry = self.env[p["id"]]
+            param = {"name": p["name"], "ctype": qual_type(p),
+                     "kind": entry[0]}
+            if entry[0] == "memref":
+                param["elem"] = entry[3]
+                dims = re.findall(r"x(\d+|\?)", entry[4][len("memref<?"):])
+                inner = [int(d) for d in dims]
+                info = self.accesses.get(p["id"], {})
+                ranges = info.get("ranges")
+                # Rows [0, extent): the open leading dimension is as long as
+                # the accesses reach (0: never accessed).
+                param["leading_extent"] = ranges[0][1] + 1 if ranges else 0
+                param["leading_min"] = ranges[0][0] if ranges else 0
+                param["inner_dims"] = inner
+                param["read"] = info.get("read", False)
+                param["written"] = info.get("written", False)
+                param["noalias"] = "restrict" in qual_type(p)
+            elif entry[0] == "scalar":
+                param["elem"] = entry[2]
+            out["params"].append(param)
+        return out
 
     def parameter(self, p):
         t = strip_qualifiers(qual_type(p))
@@ -353,7 +426,10 @@ class Translator:
                                     "loop body")
 
         name = self.unique(var.get("name", "iv"))
-        self.env[decl] = ("iv", name)
+        # The counter's first and last values, or None for a loop that runs
+        # zero times.
+        values = (lb, lb + step * ((ub - 1 - lb) // step)) if ub > lb else None
+        self.env[decl] = ("iv", name, values)
         step_text = "" if step == 1 else " step %d" % step
         self.emit(indent, "affine.for %s = %d to %d%s {" %
                   (name, lb, ub, step_text))
@@ -366,42 +442,66 @@ class Translator:
 
     # ------------------------------------------------------------ expressions
     def affine_index(self, node):
-        """An affine subscript: a string usable inside affine.load brackets."""
+        """An affine subscript: (text usable inside affine.load brackets,
+        linear form ({counter decl id: coefficient}, constant))."""
         node = strip_parens_and_casts(node, ("LValueToRValue", "IntegralCast",
                                              "NoOp"))
         kind = node["kind"]
         if kind == "IntegerLiteral":
-            return str(int(node["value"]))
+            v = int(node["value"])
+            return str(v), ({}, v)
         if kind == "DeclRefExpr":
-            entry = self.env.get(node.get("referencedDecl", {}).get("id"))
+            decl = node.get("referencedDecl", {}).get("id")
+            entry = self.env.get(decl)
             if entry and entry[0] == "iv":
-                return entry[1]
+                return entry[1], ({decl: 1}, 0)
             raise Unsupported(node, "subscript uses '%s', which is not an "
                                     "enclosing loop counter" %
                               node.get("referencedDecl", {}).get("name", "?"))
         if kind == "UnaryOperator" and node["opcode"] == "-":
-            return "-(%s)" % self.affine_index(node["inner"][0])
+            text, form = self.affine_index(node["inner"][0])
+            return "-(%s)" % text, scale_form(form, -1)
         if kind == "BinaryOperator" and node["opcode"] in ("+", "-"):
-            return "(%s %s %s)" % (self.affine_index(node["inner"][0]),
-                                   node["opcode"],
-                                   self.affine_index(node["inner"][1]))
+            ta, fa = self.affine_index(node["inner"][0])
+            tb, fb = self.affine_index(node["inner"][1])
+            sign = 1 if node["opcode"] == "+" else -1
+            return "(%s %s %s)" % (ta, node["opcode"], tb), \
+                add_forms(fa, scale_form(fb, sign))
         if kind == "BinaryOperator" and node["opcode"] == "*":
             a, b = node["inner"]
-            for const, other, form in ((a, b, "(%d * %s)"), (b, a, "(%s * %d)")):
+            for const, other, const_first in ((a, b, True), (b, a, False)):
                 try:
                     c = self.int_constant(const)
                 except Unsupported:
                     continue
-                index = self.affine_index(other)
-                return form % ((c, index) if form.startswith("(%d") else
-                               (index, c))
+                text, form = self.affine_index(other)
+                text = ("(%d * %s)" % (c, text)) if const_first else \
+                    ("(%s * %d)" % (text, c))
+                return text, scale_form(form, c)
             raise Unsupported(node, "subscript multiplies two non-constant "
                                     "terms; not an affine expression")
         raise Unsupported(node, "subscript is not an affine expression of "
                                 "the loop counters")
 
-    def array_access(self, node):
-        """(memref entry, [subscripts]) of a fully subscripted array element."""
+    def form_range(self, form):
+        """Exact (min, max) of a linear form over the enclosing loops' box,
+        or None if some enclosing loop runs zero times (the access never
+        executes)."""
+        coeffs, const = form
+        lo = hi = const
+        for decl, c in coeffs.items():
+            entry = self.env[decl]
+            if entry[2] is None:
+                return None
+            first, last = entry[2]
+            lo += min(c * first, c * last)
+            hi += max(c * first, c * last)
+        return lo, hi
+
+    def array_access(self, node, read=False, written=False):
+        """(memref entry, [subscripts]) of a fully subscripted array element.
+        Records the access (read / written, the exact range of each
+        subscript) for the function's interface."""
         indices = []
         cur = node
         while True:
@@ -426,7 +526,20 @@ class Translator:
                               (base["referencedDecl"]["name"], entry[2],
                                len(indices)))
         indices.reverse()
-        return entry, [self.affine_index(i) for i in indices]
+        subscripts = [self.affine_index(i) for i in indices]
+        param = base["referencedDecl"]["id"]
+        info = self.accesses.setdefault(
+            param, {"read": False, "written": False, "ranges": None})
+        info["read"] |= read
+        info["written"] |= written
+        ranges = [self.form_range(form) for _, form in subscripts]
+        if all(r is not None for r in ranges):
+            if info["ranges"] is None:
+                info["ranges"] = ranges
+            else:
+                info["ranges"] = [(min(a[0], b[0]), max(a[1], b[1]))
+                                  for a, b in zip(info["ranges"], ranges)]
+        return entry, [text for text, _ in subscripts]
 
     def float_constant(self, value, elem, node):
         if elem == "f32":
@@ -510,7 +623,7 @@ class Translator:
         return name
 
     def load(self, node, indent):
-        entry, idx = self.array_access(node)
+        entry, idx = self.array_access(node, read=True)
         name = self.fresh()
         self.emit(indent, "%s = affine.load %s[%s] : %s %s" %
                   (name, entry[1], ", ".join(idx), entry[4], self.loc(node)))
@@ -526,7 +639,8 @@ class Translator:
         lhs_node = strip_parens_and_casts(lhs, ("NoOp",))
         if lhs_node["kind"] != "ArraySubscriptExpr":
             raise Unsupported(lhs, "only array elements can be assigned")
-        entry, idx = self.array_access(lhs_node)
+        entry, idx = self.array_access(lhs_node, written=True,
+                                       read=(opcode != "="))
         elem = entry[3]
         if opcode == "=":
             v, v_elem = self.value(rhs, indent)
@@ -572,6 +686,16 @@ def main():
     parser.add_argument("-D", dest="defines", action="append", default=[])
     parser.add_argument("-I", dest="includes", action="append", default=[])
     parser.add_argument("-std", dest="std", default="c11")
+    parser.add_argument("--skip-unsupported", action="store_true",
+                        help="translate the functions inside the subset and "
+                             "report the others as notes (they stay C), "
+                             "instead of failing on the first one")
+    parser.add_argument("--symbol-suffix", default="",
+                        help="append this to every emitted function's name")
+    parser.add_argument("--interface",
+                        help="write the translated functions' C interface "
+                             "(parameters, shapes, accesses, source ranges) "
+                             "to this JSON file")
     args = parser.parse_args()
 
     if not args.clang:
@@ -646,17 +770,32 @@ def main():
             (version, args.std,
              "".join(" -D" + d for d in args.defines)))
     tr.emit(0, "module {")
+    tr.symbol_suffix = args.symbol_suffix
     for fn in functions:
+        mark = len(tr.lines)
         try:
             tr.function(fn)
         except Unsupported as e:
             offset = node_offset(e.node)
             line, col = source_map.line_col(offset) if offset is not None \
                 else (0, 0)
-            print("%s:%d:%d: error: %s" % (args.source, line, col, e.message),
+            if not args.skip_unsupported:
+                print("%s:%d:%d: error: %s" % (args.source, line, col,
+                                               e.message), file=sys.stderr)
+                return 1
+            # The function stays C; nothing of it is emitted.
+            del tr.lines[mark:]
+            print("%s:%d:%d: note: '%s' is outside the supported C subset "
+                  "and is not translated: %s" %
+                  (args.source, line, col, fn["name"], e.message),
                   file=sys.stderr)
-            return 1
     tr.emit(0, "}")
+
+    if args.interface:
+        with open(args.interface, "w") as f:
+            json.dump({"source": os.path.realpath(args.source),
+                       "clang": version, "functions": tr.interfaces}, f,
+                      indent=1)
 
     text = "\n".join(tr.lines) + "\n"
     if args.output == "-":
