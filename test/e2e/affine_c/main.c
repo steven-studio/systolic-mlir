@@ -1,7 +1,9 @@
 /*
  * main.c -- numerical check of the compiled affine GEMM (test/e2e/affine_c).
  *
- *   gemm_systolic   the kernel the compiler produced from the affine loops:
+ *   GEMM_KERNEL     the kernel the compiler produced from the affine loops
+ *                   (gemm, from gemm.c through the C front end; gemm_systolic,
+ *                   from the hand-written fixture):
  *                   systolic.matmul_tile regions -> runtime calls -> LLVM
  *   gemm_reference  gemm.c compiled by clang, run on the CPU
  *
@@ -42,7 +44,11 @@
   (p), (p), (int64_t)0, (int64_t)(rows), (int64_t)(cols), (int64_t)(cols),     \
       (int64_t)1
 
-void gemm_systolic(float *, float *, int64_t, int64_t, int64_t, int64_t,
+#ifndef GEMM_KERNEL
+#define GEMM_KERNEL gemm_systolic
+#endif
+
+void GEMM_KERNEL(float *, float *, int64_t, int64_t, int64_t, int64_t,
                    int64_t, float *, float *, int64_t, int64_t, int64_t,
                    int64_t, int64_t, float *, float *, int64_t, int64_t,
                    int64_t, int64_t, int64_t);
@@ -65,9 +71,9 @@ int main(void) {
     for (int j = 0; j < GEMM_N; ++j)
       C[i][j] = C_ref[i][j] = (float)((i + 2 * j) % 5 - 2);
 
-  gemm_systolic(MEMREF2D(&A[0][0], GEMM_M, GEMM_K),
-                MEMREF2D(&B[0][0], GEMM_K, GEMM_N),
-                MEMREF2D(&C[0][0], GEMM_M, GEMM_N));
+  GEMM_KERNEL(MEMREF2D(&A[0][0], GEMM_M, GEMM_K),
+              MEMREF2D(&B[0][0], GEMM_K, GEMM_N),
+              MEMREF2D(&C[0][0], GEMM_M, GEMM_N));
   gemm_reference(A, B, C_ref);
 
   e2e_runtime_report_t rt;

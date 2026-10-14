@@ -2,13 +2,16 @@
 #
 # run.sh [M N K] -- the C GEMM through the affine path, stage by stage.
 #
-#   gemm.c
-#     -> clang -S -emit-llvm                     10-gemm.ll (LLVM IR)
-#     -> C frontend to MLIR SCF/Affine           BLOCKED: no Polygeist /
-#                                                ClangIR on this machine; the
-#                                                affine loop nest of gemm.c
-#                                                is written out instead
-#                                                (20-gemm.affine.mlir)
+#   gemm.c                                     00-gemm.c (the source compiled)
+#     -> clang -S -emit-llvm                     10-gemm.ll (LLVM IR, kept)
+#     -> C front end: tools/systolic-cfront      20-gemm.affine.mlir
+#        (clang 24 -ast-dump=json -> func/affine/arith/memref MLIR),
+#        checked by systolic-opt (LLVM/MLIR 24)
+#          FRONTEND=c (default)    the C source through the front end; needs
+#                                  SYSTOLIC_CFRONT_CLANG = a clang 24 -- any
+#                                  other clang is refused, never substituted
+#          FRONTEND=fixture        the hand-written affine nest instead (the
+#                                  input of the first hardware runs)
 #     -> --systolic-declare-fpga-fleet           the 1x8x8 + 3x4x4 devices
 #        --test-affine-matmul-discovery          30-analysis.txt
 #     -> --affine-matmul-to-systolic             40-systolic.mlir
@@ -40,7 +43,9 @@
 # Environment: LLVM_BUILD (the LLVM/MLIR 24 build; default
 # ~/work/llvm-project/build), CLANG (default clang-18 / clang on PATH),
 # K_MAX_8X8 / K_MAX_4X4 (the fleet's k_max; default 16 / 16), ORDER (the
-# loop order of the affine nest, default ijk), BACKEND (soft | board).
+# loop order, default ijk: with FRONTEND=c a C source with the loops in that
+# order is written and compiled, the reference stays gemm.c), BACKEND (soft |
+# board), FRONTEND (c | fixture), SYSTOLIC_CFRONT_CLANG (clang 24).
 
 set -uo pipefail
 
@@ -56,6 +61,12 @@ K_MAX_8X8="${K_MAX_8X8:-16}"
 K_MAX_4X4="${K_MAX_4X4:-16}"
 ORDER="${ORDER:-ijk}"
 BACKEND="${BACKEND:-soft}"
+FRONTEND="${FRONTEND:-c}"
+case "$FRONTEND" in
+  c|fixture) ;;
+  *) echo "FRONTEND must be c or fixture, got '$FRONTEND'" >&2; exit 2 ;;
+esac
+CFRONT="$ROOT/tools/systolic-cfront/systolic-cfront.py"
 case "$BACKEND" in
   soft|board) ;;
   *) echo "BACKEND must be soft or board, got '$BACKEND'" >&2; exit 2 ;;
@@ -105,7 +116,7 @@ if [ "$BACKEND" = board ]; then
   fi
 fi
 
-OUT="${OUT:-$ROOT/build/test-output/affine_c_gemm/${M}x${N}x${K}$([ "$ORDER" = ijk ] || echo "-$ORDER")$([ "$BACKEND" = soft ] || echo "-$BACKEND")}"
+OUT="${OUT:-$ROOT/build/test-output/affine_c_gemm/${M}x${N}x${K}$([ "$ORDER" = ijk ] || echo "-$ORDER")$([ "$BACKEND" = soft ] || echo "-$BACKEND")$([ "$FRONTEND" = c ] || echo "-$FRONTEND")}"
 mkdir -p "$OUT"
 : > "$OUT/commands.txt"
 
@@ -152,61 +163,98 @@ for tool in "$SYSTOLIC_OPT" "$MLIR_TRANSLATE" "$LLC" "$CLANG"; do
 done
 
 DEFS=(-DGEMM_M="$M" -DGEMM_N="$N" -DGEMM_K="$K")
-cp "$HERE/gemm.c" "$OUT/00-gemm.c"
-
-# ---------------------------------------------------------------------------
-# 1. C -> LLVM IR. Kept as the frontend's first artifact. The MLIR path does
-#    not consume it: LLVM IR imports into MLIR only as the llvm dialect
-#    (mlir-translate --import-llvm), and nothing raises that to SCF/Affine.
-if run "C -> LLVM IR (clang)" "$OUT/10-clang.log" \
-    "$CLANG" -std=c11 -O0 -S -emit-llvm "${DEFS[@]}" "$HERE/gemm.c" \
-    -o "$OUT/10-gemm.ll"; then
-  record "C -> LLVM IR (clang)" "PASS" "$("$CLANG" --version | head -1)"
-fi
-
-# ---------------------------------------------------------------------------
-# 2. C -> MLIR SCF/Affine. Polygeist (cgeist) and ClangIR are not installed;
-#    without a frontend this stage is BLOCKED and the affine loop nest of
-#    gemm.c is written out: the same three loops in the same order, the same
-#    accesses, and llvm.noalias for restrict.
-FRONTEND="$(command -v cgeist || true)"
-record "C -> MLIR SCF/Affine (frontend)" "BLOCKED" \
-  "${FRONTEND:+cgeist found at $FRONTEND but not wired up; }no C->MLIR frontend (Polygeist/ClangIR) integrated; using 20-gemm.affine.mlir"
-
-# ORDER (default ijk) permutes the loops of the written-out nest -- e.g.
-# ORDER=kij -- with the accesses unchanged: the same GEMM, which the C
-# reference (ijk) must still match exactly. The loop order is what the
-# recognizer maps back to logical I, J, K.
 case "$ORDER" in
   ijk|ikj|jik|jki|kij|kji) ;;
   *) echo "ORDER must be a permutation of ijk, got '$ORDER'" >&2; exit 2 ;;
 esac
-bound() { case "$1" in i) echo "$M" ;; j) echo "$N" ;; k) echo "$K" ;; esac; }
-{
-  echo "// The affine form of gemm.c (M = $M, N = $N, K = $K, loop order $ORDER),"
-  echo "// written by run.sh in place of a C frontend. restrict -> llvm.noalias."
-  echo "func.func @gemm_systolic(%A: memref<${M}x${K}xf32> {llvm.noalias},"
-  echo "                         %B: memref<${K}x${N}xf32> {llvm.noalias},"
-  echo "                         %C: memref<${M}x${N}xf32> {llvm.noalias}) {"
-  indent="  "
-  for (( l = 0; l < 3; ++l )); do
-    v="${ORDER:$l:1}"
-    echo "${indent}affine.for %$v = 0 to $(bound "$v") {"
-    indent="$indent  "
-  done
-  echo "${indent}%a = affine.load %A[%i, %k] : memref<${M}x${K}xf32>"
-  echo "${indent}%b = affine.load %B[%k, %j] : memref<${K}x${N}xf32>"
-  echo "${indent}%c = affine.load %C[%i, %j] : memref<${M}x${N}xf32>"
-  echo "${indent}%p = arith.mulf %a, %b : f32"
-  echo "${indent}%s = arith.addf %c, %p : f32"
-  echo "${indent}affine.store %s, %C[%i, %j] : memref<${M}x${N}xf32>"
-  for (( l = 2; l >= 0; --l )); do
-    indent="${indent:2}"
-    echo "${indent}}"
-  done
-  echo "  return"
-  echo "}"
-} > "$OUT/20-gemm.affine.mlir"
+bound() { case "$1" in i) echo "GEMM_M" ;; j) echo "GEMM_N" ;; k) echo "GEMM_K" ;; esac; }
+
+# The C source compiled: gemm.c itself, or for another ORDER the same
+# function with its loops in that order (still ordinary C; the reference the
+# result is compared against is gemm.c, unpermuted).
+if [ "$ORDER" = ijk ]; then
+  cp "$HERE/gemm.c" "$OUT/00-gemm.c"
+else
+  {
+    echo "/* gemm.c with its loops in $ORDER order, written by run.sh. */"
+    sed -n '/^#ifndef GEMM_M/,/^#endif/p; /^#ifndef GEMM_N/,/^#endif/p; /^#ifndef GEMM_K/,/^#endif/p' "$HERE/gemm.c"
+    echo "void gemm(float A[restrict GEMM_M][GEMM_K], float B[restrict GEMM_K][GEMM_N],"
+    echo "          float C[restrict GEMM_M][GEMM_N]) {"
+    indent="  "
+    for (( l = 0; l < 3; ++l )); do
+      v="${ORDER:$l:1}"
+      echo "${indent}for (int $v = 0; $v < $(bound "$v"); ++$v)"
+      indent="$indent  "
+    done
+    echo "${indent}C[i][j] += A[i][k] * B[k][j];"
+    echo "}"
+  } > "$OUT/00-gemm.c"
+fi
+
+# ---------------------------------------------------------------------------
+# 1. C -> LLVM IR. Kept as the C compiler's view of the same source; the MLIR
+#    path does not consume it (LLVM IR imports into MLIR only as the llvm
+#    dialect, and nothing raises that to SCF/Affine).
+IR_CLANG="$CLANG"
+[ "$FRONTEND" = c ] && [ -n "${SYSTOLIC_CFRONT_CLANG:-}" ] && IR_CLANG="$SYSTOLIC_CFRONT_CLANG"
+if run "C -> LLVM IR (clang)" "$OUT/10-clang.log" \
+    "$IR_CLANG" -std=c11 -O0 -S -emit-llvm "${DEFS[@]}" "$OUT/00-gemm.c" \
+    -o "$OUT/10-gemm.ll"; then
+  record "C -> LLVM IR (clang)" "PASS" "$("$IR_CLANG" --version | head -1)"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. C -> MLIR (func / affine / arith / memref).
+if [ "$FRONTEND" = c ]; then
+  # The front end refuses a clang that is not clang 24 (exit 2); this stage
+  # is then BLOCKED, and so is everything after it.
+  if [ -z "${SYSTOLIC_CFRONT_CLANG:-}" ]; then
+    BROKEN=1
+    record "C -> MLIR (systolic-cfront)" "BLOCKED" \
+      "SYSTOLIC_CFRONT_CLANG is not set (a clang 24, e.g. ~/work/clang24-build/bin/clang); no other clang is used in its place"
+  elif run "C -> MLIR (systolic-cfront)" "$OUT/20-cfront.log" \
+      python3 "$CFRONT" --clang "$SYSTOLIC_CFRONT_CLANG" "${DEFS[@]}" \
+      "$OUT/00-gemm.c" -o "$OUT/20-gemm.affine.mlir" &&
+    run "C -> MLIR (systolic-cfront)" "$OUT/20-verify.log" \
+      "$SYSTOLIC_OPT" "$OUT/20-gemm.affine.mlir" -o /dev/null; then
+    loops="$(grep -c 'affine.for' "$OUT/20-gemm.affine.mlir")"
+    record "C -> MLIR (systolic-cfront)" "PASS" \
+      "$("$SYSTOLIC_CFRONT_CLANG" --version | head -1); $loops affine.for; verified by systolic-opt (MLIR 24)"
+  fi
+  KERNEL=gemm
+else
+  record "C -> MLIR (systolic-cfront)" "NOT RUN" \
+    "FRONTEND=fixture: the hand-written affine nest 20-gemm.affine.mlir"
+  # The written-out affine nest of gemm.c: the same three loops (in ORDER),
+  # the same accesses, and llvm.noalias for restrict.
+  {
+    echo "// The affine form of gemm.c (M = $M, N = $N, K = $K, loop order $ORDER),"
+    echo "// written by run.sh in place of a C frontend. restrict -> llvm.noalias."
+    echo "func.func @gemm_systolic(%A: memref<${M}x${K}xf32> {llvm.noalias},"
+    echo "                         %B: memref<${K}x${N}xf32> {llvm.noalias},"
+    echo "                         %C: memref<${M}x${N}xf32> {llvm.noalias}) {"
+    indent="  "
+    for (( l = 0; l < 3; ++l )); do
+      v="${ORDER:$l:1}"
+      case "$v" in i) ub=$M ;; j) ub=$N ;; k) ub=$K ;; esac
+      echo "${indent}affine.for %$v = 0 to $ub {"
+      indent="$indent  "
+    done
+    echo "${indent}%a = affine.load %A[%i, %k] : memref<${M}x${K}xf32>"
+    echo "${indent}%b = affine.load %B[%k, %j] : memref<${K}x${N}xf32>"
+    echo "${indent}%c = affine.load %C[%i, %j] : memref<${M}x${N}xf32>"
+    echo "${indent}%p = arith.mulf %a, %b : f32"
+    echo "${indent}%s = arith.addf %c, %p : f32"
+    echo "${indent}affine.store %s, %C[%i, %j] : memref<${M}x${N}xf32>"
+    for (( l = 2; l >= 0; --l )); do
+      indent="${indent:2}"
+      echo "${indent}}"
+    done
+    echo "  return"
+    echo "}"
+  } > "$OUT/20-gemm.affine.mlir"
+  KERNEL=gemm_systolic
+fi
 
 FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$K_MAX_8X8 k-max-4x4=$K_MAX_4X4"
 PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$K_MAX_8X8 phys-k-max-4x4=$K_MAX_4X4"
@@ -286,9 +334,15 @@ else
   RUN_ENV=(env SOFT_K_MAX_8X8="$K_MAX_8X8" SOFT_K_MAX_4X4="$K_MAX_4X4")
   CHECK_NAME="Numerical check vs CPU reference (software runtime model)"
 fi
+# The reference is gemm.c (ijk) compiled by the host compiler on its own,
+# renamed gemm_reference, with -ffp-contract=off: the front end gives every C
+# operator its own MLIR op, which is that semantics.
 if run "Link test binary" "$OUT/80-link.log" \
-    "$CLANG" -std=c11 -O0 "${DEFS[@]}" -Dgemm=gemm_reference \
-    "$HERE/main.c" "$HERE/gemm.c" "$OUT/70-kernel.o" "${RUNTIME_SRC[@]}" \
+    "$CLANG" -std=c11 -O0 -ffp-contract=off "${DEFS[@]}" -Dgemm=gemm_reference \
+    -c "$HERE/gemm.c" -o "$OUT/75-reference.o" &&
+  run "Link test binary" "$OUT/80-link.log" \
+    "$CLANG" -std=c11 -O0 "${DEFS[@]}" -DGEMM_KERNEL="$KERNEL" \
+    "$HERE/main.c" "$OUT/75-reference.o" "$OUT/70-kernel.o" "${RUNTIME_SRC[@]}" \
     -L"$LLVM_BUILD/lib" -lmlir_c_runner_utils -Wl,-rpath,"$LLVM_BUILD/lib" \
     -o "$OUT/80-gemm-test"; then
   record "Link test binary" "PASS" "80-gemm-test ($BACKEND runtime)"
