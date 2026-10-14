@@ -1,3 +1,20 @@
+// RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s
+//
+// CHECK: recognition result: failure
+// CHECK: unique logical matmul count: 1
+// CHECK: recognition result: success
+// CHECK: T[0] = [1 0 0 0]
+// CHECK: T[1] = [1 1 0 0]
+// CHECK: T[2] = [0 0 1 0]
+// CHECK: T[3] = [0 0 0 1]
+// CHECK: c = [0 0 0 0]
+// CHECK: row extent: unknown
+// CHECK: column extent: static 4
+// CHECK: reduction extent: static 4
+// CHECK: dense logical GEMM: no (batched GEMM (a partition prefix P* of 1 coordinates) is not supported)
+// CHECK: partition count: 1
+
 func.func @affine_gemm_partition_coupled(
     %A: memref<2x5x4xf32>,
     %B: memref<2x4x4xf32>,

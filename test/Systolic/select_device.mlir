@@ -20,9 +20,9 @@
 
 module {
   systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = weight_stationary
-      {k_max = 8 : i64, tile_overhead = 6 : i64}
+      k_max = 8 tile_overhead = 6
   systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = weight_stationary
-      {k_max = 4 : i64, tile_overhead = 6 : i64}
+      k_max = 4 tile_overhead = 6
 
   // Largest tile, considered first. Both devices are idle, so this is a
   // straight cost comparison:
