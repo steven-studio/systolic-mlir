@@ -322,7 +322,7 @@ fi
 #    mlir_c_runner_utils provides memrefCopy, which the lowered copies of
 #    non-contiguous views call (systolic-matmul's JIT links it too).
 if [ "$BACKEND" = board ]; then
-  RUNTIME_SRC=("$HERE/board_runtime.c" -I"$ROOT/runtime"
+  RUNTIME_SRC=("$ROOT/runtime/offload/board_stats.c" -I"$ROOT/runtime" -I"$ROOT/runtime/offload"
                "$ROOT/build/runtime/libsystolic_fpga_runtime.a"
                $(pkg-config --libs libftdi1) -lstdc++)
   RUN_ENV=(env SYSTOLIC_FPGA_CONFIG="$SYSTOLIC_FPGA_CONFIG"
@@ -330,7 +330,7 @@ if [ "$BACKEND" = board ]; then
   CHECK_NAME="Numerical check vs CPU reference (FPGA board over DPTI)"
   record "Board configuration" "PASS" "$CONFIG_NOTE"
 else
-  RUNTIME_SRC=("$HERE/soft_runtime.c")
+  RUNTIME_SRC=("$ROOT/runtime/offload/soft_runtime.c" -I"$ROOT/runtime/offload")
   RUN_ENV=(env SOFT_K_MAX_8X8="$K_MAX_8X8" SOFT_K_MAX_4X4="$K_MAX_4X4")
   CHECK_NAME="Numerical check vs CPU reference (software runtime model)"
 fi

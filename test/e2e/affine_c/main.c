@@ -13,16 +13,16 @@
  * for element whatever the summation order.
  *
  * The runtime calls go to whatever fpga_matmul_tiled_auto_scheduled the
- * binary is linked with: run.sh links soft_runtime.c (BACKEND=soft, a
+ * binary is linked with: run.sh links runtime/offload/soft_runtime.c (BACKEND=soft, a
  * software model, NOT the FPGA) or the real runtime (BACKEND=board,
- * board_runtime.c + libsystolic_fpga_runtime: DPTI to the programmed board).
- * The verdict line names which one ran (e2e_runtime_report.h).
+ * runtime/offload/board_stats.c + libsystolic_fpga_runtime: DPTI to the programmed board).
+ * The verdict line names which one ran (runtime/offload/systolic_offload.h).
  *
  * Exit: 0 PASS, 1 FAIL (mismatch, or an invocation that failed: refused,
  * or a transport failure on the board).
  */
 
-#include "e2e_runtime_report.h"
+#include "systolic_offload.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -76,8 +76,9 @@ int main(void) {
               MEMREF2D(&C[0][0], GEMM_M, GEMM_N));
   gemm_reference(A, B, C_ref);
 
-  e2e_runtime_report_t rt;
-  e2e_runtime_report(&rt);
+  systolic_offload_stats_t rt;
+  systolic_offload_stats(&rt);
+  systolic_offload_close();
 
   long mismatches = 0;
   int first_i = -1, first_j = -1;

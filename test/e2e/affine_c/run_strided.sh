@@ -46,7 +46,7 @@ esac
 
 case "$BACKEND" in
   soft)
-    RUNTIME=("$HERE/soft_runtime.c")
+    RUNTIME=("$ROOT/runtime/offload/soft_runtime.c" -I"$ROOT/runtime/offload")
     PHYS=--lower-systolic-matmul-tile-to-fpga
     FLEET=--systolic-declare-fpga-fleet ;;
   board)
@@ -54,7 +54,7 @@ case "$BACKEND" in
     cfg="$("$ROOT/build/bin/runtime-dispatch-test" --print-config)"
     k8="$(sed -n 's/^K_MAX_8X8=//p' <<< "$cfg")"
     k4="$(sed -n 's/^K_MAX_4X4=//p' <<< "$cfg")"
-    RUNTIME=("$HERE/board_runtime.c" -I"$ROOT/runtime"
+    RUNTIME=("$ROOT/runtime/offload/board_stats.c" -I"$ROOT/runtime" -I"$ROOT/runtime/offload"
              "$ROOT/build/runtime/libsystolic_fpga_runtime.a"
              $(pkg-config --libs libftdi1) -lstdc++)
     PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$k8 phys-k-max-4x4=$k4"

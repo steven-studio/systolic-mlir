@@ -4,12 +4,12 @@
  * The compiled kernel against the same loop nest written in C. Every element
  * of C is compared, including the rows and columns outside the GEMM's
  * footprint, which must be left unchanged. Small integers: exact in binary32
- * in any summation order. The runtime calls go to soft_runtime.c (a software
+ * in any summation order. The runtime calls go to runtime/offload/soft_runtime.c (a software
  * model, NOT the FPGA) or, with BACKEND=board, the real runtime and board;
- * the verdict line says which (e2e_runtime_report.h).
+ * the verdict line says which (runtime/offload/systolic_offload.h).
  */
 
-#include "e2e_runtime_report.h"
+#include "systolic_offload.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -47,8 +47,9 @@ int main(void) {
   permuted_strided(MEMREF2D(&A[0][0], 20, 4), MEMREF2D(&B[0][0], 4, 5),
                    MEMREF2D(&C[0][0], 20, 5));
 
-  e2e_runtime_report_t rt;
-  e2e_runtime_report(&rt);
+  systolic_offload_stats_t rt;
+  systolic_offload_stats(&rt);
+  systolic_offload_close();
 
   long mismatches = 0;
   for (int r = 0; r < 20; ++r)
