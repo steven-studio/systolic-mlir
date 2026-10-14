@@ -32,13 +32,13 @@
 
 module {
   systolic.device @fold_k256 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 256 : i64, tile_overhead = 95 : i64}
+      dataflow = output_stationary k_max = 256 tile_overhead = 95
   systolic.device @fold_k512 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 512 : i64, tile_overhead = 95 : i64}
+      dataflow = output_stationary k_max = 512 tile_overhead = 95
   systolic.device @fold_k1024 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 1024 : i64, tile_overhead = 95 : i64}
+      dataflow = output_stationary k_max = 1024 tile_overhead = 95
   systolic.device @fold_k2048 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 2048 : i64, tile_overhead = 95 : i64}
+      dataflow = output_stationary k_max = 2048 tile_overhead = 95
 
   // ---- single invocation, k <= k_max ----------------------------------
 
@@ -179,7 +179,7 @@ module {
   // k_max = 1024, is @fold_1024 above): the invocation count is the only
   // thing that changes, and each invocation costs its depth + 109.
   systolic.device @fold_k64 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 64 : i64, tile_overhead = 95 : i64}
+      dataflow = output_stationary k_max = 64 tile_overhead = 95
 
   // Board: 2768 = 16 * 173.
   // CHECK-LABEL: func.func @fold_1024_k64
@@ -293,7 +293,7 @@ module {
   // sha256 83302e6057d7): 146 / 202 / 394 at k = 8 / 64 / 256 -- all three
   // match. In the dialect that is a second device differing in one attribute.
   systolic.device @fold_k256_b32 rows = 8 cols = 8
-      dataflow = output_stationary {k_max = 256 : i64, tile_overhead = 124 : i64}
+      dataflow = output_stationary k_max = 256 tile_overhead = 124
 
   // Board: 146 = 8 + 14 + 124.
   // CHECK-LABEL: func.func @b32_8
@@ -341,7 +341,7 @@ module {
   // and the model can only tell them apart because the constant is on the
   // device.
   systolic.device @hls_k8 rows = 8 cols = 8
-      dataflow = weight_stationary {k_max = 8 : i64, tile_overhead = 6 : i64}
+      dataflow = weight_stationary k_max = 8 tile_overhead = 6
 
   // CHECK-LABEL: func.func @hls_8
   // CHECK: systolic.matmul_tile
@@ -359,7 +359,7 @@ module {
   // 8 + 14 + 0 = 22. The difference between the calibrated map and the
   // geometric one is this one attribute and nothing else.
   systolic.device @geom_k8 rows = 8 cols = 8
-      dataflow = weight_stationary {k_max = 8 : i64}
+      dataflow = weight_stationary k_max = 8
 
   // CHECK-LABEL: func.func @geom_8
   // CHECK: systolic.matmul_tile

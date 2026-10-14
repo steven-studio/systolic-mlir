@@ -1,3 +1,9 @@
+// RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s
+//
+// CHECK: recognition result: failure
+// CHECK: unique logical matmul count: 0
+
 func.func @affine_gemm(
     %A: memref<4x4xf32>,
     %B: memref<4x4xf32>,

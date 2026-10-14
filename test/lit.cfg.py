@@ -1,5 +1,6 @@
 # -*- Python -*-
 import os
+import sys
 
 import lit.formats
 from lit.llvm import llvm_config
@@ -8,7 +9,7 @@ config.name = "SYSTOLIC"
 # lit >= 23 removes the external-shell option; the internal shell runs these
 # RUN lines (plain pipes) identically everywhere.
 config.test_format = lit.formats.ShTest()
-config.suffixes = [".mlir"]
+config.suffixes = [".mlir", ".c"]
 
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.systolic_obj_root, "test")
@@ -16,7 +17,27 @@ config.test_exec_root = os.path.join(config.systolic_obj_root, "test")
 config.substitutions.append(("%PATH%", config.environment["PATH"]))
 
 llvm_config.with_system_environment(["HOME", "INCLUDE", "LIB", "TMP", "TEMP"])
-llvm_config.use_default_substitutions()
+
+# use_default_substitutions() looks for FileCheck, count and not only in
+# llvm_tools_dir, and an LLVM build tree configured without
+# LLVM_INSTALL_UTILS / LLVM_BUILD_UTILS (the LLVM 24 build this project uses)
+# has FileCheck but no count or not, so lit stopped before running anything.
+# The same substitutions, searched in llvm_tools_dir first and then on PATH:
+# count and not are version-independent helpers.
+from lit.llvm.subst import FindTool, ToolSubst
+
+config.substitutions.append(("%python", '"%s"' % (sys.executable)))
+llvm_config.add_tool_substitutions(
+    [
+        ToolSubst("FileCheck", unresolved="fatal"),
+        ToolSubst(r"\| \bcount\b", command=FindTool("count"), verbatim=True,
+                  unresolved="fatal"),
+        ToolSubst(r"\| \bnot\b", command=FindTool("not"), verbatim=True,
+                  unresolved="fatal"),
+    ],
+    [config.llvm_tools_dir] + config.environment["PATH"].split(os.pathsep),
+)
+llvm_config.add_err_msg_substitutions()
 
 # Everything here that is not itself a test.
 config.excludes = [
@@ -31,32 +52,32 @@ config.excludes = [
     "Inputs",
 ]
 
-# Inputs for running the affine-GEMM discovery passes by hand
-# (--test-affine-matmul-discovery, --affine-matmul-to-systolic): they carry
-# no RUN line, so lit would report each as UNRESOLVED. Listed by name rather
-# than by "has no RUN line", so a new test that forgets its RUN line still
-# shows up as UNRESOLVED.
-config.excludes += [
-    "affine_gemm.mlir",
-    "affine_gemm_access_stride.mlir",
-    "affine_gemm_access_stride5.mlir",
-    "affine_gemm_bad_reduction.mlir",
-    "affine_gemm_batched.mlir",
-    "affine_gemm_composed.mlir",
-    "affine_gemm_loop_3_5.mlir",
-    "affine_gemm_loop_3_5_access_7_2.mlir",
-    "affine_gemm_nested.mlir",
-    "affine_gemm_nonunimodular.mlir",
-    "affine_gemm_nonzero_origin.mlir",
-    "affine_gemm_offset.mlir",
-    "affine_gemm_partition_coupled.mlir",
-    "affine_gemm_permuted.mlir",
-    "affine_gemm_singular_mapping.mlir",
-    "affine_gemm_step2.mlir",
-    "affine_matmul_k.mlir",
-    "affine_matmul_x.mlir",
-    "livermore_kernel21.mlir",
-]
+
+# The C front end (build/bin/systolic-cfront) runs the clang the build names
+# (-DSYSTOLIC_CFRONT_CLANG=<clang 24>, see test/CMakeLists.txt). Tests that
+# need it say REQUIRES: cfront-clang; without it they are UNSUPPORTED -- no
+# other clang on PATH is picked up in its place. Both tools are C programs
+# of this build (tools/systolic-cfront, tools/systolic-cc); lit only runs
+# them.
+if config.cfront_clang:
+    config.available_features.add("cfront-clang")
+    cfront = os.path.join(config.systolic_tools_dir, "systolic-cfront")
+    config.substitutions.append(
+        ("%cfront", '"%s" --clang "%s"' % (cfront, config.cfront_clang)))
+    # A plain C compile with the same clang, for comparing a program's
+    # output with what systolic-cc made of it.
+    config.substitutions.append(("%host-cc", '"%s"' % config.cfront_clang))
+    # The driver: the front end, the existing pipeline, the host compile and
+    # the link, with the software runtime model unless a test says
+    # otherwise. The LLVM build is the one llvm_tools_dir belongs to (llc,
+    # mlir-translate, mlir_c_runner_utils).
+    cc = os.path.join(config.systolic_tools_dir, "systolic-cc")
+    config.substitutions.append(
+        ("%systolic-cc", '"%s" --clang "%s" --build-dir "%s" '
+         '--llvm-build "%s"' % (cc, config.cfront_clang,
+                                config.systolic_obj_root,
+                                os.path.dirname(os.path.realpath(
+                                    config.llvm_tools_dir)))))
 
 tool_dirs = [config.systolic_tools_dir, config.llvm_tools_dir]
 tools = ["systolic-opt", "systolic-translate", "systolic-cost"]

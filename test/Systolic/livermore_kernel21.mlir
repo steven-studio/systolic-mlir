@@ -1,3 +1,19 @@
+// RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s
+//
+// CHECK: recognition result: failure
+// CHECK: unique logical matmul count: 1
+// CHECK: recognition result: success
+// CHECK: T[0] = [0 0 1]
+// CHECK: T[1] = [0 1 0]
+// CHECK: T[2] = [1 0 0]
+// CHECK: c = [0 0 0]
+// CHECK: row extent: symbolic <block argument> of type 'index' at index: 3
+// CHECK: column extent: static 25
+// CHECK: reduction extent: static 25
+// CHECK: dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
+// CHECK: partition count: 1
+
 func.func @livermore_kernel21(
     %px: memref<101x25xf32>,
     %vy: memref<25x101xf32>,

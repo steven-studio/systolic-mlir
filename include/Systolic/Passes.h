@@ -48,6 +48,10 @@ void registerSystolicMaterializeSchedulePass();
 std::unique_ptr<Pass> createAffineMatmulToSystolicPass();
 void registerAffineMatmulToSystolicPass();
 
+/// --systolic-declare-fpga-fleet: the systolic.device ops of the 1x8x8 + 3x4x4
+/// bitstream (Systolic/FpgaFleet.h), for input that declares no target.
+void registerDeclareFpgaFleetPass();
+
 std::unique_ptr<Pass> createConvertMatmulToSystolicPass();
 
 //===----------------------------------------------------------------------===//
