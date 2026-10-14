@@ -11,6 +11,11 @@ expectation table that README.md includes.
 in --out are identical (the showcase set is meant to be stable: regenerate
 only deliberately, and review the diff).
 
+Every case file is written read-only (mode 0555, casespec.write_test_source)
+so that nothing edits the test data by accident; a run over an existing set
+leaves identical files alone and refuses to replace a changed one unless
+--force is given.
+
 Every case is validated before it is written: the Python oracle evaluates it
 (an out-of-bounds subscript is an error), its mathematical class is derived
 from the subscripts and must agree with the author's claim, and the
@@ -76,7 +81,7 @@ def subdir_of(case):
     return {"positive": "positive", "negative": "negative", "extended": "extended"}[case.set]
 
 
-def write_all(out):
+def write_all(out, force=False):
     cases = showcase_cases.ALL
     ids = [c.id for c in cases]
     assert len(ids) == len(set(ids)), "duplicate case ids"
@@ -109,12 +114,15 @@ def write_all(out):
         d = os.path.join(out, sub)
         os.makedirs(d, exist_ok=True)
         text = casespec.c_file_text(case, COMPILER_COMMIT)
-        with open(os.path.join(d, case.id + ".c"), "w") as f:
-            f.write(text)
+        # the test source is written once and made read-only (0o555); an
+        # existing identical file is left alone, a different one is
+        # replaced only with --force (casespec.write_test_source)
+        status = casespec.write_test_source(os.path.join(d, case.id + ".c"), text, force=force)
+        counts[status] = counts.get(status, 0) + 1
         entry = casespec.manifest_entry(case, sub)
         (manifest["extended"] if case.set == "extended" else manifest["showcase"]).append(entry)
         counts[case.set] += 1
-    manifest["counts"] = counts
+    manifest["counts"] = {k: counts[k] for k in ("positive", "negative", "extended")}
     with open(os.path.join(out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
         f.write("\n")
@@ -150,6 +158,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(HERE, "..", "showcase"))
     ap.add_argument("--check", action="store_true", help="compare a fresh generation with --out")
+    ap.add_argument("--force", action="store_true",
+                    help="replace protected (read-only) case files whose content would change; "
+                         "without it such a file is an error, since the set is meant to be fixed")
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     if a.check:
@@ -172,9 +183,15 @@ def main():
             return 0
         finally:
             shutil.rmtree(tmp)
-    counts = write_all(out)
-    print("wrote %d positive, %d negative, %d extended cases + manifest.json + CASES.md to %s"
-          % (counts["positive"], counts["negative"], counts["extended"], out))
+    try:
+        counts = write_all(out, force=a.force)
+    except casespec.ProtectedTestSource as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    print("wrote %d positive, %d negative, %d extended cases + manifest.json + CASES.md to %s "
+          "(%d case file(s) written, %d unchanged; all case files are mode 0555)"
+          % (counts["positive"], counts["negative"], counts["extended"], out,
+             counts.get("written", 0), counts.get("unchanged", 0)))
     return 0
 
 

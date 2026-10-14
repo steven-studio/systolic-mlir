@@ -11,7 +11,8 @@ gen_cases.py -- the unbounded case generator.
 Every call writes N *new* cases (never seen before, by canonical signature) to
 DIR/gen_<signature>.c with DIR/manifest.json, in exactly the format of the
 showcase set (generator/casespec.py: header, kernel, two or three independent
-references, Python-oracle checksum).  Nothing limits the total: the sequence
+references, Python-oracle checksum).  Each case file is made read-only (mode
+0555) as soon as it is written; the batch's JSON files stay writable.  Nothing limits the total: the sequence
 is infinite -- `--start` continues where a previous run stopped, the seed and
 index of every case are recorded, and `gen_cases.py --reproduce SEED:INDEX`
 (or MODE:INDEX) re-creates one case bit for bit.
@@ -60,6 +61,7 @@ import os
 import random
 import sys
 import time
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -306,7 +308,10 @@ def positive_case(cid, M, N, K, p: Params, family, rng, max_extent, max_loops, s
     stmt = STMTS[p.stmt]
     name = "gen_%s_%s_%dx%dx%d" % (family, order, M, N, K)
     case = Case(id=cid, name=name, set="generated", category="generated_" + family, loops=seq,
-                arrays={"a": A, "b": B, "c": C}, stmt=stmt, seed=(hash(seed_tag) & 0xff) + 1)
+                arrays={"a": A, "b": B, "c": C}, stmt=stmt,
+                # the data seed must be a deterministic function of the tag (Python's
+                # str hash is randomised per process, which made --reproduce inexact)
+                seed=(zlib.crc32(seed_tag.encode()) & 0xff) + 1)
     return case
 
 
@@ -581,7 +586,7 @@ def main():
         case, fam, mut, tag = build_one(mode, a.family, seed, int(index), a.max_extent, a.max_loops)
         case.id = "gen_" + signature(case)
         cls = finalize(case)
-        print(casespec.c_file_text(case))
+        sys.stdout.write(casespec.c_file_text(case))   # byte for byte the file's content
         print("// family %s mutation %s classification %s signature %s" % (fam, mut, cls, case.id), file=sys.stderr)
         return 0
 
@@ -614,8 +619,8 @@ def main():
             index += 1
             continue
         path = os.path.join(out, case.id + ".c")
-        with open(path, "w") as f:
-            f.write(text)
+        # written once, then read-only (0o555): see casespec.write_test_source
+        casespec.write_test_source(path, text)
         entry = casespec.manifest_entry(case, os.path.basename(out))
         entry["file"] = case.id + ".c"
         entry["generated_from"] = {"mode": a.mode, "seed": a.seed, "index": index, "family": fam,

@@ -36,6 +36,10 @@ reproducers, and compares with regression/baseline.json.
 
 The loop never edits expectations, never deletes a case and never touches
 the compiler.  It stops after --iterations (0: run until interrupted).
+
+Every test source it keeps (the batch's cases, a failure record's program and
+its minimized variant, a corpus entry) is read-only (mode 0555); only the
+throw-away candidates of the minimizer in the work directory are not.
 """
 
 import argparse
@@ -164,6 +168,7 @@ def write_failure(root, stamp, case, entry, v, actual, mism, notes, st, src, min
     d = os.path.join(root, "failures", "%s_%s" % (stamp, case.id))
     os.makedirs(d, exist_ok=True)
     shutil.copy(src, os.path.join(d, case.id + ".c"))
+    casespec.protect_test_source(os.path.join(d, case.id + ".c"))   # read-only test source
     with open(os.path.join(d, "manifest_entry.json"), "w") as f:
         json.dump(entry, f, indent=1)
     with open(os.path.join(d, "stages.json"), "w") as f:
@@ -203,8 +208,7 @@ def write_failure(root, stamp, case, entry, v, actual, mism, notes, st, src, min
         md = os.path.join(d, "minimized")
         os.makedirs(md, exist_ok=True)
         mcase, mentry = minimized[0], minimized[1]
-        with open(os.path.join(md, mcase.id + ".c"), "w") as f:
-            f.write(casespec.c_file_text(mcase))
+        casespec.write_test_source(os.path.join(md, mcase.id + ".c"), casespec.c_file_text(mcase))
         with open(os.path.join(md, "manifest_entry.json"), "w") as f:
             json.dump(mentry, f, indent=1)
     return d
@@ -216,6 +220,7 @@ def add_to_corpus(root, case, entry, src, record_dir):
     dst = os.path.join(cd, case.id + ".c")
     if not os.path.exists(dst):
         shutil.copy(src, dst)
+        casespec.protect_test_source(dst)   # read-only test source
     mpath = os.path.join(cd, "manifest.json")
     m = gen_cases.load_json(mpath, {"kind": "regression_corpus", "cases": []})
     if not any(e["id"] == case.id for e in m["cases"]):

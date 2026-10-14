@@ -1,7 +1,7 @@
 {
  "kind": "regression_run",
  "runtime": "soft",
- "timestamp": "20261015-014651",
+ "timestamp": "20261015-025742",
  "tools": {
   "build_dir": "/home/claude/systolic-mlir-src/build",
   "llvm_build": "/home/claude/llvm/build",
@@ -1919,9 +1919,9 @@
   "tail": [
    "[0/1] Running the systolic regression tests",
    "-- Testing: 74 tests, 2 workers --",
-   "Testing:  0.. 10.. 20.. 30.. 40.. 50.. 60.. 70.. 80.. 90.. ",
+   "Testing:  0.. 10.. 20.. 30.. 40.. 50.. 60.. 70.. 80.. 90..",
    "",
-   "Testing Time: 2.70s",
+   "Testing Time: 3.06s",
    "",
    "Total Discovered Tests: 74",
    "  Passed           : 72 (97.30%)",

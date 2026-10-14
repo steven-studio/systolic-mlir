@@ -143,6 +143,10 @@ python3 generator/gen_cases.py --mode boundary  --count 50
 python3 generator/gen_cases.py --reproduce random:42:17                     # one case, bit for bit
 ```
 
+`--reproduce` prints exactly the bytes the batch run wrote (the manifest's `generated_from.reproduce`
+command includes `--family`, which random mode depends on; the data seed is derived from the seed
+tag with CRC-32, so it no longer depends on Python's per-process hash randomisation).
+
 The index family: every loop order; origins; steps; offsets; strides; coordinates split over
 2–3 loops; repetition loops outside / between / before the reduction; four statement
 spellings; `<=`/`i++` syntax; leading-dimension slack; shapes from (1,1,1) upward without bound
@@ -179,7 +183,8 @@ approval, never by the loop:
    expectation is wrong (the expectation changes only when the specification was wrong — in
    writing, in §2 — never to make a failing compiler look green);
 2. change the compiler; add the reproducer as a lit test (`failures/issues/ISSUE-NNN-*/repro_*.mlir`
-   is already one, marked `XFAIL` while the issue is open: remove the marker);
+   is already one, marked `XFAIL` while the issue is open: remove the marker — the file is
+   read-only, §7, so `chmod u+w` it first and `chmod 555` it again afterwards);
 3. `cmake --build build`;
 4. re-run the original failing case: `scripts/run_showcase.py --case ID` or
    `scripts/stages.py REPO FILE.c KERNEL soft`;
@@ -188,7 +193,8 @@ approval, never by the loop:
 6. `scripts/regression.py diff` must show no REGRESSION; an IMPROVED line means the issue record
    is updated (status, date, commit) and the case's `current_implementation` prediction in
    `generator/casespec.py: predict()` is revised to the new rule — then
-   `generator/make_showcase.py` regenerates the headers/manifest (the specification layer does
+   `generator/make_showcase.py --force` regenerates the headers/manifest (the case files are
+   read-only, §7, and a changed file is refused without `--force`; the specification layer does
    not change);
 7. `scripts/regression.py save` writes the new baseline;
 8. `scripts/loop.py` continues generating.
@@ -204,3 +210,41 @@ The scripts write only under `test/gemm_recognition/` (and the temporary work di
 never run `git reset`, `git clean`, remove files outside their output directories, or push.
 Before any compiler change: `git status --short`, `git log -1 --oneline`, and keep uncommitted
 research files untouched.
+
+## 7. Test sources are read-only (mode 0555)
+
+Every test-source file the tooling produces is written through
+`generator/casespec.py: write_test_source()` (or re-protected with `protect_test_source()`) and
+ends up `r-xr-xr-x` (0555), so that a case that was generated, judged and recorded cannot be
+edited by accident afterwards — a case file is evidence, and its content must stay what the
+`--reproduce` command regenerates. That covers:
+
+| path | writer |
+|---|---|
+| `showcase/{positive,negative,extended}/*.c` | `generator/make_showcase.py` (create and regenerate) |
+| `generated/batch_*/*.c` | `generator/gen_cases.py` (random / enumerate / boundary; also when started by `scripts/loop.py`) |
+| `failures/<stamp>_<id>/<id>.c` and `.../minimized/<id>.c` | `scripts/loop.py: write_failure()` |
+| `regression/corpus/*.c` | `scripts/loop.py: add_to_corpus()` |
+| `failures/issues/ISSUE-*/{repro_*,variants}.mlir`, `failures/resolved/*/*.c` | written by hand — `chmod 555` them when adding one (the existing ones are) |
+
+Only the test sources are protected: `manifest.json`, `CASES.md`, `registry.json`,
+`coverage.json`, `rejected.json`, `loop_state.json`, `results_*.json`, `REPORT.md`,
+`stages.json`, `known_issue_log.jsonl`, the reports and the baselines stay writable; the Python
+and shell tools keep their own modes; directories are never changed (so a protected file can
+still be replaced, by unlinking it, and new files can still be created next to it); nothing
+under the temporary work directory (compile outputs, `systolic-cc --keep-dir` copies, the
+minimizer's candidate programs `min_N/<id>.c`) is touched.
+
+Regeneration rules (`write_test_source`): an existing file with *identical* content is left
+alone and just re-protected (the normal case for `make_showcase.py` and for `gen_cases.py`
+re-run with the same seed/indices into the same directory); an existing file with *different*
+content is refused with `ProtectedTestSource` — regenerating a case deliberately is
+`python3 generator/make_showcase.py --force` (the corpus and the failure records are never
+rewritten: a case is copied into them only once). The protection is enforced by the kernel for
+ordinary users; root ignores mode bits, so the "cannot open for writing" check only means
+something when the tests run as a non-root user.
+
+`python3 scripts/test_permissions.py` verifies all of this in a temporary copy (every generator
+mode, `make_showcase.py` create / unchanged / refuse / `--force`, the loop's failure record,
+minimized program and corpus, the `--reproduce` byte-exactness, and that every tool file and
+directory under `test/gemm_recognition/` keeps its mode); it needs no compiler.

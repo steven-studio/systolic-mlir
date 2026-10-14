@@ -31,6 +31,7 @@ Nothing here depends on the compiler or on numpy.
 """
 
 import ast
+import os
 import itertools
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -1413,6 +1414,55 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("}")
     out.append("")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# writing a generated test program: read-only once written
+# --------------------------------------------------------------------------
+#
+# Every generated test source (.c / .mlir under showcase/, generated/,
+# regression/corpus/, failures/) is made mode 0o555 the moment it is complete,
+# so that a tool fixing the compiler cannot edit the test data by accident.
+# The generator remains its only author: it never rewrites a protected file
+# with different content unless told to (force), and a file that would be
+# regenerated identically is left alone (only its mode is enforced).
+# Metadata (manifest.json, rejected.json, registry, coverage, reports) stays
+# writable: it is updated across runs and is not test data.
+
+TEST_SOURCE_MODE = 0o555
+
+
+class ProtectedTestSource(Exception):
+    """The destination is an existing, protected test source with different
+    content; regenerating it must be explicit."""
+
+
+def write_test_source(path: str, text: str, force: bool = False) -> str:
+    """Write `text` to `path` and make it read-only (0o555).  Returns
+    'written', or 'unchanged' when the file already holds exactly `text` (its
+    mode is enforced, nothing is rewritten).  Raises ProtectedTestSource when
+    the file exists with different content and `force` is false; with
+    `force` the old file is unlinked and replaced."""
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read()
+        if old == text:
+            os.chmod(path, TEST_SOURCE_MODE)
+            return "unchanged"
+        if not force:
+            raise ProtectedTestSource(
+                "%s exists with different content and is a protected test source; "
+                "regenerate it deliberately (--force)" % path)
+        os.unlink(path)   # a read-only file can be unlinked from a writable directory
+    with open(path, "w") as f:
+        f.write(text)
+    os.chmod(path, TEST_SOURCE_MODE)
+    return "written"
+
+
+def protect_test_source(path: str) -> None:
+    """Make an already written or copied test source read-only (0o555)."""
+    os.chmod(path, TEST_SOURCE_MODE)
 
 
 # --------------------------------------------------------------------------

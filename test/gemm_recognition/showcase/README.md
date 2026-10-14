@@ -21,7 +21,9 @@ showcase/
 ```
 
 The files are generated once from `generator/showcase_cases.py` by `generator/make_showcase.py`
-and then kept fixed (`make_showcase.py --check` verifies they are unchanged). They are not lit
+and then kept fixed: every case file is written read-only (mode 0555, see `../README.md` §7),
+`make_showcase.py --check` verifies they are unchanged, and re-running `make_showcase.py` leaves
+identical files alone and refuses to replace a changed one unless `--force`. They are not lit
 tests (the directory's `lit.local.cfg` hides them from `check-systolic`); they are run by
 `scripts/run_showcase.py`, which compares every stage with `manifest.json` and writes the actual
 results to `reports/`.
