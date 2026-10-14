@@ -64,6 +64,21 @@ if config.cfront_clang:
     config.substitutions.append(
         ("%cfront", '"%s" "%s" --clang "%s"' % (sys.executable, cfront,
                                                 config.cfront_clang)))
+    # A plain C compile with the same clang, for comparing a program's
+    # output with what systolic-cc made of it.
+    config.substitutions.append(("%host-cc", '"%s"' % config.cfront_clang))
+    # The driver: the front end, the existing pipeline, the host compile and
+    # the link, with the software runtime model unless a test says
+    # otherwise. The LLVM build is the one llvm_tools_dir belongs to (llc,
+    # mlir-translate, mlir_c_runner_utils).
+    cc = os.path.join(os.path.dirname(config.test_source_root), "tools",
+                      "systolic-cc", "systolic-cc.py")
+    config.substitutions.append(
+        ("%systolic-cc", '"%s" "%s" --clang "%s" --build-dir "%s" '
+         '--llvm-build "%s"' % (sys.executable, cc, config.cfront_clang,
+                                config.systolic_obj_root,
+                                os.path.dirname(os.path.realpath(
+                                    config.llvm_tools_dir)))))
 
 tool_dirs = [config.systolic_tools_dir, config.llvm_tools_dir]
 tools = ["systolic-opt", "systolic-translate", "systolic-cost"]
