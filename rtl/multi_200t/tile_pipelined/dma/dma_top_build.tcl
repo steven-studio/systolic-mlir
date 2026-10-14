@@ -199,6 +199,28 @@ if {$HAVE_GOLDEN} {
 # left alone as well.
 set PROJ_DIR   $::env(HOME)/work/vivado/tile_pipelined/systolic_dma_${VARIANT}_k8_${K8}_k4_${K4}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
 
+# SYSTOLIC_PROJ_TAG=<tag> builds into PROJ_DIR_<tag> instead.  'build' moves an
+# existing PROJ_DIR aside to .prev and deletes the previous .prev, so an
+# untagged rebuild of a geometry replaces the project -- bitstream, DCPs, .ltx
+# -- that a board result or an archive was taken from.  A tagged build never
+# touches the untagged directory.
+#
+# With a tag set, mode 'all' is refused, including when it is the default
+# because no mode was given: it builds and then programs the board in one
+# step.  Name the mode (build | program | read | sweep).  An empty or malformed
+# tag is an error rather than a silent fallback to the untagged directory.
+if {[info exists ::env(SYSTOLIC_PROJ_TAG)]} {
+    set PROJ_TAG $::env(SYSTOLIC_PROJ_TAG)
+    if {![regexp {^[A-Za-z0-9_-]{1,40}$} $PROJ_TAG]} {
+        error "SYSTOLIC_PROJ_TAG must be 1..40 characters from \[A-Za-z0-9_-\], got '$PROJ_TAG'"
+    }
+    if {$MODE eq "all"} {
+        error "SYSTOLIC_PROJ_TAG=$PROJ_TAG: mode 'all' (also the default when no mode is given) is disabled; name the mode: build | program | read | sweep"
+    }
+    set PROJ_DIR ${PROJ_DIR}_${PROJ_TAG}
+    puts "SYSTOLIC_PROJ_TAG=$PROJ_TAG  PROJ_DIR = $PROJ_DIR"
+}
+
 # Where the result tile is written back.  One page clear of the operand image,
 # which is K_MAX_8X8*8*N bytes long (1 KiB at K8 = 16, 16 KiB at 256; the top's
 # RX_BYTES is sized by K_MAX_8X8), so that an address error in either direction
