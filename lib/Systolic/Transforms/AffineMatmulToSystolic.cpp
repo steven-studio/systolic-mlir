@@ -25,7 +25,7 @@
 //
 // A nest is left untouched, with a remark saying why, when the lowering
 // cannot be shown correct: a batched or non-permutation mapping, operands
-// that may alias C, out-of-bounds or non-identity-layout memrefs, or a
+// that may alias C, provably out-of-bounds or non-identity-layout memrefs, or a
 // partition that is not exact. Semantics: the lowering keeps every product
 // A(i,k) * B(k,j) and accumulates each C(i,j) over K in increasing order of
 // the K-folded invocations, but the array's own summation order inside an
@@ -115,7 +115,8 @@ struct LogicalOperand {
 
   bool isWholeMemref() const {
     auto ty = cast<MemRefType>(memref.getType());
-    return offsets[0] == 0 && offsets[1] == 0 && strides[0] == 1 &&
+    return ty.hasStaticShape() && offsets[0] == 0 && offsets[1] == 0 &&
+           strides[0] == 1 &&
            strides[1] == 1 && sizes[0] == ty.getDimSize(0) &&
            sizes[1] == ty.getDimSize(1);
   }
@@ -129,10 +130,8 @@ static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
                   unsigned colDim, StringRef name, std::string &why) {
   auto ty = dyn_cast<MemRefType>(memref.getType());
-  if (!ty || ty.getRank() != 2 || !ty.hasStaticShape() ||
-      !ty.getLayout().isIdentity()) {
-    why = (name + " is not a static rank-2 memref with the identity layout")
-              .str();
+  if (!ty || ty.getRank() != 2 || !ty.getLayout().isIdentity()) {
+    why = (name + " is not a rank-2 memref with the identity layout").str();
     return failure();
   }
 
@@ -142,11 +141,17 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
     operand.offsets[r] = dense.offset[d];
     operand.sizes[r] = dense.extent[d];
     operand.strides[r] = dense.scale[d];
-    // The accesses of the loop nest itself; out of bounds, the nest was
-    // undefined to begin with and there is nothing correct to lower it to.
+    // The view holds exactly the elements the loop nest itself accesses
+    // (every row and column of the logical matrix is touched by some
+    // iteration), so it is in bounds whenever the nest was defined. A
+    // dynamic extent -- the leading dimension of a C array parameter,
+    // float A[][K] -- is therefore taken as the nest's own guarantee; a
+    // static one that the accesses provably exceed means the nest was
+    // undefined to begin with, and there is nothing correct to lower it to.
     const int64_t last =
         dense.offset[d] + dense.scale[d] * (dense.extent[d] - 1);
-    if (dense.offset[d] < 0 || last >= ty.getDimSize(r)) {
+    if (dense.offset[d] < 0 ||
+        (!ty.isDynamicDim(r) && last >= ty.getDimSize(r))) {
       why = (name + " is accessed out of bounds along dimension " +
              llvm::Twine(r))
                 .str();

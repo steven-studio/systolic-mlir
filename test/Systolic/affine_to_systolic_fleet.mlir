@@ -150,3 +150,34 @@ func.func @repeated(%A: memref<8x8xf32> {llvm.noalias},
   }
   return
 }
+
+// -----
+
+// The leading extent of a C array parameter is not part of its type
+// (float A[][16] is float (*)[16]), so a C front end gives memref<?x16xf32>.
+// The views hold exactly the elements the nest reads and writes, so they are
+// in bounds whenever the nest is; a static extent the accesses provably
+// exceed is still refused (affine_to_systolic_refused.mlir, @out_of_bounds).
+
+// CHECK-LABEL: func.func @dynamic_rows
+// CHECK:       %[[AV:.*]] = memref.subview %arg0[0, 0] [16, 16] [1, 1] : memref<?x16xf32> to memref<16x16xf32, strided<[16, 1]>>
+// CHECK:       bufferization.to_tensor %[[AV]] restrict : memref<16x16xf32, strided<[16, 1]>> to tensor<16x16xf32>
+// CHECK-COUNT-10: systolic.matmul_tile {{.*}} on @acc_
+// CHECK:       bufferization.materialize_in_destination
+func.func @dynamic_rows(%A: memref<?x16xf32> {llvm.noalias},
+                        %B: memref<?x16xf32> {llvm.noalias},
+                        %C: memref<?x16xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 16 {
+    affine.for %j = 0 to 16 {
+      affine.for %k = 0 to 16 {
+        %a = affine.load %A[%i, %k] : memref<?x16xf32>
+        %b = affine.load %B[%k, %j] : memref<?x16xf32>
+        %c = affine.load %C[%i, %j] : memref<?x16xf32>
+        %p = arith.mulf %a, %b : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<?x16xf32>
+      }
+    }
+  }
+  return
+}
