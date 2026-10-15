@@ -337,7 +337,55 @@ set SRC [list \
     $ROOT/scheduler/systolic_hw_scheduler_adapter.sv ]
 
 # -----------------------------------------------------------------------------
+# ONE BUILD PER PROJ_DIR AT A TIME.  On 2026-10-15 two 'build v1 512 512 1 1 3'
+# sessions were started 110 s apart on the same PROJ_DIR.  The second one's
+# 'file delete -force $prev' deleted the first one's backup -- the previous
+# project -- and moved the first one's live project aside; both then launched
+# impl_1 into the same run directory, both opt_design processes failed writing
+# the same systolic_dma_top_opt.dcp (Common 17-99), and the two restores
+# deleted each other's directory: PROJ_DIR and .prev were both gone.
+#
+# The lock is $PROJ_DIR.lock, created with O_EXCL so exactly one session wins.
+# A lock whose pid is no longer running is left by a killed session and is
+# reclaimed; one whose pid is alive, or which names no pid, is never touched.
+proc acquire_build_lock {lock} {
+    for {set try 0} {$try < 2} {incr try} {
+        if {![catch {open $lock {WRONLY CREAT EXCL}} f]} {
+            puts $f "pid=[pid]"
+            puts $f "started=[clock format [clock seconds] -format {%Y-%m-%dT%H:%M:%S%z}]"
+            puts $f "argv=$::argv"
+            close $f
+            return
+        }
+        if {![file exists $lock]} { error "cannot create build lock $lock: $f" }
+        set holder ""
+        catch {
+            set h [open $lock r]
+            regexp -line {^pid=([0-9]+)$} [read $h] -> holder
+            close $h
+        }
+        if {$holder eq "" || [file exists /proc/$holder]} {
+            error "another build owns this project: $lock\n[expr {$holder eq {} ? {  (no pid recorded yet)} : "  pid $holder is still running"}]\n\
+                   Wait for it to finish.  Two builds of one PROJ_DIR delete each other's\n\
+                   project and backup.  Remove the lock by hand only if no Vivado\n\
+                   session is building this geometry (ps -ef | grep vivado)."
+        }
+        puts "removing stale build lock $lock (pid $holder is not running)"
+        file delete $lock
+    }
+    error "could not take build lock $lock"
+}
+
 proc build {} {
+    global PROJ_DIR
+    set lock $PROJ_DIR.lock
+    acquire_build_lock $lock
+    catch {build_locked} msg opts
+    file delete -force $lock
+    return -options $opts $msg
+}
+
+proc build_locked {} {
     global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC XDC_DPTI JOBS BOARD_REPO BOARD_PART
 
     foreach f [concat [list $XCI $XDC $XDC_DPTI] $SRC] {
@@ -359,11 +407,16 @@ proc build {} {
     if {[catch {build_body} msg]} {
         puts "\n=== BUILD FAILED =============================================="
         puts "  $msg"
-        if {$had_prev} {
+        # Only discard the failed project when there is something to put in
+        # its place: deleting PROJ_DIR and then finding no .prev loses both.
+        if {$had_prev && [file isdirectory $prev]} {
             file delete -force $PROJ_DIR
             file rename $prev $PROJ_DIR
             puts "\n  The previous project has been PUT BACK, bitstream and .ltx"
             puts "  intact.  The board was never reprogrammed."
+        } elseif {$had_prev} {
+            puts "\n  The previous project could NOT be put back: $prev is gone."
+            puts "  The failed project is left in $PROJ_DIR; nothing was deleted."
         }
         error "build failed"
     }
