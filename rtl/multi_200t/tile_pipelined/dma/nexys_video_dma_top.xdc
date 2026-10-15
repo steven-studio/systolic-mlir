@@ -26,9 +26,15 @@ set_property -dict { PACKAGE_PIN P17 IOSTANDARD LVCMOS33 } [get_ports { dpti_siw
 set_property -dict { PACKAGE_PIN Y18 IOSTANDARD LVCMOS33 } [get_ports { dpti_clkout }]
 
 # FT2232H synchronous FIFO interface clock.
-# CLKOUT is a 60 MHz source clock for the DPTI interface.
+# CLKOUT is a 60 MHz source clock for the DPTI interface.  It drives only the
+# MMCM in dpti_clk_gen; the DPTI logic runs on that MMCM's output, named
+# clk_dpti here (the rename form of create_generated_clock: Vivado derives the
+# clock, including the MMCM's compensation and phase, and only the name is
+# set).  I/O timing: nexys_video_dpti_timing.xdc.
 create_clock -add -name dpti_clkout -period 16.667 \
   -waveform {0 8.3335} [get_ports { dpti_clkout }]
+create_generated_clock -name clk_dpti \
+  [get_pins -hierarchical -filter {NAME =~ *u_dpti_clk_gen/u_mmcm/CLKOUT0}]
 
 #
 #
@@ -50,10 +56,16 @@ create_clock -add -name sys_clk_pin -period 10.000 -waveform {0 5} [get_ports { 
 
 # DPTI clock and the MIG ui_clk-derived clock are independent clock domains.
 # CDC between them is handled explicitly by dpti_mem_write_cdc /
-# dpti_async_fifo.  Do not time these paths as synchronous inter-clock paths.
+# dpti_async_fifo / dpti_cmd_async_fifo and dpti_link_ctrl's synchronizers.
+# Do not time these paths as synchronous inter-clock paths.
+#
+# Both groups take their generated clocks: the DPTI logic is on clk_dpti (the
+# MMCM output), not on dpti_clkout itself, and naming only dpti_clkout would
+# leave clk_dpti <-> clk_pll_i timed as synchronous.  sys_clk_pin's family is
+# the board oscillator and everything derived from it, clk_pll_i included.
 set_clock_groups -asynchronous \
-  -group [get_clocks dpti_clkout] \
-  -group [get_clocks clk_pll_i]
+  -group [get_clocks -include_generated_clocks dpti_clkout] \
+  -group [get_clocks -include_generated_clocks sys_clk_pin]
 
 ## reset button, active low                     Sch=cpu_resetn
 set_property -dict { PACKAGE_PIN G4  IOSTANDARD LVCMOS15 } [get_ports { cpu_resetn }]

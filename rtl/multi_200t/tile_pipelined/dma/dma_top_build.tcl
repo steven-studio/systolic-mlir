@@ -191,6 +191,35 @@ if {$HAVE_GOLDEN} {
     puts "      python3 tools/seed_ref.py --mode 1 --kmax $K8   (K8 a multiple of 8)"
 }
 
+# DPTI_CLK_PHASE=<degrees> overrides dpti_clk_gen's CLKOUT0 phase
+# (systolic_dma_top DPTI_CLKOUT0_PHASE, default 0).  Only for the phase sweep
+# that dpti_clk_gen.sv's header describes; pair it with SYSTOLIC_PROJ_TAG so a
+# swept build never replaces the default one.  It is recorded in
+# fpga_config.txt.
+set DPTI_CLK_PHASE 0.0
+if {[info exists ::env(DPTI_CLK_PHASE)]} {
+    set DPTI_CLK_PHASE $::env(DPTI_CLK_PHASE)
+    if {![regexp {^-?[0-9]+(\.[0-9]+)?$} $DPTI_CLK_PHASE] || abs($DPTI_CLK_PHASE) > 180.0} {
+        error "DPTI_CLK_PHASE must be a decimal number of degrees in -180..180, got '$DPTI_CLK_PHASE'"
+    }
+}
+
+# Implementation directives; see the routability note in build_body.
+set PLACE_DIRECTIVE AltSpreadLogic_high
+set ROUTE_DIRECTIVE Explore
+foreach {var envname} {PLACE_DIRECTIVE SYSTOLIC_PLACE_DIRECTIVE ROUTE_DIRECTIVE SYSTOLIC_ROUTE_DIRECTIVE} {
+    if {[info exists ::env($envname)]} {
+        if {![regexp {^[A-Za-z0-9_]{1,40}$} $::env($envname)]} {
+            error "$envname must be a Vivado directive name, got '$::env($envname)'"
+        }
+        set $var $::env($envname)
+    }
+}
+set INCR_REF ""
+if {[info exists ::env(SYSTOLIC_INCR_REF)]} {
+    set INCR_REF [file normalize $::env(SYSTOLIC_INCR_REF)]
+}
+
 # One project per (variant, K8, K4, NUM_8X8, NUM_4X4) so bitstreams of
 # different geometries coexist and 'read' cannot open the wrong one; K8 and K4
 # are both in the name, so (32,16) and (16,32) never overwrite each other.
@@ -245,6 +274,9 @@ set XCI     $SCRIPT_DIR/ip/ddr3/mig_7series_0.xci
 set FP_DIR  $ROOT/ip/fp32
 set FP_IPS  [list floating_point_add_0 floating_point_mul_0]
 set XDC     $SCRIPT_DIR/nexys_video_dma_top.xdc
+# FT2232H I/O timing (input/output delays, IOB, pull-ups, the lock
+# controller's crossings).  Read after XDC: it uses dpti_clkout and clk_dpti.
+set XDC_DPTI $SCRIPT_DIR/nexys_video_dpti_timing.xdc
 set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 
 # The DMA side, then the compute core.
@@ -272,6 +304,10 @@ set SRC [list \
     $SCRIPT_DIR/dpti_output_cdc.sv \
     $SCRIPT_DIR/dpti_beat_to_byte.sv \
     $SCRIPT_DIR/dpti_byte_tx.sv \
+    $SCRIPT_DIR/dpti_sync245_phy.sv \
+    $SCRIPT_DIR/dpti_sync245_fifo.sv \
+    $SCRIPT_DIR/dpti_clk_gen.sv \
+    $SCRIPT_DIR/dpti_link_ctrl.sv \
     $SCRIPT_DIR/dpti_mem_write_cdc.sv \
     $SCRIPT_DIR/dpti_mem_write_engine.sv \
     $SCRIPT_DIR/dpti_mem_write_cdc_engine.sv \
@@ -302,9 +338,9 @@ set SRC [list \
 
 # -----------------------------------------------------------------------------
 proc build {} {
-    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
+    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC XDC_DPTI JOBS BOARD_REPO BOARD_PART
 
-    foreach f [concat [list $XCI $XDC] $SRC] {
+    foreach f [concat [list $XCI $XDC $XDC_DPTI] $SRC] {
         if {![file exists $f]} { error "missing: $f" }
     }
 
@@ -335,11 +371,13 @@ proc build {} {
 }
 
 proc build_body {} {
-    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
+    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC XDC_DPTI JOBS BOARD_REPO BOARD_PART
+    global DPTI_CLK_PHASE
     global FP_DIR FP_IPS HOLD_TCL NARR K8 K4 KDIM EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
     global WB_BASE USE_V2 VARIANT
     global NUM_8X8 NUM_4X4
     global SCRIPT_DIR HAVE_GOLDEN
+    global PLACE_DIRECTIVE ROUTE_DIRECTIVE INCR_REF
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -412,6 +450,7 @@ proc build_body {} {
 
     foreach f $SRC { add_files -norecurse $f }
     add_files -fileset constrs_1 -norecurse $XDC
+    add_files -fileset constrs_1 -norecurse $XDC_DPTI
     set_property top $TOP [current_fileset]
 
     # Geometry and the golden constants come from this script.  K_MAX_8X8 reaches
@@ -426,10 +465,12 @@ proc build_body {} {
         USE_LEGACY_JOB_PORTS=1'b0 \
         USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
-        EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
+        EXPECT_C_CHK=32'h$EXPECT_C_CHK \
+        DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE ] [current_fileset]
     puts "building $VARIANT at N=$NARR (USE_V2=$USE_V2), fleet ${NUM_8X8}x8x8 + ${NUM_4X4}x4x4, project $PROJ_DIR"
     puts "K_MAX_8X8=$K8"
     puts "K_MAX_4X4=$K4"
+    puts "DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE degrees"
     puts "K_DIM=$KDIM  (= K8: one fold of the 8x8's full depth; the top clamps it to K4 for the 4x4s)"
     puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC[expr {$HAVE_GOLDEN ? {} : {  (none tabulated)}}]"
 
@@ -450,6 +491,30 @@ proc build_body {} {
     if {![file exists $DRC_TCL]} { error "missing: $DRC_TCL" }
     add_files -fileset utils_1 -norecurse $DRC_TCL
     set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
+
+    # Routability.  At K8 = K4 = 512 with the 1x8x8 + 3x4x4 fleet the placed
+    # design fills 99.6% of the slices.  With the default directives, routing
+    # of that geometry is a lottery: the 2026-10-14 _s4 placement routed, the
+    # next one (same fleet, ~20 extra PHY flops) failed after 3h48m with 573
+    # nets unroutable from congestion (Route 35-162 / 35-2), hot spots in the
+    # 8x8 context's result bank and the PE array.  These directives spread the
+    # placement and give the router more rip-up-and-reroute effort; no timing
+    # constraint is touched.  Override with SYSTOLIC_PLACE_DIRECTIVE /
+    # SYSTOLIC_ROUTE_DIRECTIVE (Default restores the previous flow).  Both are
+    # recorded in fpga_config.txt.
+    set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $PLACE_DIRECTIVE [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE $ROUTE_DIRECTIVE [get_runs impl_1]
+    puts "impl_1: place_design -directive $PLACE_DIRECTIVE, route_design -directive $ROUTE_DIRECTIVE"
+
+    # SYSTOLIC_INCR_REF=<routed .dcp>: incremental implementation against a
+    # previous routed checkpoint of the same geometry.  Cells that match keep
+    # their placement and routing, which carries a placement that is known to
+    # route across a small RTL change.  Recorded in fpga_config.txt.
+    if {$INCR_REF ne ""} {
+        if {![file exists $INCR_REF]} { error "SYSTOLIC_INCR_REF: missing $INCR_REF" }
+        set_property incremental_checkpoint $INCR_REF [get_runs impl_1]
+        puts "impl_1: incremental against $INCR_REF"
+    }
 
     # -------------------------------------------------------------------------
     # Reproducibility gate.
@@ -480,6 +545,13 @@ proc build_body {} {
     set dir  [get_property DIRECTORY [get_runs impl_1]]
     set wns  [get_property STATS.WNS [get_runs impl_1]]
     set whs  [get_property STATS.WHS [get_runs impl_1]]
+
+    # FT2232H I/O and clocking gate on the routed design.  Its reports go to
+    # $dir/dpti_io/; the verdict is recorded in fpga_config.txt and enforced
+    # below, after the record is written.
+    open_run impl_1
+    set dpti_io_ok [verify_dpti_io_after_impl $dir/dpti_io]
+    close_design
     puts "\n=== bitstream ================================================="
     puts "  $VARIANT  N=$NARR  K_MAX_8X8=$K8  K_MAX_4X4=$K4  fleet ${NUM_8X8}x8x8+${NUM_4X4}x4x4"
     foreach b [glob -nocomplain $dir/*.bit] { puts "  $b" }
@@ -493,11 +565,15 @@ proc build_body {} {
         puts "  trustworthy.  Rebuild before reading."
     }
     foreach b [glob -nocomplain $dir/*.bit] {
-        set cfg [write_fpga_config $dir/fpga_config.txt $b $wns $whs]
+        set cfg [write_fpga_config $dir/fpga_config.txt $b $wns $whs $dpti_io_ok]
         puts "  parameters recorded in $cfg"
         puts "  host side:  export SYSTOLIC_FPGA_CONFIG=$cfg"
     }
     close_project
+    if {!$dpti_io_ok} {
+        error "FT2232H I/O / clocking gate FAILED -- see $dir/dpti_io/summary.txt.\n\
+               Do not program this bitstream."
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -505,8 +581,9 @@ proc build_body {} {
 # KEY=VALUE form the runtime reads (runtime/fpga_matmul_tiled.h,
 # fpga_runtime_get_config).  The runtime reads K_MAX_8X8, K_MAX_4X4, N,
 # NUM_8X8 and NUM_4X4; every other line is for people.
-proc write_fpga_config {path bit wns whs} {
-    global K8 K4 KDIM NARR NUM_8X8 NUM_4X4 VARIANT USE_V2 SCRIPT_DIR
+proc write_fpga_config {path bit wns whs dpti_io_ok} {
+    global K8 K4 KDIM NARR NUM_8X8 NUM_4X4 VARIANT USE_V2 SCRIPT_DIR DPTI_CLK_PHASE
+    global PLACE_DIRECTIVE ROUTE_DIRECTIVE INCR_REF
     set slab8 [expr {($K8 + 7) / 8 * 8}]
     set slab4 [expr {($K4 + 7) / 8 * 8}]
     if {$NUM_8X8 == 0} {
@@ -542,7 +619,12 @@ proc write_fpga_config {path bit wns whs} {
     puts $f "RTL_TREE_DIRTY=$dirty"
     puts $f "WNS_NS=$wns"
     puts $f "WHS_NS=$whs"
-    puts $f "TIMING_MET=[expr {($wns ne {} && $whs ne {} && $wns >= 0 && $whs >= 0) ? 1 : 0}]"
+    puts $f "TIMING_MET=[expr {($wns ne {} && $whs ne {} && $wns >= 0 && $whs >= 0 && $dpti_io_ok) ? 1 : 0}]"
+    puts $f "DPTI_IO_GATE=[expr {$dpti_io_ok ? {PASS} : {FAIL}}]"
+    puts $f "DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE"
+    puts $f "IMPL_PLACE_DIRECTIVE=$PLACE_DIRECTIVE"
+    puts $f "IMPL_ROUTE_DIRECTIVE=$ROUTE_DIRECTIVE"
+    puts $f "IMPL_INCREMENTAL_REF=[expr {$INCR_REF eq {} ? {none} : $INCR_REF}]"
     puts $f "BUILT=[clock format [clock seconds] -format {%Y-%m-%dT%H:%M:%S%z}]"
     close $f
     return $path
@@ -646,25 +728,38 @@ proc pick_device {} {
 # after synthesis and BEFORE allowing implementation to start.
 #
 # Implementation is forbidden unless Vivado itself reports both directions
-# between dpti_clkout and clk_pll_i as Asynchronous Groups.
+# between clk_dpti (the DPTI logic's clock: dpti_clkout through dpti_clk_gen's
+# MMCM) and clk_pll_i as Asynchronous Groups, and clk_dpti is derived from the
+# dpti_clkout port clock.
 proc verify_clock_groups_before_impl {} {
     puts ""
     puts "============================================================"
     puts "=== PRE-IMPLEMENTATION CLOCK CONSTRAINT CHECK ==="
     puts "============================================================"
 
-    set dpti [get_clocks -quiet dpti_clkout]
+    set port [get_clocks -quiet dpti_clkout]
+    set dpti [get_clocks -quiet clk_dpti]
     set pll  [get_clocks -quiet clk_pll_i]
 
-    if {[llength $dpti] != 1} {
+    if {[llength $port] != 1} {
         error "REPRODUCIBILITY CHECK FAILED: dpti_clkout clock not found"
+    }
+
+    if {[llength $dpti] != 1} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti clock not found (dpti_clk_gen MMCM output)"
     }
 
     if {[llength $pll] != 1} {
         error "REPRODUCIBILITY CHECK FAILED: clk_pll_i clock not found"
     }
 
-    puts "dpti_clkout = $dpti"
+    set master [get_property MASTER_CLOCK $dpti]
+    if {$master ne "dpti_clkout"} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti is derived from '$master', not dpti_clkout"
+    }
+
+    puts "dpti_clkout = $port"
+    puts "clk_dpti    = $dpti  (master $master, period [get_property PERIOD $dpti] ns)"
     puts "clk_pll_i   = $pll"
 
     set report_fwd [report_clock_interaction \
@@ -675,7 +770,7 @@ proc verify_clock_groups_before_impl {} {
     puts $report_fwd
 
     if {![string match "*Asynchronous Groups*" $report_fwd]} {
-        error "REPRODUCIBILITY CHECK FAILED: dpti_clkout -> clk_pll_i is NOT Asynchronous Groups"
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti -> clk_pll_i is NOT Asynchronous Groups"
     }
 
     set report_rev [report_clock_interaction \
@@ -686,13 +781,193 @@ proc verify_clock_groups_before_impl {} {
     puts $report_rev
 
     if {![string match "*Asynchronous Groups*" $report_rev]} {
-        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i -> dpti_clkout is NOT Asynchronous Groups"
+        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i -> clk_dpti is NOT Asynchronous Groups"
     }
+
+    set missing [dpti_ports_without_io_delay]
+    if {[llength $missing] > 0} {
+        error "REPRODUCIBILITY CHECK FAILED: FT2232H ports without I/O delay: $missing"
+    }
+    puts "FT2232H ports: every input has an input delay, every output an output delay."
 
     puts ""
     puts "CLOCK CONSTRAINT CHECK PASSED."
     puts "Implementation is allowed to proceed."
     puts ""
+}
+
+# The FT2232H ports, by direction as the FPGA sees them.  dpti_d is in both.
+proc dpti_in_ports {}  { get_ports {dpti_d[*] dpti_rxf_n dpti_txe_n} }
+proc dpti_out_ports {} { get_ports {dpti_d[*] dpti_rd_n dpti_wr_n dpti_oe_n} }
+
+# Ports Vivado does not time: an input with no path from it, or an output with
+# no path to it, under either delay type.  (A port with no input/output delay
+# has no timing path, so this is the same question check_timing's
+# no_input_delay / no_output_delay asks, answered per port.)
+proc dpti_ports_without_io_delay {} {
+    set missing {}
+    foreach p [dpti_in_ports] {
+        foreach dt {max min} {
+            if {[llength [get_timing_paths -quiet -from $p -delay_type $dt -max_paths 1]] == 0} {
+                lappend missing "${p}:in:$dt"
+            }
+        }
+    }
+    foreach p [dpti_out_ports] {
+        foreach dt {max min} {
+            if {[llength [get_timing_paths -quiet -to $p -delay_type $dt -max_paths 1]] == 0} {
+                lappend missing "${p}:out:$dt"
+            }
+        }
+    }
+    return $missing
+}
+
+# -----------------------------------------------------------------------------
+# FT2232H I/O and clocking gate, on the ROUTED design (open_run impl_1).
+#
+# Writes every report to OUT and a verdict table to OUT/summary.txt; returns 1
+# only if all of these hold:
+#   1. no FT2232H port is unconstrained (input or output delay missing);
+#   2. input setup and hold slack >= 0 on every FT2232H input;
+#   3. output setup and hold slack >= 0 on every FT2232H output (dpti_d's
+#      data and output-enable paths included);
+#   4. WNS >= 0 and WHS >= 0 for the whole design;
+#   5. every register that captures an FT2232H input sits in that pin's
+#      ILOGIC, and every register that launches an FT2232H output (data and
+#      tristate) in that pin's OLOGIC;
+#   6. every strobe and tristate pad register has an asynchronous preset (and
+#      the data registers an asynchronous reset), so the pads go to their
+#      safe state without a clock;
+#   7. dpti_clk_gen's MMCM: COMPENSATION = ZHOLD, CLKFBIN driven by a BUFG
+#      fed from CLKFBOUT, CLKIN1 without CLOCK_DEDICATED_ROUTE = FALSE, and
+#      clk_dpti derived from dpti_clkout.
+# Never edits the design; only reads it.
+proc verify_dpti_io_after_impl {out} {
+    file mkdir $out
+    set ok 1
+    set lines {}
+    proc _dpti_note {var ok_var cond msg} {
+        upvar $var l
+        upvar $ok_var o
+        if {$cond} { lappend l "PASS  $msg" } else { lappend l "FAIL  $msg"; set o 0 }
+    }
+
+    # ---- reports (for people) -----------------------------------------------
+    report_clocks                    -file $out/clocks.rpt
+    report_clock_networks            -file $out/clock_networks.rpt
+    report_clock_utilization         -file $out/clock_utilization.rpt
+    report_clock_interaction -delay_type min_max -file $out/clock_interaction.rpt
+    report_cdc -details              -file $out/cdc.rpt
+    check_timing -verbose            -file $out/check_timing.rpt
+    report_methodology               -file $out/methodology.rpt
+    report_io                        -file $out/io.rpt
+    report_timing_summary -check_timing_verbose -max_paths 10 -file $out/timing_summary.rpt
+    report_timing -from [dpti_in_ports] -delay_type max -max_paths 30 -nworst 1 -file $out/input_setup.rpt
+    report_timing -from [dpti_in_ports] -delay_type min -max_paths 30 -nworst 1 -file $out/input_hold.rpt
+    report_timing -to [dpti_out_ports]  -delay_type max -max_paths 30 -nworst 1 -file $out/output_setup.rpt
+    report_timing -to [dpti_out_ports]  -delay_type min -max_paths 30 -nworst 1 -file $out/output_hold.rpt
+    report_datasheet                 -file $out/datasheet.rpt
+
+    # ---- 1. unconstrained ports ---------------------------------------------
+    set missing [dpti_ports_without_io_delay]
+    _dpti_note lines ok [expr {[llength $missing] == 0}] \
+        "unconstrained FT2232H ports: [expr {[llength $missing] ? $missing : {none}}]"
+
+    # ---- 2/3. per-port I/O slack --------------------------------------------
+    lappend lines ""
+    lappend lines [format "      %-14s %-4s %10s %10s" port dir setup hold]
+    foreach {dir ports opt} [list in [dpti_in_ports] -from out [dpti_out_ports] -to] {
+        foreach p $ports {
+            set su [get_timing_paths -quiet $opt $p -delay_type max -max_paths 1]
+            set ho [get_timing_paths -quiet $opt $p -delay_type min -max_paths 1]
+            set s_su [expr {[llength $su] ? [get_property SLACK $su] : {none}}]
+            set s_ho [expr {[llength $ho] ? [get_property SLACK $ho] : {none}}]
+            set good [expr {$s_su ne {none} && $s_ho ne {none} && $s_su ne {} && $s_ho ne {} \
+                            && $s_su >= 0 && $s_ho >= 0}]
+            if {!$good} { set ok 0 }
+            lappend lines [format "%-5s %-14s %-4s %10s %10s" \
+                [expr {$good ? {PASS} : {FAIL}}] $p $dir $s_su $s_ho]
+        }
+    }
+    lappend lines ""
+
+    # ---- 4. WNS / WHS ---------------------------------------------------------
+    set wp [get_timing_paths -quiet -delay_type max -max_paths 1]
+    set hp [get_timing_paths -quiet -delay_type min -max_paths 1]
+    set wns [expr {[llength $wp] ? [get_property SLACK $wp] : {}}]
+    set whs [expr {[llength $hp] ? [get_property SLACK $hp] : {}}]
+    _dpti_note lines ok [expr {$wns ne {} && $wns >= 0}] "WNS = $wns ns"
+    _dpti_note lines ok [expr {$whs ne {} && $whs >= 0}] "WHS = $whs ns (includes hold_margin.tcl's 0.150 ns on ui_clk)"
+
+    # ---- 5/6. I/O register packing and async preset ---------------------------
+    foreach {dir ports} [list in [dpti_in_ports] out [dpti_out_ports]] {
+        foreach p $ports {
+            set xy ?
+            regexp {X[0-9]+Y[0-9]+$} [get_sites -quiet -of_objects $p] xy
+            if {$dir eq "in"} {
+                set pins [all_fanout -quiet -from $p -flat -endpoints_only]
+                set want ILOGIC
+            } else {
+                set pins [all_fanin -quiet -to $p -flat -startpoints_only]
+                set want OLOGIC
+            }
+            set regs [get_cells -quiet -of_objects $pins -filter {IS_SEQUENTIAL}]
+            if {[llength $regs] == 0} {
+                _dpti_note lines ok 0 "$p ($dir): no register found"
+                continue
+            }
+            foreach r $regs {
+                set loc [get_property LOC $r]
+                _dpti_note lines ok [string match "${want}_$xy" $loc] \
+                    "$p ($dir): $r at $loc (want ${want}_$xy)"
+                # Strobes and tristate controls must PRESET (high = inactive /
+                # released) asynchronously; the data register d_o_r only needs
+                # an asynchronous reset of either kind, its pad being high-Z
+                # while d_t_r is preset.
+                if {$dir eq "out"} {
+                    set ref [get_property REF_NAME $r]
+                    set want_ref [expr {[string match "*d_o_r_reg*" $r] ? {FDPE FDCE} : {FDPE}}]
+                    _dpti_note lines ok [expr {[lsearch -exact $want_ref $ref] >= 0}] \
+                        "$p (out): $r is $ref (want [join $want_ref /]: safe without a clock)"
+                }
+            }
+        }
+    }
+
+    # ---- 7. MMCM and clock --------------------------------------------------
+    lappend lines ""
+    set mmcm [get_cells -quiet -hierarchical -filter {REF_NAME == MMCME2_ADV && NAME =~ *u_dpti_clk_gen*}]
+    if {[llength $mmcm] != 1} {
+        _dpti_note lines ok 0 "dpti_clk_gen MMCM: found [llength $mmcm] MMCME2_ADV"
+    } else {
+        _dpti_note lines ok [expr {[get_property COMPENSATION $mmcm] eq "ZHOLD"}] \
+            "MMCM $mmcm at [get_property LOC $mmcm]: COMPENSATION = [get_property COMPENSATION $mmcm]"
+        set fbdrv [get_cells -quiet -of_objects [get_pins -quiet -leaf -filter {DIRECTION == OUT} \
+                     -of_objects [get_nets -quiet -of_objects [get_pins $mmcm/CLKFBIN]]]]
+        set fbin  [get_cells -quiet -of_objects [get_pins -quiet -leaf -filter {DIRECTION == OUT} \
+                     -of_objects [get_nets -quiet -of_objects [get_pins -quiet $fbdrv/I]]]]
+        _dpti_note lines ok [expr {[llength $fbdrv] == 1 && [get_property REF_NAME $fbdrv] eq "BUFG" \
+                                   && $fbin eq $mmcm}] \
+            "MMCM feedback: CLKFBIN <- [expr {[llength $fbdrv] ? [get_property REF_NAME $fbdrv] : {nothing}}] <- $fbin"
+        set cdr [get_property CLOCK_DEDICATED_ROUTE [get_nets -quiet -of_objects [get_pins $mmcm/CLKIN1]]]
+        _dpti_note lines ok [expr {[string toupper $cdr] ne "FALSE"}] \
+            "MMCM CLKIN1 net CLOCK_DEDICATED_ROUTE = '[expr {$cdr eq {} ? {(default)} : $cdr}]'"
+    }
+    set cd [get_clocks -quiet clk_dpti]
+    _dpti_note lines ok [expr {[llength $cd] == 1 && [get_property MASTER_CLOCK $cd] eq "dpti_clkout"}] \
+        "clk_dpti: [expr {[llength $cd] ? "period [get_property PERIOD $cd] ns, master [get_property MASTER_CLOCK $cd]" : {missing}}]"
+
+    set f [open $out/summary.txt w]
+    puts $f "FT2232H I/O and clocking gate -- [expr {$ok ? {PASS} : {FAIL}}]"
+    puts $f "slack in ns; reports in this directory"
+    foreach l $lines { puts $f $l }
+    close $f
+
+    puts "\n=== FT2232H I/O and clocking gate: [expr {$ok ? {PASS} : {FAIL}}] ==="
+    foreach l $lines { puts "  $l" }
+    puts "  reports: $out"
+    return $ok
 }
 
 proc arm_run {v n} {

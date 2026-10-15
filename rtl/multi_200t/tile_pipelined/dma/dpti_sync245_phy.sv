@@ -21,13 +21,17 @@
 // Clocking assumption (integration, not this file): clk is phase-aligned to the
 // FT2232H CLKOUT at the FPGA pins (e.g. an MMCM with zero-delay compensation),
 // so that every pad register below meets Table 4.1 when packed into the IOB.
+// In systolic_dma_top that clock is dpti_clk_gen's clk_dpti; whether Table 4.1
+// is met is decided by STA against nexys_video_dpti_timing.xdc, not here.
 //
 // ---------------------------------------------------------------------------
 // Cycle model.  Edge k = a rising edge of clk (= of CLKOUT).
 //
 //   Pad registers (IOB):
 //     inputs  rxf_q, txe_q, d_q   capture the pins as they stood before edge k
-//     outputs rd_n_r, oe_n_r, wr_n_r, d_o_r, d_t_r drive the pins during (k, k+1]
+//     outputs rd_n_pad, oe_n_pad, wr_n_pad, d_o_r, d_t_r drive the pins during
+//             (k, k+1]; rd_n_r / oe_n_r / wr_n_r are fabric twins of the
+//             three strobes, equal to them at every edge
 //     -> the chip samples at edge k+1 exactly what was registered at edge k.
 //
 //   Shadows: rd_low_prev / wr_low_prev hold, after edge k, what RD# / WR# were
@@ -105,6 +109,8 @@ module dpti_sync245_phy #(
     output wire        tx_ready,
 
     // ---- status ----
+    output wire        dbg_rxf_avail,    // registered: RXF# was low at the last edge
+    output wire        dbg_rd_active,    // registered: RD# is being driven low
     output wire [1:0]  bus_mode,         // 0 IDLE, 1 RX, 2 TX
     output reg         err_rx_overflow,  // sticky; must never set
     output reg  [31:0] rx_xfer_count,    // bytes the chip handed over
@@ -148,11 +154,32 @@ module dpti_sync245_phy #(
     (* IOB = "TRUE" *) reg       rxf_q;
     (* IOB = "TRUE" *) reg       txe_q;
 
-    (* IOB = "TRUE" *) reg       rd_n_r;
-    (* IOB = "TRUE" *) reg       oe_n_r;
-    (* IOB = "TRUE" *) reg       wr_n_r;
     (* IOB = "TRUE" *) reg [7:0] d_o_r;
-    (* IOB = "TRUE" *) reg [7:0] d_t_r;   // one register per bit, one per IOB
+    // One register per bit, one per IOB.  All eight always hold the same value,
+    // so without DONT_TOUCH synthesis merges them into one register that can
+    // sit in at most one OLOGIC.  d_t_q is their fabric twin (see below).
+    (* IOB = "TRUE", DONT_TOUCH = "TRUE" *) reg [7:0] d_t_r;
+    (* DONT_TOUCH = "TRUE" *)               reg       d_t_q;
+
+    // RD#, OE#, WR#: two registers each, loaded with the same value at the
+    // same edge.  The *_pad copy drives only its pad and can therefore be
+    // packed into the OLOGIC (an OLOGIC register has no path back to the
+    // fabric); the *_r copy is the state the logic below reads.  DONT_TOUCH on
+    // both keeps synthesis from merging the equivalent pair, which would put
+    // the fabric loads back on the pad register and make it unpackable.
+    //
+    // A pad register must not read itself either.  Left to hold its value
+    // implicitly, synthesis may build the hold as a LUT fed from the
+    // register's own Q (it did for d_t_r and wr_n_pad: Shape Builder 18-132,
+    // Place 30-722), and that Q-to-fabric load keeps it out of the OLOGIC.
+    // So every pad register is loaded at every edge, by default from its
+    // fabric twin, which always holds the same value.
+    (* IOB = "TRUE", DONT_TOUCH = "TRUE" *) reg rd_n_pad;
+    (* IOB = "TRUE", DONT_TOUCH = "TRUE" *) reg oe_n_pad;
+    (* IOB = "TRUE", DONT_TOUCH = "TRUE" *) reg wr_n_pad;
+    (* DONT_TOUCH = "TRUE" *)               reg rd_n_r;
+    (* DONT_TOUCH = "TRUE" *)               reg oe_n_r;
+    (* DONT_TOUCH = "TRUE" *)               reg wr_n_r;
 
     always @(posedge clk) begin
         d_q <= pad_d_i;
@@ -169,9 +196,12 @@ module dpti_sync245_phy #(
         end
     end
 
-    assign pad_rd_n = rd_n_r;
-    assign pad_oe_n = oe_n_r;
-    assign pad_wr_n = wr_n_r;
+    assign dbg_rxf_avail = !rxf_q;
+    assign dbg_rd_active = !rd_n_r;
+
+    assign pad_rd_n = rd_n_pad;
+    assign pad_oe_n = oe_n_pad;
+    assign pad_wr_n = wr_n_pad;
     assign pad_d_o  = d_o_r;
     assign pad_d_t  = d_t_r;
 
@@ -261,13 +291,20 @@ module dpti_sync245_phy #(
     // if any, has its outcome in tx_acc / tx_rej now).
     wire tx_slot = wr_n_r;
 
+    // RD# for the next edge while in M_RX.
+    wire rd_n_rx_next = !(!oe_n_r && !rxf_q && rx_space);
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             rd_n_r          <= 1'b1;
+            rd_n_pad        <= 1'b1;
             oe_n_r          <= 1'b1;
+            oe_n_pad        <= 1'b1;
             wr_n_r          <= 1'b1;
+            wr_n_pad        <= 1'b1;
             d_o_r           <= 8'h00;
             d_t_r           <= 8'hFF;
+            d_t_q           <= 1'b1;
             rd_low_prev     <= 1'b0;
             wr_low_prev     <= 1'b0;
             mode            <= M_IDLE;
@@ -280,6 +317,13 @@ module dpti_sync245_phy #(
             tx_reject_count <= 32'd0;
         end
         else begin
+            // Pad registers hold through their twins, never through their
+            // own Q (see the declarations).  Overridden below.
+            rd_n_pad <= rd_n_r;
+            oe_n_pad <= oe_n_r;
+            wr_n_pad <= wr_n_r;
+            d_t_r    <= {8{d_t_q}};
+
             rd_low_prev <= !rd_n_r;
             wr_low_prev <= !wr_n_r;
 
@@ -297,9 +341,13 @@ module dpti_sync245_phy #(
             // ----------------------------------------------------------
             M_IDLE: begin
                 rd_n_r <= 1'b1;
+                rd_n_pad <= 1'b1;
                 oe_n_r <= 1'b1;
+                oe_n_pad <= 1'b1;
                 wr_n_r <= 1'b1;
+                wr_n_pad <= 1'b1;
                 d_t_r  <= 8'hFF;
+                d_t_q  <= 1'b1;
 
                 if (!turn_done)
                     turn_cnt <= turn_cnt + 1'b1;
@@ -308,13 +356,16 @@ module dpti_sync245_phy #(
                     if (rx_want && (!tx_want || last_tx)) begin
                         mode      <= M_RX;
                         oe_n_r    <= 1'b0;   // RD# follows no earlier than next edge
+                        oe_n_pad  <= 1'b0;
                         burst_cnt <= {BW{1'b0}};
                     end
                     else if (tx_want) begin
                         mode      <= M_TX;
                         d_t_r     <= 8'h00;
+                        d_t_q     <= 1'b0;
                         d_o_r     <= tx_next;
                         wr_n_r    <= 1'b0;   // data and WR# launched together
+                        wr_n_pad  <= 1'b0;
                         burst_cnt <= {BW{1'b0}};
                     end
                 end
@@ -330,15 +381,19 @@ module dpti_sync245_phy #(
                     // edge (RD# low before it) is already in d_q / rd_low_prev.
                     mode     <= M_IDLE;
                     rd_n_r   <= 1'b1;
+                    rd_n_pad <= 1'b1;
                     oe_n_r   <= 1'b1;
+                    oe_n_pad <= 1'b1;
                     turn_cnt <= {TW{1'b0}};
                     last_tx  <= 1'b0;
                 end
                 else begin
                     oe_n_r <= 1'b0;
+                    oe_n_pad <= 1'b0;
                     // OE# is already low on the pins (oe_n_r == 0 here), so
                     // RD# low from this edge satisfies OE#-before-RD#.
-                    rd_n_r <= !(!oe_n_r && !rxf_q && rx_space);
+                    rd_n_r   <= rd_n_rx_next;
+                    rd_n_pad <= rd_n_rx_next;
                 end
             end
 
@@ -350,18 +405,21 @@ module dpti_sync245_phy #(
                 if (!tx_slot) begin
                     // A strobe is on the pins: always follow it with a gap.
                     wr_n_r <= 1'b1;
+                    wr_n_pad <= 1'b1;
                 end
                 else if (!tx_left_ge1 ||
                          (rx_want && (txe_q || burst_cnt >= TX_BURST_C))) begin
                     // Nothing in flight (outcome handled this edge): release.
                     mode     <= M_IDLE;
                     d_t_r    <= 8'hFF;
+                    d_t_q    <= 1'b1;
                     turn_cnt <= {TW{1'b0}};
                     last_tx  <= 1'b1;
                 end
                 else if (!txe_q) begin
                     d_o_r  <= tx_next;
                     wr_n_r <= 1'b0;
+                    wr_n_pad <= 1'b0;
                 end
             end
 
