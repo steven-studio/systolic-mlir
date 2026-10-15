@@ -43,6 +43,9 @@ module dpti_mem_write_cdc_engine #(
 
     input  wire                     ui_clk,
     input  wire                     ui_rst_n,
+    // Resets only the ui_clk half of the crossing (not the AXI engine): the
+    // DPTI link reset, applied together with src_rst (dpti_link_ctrl).
+    input  wire                     ui_cdc_rst,
 
     output wire                     busy,
     output wire                     done,
@@ -101,7 +104,7 @@ module dpti_mem_write_cdc_engine #(
         .src_ready     (src_ready),
 
         .dst_clk       (ui_clk),
-        .dst_rst       (~ui_rst_n),
+        .dst_rst       (~ui_rst_n | ui_cdc_rst),
 
         .dst_start     (writer_start),
         .dst_base_addr (writer_base_addr),

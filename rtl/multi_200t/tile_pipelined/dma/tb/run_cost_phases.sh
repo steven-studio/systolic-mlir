@@ -56,6 +56,10 @@ verilator --binary -Wno-fatal -Werror-USERERROR --timing --public-flat-rw -O2 \
     "$DMA/systolic_accel_context.sv" \
     "$DMA/dpti_host_rx.sv" \
     "$DMA/dpti_byte_tx.sv" \
+    "$DMA/dpti_sync245_phy.sv" \
+    "$DMA/dpti_sync245_fifo.sv" \
+    "$DMA/dpti_clk_gen.sv" \
+    "$DMA/dpti_link_ctrl.sv" \
     "$DMA/dpti_write32_decoder.sv" \
     "$DMA/dpti_axi4lite_master.sv" \
     "$DMA/dpti_byte_rx.sv" \

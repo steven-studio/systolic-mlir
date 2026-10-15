@@ -150,6 +150,13 @@ RTL_SRCS+=(
     "$T/scheduler/systolic_hw_scheduler.sv"
     "$T/scheduler/systolic_hw_scheduler_adapter.sv"
 )
+# The registered FT2232H PHY (systolic_dma_top DPTI_PHY_SYNC245) exists only
+# in RTL after 29f3209, and the MMCM clock / link reset (dpti_clk_gen,
+# dpti_link_ctrl) only after it; older revisions build without them.
+for f in "$D/dpti_sync245_phy.sv" "$D/dpti_sync245_fifo.sv" \
+         "$D/dpti_clk_gen.sv" "$D/dpti_link_ctrl.sv"; do
+    [ -f "$f" ] && RTL_SRCS+=("$f")
+done
 STANDINS=(
     "$D/tb/xil_stubs.sv"
     "$D/tb/mig_axi_model.sv"
