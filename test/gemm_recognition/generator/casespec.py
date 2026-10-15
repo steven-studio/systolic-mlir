@@ -31,8 +31,10 @@ Nothing here depends on the compiler or on numpy.
 """
 
 import ast
-import os
 import itertools
+import math
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -163,35 +165,89 @@ STMT_TEXT = {"+=": "C[..] += A[..] * B[..]",
 class Loop:
     var: str
     lb: int
-    ub: int            # exclusive bound for cmp '<', inclusive for '<='
-    step: int = 1
-    cmp: str = "<"     # '<' or '<='
+    ub: int            # the bound as written: exclusive for '<' / '>', inclusive for '<=' / '>='
+    step: int = 1      # negative for a decreasing loop (cmp '>' or '>=')
+    cmp: str = "<"     # '<', '<=', '>' or '>='
     role: str = "X"    # I, J, K, P, R, X
     ctype: str = "int"
-    inc: str = "++"    # '++' (prefix), 'post++', '+=', '=+'
+    inc: str = "++"    # '++' (prefix), 'post++', '+=', '=+'; for step < 0: '--', 'post--', '-=' (i -= |step|)
+    cond: str = ""     # the loop condition as written in C when it is not 'var cmp ub' -- an
+                       # affine expression of the counter compared with a constant, e.g.
+                       # '2 * i - 3 > 0'; cmp / ub are then its declared equivalent (i > 1),
+                       # and values() checks the two against each other
+
+    def __post_init__(self):
+        if self.cmp not in ("<", "<=", ">", ">="):
+            raise ValueError("%s: comparison %r" % (self.var, self.cmp))
+        if self.step == 0:
+            raise ValueError("%s: step 0" % self.var)
+        if (self.step < 0) != (self.cmp in (">", ">=")):
+            raise ValueError("%s: a loop with step %d and condition %r never terminates"
+                             % (self.var, self.step, self.cmp))
+        if self.inc not in ("++", "post++", "+=", "=+", "--", "post--", "-="):
+            raise ValueError("%s: increment %r" % (self.var, self.inc))
+        if self.cond and not re.search(r"\b%s\b" % re.escape(self.var), self.cond):
+            raise ValueError("%s: condition %r does not use the counter" % (self.var, self.cond))
+
+    def decreasing(self):
+        return self.step < 0
 
     def exclusive_ub(self):
-        return self.ub + 1 if self.cmp == "<=" else self.ub
+        """The bound in range() terms: the first value NOT visited, in the
+        direction of the step."""
+        if self.cmp == "<=":
+            return self.ub + 1
+        if self.cmp == ">=":
+            return self.ub - 1
+        return self.ub
 
     def values(self):
-        return list(range(self.lb, self.exclusive_ub(), self.step))
+        declared = list(range(self.lb, self.exclusive_ub(), self.step))
+        if self.cond:
+            # run the condition as written (integer + - * and comparisons
+            # mean the same in Python as in C over these values): the
+            # declared equivalent must visit exactly the same values
+            written, v = [], self.lb
+            while eval(self.cond, {"__builtins__": {}}, {self.var: v}):
+                written.append(v)
+                v += self.step
+                if len(written) > 10 ** 6:
+                    raise ValueError("%s: condition %r runs for more than 10^6 iterations"
+                                     % (self.var, self.cond))
+            if written != declared:
+                raise ValueError("%s: the condition %r visits %d value(s), the declared %s %s %d "
+                                 "visits %d" % (self.var, self.cond, len(written), self.var,
+                                                self.cmp, self.ub, len(declared)))
+            return written
+        return declared
 
     def trip(self):
         return len(self.values())
 
     def c_header(self):
-        if self.inc == "++":
-            inc = "++%s" % self.var if self.step == 1 else "%s += %d" % (self.var, self.step)
-        elif self.inc == "post++":
-            inc = "%s++" % self.var if self.step == 1 else "%s += %d" % (self.var, self.step)
-        elif self.inc == "+=":
-            inc = "%s += %d" % (self.var, self.step)
+        s, v = abs(self.step), self.var
+        if self.inc in ("++", "--"):
+            inc = ("++%s" if self.step > 0 else "--%s") % v if s == 1 else self._compound(s)
+        elif self.inc in ("post++", "post--"):
+            inc = ("%s++" if self.step > 0 else "%s--") % v if s == 1 else self._compound(s)
+        elif self.inc in ("+=", "-="):
+            inc = self._compound(s)
         elif self.inc == "=+":
-            inc = "%s = %s + %d" % (self.var, self.var, self.step)
+            inc = "%s = %s %s %d" % (v, v, "+" if self.step > 0 else "-", s)
         else:
             raise ValueError(self.inc)
-        return "for (%s %s = %d; %s %s %d; %s)" % (
-            self.ctype, self.var, self.lb, self.var, self.cmp, self.ub, inc)
+        cond = self.cond or "%s %s %d" % (self.var, self.cmp, self.ub)
+        return "for (%s %s = %d; %s; %s)" % (self.ctype, self.var, self.lb, cond, inc)
+
+    def _compound(self, s):
+        return "%s %s %d" % (self.var, "+=" if self.step > 0 else "-=", s)
+
+    def reference_header(self, ctype="long"):
+        """The same iteration set as a reference loop: for (v = lb; v < / >
+        exclusive bound; v += step)."""
+        return "for (%s %s = %d; %s %s %d; %s += %d)" % (
+            ctype, self.var, self.lb, self.var, "<" if self.step > 0 else ">",
+            self.exclusive_ub(), self.var, self.step)
 
 
 @dataclass
@@ -548,6 +604,37 @@ def analyse(case: Case) -> dict:
 STAGES = ["frontend", "recognition", "dense_partition", "lowering", "driver"]
 
 
+def _gcd_content(f: LinearForm) -> int:
+    g = 0
+    for v in f.coef.values():
+        g = math.gcd(g, abs(v))
+    return g
+
+
+def shared_coordinate(a: LinearForm, b: LinearForm) -> Optional[LinearForm]:
+    """The logical coordinate two operand subscripts share, or None.
+
+    Identical expressions share it trivially (the coordinate is that
+    expression).  Otherwise both must be s * g + o for one linear form g over
+    the loop counters with integer s > 0: the same loop combination, the same
+    direction, each operand with its own constant offset and positive stride
+    -- then the coordinate is the primitive form g (coefficients divided by
+    their gcd, no constant).  Different loop combinations (4 i0 + i1 against
+    8 i0 + i1), opposite directions (i against 7 - i) and constants are not
+    one coordinate.  This mirrors matchSharedCoordinate in
+    AffineMatmulAnalysis.cpp."""
+    if a == b:
+        return a
+    ga, gb = _gcd_content(a), _gcd_content(b)
+    if ga == 0 or gb == 0:
+        return None
+    pa = {k: v // ga for k, v in a.coef.items()}
+    pb = {k: v // gb for k, v in b.coef.items()}
+    if pa != pb:
+        return None
+    return LinearForm(pa, 0)
+
+
 def predict(case: Case) -> dict:
     """What each stage of the compiler is expected to do, from its rules as
     read in the sources (README.md, 'What the compiler supports').  Fields:
@@ -579,6 +666,10 @@ def predict(case: Case) -> dict:
     if case.kernel_style == "scalar_acc":
         ex["frontend"] = "rejected"
         return stop("frontend", "local variables are not supported (only for-loop counters)")
+    # A loop that counts down ('>' / '>=' with --, -=, = i - S) is translated
+    # since 2026-10-15: systolic-cfront emits the ordinal affine.for 0 to N
+    # and the counter LB - S * t, i.e. the coordinate's coefficient times the
+    # (negative) step below -- the same model as before for the later stages.
     if not an["affine"]:
         ex["frontend"] = "rejected"
         return stop("frontend", "subscript is not an affine expression of the loop counters")
@@ -629,21 +720,33 @@ def predict(case: Case) -> dict:
     fa, fb, fc = forms["a"], forms["b"], forms["c"]
 
     def matches(a, b):
+        """The shared coordinates (I, J, K) as linear forms, or None.  Two
+        operands share a coordinate when their expressions are identical or
+        are both s * g + o of one linear form g (s > 0): matchSharedCoordinate
+        in AffineMatmulAnalysis.cpp (the rule since the fix of ISSUE-001)."""
         for p in range(npart):
             if a[p] != fc[p] or b[p] != fc[p]:
-                return False
-        I, K, J = a[npart], a[npart + 1], b[npart + 1]
-        return (I == fc[npart] and J == fc[npart + 1] and K == b[npart]
-                and I != J and I != K and J != K)
+                return None
+        I = shared_coordinate(a[npart], fc[npart])
+        J = shared_coordinate(b[npart + 1], fc[npart + 1])
+        K = shared_coordinate(a[npart + 1], b[npart])
+        if I is None or J is None or K is None:
+            return None
+        if I == J or I == K or J == K:
+            return None
+        return I, J, K
 
-    if not (matches(fa, fb) or matches(fb, fa)):
+    m = matches(fa, fb)
+    if m is None:
+        m = matches(fb, fa)
+        if m is not None:
+            fa, fb = fb, fa   # the product's operands swapped: logical A is the C-side's B
+    if m is None:
         ex["recognition"] = "reject"
-        return stop("recognition", "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with "
-                    "the same affine expression for each shared coordinate")
-    if matches(fa, fb):
-        I, K, J = fa[npart], fa[npart + 1], fb[npart + 1]
-    else:
-        I, K, J = fb[npart], fb[npart + 1], fa[npart + 1]
+        return stop("recognition", "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared "
+                    "coordinate must be the same linear form of the loop counters in both "
+                    "operands (up to each operand's own constant offset and positive stride)")
+    I, J, K = m
     # repetition loops: outside the used loops they are fine; between them
     # they are hoisted outward when the interchange is legal
     # (affine::isValidLoopInterchangePermutation) -- it is not when a
@@ -671,6 +774,13 @@ def predict(case: Case) -> dict:
         return stop("dense_partition", "batched GEMM (a partition prefix P* of %d coordinates) "
                     "is not supported" % npart)
     used_loops = [loops[i] for i in used_idx]
+    if any(lp.trip() == 0 for lp in used_loops):
+        # normalizeLogicalCoordinates refuses an empty loop (upper <= lower)
+        # and records it (LogicalMatmul::normalizationEmptyLoop), so
+        # getDenseLogicalGemm reports an empty GEMM -- SQ-2 leaves open
+        # whether it should be offloaded instead
+        ex["dense_partition"] = "unsupported"
+        return stop("dense_partition", "a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)")
     for s, lp in enumerate(used_loops):
         drives = [name for name, f in (("I", I), ("J", J), ("K", K)) if lp.var in f.coef]
         if len(drives) > 1:
@@ -684,10 +794,10 @@ def predict(case: Case) -> dict:
         scaled = []
         for lp in used_loops:
             if lp.var in f.coef:
-                sc = f.coef[lp.var] * lp.step
-                if sc < 0:
-                    ex["dense_partition"] = "unsupported"
-                    return stop("dense_partition", "logical coordinate %s decreases along its loop" % name)
+                # a coordinate that decreases along the loop (a negative
+                # coefficient or a loop that counts down) is read backwards
+                # by getDenseLogicalGemm: its magnitude enumerates it
+                sc = abs(f.coef[lp.var] * lp.step)
                 scaled.append((sc, lp.trip()))
         scaled.sort()
         expected = scaled[0][0]
@@ -707,14 +817,24 @@ def predict(case: Case) -> dict:
             return stop("lowering", "%s is not a rank-2 memref with the identity layout" % nm)
 
     def dense_of(f):
+        """The view an operand's own subscript f (over the loops of one
+        coordinate) spans: (first index, stride, extent) -- getLogicalOperand
+        builds the memref.subview from the operand's view of the coordinate."""
         lps = [lp for lp in used_loops if lp.var in f.coef]
-        off = f.const + sum(f.coef[lp.var] * lp.lb for lp in lps)
-        scale = min(f.coef[lp.var] * lp.step for lp in lps)
+        # the smallest index: each loop at its first value if the subscript
+        # grows along it, at its last value if it shrinks (read backwards)
+        off = f.const + sum(f.coef[lp.var] * (lp.lb if f.coef[lp.var] * lp.step > 0
+                                              else lp.lb + lp.step * (lp.trip() - 1))
+                            for lp in lps)
+        scale = min(abs(f.coef[lp.var] * lp.step) for lp in lps)
         ext = volume([lp.trip() for lp in lps])
         return off, scale, ext
 
-    dI, dJ, dK = dense_of(I), dense_of(J), dense_of(K)
-    for r, nm, (d0, d1) in (("a", "A", (dI, dK)), ("b", "B", (dK, dJ)), ("c", "C", (dI, dJ))):
+    # per operand: A = (I, K), B = (K, J), C = (I, J) through its own subscripts
+    vA = (dense_of(fa[npart]), dense_of(fa[npart + 1]))
+    vB = (dense_of(fb[npart]), dense_of(fb[npart + 1]))
+    vC = (dense_of(fc[npart]), dense_of(fc[npart + 1]))
+    for r, nm, (d0, d1) in (("a", "A", vA), ("b", "B", vB), ("c", "C", vC)):
         arr = case.arrays[r]
         for pos, (off, scale, ext) in enumerate((d0, d1)):
             last = off + scale * (ext - 1)
@@ -735,7 +855,7 @@ def predict(case: Case) -> dict:
             ex["lowering"] = "unsupported"
             return stop("lowering", "%s may overlap C; declare the arguments llvm.noalias (C restrict) "
                         "or pass assume-no-alias" % nm)
-    if case.a.name == case.b.name and (dI, dK) != (dK, dJ):
+    if case.a.name == case.b.name and vA != vB:
         ex["lowering"] = "unsupported"
         return stop("lowering", "A and B are different views of the same memref")
     ex["lowering"] = "supported"
@@ -776,6 +896,27 @@ def predict(case: Case) -> dict:
 #   DOCUMENTED_LIMITATION  spec OUT_OF_SCOPE, implementation refuses
 #   UNEXPECTED_ACCEPT      spec OUT_OF_SCOPE, implementation offloads
 
+# Questions the specification (README.md section 2) does not settle.  A case
+# whose expectation depends on one is UNDETERMINED: it is run, its behaviour
+# is recorded, its program must still compute the right result, but neither
+# 'offloaded' nor 'refused' counts as a failure until the question is decided
+# (in README.md, in writing) -- never by the output of the compiler.
+SPEC_QUESTIONS = {
+    "SQ-1": "a coordinate split over several loops with a different mixed radix per operand "
+            "(A[4*i0 + i1][k] with C[8*i0 + i1][j]): the definition's 'injective affine function "
+            "of the coordinate's loops' admits it, the 'inside' list does not name it, and the "
+            "operand views are not strided sub-matrices (a rank-2 memref.subview cannot express "
+            "them) -- inside the specification (with a copy or a rank-3 view) or a documented "
+            "limitation?",
+    "SQ-2": "an empty GEMM (a loop of zero iterations, M, N or K = 0): the nest computes nothing; "
+            "must the compiler offload it (zero invocations) or refuse it?  Either keeps the "
+            "result correct; the specification does not say which",
+    "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime "
+            "value): unreachable from the C front end, whose bounds must be constants; is the MLIR "
+            "path's refusal ('no static normalized extent') a documented limitation, or must dynamic "
+            "extents be supported?",
+}
+
 SPEC_BASIS = {
     "dense_gemm": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h "
                   "('loops in any order, steps, nonzero origins, access offsets and strides, and "
@@ -803,8 +944,10 @@ SPEC_BASIS = {
                    "and arith.addf (no conversions); the datapath is fp32",
     "aliasing": "AffineMatmulToSystolic.cpp provablyDisjointFromOutput: A and B must be provably disjoint "
                 "from C (restrict / fresh allocations); test/Systolic/affine_to_systolic_refused.mlir @may_alias",
-    "negative_scale": "AffineMatmulPartitioning.cpp getDenseLogicalGemm: 'logical coordinate decreases along "
-                      "its loop' (a memref.subview has no negative stride)",
+    "negative_scale": "two operands run through a shared coordinate in opposite directions (A[7 - i] "
+                      "with C[i]): no strided view of one operand matches the other (a memref.subview "
+                      "has no negative stride); recognizeLogicalMatmul matchSharedCoordinate refuses "
+                      "it. (A coordinate that decreases in every operand is supported: ISSUE-004)",
     "repeat_in_reduction": "AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop inside a "
                            "reduction loop (both of more than one iteration) cannot be moved outward -- "
                            "affine::isValidLoopInterchangePermutation refuses it, the accumulation order "
@@ -813,6 +956,19 @@ SPEC_BASIS = {
     "matvec": "AffineMatmulAnalysis.cpp collectAffineMatmulCandidates expects a three-deep affine.for "
               "nest with rank-2 (or batched rank-3) operands; a GEMV has two index dimensions",
     "not_gemm": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "decreasing_loop": "(no longer a limitation since 2026-10-15, ISSUE-004) a loop that counts down "
+                       "enumerates its coordinate in decreasing order (i = 5, 3, 1 is I = 5 - 2 "
+                       "ordinal); the front end translates it to an ordinal loop and the recognizer "
+                       "reads the coordinate backwards",
+    "out_of_bounds": "the subscripts leave a static array dimension: the nest has no defined "
+                     "meaning as a program, so there is no GEMM to lower and offloading it would be "
+                     "wrong code; the lowering must refuse it and say so (AffineMatmulToSystolic.cpp "
+                     "getLogicalOperand: 'accessed out of bounds along dimension'; "
+                     "AffineMatmulPartitioning.cpp getDenseLogicalGemm when the coordinate's values "
+                     "overflow 64-bit arithmetic -- ISSUE-002)",
+    "SQ-1": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-1"],
+    "SQ-2": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-2"],
+    "SQ-3": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-3"],
 }
 
 
@@ -825,7 +981,9 @@ def spec_expect(case: Case) -> dict:
         out["recognition"] = rec
         out["basis_key"] = key
         out["basis"] = SPEC_BASIS[key]
-        out["offload"] = "offloaded" if rec == "ACCEPT" else "stays_on_host"
+        out["offload"] = {"ACCEPT": "offloaded", "UNDETERMINED": "undetermined"}.get(rec, "stays_on_host")
+        if rec == "UNDETERMINED":
+            out["spec_question"] = key
         case.spec = out
         return out
 
@@ -835,6 +993,8 @@ def spec_expect(case: Case) -> dict:
         if an["math_class"] == "matrix_vector":
             return done("OUT_OF_SCOPE", "matvec")
         return done("REJECT", "not_gemm")
+    if any(lp.trip() == 0 for lp in case.loops):
+        return done("UNDETERMINED", "SQ-2")
     if "batched" in tags:
         return done("OUT_OF_SCOPE", "batched")
     if tags & {"A_transposed", "B_transposed", "C_transposed"}:
@@ -860,11 +1020,25 @@ def spec_expect(case: Case) -> dict:
     for ri, lp in enumerate(loops):
         if lp.var not in used and lp.trip() >= 2 and any(ki < ri for ki in k_idx):
             return done("OUT_OF_SCOPE", "repeat_in_reduction")
-    # a coordinate that decreases along a loop
-    for a in case.arrays.values():
-        for f in a.forms():
-            if any(c < 0 for c in f.coef.values()):
-                return done("OUT_OF_SCOPE", "negative_scale")
+    # A coordinate that decreases along its loop -- a loop that counts down,
+    # or a reversed subscript such as 7 - i -- is a dense GEMM like any other
+    # since 2026-10-15 (a decision made on request, README.md section 2 and
+    # failures/issues/ISSUE-004-*): only the order in which the nest visits
+    # the (I, J, K) points differs. Two operands that run through a shared
+    # coordinate in OPPOSITE directions (A[7 - i] with C[i]) remain out of
+    # scope: no strided view of one operand matches the other.
+    forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
+    v = an["views"]
+    for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
+        fa_, fb_ = forms[ra][v[ra][g]["position"]], forms[rb][v[rb][g]["position"]]
+        if any(fa_.coef.get(x, 0) * fb_.coef.get(x, 0) < 0 for x in fa_.coef):
+            return done("OUT_OF_SCOPE", "negative_scale")
+    # two operands spelling a shared coordinate with different loop
+    # combinations (not two views of one strided coordinate): open question
+    for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
+        fa_, fb_ = forms[ra][v[ra][g]["position"]], forms[rb][v[rb][g]["position"]]
+        if shared_coordinate(fa_, fb_) is None:
+            return done("UNDETERMINED", "SQ-1")
     if case.a.name == case.b.name:
         # one array as both operands: the lowering serves both through ONE
         # read-only view, so A's (I, K) view must be B's (K, J) view
@@ -887,6 +1061,10 @@ def classify_case(case: Case) -> str:
         c = "TRUE_POSITIVE" if offloaded else "FALSE_NEGATIVE"
     elif spec["recognition"] == "REJECT":
         c = "FALSE_POSITIVE" if offloaded else "TRUE_NEGATIVE"
+    elif spec["recognition"] == "UNDETERMINED":
+        # the specification does not decide; the implementation's behaviour
+        # is recorded, not judged (verdict 'spec_open' when it is as predicted)
+        c = "SPEC_OPEN"
     else:
         c = "UNEXPECTED_ACCEPT" if offloaded else "DOCUMENTED_LIMITATION"
     case.classification = c
@@ -1016,8 +1194,7 @@ def reference_direct_text(case: Case) -> str:
     n = len(case.loops)
     zero = case.kernel_style in ("init_inside", "scalar_acc")
     for dd, lp in enumerate(case.loops):
-        hdr = "for (long %s = %d; %s < %d; %s += %d)" % (
-            lp.var, lp.lb, lp.var, lp.exclusive_ub(), lp.var, lp.step)
+        hdr = lp.reference_header()
         if zero and dd == n - 2:
             lines.append("  " * (dd + 1) + hdr + " {")
             lines.append("  " * (dd + 2) + "%s = 0;   /* the kernel zeroes C here */" % c)
@@ -1043,6 +1220,10 @@ def reference_logical_text(case: Case) -> Optional[str]:
         groups.setdefault(lp.role, []).append(lp)
     ext = an["extents"]
     M, N, K = ext["I"], ext["J"], ext["K"]
+    if min(M, N, K) == 0:
+        # an empty GEMM: there is no logical operand to gather (a zero-size
+        # array is not standard C); reference 1 and the oracle still apply
+        return None
     A, B, C = case.a, case.b, case.c
     pl = groups.get("P", [])
     E = case.elem
@@ -1063,8 +1244,7 @@ def reference_logical_text(case: Case) -> Optional[str]:
         dd = depth
         for g in gs:
             for lp in groups.get(g, []):
-                out.append("  " * dd + "for (long %s = %d; %s < %d; %s += %d)" % (
-                    lp.var, lp.lb, lp.var, lp.exclusive_ub(), lp.var, lp.step))
+                out.append("  " * dd + lp.reference_header())
                 dd += 1
         return out, dd
 
@@ -1118,6 +1298,21 @@ def _span(view):
     return "%d..%d" % (view["first"], view["last"])
 
 
+def _wrap(text, width):
+    """Greedy word wrap (no textwrap: keeps the output byte-stable across
+    Python versions)."""
+    lines, cur = [], ""
+    for w in text.split():
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w) if cur else w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def math_description(case: Case) -> List[str]:
     """Header lines: the statement over its loop domain, and the logical view."""
     an = case.analysis
@@ -1125,9 +1320,16 @@ def math_description(case: Case) -> List[str]:
     a, b, c = A.name + _sub_text(A), B.name + _sub_text(B), C.name + _sub_text(C)
     d = case.arrays["d"].name + _sub_text(case.arrays["d"]) if "d" in case.arrays else None
     out = []
-    dom = ", ".join("%s in {%d, %d, ..., %d}" % (lp.var, lp.lb, lp.lb + lp.step, lp.values()[-1])
-                    if lp.step != 1 else "%s in [%d, %d)" % (lp.var, lp.lb, lp.exclusive_ub())
-                    for lp in case.loops)
+    def dom_text(lp):
+        if lp.trip() == 0:
+            return "%s in {} (the loop runs zero times)" % lp.var
+        if lp.step == 1:
+            return "%s in [%d, %d)" % (lp.var, lp.lb, lp.exclusive_ub())
+        if lp.trip() == 1:
+            return "%s in {%d}" % (lp.var, lp.lb)
+        return "%s in {%d, %d, ..., %d}" % (lp.var, lp.lb, lp.lb + lp.step, lp.values()[-1])
+
+    dom = ", ".join(dom_text(lp) for lp in case.loops)
     out.append("for " + dom + " (loops outer to inner):")
     if case.kernel_style in ("init_inside", "scalar_acc"):
         out.append("  %s = 0 before the innermost loop, then" % c)
@@ -1151,6 +1353,9 @@ def math_description(case: Case) -> List[str]:
             arr = case.arrays[role]
             vv = v[role]
             txt = arr.name + _sub_text(arr)
+            if vv[g0]["first"] is None or vv[g1]["first"] is None:
+                out.append("  %s = %s   (an empty coordinate: no element is touched)" % (nm, txt))
+                continue
             if vv[g0]["position"] < vv[g1]["position"]:
                 out.append("  %s = %s   (%s index %s..%s via '%s'; %s index %s..%s via '%s')" % (
                     nm, txt, g0, vv[g0]["first"], vv[g0]["last"], vv[g0]["subscript"],
@@ -1219,7 +1424,10 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     h.append("Mathematical GEMM: %s" % ("YES" if an.get("is_gemm") else "NO"))
     h.append("Expected recognition (specification): %s" % spec["recognition"])
     h.append("  basis: %s" % spec["basis"])
-    h.append("Current implementation (commit %s, predicted from its sources; measured by" % compiler_commit)
+    commit_text = compiler_commit
+    if case.issue and cls != "FALSE_NEGATIVE":
+        commit_text = "%s with the fix of %s" % (compiler_commit, case.issue)
+    h.append("Current implementation (commit %s, predicted from its sources; measured by" % commit_text)
     h.append("scripts/run_showcase.py, never assumed):")
     h.append("  front end (systolic-cfront):             %s" % ex["frontend"])
     h.append("  recognition (recognizeLogicalMatmul):    %s%s" % (
@@ -1231,7 +1439,13 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     if ex["reject_stage"]:
         h.append("  rejection at: %s" % ex["reject_stage"])
         h.append("  reason: %s" % ex["reject_reason"])
-    h.append("Classification: %s%s" % (cls.replace("_", " "), " -- see failures/issues/%s" % case.issue if case.issue else ""))
+    if case.issue and cls != "FALSE_NEGATIVE":
+        issue_note = " -- was a FALSE NEGATIVE of failures/issues/%s (fixed)" % case.issue
+    elif case.issue:
+        issue_note = " -- see failures/issues/%s" % case.issue
+    else:
+        issue_note = ""
+    h.append("Classification: %s%s" % (cls.replace("_", " "), issue_note))
     if cls == "FALSE_NEGATIVE":
         h.append("  This nest IS a GEMM and the specification requires it to be recognized;")
         h.append("  the current recognizer refuses it.  The expectation is not lowered to match")
@@ -1243,6 +1457,12 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
         h.append("  'refused' must never be read as 'not a GEMM'.")
     elif cls == "TRUE_NEGATIVE":
         h.append("  Not a dense GEMM of these operands; the compiler must keep refusing it.")
+    elif cls == "SPEC_OPEN":
+        h.append("  The specification does not decide this case (%s, README.md section 2):" % spec["spec_question"])
+        for ln in _wrap(SPEC_QUESTIONS[spec["spec_question"]], 74):
+            h.append("    " + ln)
+        h.append("  The compiler's behaviour is recorded, not judged, until the question is")
+        h.append("  settled in writing; the program's own result check must pass either way.")
     h.append("")
     refs = ["(1) direct evaluation of the statement over the loop domain on flat arrays",
             "    with explicit row-major offsets, the product through a function call;"]
@@ -1417,6 +1637,166 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
 
 
 # --------------------------------------------------------------------------
+# MLIR-level cases: nests the C front end cannot express (its subset has
+# static, counter-independent bounds and in-bounds programs are the only
+# valid ones), written directly in the affine dialect.  They exercise the
+# recognizer, the dense partition and the lowering pass only -- nothing is
+# compiled by systolic-cc or executed, and no verdict claims otherwise.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class MlirCase:
+    id: str
+    name: str
+    set: str                 # 'positive' | 'negative' | 'extended'
+    category: str
+    kernel: str              # the func.func symbol
+    mlir: str                # the module text (func.func ... with the nest)
+    math_note: str           # the mathematics and the author's reasoning
+    is_gemm: bool            # mathematically a (dense) GEMM?
+    math_class: str
+    spec_recognition: str    # ACCEPT | REJECT | OUT_OF_SCOPE | UNDETERMINED
+    spec_basis_key: str      # a key of SPEC_BASIS
+    # the current implementation, predicted from the sources: what
+    # --test-affine-matmul-discovery and --affine-matmul-to-systolic do
+    cur_recognition: str     # accept | reject
+    cur_dense: str           # supported | unsupported | not_reached
+    cur_lowering: str        # supported | unsupported | not_reached
+    cur_reject_stage: Optional[str] = None   # recognition | dense_partition | lowering | None
+    cur_reject_reason: str = ""              # the compiler's wording (a substring is checked)
+    notes: str = ""
+    issue: str = ""
+    expected_views: Dict[str, str] = field(default_factory=dict)   # e.g. {"C": "[1*I + 8, 1*J + 16]"}
+
+    @property
+    def classification(self):
+        offloaded = self.cur_lowering == "supported"
+        if self.spec_recognition == "ACCEPT":
+            return "TRUE_POSITIVE" if offloaded else "FALSE_NEGATIVE"
+        if self.spec_recognition == "REJECT":
+            return "FALSE_POSITIVE" if offloaded else "TRUE_NEGATIVE"
+        if self.spec_recognition == "UNDETERMINED":
+            return "SPEC_OPEN"
+        return "UNEXPECTED_ACCEPT" if offloaded else "DOCUMENTED_LIMITATION"
+
+
+def mlir_file_text(case: MlirCase) -> str:
+    h = []
+    h.append("Case ID: %s" % case.id)
+    h.append("Name: %s" % case.name)
+    h.append("Set / category: %s / %s" % (case.set, case.category))
+    h.append("Kind: MLIR-level case (the affine nest as the C front end would emit it, or as")
+    h.append("  the front end cannot express it); stages: recognition, dense partition, lowering.")
+    h.append("  No C program, nothing is executed: the verdict covers those stages only.")
+    h.append("Mathematical class: %s" % case.math_class)
+    h.append("")
+    h.append("Mathematical operation:")
+    for ln in case.math_note.strip("\n").split("\n"):
+        h.append("  " + ln if ln else "")
+    h.append("")
+    h.append("Mathematical GEMM: %s" % ("YES" if case.is_gemm else "NO"))
+    h.append("Expected recognition (specification): %s" % case.spec_recognition)
+    h.append("  basis: %s" % SPEC_BASIS[case.spec_basis_key])
+    h.append("Current implementation (predicted from the compiler sources; measured by")
+    h.append("scripts/run_showcase.py, never assumed):")
+    h.append("  recognition (recognizeLogicalMatmul):    %s" % case.cur_recognition.upper())
+    h.append("  dense partition (getDenseLogicalGemm):   %s" % case.cur_dense)
+    h.append("  lowering (--affine-matmul-to-systolic):  %s" % case.cur_lowering)
+    if case.cur_reject_stage:
+        h.append("  rejection at: %s" % case.cur_reject_stage)
+        h.append("  reason: %s" % case.cur_reject_reason)
+    cls = case.classification
+    h.append("Classification: %s%s" % (cls.replace("_", " "),
+                                       " -- see failures/issues/%s" % case.issue if case.issue else ""))
+    if cls == "SPEC_OPEN":
+        h.append("  The specification does not decide this case (%s, README.md section 2):" % case.spec_basis_key)
+        for ln in _wrap(SPEC_QUESTIONS[case.spec_basis_key], 74):
+            h.append("    " + ln)
+        h.append("  The compiler's behaviour is recorded, not judged, until the question is settled.")
+    elif cls == "TRUE_NEGATIVE":
+        h.append("  Not a dense GEMM the compiler may lower; it must keep refusing it, for the")
+        h.append("  reason above (the lowering pass's remark is compared with it).")
+    elif cls == "DOCUMENTED_LIMITATION":
+        h.append("  A mathematically valid GEMM that the specification excludes explicitly;")
+        h.append("  'refused' must never be read as 'not a GEMM'.")
+    h.append("")
+    h.append("Independent reference: none at this level (no program to run); the checks are the")
+    h.append("recognizer's result, the dense-partition result, the operand views it reports and")
+    h.append("the lowering pass's outcome and remark, compared with the lines above.")
+    h.append("")
+    h.append("How to run:")
+    h.append("  build/bin/systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \\")
+    h.append("    showcase/%s/%s.mlir -o /dev/null" % (case.set, case.id))
+    h.append("  build/bin/systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \\")
+    h.append("    showcase/%s/%s.mlir -o /dev/null" % (case.set, case.id))
+    h.append("  Stage by stage, results collected: scripts/run_showcase.py --case %s" % case.id)
+    if case.notes:
+        h.append("")
+        for ln in case.notes.strip("\n").split("\n"):
+            h.append(ln)
+    out = ["// " + ln if ln else "//" for ln in h]
+    out.append("")
+    out.append(case.mlir.strip("\n"))
+    out.append("")
+    return "\n".join(out)
+
+
+def mlir_manifest_entry(case: MlirCase, subdir: str) -> dict:
+    cls = case.classification
+    path = "%s/%s.mlir" % (subdir, case.id)
+    cur_driver = "offloaded" if case.cur_lowering == "supported" else "stays_on_host"
+    return {
+        "id": case.id,
+        "kind": "mlir",
+        "file": path,
+        "name": case.name,
+        "set": case.set,
+        "category": case.category,
+        "kernel": case.kernel,
+        "mathematical_class": case.math_class,
+        "is_valid_gemm": case.is_gemm,
+        "stages": ["discovery", "lowering"],
+        "expected": {
+            "_meaning": "the specification: set by the mathematics and the support "
+                        "specification (README.md), never by the current compiler's output",
+            "mathematical_gemm": case.is_gemm,
+            "recognition": case.spec_recognition,
+            "offload": {"ACCEPT": "offloaded", "UNDETERMINED": "undetermined"}.get(case.spec_recognition, "stays_on_host"),
+            "basis": SPEC_BASIS[case.spec_basis_key],
+            "spec_question": case.spec_basis_key if case.spec_recognition == "UNDETERMINED" else None,
+            "views": case.expected_views,
+            "runtime": "not applicable: an MLIR-level case is not compiled by systolic-cc nor executed",
+        },
+        "current_implementation": {
+            "_meaning": "the behaviour predicted from the compiler sources; what scripts/run_showcase.py "
+                        "measures (discovery + lowering) is compared with both layers",
+            "frontend": "not_applicable",
+            "recognition": case.cur_recognition,
+            "hoisting_required": False,
+            "dense_partition": case.cur_dense,
+            "lowering": case.cur_lowering,
+            "driver": cur_driver,
+            "reject_stage": case.cur_reject_stage,
+            "reject_reason": case.cur_reject_reason,
+        },
+        "classification": cls,
+        "issue": case.issue or None,
+        "has_independent_reference": False,
+        "reference_kinds": [],
+        "math_note": case.math_note.strip(),
+        "tested": False,
+        "how_to_run": {
+            "discovery": "build/bin/systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery "
+                         "showcase/%s -o /dev/null" % path,
+            "lowering": "build/bin/systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true "
+                        "showcase/%s -o /dev/null" % path,
+            "stages": "python3 scripts/run_showcase.py --case %s" % case.id,
+        },
+    }
+
+
+# --------------------------------------------------------------------------
 # writing a generated test program: read-only once written
 # --------------------------------------------------------------------------
 #
@@ -1473,6 +1853,68 @@ def protect_test_source(path: str) -> None:
 COMPILER_COMMIT_DEFAULT = "6e25528"
 
 
+def index_form_kind(f: LinearForm, roles: Dict[str, str]) -> str:
+    """The kind of affine index expression f is (for coverage accounting):
+    constant, identity (i), offset (i + c), stride (c*i), stride+offset,
+    reversed (a negative coefficient), split (several loops of one
+    coordinate, mixed radix), coupled (loops of different coordinates)."""
+    if f.is_const():
+        return "constant"
+    if len(f.coef) == 1:
+        (v, c), = f.coef.items()
+        if c < 0:
+            return "reversed"
+        if c == 1:
+            return "identity" if f.const == 0 else "offset"
+        return "stride" if f.const == 0 else "stride+offset"
+    groups = {roles.get(v, "?") for v in f.coef}
+    if len(groups) == 1:
+        if any(c < 0 for c in f.coef.values()):
+            return "reversed"
+        return "split" if f.const == 0 else "split+offset"
+    return "coupled"
+
+
+def index_forms(case: Case) -> dict:
+    """Per operand, the kind of each subscript, and per shared coordinate how
+    the two operands' expressions relate (identical / own offset / own stride
+    / own offset and stride / different loop combination)."""
+    roles = {lp.var: lp.role for lp in case.loops}
+    out = {"operands": {}, "shared": {}}
+    forms = {}
+    for role, arr in case.arrays.items():
+        try:
+            forms[role] = arr.forms()
+        except NotAffine:
+            out["operands"][arr.name] = ["not_affine"]
+            continue
+        out["operands"][arr.name] = [index_form_kind(f, roles) for f in forms[role]]
+    an = case.analysis or {}
+    v = an.get("views")
+    if v:
+        for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
+            fa_ = forms[ra][v[ra][g]["position"]]
+            fb_ = forms[rb][v[rb][g]["position"]]
+            if fa_ == fb_:
+                rel = "identical"
+            elif shared_coordinate(fa_, fb_) is None:
+                rel = "different loop combination"
+            else:
+                sa, sb = _gcd_content(fa_), _gcd_content(fb_)
+                rel = ("own stride and offset" if (sa != sb and fa_.const != fb_.const) else
+                       "own stride" if sa != sb else "own offset")
+            out["shared"][g] = {"operands": "%s/%s" % (case.arrays[ra].name, case.arrays[rb].name),
+                                "relation": rel, "expressions": [fa_.c_text(), fb_.c_text()]}
+    return out
+
+
+def loop_summary(case: Case) -> List[str]:
+    return ["%s [%s]: %d %s %s %s %d, step %d, %d iteration(s)%s" % (
+        lp.var, lp.role, lp.lb, "<=" if lp.step > 0 else ">=", lp.var, lp.cmp, lp.ub, lp.step, lp.trip(),
+        " (written as the condition %s)" % lp.cond if lp.cond else "")
+        for lp in case.loops]
+
+
 def manifest_entry(case: Case, subdir: str) -> dict:
     an = case.analysis or analyse(case)
     ex = case.expect or predict(case)
@@ -1481,6 +1923,7 @@ def manifest_entry(case: Case, subdir: str) -> dict:
     path = "%s/%s.c" % (subdir, case.id)
     entry = {
         "id": case.id,
+        "kind": "c",
         "file": path,
         "name": case.name,
         "set": case.set,
@@ -1494,13 +1937,16 @@ def manifest_entry(case: Case, subdir: str) -> dict:
         "element_type": case.elem,
         "statement": case.stmt,
         "kernel_style": case.kernel_style,
-        "loops": [{"var": lp.var, "role": lp.role, "lb": lp.lb, "ub_exclusive": lp.exclusive_ub(),
-                   "step": lp.step, "cmp": lp.cmp, "trip": lp.trip()} for lp in case.loops],
+        "loops": [dict({"var": lp.var, "role": lp.role, "lb": lp.lb, "ub_exclusive": lp.exclusive_ub(),
+                        "step": lp.step, "cmp": lp.cmp, "trip": lp.trip()},
+                       **({"cond": lp.cond} if lp.cond else {})) for lp in case.loops],
         "arrays": {role: {"name": arr.name, "dims": list(arr.dims), "subscripts": list(arr.subs),
                           "restrict": arr.restrict, "elem": arr.elem}
                    for role, arr in case.arrays.items()},
         "repetitions": an.get("repetitions", 1),
         "logical_extents": an.get("extents"),
+        "index_forms": index_forms(case),
+        "loop_summary": loop_summary(case),
         "expected": {
             "_meaning": "the specification: set by the mathematics and the support "
                         "specification (README.md), never by the current compiler's output",
@@ -1508,6 +1954,7 @@ def manifest_entry(case: Case, subdir: str) -> dict:
             "recognition": spec["recognition"],
             "offload": spec["offload"],
             "basis": spec["basis"],
+            "spec_question": spec.get("spec_question"),
             "runtime": "the program's own check must pass on every backend (kernel == references)",
         },
         "current_implementation": {

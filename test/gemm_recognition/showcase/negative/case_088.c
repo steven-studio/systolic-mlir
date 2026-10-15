@@ -39,7 +39,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate
+ *   reason: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

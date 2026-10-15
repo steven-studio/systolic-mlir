@@ -2,7 +2,7 @@
 
 | field | value |
 |---|---|
-| Status | **OPEN — reproduced, root cause located, compiler not modified** |
+| Status | **FIXED** (2026-10-15, in the working tree on top of 6e25528; see section 11) — the former XFAIL reproducers in this directory are now permanent regression tests |
 | Found by | showcase case_065 (`showcase/positive/case_065.c`), 2026-10-15 |
 | Also reproduced by | case_094 (`C[2*i][j]`), ext_008 (`A[i+2][k]`), ext_007 (`A[k][j+1]`), variants v1, v3–v7 in `variants.mlir` |
 | Compiler commit | 6e25528 `Extend affine GEMM recognition and systolic offloading` |
@@ -260,3 +260,78 @@ in the showcase and re-run by `scripts/run_showcase.py`):
 - 2026-10-15 00:2x — rejection reproduced with the real recognizer code; root cause traced to
   `matchesGemmAccesses`; variants v1–v7 isolate the rule; this record written.
   Compiler untouched.
+- 2026-10-15 08:xx — fixed (section 11); case_065, case_094, ext_008 offloaded and verified
+  on the software runtime model; `variants.mlir` and `repro_case_065.mlir` un-XFAILed;
+  check-systolic 74/74.
+
+## 11. The fix (implemented after the user allowed compiler changes)
+
+**Root cause, restated.** `matchesGemmAccesses` compared the two operands' index *expressions*
+for a shared coordinate with `AffineExpr ==`. A coordinate is a linear form of the loop
+counters; an operand may read it through its own affine view (`C[i + 8][j]` with `A[i][k]`,
+`C[2i][j]` with `A[i][k]`), and the pass that builds the operand views (`getLogicalOperand`)
+assumed one view per coordinate, so the recognizer had to refuse everything else.
+
+**Change** (three files, no new pass, no change to partitioning policy or code generation):
+
+1. `lib/Systolic/Transforms/AffineMatmulAnalysis.cpp` — `matchSharedCoordinate(a, b)`: two
+   expressions address the same coordinate when they are identical (as before: the coordinate is
+   that expression, both views are the identity, so `T`, `c` and every existing test are
+   unchanged) or when both are `s * g + o` for one linear form `g` over the loop IVs with integer
+   `s > 0` — then the coordinate is the primitive form `g` (coefficients divided by their gcd, no
+   constant) and each operand records its view `(s, o)`. Expressions over different loop
+   combinations (`4 i0 + i1` vs `8 i0 + i1`, spec question SQ-1), of opposite direction (`i` vs
+   `7 - i`, the documented negative-stride limitation) or without a loop are not one coordinate.
+   `recognizeLogicalMatmul` uses it for I (A/C), J (B/C) and K (A/B); I, J, K must still be three
+   different expressions. `LogicalMatmul` gains `viewA/viewB/viewC` (`OperandCoordinateView`:
+   scale, offset, per coordinate of the operand) and the factor maps `phiA/B/C` are now what the
+   header always documented: maps over the logical coordinates `(P*, I, J, K)` whose results are
+   the operand's views (`F_A = phiA o (P, I, K)`).
+2. `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` — `getLogicalOperand` builds each
+   operand's `memref.subview` from its own view: offset `view.offset + view.scale * dense.offset`,
+   stride `view.scale * dense.scale`, size `dense.extent`; the bounds check uses the operand's own
+   last index. A view that would decrease (scale <= 0) is refused with its own message (a
+   `memref.subview` has no negative stride) — unreachable today, since the recognizer gives the
+   primitive form the sign.
+3. `lib/Systolic/Transforms/TestAffineMatmulDiscovery.cpp` — prints `view A/B/C: [s*I + o, ...]`
+   so tests can check the views.
+
+Done in the same change, because the new views made the arithmetic reachable: the overflow
+hardening of ISSUE-002 (checked 64-bit arithmetic in `normalizeLogicalCoordinates`,
+`getDenseLogicalGemm` and `getLogicalOperand`).
+
+**What it does not change.** Shared expressions keep exactly the previous `T`/`c` representation
+(`affine_gemm_access_stride.mlir`: `T[0] = [8 0 0]`, `c = [5 0 0]`, unchanged); the dense
+partition, the tile plan, the exact-cover proof, the runtime path and `systolic-cc` are untouched.
+Every refusal in section 7's table still happens, at the same stage, with the same reason
+(measured: `reports/showcase_soft_*`, all of case_081–100 and ext_003–006 pass as TRUE
+NEGATIVE / DOCUMENTED LIMITATION); ext_007 (`A[i][k] · A[k][j+1]`) is now refused at the
+correct stage, the lowering's "A and B are different views of the same memref".
+
+**Verification (section 8, executed).**
+
+1. `variants.mlir`: v1–v7 all `recognition result: success`, dense, 1 exact fleet region each,
+   the views as expected (`view C: [1*I + 8, 1*J + 16]` for v1, `[2*I + 0, 1*J + 0]` for v6,
+   `view A: [1*I + 2, 1*K + 0]` for v7); `XFAIL` removed, the views added as `VIEW:` checks.
+2. `repro_case_065.mlir`: XPASS, then `XFAIL` removed; its `SYS` check had named the argument
+   `%C` where the printer says `%arg2` (a bug in the test written before the fix), corrected to
+   `%{{.*}}[8, 16] [8, 8] [1, 1]`.
+3. `scripts/run_showcase.py --runtime soft`: case_065, case_094, ext_008 → `driver = offloaded`,
+   1 invocation (= the plan), `verified: N elements equal the CPU reference (bitwise)`,
+   `RESULT ... PASS`. The board (`--runtime board`) has not been run from here: the software
+   runtime model is not the FPGA.
+4. `cmake --build build --target check-systolic`: 74/74 (the 72 existing tests unchanged, the
+   two former XFAILs pass).
+5. The negatives: every one still refused at the same stage with the same reason (the
+   showcase run compares each stage with `manifest.json`; 160/160 cases pass or are open
+   spec questions, `reports/latest_soft.json`).
+6. The generator: `scripts/loop.py --family views` (the family built to track this issue, 100%
+   known false negatives before) — 12/12 and then 120/120 pass; mixed / enumerate / boundary
+   batches: no new failures (`generated/batch_random_fix*`, `generated/coverage.json`).
+
+The predictions in `generator/casespec.py: predict()` follow the new rule (`shared_coordinate`,
+mirroring `matchSharedCoordinate`), and `generator/make_showcase.py --force` regenerated the
+headers of the 11 affected case files (case_065, case_094, ext_007, ext_008 and the seven
+negatives whose predicted reject-reason wording changed); no kernel, reference or expectation
+changed. case_094 stays in `showcase/negative/` — files are never moved — with its header saying
+it is a TRUE POSITIVE since this fix.

@@ -32,16 +32,20 @@ struct LogicalBox {
 /// number of loops per coordinate, at any depth of the nest:
 ///
 ///   y_d = offset[d] + scale[d] * ordinal_d,   ordinal_d = sum over the
-///         loops s of coordinate d of (T[d][s] / scale[d]) * z_s,
+///         loops s of coordinate d of (|T[d][s]| / scale[d]) * z'_s,
 ///
+/// with z'_s = z_s for a loop along which y_d increases and z'_s = n_s - 1 -
+/// z_s for one along which it decreases (T[d][s] < 0: a counting-down C loop
+/// or a reversed subscript; offset[d] is then the smallest value),
 /// where the loops of a coordinate number it densely (mixed radix: sorted by
 /// scale, each scale is the previous one times the previous loop's extent),
 /// so ordinal_d runs over [0, extent[d]) exactly once and the logical space
 /// is the dense box [0, extent[0]) x [0, extent[1]) x [0, extent[2]). That
 /// is what lets a box of logical ordinals be executed as a GEMM tile of
 /// matrices whose rows/columns are those ordinals. Loops in any order,
-/// steps, nonzero origins, access offsets and strides, and coordinates split
-/// over several loops (tiled nests) are all of this form; batched GEMMs (a
+/// steps, nonzero origins, access offsets and strides, coordinates split
+/// over several loops (tiled nests) and coordinates enumerated downward are
+/// all of this form; batched GEMMs (a
 /// partition prefix P*) and coupled or singular mappings (I = i+j, one loop
 /// driving two coordinates) are not.
 struct DenseLogicalGemm {

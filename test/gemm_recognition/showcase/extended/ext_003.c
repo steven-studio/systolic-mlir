@@ -19,8 +19,9 @@
  *
  *   C[7-i][j] += A[7-i][k] B[k][j]: the GEMM over the rows in reverse
  *   order -- the same mathematics as case_001 (a valid GEMM).  The
- *   logical row I = 7 - i decreases along i; getDenseLogicalGemm refuses
- *   negative scales.  Legal, unsupported.
+ *   logical row I = 7 - i decreases along i; getDenseLogicalGemm reads it
+ *   backwards (rows 0..7 as a view) since ISSUE-004 (2026-10-15); before, it
+ *   refused negative scales.
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -29,20 +30,16 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: AffineMatmulPartitioning.cpp getDenseLogicalGemm: 'logical coordinate decreases along its loop' (a memref.subview has no negative stride)
+ * Expected recognition (specification): ACCEPT
+ *   basis: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
- *   dense partition (getDenseLogicalGemm):   unsupported
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: dense_partition
- *   reason: logical coordinate I decreases along its loop
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

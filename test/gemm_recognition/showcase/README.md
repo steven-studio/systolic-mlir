@@ -3,20 +3,36 @@
 One hundred fixed, human-readable C programs that exercise the compiler's GEMM recognizer
 (`recognizeLogicalMatmul`), its dense-partition view (`getDenseLogicalGemm`), the lowering
 (`--affine-matmul-to-systolic`) and the driver (`systolic-cc`), each with its own independent
-CPU references — plus a few extended cases outside the hundred.
+CPU references — plus the extended cases, the boundary cases added after the hundred (README.md
+section 8) and the MLIR-level cases.
 
 ```
 showcase/
 ├── positive/case_001.c .. case_080.c   80 nests that ARE dense GEMMs the specification requires
 │                                        to be recognized, partitioned, lowered and offloaded
-├── negative/case_081.c .. case_100.c   20 nests the compiler at 6e25528 is expected NOT to accept;
-│                                        each one says whether it is nevertheless a valid GEMM
+│          case_101.c .. case_118.c,    boundary cases the specification requires to be accepted
+│          case_132.c                   (case_132: an affine loop condition, 2 * i - 3 > 0)
+│          mlir_014.mlir, mlir_015.mlir MLIR-level positives (per-operand views, a 2^62 stride)
+├── negative/case_081.c .. case_100.c   20 nests the compiler at 6e25528 was expected NOT to
+│                                        accept; each one says whether it is nevertheless a valid
+│                                        GEMM (case_094 IS one and is accepted since the fix of
+│                                        ISSUE-001; it stays here -- files are never moved)
+│          case_119.c .. case_127.c     boundary negatives (counting-down loops: documented
+│                                        limitation; diagonal / wrong-coordinate / coupled
+│                                        subscripts: not a GEMM)
+│          mlir_001 .. mlir_010.mlir    MLIR-level negatives (out-of-bounds views, overflowing
+│                                        coefficients, a triangular domain, a reversed operand)
 ├── extended/ext_001.c .. ext_014.c     further forms (front-end subset, aliasing, reversed rows,
 │                                        a repetition inside the reduction, probes), same tooling
-├── manifest.json                       every case: loops, arrays, subscripts, mathematical class,
-│                                        the specification's expectation, the current
-│                                        implementation's predicted behaviour, the classification
+│          case_128.c .. case_131.c     cases the specification does not decide (spec questions
+│          mlir_011 .. mlir_013.mlir    SQ-1, SQ-2, SQ-3): run, recorded, not judged
+├── manifest.json                       every case: loops, arrays, subscripts, index forms,
+│                                        mathematical class, the specification's expectation (and
+│                                        the spec question, if any), the current implementation's
+│                                        predicted behaviour, the classification
 ├── CASES.md                            the same as a table
+├── INVENTORY.md / inventory.json       scripts/inventory.py: the per-case inventory joined with
+│                                        the latest report's execution evidence
 └── README.md                           this file
 ```
 

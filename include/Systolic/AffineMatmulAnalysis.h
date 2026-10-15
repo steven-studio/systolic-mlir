@@ -11,6 +11,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include <array>
 #include <optional>
 
 namespace mlir {
@@ -63,6 +64,17 @@ struct AffineLogicalMapping {
   // True when T is square and full-rank, so the source iteration
   // coordinates can be recovered from the logical coordinates over Q.
   bool isInvertible = false;
+};
+
+/// An operand's own view of a logical coordinate y: along that coordinate the
+/// operand is subscripted by scale * y + offset.  (1, 0) when the operand's
+/// subscript is the coordinate's expression itself; otherwise the operand
+/// spells the shared coordinate differently from the other operand (C[i + 8][j]
+/// with A[i][k]: C's row view has offset 8; C[2i][j] with A[i][k]: scale 2) and
+/// the coordinate is the linear form both subscripts are affine images of.
+struct OperandCoordinateView {
+  int64_t scale = 1;
+  int64_t offset = 0;
 };
 
 struct AffineLogicalNormalization {
@@ -124,6 +136,17 @@ struct LogicalMatmul {
   // Normalized dense logical coordinates used by later tiling/lowering.
   AffineLogicalNormalization normalization;
 
+  // True when no normalization could be computed because a checked
+  // product, sum or trip count of it does not fit in 64 bits (and only then;
+  // a bound that is not one constant leaves it false). getDenseLogicalGemm
+  // reports the refusal as an overflow on this flag alone.
+  bool normalizationOverflow = false;
+
+  // True when no normalization could be computed because a loop of the nest
+  // has constant bounds and no iteration (upper <= lower): an empty GEMM,
+  // M, N or K = 0 (spec question SQ-2). Reported as such, not as "not static".
+  bool normalizationEmptyLoop = false;
+
   // Exact source iteration domain D_S over the original iteration
   // coordinates x, in the same order as the columns of logicalMapping.
   std::optional<affine::FlatAffineValueConstraints> sourceDomain;
@@ -142,14 +165,24 @@ struct LogicalMatmul {
   LogicalExtent columnExtent;
   LogicalExtent reductionExtent;
 
-  // Factor maps:
+  // Factor maps over the logical coordinates y = (P*, I, J, K):
   //
   //   F_A = phiA o (P, I, K)
   //   F_B = phiB o (P, K, J)
   //   F_C = phiC o (P, I, J)
+  //
+  // i.e. phiA(P*, I, J, K) = (P*, viewA[0](I), viewA[1](K)) and so on.
   AffineMap phiA;
   AffineMap phiB;
   AffineMap phiC;
+
+  // Each operand's view of its two non-partition coordinates, in the
+  // operand's subscript order: A = (I, K), B = (K, J), C = (I, J).  The
+  // logical coordinate is one and the same for the two operands that share
+  // it; the views are what differ when the operands spell it differently.
+  std::array<OperandCoordinateView, 2> viewA;
+  std::array<OperandCoordinateView, 2> viewB;
+  std::array<OperandCoordinateView, 2> viewC;
 };
 
 /// Find Affine loop nests worth attempting to recognize.

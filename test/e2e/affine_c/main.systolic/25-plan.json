@@ -1,0 +1,9 @@
+{
+ "source": "/home/steven-studio/work/systolic-mlir-affine/test/e2e/affine_c/main.c",
+ "runtime": "board",
+ "k_max_8x8": 16,
+ "k_max_4x4": 16,
+ "verify": false,
+ "offloaded": [],
+ "translated_not_offloaded": []
+}

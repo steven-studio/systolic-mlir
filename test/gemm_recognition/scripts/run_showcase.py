@@ -109,6 +109,17 @@ def one(args):
     workdir = os.path.join(outdir, entry["id"])
     if os.path.isdir(workdir):
         shutil.rmtree(workdir)
+    if entry.get("kind") == "mlir":
+        # an MLIR-level case: recognition, dense partition and lowering only;
+        # --cpu-only has nothing to run for it, and a --stages subset applies
+        # to those two stages at most
+        if cpu_only:
+            return entry["id"], "not_applicable", {"kind": "mlir"}, [], ["MLIR-level case: no C program to compile"], {}
+        st = stages.run_case(tools, src, entry["kernel"], workdir, runtime=runtime, env=env, only=only_stages)
+        if only_stages and not ({"discovery", "lowering"} <= set(only_stages)):
+            return entry["id"], "not_applicable", {"kind": "mlir"}, [], ["MLIR-level case: needs the discovery and lowering stages"], stages.strip_runs(st, keep_output)
+        verdict, actual, mism, notes = classify(entry, st)
+        return entry["id"], verdict, actual, mism, notes, stages.strip_runs(st, keep_output)
     if cpu_only:
         os.makedirs(workdir, exist_ok=True)
         st = {"cpu": stages.stage_cpu(src, workdir)}
@@ -139,6 +150,9 @@ def main():
                                      "(e.g. frontend,discovery on a machine with only the recognizer built)")
     ap.add_argument("--keep-output", action="store_true", help="keep every tool's full output in the report")
     ap.add_argument("--label", default="", help="free text recorded in the report (e.g. the machine)")
+    ap.add_argument("--allow-spec-open", action="store_true",
+                    help="exit 0 even when UNDETERMINED cases (verdict spec_open) are present; they are "
+                         "still counted separately, never as pass")
     ap.add_argument("--allow-known-issues", action="store_true",
                     help="exit 0 even when recorded false negatives reproduce (regression gating)")
     a = ap.parse_args()
@@ -190,9 +204,10 @@ def main():
         counts[verdict] = counts.get(verdict, 0) + 1
         e = by_id[cid]
         report_cases.append({
-            "id": cid, "name": e["name"], "set": e["set"], "category": e["category"],
+            "id": cid, "kind": e.get("kind", "c"), "name": e["name"], "set": e["set"], "category": e["category"],
             "mathematical_class": e["mathematical_class"], "is_valid_gemm": e["is_valid_gemm"],
             "classification": e.get("classification"), "issue": e.get("issue"),
+            "spec_question": e["expected"].get("spec_question"),
             "expected": e["expected"], "current_implementation": e["current_implementation"],
             "actual": actual, "verdict": verdict,
             "mismatches": mism, "notes": notes, "stages": st,
@@ -227,7 +242,22 @@ def main():
     if known:
         print("%d known false negative(s) reproduced (open issues in failures/issues/); "
               "they fail the run unless --allow-known-issues" % known)
-    ok = {"pass", "partial_pass"} | ({"known_false_negative"} if a.allow_known_issues else set())
+    opens = counts.get("spec_open", 0)
+    if opens:
+        # UNDETERMINED is its own status: not a PASS (the specification has
+        # not decided what the right outcome is) and not hidden either
+        print("%d UNDETERMINED case(s) (verdict spec_open; spec questions, SPEC_QUESTIONS.md): neither "
+              "PASS nor FAIL; they fail the run unless --allow-spec-open" % opens)
+    refusals = counts.get("expected_refusal", 0)
+    if refusals:
+        # an open spec question the compiler answers conservatively (refused,
+        # at the predicted stage, with the predicted reason): reported on its
+        # own, never as a pass, and not a failure of the run
+        print("%d EXPECTED_REFUSAL case(s) (open spec questions, SPEC_QUESTIONS.md, refused "
+              "conservatively as predicted): not PASS, not blocking" % refusals)
+    ok = ({"pass", "partial_pass", "not_applicable", "expected_refusal"}
+          | ({"known_false_negative"} if a.allow_known_issues else set())
+          | ({"spec_open"} if a.allow_spec_open else set()))
     return 0 if set(counts) <= ok else 1
 
 
@@ -246,16 +276,38 @@ def markdown(report):
             t.get("clang_version"), t.get("build_dir"), t.get("llvm_build")))
     L.append("- cases: %d; verdicts: %s" % (report["cases_selected"], ", ".join("%s=%d" % kv for kv in sorted(report["counts"].items()))))
     L.append("")
-    L.append("| id | set | spec | impl. predicted | actual driver | recognition | dense | lowering | planned inv. | runtime inv. | program | verdict | notes |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L.append("| id | kind | set | spec | impl. predicted | actual driver | recognition | dense | lowering | planned inv. | runtime inv. | program | verdict | notes |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for c in report["cases"]:
         a = c["actual"]
-        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | **%s** | %s |" % (
-            c["id"], c["set"], c["expected"]["recognition"], c["current_implementation"]["driver"], a.get("driver"),
+        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | **%s** | %s |" % (
+            c["id"], c.get("kind", "c"), c["set"], c["expected"]["recognition"], c["current_implementation"]["driver"], a.get("driver"),
             a.get("recognition"), a.get("dense_partition"),
             a.get("lowering"), a.get("planned_per_call", ""), a.get("invocations", ""), a.get("execute"),
             c["verdict"], "; ".join(c["mismatches"] + c["notes"]).replace("|", "\\|")))
     L.append("")
+    refused = [c for c in report["cases"] if c["verdict"] == "expected_refusal"]
+    if refused:
+        L.append("## Open spec questions refused conservatively (expected_refusal; not a pass, not blocking)")
+        L.append("")
+        for c in refused:
+            L.append("- %s (%s): %s -- compiler: recognition %s, dense %s, lowering %s, driver %s, program %s; "
+                     "reason: %s" % (
+                c["id"], c["name"], c.get("spec_question"), c["actual"].get("recognition"),
+                c["actual"].get("dense_partition"), c["actual"].get("lowering"), c["actual"].get("driver"),
+                c["actual"].get("execute"), c["actual"].get("dense_reason") or c["actual"].get("lowering_reason")
+                or c["actual"].get("driver_reason") or "(recognizer refusal; no reason stated)"))
+        L.append("")
+    opens = [c for c in report["cases"] if c["verdict"] == "spec_open"]
+    if opens:
+        L.append("## Cases the specification does not decide (spec questions; recorded, not judged)")
+        L.append("")
+        for c in opens:
+            L.append("- %s (%s): %s -- compiler: recognition %s, dense %s, lowering %s, driver %s, program %s" % (
+                c["id"], c["name"], c.get("spec_question"), c["actual"].get("recognition"),
+                c["actual"].get("dense_partition"), c["actual"].get("lowering"), c["actual"].get("driver"),
+                c["actual"].get("execute")))
+        L.append("")
     known = [c for c in report["cases"] if c["verdict"] == "known_false_negative"]
     if report["mode"].startswith("stages-"):
         L.insert(2, "- **partial run**: only the stages %s were executed; 'partial_pass' means those stages "
@@ -266,7 +318,7 @@ def markdown(report):
         for c in known:
             L.append("- %s (%s): %s" % (c["id"], c["name"], "; ".join(c["mismatches"])))
         L.append("")
-    bad = [c for c in report["cases"] if c["verdict"] not in ("pass", "partial_pass", "known_false_negative")]
+    bad = [c for c in report["cases"] if c["verdict"] not in ("pass", "partial_pass", "known_false_negative", "spec_open", "expected_refusal", "not_applicable")]
     if bad:
         L.append("## Cases that are not 'pass'")
         L.append("")

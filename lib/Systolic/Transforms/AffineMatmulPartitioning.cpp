@@ -3,9 +3,11 @@
 #include "mlir/Analysis/Presburger/PresburgerRelation.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,9 +24,21 @@ FailureOr<DenseLogicalGemm>
 mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
                                     std::string *why) {
   const AffineLogicalNormalization &norm = matmul.normalization;
-  if (!norm.domain)
+  if (!norm.domain) {
+    // Overflow is reported only when normalizeLogicalCoordinates saw a
+    // checked operation fail; every other nest without a normalized form
+    // keeps the wording below.
+    if (matmul.normalizationOverflow)
+      return fail(why, "the iteration domain's normalized form overflows "
+                       "64-bit arithmetic");
+    // An empty GEMM (M, N or K = 0): whether it should be offloaded with
+    // zero invocations is open (SQ-2); refused, with this reason.
+    if (matmul.normalizationEmptyLoop)
+      return fail(why, "a loop of the nest has no iteration (an empty GEMM: "
+                       "M, N or K is 0)");
     return fail(why, "the loop bounds are not static, so the iteration "
                      "domain has no static normalized extent");
+  }
 
   // y = (P*, I, J, K): a nonempty P* is a batched GEMM.
   const auto &T = norm.logicalTransformation;
@@ -67,7 +81,11 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
         presburger::BoundType::UB, s);
     if (!lb || !ub || *lb != 0 || *ub < 0)
       return fail(why, "the normalized iteration domain is not a dense box");
-    extentOf[s] = *ub + 1;
+    std::optional<int64_t> trips = llvm::checkedAdd(*ub, int64_t(1));
+    if (!trips)
+      return fail(why, "loop " + llvm::Twine(s) +
+                           "'s trip count overflows 64-bit arithmetic");
+    extentOf[s] = *trips;
   }
 
   DenseLogicalGemm dense;
@@ -76,29 +94,79 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
     for (unsigned s = 0; s < numSourceDims; ++s)
       if (T[d][s] != 0)
         loops.push_back(s);
-    for (unsigned s : loops)
-      if (T[d][s] < 0)
+    // A coordinate no loop drives is a constant subscript (C[0][j] with
+    // A[0][k]): its extent would be 1, but whether such a nest is a GEMM to
+    // offload with M, N or K = 1 is not decided by the specification
+    // (test/gemm_recognition/SPEC_QUESTIONS.md, SQ-4). Refuse it with a
+    // reason -- and never index loops.front() on an empty list.
+    if (loops.empty())
+      return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                           " is driven by no loop (a constant subscript)");
+    // A loop along which the coordinate decreases (a negative coefficient:
+    // a C loop that counts down, or a reversed subscript such as 7 - i)
+    // enumerates the same values in the opposite order. With z in [0, n),
+    //   T z = T (n - 1) + |T| (n - 1 - z),
+    // so reading that loop's ordinal backwards gives the coordinate as
+    // offset' + |T| z' with z' in [0, n): offset' adds T (n - 1) for every
+    // such loop, and the density test below runs on the magnitudes. The set
+    // of (I, J, K) points is unchanged; only the order the loop nest visits
+    // them in differs -- immaterial for I and J (each point writes its own C
+    // element), and for K the reordering of the sums that the systolic
+    // lowering performs anyway (see AffineMatmulToSystolic.cpp, header).
+    SmallVector<int64_t> magnitude(numSourceDims, 0);
+    int64_t offset = norm.logicalOffset[d];
+    for (unsigned s : loops) {
+      if (T[d][s] > 0) {
+        magnitude[s] = T[d][s];
+        continue;
+      }
+      std::optional<int64_t> abs = llvm::checkedSub(int64_t(0), T[d][s]);
+      std::optional<int64_t> shift =
+          llvm::checkedMul(T[d][s], extentOf[s] - 1);
+      std::optional<int64_t> shifted =
+          shift ? llvm::checkedAdd(offset, *shift) : std::nullopt;
+      if (!abs || !shifted)
         return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
-                             " decreases along its loop");
+                             "'s scale or extent overflows 64-bit arithmetic");
+      magnitude[s] = *abs;
+      offset = *shifted;
+    }
     llvm::stable_sort(loops, [&](unsigned a, unsigned b) {
-      return T[d][a] < T[d][b];
+      return magnitude[a] < magnitude[b];
     });
-    int64_t expected = T[d][loops.front()];
+    int64_t expected = magnitude[loops.front()];
     int64_t extent = 1;
     for (unsigned s : loops) {
-      if (T[d][s] != expected)
+      if (magnitude[s] != expected)
         return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
                              " is driven by " + llvm::Twine(loops.size()) +
                              " loops that do not enumerate it densely "
                              "(scales must grow by the finer loops' extents)");
-      expected *= extentOf[s];
-      extent *= extentOf[s];
+      // The products are what the coordinate's values and the views built
+      // from them are computed with; one that does not fit in 64 bits is
+      // refused rather than wrapped around (a wrapped value could pass the
+      // bounds checks downstream).
+      std::optional<int64_t> nextExpected =
+          llvm::checkedMul(expected, extentOf[s]);
+      std::optional<int64_t> nextExtent = llvm::checkedMul(extent, extentOf[s]);
+      if (!nextExpected || !nextExtent)
+        return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                             "'s scale or extent overflows 64-bit arithmetic");
+      expected = *nextExpected;
+      extent = *nextExtent;
     }
     dense.sourceDim[d] = loops.front();
     dense.sourceDims[d] = loops;
-    dense.scale[d] = T[d][loops.front()];
-    dense.offset[d] = norm.logicalOffset[d];
+    dense.scale[d] = magnitude[loops.front()];
+    dense.offset[d] = offset;
     dense.extent[d] = extent;
+    // The coordinate's last value, offset + scale * (extent - 1), must be
+    // representable too: restrictToBox and the lowering's views compute it.
+    std::optional<int64_t> span =
+        llvm::checkedMul(dense.scale[d], dense.extent[d]);
+    if (!span || !llvm::checkedAdd(dense.offset[d], *span))
+      return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                           "'s values overflow 64-bit arithmetic");
   }
   return dense;
 }
@@ -132,26 +200,55 @@ mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul) {
 /// value rather than closed on this region's last one, so consecutive
 /// regions cover y_d without gaps whether or not the source domain encodes
 /// the loops' steps.
-static affine::FlatAffineValueConstraints
+///
+/// Every bound is formed in checked 64-bit arithmetic; failure (with the
+/// reason in `why`) when one does not fit -- a wrapped-around bound would
+/// describe a different region.
+static FailureOr<affine::FlatAffineValueConstraints>
 restrictToBox(const LogicalMatmul &matmul, const DenseLogicalGemm &dense,
-              const LogicalBox &box) {
+              const LogicalBox &box, std::string *why) {
   affine::FlatAffineValueConstraints domain = *matmul.sourceDomain;
   const auto &T = matmul.logicalMapping.transformation;
   const auto &c = matmul.logicalMapping.offset;
   const unsigned numDims = domain.getNumDimVars();
+  static constexpr const char *kName[] = {"I", "J", "K"};
   // y_d is (P*, I, J, K)'s last three rows: no P* in a dense GEMM.
   for (unsigned d = 0; d < 3; ++d) {
-    const int64_t first = dense.offset[d] + dense.scale[d] * box.lower[d];
-    const int64_t next =
-        dense.offset[d] + dense.scale[d] * (box.lower[d] + box.extent[d]);
+    std::optional<int64_t> nextOrdinal =
+        llvm::checkedAdd(box.lower[d], box.extent[d]);
+    std::optional<int64_t> firstStep =
+        llvm::checkedMul(dense.scale[d], box.lower[d]);
+    std::optional<int64_t> nextStep =
+        nextOrdinal ? llvm::checkedMul(dense.scale[d], *nextOrdinal)
+                    : std::nullopt;
+    std::optional<int64_t> first =
+        firstStep ? llvm::checkedAdd(dense.offset[d], *firstStep)
+                  : std::nullopt;
+    std::optional<int64_t> next =
+        nextStep ? llvm::checkedAdd(dense.offset[d], *nextStep) : std::nullopt;
+    // y_d - first >= 0 and next - 1 - y_d >= 0, with y_d = T_d x + c_d.
+    std::optional<int64_t> lowerConstant =
+        first ? llvm::checkedSub(c[d], *first) : std::nullopt;
+    std::optional<int64_t> nextMinusOne =
+        next ? llvm::checkedSub(*next, int64_t(1)) : std::nullopt;
+    std::optional<int64_t> upperConstant =
+        nextMinusOne ? llvm::checkedSub(*nextMinusOne, c[d]) : std::nullopt;
+    if (!lowerConstant || !upperConstant)
+      return fail(why, llvm::Twine("the bounds of logical coordinate ") +
+                           kName[d] + " in a region overflow 64-bit "
+                           "arithmetic");
     SmallVector<int64_t> lower(domain.getNumCols(), 0);
     SmallVector<int64_t> upper(domain.getNumCols(), 0);
     for (unsigned s = 0; s < numDims; ++s) {
+      std::optional<int64_t> negated = llvm::checkedSub(int64_t(0), T[d][s]);
+      if (!negated)
+        return fail(why, llvm::Twine("logical coordinate ") + kName[d] +
+                             "'s coefficient overflows 64-bit arithmetic");
       lower[s] = T[d][s];
-      upper[s] = -T[d][s];
+      upper[s] = *negated;
     }
-    lower.back() = c[d] - first;      // y_d - first >= 0
-    upper.back() = next - 1 - c[d];   // next - 1 - y_d >= 0
+    lower.back() = *lowerConstant;
+    upper.back() = *upperConstant;
     domain.addInequality(lower);
     domain.addInequality(upper);
   }
@@ -299,9 +396,13 @@ mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul,
 
   SmallVector<LogicalPartition, 1> partitions;
   partitions.reserve(boxes.size());
-  for (const LogicalBox &box : boxes)
-    partitions.push_back(
-        LogicalPartition{restrictToBox(matmul, *dense, box), box});
+  for (const LogicalBox &box : boxes) {
+    FailureOr<affine::FlatAffineValueConstraints> region =
+        restrictToBox(matmul, *dense, box, why);
+    if (failed(region))
+      return failure();
+    partitions.push_back(LogicalPartition{std::move(*region), box});
+  }
 
   if (failed(checkSourceCover(matmul, partitions, why)))
     return failure();

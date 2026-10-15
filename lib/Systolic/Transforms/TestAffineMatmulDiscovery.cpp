@@ -185,6 +185,18 @@ struct TestAffineMatmulDiscoveryPass
       result.phiC.print(llvm::errs());
       llvm::errs() << "\n";
 
+      // Each operand's own view of its coordinates: subscript = scale *
+      // coordinate + offset (1 * I + 0 when the subscript is the coordinate).
+      auto printView = [](StringRef operand, StringRef c0, StringRef c1,
+                          const std::array<OperandCoordinateView, 2> &view) {
+        llvm::errs() << "  view " << operand << ": [" << view[0].scale << "*"
+                     << c0 << " + " << view[0].offset << ", " << view[1].scale
+                     << "*" << c1 << " + " << view[1].offset << "]\n";
+      };
+      printView("A", "I", "K", result.viewA);
+      printView("B", "K", "J", result.viewB);
+      printView("C", "I", "J", result.viewC);
+
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);

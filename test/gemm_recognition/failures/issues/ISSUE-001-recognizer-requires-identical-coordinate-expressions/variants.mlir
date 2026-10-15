@@ -3,17 +3,30 @@
 // however trivially (a constant offset or a stride on one side only).
 //
 // Each function is one variant; the comment above it says what the recognizer
-// is expected to do by the specification, and what commit 6e25528 does.  By
+// is expected to do by the specification, and what commit 6e25528 did.  By
 // the specification all seven variants are dense GEMMs, so the RUN line
-// expects seven successes; at 6e25528 only v2 succeeds, hence the
-// expected-failure marker (XPASS = fixed; then drop the marker line).  Or run
+// expects seven successes; at 6e25528 only v2 succeeded (the file carried an
+// expected-failure marker).  Fixed by matchSharedCoordinate in
+// AffineMatmulAnalysis.cpp: the seven variants are recognized, each operand
+// with its own view of the shared coordinate (checked below).  Or run
 // scripts/run_issue.sh ISSUE-001, which records the actual output in this
 // directory.
 //
-// XFAIL: *
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s
+// RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \
+// RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=VIEW
 // CHECK-COUNT-7: recognition result: success
+//
+// The views, in the order of the variants below (v1 .. v7):
+// VIEW: view C: [1*I + 8, 1*J + 16]
+// VIEW: view C: [1*I + 0, 1*J + 0]
+// VIEW: view C: [1*I + 8, 1*J + 0]
+// VIEW: view C: [1*I + 0, 1*J + 16]
+// VIEW: view A: [1*I + 0, 1*K + 1]
+// VIEW: view B: [1*K + 2, 1*J + 0]
+// VIEW: view C: [2*I + 0, 1*J + 0]
+// VIEW: view A: [1*I + 2, 1*K + 0]
 //
 // Every variant computes a valid GEMM: C'(I,J) += A'(I,K) B'(K,J) over the
 // 8x8x8 loop domain, with each operand's own view (row/column offsets or

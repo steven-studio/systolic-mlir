@@ -9,7 +9,91 @@ regression.py so that every runner judges a case the same way.
 DENSE_REASON_MARKERS = ("batched GEMM", "two logical coordinates are driven by the same loop",
                         "drives no logical coordinate", "decreases along its loop",
                         "do not enumerate it densely", "loop bounds are not static",
-                        "fewer than three dimensions", "not a dense box")
+                        "fewer than three dimensions", "not a dense box",
+                        "overflows 64-bit arithmetic",
+                        # getDenseLogicalGemm's own reasons for an empty GEMM
+                        # (SQ-2) and a constant coordinate (ISSUE-003, SQ-4)
+                        "has no iteration (an empty GEMM", "is driven by no loop")
+
+
+def classify_mlir(entry, st):
+    """The MLIR-level cases (manifest kind 'mlir'): the recognizer, the dense
+    partition and the lowering pass, nothing else.  'offloaded' here means
+    'the lowering pass replaced the nest'; the specification layer is judged
+    on that.  Verdicts as classify(), minus the runtime ones."""
+    spec = entry["expected"]
+    cur = entry["current_implementation"]
+    actual = {"kind": "mlir", "frontend": "not_applicable", "driver": "not_applicable",
+              "execute": "not_applicable", "invocations": None}
+    mism, notes = [], []
+    di, lo = st.get("discovery"), st.get("lowering")
+    for key, stg in (("discovery", di), ("lowering", lo)):
+        if stg and stg.get("result") == "tool_error":
+            return "tool_error", {key: "tool_error", "reason": stg.get("reason")}, \
+                ["%s: tool_error: %s" % (key, stg.get("reason"))], notes
+    if not di or not lo:
+        return "tool_error", actual, ["discovery or lowering did not run"], notes
+    actual["recognition"] = di.get("recognition")
+    actual["discovery_recognition"] = di.get("recognition")
+    actual["views"] = di.get("views", {})
+    if di.get("recognition") != cur["recognition"]:
+        mism.append("recognition: predicted %s, got %s" % (cur["recognition"], di.get("recognition")))
+    dense = di.get("dense") if di.get("recognition") == "accept" else "not_reached"
+    actual["dense_partition"] = dense
+    actual["dense_reason"] = di.get("dense_reason", "")
+    if dense != cur["dense_partition"]:
+        mism.append("dense_partition: predicted %s, got %s (%s)" % (cur["dense_partition"], dense, di.get("dense_reason", "")))
+    if lo["result"] == "lowered":
+        low = "supported"
+    elif lo["result"] == "recognized_not_lowered" and dense == "supported":
+        low = "unsupported"
+    else:
+        low = "not_reached"
+    actual["lowering"] = low
+    actual["lowering_result"] = lo["result"]
+    actual["lowering_reason"] = lo.get("reason", "")
+    actual["lowered_regions"] = lo.get("regions")
+    actual["matmul_tiles"] = lo.get("matmul_tiles")
+    if low != cur["lowering"]:
+        mism.append("lowering: predicted %s, got %s (%s)" % (cur["lowering"], low, lo.get("reason", "")))
+    # the rejection reason: the lowering pass's remark (or the discovery
+    # pass's dense reason) must carry the predicted wording
+    if cur.get("reject_reason") and cur.get("reject_stage") in ("dense_partition", "lowering"):
+        said = (lo.get("reason", "") + " | " + di.get("dense_reason", "")).lower()
+        if cur["reject_reason"][:48].lower() not in said:
+            mism.append("rejection reason: predicted '%s', the compiler said '%s'" % (
+                cur["reject_reason"], lo.get("reason") or di.get("dense_reason") or "(nothing)"))
+    for operand, want in (spec.get("views") or {}).items():
+        got = di.get("views", {}).get(operand)
+        if got != want:
+            mism.append("view %s: specification %s, the recognizer reports %s" % (operand, want, got))
+    offloaded = lo["result"] == "lowered"
+    if spec["recognition"] == "UNDETERMINED":
+        actual["matches_specification"] = None
+        if mism:
+            return "unexpected_stage", actual, mism, notes
+        if not offloaded:
+            return "expected_refusal", actual, [], notes + [
+                "%s: the specification does not decide this case; the lowering pass refused it at the "
+                "predicted stage with the predicted reason (conservative; not a pass)" % spec.get("spec_question")]
+        return "spec_open", actual, [], notes + ["%s: the specification does not decide this case; the "
+                                                "compiler lowered it" % spec.get("spec_question")]
+    spec_says_offload = spec["recognition"] == "ACCEPT"
+    actual["matches_specification"] = (offloaded == spec_says_offload)
+    if offloaded and not spec_says_offload:
+        return "false_positive", actual, mism + [
+            "the specification says %s (%s) but the lowering pass replaced the nest" % (spec["recognition"], spec["basis"][:80])], notes
+    if not offloaded and spec_says_offload:
+        if not mism:
+            return "known_false_negative", actual, ["specification: ACCEPT; compiler: %s (%s) -- %s" % (
+                lo["result"], lo.get("reason") or di.get("dense_reason") or "refused at recognition",
+                entry.get("issue") or "no issue recorded yet")], notes
+        return "unexpected_stage", actual, mism, notes
+    if mism:
+        if cur["lowering"] != "supported" and offloaded and spec_says_offload:
+            return "fixed_issue", actual, mism, notes + ["%s no longer reproduces" % (entry.get("issue") or "the predicted refusal")]
+        return "unexpected_stage", actual, mism, notes
+    return "pass", actual, mism, notes
 
 
 def classify(entry, st):
@@ -33,7 +117,22 @@ def classify(entry, st):
                             runtime reported failed invocations, or a crash
       test_bug              the program's references disagree among themselves
       tool_error            a tool is missing or crashed; not tested
+      expected_refusal      the specification does not decide the case (a
+                            recorded spec question, entry['expected']
+                            ['spec_question']), every stage did what was
+                            predicted -- including the predicted refusal
+                            reason where the compiler states one -- the
+                            program's check passed, and the compiler did NOT
+                            offload it: a conservative refusal. Not a pass
+                            (reported and counted on its own), not a failure
+      spec_open             the same, but the compiler offloaded the nest: a
+                            choice the specification has not made -- blocking
+                            until the spec question is decided
+    MLIR-level cases (kind 'mlir') are judged by classify_mlir() on the
+    recognition, dense-partition and lowering stages only.
     """
+    if entry.get("kind") == "mlir" or st.get("kind") == "mlir":
+        return classify_mlir(entry, st)
     spec = entry["expected"]
     cur = entry["current_implementation"]
     actual = {}
@@ -110,9 +209,21 @@ def classify(entry, st):
     actual["planned_per_call"] = dr.get("planned_per_call")
     if dr.get("result") != cur["driver"]:
         mism.append("driver: predicted %s, got %s (%s)" % (cur["driver"], dr.get("result"), dr.get("reason", "")))
-    if cur.get("reject_reason") and dr.get("reason") and cur["reject_stage"] in ("lowering", "dense_partition", "driver"):
-        if cur["reject_reason"][:40].lower() not in dr["reason"].lower():
-            notes.append("rejection wording differs: predicted '%s', driver said '%s'" % (cur["reject_reason"], dr["reason"]))
+    # The rejection reason.  systolic-cc --explain quotes the compiler's own
+    # diagnostic (the front end's error, the dense-partition / lowering
+    # remark, the driver's policy), so for those stages the predicted wording
+    # must be in it -- a refusal for another reason is a behaviour change to
+    # analyse (unexpected_stage), not a pass.  The recognizer itself gives no
+    # reason (recognizeLogicalMatmul returns a bare failure), so a prediction
+    # for that stage cannot be checked against the output: noted only.
+    if cur.get("reject_reason") and dr.get("reason") is not None and dr.get("result") != "offloaded":
+        said = dr["reason"].lower()
+        want = cur["reject_reason"][:40].lower()
+        if cur["reject_stage"] in ("frontend", "dense_partition", "lowering", "driver") and want not in said:
+            mism.append("rejection reason: predicted '%s' (%s), the compiler said '%s'" % (
+                cur["reject_reason"], cur["reject_stage"], dr["reason"]))
+        elif cur["reject_stage"] == "recognition":
+            notes.append("refused at recognition (the recognizer states no reason; predicted: %s)" % cur["reject_reason"][:60])
 
     exe = st.get("execute", {})
     actual["execute"] = exe.get("result")
@@ -145,6 +256,20 @@ def classify(entry, st):
 
     # the specification layer
     offloaded = dr.get("result") == "offloaded"
+    if spec["recognition"] == "UNDETERMINED":
+        # a recorded spec question: the program's result was checked above;
+        # the compiler's choice is recorded, not judged
+        actual["matches_specification"] = None
+        if mism:
+            return "unexpected_stage", actual, mism, notes
+        if not offloaded:
+            return "expected_refusal", actual, [], notes + [
+                "%s: the specification does not decide this case; the compiler kept it on the host at the "
+                "predicted stage with the predicted reason, the program's check passed (conservative; not a "
+                "pass)" % spec.get("spec_question")]
+        return "spec_open", actual, [], notes + ["%s: the specification does not decide this case; the "
+                                                "compiler offloaded the nest, the program's check passed" % (
+                                                    spec.get("spec_question"))]
     spec_says_offload = spec["recognition"] == "ACCEPT"
     actual["matches_specification"] = (offloaded == spec_says_offload)
     if offloaded and not spec_says_offload:

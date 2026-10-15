@@ -1,13 +1,13 @@
 {
  "kind": "regression_run",
  "runtime": "soft",
- "timestamp": "20261015-025742",
+ "timestamp": "20261015-160426",
  "tools": {
-  "build_dir": "/home/claude/systolic-mlir-src/build",
-  "llvm_build": "/home/claude/llvm/build",
-  "clang": "/home/claude/llvm/build/bin/clang",
-  "clang_version": "clang version 24.0.0git (https://github.com/llvm/llvm-project.git 2428c10786f12f8e4e7bffa63b0393c137b031bb)",
-  "compiler_commit": "6e25528",
+  "build_dir": "/home/steven-studio/work/systolic-mlir-affine/build",
+  "llvm_build": "/home/steven-studio/work/llvm-project/build",
+  "clang": "/home/steven-studio/work/clang24-build/bin/clang",
+  "clang_version": "clang version 24.0.0git (https://github.com/llvm/llvm-project.git 7615da10b75c57286a4032eac8bb43c1b8d2ba46)",
+  "compiler_commit": "",
   "compiler_dirty": false
  },
  "cases": {
@@ -1045,20 +1045,18 @@
   },
   "case_065": {
    "origin": "showcase",
-   "verdict": "known_false_negative",
-   "classification": "FALSE_NEGATIVE",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
-   "mismatches": [
-    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
-   ],
+   "mismatches": [],
    "notes": [],
    "actual": {
-    "driver": "stays_on_host",
-    "recognition": "reject",
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
     "execute": "pass",
-    "invocations": 0
+    "invocations": 1
    }
   },
   "case_066": {
@@ -1307,7 +1305,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: fewer than three loop counters are used by the accesses: no )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1323,7 +1323,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1339,7 +1341,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: fewer than three loop counters are used by the accesses: no )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1355,7 +1359,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: fewer than three loop counters are used by the accesses: no )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1387,7 +1393,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: A, B and C must have the same number of subscripts (>= 2); t)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1419,7 +1427,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1451,7 +1461,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1467,7 +1479,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1483,7 +1497,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1499,7 +1515,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1511,20 +1529,18 @@
   },
   "case_094": {
    "origin": "showcase",
-   "verdict": "known_false_negative",
-   "classification": "FALSE_NEGATIVE",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
-   "mismatches": [
-    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
-   ],
+   "mismatches": [],
    "notes": [],
    "actual": {
-    "driver": "stays_on_host",
-    "recognition": "reject",
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
     "execute": "pass",
-    "invocations": 0
+    "invocations": 1
    }
   },
   "case_095": {
@@ -1533,7 +1549,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1549,7 +1567,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: both operands of the product must be affine.load results; a )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1565,7 +1585,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the stored value must be an arith.addf of the accumulator lo)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1581,7 +1603,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the stored value is an arith.subf, not an arith.addf)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1597,7 +1621,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the nest is not a perfect chain of affine.for ops around the)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1621,6 +1647,640 @@
     "lowering": "supported",
     "execute": "pass",
     "invocations": 0
+   }
+  },
+  "case_101": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_102": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_103": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_104": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_105": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_106": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_107": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_108": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_109": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_110": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_111": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_112": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_113": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_114": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_115": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_116": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_117": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 2
+   }
+  },
+  "case_118": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "pass",
+    "invocations": 1
+   }
+  },
+  "case_119": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_translated",
+    "recognition": "not_reached",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_120": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_translated",
+    "recognition": "not_reached",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_121": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_translated",
+    "recognition": "not_reached",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_122": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_translated",
+    "recognition": "not_reached",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_123": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_124": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_125": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_126": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_127": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "mlir_001": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_002": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_003": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_004": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": "ISSUE-002",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_005": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": "ISSUE-002",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_006": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_007": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": "ISSUE-002",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_008": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": "ISSUE-002",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_009": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_010": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "DOCUMENTED_LIMITATION",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_014": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-001",
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_015": {
+   "origin": "showcase",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "mismatches": [],
+   "notes": [],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "execute": "not_applicable",
+    "invocations": null
    }
   },
   "ext_001": {
@@ -1677,7 +2337,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: loop 3 of the nest repeats the accumulation inside it, and m)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1693,7 +2355,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: both operands of the product must be affine.load results; a )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1709,7 +2373,9 @@
    "classification": "TRUE_NEGATIVE",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accumulated value must be an arith.mulf of two loads, no)"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1728,29 +2394,27 @@
    "notes": [],
    "actual": {
     "driver": "stays_on_host",
-    "recognition": "reject",
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
     "execute": "pass",
     "invocations": 0
    }
   },
   "ext_008": {
    "origin": "showcase",
-   "verdict": "known_false_negative",
-   "classification": "FALSE_NEGATIVE",
+   "verdict": "pass",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
-   "mismatches": [
-    "specification: ACCEPT; compiler: stays_on_host (no GEMM the systolic arrays can run was recognized in it) -- ISSUE-001"
-   ],
+   "mismatches": [],
    "notes": [],
    "actual": {
-    "driver": "stays_on_host",
-    "recognition": "reject",
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "driver": "offloaded",
+    "recognition": "accept",
+    "dense_partition": "supported",
+    "lowering": "supported",
     "execute": "pass",
-    "invocations": 0
+    "invocations": 1
    }
   },
   "ext_009": {
@@ -1775,7 +2439,9 @@
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
    "mismatches": [],
-   "notes": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the MAC body contains arith.extf/truncf conversions between )"
+   ],
    "actual": {
     "driver": "stays_on_host",
     "recognition": "reject",
@@ -1851,6 +2517,133 @@
     "invocations": 2
    }
   },
+  "case_128": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "refused at recognition (the recognizer states no reason; predicted: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shar)",
+    "SQ-1: the specification does not decide this case; the compiler kept on the host the nest, the program's check passed"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_129": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-2: the specification does not decide this case; the compiler kept on the host the nest, the program's check passed"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_130": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-2: the specification does not decide this case; the compiler kept on the host the nest, the program's check passed"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "case_131": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-2: the specification does not decide this case; the compiler kept on the host the nest, the program's check passed"
+   ],
+   "actual": {
+    "driver": "stays_on_host",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "pass",
+    "invocations": 0
+   }
+  },
+  "mlir_011": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-3: the specification does not decide this case; the compiler refused it"
+   ],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_012": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-1: the specification does not decide this case; the compiler refused it"
+   ],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "reject",
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
+  "mlir_013": {
+   "origin": "showcase",
+   "verdict": "spec_open",
+   "classification": "SPEC_OPEN",
+   "issue": null,
+   "mismatches": [],
+   "notes": [
+    "SQ-2: the specification does not decide this case; the compiler refused it"
+   ],
+   "actual": {
+    "driver": "not_applicable",
+    "recognition": "accept",
+    "dense_partition": "unsupported",
+    "lowering": "not_reached",
+    "execute": "not_applicable",
+    "invocations": null
+   }
+  },
   "gen_06c950c874b9": {
    "origin": "corpus",
    "verdict": "pass",
@@ -1908,24 +2701,35 @@
  },
  "issues": {
   "ISSUE-001": {
-   "repro_passed": 0,
-   "repro_failed": 2,
+   "repro_passed": 2,
+   "repro_failed": 0,
    "rc": 0,
-   "status": "still_open"
+   "status": "fixed?"
+  },
+  "ISSUE-002": {
+   "repro_passed": 9,
+   "repro_failed": 0,
+   "rc": 0,
+   "status": "fixed?"
+  },
+  "ISSUE-003": {
+   "repro_passed": 2,
+   "repro_failed": 0,
+   "rc": 0,
+   "status": "fixed?"
   }
  },
  "check_systolic": {
   "rc": 0,
   "tail": [
    "[0/1] Running the systolic regression tests",
-   "-- Testing: 74 tests, 2 workers --",
+   "-- Testing: 80 tests, 8 workers --",
    "Testing:  0.. 10.. 20.. 30.. 40.. 50.. 60.. 70.. 80.. 90..",
    "",
-   "Testing Time: 3.06s",
+   "Testing Time: 2.19s",
    "",
-   "Total Discovered Tests: 74",
-   "  Passed           : 72 (97.30%)",
-   "  Expectedly Failed:  2 (2.70%)"
+   "Total Discovered Tests: 80",
+   "  Passed: 80 (100.00%)"
   ]
  }
 }

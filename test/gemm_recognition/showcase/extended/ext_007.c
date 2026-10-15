@@ -34,16 +34,16 @@
  * Mathematical GEMM: YES
  * Expected recognition (specification): OUT_OF_SCOPE
  *   basis: AffineMatmulToSystolic.cpp: 'A and B are different views of the same memref'
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Current implementation (commit 6e25528 with the fix of ISSUE-001, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  unsupported
  *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate
- * Classification: DOCUMENTED LIMITATION -- see failures/issues/ISSUE-001
+ *   rejection at: lowering
+ *   reason: A and B are different views of the same memref
+ * Classification: DOCUMENTED LIMITATION -- was a FALSE NEGATIVE of failures/issues/ISSUE-001 (fixed)
  *   A mathematically valid GEMM that the specification excludes explicitly;
  *   'refused' must never be read as 'not a GEMM'.
  *

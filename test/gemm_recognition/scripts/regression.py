@@ -44,8 +44,13 @@ sys.path.insert(0, HERE)
 import stages  # noqa: E402
 import verdict  # noqa: E402
 
-RANK = {"pass": 0, "fixed_issue": 0, "known_false_negative": 1, "unexpected_stage": 2, "false_positive": 3,
-        "fail_runtime": 3, "test_bug": 3, "tool_error": 4}
+# spec_open (an UNDETERMINED case) ranks with the open issues: it is not a
+# pass, so a case moving from pass to spec_open is a regression to analyse.
+# expected_refusal (an UNDETERMINED case refused conservatively, as predicted)
+# ranks with them too: not a pass, so pass -> expected_refusal is a regression.
+RANK = {"pass": 0, "fixed_issue": 0, "spec_open": 1, "expected_refusal": 1, "known_false_negative": 1,
+        "unexpected_stage": 2,
+        "false_positive": 3, "fail_runtime": 3, "test_bug": 3, "tool_error": 4}
 
 
 def load(path, default):
@@ -116,9 +121,13 @@ def diff(a, last=None):
     if not last:
         print("no last run for runtime %s" % a.runtime)
         return 2
-    regressions, improvements, new_bad, same = [], [], [], 0
+    regressions, improvements, new_bad, undetermined, refused, reclassified, same = [], [], [], [], [], [], 0
     for cid, r in last["cases"].items():
         v = r["verdict"]
+        if v == "spec_open":
+            undetermined.append(cid)
+        if v == "expected_refusal":
+            refused.append(cid)
         if base and cid in base["cases"]:
             b = base["cases"][cid]["verdict"]
             if RANK.get(v, 9) > RANK.get(b, 9):
@@ -127,6 +136,10 @@ def diff(a, last=None):
                 improvements.append((cid, b, v))
             else:
                 same += 1
+                if v != b:
+                    reclassified.append((cid, b, v))
+        elif v in ("spec_open", "expected_refusal"):
+            pass   # counted in `undetermined` / `refused`, reported below
         elif v != "pass":
             new_bad.append((cid, v, "; ".join(r["mismatches"])[:160]))
         else:
@@ -145,10 +158,21 @@ def diff(a, last=None):
         print("NEW FAILURE %-18s %s  %s" % (cid, v, m))
     for cid, b, v in improvements:
         print("IMPROVED    %-18s %s -> %s  (update the issue record, then `regression.py save`)" % (cid, b, v))
+    for cid, b, v in reclassified:
+        print("RECLASSIFIED %-17s %s -> %s  (same rank; review before `regression.py save`)" % (cid, b, v))
+    for cid in refused:
+        print("EXPECTED_REFUSAL %-13s open spec question, refused as predicted (not a pass, not blocking)" % cid)
+    for cid in undetermined:
+        print("UNDETERMINED %-17s spec_open (a spec question decides it; not a pass)" % cid)
+    print("totals: %s" % ", ".join("%s=%d" % kv for kv in sorted(
+        __import__("collections").Counter(r["verdict"] for r in last["cases"].values()).items())))
     if last.get("check_systolic"):
         print("check-systolic rc=%d" % last["check_systolic"]["rc"])
         if last["check_systolic"]["rc"] != 0:
             new_bad.append(("check-systolic", "failed", ""))
+    if undetermined and not getattr(a, "allow_spec_open", False):
+        print("%d UNDETERMINED case(s): the gate fails unless --allow-spec-open" % len(undetermined))
+        return 1
     return 1 if regressions or new_bad else 0
 
 
@@ -162,6 +186,8 @@ def main():
     ap.add_argument("--clang-major", type=int)
     ap.add_argument("--work")
     ap.add_argument("--check-systolic", action="store_true", help="also run cmake --build build --target check-systolic")
+    ap.add_argument("--allow-spec-open", action="store_true",
+                    help="do not fail on UNDETERMINED cases (spec_open); they are still listed and counted")
     a = ap.parse_args()
     if a.command == "save":
         last = load(os.path.join(ROOT, "regression", "last_run_%s.json" % a.runtime), None)

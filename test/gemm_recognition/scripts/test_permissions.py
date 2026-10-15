@@ -134,7 +134,13 @@ def test_make_showcase(tmp):
     if not check("make_showcase writes a fresh set", rc == 0, se.strip()[-200:]):
         return
     srcs = sources_in(out)
-    check("make_showcase: 114 case files", len(srcs) == 114, "%d" % len(srcs))
+    # the number of case files the specs define (C cases + MLIR-level cases)
+    sys.path.insert(0, os.path.join(ROOT, "generator"))
+    import showcase_cases  # noqa: E402
+    n_cases = len(showcase_cases.ALL) + len(showcase_cases.MLIR_CASES)
+    check("make_showcase: %d case files (.c and .mlir)" % n_cases, len(srcs) == n_cases, "%d" % len(srcs))
+    check("make_showcase: the MLIR-level cases are written too",
+          sum(p.endswith(".mlir") for p in srcs) == len(showcase_cases.MLIR_CASES))
     check("make_showcase: every case file is mode 0555", all(mode(p) == 0o555 for p in srcs))
     check("make_showcase: manifest.json / CASES.md stay writable",
           is_writable_mode(os.path.join(out, "manifest.json")) and is_writable_mode(os.path.join(out, "CASES.md")))
@@ -143,7 +149,7 @@ def test_make_showcase(tmp):
     before = {p: open(p).read() for p in srcs}
     rc, so, se = run([PY, MAKE, "--out", out])
     check("make_showcase over the existing set: succeeds without --force", rc == 0, se.strip()[-200:])
-    check("... reports every case file unchanged", "114 unchanged" in so, so.strip()[-120:])
+    check("... reports every case file unchanged", "%d unchanged" % n_cases in so, so.strip()[-120:])
     check("... content untouched", all(open(p).read() == before[p] for p in srcs))
     check("... still mode 0555", all(mode(p) == 0o555 for p in srcs))
     # a case file whose content would change: refused without --force, replaced with it

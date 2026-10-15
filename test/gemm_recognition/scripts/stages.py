@@ -143,6 +143,8 @@ def stage_discovery(tools, mlir, workdir, k8=16, k4=16):
     for key in ("row", "column", "reduction"):
         m = re.search(r"%s extent: (\S+(?: \S+)?)" % key, err)
         res["%s_extent" % key] = m.group(1) if m else None
+    # each operand's own view of its coordinates, e.g. "view C: [1*I + 8, 1*J + 16]"
+    res["views"] = {m.group(1): m.group(2) for m in re.finditer(r"view ([ABC]): (\[[^\]]*\])", err)}
     mT = re.findall(r"T\[\d+\] = \[([^\]]*)\]", err)
     res["T"] = [[int(x) for x in row.split()] for row in mT] if mT else None
     m = re.search(r"c = \[([^\]]*)\]", err)
@@ -293,6 +295,20 @@ def run_case(tools, src, kernel, workdir, runtime="soft", k8=16, k4=16, env=None
     for st in ALL_STAGES:
         if st not in only:
             out["not_run"][st] = "not selected"
+    if src.endswith(".mlir"):
+        # An MLIR-level case: the affine nest itself.  Only the recognizer,
+        # the dense partition and the lowering pass apply; there is no C
+        # program to compile with cc or systolic-cc, nothing to execute, and
+        # the result says so instead of claiming those stages.
+        out["kind"] = "mlir"
+        for st in ("cpu", "frontend", "driver", "execute"):
+            out["not_run"][st] = "MLIR-level case: no C program (recognition, dense partition and lowering only)"
+        if "discovery" in only:
+            out["discovery"] = stage_discovery(tools, src, workdir, k8, k4)
+        if "lowering" in only:
+            out["lowering"] = stage_lowering(tools, src, workdir, k8, k4)
+        return out
+    out["kind"] = "c"
     if with_cpu and "cpu" in only:
         out["cpu"] = stage_cpu(src, workdir, cpu_cc)
     if "frontend" not in only:

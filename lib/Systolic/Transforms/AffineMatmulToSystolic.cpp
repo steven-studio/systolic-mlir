@@ -58,6 +58,9 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/Support/CheckedArithmetic.h"
+
+#include <optional>
 #include <string>
 
 using namespace mlir;
@@ -112,8 +115,8 @@ static bool provablyDisjointFromOutput(Value input, Value output,
 
 /// The logical matrix a memref holds: rows are logical coordinate `rowDim`,
 /// columns `colDim`, element (r, c) at memref[offset_r + scale_r * r,
-/// offset_c + scale_c * c] -- which is what the recognized access function
-/// computes, since its results are the logical coordinates themselves.
+/// offset_c + scale_c * c] -- the operand's own view (LogicalMatmul::viewA/B/C)
+/// of the coordinate's dense values offset_d + scale_d * ordinal.
 struct LogicalOperand {
   Value memref;
   std::array<int64_t, 2> offsets, sizes, strides;
@@ -133,19 +136,53 @@ struct LogicalOperand {
 
 static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
-                  unsigned colDim, StringRef name, std::string &why) {
+                  unsigned colDim,
+                  const std::array<OperandCoordinateView, 2> &views,
+                  StringRef name, std::string &why) {
   auto ty = dyn_cast<MemRefType>(memref.getType());
   if (!ty || ty.getRank() != 2 || !ty.getLayout().isIdentity()) {
     why = (name + " is not a rank-2 memref with the identity layout").str();
     return failure();
   }
 
+  static constexpr const char *kName[] = {"I", "J", "K"};
   LogicalOperand operand;
   operand.memref = memref;
   for (auto [r, d] : llvm::enumerate(std::array<unsigned, 2>{rowDim, colDim})) {
-    operand.offsets[r] = dense.offset[d];
+    // Along this dimension the operand reads view.offset + view.scale * y_d
+    // with y_d = dense.offset[d] + dense.scale[d] * ordinal: a strided view
+    // starting at view.offset + view.scale * dense.offset[d] with stride
+    // view.scale * dense.scale[d]. A memref.subview has no negative stride,
+    // and a coordinate that decreases along its loop is refused by
+    // getDenseLogicalGemm; an operand whose own view decreases is refused
+    // here for the same reason.
+    const OperandCoordinateView &view = views[r];
+    if (view.scale <= 0) {
+      why = (name + "'s view of logical coordinate " + kName[d] +
+             " decreases along it (a negative stride)")
+                .str();
+      return failure();
+    }
+    // All of it in checked arithmetic: a wrapped-around offset or stride
+    // could pass the bounds test below and address memory the nest never
+    // touched.
+    std::optional<int64_t> start = llvm::checkedMul(view.scale, dense.offset[d]);
+    std::optional<int64_t> offset =
+        start ? llvm::checkedAdd(*start, view.offset) : std::nullopt;
+    std::optional<int64_t> stride = llvm::checkedMul(view.scale, dense.scale[d]);
+    std::optional<int64_t> span =
+        stride ? llvm::checkedMul(*stride, dense.extent[d] - 1) : std::nullopt;
+    std::optional<int64_t> last =
+        (offset && span) ? llvm::checkedAdd(*offset, *span) : std::nullopt;
+    if (!offset || !stride || !last) {
+      why = (name + "'s subscripts along dimension " + llvm::Twine(r) +
+             " overflow 64-bit arithmetic")
+                .str();
+      return failure();
+    }
+    operand.offsets[r] = *offset;
     operand.sizes[r] = dense.extent[d];
-    operand.strides[r] = dense.scale[d];
+    operand.strides[r] = *stride;
     // The view holds exactly the elements the loop nest itself accesses
     // (every row and column of the logical matrix is touched by some
     // iteration), so it is in bounds whenever the nest was defined. A
@@ -153,10 +190,7 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
     // float A[][K] -- is therefore taken as the nest's own guarantee; a
     // static one that the accesses provably exceed means the nest was
     // undefined to begin with, and there is nothing correct to lower it to.
-    const int64_t last =
-        dense.offset[d] + dense.scale[d] * (dense.extent[d] - 1);
-    if (dense.offset[d] < 0 ||
-        (!ty.isDynamicDim(r) && last >= ty.getDimSize(r))) {
+    if (*offset < 0 || (!ty.isDynamicDim(r) && *last >= ty.getDimSize(r))) {
       why = (name + " is accessed out of bounds along dimension " +
              llvm::Twine(r))
                 .str();
@@ -167,15 +201,19 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
 }
 
 /// How many times the loops enclosing `op` (up to its function) run it, or
-/// nullopt when one of them has no constant trip count.
+/// nullopt when one of them has no constant trip count or the product does
+/// not fit in 64 bits.
 static std::optional<uint64_t> enclosingRepetitions(Operation *op) {
   uint64_t times = 1;
   for (auto loop = op->getParentOfType<affine::AffineForOp>(); loop;
        loop = loop->getParentOfType<affine::AffineForOp>()) {
     std::optional<uint64_t> trips = affine::getConstantTripCount(loop);
-    if (!trips)
+    // A product past 64 bits is as unknown as a non-constant trip count.
+    std::optional<uint64_t> product =
+        trips ? llvm::checkedMulUnsigned(times, *trips) : std::nullopt;
+    if (!product)
       return std::nullopt;
-    times *= *trips;
+    times = *product;
   }
   return times;
 }
@@ -317,15 +355,15 @@ struct AffineMatmulToSystolicPass
     const int64_t K = dense->extent[kLogicalK];
 
     auto lhs = getLogicalOperand(matmul.lhs, *dense, kLogicalI, kLogicalK,
-                                 "A", why);
+                                 matmul.viewA, "A", why);
     if (failed(lhs))
       return failure();
     auto rhs = getLogicalOperand(matmul.rhs, *dense, kLogicalK, kLogicalJ,
-                                 "B", why);
+                                 matmul.viewB, "B", why);
     if (failed(rhs))
       return failure();
     auto out = getLogicalOperand(matmul.output, *dense, kLogicalI, kLogicalJ,
-                                 "C", why);
+                                 matmul.viewC, "C", why);
     if (failed(out))
       return failure();
 

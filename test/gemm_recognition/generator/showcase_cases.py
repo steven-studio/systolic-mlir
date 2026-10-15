@@ -17,8 +17,8 @@ Conventions used below:
 from casespec import Array, Case, Loop
 
 
-def L(var, lb, ub, role, step=1, cmp="<", ctype="int", inc="++"):
-    return Loop(var=var, lb=lb, ub=ub, step=step, cmp=cmp, role=role, ctype=ctype, inc=inc)
+def L(var, lb, ub, role, step=1, cmp="<", ctype="int", inc="++", cond=""):
+    return Loop(var=var, lb=lb, ub=ub, step=step, cmp=cmp, role=role, ctype=ctype, inc=inc, cond=cond)
 
 
 def arr(name, dims, subs, restrict=True, elem="float"):
@@ -512,8 +512,9 @@ EXTENDED = [
               "c": arr("C", (8, 8), ("7 - i", "j"))},
              math_note="C[7-i][j] += A[7-i][k] B[k][j]: the GEMM over the rows in reverse\n"
                        "order -- the same mathematics as case_001 (a valid GEMM).  The\n"
-                       "logical row I = 7 - i decreases along i; getDenseLogicalGemm refuses\n"
-                       "negative scales.  Legal, unsupported."),
+                       "logical row I = 7 - i decreases along i; getDenseLogicalGemm reads it\n"
+                       "backwards (rows 0..7 as a view) since ISSUE-004 (2026-10-15); before, it\n"
+                       "refused negative scales."),
     ext_case(4, "repeat_inside_reduction", "repetition_loop",
              [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K"), L("r", 0, 2, "R")],
              dict(zip("abc", std_arrays(8, 8, 8))),
@@ -594,4 +595,488 @@ EXTENDED = [
                        "refused only because of its rank-3 arrays."),
 ]
 
-ALL = POSITIVE + NEGATIVE + EXTENDED
+# ==========================================================================
+# BOUNDARY: cases 101 .. added after the hundred to cover the recognition
+# boundaries the hundred left out (decreasing loops, non-divisible steps,
+# per-operand offsets / strides, coupled and singular mappings, large and
+# overflowing coefficients, empty loops).  Each goes to the set its
+# SPECIFICATION puts it in -- positive (must be ACCEPTED), negative (must be
+# REJECTED, or a documented limitation), extended (the specification does not
+# decide: a recorded spec question) -- never to the set the current
+# implementation's behaviour would suggest.  The hundred are untouched.
+# ==========================================================================
+
+BOUNDARY = []
+
+
+def Bp(*a, **k):
+    k.setdefault("set", "positive")
+    BOUNDARY.append(gemm(*a, **k))
+
+
+def Bn(*a, **k):
+    k.setdefault("set", "negative")
+    BOUNDARY.append(gemm(*a, **k))
+
+
+def Bx(num, name, category, loops, A, B, C, **k):
+    BOUNDARY.append(Case(id="case_%03d" % num, name=name, set="extended", category=category,
+                         loops=loops, arrays={"a": A, "b": B, "c": C}, **k))
+
+
+# --- B1: loop steps that do not divide the bounds, several steps at once
+Bp(101, "step_3_of_10_nondivisible", "loop_step",
+   [L("i", 0, 10, "I", step=3), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (10, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (10, 8), ("i", "j")),
+   notes="i < 10 with i += 3 visits 0, 3, 6, 9: four iterations, the bound is not a\n"
+         "multiple of the step (affine.for 0 to 10 step 3 has trip count ceil(10/3)).")
+Bp(102, "steps_nondivisible_all_three", "loop_step",
+   [L("i", 0, 10, "I", step=3), L("j", 0, 11, "J", step=4), L("k", 0, 7, "K", step=5)],
+   arr("A", (10, 7), ("i", "k")), arr("B", (7, 11), ("k", "j")), arr("C", (10, 11), ("i", "j")),
+   notes="Three steps, none dividing its bound: i = 0, 3, 6, 9; j = 0, 4, 8; k = 0, 5.\n"
+         "M = 4, N = 3, K = 2 over strided views of 10x7, 7x11 and 10x11 arrays.")
+Bp(103, "steps_2_3_4_divisible", "loop_step",
+   [L("i", 0, 16, "I", step=2), L("j", 0, 24, "J", step=3), L("k", 0, 32, "K", step=4)],
+   arr("A", (16, 32), ("i", "k")), arr("B", (32, 24), ("k", "j")), arr("C", (16, 24), ("i", "j")),
+   notes="A different positive step on every loop (2, 3, 4), each dividing its bound.")
+Bp(104, "le_bound_step_4_nondivisible", "loop_step",
+   [L("i", 0, 10, "I", step=4, cmp="<="), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (11, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (11, 8), ("i", "j")),
+   notes="i <= 10 with i += 4: 0, 4, 8 (affine.for 0 to 11 step 4, three iterations).")
+Bp(105, "origin_1_step_5_nondivisible", "loop_step",
+   [L("i", 1, 12, "I", step=5), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (12, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (12, 8), ("i", "j")),
+   notes="i = 1, 6, 11: origin 1, step 5, bound 12 (rows 1, 6, 11 of A and C).")
+
+# --- B2: a shared coordinate spelled differently by the two operands (per-operand
+#         offsets and strides): dense GEMMs of the operands' own views.  All were
+#         FALSE NEGATIVES of ISSUE-001 until its fix; they are TRUE POSITIVES now.
+Bp(106, "operand_offset_b_on_k", "operand_view",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (10, 8), ("k + 2", "j")), arr("C", (8, 8), ("i", "j")),
+   notes="C += A B[2:10, :]: the reduction coordinate is k on A and k + 2 on B --\n"
+         "the same coordinate, B through its own offset view (ISSUE-001's family, v5).",
+   issue="ISSUE-001")
+Bp(107, "operand_offset_b_on_j", "operand_view",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 10), ("k", "j + 2")), arr("C", (8, 8), ("i", "j")),
+   notes="C += A B[:, 2:10]: J is j on C and j + 2 on B.", issue="ISSUE-001")
+Bp(108, "operand_offsets_differ_a_c", "operand_view",
+   ijk(8, 8, 8), arr("A", (9, 8), ("i + 1", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (11, 8), ("i + 3", "j")),
+   notes="C[3:11, :] += A[1:9, :] B: both operands offset on I, by different amounts.",
+   issue="ISSUE-001")
+Bp(109, "operand_stride_a_on_i", "operand_view",
+   ijk(8, 8, 8), arr("A", (16, 8), ("2 * i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
+   notes="C += A[0::2, :] B: the even rows of A against the plain rows of C (the mirror\n"
+         "image of case_094, where the stride was on C).", issue="ISSUE-001")
+Bp(110, "operand_stride_b_on_j", "operand_view",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 22), ("k", "3 * j")), arr("C", (8, 8), ("i", "j")),
+   notes="C += A B[:, 0::3]: every third column of B into consecutive columns of C.",
+   issue="ISSUE-001")
+Bp(111, "operand_stride_a_on_k", "operand_view",
+   ijk(8, 8, 8), arr("A", (8, 16), ("i", "2 * k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
+   notes="C += A[:, 0::2] B: K is 2k on A and k on B (the stride on the reduction, one\n"
+         "operand only; case_043 has it on both).", issue="ISSUE-001")
+Bp(112, "operand_stride_c_on_j", "operand_view",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 16), ("i", "2 * j")),
+   notes="C[:, 0::2] += A B: the product lands in the even columns of C.", issue="ISSUE-001")
+Bp(113, "operand_strides_2_and_3", "operand_view",
+   ijk(8, 8, 8), arr("A", (16, 8), ("2 * i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (22, 8), ("3 * i", "j")),
+   notes="C[0::3, :] += A[0::2, :] B: I has stride 2 on A and 3 on C -- neither expression\n"
+         "is a multiple of the other; both are views of the one coordinate i.",
+   issue="ISSUE-001")
+Bp(114, "operand_views_all_coordinates", "operand_view",
+   ijk(8, 8, 8), arr("A", (9, 16), ("i + 1", "2 * k")), arr("B", (11, 8), ("k + 3", "j")), arr("C", (16, 10), ("2 * i", "j + 2")),
+   notes="Every shared coordinate spelled differently: I = i + 1 (A) / 2i (C), J = j (B) /\n"
+         "j + 2 (C), K = 2k (A) / k + 3 (B).  C[0::2, 2:10] += A[1:9, 0::2] B[3:11, :].",
+   issue="ISSUE-001")
+
+# --- B3: large loop origins and coefficients that are valid C
+Bp(115, "long_counter_origin_beyond_int", "loop_bounds",
+   [L("i", 2147483645, 2147483649, "I", ctype="long"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (4, 8), ("i - 2147483645", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (4, 8), ("i - 2147483645", "j")),
+   notes="A long counter running past INT_MAX (2147483645 .. 2147483648) with the\n"
+         "subscript i - 2147483645: the origin and the constant cancel, rows 0..3.\n"
+         "Loop bounds and the affine constant exceed 32 bits; the trip count is 4.")
+Bp(116, "int_counter_last_increment_int_max", "loop_bounds",
+   [L("i", 2147483645, 2147483646, "I", cmp="<="), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (2, 8), ("i - 2147483645", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (2, 8), ("i - 2147483645", "j")),
+   notes="int i = 2147483645; i <= 2147483646: the last increment makes i exactly\n"
+         "INT_MAX, which is defined behaviour (one more would not be, and the front end\n"
+         "refuses such a loop: 'the loop counter could overflow').  Trip count 2.")
+Bp(117, "huge_coefficient_single_iteration", "coefficient_range",
+   [L("i", 0, 1, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (1, 8), ("i * 4611686018427387904", "k")), arr("B", (8, 8), ("k", "j")),
+   arr("C", (1, 8), ("i * 4611686018427387904", "j")),
+   notes="The row subscript i * 2^62 with a single iteration i = 0: a valid C program\n"
+         "(the only index computed is 0) and a dense 1x8x8 GEMM whose row view has\n"
+         "stride 2^62 and extent 1.  The coefficient is as large as int64 allows for a\n"
+         "stride; every product the compiler forms from it (scale x extent, offset +\n"
+         "scale x (extent - 1)) must be computed without overflow.")
+Bp(118, "unsigned_counter", "loop_syntax",
+   [L("i", 0, 8, "I", ctype="unsigned"), L("j", 0, 8, "J"), L("k", 0, 8, "K")], *std_arrays(8, 8, 8),
+   notes="An unsigned loop counter: inside the front end's subset (an initialized\n"
+         "integer counter with static bounds).")
+
+# --- B4: decreasing loops (negative steps): the coordinate decreases along its
+#         loop. Written when the front end refused them (a documented
+#         limitation then); supported since ISSUE-004 (2026-10-15) -- the cases
+#         stay in negative/ (files are never moved), tagged with the issue
+Bn(119, "decreasing_loop_i_step_minus_2", "decreasing_loop",
+   [L("i", 7, 0, "I", step=-2, cmp=">=", inc="-="), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
+   math_note="for (int i = 7; i >= 0; i -= 2): rows 7, 5, 3, 1 of A and C, in that order.\n"
+             "The same GEMM as case_031 on the odd rows, with I enumerated downward\n"
+             "(I = 7 - 2 ordinal).  A valid GEMM; the specification lists a coordinate\n"
+             "that decreased along its loop as a documented limitation until ISSUE-004\n"
+             "(ext_003 is the same mathematics through a reversed subscript); now the\n"
+             "front end emits the ordinal loop and 7 - 2 t, and it is offloaded.",
+   issue="ISSUE-004")
+Bn(120, "decreasing_loop_k_minus_minus", "decreasing_loop",
+   [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 7, 0, "K", step=-1, cmp=">=", inc="--")],
+   *std_arrays(8, 8, 8),
+   math_note="The reduction loop counts down (for (int k = 7; k >= 0; --k)): the same\n"
+             "products as case_001 summed in the opposite order.  The result is bitwise\n"
+             "equal here only because the data are small integers; in general a reversed\n"
+             "reduction order changes floating-point rounding (as for every offloaded\n"
+             "GEMM: the arrays sum in their own order).  A valid GEMM; offloaded since\n"
+             "ISSUE-004.",
+   issue="ISSUE-004")
+Bn(121, "decreasing_loop_j_gt_bound_step_3", "decreasing_loop",
+   [L("i", 0, 8, "I"), L("j", 7, 0, "J", step=-3, cmp=">", inc="-="), L("k", 0, 8, "K")],
+   *std_arrays(8, 8, 8),
+   math_note="for (int j = 7; j > 0; j -= 3): columns 7, 4, 1 of B and C (the bound is\n"
+             "exclusive and not a multiple of the step).  Offloaded since ISSUE-004.",
+   issue="ISSUE-004")
+Bn(122, "mixed_direction_steps", "decreasing_loop",
+   [L("i", 0, 16, "I", step=2), L("j", 7, 0, "J", step=-3, cmp=">=", inc="-="), L("k", 0, 8, "K")],
+   arr("A", (16, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (16, 8), ("i", "j")),
+   math_note="i increases by 2, j decreases by 3 (7, 4, 1), k increases by 1: the even rows\n"
+             "and the columns 7, 4, 1.  Offloaded since ISSUE-004.",
+   issue="ISSUE-004")
+
+# --- B5: mappings that are not a GEMM of the operands (coupled, singular,
+#         the wrong coordinate in an operand)
+Bn(123, "output_on_the_diagonal", "singular_mapping",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "i")),
+   math_class="not_gemm_diagonal_output",
+   math_note="C[i][i] += A[i][k] * B[k][j]: both subscripts of the output are the row\n"
+             "coordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).\n"
+             "The output is not indexed by (I, J).  Not a GEMM.  Expected rejection at\n"
+             "recognition: C's column expression i is not B's column expression j.")
+Bn(124, "b_column_is_the_row_coordinate", "coupled_mapping",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "i")), arr("C", (8, 8), ("i", "j")),
+   math_class="not_gemm_rank1_broadcast",
+   math_note="C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\n"
+             "in C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n"
+             "(A B)[i][i].  Not a GEMM of A and B.  Expected rejection at recognition:\n"
+             "B's column expression i is not C's column expression j.")
+Bn(125, "a_on_its_diagonal", "singular_mapping",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
+   math_class="not_gemm_scaled_rows",
+   math_note="C[i][j] += A[i][i] * B[k][j]: A is read on its diagonal (no K in A), so\n"
+             "C[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.\n"
+             "Not a GEMM.  Expected rejection at recognition: A's column expression i is\n"
+             "not B's row expression k.")
+Bn(126, "a_column_couples_i_and_k", "coupled_mapping",
+   ijk(8, 8, 8), arr("A", (8, 15), ("i", "i + k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
+   math_class="gemm_of_skewed_view",
+   math_note="C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(i,k) = A[i][i+k]\n"
+             "(a Hankel-like gather).  Mathematically C += A' B for that A', but A' is not\n"
+             "an affine strided view of A: the subscript i + k depends on two coordinates\n"
+             "(coupled), which the specification's definition excludes.  Not a dense GEMM\n"
+             "of A.  Expected rejection at recognition: A's column expression i + k is not\n"
+             "B's row expression k.")
+Bn(127, "c_row_couples_i_and_k", "coupled_mapping",
+   ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (15, 8), ("i + k", "j")),
+   math_class="not_gemm_skewed_output",
+   math_note="C[i+k][j] += A[i][k] * B[k][j]: the output row depends on the reduction\n"
+             "index, so no element of C accumulates a full dot product; C[r][j] receives\n"
+             "the sum over the anti-diagonal i + k = r.  Not a GEMM.  Expected rejection at\n"
+             "recognition: C's row expression i + k is not A's row expression i.")
+
+# --- B6: open questions of the specification (recorded, not judged)
+Bx(128, "split_coordinate_radix_differs_per_operand", "split_coordinate",
+   [L("i0", 0, 2, "I"), L("i1", 0, 4, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (8, 8), ("4 * i0 + i1", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (12, 8), ("8 * i0 + i1", "j")),
+   math_note="I is split over i0 and i1 with radix 4 on A (rows 0..7) and radix 8 on C\n"
+             "(rows 0..3 and 8..11): each operand's subscript is injective on (i0, i1),\n"
+             "so by the definition C'(I,J) += A'(I,K) B'(K,J) holds with C' a gather of\n"
+             "C's rows {0,1,2,3,8,9,10,11} -- but C' is not a strided sub-matrix.  The\n"
+             "specification's 'inside' list names per-operand offsets and strides and\n"
+             "split coordinates, not a per-operand radix: open question SQ-1.  The\n"
+             "recognizer refuses it (the two row expressions are not multiples of one\n"
+             "linear form); the behaviour is recorded, not judged.")
+Bx(129, "zero_trip_i", "empty_domain",
+   [L("i", 0, 0, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")], *std_arrays(8, 8, 8),
+   math_note="for (int i = 0; i < 0; ++i): the nest runs zero times, C is unchanged (an\n"
+             "M = 0 GEMM).  Whether the compiler must offload it (zero invocations) or\n"
+             "refuse it is open question SQ-2; the result must be correct either way.\n"
+             "The front end emits affine.for 0 to 0; the recognizer accepts the nest and\n"
+             "getDenseLogicalGemm refuses it (an empty loop has no normalized extent),\n"
+             "with the message meant for symbolic bounds.")
+Bx(130, "zero_trip_k", "empty_domain",
+   [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 0, "K")], *std_arrays(8, 8, 8),
+   math_note="K = 0: an empty reduction; C += A B with no products is C.  Open question\n"
+             "SQ-2 (see case_129); the compiler refuses it today.")
+Bx(131, "zero_trip_le_bound", "empty_domain",
+   [L("i", 0, 8, "I"), L("j", 5, 4, "J", cmp="<="), L("k", 0, 8, "K")], *std_arrays(8, 8, 8),
+   math_note="j = 5; j <= 4: an empty loop written with an inclusive bound (affine.for 5\n"
+             "to 5).  Open question SQ-2.")
+
+# --- B7: an affine loop condition (the counter inside an expression), counting
+#         down -- translated since 2026-10-15 (front end: E OP C with E affine
+#         in the counter is the equivalent comparison of the counter itself)
+Bp(132, "affine_condition_counting_down", "loop_syntax",
+   [L("i", 100, 1, "I", step=-1, cmp=">", inc="post--", cond="2 * i - 3 > 0"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+   arr("A", (101, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (101, 8), ("i", "j")),
+   notes="for (int i = 100; 2 * i - 3 > 0; i--): the condition is an affine expression of\n"
+         "the counter; over the integers it is i > 1 (2 * i - 3 > 0 is i > 1.5), so the\n"
+         "rows are 100, 99, ..., 2 -- 99 iterations, the loop ends at i = 1 (2 - 3 = -1).\n"
+         "The kernel keeps the condition as written; the generator runs it to get the\n"
+         "values (and checks them against i > 1).  A 99 x 8 x 8 GEMM on rows 2 .. 100.")
+
+assert [c.id for c in BOUNDARY] == ["case_%03d" % n for n in range(101, 133)]
+
+ALL = POSITIVE + NEGATIVE + EXTENDED + BOUNDARY
+
+# ==========================================================================
+# MLIR-level cases (mlir_001 ..): nests the C front end cannot produce --
+# static shapes on every dimension (so out-of-bounds views are decidable),
+# coefficients beyond what a valid C program can index, loop bounds that
+# depend on another counter, symbolic bounds.  They run through
+# --test-affine-matmul-discovery and --affine-matmul-to-systolic only.
+# ==========================================================================
+
+from casespec import MlirCase  # noqa: E402
+
+
+def gemm_mlir(name, A, B, C, loops, loadA, loadB, loadC, shapes=("8x8", "8x8", "8x8"), attrs=" {llvm.noalias}"):
+    """A func.func with the canonical MAC body; `loops` is the affine.for header
+    lines (outer to inner), `loadX` the index lists of the three accesses."""
+    sa, sb, sc = shapes
+    ind = "  " * (len(loops) + 1)
+    body = []
+    body.append("func.func @%s(%%%s: memref<%sxf32>%s, %%%s: memref<%sxf32>%s, %%%s: memref<%sxf32>%s) {"
+                % (name, A, sa, attrs, B, sb, attrs, C, sc, attrs))
+    for d, lp in enumerate(loops):
+        body.append("  " * (d + 1) + lp + " {")
+    body.append(ind + "%%a = affine.load %%%s[%s] : memref<%sxf32>" % (A, loadA, sa))
+    body.append(ind + "%%b = affine.load %%%s[%s] : memref<%sxf32>" % (B, loadB, sb))
+    body.append(ind + "%%c = affine.load %%%s[%s] : memref<%sxf32>" % (C, loadC, sc))
+    body.append(ind + "%p = arith.mulf %a, %b : f32")
+    body.append(ind + "%s = arith.addf %c, %p : f32")
+    body.append(ind + "affine.store %%s, %%%s[%s] : memref<%sxf32>" % (C, loadC, sc))
+    for d in range(len(loops) - 1, -1, -1):
+        body.append("  " * (d + 1) + "}")
+    body.append("  return")
+    body.append("}")
+    return "\n".join(body)
+
+
+IJK8 = ["affine.for %i = 0 to 8", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"]
+
+MLIR_CASES = [
+    MlirCase("mlir_001", "oob_static_dim0_offset", "negative", "out_of_bounds", "oob_static_dim0_offset",
+             gemm_mlir("oob_static_dim0_offset", "A", "B", "C", IJK8, "%i + 4, %k", "%k, %j", "%i + 4, %j"),
+             math_note="C[i+4][j] += A[i+4][k] B[k][j] for i, j, k < 8 on 8x8 memrefs: rows 4..11 of A and\n"
+                       "C do not exist.  As a program the nest is undefined (the accesses leave the\n"
+                       "arrays), so there is no GEMM to lower: the lowering must refuse it, saying\n"
+                       "why.  (The C front end gives array parameters a dynamic leading dimension,\n"
+                       "so this check is reachable only with static shapes.)",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="unsupported",
+             cur_reject_stage="lowering", cur_reject_reason="A is accessed out of bounds along dimension 0"),
+    MlirCase("mlir_002", "oob_static_dim1_operand_stride", "negative", "out_of_bounds", "oob_static_dim1_operand_stride",
+             gemm_mlir("oob_static_dim1_operand_stride", "A", "B", "C", IJK8, "%i, %k", "%k, %j * 3", "%i, %j"),
+             math_note="C[i][j] += A[i][k] B[k][3j]: B's column view has stride 3 (a per-operand\n"
+                       "stride, fine in itself) but 3 * 7 = 21 exceeds B's 8 columns.  Undefined;\n"
+                       "the lowering must refuse B's view.",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="unsupported",
+             cur_reject_stage="lowering", cur_reject_reason="B is accessed out of bounds along dimension 1",
+             expected_views={"B": "[1*K + 0, 3*J + 0]"}),
+    MlirCase("mlir_003", "oob_offset_plus_extent_by_one", "negative", "out_of_bounds", "oob_offset_plus_extent_by_one",
+             gemm_mlir("oob_offset_plus_extent_by_one", "A", "B", "C",
+                       ["affine.for %i = 0 to 7", "affine.for %j = 0 to 7", "affine.for %k = 0 to 8"],
+                       "%i + 2, %k", "%k, %j + 2", "%i + 2, %j + 2"),
+             math_note="Offsets 2 with extents 7 on 8x8 arrays: the last row/column touched is 2 + 6 =\n"
+                       "8, one past the end on every operand but B's rows.  The boundary of the bounds\n"
+                       "check: offset + scale * (extent - 1) = 8 is not < 8.",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="unsupported",
+             cur_reject_stage="lowering", cur_reject_reason="A is accessed out of bounds along dimension 0"),
+    MlirCase("mlir_004", "overflow_scale_2pow62_extent_3", "negative", "coefficient_overflow", "overflow_scale_2pow62_extent_3",
+             gemm_mlir("overflow_scale_2pow62_extent_3", "A", "B", "C",
+                       ["affine.for %i = 0 to 3", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i * 4611686018427387904, %k", "%k, %j", "%i * 4611686018427387904, %j"),
+             math_note="The row subscript i * 2^62 for i = 0, 1, 2 on 8x8 arrays: rows 0, 2^62 and 2^63\n"
+                       "-- the last does not even fit in int64.  Undefined (out of bounds); the\n"
+                       "compiler must refuse it without computing a wrapped-around product: the\n"
+                       "coordinate's scale x extent overflows 64 bits (ISSUE-002).",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="logical coordinate I's scale or extent overflows 64-bit arithmetic",
+             issue="ISSUE-002"),
+    MlirCase("mlir_005", "overflow_scale_2pow62_wraps_to_zero", "negative", "coefficient_overflow", "overflow_scale_2pow62_wraps_to_zero",
+             gemm_mlir("overflow_scale_2pow62_wraps_to_zero", "A", "B", "C",
+                       ["affine.for %i = 0 to 5", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i * 4611686018427387904, %k", "%k, %j", "%i * 4611686018427387904, %j"),
+             math_note="i * 2^62 for i < 5: in wrapping int64 arithmetic the last row, 2^62 * 4 =\n"
+                       "2^64, is 0 -- a bounds check computed without overflow detection would\n"
+                       "accept rows [0, 0] and lower an out-of-bounds nest (at 6e25528 only the\n"
+                       "partition's Presburger check happened to catch it, with the wrong reason).\n"
+                       "Undefined; must be refused for the right reason (ISSUE-002).",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="logical coordinate I's scale or extent overflows 64-bit arithmetic",
+             issue="ISSUE-002"),
+    MlirCase("mlir_006", "offset_2pow62_out_of_bounds", "negative", "coefficient_overflow", "offset_2pow62_out_of_bounds",
+             gemm_mlir("offset_2pow62_out_of_bounds", "A", "B", "C",
+                       ["affine.for %i = 0 to 4", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i + 4611686018427387904, %k", "%k, %j", "%i + 4611686018427387904, %j"),
+             math_note="A constant offset of 2^62 on the rows of A and C: representable, plainly out\n"
+                       "of bounds.  Refused by the lowering's bounds check.",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="unsupported",
+             cur_reject_stage="lowering", cur_reject_reason="A is accessed out of bounds along dimension 0"),
+    MlirCase("mlir_007", "large_stride_representable_oob", "negative", "coefficient_overflow", "large_stride_representable_oob",
+             gemm_mlir("large_stride_representable_oob", "A", "B", "C",
+                       ["affine.for %i = 0 to 4", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i * 2305843009213693952, %k", "%k, %j", "%i * 2305843009213693952, %j"),
+             math_note="Stride 2^61 with 4 iterations: the last row, 3 * 2^61, is representable and out\n"
+                       "of bounds, but the coordinate's exclusive end 4 * 2^61 = 2^63 -- which the\n"
+                       "partition's half-open regions are computed with -- is not; getDenseLogicalGemm\n"
+                       "refuses the coordinate for that before the bounds check is reached (ISSUE-002).\n"
+                       "Undefined either way; refused with the overflow reason.",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="logical coordinate I's scale or extent overflows 64-bit arithmetic",
+             issue="ISSUE-002"),
+    MlirCase("mlir_008", "per_operand_view_offset_overflow", "negative", "coefficient_overflow", "per_operand_view_offset_overflow",
+             gemm_mlir("per_operand_view_offset_overflow", "A", "B", "C",
+                       ["affine.for %i = 0 to 4", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i * 4611686018427387904 + 4611686018427387904, %k", "%k, %j", "%i * 4611686018427387904, %j"),
+             math_note="A's rows are 2^62 i + 2^62, C's 2^62 i: the same coordinate i (scale 1,\n"
+                       "extent 4: nothing overflows in the dense form), A and C through views of\n"
+                       "stride 2^62 -- and A's offset plus its span, 2^62 + 2^62 * 3 = 2^64, exceeds\n"
+                       "int64.  Undefined; the lowering must refuse A's view for the overflow rather\n"
+                       "than compute a wrapped-around last index (ISSUE-002).",
+             is_gemm=False, math_class="undefined_out_of_bounds",
+             spec_recognition="REJECT", spec_basis_key="out_of_bounds",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="unsupported",
+             cur_reject_stage="lowering",
+             cur_reject_reason="A's subscripts along dimension 0 overflow 64-bit arithmetic",
+             issue="ISSUE-002",
+             expected_views={"A": "[4611686018427387904*I + 4611686018427387904, 1*K + 0]",
+                             "C": "[4611686018427387904*I + 0, 1*J + 0]"}),
+    MlirCase("mlir_009", "triangular_bounds", "negative", "coordinate_dependency", "triangular_bounds",
+             gemm_mlir("triangular_bounds", "A", "B", "C",
+                       ["affine.for %i = 0 to 8", "affine.for %j = affine_map<(d0) -> (d0)>(%i) to 8", "affine.for %k = 0 to 8"],
+                       "%i, %k", "%k, %j", "%i, %j"),
+             math_note="j runs from i: only the upper triangle of C (j >= i) accumulates A B.  The\n"
+                       "iteration domain is not a box, so the computed elements are not one\n"
+                       "rectangular GEMM of strided views (the specification's definition needs a\n"
+                       "box).  Not a dense GEMM; must be refused.  The recognizer accepts the access\n"
+                       "pattern; getDenseLogicalGemm refuses the non-static (counter-dependent)\n"
+                       "bound.  The C front end cannot express this nest (bounds must be constants).",
+             is_gemm=False, math_class="gemm_values_triangular_region",
+             spec_recognition="REJECT", spec_basis_key="not_gemm",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="the loop bounds are not static, so the iteration domain has no static normalized extent"),
+    MlirCase("mlir_010", "reversed_coordinate_on_a_only", "negative", "negative_coefficient", "reversed_coordinate_on_a_only",
+             gemm_mlir("reversed_coordinate_on_a_only", "A", "B", "C", IJK8, "7 - %i, %k", "%k, %j", "%i, %j"),
+             math_note="C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM\n"
+                       "of a reversed view of A.  I is i on C and 7 - i on A: opposite directions,\n"
+                       "which the specification lists as a documented limitation (a negative stride).\n"
+                       "The recognizer refuses it (the two expressions are not the same coordinate in\n"
+                       "the same direction); ext_003 is the same limitation with both operands reversed.",
+             is_gemm=True, math_class="gemm",
+             spec_recognition="OUT_OF_SCOPE", spec_basis_key="negative_scale",
+             cur_recognition="reject", cur_dense="not_reached", cur_lowering="not_reached",
+             cur_reject_stage="recognition",
+             cur_reject_reason="not recognized: A's row expression 7 - i and C's i are not one coordinate"),
+    MlirCase("mlir_011", "symbolic_bound", "extended", "symbolic_bound", "symbolic_bound",
+             "func.func @symbolic_bound(%A: memref<?x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, "
+             "%C: memref<?x8xf32> {llvm.noalias}, %n: index) {\n"
+             "  affine.for %i = 0 to %n {\n"
+             "    affine.for %j = 0 to 8 {\n"
+             "      affine.for %k = 0 to 8 {\n"
+             "        %a = affine.load %A[%i, %k] : memref<?x8xf32>\n"
+             "        %b = affine.load %B[%k, %j] : memref<8x8xf32>\n"
+             "        %c = affine.load %C[%i, %j] : memref<?x8xf32>\n"
+             "        %p = arith.mulf %a, %b : f32\n"
+             "        %s = arith.addf %c, %p : f32\n"
+             "        affine.store %s, %C[%i, %j] : memref<?x8xf32>\n"
+             "      }\n"
+             "    }\n"
+             "  }\n"
+             "  return\n"
+             "}",
+             math_note="M = %n, a symbolic extent: a GEMM whose row count is a runtime value.  The C\n"
+                       "front end cannot produce it (bounds must be constants), and the specification\n"
+                       "does not say whether the MLIR path must support dynamic extents: open question\n"
+                       "SQ-3.  Today: recognized (row extent symbolic), no dense form, not lowered.",
+             is_gemm=True, math_class="gemm_dynamic_extent",
+             spec_recognition="UNDETERMINED", spec_basis_key="SQ-3",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="the loop bounds are not static, so the iteration domain has no static normalized extent"),
+    MlirCase("mlir_012", "split_radix_differs_per_operand", "extended", "split_coordinate", "split_radix_differs_per_operand",
+             gemm_mlir("split_radix_differs_per_operand", "A", "B", "C",
+                       ["affine.for %i0 = 0 to 2", "affine.for %i1 = 0 to 4", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i0 * 4 + %i1, %k", "%k, %j", "%i0 * 8 + %i1, %j", shapes=("8x8", "8x8", "12x8")),
+             math_note="case_128 at the MLIR level: I = 4 i0 + i1 on A, 8 i0 + i1 on C.  Open question\n"
+                       "SQ-1; the recognizer refuses the two expressions as one coordinate.",
+             is_gemm=True, math_class="gemm_per_operand_radix",
+             spec_recognition="UNDETERMINED", spec_basis_key="SQ-1",
+             cur_recognition="reject", cur_dense="not_reached", cur_lowering="not_reached",
+             cur_reject_stage="recognition",
+             cur_reject_reason="not recognized: 4 i0 + i1 and 8 i0 + i1 are not multiples of one linear form"),
+    MlirCase("mlir_013", "zero_trip_loop", "extended", "empty_domain", "zero_trip_loop",
+             gemm_mlir("zero_trip_loop", "A", "B", "C",
+                       ["affine.for %i = 0 to 0", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i, %k", "%k, %j", "%i, %j"),
+             math_note="case_129 at the MLIR level (affine.for 0 to 0): open question SQ-2.  Today:\n"
+                       "recognized, refused by getDenseLogicalGemm as an empty GEMM (its own\n"
+                       "reason since 2026-10-15; before, the message meant for symbolic bounds).",
+             is_gemm=True, math_class="gemm",
+             spec_recognition="UNDETERMINED", spec_basis_key="SQ-2",
+             cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
+             cur_reject_stage="dense_partition",
+             cur_reject_reason="a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)"),
+    MlirCase("mlir_014", "per_operand_views_all_coordinates", "positive", "operand_view", "per_operand_views_all_coordinates",
+             gemm_mlir("per_operand_views_all_coordinates", "A", "B", "C",
+                       ["affine.for %i = 0 to 4", "affine.for %j = 0 to 4", "affine.for %k = 0 to 4"],
+                       "%i + 1, %k * 2", "%k + 3, %j", "%i * 2, %j + 2"),
+             math_note="case_114 at the MLIR level with static 8x8 shapes: C[0::2, 2:6] += A[1:5, 0::2]\n"
+                       "B[3:7, 0:4], every shared coordinate spelled differently by its two operands.\n"
+                       "A dense GEMM of the operands' own views: must be recognized with the views\n"
+                       "A = [I + 1, 2K], B = [K + 3, J], C = [2I, J + 2] and lowered.",
+             is_gemm=True, math_class="gemm",
+             spec_recognition="ACCEPT", spec_basis_key="dense_gemm",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="supported",
+             issue="ISSUE-001",
+             expected_views={"A": "[1*I + 1, 2*K + 0]", "B": "[1*K + 3, 1*J + 0]", "C": "[2*I + 0, 1*J + 2]"}),
+    MlirCase("mlir_015", "huge_stride_single_row", "positive", "coefficient_range", "huge_stride_single_row",
+             gemm_mlir("huge_stride_single_row", "A", "B", "C",
+                       ["affine.for %i = 0 to 1", "affine.for %j = 0 to 8", "affine.for %k = 0 to 8"],
+                       "%i * 4611686018427387904, %k", "%k, %j", "%i * 4611686018427387904, %j"),
+             math_note="case_117 at the MLIR level: stride 2^62 on a coordinate of extent 1 -- row 0\n"
+                       "only, a 1x8x8 GEMM, in bounds.  The compiler must not overflow while deciding\n"
+                       "that (scale x extent = 2^62, offset + scale x (extent - 1) = 0).",
+             is_gemm=True, math_class="gemm",
+             spec_recognition="ACCEPT", spec_basis_key="dense_gemm",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="supported"),
+]
+
+assert [c.id for c in MLIR_CASES] == ["mlir_%03d" % n for n in range(1, 16)]

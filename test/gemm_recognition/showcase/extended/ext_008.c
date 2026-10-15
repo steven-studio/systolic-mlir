@@ -32,21 +32,14 @@
  * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
  *   basis: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Current implementation (commit 6e25528 with the fix of ISSUE-001, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J) with the same affine expression for each shared coordinate
- * Classification: FALSE NEGATIVE -- see failures/issues/ISSUE-001
- *   This nest IS a GEMM and the specification requires it to be recognized;
- *   the current recognizer refuses it.  The expectation is not lowered to match
- *   the implementation: the test fails until the recognizer is fixed.
- *   Lowering support: to be verified once recognized.
- *   FPGA execution support: to be verified once lowered.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-001 (fixed)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

@@ -33,6 +33,11 @@
  *                (S > 0), i = i + S -- with LB, UB, S integer constant
  *                expressions; i declared in the for, never written in the
  *                body. Becomes affine.for LB to UB step S (<=: UB + 1).
+ *                Counting down: for (int i = LB; i > B; --i) -- also >=,
+ *                i--, i -= S (S > 0), i = i - S. affine.for only counts up,
+ *                so it becomes the ordinal loop affine.for %i = 0 to N (N the
+ *                trip count) and every use of i the affine expression
+ *                LB - S * %i: the values LB, LB - S, ... in the same order.
  *   subscripts   every array access subscripts all dimensions; each subscript
  *                is an affine expression of the enclosing loop counters and
  *                integer constants (+, -, constant *).
@@ -370,6 +375,10 @@ typedef struct {
   /* ENV_IV: the counter's first and last values, unless it runs zero times */
   int has_values;
   long long first, last;
+  /* ENV_IV of a loop that counts down: `name` is the ordinal t = 0 .. N-1 of
+     the emitted affine.for, and the counter's value is origin - stride * t */
+  int descending;
+  long long origin, stride;
 } env_entry;
 
 typedef struct {
@@ -619,10 +628,16 @@ static char *affine_index(translator *tr, const json_value *node,
     const char *decl = referenced_id(node);
     env_entry *e = env_find(tr, decl);
     if (e && e->kind == ENV_IV) {
+      /* The form is over the counter's value (form_range takes its first and
+         last values); the text is what the counter is in the emitted IR. */
       memset(form, 0, sizeof *form);
       form->ids[0] = e->decl;
       form->coef[0] = 1;
       form->n = 1;
+      if (e->descending)
+        return e->stride == 1 ? format("(%lld - %s)", e->origin, e->name)
+                              : format("(%lld - %s * %lld)", e->origin, e->name,
+                                       e->stride);
       return xstrdup(e->name);
     }
     unsupported(node, "subscript uses '%s', which is not an enclosing loop "
@@ -884,6 +899,147 @@ static char *value(translator *tr, const json_value *node, int indent,
 
 /* -------------------------------------------------------------- statements */
 
+/* ------------------------------------------------------- loop conditions */
+
+/* The linear form a * counter + b of an integer expression built from the
+   loop counter `decl`, integer constants, + - (binary and unary) and
+   multiplication by a constant -- the left side of an affine loop condition
+   such as `2 * i - 3 > 0`. 0 if the expression is not of that form (the
+   magnitudes are kept below 2^100, far beyond any value the checks below let
+   through). */
+static int counter_linear(const json_value *n, const char *decl, __int128 *a,
+                          __int128 *b) {
+  const __int128 kLimit = (__int128)1 << 100;
+  n = strip_parens_and_casts(n, kIntConstantCasts);
+  const char *kind = kind_of(n);
+  const char *op = opcode_of(n);
+  long long v;
+  if (is_ref_to(n, decl)) {
+    *a = 1;
+    *b = 0;
+    return 1;
+  }
+  if (strcmp(kind, "DeclRefExpr") != 0 && try_int_constant(n, &v)) {
+    *a = 0;
+    *b = v;
+    return 1;
+  }
+  __int128 a0, b0, a1, b1;
+  if (strcmp(kind, "UnaryOperator") == 0 &&
+      (strcmp(op, "-") == 0 || strcmp(op, "+") == 0)) {
+    if (!counter_linear(child(n, 0), decl, &a0, &b0))
+      return 0;
+    *a = op[0] == '-' ? -a0 : a0;
+    *b = op[0] == '-' ? -b0 : b0;
+    return 1;
+  }
+  if (strcmp(kind, "BinaryOperator") != 0)
+    return 0;
+  if (!counter_linear(child(n, 0), decl, &a0, &b0) ||
+      !counter_linear(child(n, 1), decl, &a1, &b1))
+    return 0;
+  if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) {
+    int sign = op[0] == '+' ? 1 : -1;
+    *a = a0 + sign * a1;
+    *b = b0 + sign * b1;
+  } else if (strcmp(op, "*") == 0 && (a0 == 0 || a1 == 0)) {
+    /* one factor is a constant */
+    __int128 c = a0 == 0 ? b0 : b1, fa = a0 == 0 ? a1 : a0,
+             fb = a0 == 0 ? b1 : b0;
+    if (c > kLimit || c < -kLimit || fa > kLimit || fa < -kLimit ||
+        fb > kLimit || fb < -kLimit)
+      return 0;
+    *a = c * fa;
+    *b = c * fb;
+  } else {
+    return 0;
+  }
+  return *a < kLimit && *a > -kLimit && *b < kLimit && *b > -kLimit;
+}
+
+/* The value of that expression at counter value `i`, every operation checked
+   against the range of the C type clang gives it (the condition is evaluated
+   in C, where a signed overflow is undefined behaviour). 0 if one does not
+   fit, or a type is not a signed integer type. */
+static int counter_eval(const json_value *n, const char *decl, __int128 i,
+                        __int128 *out) {
+  const json_value *s = strip_parens_and_casts(n, kIntConstantCasts);
+  const char *kind = kind_of(s);
+  const char *op = opcode_of(s);
+  long long v;
+  __int128 x, y, r;
+  if (is_ref_to(s, decl)) {
+    r = i;
+  } else if (strcmp(kind, "DeclRefExpr") != 0 && try_int_constant(s, &v)) {
+    r = v;
+  } else if (strcmp(kind, "UnaryOperator") == 0) {
+    if (!counter_eval(child(s, 0), decl, i, &x))
+      return 0;
+    r = op[0] == '-' ? -x : x;
+  } else if (strcmp(kind, "BinaryOperator") == 0) {
+    if (!counter_eval(child(s, 0), decl, i, &x) ||
+        !counter_eval(child(s, 1), decl, i, &y))
+      return 0;
+    if (op[0] == '*') {
+      __int128 lim = (__int128)1 << 64;
+      if (x > lim || x < -lim || y > lim || y < -lim)
+        return 0;
+      r = x * y;
+    } else {
+      r = op[0] == '+' ? x + y : x - y;
+    }
+  } else {
+    return 0;
+  }
+  /* the range of this operation's own C type */
+  char *t = strip_qualifiers(qual_type(s));
+  unsigned long long max;
+  int ok = int_type_max(t, &max) && strncmp(t, "unsigned", 8) != 0 &&
+           r <= (__int128)max && r >= -(__int128)max - 1;
+  free(t);
+  *out = r;
+  return ok;
+}
+
+static __int128 floor_div(__int128 n, __int128 d) {   /* d > 0 */
+  return n >= 0 ? n / d : -((-n + d - 1) / d);
+}
+
+/* `E OP C` with E = a * counter + b (a != 0) and C an integer constant, as the
+   equivalent `counter OP' BOUND` (exact over the integers): divide by a (the
+   comparison flips when a < 0), then round -- i < q is i < ceil(q), i <= q is
+   i <= floor(q), i > q is i > floor(q), i >= q is i >= ceil(q). 0 if the
+   condition is not of this form or the bound does not fit a long long. */
+static int affine_condition(const json_value *cond, const char *decl,
+                            const char **op, long long *bound) {
+  const char *cop = opcode_of(cond);
+  if (strcmp(kind_of(cond), "BinaryOperator") != 0 ||
+      !(strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0 ||
+        strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0))
+    return 0;
+  __int128 a, b;
+  long long c;
+  if (!counter_linear(child(cond, 0), decl, &a, &b) || a == 0 ||
+      !try_int_constant(child(cond, 1), &c))
+    return 0;
+  __int128 num = (__int128)c - b, den = a;
+  char rel = cop[0];            /* '<' or '>' */
+  int strict = cop[1] == '\0';
+  if (den < 0) {
+    num = -num;
+    den = -den;
+    rel = rel == '<' ? '>' : '<';
+  }
+  __int128 fl = floor_div(num, den), ce = -floor_div(-num, den);
+  __int128 q = (rel == '<') == strict ? ce : fl;
+  static const char *const kOps[2][2] = {{"<=", "<"}, {">=", ">"}};
+  if (q > (__int128)9223372036854775807LL || q < -(__int128)9223372036854775807LL - 1)
+    return 0;
+  *op = kOps[rel == '>'][strict];
+  *bound = (long long)q;
+  return 1;
+}
+
 static void statements(translator *tr, const json_value *stmts, int indent,
                        int top_level);
 
@@ -949,49 +1105,125 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
 
   const char *cop = opcode_of(cond);
   int has_cond = cond && cond->kind == JSON_OBJECT && cond->count;
-  if (strcmp(kind_of(cond), "BinaryOperator") != 0 ||
-      (strcmp(cop, "<") && strcmp(cop, "<=")) ||
-      !is_ref_to(child(cond, 0), decl))
-    unsupported(has_cond ? cond : s, "the loop condition must be 'counter < "
-                                     "bound' or 'counter <= bound'");
-  long long ub = int_constant(child(cond, 1));
-  if (strcmp(cop, "<=") == 0)
-    ub = checked(ub, 1, '+', cond);
+  int up = strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0;
+  int down = strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0;
+  long long bound;
+  /* An affine condition E OP C (2 * i - 3 > 0): the equivalent comparison of
+     the counter with a constant; E itself is checked for overflow below,
+     once the values it is evaluated at are known. */
+  int affine_cond = 0;
+  if (strcmp(kind_of(cond), "BinaryOperator") == 0 && (up || down) &&
+      !is_ref_to(child(cond, 0), decl) &&
+      affine_condition(cond, decl, &cop, &bound)) {
+    affine_cond = 1;
+    up = cop[0] == '<';
+    down = !up;
+  }
+  if (!affine_cond) {
+    if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
+        !is_ref_to(child(cond, 0), decl))
+      unsupported(has_cond ? cond : s, "the loop condition must be 'counter < "
+                                       "bound', 'counter <= bound', 'counter > "
+                                       "bound' or 'counter >= bound'");
+    bound = int_constant(child(cond, 1));
+  }
 
+  /* The signed step: ++ / += S / = i + S count up, -- / -= S / = i - S count
+     down. */
   int has_step = 0;
   long long step = 0;
   const char *iop = opcode_of(inc);
-  if (strcmp(kind_of(inc), "UnaryOperator") == 0 && strcmp(iop, "++") == 0 &&
+  if (strcmp(kind_of(inc), "UnaryOperator") == 0 &&
+      (strcmp(iop, "++") == 0 || strcmp(iop, "--") == 0) &&
       is_ref_to(child(inc, 0), decl)) {
-    step = 1;
+    step = iop[0] == '+' ? 1 : -1;
     has_step = 1;
   } else if (strcmp(kind_of(inc), "CompoundAssignOperator") == 0 &&
-             strcmp(iop, "+=") == 0 && is_ref_to(child(inc, 0), decl)) {
+             (strcmp(iop, "+=") == 0 || strcmp(iop, "-=") == 0) &&
+             is_ref_to(child(inc, 0), decl)) {
     step = int_constant(child(inc, 1));
+    if (iop[0] == '-')
+      step = checked(0, step, '-', inc);
     has_step = 1;
   } else if (strcmp(kind_of(inc), "BinaryOperator") == 0 &&
              strcmp(iop, "=") == 0 && is_ref_to(child(inc, 0), decl)) {
     const json_value *rhs = strip_parens_and_casts(child(inc, 1),
                                                    kLValueToRValue);
+    const char *rop = opcode_of(rhs);
     if (strcmp(kind_of(rhs), "BinaryOperator") == 0 &&
-        strcmp(opcode_of(rhs), "+") == 0 && is_ref_to(child(rhs, 0), decl)) {
+        (strcmp(rop, "+") == 0 || strcmp(rop, "-") == 0) &&
+        is_ref_to(child(rhs, 0), decl)) {
       step = int_constant(child(rhs, 1));
+      if (rop[0] == '-')
+        step = checked(0, step, '-', inc);
       has_step = 1;
     }
   }
   int has_inc = inc && inc->kind == JSON_OBJECT && inc->count;
   if (!has_step)
     unsupported(has_inc ? inc : s, "the loop increment must be '++i', 'i++', "
-                                   "'i += S' or 'i = i + S'");
-  if (step <= 0)
-    unsupported(inc, "the loop step must be positive");
+                                   "'i += S' or 'i = i + S' (counting up), or "
+                                   "'--i', 'i--', 'i -= S' or 'i = i - S' "
+                                   "(counting down)");
+  /* A zero step never reaches the bound; a step against the condition's
+     direction runs until the counter overflows. Neither is a loop affine.for
+     can express. */
+  if (step == 0)
+    unsupported(inc, "the loop step must not be zero");
+  if (up && step < 0)
+    unsupported(inc, "the loop step must be positive (the condition '%s' "
+                     "counts up)", cop);
+  if (down && step > 0)
+    unsupported(inc, "the loop step must be negative (the condition '%s' "
+                     "counts down)", cop);
 
-  /* The counter's last increment must not overflow its type (that would be
-     undefined behaviour or wrap-around, neither of which affine.for
-     models). */
-  __int128 last_increment = (__int128)ub - 1 + step;
-  if (last_increment > (__int128)type_max || lb < -2147483648LL)
-    unsupported(s, "the loop counter could overflow '%s'", vtype);
+  /* The values the counter takes, first, first + step, ... while the
+     condition holds: `trips` of them (exact integer arithmetic). */
+  int is_unsigned = strncmp(vtype, "unsigned", 8) == 0;
+  __int128 type_min = is_unsigned ? 0 : -(__int128)type_max - 1;
+  long long ub = 0;   /* counting up: the exclusive upper bound */
+  __int128 trips;
+  if (up) {
+    ub = bound;
+    if (strcmp(cop, "<=") == 0)
+      ub = checked(ub, 1, '+', cond);
+    trips = ub > lb ? ((__int128)ub - 1 - lb) / step + 1 : 0;
+    /* The counter's last increment must not overflow its type (that would
+       be undefined behaviour or wrap-around, neither of which affine.for
+       models). */
+    __int128 last_increment = (__int128)ub - 1 + step;
+    if (last_increment > (__int128)type_max || lb < -2147483648LL)
+      unsupported(s, "the loop counter could overflow '%s'", vtype);
+  } else {
+    /* i > B is i >= B + 1 */
+    __int128 lowest = strcmp(cop, ">") == 0 ? (__int128)bound + 1 : bound;
+    __int128 down_step = -(__int128)step;
+    trips = (__int128)lb >= lowest ? ((__int128)lb - lowest) / down_step + 1
+                                   : 0;
+    /* The decrement after the last iteration must not leave the type: for
+       an unsigned counter and the condition i >= 0 it would wrap around and
+       the loop would never end. */
+    __int128 exit_value = (__int128)lb - down_step * trips;
+    if (exit_value < type_min)
+      unsupported(s, "the loop counter could overflow '%s'", vtype);
+    if (trips > (__int128)9223372036854775807LL)
+      unsupported(s, "the loop runs more than 2^63 - 1 times");
+  }
+
+  /* An affine condition is evaluated before every iteration and once more
+     when the loop ends: at the counter values lb, lb + step, ..., lb + step *
+     trips. Every operation of it is linear in the counter, so its extremes
+     are at the first and the last of those values; it must not overflow its
+     C type at either. */
+  if (affine_cond) {
+    __int128 v;
+    __int128 last_eval = (__int128)lb + (__int128)step * trips;
+    if (!counter_eval(child(cond, 0), decl, lb, &v) ||
+        !counter_eval(child(cond, 0), decl, last_eval, &v))
+      unsupported(cond, "the loop condition could overflow (it is evaluated "
+                        "for the counter values %lld .. %lld)", lb,
+                  (long long)last_eval);
+  }
 
   if (writes_to(body, decl))
     unsupported(body, "the loop counter is modified in the loop body");
@@ -1001,12 +1233,19 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   e->name = name;
   /* The counter's first and last values; none for a loop that runs zero
      times. */
-  if (ub > lb) {
+  if (trips > 0) {
     e->has_values = 1;
     e->first = lb;
-    e->last = lb + step * ((ub - 1 - lb) / step);
+    e->last = (long long)((__int128)lb + (__int128)step * (trips - 1));
   }
-  if (step == 1)
+  if (down) {
+    /* affine.for counts up: the ordinal t = 0 .. trips-1, the counter
+       lb - |step| * t (see affine_index). */
+    e->descending = 1;
+    e->origin = lb;
+    e->stride = -step;
+    emit(tr, indent, "affine.for %s = 0 to %lld {", name, (long long)trips);
+  } else if (step == 1)
     emit(tr, indent, "affine.for %s = %lld to %lld {", name, lb, ub);
   else
     emit(tr, indent, "affine.for %s = %lld to %lld step %lld {", name, lb, ub,
@@ -1346,10 +1585,11 @@ typedef struct {
 } loop_frame;
 
 /* The constant trip count of `for (int i = LB; i < UB (or <=); ++i / i++ /
-   i += S / i = i + S)`, else -1. */
+   i += S / i = i + S)` or of the counting-down form `for (int i = LB; i > B
+   (or >=); --i / i-- / i -= S / i = i - S)`, else -1 (as for_stmt counts). */
 static long long for_trip_count(const json_value *n) {
   const json_value *init = child(n, 0), *cond = child(n, 2), *inc = child(n, 3);
-  long long lb, ub, step;
+  long long lb, bound, step;
   const json_value *lb_expr = NULL;
   if (strcmp(kind_of(init), "DeclStmt") == 0 && child_count(init) == 1 &&
       child_count(child(init, 0)) > 0)
@@ -1360,33 +1600,57 @@ static long long for_trip_count(const json_value *n) {
   if (!lb_expr || !try_int_constant(lb_expr, &lb))
     return -1;
   const char *cop = opcode_of(cond);
-  if (strcmp(kind_of(cond), "BinaryOperator") != 0 ||
-      (strcmp(cop, "<") && strcmp(cop, "<=")) ||
-      !try_int_constant(child(cond, 1), &ub))
+  int up = strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0;
+  int down = strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0;
+  /* the counter: the declared or assigned variable */
+  const char *decl = NULL;
+  if (strcmp(kind_of(init), "DeclStmt") == 0 && child_count(init) == 1)
+    decl = json_string(json_get(child(init, 0), "id"), NULL);
+  else if (strcmp(kind_of(init), "BinaryOperator") == 0)
+    decl = referenced_id(strip_parens_and_casts(child(init, 0), kNoOp));
+  if (strcmp(kind_of(cond), "BinaryOperator") == 0 && (up || down) && decl &&
+      !is_ref_to(child(cond, 0), decl) &&
+      affine_condition(cond, decl, &cop, &bound)) {
+    up = cop[0] == '<';
+    down = !up;
+  } else if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
+             !try_int_constant(child(cond, 1), &bound)) {
     return -1;
-  if (strcmp(cop, "<=") == 0)
-    ++ub;
+  }
   const char *iop = opcode_of(inc);
-  if (strcmp(kind_of(inc), "UnaryOperator") == 0 && strcmp(iop, "++") == 0) {
-    step = 1;
+  if (strcmp(kind_of(inc), "UnaryOperator") == 0 &&
+      (strcmp(iop, "++") == 0 || strcmp(iop, "--") == 0)) {
+    step = iop[0] == '+' ? 1 : -1;
   } else if (strcmp(kind_of(inc), "CompoundAssignOperator") == 0 &&
-             strcmp(iop, "+=") == 0) {
-    if (!try_int_constant(child(inc, 1), &step))
+             (strcmp(iop, "+=") == 0 || strcmp(iop, "-=") == 0)) {
+    if (!try_int_constant(child(inc, 1), &step) ||
+        __builtin_mul_overflow(step, iop[0] == '-' ? -1 : 1, &step))
       return -1;
   } else if (strcmp(kind_of(inc), "BinaryOperator") == 0 &&
              strcmp(iop, "=") == 0) {
     const json_value *rhs = strip_parens_and_casts(child(inc, 1),
                                                    kLValueToRValue);
+    const char *rop = opcode_of(rhs);
     if (strcmp(kind_of(rhs), "BinaryOperator") != 0 ||
-        strcmp(opcode_of(rhs), "+") != 0 ||
-        !try_int_constant(child(rhs, 1), &step))
+        (strcmp(rop, "+") != 0 && strcmp(rop, "-") != 0) ||
+        !try_int_constant(child(rhs, 1), &step) ||
+        __builtin_mul_overflow(step, rop[0] == '-' ? -1 : 1, &step))
       return -1;
   } else {
     return -1;
   }
-  if (step <= 0)
+  __int128 trips;
+  if (up && step > 0) {
+    __int128 ub = (__int128)bound + (strcmp(cop, "<=") == 0);
+    trips = ub > lb ? (ub - 1 - lb) / step + 1 : 0;
+  } else if (down && step < 0) {
+    __int128 lowest = (__int128)bound + (strcmp(cop, ">") == 0);
+    trips = (__int128)lb >= lowest ? ((__int128)lb - lowest) / -(__int128)step + 1
+                                   : 0;
+  } else {
     return -1;
-  return ub > lb ? (ub - lb + step - 1) / step : 0;
+  }
+  return trips > (__int128)9223372036854775807LL ? -1 : (long long)trips;
 }
 
 static void collect_decl_ids(const json_value *n, strvec *ids) {

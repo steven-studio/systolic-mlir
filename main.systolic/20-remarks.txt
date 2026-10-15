@@ -1,0 +1,14 @@
+main.c:79:3: remark: affine GEMM 16x16x16 lowered as 10 exact region(s) on 4 accelerator(s): makespan = 1245 cycles (read + compute + write), 10 output block(s)
+main.c:79:3: note: see current operation: 
+affine.for %arg3 = 0 to 16 {
+  affine.for %arg4 = 0 to 16 {
+    affine.for %arg5 = 0 to 16 {
+      %13 = affine.load %arg2[%arg3, %arg4] : memref<?x16xf32>
+      %14 = affine.load %arg0[%arg3, %arg5] : memref<?x16xf32>
+      %15 = affine.load %arg1[%arg5, %arg4] : memref<?x16xf32>
+      %16 = arith.mulf %14, %15 : f32
+      %17 = arith.addf %13, %16 : f32
+      affine.store %17, %arg2[%arg3, %arg4] : memref<?x16xf32>
+    }
+  }
+}

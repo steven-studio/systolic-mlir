@@ -1,0 +1,297 @@
+module {
+  llvm.func @fpga_matmul_tiled_auto_scheduled(i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+  func.func @gemm__systolic_kernel(%arg0: memref<?x16xf32> {llvm.noalias}, %arg1: memref<?x16xf32> {llvm.noalias}, %arg2: memref<?x16xf32> {llvm.noalias}) {
+    %alloca = memref.alloca() : memref<128xf32>
+    %alloca_0 = memref.alloca() : memref<128xf32>
+    %alloca_1 = memref.alloca() : memref<64xf32>
+    %subview = memref.subview %arg0[0, 0] [16, 16] [1, 1] : memref<?x16xf32> to memref<16x16xf32, strided<[16, 1]>>
+    %0 = bufferization.to_tensor %subview restrict : memref<16x16xf32, strided<[16, 1]>> to tensor<16x16xf32>
+    %subview_2 = memref.subview %arg1[0, 0] [16, 16] [1, 1] : memref<?x16xf32> to memref<16x16xf32, strided<[16, 1]>>
+    %1 = bufferization.to_tensor %subview_2 restrict : memref<16x16xf32, strided<[16, 1]>> to tensor<16x16xf32>
+    %subview_3 = memref.subview %arg2[0, 0] [16, 16] [1, 1] : memref<?x16xf32> to memref<16x16xf32, strided<[16, 1]>>
+    %2 = bufferization.to_tensor %subview_3 restrict writable : memref<16x16xf32, strided<[16, 1]>> to tensor<16x16xf32>
+    %extracted_slice = tensor.extract_slice %2[0, 0] [8, 8] [1, 1] : tensor<16x16xf32> to tensor<8x8xf32>
+    %3 = bufferization.to_buffer %extracted_slice : tensor<8x8xf32> to memref<8x8xf32>
+    %intptr = memref.extract_aligned_pointer_as_index %3 : memref<8x8xf32> -> index
+    %4 = arith.index_cast %intptr : index to i64
+    %5 = llvm.inttoptr %4 : i64 to !llvm.ptr
+    %6 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_4 = memref.subview %6[0, 0] [8, 16] [1, 1] : memref<16x16xf32> to memref<8x16xf32, strided<[16, 1]>>
+    %reinterpret_cast = memref.reinterpret_cast %alloca to offset: [0], sizes: [8, 16], strides: [16, 1] : memref<128xf32> to memref<8x16xf32>
+    memref.copy %subview_4, %reinterpret_cast : memref<8x16xf32, strided<[16, 1]>> to memref<8x16xf32>
+    %intptr_5 = memref.extract_aligned_pointer_as_index %reinterpret_cast : memref<8x16xf32> -> index
+    %7 = arith.index_cast %intptr_5 : index to i64
+    %8 = llvm.inttoptr %7 : i64 to !llvm.ptr
+    %9 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_6 = memref.subview %9[0, 0] [16, 8] [1, 1] : memref<16x16xf32> to memref<16x8xf32, strided<[16, 1]>>
+    %reinterpret_cast_7 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 8], strides: [8, 1] : memref<128xf32> to memref<16x8xf32>
+    memref.copy %subview_6, %reinterpret_cast_7 : memref<16x8xf32, strided<[16, 1]>> to memref<16x8xf32>
+    %intptr_8 = memref.extract_aligned_pointer_as_index %reinterpret_cast_7 : memref<16x8xf32> -> index
+    %10 = arith.index_cast %intptr_8 : index to i64
+    %11 = llvm.inttoptr %10 : i64 to !llvm.ptr
+    %c8_i32 = arith.constant 8 : i32
+    %c16_i32 = arith.constant 16 : i32
+    %c8_i32_9 = arith.constant 8 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_10 = arith.constant 0 : i32
+    %c125_i32 = arith.constant 125 : i32
+    %12 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c8_i32, %c16_i32, %c8_i32_9, %8, %11, %5, %c0_i32, %c0_i32_10, %c125_i32) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %13 = bufferization.to_tensor %3 restrict writable : memref<8x8xf32> to tensor<8x8xf32>
+    %inserted_slice = tensor.insert_slice %13 into %2[0, 0] [8, 8] [1, 1] : tensor<8x8xf32> into tensor<16x16xf32>
+    %extracted_slice_11 = tensor.extract_slice %inserted_slice[0, 8] [8, 8] [1, 1] : tensor<16x16xf32> to tensor<8x8xf32>
+    %14 = bufferization.to_buffer %extracted_slice_11 : tensor<8x8xf32> to memref<8x8xf32>
+    %intptr_12 = memref.extract_aligned_pointer_as_index %14 : memref<8x8xf32> -> index
+    %15 = arith.index_cast %intptr_12 : index to i64
+    %16 = llvm.inttoptr %15 : i64 to !llvm.ptr
+    %17 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_13 = memref.subview %17[0, 0] [8, 16] [1, 1] : memref<16x16xf32> to memref<8x16xf32, strided<[16, 1]>>
+    %reinterpret_cast_14 = memref.reinterpret_cast %alloca to offset: [0], sizes: [8, 16], strides: [16, 1] : memref<128xf32> to memref<8x16xf32>
+    memref.copy %subview_13, %reinterpret_cast_14 : memref<8x16xf32, strided<[16, 1]>> to memref<8x16xf32>
+    %intptr_15 = memref.extract_aligned_pointer_as_index %reinterpret_cast_14 : memref<8x16xf32> -> index
+    %18 = arith.index_cast %intptr_15 : index to i64
+    %19 = llvm.inttoptr %18 : i64 to !llvm.ptr
+    %20 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_16 = memref.subview %20[0, 8] [16, 8] [1, 1] : memref<16x16xf32> to memref<16x8xf32, strided<[16, 1], offset: 8>>
+    %reinterpret_cast_17 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 8], strides: [8, 1] : memref<128xf32> to memref<16x8xf32>
+    memref.copy %subview_16, %reinterpret_cast_17 : memref<16x8xf32, strided<[16, 1], offset: 8>> to memref<16x8xf32>
+    %intptr_18 = memref.extract_aligned_pointer_as_index %reinterpret_cast_17 : memref<16x8xf32> -> index
+    %21 = arith.index_cast %intptr_18 : index to i64
+    %22 = llvm.inttoptr %21 : i64 to !llvm.ptr
+    %c8_i32_19 = arith.constant 8 : i32
+    %c16_i32_20 = arith.constant 16 : i32
+    %c8_i32_21 = arith.constant 8 : i32
+    %c0_i32_22 = arith.constant 0 : i32
+    %c125_i32_23 = arith.constant 125 : i32
+    %c125_i32_24 = arith.constant 125 : i32
+    %23 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c8_i32_19, %c16_i32_20, %c8_i32_21, %19, %22, %16, %c0_i32_22, %c125_i32_23, %c125_i32_24) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %24 = bufferization.to_tensor %14 restrict writable : memref<8x8xf32> to tensor<8x8xf32>
+    %inserted_slice_25 = tensor.insert_slice %24 into %inserted_slice[0, 8] [8, 8] [1, 1] : tensor<8x8xf32> into tensor<16x16xf32>
+    %extracted_slice_26 = tensor.extract_slice %inserted_slice_25[8, 0] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %25 = bufferization.to_buffer %extracted_slice_26 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_27 = memref.extract_aligned_pointer_as_index %25 : memref<4x4xf32> -> index
+    %26 = arith.index_cast %intptr_27 : index to i64
+    %27 = llvm.inttoptr %26 : i64 to !llvm.ptr
+    %28 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_28 = memref.subview %28[8, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 128>>
+    %reinterpret_cast_29 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_28, %reinterpret_cast_29 : memref<4x16xf32, strided<[16, 1], offset: 128>> to memref<4x16xf32>
+    %intptr_30 = memref.extract_aligned_pointer_as_index %reinterpret_cast_29 : memref<4x16xf32> -> index
+    %29 = arith.index_cast %intptr_30 : index to i64
+    %30 = llvm.inttoptr %29 : i64 to !llvm.ptr
+    %31 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_31 = memref.subview %31[0, 0] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1]>>
+    %reinterpret_cast_32 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_31, %reinterpret_cast_32 : memref<16x4xf32, strided<[16, 1]>> to memref<16x4xf32>
+    %intptr_33 = memref.extract_aligned_pointer_as_index %reinterpret_cast_32 : memref<16x4xf32> -> index
+    %32 = arith.index_cast %intptr_33 : index to i64
+    %33 = llvm.inttoptr %32 : i64 to !llvm.ptr
+    %c4_i32 = arith.constant 4 : i32
+    %c16_i32_34 = arith.constant 16 : i32
+    %c4_i32_35 = arith.constant 4 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c0_i32_36 = arith.constant 0 : i32
+    %c117_i32 = arith.constant 117 : i32
+    %34 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32, %c16_i32_34, %c4_i32_35, %30, %33, %27, %c1_i32, %c0_i32_36, %c117_i32) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %35 = bufferization.to_tensor %25 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_37 = tensor.insert_slice %35 into %inserted_slice_25[8, 0] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_38 = tensor.extract_slice %inserted_slice_37[8, 4] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %36 = bufferization.to_buffer %extracted_slice_38 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_39 = memref.extract_aligned_pointer_as_index %36 : memref<4x4xf32> -> index
+    %37 = arith.index_cast %intptr_39 : index to i64
+    %38 = llvm.inttoptr %37 : i64 to !llvm.ptr
+    %39 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_40 = memref.subview %39[8, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 128>>
+    %reinterpret_cast_41 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_40, %reinterpret_cast_41 : memref<4x16xf32, strided<[16, 1], offset: 128>> to memref<4x16xf32>
+    %intptr_42 = memref.extract_aligned_pointer_as_index %reinterpret_cast_41 : memref<4x16xf32> -> index
+    %40 = arith.index_cast %intptr_42 : index to i64
+    %41 = llvm.inttoptr %40 : i64 to !llvm.ptr
+    %42 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_43 = memref.subview %42[0, 4] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 4>>
+    %reinterpret_cast_44 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_43, %reinterpret_cast_44 : memref<16x4xf32, strided<[16, 1], offset: 4>> to memref<16x4xf32>
+    %intptr_45 = memref.extract_aligned_pointer_as_index %reinterpret_cast_44 : memref<16x4xf32> -> index
+    %43 = arith.index_cast %intptr_45 : index to i64
+    %44 = llvm.inttoptr %43 : i64 to !llvm.ptr
+    %c4_i32_46 = arith.constant 4 : i32
+    %c16_i32_47 = arith.constant 16 : i32
+    %c4_i32_48 = arith.constant 4 : i32
+    %c2_i32 = arith.constant 2 : i32
+    %c0_i32_49 = arith.constant 0 : i32
+    %c117_i32_50 = arith.constant 117 : i32
+    %45 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_46, %c16_i32_47, %c4_i32_48, %41, %44, %38, %c2_i32, %c0_i32_49, %c117_i32_50) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %46 = bufferization.to_tensor %36 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_51 = tensor.insert_slice %46 into %inserted_slice_37[8, 4] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_52 = tensor.extract_slice %inserted_slice_51[8, 8] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %47 = bufferization.to_buffer %extracted_slice_52 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_53 = memref.extract_aligned_pointer_as_index %47 : memref<4x4xf32> -> index
+    %48 = arith.index_cast %intptr_53 : index to i64
+    %49 = llvm.inttoptr %48 : i64 to !llvm.ptr
+    %50 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_54 = memref.subview %50[8, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 128>>
+    %reinterpret_cast_55 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_54, %reinterpret_cast_55 : memref<4x16xf32, strided<[16, 1], offset: 128>> to memref<4x16xf32>
+    %intptr_56 = memref.extract_aligned_pointer_as_index %reinterpret_cast_55 : memref<4x16xf32> -> index
+    %51 = arith.index_cast %intptr_56 : index to i64
+    %52 = llvm.inttoptr %51 : i64 to !llvm.ptr
+    %53 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_57 = memref.subview %53[0, 8] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 8>>
+    %reinterpret_cast_58 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_57, %reinterpret_cast_58 : memref<16x4xf32, strided<[16, 1], offset: 8>> to memref<16x4xf32>
+    %intptr_59 = memref.extract_aligned_pointer_as_index %reinterpret_cast_58 : memref<16x4xf32> -> index
+    %54 = arith.index_cast %intptr_59 : index to i64
+    %55 = llvm.inttoptr %54 : i64 to !llvm.ptr
+    %c4_i32_60 = arith.constant 4 : i32
+    %c16_i32_61 = arith.constant 16 : i32
+    %c4_i32_62 = arith.constant 4 : i32
+    %c3_i32 = arith.constant 3 : i32
+    %c0_i32_63 = arith.constant 0 : i32
+    %c117_i32_64 = arith.constant 117 : i32
+    %56 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_60, %c16_i32_61, %c4_i32_62, %52, %55, %49, %c3_i32, %c0_i32_63, %c117_i32_64) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %57 = bufferization.to_tensor %47 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_65 = tensor.insert_slice %57 into %inserted_slice_51[8, 8] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_66 = tensor.extract_slice %inserted_slice_65[8, 12] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %58 = bufferization.to_buffer %extracted_slice_66 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_67 = memref.extract_aligned_pointer_as_index %58 : memref<4x4xf32> -> index
+    %59 = arith.index_cast %intptr_67 : index to i64
+    %60 = llvm.inttoptr %59 : i64 to !llvm.ptr
+    %61 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_68 = memref.subview %61[8, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 128>>
+    %reinterpret_cast_69 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_68, %reinterpret_cast_69 : memref<4x16xf32, strided<[16, 1], offset: 128>> to memref<4x16xf32>
+    %intptr_70 = memref.extract_aligned_pointer_as_index %reinterpret_cast_69 : memref<4x16xf32> -> index
+    %62 = arith.index_cast %intptr_70 : index to i64
+    %63 = llvm.inttoptr %62 : i64 to !llvm.ptr
+    %64 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_71 = memref.subview %64[0, 12] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 12>>
+    %reinterpret_cast_72 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_71, %reinterpret_cast_72 : memref<16x4xf32, strided<[16, 1], offset: 12>> to memref<16x4xf32>
+    %intptr_73 = memref.extract_aligned_pointer_as_index %reinterpret_cast_72 : memref<16x4xf32> -> index
+    %65 = arith.index_cast %intptr_73 : index to i64
+    %66 = llvm.inttoptr %65 : i64 to !llvm.ptr
+    %c4_i32_74 = arith.constant 4 : i32
+    %c16_i32_75 = arith.constant 16 : i32
+    %c4_i32_76 = arith.constant 4 : i32
+    %c1_i32_77 = arith.constant 1 : i32
+    %c117_i32_78 = arith.constant 117 : i32
+    %c117_i32_79 = arith.constant 117 : i32
+    %67 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_74, %c16_i32_75, %c4_i32_76, %63, %66, %60, %c1_i32_77, %c117_i32_78, %c117_i32_79) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %68 = bufferization.to_tensor %58 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_80 = tensor.insert_slice %68 into %inserted_slice_65[8, 12] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_81 = tensor.extract_slice %inserted_slice_80[12, 0] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %69 = bufferization.to_buffer %extracted_slice_81 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_82 = memref.extract_aligned_pointer_as_index %69 : memref<4x4xf32> -> index
+    %70 = arith.index_cast %intptr_82 : index to i64
+    %71 = llvm.inttoptr %70 : i64 to !llvm.ptr
+    %72 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_83 = memref.subview %72[12, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 192>>
+    %reinterpret_cast_84 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_83, %reinterpret_cast_84 : memref<4x16xf32, strided<[16, 1], offset: 192>> to memref<4x16xf32>
+    %intptr_85 = memref.extract_aligned_pointer_as_index %reinterpret_cast_84 : memref<4x16xf32> -> index
+    %73 = arith.index_cast %intptr_85 : index to i64
+    %74 = llvm.inttoptr %73 : i64 to !llvm.ptr
+    %75 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_86 = memref.subview %75[0, 0] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1]>>
+    %reinterpret_cast_87 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_86, %reinterpret_cast_87 : memref<16x4xf32, strided<[16, 1]>> to memref<16x4xf32>
+    %intptr_88 = memref.extract_aligned_pointer_as_index %reinterpret_cast_87 : memref<16x4xf32> -> index
+    %76 = arith.index_cast %intptr_88 : index to i64
+    %77 = llvm.inttoptr %76 : i64 to !llvm.ptr
+    %c4_i32_89 = arith.constant 4 : i32
+    %c16_i32_90 = arith.constant 16 : i32
+    %c4_i32_91 = arith.constant 4 : i32
+    %c2_i32_92 = arith.constant 2 : i32
+    %c117_i32_93 = arith.constant 117 : i32
+    %c117_i32_94 = arith.constant 117 : i32
+    %78 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_89, %c16_i32_90, %c4_i32_91, %74, %77, %71, %c2_i32_92, %c117_i32_93, %c117_i32_94) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %79 = bufferization.to_tensor %69 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_95 = tensor.insert_slice %79 into %inserted_slice_80[12, 0] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_96 = tensor.extract_slice %inserted_slice_95[12, 4] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %80 = bufferization.to_buffer %extracted_slice_96 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_97 = memref.extract_aligned_pointer_as_index %80 : memref<4x4xf32> -> index
+    %81 = arith.index_cast %intptr_97 : index to i64
+    %82 = llvm.inttoptr %81 : i64 to !llvm.ptr
+    %83 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_98 = memref.subview %83[12, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 192>>
+    %reinterpret_cast_99 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_98, %reinterpret_cast_99 : memref<4x16xf32, strided<[16, 1], offset: 192>> to memref<4x16xf32>
+    %intptr_100 = memref.extract_aligned_pointer_as_index %reinterpret_cast_99 : memref<4x16xf32> -> index
+    %84 = arith.index_cast %intptr_100 : index to i64
+    %85 = llvm.inttoptr %84 : i64 to !llvm.ptr
+    %86 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_101 = memref.subview %86[0, 4] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 4>>
+    %reinterpret_cast_102 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_101, %reinterpret_cast_102 : memref<16x4xf32, strided<[16, 1], offset: 4>> to memref<16x4xf32>
+    %intptr_103 = memref.extract_aligned_pointer_as_index %reinterpret_cast_102 : memref<16x4xf32> -> index
+    %87 = arith.index_cast %intptr_103 : index to i64
+    %88 = llvm.inttoptr %87 : i64 to !llvm.ptr
+    %c4_i32_104 = arith.constant 4 : i32
+    %c16_i32_105 = arith.constant 16 : i32
+    %c4_i32_106 = arith.constant 4 : i32
+    %c3_i32_107 = arith.constant 3 : i32
+    %c117_i32_108 = arith.constant 117 : i32
+    %c117_i32_109 = arith.constant 117 : i32
+    %89 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_104, %c16_i32_105, %c4_i32_106, %85, %88, %82, %c3_i32_107, %c117_i32_108, %c117_i32_109) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %90 = bufferization.to_tensor %80 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_110 = tensor.insert_slice %90 into %inserted_slice_95[12, 4] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_111 = tensor.extract_slice %inserted_slice_110[12, 8] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %91 = bufferization.to_buffer %extracted_slice_111 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_112 = memref.extract_aligned_pointer_as_index %91 : memref<4x4xf32> -> index
+    %92 = arith.index_cast %intptr_112 : index to i64
+    %93 = llvm.inttoptr %92 : i64 to !llvm.ptr
+    %94 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_113 = memref.subview %94[12, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 192>>
+    %reinterpret_cast_114 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_113, %reinterpret_cast_114 : memref<4x16xf32, strided<[16, 1], offset: 192>> to memref<4x16xf32>
+    %intptr_115 = memref.extract_aligned_pointer_as_index %reinterpret_cast_114 : memref<4x16xf32> -> index
+    %95 = arith.index_cast %intptr_115 : index to i64
+    %96 = llvm.inttoptr %95 : i64 to !llvm.ptr
+    %97 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_116 = memref.subview %97[0, 8] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 8>>
+    %reinterpret_cast_117 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_116, %reinterpret_cast_117 : memref<16x4xf32, strided<[16, 1], offset: 8>> to memref<16x4xf32>
+    %intptr_118 = memref.extract_aligned_pointer_as_index %reinterpret_cast_117 : memref<16x4xf32> -> index
+    %98 = arith.index_cast %intptr_118 : index to i64
+    %99 = llvm.inttoptr %98 : i64 to !llvm.ptr
+    %c4_i32_119 = arith.constant 4 : i32
+    %c16_i32_120 = arith.constant 16 : i32
+    %c4_i32_121 = arith.constant 4 : i32
+    %c1_i32_122 = arith.constant 1 : i32
+    %c234_i32 = arith.constant 234 : i32
+    %c117_i32_123 = arith.constant 117 : i32
+    %100 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_119, %c16_i32_120, %c4_i32_121, %96, %99, %93, %c1_i32_122, %c234_i32, %c117_i32_123) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %101 = bufferization.to_tensor %91 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_124 = tensor.insert_slice %101 into %inserted_slice_110[12, 8] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    %extracted_slice_125 = tensor.extract_slice %inserted_slice_124[12, 12] [4, 4] [1, 1] : tensor<16x16xf32> to tensor<4x4xf32>
+    %102 = bufferization.to_buffer %extracted_slice_125 : tensor<4x4xf32> to memref<4x4xf32>
+    %intptr_126 = memref.extract_aligned_pointer_as_index %102 : memref<4x4xf32> -> index
+    %103 = arith.index_cast %intptr_126 : index to i64
+    %104 = llvm.inttoptr %103 : i64 to !llvm.ptr
+    %105 = bufferization.to_buffer %0 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_127 = memref.subview %105[12, 0] [4, 16] [1, 1] : memref<16x16xf32> to memref<4x16xf32, strided<[16, 1], offset: 192>>
+    %reinterpret_cast_128 = memref.reinterpret_cast %alloca to offset: [0], sizes: [4, 16], strides: [16, 1] : memref<128xf32> to memref<4x16xf32>
+    memref.copy %subview_127, %reinterpret_cast_128 : memref<4x16xf32, strided<[16, 1], offset: 192>> to memref<4x16xf32>
+    %intptr_129 = memref.extract_aligned_pointer_as_index %reinterpret_cast_128 : memref<4x16xf32> -> index
+    %106 = arith.index_cast %intptr_129 : index to i64
+    %107 = llvm.inttoptr %106 : i64 to !llvm.ptr
+    %108 = bufferization.to_buffer %1 read_only : tensor<16x16xf32> to memref<16x16xf32>
+    %subview_130 = memref.subview %108[0, 12] [16, 4] [1, 1] : memref<16x16xf32> to memref<16x4xf32, strided<[16, 1], offset: 12>>
+    %reinterpret_cast_131 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 4], strides: [4, 1] : memref<128xf32> to memref<16x4xf32>
+    memref.copy %subview_130, %reinterpret_cast_131 : memref<16x4xf32, strided<[16, 1], offset: 12>> to memref<16x4xf32>
+    %intptr_132 = memref.extract_aligned_pointer_as_index %reinterpret_cast_131 : memref<16x4xf32> -> index
+    %109 = arith.index_cast %intptr_132 : index to i64
+    %110 = llvm.inttoptr %109 : i64 to !llvm.ptr
+    %c4_i32_133 = arith.constant 4 : i32
+    %c16_i32_134 = arith.constant 16 : i32
+    %c4_i32_135 = arith.constant 4 : i32
+    %c2_i32_136 = arith.constant 2 : i32
+    %c234_i32_137 = arith.constant 234 : i32
+    %c117_i32_138 = arith.constant 117 : i32
+    %111 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c4_i32_133, %c16_i32_134, %c4_i32_135, %107, %110, %104, %c2_i32_136, %c234_i32_137, %c117_i32_138) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    %112 = bufferization.to_tensor %102 restrict writable : memref<4x4xf32> to tensor<4x4xf32>
+    %inserted_slice_139 = tensor.insert_slice %112 into %inserted_slice_124[12, 12] [4, 4] [1, 1] : tensor<4x4xf32> into tensor<16x16xf32>
+    bufferization.materialize_in_destination %inserted_slice_139 in restrict writable %subview_3 : (tensor<16x16xf32>, memref<16x16xf32, strided<[16, 1]>>) -> ()
+    return
+  }
+}
+

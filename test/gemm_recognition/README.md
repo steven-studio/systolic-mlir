@@ -9,14 +9,18 @@ board). Everything here is a test: nothing under `test/gemm_recognition/` modifi
 ```
 test/gemm_recognition/
 ├── README.md                this file: layout, the support specification, how to run, the loop
-├── showcase/                the hundred (+ extended): positive/, negative/, extended/, manifest.json,
-│                            CASES.md, README.md
-├── generator/               casespec.py (model, oracle, analysis, predictor, spec, C emitter),
-│                            showcase_cases.py (the hundred's specs), make_showcase.py,
+├── showcase/                the hundred (case_001..100), the boundary cases added after it
+│                            (case_101.., section 8), the extended cases (ext_*) and the MLIR-level
+│                            cases (mlir_*): positive/, negative/, extended/ (each case in the set
+│                            its SPECIFICATION puts it in), manifest.json, CASES.md, INVENTORY.md
+│                            (+ inventory.json: per-case purpose, expectation, basis, index forms,
+│                            loops, execution evidence, spec questions), README.md
+├── generator/               casespec.py (model, oracle, analysis, predictor, spec, C and MLIR
+│                            emitters), showcase_cases.py (every case's spec), make_showcase.py,
 │                            gen_cases.py (the unbounded generator)
 ├── scripts/                 stages.py (one program through every stage), verdict.py (judging),
 │                            run_showcase.py, loop.py (the closed loop), regression.py (the gate),
-│                            run_issue.sh (issue reproducers)
+│                            run_issue.sh (issue reproducers), inventory.py, test_permissions.py
 ├── failures/                issues/ISSUE-NNN-*/ (recorded compiler issues: record, reproducers,
 │                            lit XFAIL test), <stamp>_<id>/ (new findings of the loop),
 │                            known_issue_log.jsonl
@@ -27,7 +31,7 @@ test/gemm_recognition/
 └── reports/                 actual results of run_showcase.py (json + md); latest_<mode>.json
 ```
 
-## 1. What the compiler supports (read from the sources at commit 6e25528)
+## 1. What the compiler supports (read from the sources at commit 6e25528, with the fixes of ISSUE-001 and ISSUE-002 noted)
 
 Stage by stage. "Documented" means the sources or the existing tests say so explicitly.
 
@@ -38,7 +42,15 @@ are affine expressions of the enclosing counters (`+`, `-`, constant `*`); assig
 elements (`=`, `+=`, `-=`, `*=`, `/=`); `+ - * /` and unary `-` on float/double. Outside the
 subset (an error, never an approximation): local variables, `if`, `while`, calls, pointer
 arithmetic, globals, integer arrays, non-affine or symbolic subscripts, symbolic bounds,
-downward loops, `!=` conditions, `return` with a value.
+`!=` conditions, `return` with a value. Loops that count down (`i > B | i >= B; --i | i-- |
+i -= S | i = i - S`, since 2026-10-15, ISSUE-004) are translated to the ordinal loop
+`affine.for %i = 0 to N` (N the trip count) with the counter `LB - S * %i` (affine.for only
+counts up); a zero step, a step against the condition's direction, and an unsigned counter that
+would wrap below 0 are errors. A condition may also compare an affine expression of the counter
+with a constant (`2 * i - 3 > 0`, `100 - 3 * i > 0`): it is translated as the equivalent
+comparison of the counter (exact over the integers: `i > 1`, `i <= 33`), and refused when the
+expression could overflow its C type at any counter value it is evaluated at -- including the
+evaluation that ends the loop -- or is unsigned.
 
 **Recognizer** (`recognizeLogicalMatmul`): a perfect chain of `affine.for` ops (from some anchor
 down to the innermost) whose innermost body holds exactly three `affine.load`, one
@@ -47,24 +59,40 @@ down to the innermost) whose innermost body holds exactly three `affine.load`, o
 through the same map and indices; every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
-all three, followed by `A = (I, K)`, `B = (K, J)`, `C = (I, J)` **as identical affine
-expressions** for each shared coordinate, pairwise distinct; the expressions are linear forms
-(no mod/floordiv). Static or symbolic (`0 to %n`) bounds. A repetition loop (used by no
+all three, followed by `A = (I, K)`, `B = (K, J)`, `C = (I, J)` where the two operands that share
+a coordinate must address **the same coordinate, each through its own view**
+(`matchSharedCoordinate`, since the fix of ISSUE-001): identical expressions, or both
+`s · g + o` for one linear form `g` of the loop IVs with integer `s > 0` — a constant offset or a
+positive stride on one operand only (`C[i+8][j]` with `A[i][k]`, `C[2i][j]` with `A[i][k]`); then
+the coordinate is the primitive form `g` and the operand's view `(s, o)` is recorded
+(`LogicalMatmul::viewA/B/C`, the factor maps `phiA/B/C`). Expressions over different loop
+combinations (`4 i0 + i1` vs `8 i0 + i1`), of opposite direction (`i` vs `7 - i`) or without a
+loop are not one coordinate (refused at recognition). I, J, K pairwise distinct; the
+expressions are linear forms (no mod/floordiv). At 6e25528 the rule was expression identity
+(ISSUE-001, fixed). Static or symbolic (`0 to %n`) bounds. A repetition loop (used by no
 access) must be outside the chain — the lowering pass first moves one that sits between the
 GEMM's loops outward when the interchange is legal (not inside a reduction loop).
 
 **Dense partition** (`getDenseLogicalGemm`): no partition prefix (batched is refused with a
-message); static bounds; every loop drives exactly one of I, J, K with a non-negative
-coefficient; the loops of one coordinate enumerate it densely (sorted by scale = coefficient ×
-step, each scale is the previous scale × the previous loop's trip count). Tiled/split
-coordinates, steps, origins, offsets and strides are therefore in; coupled (`i + j`), singular
-and reversed mappings are out.
+message); static bounds (a loop of zero iterations has no normalized extent either and is
+refused with its own message, "a loop of the nest has no iteration (an empty GEMM ...)" — spec
+question SQ-2; a coordinate no loop drives, a constant subscript, is refused — SQ-4, ISSUE-003);
+every loop drives exactly one
+of I, J, K with a non-negative coefficient; the loops of one coordinate enumerate it densely
+(sorted by scale = coefficient × step, each scale is the previous scale × the previous loop's
+trip count). Tiled/split coordinates, steps (dividing the bound or not), origins, offsets and
+strides are therefore in; coupled (`i + j`), singular and reversed mappings are out. Every
+product and sum of coefficients, steps, origins and extents is computed in checked 64-bit
+arithmetic; one that does not fit refuses the nest ("... overflows 64-bit arithmetic";
+ISSUE-002, fixed — at 6e25528 it wrapped around).
 
 **Lowering** (`--affine-matmul-to-systolic`): rank-2 identity-layout memrefs; each operand's
-view built from the coordinate's `(offset, scale, extent)`; offsets ≥ 0 and in bounds on static
-dims; equal element types; A and B provably disjoint from C (`restrict` / fresh allocations, or
-`assume-no-alias`); `A × A` through one view, not two different views of one memref; the fleet
-plan's tiles proven an exact partition.
+`memref.subview` built from **its own view** of the coordinate's `(offset, scale, extent)`:
+offset `o + s · offset`, stride `s · scale` (since the fix of ISSUE-001; before, one view per
+coordinate); offsets ≥ 0 and the operand's last index in bounds on static dims, in checked
+arithmetic (ISSUE-002); equal element types; A and B provably disjoint from C (`restrict` /
+fresh allocations, or `assume-no-alias`); `A × A` through one view, not two different views of
+one memref; the fleet plan's tiles proven an exact partition.
 
 **Driver** (`systolic-cc`): fp32 only (double arrays stay on the host), not `static`/`inline`,
 not from a macro; `--verify` compares every offloaded call with the function as written.
@@ -85,12 +113,17 @@ the following are *also* GEMMs (and are marked as such) but are **outside** this
 specification by explicit, documented decision (DOCUMENTED_LIMITATION): batched GEMMs
 (partition prefix), transposed operand views (the operand convention is row-major (I,K)/(K,J)/(I,J)),
 alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the nest or a scalar
-accumulator, double or mixed precision, operands that may alias C, a coordinate that decreases
-along its loop (negative stride), a repetition loop of more than one iteration inside a reduction
-loop of more than one iteration (hoisting it would reorder the accumulation; with a single-iteration
-reduction the hoist is legal and the nest is offloaded — `failures/resolved/NOTE-001`), two
-different views of one array as A and B, and matrix-vector products (two loop dimensions, rank-1
-operands).
+accumulator, double or mixed precision, operands that may alias C, one operand reading a shared
+coordinate in the direction opposite to the other's (`A[7 - i]` with `C[i]`: no strided view of A
+matches; a coordinate that decreases in every operand — a reversed subscript such as `7 - i` on
+both, or a loop that counts down — is a dense GEMM and supported since ISSUE-004: only the order
+in which the nest visits the points differs), a repetition loop of more than
+one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
+accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
+`failures/resolved/NOTE-001`), two different views of one array as A and B, and matrix-vector
+products (two loop dimensions, rank-1 operands). The C front end's subset (section 1) refuses
+some of these before the recognizer sees them (a counting-down loop: "the loop condition must be
+'counter < bound' or 'counter <= bound'"); the stage does not change the classification.
 
 **Inside the specification (must be ACCEPTED):** every dense GEMM not listed above — any loop
 order, origins, steps, `<`/`<=`, any affine offsets and strides on any operand (**per operand**:
@@ -102,15 +135,48 @@ operand), coordinates split over several loops in any order, repetition loops ou
 reduction, the GEMM inside larger arrays, `A × A`.
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products, nests without a reduction
-coordinate, the reduction index in the output, coupled (`C[i+j][j]`) and skewed placements
-(GEMM values over a non-rectangular region are not one dense GEMM), singular mappings, products
-with a third factor or sums, no accumulation. The compiler must also never offload anything the
-specification refuses (a FALSE_POSITIVE is the most serious finding: wrong code).
+coordinate, the reduction index in the output, coupled (`C[i+j][j]`, `A[i][i+k]`) and skewed
+placements (GEMM values over a non-rectangular region are not one dense GEMM), an output on a
+diagonal (`C[i][i]`) or an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), singular
+mappings, a non-box iteration domain (a bound that depends on another counter), products with a
+third factor or sums, no accumulation; and nests whose subscripts leave a static array dimension
+(undefined as programs: there is no GEMM to lower, and the refusal must say "out of bounds" or
+"overflows 64-bit arithmetic", never come from a wrapped-around value — ISSUE-002). The compiler
+must also never offload anything the specification refuses (a FALSE_POSITIVE is the most serious
+finding: wrong code).
 
-**Gaps found so far** (the specification says ACCEPT, the compiler refuses): per-operand offsets
-or strides on a shared coordinate — **ISSUE-001**, `failures/issues/`. Specification refinements
-made after a measurement (never to make a failing compiler look green; each one argued from the
-mathematics and the documented rule): `failures/resolved/NOTE-*.md`.
+**UNDETERMINED (spec questions, recorded in `generator/casespec.py: SPEC_QUESTIONS` and in
+`showcase/manifest.json`):** a case whose expectation depends on one is run and its behaviour
+recorded, its program must still compute the right result, and the question is decided here, in
+writing — never by what the compiler happens to do. Two verdicts, neither of them a PASS:
+**expected_refusal** — the compiler refused the case at the predicted stage with the predicted
+reason and the program's check passed (a conservative answer that keeps the program on the host);
+reported and counted on its own, not blocking; **spec_open** — the compiler offloaded it, a choice
+the specification has not made: `run_showcase.py` / `regression.py` exit non-zero while one is
+present unless `--allow-spec-open` is given (as for `--allow-known-issues`). A stage that differs
+from the prediction is `unexpected_stage`, as for any case. The questions are also listed on
+their own in `SPEC_QUESTIONS.md`. Open now:
+
+- **SQ-1** — a coordinate split over several loops with a different mixed radix per operand
+  (`A[4 i0 + i1][k]` with `C[8 i0 + i1][j]`): the definition admits it (each subscript is an
+  injective affine function of the coordinate's loops), the "inside" list does not name it, and
+  the operand views are not strided sub-matrices (a rank-2 `memref.subview` cannot express them).
+  Inside (with a copy or a rank-3 view) or a documented limitation? Cases case_128, mlir_012.
+- **SQ-2** — an empty GEMM (a loop of zero iterations): offload it with zero invocations, or
+  refuse it? Either keeps the result correct. Cases case_129–131, mlir_013. (Refused with its own
+  message since 2026-10-15; before, with the message meant for symbolic bounds.)
+- **SQ-3** — a symbolic loop bound (`affine.for 0 to %n`), unreachable from the C front end: is
+  the MLIR path's refusal a documented limitation, or must dynamic extents be supported? Case
+  mlir_011.
+
+**Gaps found and closed** (the specification says ACCEPT, the compiler refused): per-operand
+offsets or strides on a shared coordinate — **ISSUE-001**, fixed (`failures/issues/ISSUE-001-*/`,
+section 11 of the record); the unsound bounds arithmetic — **ISSUE-002**, fixed; a constant
+coordinate crashed the dense partition — **ISSUE-003**, fixed (refused; SQ-4 open). Changed on
+request: loops that count down and coordinates that decrease in every operand — **ISSUE-004**,
+supported since 2026-10-15 (README §1, §2). Specification
+refinements made after a measurement (never to make a failing compiler look green; each one
+argued from the mathematics and the documented rule): `failures/resolved/NOTE-*.md`.
 
 ## 3. Running the showcase set
 
@@ -131,8 +197,17 @@ Per case the runner executes, each a real tool invocation recorded with its comm
 unless `--allow-known-issues`), **fixed_issue** (a predicted refusal no longer happens),
 **unexpected_stage** (behaviour differs from the prediction: analyse), **false_positive**,
 **fail_runtime** (wrong result, `--verify` mismatch, failed invocations, crash), **test_bug**
-(references disagree), **tool_error**. Results: `reports/`. Nothing is ever marked PASS without
-having run; a stage that did not run is `not_run` with the reason.
+(references disagree), **tool_error**, **expected_refusal** (an UNDETERMINED case refused at
+the predicted stage with the predicted reason, the program's check passed: not a PASS, not
+blocking), **spec_open** (an UNDETERMINED case the compiler offloaded: not a PASS, and the run
+fails on it unless `--allow-spec-open`). Results:
+`reports/`. Nothing is ever marked PASS without having run; a stage that did not run is
+`not_run` with the reason. MLIR-level cases (`mlir_*`, manifest `kind: mlir`) run the discovery
+and lowering passes only — recognition, dense partition, operand views and the lowering's
+remark are compared with the manifest, nothing is compiled by `systolic-cc` or executed, and
+their report rows say so (`not_applicable`). After a run, `python3 scripts/inventory.py` writes
+`showcase/INVENTORY.md`: every case with its expectation, basis, index forms, loops, the
+execution evidence of the latest report, and the spec question it depends on, if any.
 
 ## 4. The unbounded generator
 
@@ -221,7 +296,7 @@ edited by accident afterwards — a case file is evidence, and its content must 
 
 | path | writer |
 |---|---|
-| `showcase/{positive,negative,extended}/*.c` | `generator/make_showcase.py` (create and regenerate) |
+| `showcase/{positive,negative,extended}/*.c` and `*.mlir` | `generator/make_showcase.py` (create and regenerate; the MLIR-level cases too) |
 | `generated/batch_*/*.c` | `generator/gen_cases.py` (random / enumerate / boundary; also when started by `scripts/loop.py`) |
 | `failures/<stamp>_<id>/<id>.c` and `.../minimized/<id>.c` | `scripts/loop.py: write_failure()` |
 | `regression/corpus/*.c` | `scripts/loop.py: add_to_corpus()` |
@@ -248,3 +323,32 @@ something when the tests run as a non-root user.
 mode, `make_showcase.py` create / unchanged / refuse / `--force`, the loop's failure record,
 minimized program and corpus, the `--reproduce` byte-exactness, and that every tool file and
 directory under `test/gemm_recognition/` keeps its mode); it needs no compiler.
+
+## 8. The boundary review (cases added after the hundred)
+
+The hundred cover: every loop order and statement spelling, shapes from 1×1×1 to 32×32×32 and
+K-folding, non-zero origins, steps that divide their bounds, offsets and strides shared by the
+operands, split (tiled) coordinates, repetition loops, sub-matrices, `A × A`, syntax variants;
+negatives: element-wise, matrix-vector, batched, coupled, skewed and singular mappings,
+transposed operands, the reduction index in the output, alpha, no accumulation, an imperfect
+nest, double precision. What they left out, and what was added — each case in the set its
+specification puts it in, never the set the compiler's behaviour would suggest:
+
+| boundary | cases | specification |
+|---|---|---|
+| steps that do not divide the bound; three different steps; `<=` with a step; origin + step | case_101–105 | ACCEPT |
+| a shared coordinate spelled differently by its two operands: offset on B (K or J), different offsets on A and C, stride on A / B / C / K, strides 2 and 3, every coordinate at once | case_106–114, mlir_014 | ACCEPT (ISSUE-001's family, offloaded since the fix) |
+| a `long` counter past INT_MAX; an `int` counter whose last increment is INT_MAX; a 2^62 coefficient on a single-iteration loop; an `unsigned` counter | case_115–118, mlir_015 | ACCEPT |
+| an affine loop condition counting down: `for (int i = 100; 2 * i - 3 > 0; i--)` (99 iterations, rows 2..100) | case_132 | ACCEPT |
+| loops that count down (`i -= 2`, `--k`, `j > 0; j -= 3`, mixed directions) | case_119–122 | ACCEPT since ISSUE-004 (OUT_OF_SCOPE before; the cases stay in negative/) |
+| one operand reversed against the other (`A[7 - i]` with `C[i]`) | mlir_010 | OUT_OF_SCOPE (opposite directions) |
+| the output on its diagonal, an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), coupled subscripts (`A[i][i+k]`, `C[i+k][j]`), a triangular domain | case_123–127, mlir_009 | REJECT |
+| out-of-bounds views on static shapes (offset, per-operand stride, offset + extent by one, 2^62 offset) | mlir_001–003, mlir_006 | REJECT (undefined program) |
+| coefficients whose products overflow int64 (scale 2^62 × extent, a per-operand view's last index, the coordinate's exclusive end) | mlir_004, 005, 007, 008 | REJECT; found and fixed ISSUE-002 |
+| per-operand mixed radix of a split coordinate; empty loops (M, N or K = 0, `<=` form); a symbolic bound | case_128–131, mlir_011–013 | UNDETERMINED (SQ-1, SQ-2, SQ-3) |
+
+Not added, and why: a C-level out-of-bounds or overflowing program is undefined behaviour and
+cannot carry a CPU reference (those boundaries are MLIR-level cases); a loop whose counter would
+overflow (`i <= INT_MAX; ++i`) is undefined as a C program as well (the front end refuses it:
+"the loop counter could overflow"); a triangular C loop (`j = i`) cannot be written in the
+front end's subset (static bounds) and is covered at the MLIR level.
