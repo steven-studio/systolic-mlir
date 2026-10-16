@@ -26289,6 +26289,706 @@
    }
   },
   {
+   "id": "ext_019",
+   "kind": "c",
+   "file": "extended/ext_019.c",
+   "name": "a_and_b_transposed",
+   "set": "extended",
+   "category": "transposed",
+   "kernel": "ext_019_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "A_transposed",
+    "B_transposed"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 6,
+     "step": 1,
+     "cmp": "<",
+     "trip": 6
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      8,
+      4
+     ],
+     "subscripts": [
+      "k",
+      "i"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      6,
+      8
+     ],
+     "subscripts": [
+      "j",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      4,
+      6
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": {
+    "I": 4,
+    "J": 6,
+    "K": 8
+   },
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "identity"
+     ],
+     "B": [
+      "identity",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {
+     "I": {
+      "operands": "A/C",
+      "relation": "identical",
+      "expressions": [
+       "i",
+       "i"
+      ]
+     },
+     "J": {
+      "operands": "B/C",
+      "relation": "identical",
+      "expressions": [
+       "j",
+       "j"
+      ]
+     },
+     "K": {
+      "operands": "A/B",
+      "relation": "identical",
+      "expressions": [
+       "k",
+       "k"
+      ]
+     }
+    }
+   },
+   "loop_summary": [
+    "i [I]: 0 <= i < 4, step 1, 4 iteration(s)",
+    "j [J]: 0 <= j < 6, step 1, 6 iteration(s)",
+    "k [K]: 0 <= k < 8, step 1, 8 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -106,
+   "math_note": "C = A^T B^T: A[k][i] and B[j][k], both factors storing their roles in\nthe other order; rectangular (M = 4, N = 6, K = 8), so a swapped role\ncould not go unnoticed.  Offloaded (two transposed views).",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_019.c -o ext_019 && ./ext_019",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_019.c -o ext_019 && ./ext_019",
+    "stages": "python3 scripts/run_showcase.py --case ext_019"
+   }
+  },
+  {
+   "id": "ext_020",
+   "kind": "c",
+   "file": "extended/ext_020.c",
+   "name": "a_and_b_transposed_tiles",
+   "set": "extended",
+   "category": "transposed",
+   "kernel": "ext_020_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "A_transposed",
+    "B_transposed"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 16,
+     "step": 1,
+     "cmp": "<",
+     "trip": 16
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 16,
+     "step": 1,
+     "cmp": "<",
+     "trip": 16
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 16,
+     "step": 1,
+     "cmp": "<",
+     "trip": 16
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      16,
+      16
+     ],
+     "subscripts": [
+      "k",
+      "i"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      16,
+      16
+     ],
+     "subscripts": [
+      "j",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      16,
+      16
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": {
+    "I": 16,
+    "J": 16,
+    "K": 16
+   },
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "identity"
+     ],
+     "B": [
+      "identity",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {
+     "I": {
+      "operands": "A/C",
+      "relation": "identical",
+      "expressions": [
+       "i",
+       "i"
+      ]
+     },
+     "J": {
+      "operands": "B/C",
+      "relation": "identical",
+      "expressions": [
+       "j",
+       "j"
+      ]
+     },
+     "K": {
+      "operands": "A/B",
+      "relation": "identical",
+      "expressions": [
+       "k",
+       "k"
+      ]
+     }
+    }
+   },
+   "loop_summary": [
+    "i [I]: 0 <= i < 16, step 1, 16 iteration(s)",
+    "j [J]: 0 <= j < 16, step 1, 16 iteration(s)",
+    "k [K]: 0 <= k < 16, step 1, 16 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -3926,
+   "math_note": "ext_019 at 16 x 16 x 16: ten tiles on the fleet, each a slice of the\ntransposed views, staged into contiguous scratch tiles.  Offloaded.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_020.c -o ext_020 && ./ext_020",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_020.c -o ext_020 && ./ext_020",
+    "stages": "python3 scripts/run_showcase.py --case ext_020"
+   }
+  },
+  {
+   "id": "ext_021",
+   "kind": "c",
+   "file": "extended/ext_021.c",
+   "name": "a_and_b_transposed_batch_views",
+   "set": "extended",
+   "category": "batched",
+   "kernel": "ext_021_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": false,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "b",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    },
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      4,
+      5
+     ],
+     "subscripts": [
+      "k",
+      "i + b"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      4,
+      5
+     ],
+     "subscripts": [
+      "j",
+      "k + b"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      2,
+      4,
+      4
+     ],
+     "subscripts": [
+      "b",
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "coupled"
+     ],
+     "B": [
+      "identity",
+      "coupled"
+     ],
+     "C": [
+      "identity",
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "b [P]: 0 <= b < 2, step 1, 2 iteration(s)",
+    "i [I]: 0 <= i < 4, step 1, 4 iteration(s)",
+    "j [J]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 4, step 1, 4 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": false,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-007",
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 559,
+   "math_note": "C[b][i][j] += A[k][i + b] B[j][k + b]: both factors transposed, both\nviews moving with the batch loop b (ISSUE-007): per b,\nA'(I, K) = A(K, I + b) and B'(K, J) = B(J, K + b).  Offloaded.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_021.c -o ext_021 && ./ext_021",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_021.c -o ext_021 && ./ext_021",
+    "stages": "python3 scripts/run_showcase.py --case ext_021"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (K, mixed:I+P)",
+    "B has a subscript that couples loops of different coordinates (J, mixed:K+P)"
+   ]
+  },
+  {
+   "id": "ext_022",
+   "kind": "c",
+   "file": "extended/ext_022.c",
+   "name": "b_transposed_backwards",
+   "set": "extended",
+   "category": "transposed",
+   "kernel": "ext_022_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "B_transposed",
+    "J_views_differ"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      8,
+      8
+     ],
+     "subscripts": [
+      "i",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      8,
+      8
+     ],
+     "subscripts": [
+      "7 - j",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      8,
+      8
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": {
+    "I": 8,
+    "J": 8,
+    "K": 8
+   },
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "identity"
+     ],
+     "B": [
+      "reversed",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {
+     "I": {
+      "operands": "A/C",
+      "relation": "identical",
+      "expressions": [
+       "i",
+       "i"
+      ]
+     },
+     "J": {
+      "operands": "B/C",
+      "relation": "own offset",
+      "expressions": [
+       "-j + 7",
+       "j"
+      ]
+     },
+     "K": {
+      "operands": "A/B",
+      "relation": "identical",
+      "expressions": [
+       "k",
+       "k"
+      ]
+     }
+    }
+   },
+   "loop_summary": [
+    "i [I]: 0 <= i < 8, step 1, 8 iteration(s)",
+    "j [J]: 0 <= j < 8, step 1, 8 iteration(s)",
+    "k [K]: 0 <= k < 8, step 1, 8 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 1613,
+   "math_note": "B[7 - j][k]: B transposed and read backwards along J (a negative stride\nin B's view, then the transpose).  Offloaded.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_022.c -o ext_022 && ./ext_022",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_022.c -o ext_022 && ./ext_022",
+    "stages": "python3 scripts/run_showcase.py --case ext_022"
+   }
+  },
+  {
    "id": "case_128",
    "kind": "c",
    "file": "extended/case_128.c",
@@ -27146,7 +27846,7 @@
  "counts": {
   "positive": 101,
   "negative": 39,
-  "extended": 25,
+  "extended": 29,
   "mlir": 15
  },
  "spec_questions": {

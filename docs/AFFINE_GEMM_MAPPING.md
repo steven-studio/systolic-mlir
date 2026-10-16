@@ -642,3 +642,75 @@ Lowering (`test/Systolic/affine_gemm_batch_views.mlir` @phase1_target):
 | `test_permissions.py` | 48/48 |
 | found by the oracle during Phase 1 and fixed | a batch coordinate filling several dimensions of C (one partition row per such dimension), and a coupled positional reading pre-empting the analysis by groups (16.4): 7 refused valid mappings, now lowered and verified |
 | FPGA board | NOT RUN (no board) |
+
+## 17. Phase 2: A and B transposed, alone or together (2026-10-16)
+
+A factor is **transposed** when its memref stores its two roles in the other order: A[k][i]
+holds A'(I, K) with K in dimension 0, B[j][k] holds B'(K, J) with K in dimension 1. The two
+factors are independent: either, both or neither may be transposed (C transposed is a separate
+matter, below). Phase 2 established, stage by stage, that every combination keeps the operand
+mapping, and added the executed coverage that A and B transposed together never had. No
+compiler change was needed: the transposes of ISSUE-005 were already correct in every
+combination; Phase 2 is verification and tests.
+
+**How each stage keeps the mapping.**
+
+- *Analysis* (`recognizeLogicalMatmul`): roles are found by the operands that read each loop,
+  never by position; each operand's layout records the memref dimension of each of its roles
+  (`OperandLayout::roleDim`, transposed when roleDim[0] > roleDim[1]), independently per operand.
+  The factor assignment that transposes least is chosen (C first, then the factors as written):
+  for A^T and B^T with C as written both assignments cost two transposes and A stays A; for
+  C[j][i] += A[k][i] · B[j][k] the swapped assignment C^T = B · A needs none.
+- *Partitioning* (`getDenseLogicalGemm`, `partitionLogicalMatmul`): works on the logical
+  coordinates (I, J, K) and the role loops only; the boxes are boxes of logical ordinals. The
+  layout never enters, so a transposed operand cannot change a region.
+- *Lowering* (`getLogicalOperand`, `materializeOperandView`): the subview is taken in the
+  memref's own dimension order -- offsets, sizes and signed strides of each role's dimension, the
+  bounds checked per memref dimension -- and then `memref.transpose` swaps the two dimensions of
+  a transposed operand, so that the tile receives A'(I, K) and B'(K, J). A batch offset
+  (ISSUE-007) is a dynamic offset of the subview, before the transpose.
+- *Tiling and staging* (`TileMatmulForFpga.cpp`): every tile operand is a `tensor.extract_slice`
+  of the logical (transposed) view; staging copies that slice from its strided source buffer
+  into a contiguous scratch tile (`memref.copy`, any layout), so the runtime only ever sees
+  contiguous row-major tiles.
+- *Runtime* (`fpga_matmul_tiled_auto_scheduled`, the soft model, the board): layout-free.
+
+**The shared reduction coordinate.** With A[k][i] and B[j][k], K is A's dimension 0 and B's
+dimension 1; each view carries its own K stride, and the tile pairs A'(I, K) with B'(K, J)
+logically, which the address-exact oracle checks element by element. When both factors read K
+backwards alike (A[7 − k], B[..][7 − k]) the coordinate K is the expression 7 − k itself and no
+view runs backwards; a negative stride appears only when the operands disagree (A[7 − k][3 − i]
+with B[j][k]: A's subview has strides (−1, −1)).
+
+**Coverage** (each combination: lowered IR checked in lit, executed and compared bitwise with
+the CPU reference, and in the oracle's address-exact check):
+
+| # | combination | lit (`affine_gemm_transpose_ab.mlir`) | executed (`SystolicCC/affine_transpose_ab.c`) | corpus |
+|---|---|---|---|---|
+| 1 | neither | @nn | nn | the positive set |
+| 2 | A only | @tn | tn | case_091, generated (9) |
+| 3 | B only | @nt | nt | case_092, generated (14) |
+| 4 | A and B | @tt (4 × 6 × 8) | tt | ext_019 |
+| 5 | A and B, offsets | @tt_offset | tt_offset | -- |
+| 6 | A and B, strides | @tt_stride | tt_stride | -- |
+| 7 | A and B, negative stride | @tt_negative | tt_negative | -- |
+| 8 | A and B, several tiles | @tt_tiles (to LLVM: 10 calls) | tt_tiles (10), tt_rect (22) | ext_020 |
+| 9 | A and B, views moving with the batch | @tt_batch_views | tt_batch | ext_021 |
+| -- | B transposed and backwards | @nt_negative | nt_negative | ext_022 |
+
+The oracle counts the nests whose A and B views are both transposed (9 to 15 per 400 random
+nests) and its lit test requires that count to be nonzero. C transposed is covered separately
+(`affine_gemm_p0_views.mlir` @transposed_c, `affine_p0.c` neg_c_tr, showcase case_093).
+
+**Verification** (Phase 2, 2026-10-16; logs in `~/work/integration-backups-20261016/phase2-validation/`):
+
+| test | result |
+|---|---|
+| check-systolic, release and debug (assertions) | 102/102 and 102/102 (+ `affine_gemm_transpose_ab.mlir`, `SystolicCC/affine_transpose_ab.c`) |
+| executed (`SystolicCC/affine_transpose_ab.c`) | 11 kernels (the nine combinations, B backwards, 8 × 40 × 24) equal to the CPU reference on the soft runtime and the mock board; `--verify` bitwise 11/11; without the permission nothing offloaded |
+| oracle, debug build, 40 seeds × 400 | 16,000 nests, 0 mismatches; 477 with A and B both transposed, 2,200 batched, all checked address by address; 1,200 without the permission: nothing lowered |
+| showcase (169) | rc 0: 162 pass + 7 expected_refusal; ext_019..022 (new) offloaded and verified (2, 10, 2, 1 invocations); no existing case changed |
+| regression gate | rc 0; ISSUE-001..007 reproducers pass; 172 unchanged; 165 pass + 7 expected_refusal |
+| 800 generated cases | identical to the Phase 1 run |
+| `test_permissions.py` | 48/48 |
+| FPGA board | NOT RUN (no board) |

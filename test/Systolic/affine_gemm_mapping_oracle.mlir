@@ -23,7 +23,7 @@
 //
 // CHECK-NOT: MISMATCH
 // CHECK:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}
-// CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}
+// CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}, batched {{[1-9][0-9]*}} (a factor's view moving with the batch {{[1-9][0-9]*}}), A and B both transposed {{[1-9][0-9]*}}
 // CHECK:     mismatches: 0
 //
 // Without it (the default, docs/AFFINE_GEMM_MAPPING.md section 6) nothing is

@@ -710,7 +710,17 @@ def main():
 
     counts = {"ACCEPT": 0, "REJECT": 0, "SKIP": 0}
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
-               "batched": 0, "batch_offset": 0}
+               "batched": 0, "batch_offset": 0, "both_transposed": 0}
+
+    def is_transposed(view):
+        shape, strides = view[0], view[1]
+        return abs(strides[0]) < abs(strides[1]) and shape[0] > 1 and shape[1] > 1
+
+    def both_factors_transposed(views):
+        """A's and B's views both store their roles in the other order."""
+        named = dict((nm, v) for nm, v, _ in views)
+        return all(nm in named and named[nm] is not None and is_transposed(named[nm])
+                   for nm in "AB")
     mismatches = []
     for i, (nest, got) in enumerate(zip(nests, results)):
         verdict = decide(nest)
@@ -750,6 +760,7 @@ def main():
                     continue
                 feature["batched"] += 1
                 feature["batch_offset"] += batch_offset_in_role(nest)
+                feature["both_transposed"] += both_factors_transposed(got[1])
                 continue
             if any(v[1] is None or v[1][2] is None for v in got[1]):
                 mismatches.append((i, nest, "a view of a plain GEMM has a dynamic offset"))
@@ -760,6 +771,7 @@ def main():
                 continue
             views = dict((nm, v) for nm, v, _ in got[1])
             feature["transposed"] += any(abs(v[1][0]) < abs(v[1][1]) and v[0][0] > 1 and v[0][1] > 1 for v in views.values())
+            feature["both_transposed"] += both_factors_transposed(got[1])
             feature["reversed"] += any(s < 0 for v in views.values() for s, n in zip(v[1], v[0]) if n > 1)
             feature["extent_one"] += 1 in mnk
             feature["rank_not_2"] += any(len(nest.ops[k][0]) != 2 for k in "ABC")
@@ -777,7 +789,8 @@ def main():
         print("accepted with: transposed view %(transposed)d, negative stride %(reversed)d, "
               "M/N/K = 1 %(extent_one)d, an operand of rank != 2 %(rank_not_2)d, "
               "a loop that runs once %(once)d, batched %(batched)d "
-              "(a factor's view moving with the batch %(batch_offset)d)" % feature)
+              "(a factor's view moving with the batch %(batch_offset)d), "
+              "A and B both transposed %(both_transposed)d" % feature)
     print("mismatches: %d" % len(mismatches))
 
 

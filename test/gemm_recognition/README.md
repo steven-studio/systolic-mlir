@@ -180,7 +180,9 @@ GEMMs: the basis is the compiler's own documentation — `AffineMatmulPartitioni
 origins, access offsets and strides ... are all of this form"; `AffineMatmulAnalysis.h`: one
 factor map `phi` per operand — and the task's index family `c_i i + c_j j + c_k k + c_0` per
 operand), coordinates split over several loops in any order, repetition loops outside the
-reduction, the GEMM inside larger arrays, `A × A`; since ISSUE-005 also transposed operands,
+reduction, the GEMM inside larger arrays, `A × A`; since ISSUE-005 also transposed operands
+(A, B or both, independently -- executed coverage of both together since 2026-10-16:
+`SystolicCC/affine_transpose_ab.c`, showcase ext_019..022, `docs/AFFINE_GEMM_MAPPING.md` section 17),
 opposite directions (a negative-stride view), operands of any rank with fixed dimensions, and
 roles of extent one (M, N or K = 1: a constant subscript — SQ-4, decided 2026-10-15 — or a
 matrix-vector product); since ISSUE-006 also batched GEMMs (the batch loops run the tiles once

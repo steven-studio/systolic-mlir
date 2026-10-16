@@ -638,6 +638,33 @@ EXTENDED = [
                        "4x4x4 GEMMs.  Refused until ISSUE-007 (one view per operand of a batch\n"
                        "coordinate), offloaded since.",
              issue="ISSUE-007"),
+    ext_case(19, "a_and_b_transposed", "transposed",
+             [L("i", 0, 4, "I"), L("j", 0, 6, "J"), L("k", 0, 8, "K")],
+             {"a": arr("A", (8, 4), ("k", "i")), "b": arr("B", (6, 8), ("j", "k")),
+              "c": arr("C", (4, 6), ("i", "j"))},
+             math_note="C = A^T B^T: A[k][i] and B[j][k], both factors storing their roles in\n"
+                       "the other order; rectangular (M = 4, N = 6, K = 8), so a swapped role\n"
+                       "could not go unnoticed.  Offloaded (two transposed views)."),
+    ext_case(20, "a_and_b_transposed_tiles", "transposed",
+             [L("i", 0, 16, "I"), L("j", 0, 16, "J"), L("k", 0, 16, "K")],
+             {"a": arr("A", (16, 16), ("k", "i")), "b": arr("B", (16, 16), ("j", "k")),
+              "c": arr("C", (16, 16), ("i", "j"))},
+             math_note="ext_019 at 16 x 16 x 16: ten tiles on the fleet, each a slice of the\n"
+                       "transposed views, staged into contiguous scratch tiles.  Offloaded."),
+    ext_case(21, "a_and_b_transposed_batch_views", "batched",
+             [L("b", 0, 2, "P"), L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
+             {"a": arr("A", (4, 5), ("k", "i + b")), "b": arr("B", (4, 5), ("j", "k + b")),
+              "c": arr("C", (2, 4, 4), ("b", "i", "j"))},
+             math_note="C[b][i][j] += A[k][i + b] B[j][k + b]: both factors transposed, both\n"
+                       "views moving with the batch loop b (ISSUE-007): per b,\n"
+                       "A'(I, K) = A(K, I + b) and B'(K, J) = B(J, K + b).  Offloaded.",
+             issue="ISSUE-007"),
+    ext_case(22, "b_transposed_backwards", "transposed",
+             [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
+             {"a": arr("A", (8, 8), ("i", "k")), "b": arr("B", (8, 8), ("7 - j", "k")),
+              "c": arr("C", (8, 8), ("i", "j"))},
+             math_note="B[7 - j][k]: B transposed and read backwards along J (a negative stride\n"
+                       "in B's view, then the transpose).  Offloaded."),
 ]
 
 # ==========================================================================
