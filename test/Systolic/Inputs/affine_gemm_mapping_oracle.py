@@ -39,18 +39,20 @@ equal the oracle's. That is conditions (V) and (B) of section 3 established
 directly on the emitted views, whatever ordinal direction or factor assignment
 the compiler chose.
 
-Batched nests (a coordinate read by all three operands, ISSUE-006): the
-oracle decides them by enumeration too -- the three batch subscripts must take
-the same value at every point, the batch loops (the loops those subscripts
-use) must drive no I, J or K, and within every batch iteration (I, J, K) must
-be a bijection onto the box. The compiler re-emits the batch loops around the
-tiles with the operands' batch dimensions at a dynamic offset, which this
-script's static view parser does not read: for a batched nest it checks the
-lowering (the tile, its extents, one affine.for per batch loop) and leaves the
-addresses to the end-to-end tests (test/SystolicCC/affine_batched.c, the
-showcase and the generated corpus, which run the kernels). A batch coordinate
-read through different expressions (A[b + 1] with C[b]) is valid but not
-lowered; the oracle checks that it is left alone.
+Batched nests (ISSUE-006, ISSUE-007): the batch loops are, by definition,
+the loops of two or more iterations that all three operands read. C must
+read them alone -- no dimension of C mixes a batch loop with another loop,
+no batch loop in two dimensions of C (the coupled, skewed and diagonal
+outputs the specification rejects); a batch coordinate may fill several
+dimensions of C; the factors may read them anywhere,
+each through its own expression, as a dimension of their own or as an
+offset of a role's dimension (A[4i - j][5k]). Everything else is decided by
+enumeration, per batch iteration: the points with one value of the batch
+loops must form a GEMM of strided views exactly as above, every batch
+iteration the same shape (extents and roles). For a lowered batched nest
+the emitted batch loops are enumerated, the affine.apply offsets of each
+operand's subview evaluated at every batch value, and the views checked per
+batch iteration on that iteration's points -- the same address-exact check.
 
 With --fp-default the nests go through the pass WITHOUT the reassociation
 permission, and nothing may be lowered (section 6).
@@ -227,7 +229,8 @@ def finalize(rng, loops, ops, mode, cload=None, oob=False):
 def mutate(rng, loops, trip, ops):
     kind = rng.choice(["radix", "couple", "acc", "broadcast", "double_read",
                        "batch", "batch_shift", "scale_coef", "swap_roles",
-                       "add_const_loop", "drop_dim"])
+                       "add_const_loop", "drop_dim", "batch_offset",
+                       "batch_offset_c"])
     cload = None
     many = [s for s in range(len(loops)) if trip[s] >= 2]
     every = [f for fs in ops.values() for f in fs]
@@ -259,13 +262,27 @@ def mutate(rng, loops, trip, ops):
             ops[name].insert(rng.randint(0, len(ops[name])), shared)
     elif kind == "batch_shift":
         # a batch subscript read with another constant by one operand: valid,
-        # not lowered
+        # lowered since ISSUE-007 (each operand at its own batch index)
         shared = [f for f in ops["C"] if f in ops["A"] and f in ops["B"] and
                   any(f is g for g in ops["A"]) and any(f is g for g in ops["B"])]
         if shared:
             f = shared[0]
             name = rng.choice("AB")
             ops[name][[id(g) for g in ops[name]].index(id(f))] = [list(f[0]), None]
+    elif kind in ("batch_offset", "batch_offset_c"):
+        # a batch loop added to a role's dimension: of a factor -- valid, the
+        # factor's view moves with the batch (ISSUE-007) -- or of C -- the
+        # output position moves with the batch: rejected
+        shared = [f for f in ops["C"] if any(f is g for g in ops["A"]) and
+                  any(f is g for g in ops["B"])]
+        names = "AB" if kind == "batch_offset" else "C"
+        roles = [f for nm in names for f in ops[nm]
+                 if f[1] is not None and not any(f is g for g in shared) and
+                 any(f[0][s] != 0 for s in many)]
+        if shared and roles:
+            f, b = rng.choice(roles), shared[0]
+            c = rng.choice([1, -1, 2])
+            f[0] = [x + c * y for x, y in zip(f[0], b[0])]
     elif kind == "scale_coef" and varying:
         f = rng.choice(varying)
         f[0] = [-2 * c for c in f[0]]            # still valid: a reversed, strided view
@@ -316,8 +333,50 @@ def decide(nest):
             if min(vals) < 0 or max(vals) >= shape[d]:
                 return ("REJECT", "%s is accessed out of bounds along dimension %d" % (name, d))
 
+    n = len(nest.loops)
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
+             for name in "ABC"}
+    batch_loops = sorted(reads["A"] & reads["B"] & reads["C"])
+    if not batch_loops:
+        verdict = gemm_on_points(nest, pts)
+        return verdict if verdict[0] != "ACCEPT" else ("ACCEPT", verdict[1], 0)
+    # C reads every batch loop alone: no dimension of C mixes a batch loop
+    # with another loop (a batch coordinate may fill several dimensions).
+    for d, f in enumerate(nest.ops["C"][1]):
+        if any(f[0][s] != 0 for s in batch_loops) and \
+                any(f[0][s] != 0 and many[s] and s not in batch_loops for s in range(n)):
+            return ("REJECT", "C's dimension %d mixes a batch coordinate with another coordinate" % d)
+    # Per batch iteration: a GEMM of strided views, every iteration the same.
+    groups = {}
+    for x in pts:
+        groups.setdefault(tuple(x[s] for s in batch_loops), []).append(x)
+    shape = None
+    for sub in groups.values():
+        verdict = gemm_on_points(nest, sub)
+        if verdict[0] != "ACCEPT":
+            return (verdict[0], verdict[1] + " (within a batch iteration)")
+        if not verdict[2]:
+            return ("REJECT", "an element-wise product (every coordinate a batch one)")
+        if shape is None:
+            shape = verdict[1:]
+        elif verdict[1:] != shape:
+            return ("REJECT", "the batch iterations are not one GEMM shape")
+    ext = shape[0]
+    # a batched vector-times-scalar (two of M, N, K are 1): valid, not
+    # lowered pending spec question SQ-5
+    if sum(1 for e in ext if e == 1) >= 2:
+        return ("UNSUPPORTED_BATCH", "SQ-5: two of M, N, K are 1 per batch")
+    return ("ACCEPT", ext, len(batch_loops))
+
+
+def gemm_on_points(nest, pts):
+    """The enumeration on a set of points (the whole domain, or one batch
+    iteration): ("ACCEPT", (M, N, K), roles) or ("REJECT", why). `roles`
+    names each role's (operand, dimension, step) readers -- empty when no
+    subscript varies on the points."""
     # Rank functions; coordinates = classes of rank functions up to mirroring.
-    readers = []        # (operand, dim, ranks, extent, values, subscript)
+    readers = []        # (operand, dim, ranks, extent, values, step)
     for name in "ABC":
         for d, f in enumerate(nest.ops[name][1]):
             vals = [value(f, x) for x in pts]
@@ -328,7 +387,7 @@ def decide(nest):
             if any(b - a != step for a, b in zip(distinct, distinct[1:])):
                 return ("REJECT", "%s's dimension %d is not an arithmetic progression (no strided view)" % (name, d))
             readers.append((name, d, tuple((v - distinct[0]) // step for v in vals), len(distinct),
-                            tuple(vals), f))
+                            tuple(vals), step))
     classes = []
     for rd in readers:
         for cl in classes:
@@ -338,31 +397,11 @@ def decide(nest):
                 break
         else:
             classes.append([rd])
-    # Batch coordinates: a class read by all three operands (ISSUE-006). The
-    # three subscripts must have the same value at every point (else the
-    # compiler leaves the nest alone: a per-operand view of a batch
-    # coordinate); the batch loops are the loops those subscripts use.
-    batch, rest, batch_loops = [], [], set()
-    for cl in classes:
-        names = [rd[0] for rd in cl]
-        if sorted(names) == ["A", "B", "C"]:
-            if len({rd[4] for rd in cl}) != 1:
-                return ("UNSUPPORTED_BATCH", "a batch coordinate read through different expressions")
-            batch.append(cl)
-            # the batch loops: two or more iterations (a loop that runs once
-            # is a constant on the domain, folded into the batch index)
-            batch_loops |= {s for s in range(n)
-                            if cl[0][5][0][s] != 0 and trips(*nest.loops[s]) >= 2}
-        else:
-            rest.append(cl)
-    if batch and not rest:
-        return ("REJECT", "an element-wise product (every coordinate a batch one)")
-    batch_key = [tuple(x[s] for s in sorted(batch_loops)) for x in pts]
     for first in (nest.order, nest.order[::-1]):
         a, b = first
         role = {}
         ok = True
-        for cl in rest:
+        for cl in classes:
             names = sorted(rd[0] for rd in cl)
             if len(set(names)) != len(names):
                 ok = False          # one operand reads one coordinate twice
@@ -375,7 +414,7 @@ def decide(nest):
             elif ops_in == {a, b}:
                 key = "K"
             else:
-                key = None
+                key = None          # read by one operand (a broadcast) or all three
             if key is None or key in role:
                 ok = False
                 break
@@ -384,18 +423,11 @@ def decide(nest):
             continue
         ext = {r: (role[r][0][3] if r in role else 1) for r in "IJK"}
         ordinal = {r: (role[r][0][2] if r in role else tuple(0 for _ in pts)) for r in "IJK"}
-        # within every batch iteration, (I, J, K) is a bijection onto the box
-        groups = {}
-        for i, key in enumerate(batch_key):
-            groups.setdefault(key, []).append(i)
         box = ext["I"] * ext["J"] * ext["K"]
-        if all(len({(ordinal["I"][i], ordinal["J"][i], ordinal["K"][i]) for i in g}) == len(g) == box
-               for g in groups.values()):
-            # a batched vector-times-scalar (two of M, N, K are 1): valid, not
-            # lowered pending spec question SQ-5
-            if batch and sum(1 for r in "IJK" if ext[r] == 1) >= 2:
-                return ("UNSUPPORTED_BATCH", "SQ-5: two of M, N, K are 1 per batch")
-            return ("ACCEPT", (ext["I"], ext["J"], ext["K"]), len(batch_loops))
+        if len({(ordinal["I"][i], ordinal["J"][i], ordinal["K"][i]) for i in range(len(pts))}) == len(pts) == box:
+            roles = tuple((r, tuple(sorted((rd[0], rd[1], rd[5]) for rd in role[r])))
+                          for r in "IJK" if r in role)
+            return ("ACCEPT", (ext["I"], ext["J"], ext["K"]), roles)
     return ("REJECT", "no mapping onto a GEMM of strided views")
 
 
@@ -444,17 +476,23 @@ def emit(nest, name):
 DEF = re.compile(r"^\s*(%[\w.]+) = (?:memref\.subview|memref\.transpose|memref\.expand_shape) (%[\w.]+)")
 TO_TENSOR = re.compile(r"^\s*(%[\w.]+) = bufferization\.to_tensor (%[\w.]+) .*: (memref<[^>]*(?:<[^>]*>[^>]*)?>) to tensor")
 TILE = re.compile(r"systolic\.matmul_tile (%[\w.]+), (%[\w.]+), (%[\w.]+) m = (\d+) n = (\d+) k = (\d+)")
-MEMREF = re.compile(r"memref<([\dx]+)xf32(?:, strided<\[([-\d, ]+)\](?:, offset: (-?\d+))?>)?>")
+MEMREF = re.compile(r"memref<([\dx]+)xf32(?:, strided<\[([-\d, ]+)\](?:, offset: (-?\d+|\?))?>)?>")
+MAPDEF = re.compile(r"^(#[\w$.]+) = affine_map<\(([^)]*)\) -> \((.*)\)>\s*$")
+APPLY = re.compile(r"^\s*(%[\w.]+) = affine\.apply (#[\w$.]+|affine_map<\(([^)]*)\) -> \((.*?)\)>)\(([^)]*)\)")
+FORLOOP = re.compile(r"^\s*affine\.for (%[\w.]+) = (-?\d+) to (-?\d+)(?: step (\d+))? \{")
+SUBVIEW = re.compile(r"^\s*(%[\w.]+) = memref\.subview (%[\w.]+)\[([^\]]*)\] \[([^\]]*)\] \[([^\]]*)\] : memref<([\dx]+)xf32>")
 
 
 def parse_view(type_text):
+    """(shape, strides, offset) of a view type; offset None when dynamic (a
+    batched nest: computed from the subview's offsets per batch value)."""
     m = MEMREF.match(type_text)
     if m is None:
-        return None             # a dynamic offset (a batched nest): not parsed
+        return None
     shape = [int(v) for v in m.group(1).split("x")]
     if m.group(2):
         strides = [int(v) for v in m.group(2).split(",")]
-        offset = int(m.group(3) or 0)
+        offset = None if m.group(3) == "?" else int(m.group(3) or 0)
     else:
         strides = [1] * len(shape)
         for d in range(len(shape) - 2, -1, -1):
@@ -478,24 +516,72 @@ def compiler_results(opt, text, permit):
         if not tile:
             results.append(None)
             continue
-        source, tensors = {}, {}
+        source, tensors, subviews, maps, applies, batch_loops = {}, {}, {}, {}, {}, []
         for line in chunk.splitlines():
+            m = MAPDEF.match(line)
+            if m:
+                maps[m.group(1)] = (m.group(2), m.group(3))
+            m = APPLY.match(line)
+            if m:
+                dims, body = (maps[m.group(2)] if m.group(2).startswith("#")
+                              else (m.group(3), m.group(4)))
+                applies[m.group(1)] = (dims, body, [v.strip() for v in m.group(5).split(",")])
+            m = FORLOOP.match(line)
+            if m:
+                batch_loops.append((m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 1)))
+            m = SUBVIEW.match(line)
+            if m:
+                subviews[m.group(1)] = ([v.strip() for v in m.group(3).split(",")],
+                                        [int(v) for v in m.group(6).split("x")])
             m = DEF.match(line)
             if m:
                 source[m.group(1)] = m.group(2)
             m = TO_TENSOR.match(line)
             if m:
-                root = m.group(2)
+                root, hop = m.group(2), None
                 while root in source:
+                    if root in subviews:
+                        hop = root
                     root = source[root]
-                tensors[m.group(1)] = (root, parse_view(m.group(3)))
+                tensors[m.group(1)] = (root, parse_view(m.group(3)), subviews.get(hop))
         views = []
         for t in tile.groups()[:3]:
-            root, view = tensors[t]
-            views.append(("ABC"[int(root[len("%arg"):])], view))
-        loops = sum(1 for line in chunk.splitlines() if "affine.for " in line)
-        results.append((tuple(int(v) for v in tile.groups()[3:]), views, loops))
+            root, view, subview = tensors[t]
+            views.append(("ABC"[int(root[len("%arg"):])], view, subview))
+        results.append((tuple(int(v) for v in tile.groups()[3:]), views,
+                        len(batch_loops), {"loops": batch_loops, "applies": applies}))
     return results
+
+
+def evaluate(token, env, applies):
+    """A subview offset: a constant, or an affine.apply of the batch loops'
+    counters (linear forms only)."""
+    if re.fullmatch(r"-?\d+", token):
+        return int(token)
+    dims, body, operands = applies[token]
+    names = [d.strip() for d in dims.split(",") if d.strip()]
+    if re.search(r"floordiv|ceildiv|mod", body):
+        raise ValueError("non-linear batch offset " + body)
+    expr = body
+    for name, operand in sorted(zip(names, operands), key=lambda p: -len(p[0])):
+        expr = re.sub(r"\b%s\b" % name, "(%d)" % env[operand], expr)
+    return eval(expr, {"__builtins__": {}}, {})
+
+
+def batch_views(views, env, applies):
+    """The views of one batch iteration: each dynamic offset computed from
+    its subview's offsets and the base memref's row-major strides."""
+    out = []
+    for name, view, subview in views:
+        shape, strides, offset = view
+        if offset is None:
+            offsets, base = subview
+            rm = [1] * len(base)
+            for d in range(len(base) - 2, -1, -1):
+                rm[d] = rm[d + 1] * base[d + 1]
+            offset = sum(evaluate(t, env, applies) * rm[d] for d, t in enumerate(offsets))
+        out.append((name, (shape, strides, offset)))
+    return out
 
 
 def linear(shape, index):
@@ -505,9 +591,11 @@ def linear(shape, index):
     return address
 
 
-def check_views(nest, mnk, views):
-    """(V) and (B) on the compiler's own views; None when they hold."""
-    pts = nest.points()
+def check_views(nest, mnk, views, pts=None):
+    """(V) and (B) on the compiler's own views, on the points `pts` (all of
+    them, or one batch iteration's); None when they hold."""
+    if pts is None:
+        pts = nest.points()
     M, N, K = mnk
     (an, (ash, ast, aof)), (bn, (bsh, bst, bof)), (cn, (csh, cst, cof)) = views
     if cn != "C" or {an, bn} != {"A", "B"}:
@@ -554,6 +642,51 @@ def check_views(nest, mnk, views):
     return None
 
 
+def batch_loops_of(nest):
+    n = len(nest.loops)
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    reads = [{s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
+             for name in "ABC"]
+    return sorted(reads[0] & reads[1] & reads[2])
+
+
+def batch_offset_in_role(nest):
+    """Whether a factor's dimension mixes a batch loop with another loop."""
+    batch = set(batch_loops_of(nest))
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    return any(any(f[0][s] for s in batch) and
+               any(f[0][s] and many[s] and s not in batch for s in range(len(nest.loops)))
+               for name in "AB" for f in nest.ops[name][1])
+
+
+def check_batched(nest, got):
+    """The batched lowering: the emitted batch loops are the nest's batch
+    loops (same bounds and steps, same order), and for every batch value the
+    views -- dynamic offsets evaluated -- pass check_views on that batch
+    iteration's points."""
+    mnk, views, _, info = got
+    batch = batch_loops_of(nest)
+    loops = info["loops"]
+    if len(loops) != len(batch):
+        return "%d batch loop(s) emitted for %d" % (len(loops), len(batch))
+    for (iv, lb, ub, st), s in zip(loops, batch):
+        if (lb, ub, st) != tuple(nest.loops[s]):
+            return "emitted batch loop %s is not the nest's loop %d" % (iv, s)
+    pts = nest.points()
+    for values in itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
+                                      for _, lb, ub, st in loops]):
+        env = {iv: v for (iv, _, _, _), v in zip(loops, values)}
+        sub = [x for x in pts if all(x[s] == v for s, v in zip(batch, values))]
+        try:
+            concrete = batch_views(views, env, info["applies"])
+        except (KeyError, ValueError, TypeError) as e:
+            return "batch %s: the views' offsets cannot be evaluated (%s)" % (values, e)
+        bad = check_views(nest, mnk, concrete, sub)
+        if bad:
+            return "batch %s: %s" % (values, bad)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--opt", default="systolic-opt")
@@ -577,7 +710,7 @@ def main():
 
     counts = {"ACCEPT": 0, "REJECT": 0, "SKIP": 0}
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
-               "batched": 0}
+               "batched": 0, "batch_offset": 0}
     mismatches = []
     for i, (nest, got) in enumerate(zip(nests, results)):
         verdict = decide(nest)
@@ -605,19 +738,27 @@ def main():
                 mismatches.append((i, nest, "oracle %s, compiler %s" % (mnk, got[0])))
                 continue
             if verdict[2]:
-                # batched: the batch loops re-emitted around the tiles; the
-                # views carry dynamic offsets (checked end to end, not here)
+                # batched: the batch loops re-emitted around the tiles, each
+                # operand's view at offsets evaluated per batch value
                 if got[2] != verdict[2]:
                     mismatches.append((i, nest, "batched over %d loop(s), compiler emitted %d affine.for"
                                                 % (verdict[2], got[2])))
                     continue
+                bad = check_batched(nest, got)
+                if bad:
+                    mismatches.append((i, nest, "batched views: " + bad))
+                    continue
                 feature["batched"] += 1
+                feature["batch_offset"] += batch_offset_in_role(nest)
                 continue
-            bad = check_views(nest, got[0], got[1])
+            if any(v[1] is None or v[1][2] is None for v in got[1]):
+                mismatches.append((i, nest, "a view of a plain GEMM has a dynamic offset"))
+                continue
+            bad = check_views(nest, got[0], [(nm, v) for nm, v, _ in got[1]])
             if bad:
                 mismatches.append((i, nest, "views: " + bad))
                 continue
-            views = dict((nm, v) for nm, v in got[1])
+            views = dict((nm, v) for nm, v, _ in got[1])
             feature["transposed"] += any(abs(v[1][0]) < abs(v[1][1]) and v[0][0] > 1 and v[0][1] > 1 for v in views.values())
             feature["reversed"] += any(s < 0 for v in views.values() for s, n in zip(v[1], v[0]) if n > 1)
             feature["extent_one"] += 1 in mnk
@@ -635,7 +776,8 @@ def main():
     if not a.fp_default:
         print("accepted with: transposed view %(transposed)d, negative stride %(reversed)d, "
               "M/N/K = 1 %(extent_one)d, an operand of rank != 2 %(rank_not_2)d, "
-              "a loop that runs once %(once)d, batched %(batched)d" % feature)
+              "a loop that runs once %(once)d, batched %(batched)d "
+              "(a factor's view moving with the batch %(batch_offset)d)" % feature)
     print("mismatches: %d" % len(mismatches))
 
 

@@ -604,6 +604,40 @@ EXTENDED = [
                        "B[k][j] is one 8x4x4 GEMM with I = 4b + i split over two loops.\n"
                        "Expected offloaded -- the same mathematics as case_086, which is\n"
                        "refused only because of its rank-3 arrays."),
+    ext_case(15, "batch_dependent_a_row", "batched",
+             [L("i", 1, 5, "I"), L("j", 0, 4, "P"), L("k", 0, 4, "K")],
+             {"a": arr("A", (17, 16), ("4 * i - j", "5 * k")), "b": arr("B", (16, 4), ("5 * k", "j")),
+              "c": arr("C", (33, 4), ("8 * i", "j"))},
+             math_note="C[8i][j] += A[4i - j][5k] B[5k][j], i in [1, 5): j is read by all three\n"
+                       "operands -- a batch loop -- and A's row view moves with it (offset -j);\n"
+                       "per j a 4x1x4 matrix-vector product, A's rows 4i - j inside [1, 16].\n"
+                       "Offloaded since ISSUE-007 (four invocations per call).",
+             issue="ISSUE-007"),
+    ext_case(16, "batch_dependent_a_row_tiles", "batched",
+             [L("i", 1, 17, "I"), L("j", 0, 4, "P"), L("k", 0, 16, "K")],
+             {"a": arr("A", (65, 76), ("4 * i - j", "5 * k")), "b": arr("B", (76, 4), ("5 * k", "j")),
+              "c": arr("C", (129, 4), ("8 * i", "j"))},
+             math_note="ext_015 with i in [1, 17) and k in [0, 16): a 16x1x16 product per j,\n"
+                       "several tiles per batch value, each a slice of the moving view.\n"
+                       "Offloaded since ISSUE-007.",
+             issue="ISSUE-007"),
+    ext_case(17, "a_rows_skewed_by_column", "batched",
+             [L("i", 0, 8, "I"), L("j", 0, 8, "P"), L("k", 0, 8, "K")],
+             {"a": arr("A", (15, 8), ("i + j", "k")), "b": arr("B", (8, 16), ("k", "2 * j")),
+              "c": arr("C", (8, 8), ("i", "j"))},
+             math_note="C[i][j] += A[i + j][k] B[k][2j]: not one GEMM of A and B (A's row moves\n"
+                       "with the output column), but j is read by all three operands: per j\n"
+                       "the matrix-vector product C[:, j] += A[j .. j + 7][:] B[:, 2j].\n"
+                       "Offloaded since ISSUE-007 (test/SystolicCC/depth.c ng_skew).",
+             issue="ISSUE-007"),
+    ext_case(18, "batch_index_per_operand", "batched",
+             [L("b", 0, 2, "P"), L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
+             {"a": arr("A", (3, 4, 4), ("b + 1", "i", "k")), "b": arr("B", (2, 4, 4), ("b", "k", "j")),
+              "c": arr("C", (2, 4, 4), ("b", "i", "j"))},
+             math_note="Each operand at its own batch index: A[b + 1] with B[b] and C[b] -- two\n"
+                       "4x4x4 GEMMs.  Refused until ISSUE-007 (one view per operand of a batch\n"
+                       "coordinate), offloaded since.",
+             issue="ISSUE-007"),
 ]
 
 # ==========================================================================

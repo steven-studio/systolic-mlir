@@ -34,7 +34,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: the first factor reads one logical coordinate in two of its dimensions (0 and 1)
+ *   reason: C's dimension 0 mixes a batch coordinate (loop 2, read by all three operands) with another coordinate: the output position would move with the batch (a coupled or skewed placement, not one dense GEMM)
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

@@ -128,10 +128,21 @@ original order) around the tiles, one GEMM per batch iteration on its own slice 
 expression). Nothing is required of a batch coordinate beyond the loops as written (no density,
 no injectivity); a batch loop may not also drive I, J or K (the batches would be coupled:
 refused). The three operands must read a batch coordinate through one and the same expression
-(else VALID_BUT_LOWERING_UNSUPPORTED); an operand without the batch subscript (B shared by
-every batch) is refused as a second coordinate in one GEMM role; the remark's "the enclosing
-loops run it N time(s)" counts the batch iterations, so `systolic-cc` reports the invocations
-per call correctly.
+(else VALID_BUT_LOWERING_UNSUPPORTED -- superseded by ISSUE-007 below); an operand without the
+batch subscript (B shared by every batch) is refused as a second coordinate in one GEMM role;
+the remark's "the enclosing loops run it N time(s)" counts the batch iterations, so
+`systolic-cc` reports the invocations per call correctly.
+
+**Update 2026-10-16 (ISSUE-007, batch-dependent operand views; `docs/AFFINE_GEMM_MAPPING.md`
+section 16).** Every loop is classified by the operands that read it (A and C: I; B and C: J;
+A and B: K; all three: a **batch loop**). The factors may read a batch loop through their own
+expression -- in a dimension of their own (`A[b + 1]` with `C[b]`) or as an affine offset of a
+role's dimension (`C[8i][j] += A[4i - j][5k] * B[5k][j]`: per `j` a 4 x 1 x 4 product, A's row
+view moving with `j`) -- while C reads every batch loop alone (a dimension of C mixing a batch
+loop with another loop, `C[i + k][j]`, is refused). Per batch value the role loops must be a
+dense GEMM of strided views and every index (role range plus batch range) inside its array; the
+lowering offsets each operand's view per batch iteration (an `affine.apply` per dimension).
+Offloaded since: `depth.c` ng_skew, showcase ext_015..ext_018; still refused: case_087, case_127.
 
 ## 2. Support specification (what a correct compiler must do)
 
@@ -172,15 +183,18 @@ operand), coordinates split over several loops in any order, repetition loops ou
 reduction, the GEMM inside larger arrays, `A × A`; since ISSUE-005 also transposed operands,
 opposite directions (a negative-stride view), operands of any rank with fixed dimensions, and
 roles of extent one (M, N or K = 1: a constant subscript — SQ-4, decided 2026-10-15 — or a
-matrix-vector product); since ISSUE-006 also batched GEMMs whose every operand carries every
-batch coordinate through one and the same expression (the batch loops run the tiles once per
-batch iteration).
+matrix-vector product); since ISSUE-006 also batched GEMMs (the batch loops run the tiles once
+per batch iteration), and since ISSUE-007 batched GEMMs whose factors read the batch loops
+through their own expressions or as offsets of their role dimensions, C reading every batch
+loop alone (`docs/AFFINE_GEMM_MAPPING.md` section 16).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products, nests without a reduction
 coordinate (an outer product `C[i][j] += A[i][3] * B[3][j]`, whose reduction subscript is a
 constant, is the K = 1 GEMM since SQ-4 was decided), the reduction index in the output, coupled (`C[i+j][j]`, `A[i][i+k]`) and skewed
 placements (GEMM values over a non-rectangular region are not one dense GEMM), an output on a
-diagonal (`C[i][i]`) or an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), singular
+diagonal (`C[i][i]`) or an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`; a factor
+that reads the output column only through a loop all three operands read, `A[i + j][k]` with
+`B[k][2j]` and `C[i][j]`, is a batched GEMM since ISSUE-007), singular
 mappings, a non-box iteration domain (a bound that depends on another counter), products with a
 third factor or sums, no accumulation; and nests whose subscripts leave a static array dimension
 (undefined as programs: there is no GEMM to lower, and the refusal must say "out of bounds" or
@@ -225,7 +239,7 @@ coordinate crashed the dense partition — **ISSUE-003**, fixed (refused until S
 decrease in every operand — **ISSUE-004**, supported since 2026-10-15 (README §1, §2); the P0
 operand views (transposes, negative strides, extent-one roles, other ranks) and the
 floating-point policy — **ISSUE-005**, since 2026-10-15; batched GEMMs — **ISSUE-006**, since
-2026-10-15. Specification
+2026-10-15; batch-dependent operand views — **ISSUE-007**, since 2026-10-16. Specification
 refinements made after a measurement (never to make a failing compiler look green; each one
 argued from the mathematics and the documented rule): `failures/resolved/NOTE-*.md`.
 

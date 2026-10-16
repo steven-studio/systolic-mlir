@@ -9,6 +9,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LogicalResult.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <array>
@@ -115,16 +116,32 @@ struct OperandCoordinateView {
 /// roleDim[0] and roleDim[1] of the memref, in either order (roleDim[0] >
 /// roleDim[1] is a transposed operand), or roleDim[r] = -1 when the operand
 /// has no dimension for role r (the role has extent 1 and the operand's rank
-/// is lower). Every other dimension d has a subscript that is constant on the
-/// iteration domain: constantIndex[d] (an extent-one dimension). Batch
-/// dimensions (a partition prefix) are not described here.
+/// is lower). Every other dimension d has a fixed index constantIndex[d]: an
+/// extent-one dimension, or a batch dimension (below).
+///
+/// Batch loops (docs/AFFINE_GEMM_MAPPING.md sections 15 and 16) are the loops
+/// all three operands read. Dimension d of the operand is read at its role
+/// view's index (role dimensions) or at constantIndex[d] (the others), plus
+/// sum over the batch loops s of batchCoefficients[d][s] * x_s, x_s the batch
+/// loop's counter: an affine offset per batch value. A batch dimension
+/// (batchDim) reads batch loops only; a factor may also add batch terms to a
+/// role dimension (A[4i - j][5k]: the row view moves with j), C never does.
 struct OperandLayout {
   std::array<int, 2> roleDim{-1, -1};
   SmallVector<std::optional<int64_t>> constantIndex;
-  // The memref dimension of each batch coordinate (y = (P*, I, J, K): P* in
-  // order); every operand reads a batch coordinate through the same
-  // expression, in a dimension of its own (ISSUE-006).
+  // The dimensions that read batch loops only, in increasing order -- for C
+  // one per batch coordinate. Their static index is constantIndex.
   SmallVector<int, 2> batchDim;
+  // Per memref dimension, the coefficient of each loop of the nest (in the
+  // order of the logical mapping's columns) that is a batch loop; zero for
+  // every other loop. Empty when the operand reads no batch loop.
+  SmallVector<SmallVector<int64_t>> batchCoefficients;
+
+  bool hasBatchTerms(unsigned dim) const {
+    return dim < batchCoefficients.size() &&
+           llvm::any_of(batchCoefficients[dim],
+                        [](int64_t c) { return c != 0; });
+  }
 
   bool isTransposed() const {
     return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];

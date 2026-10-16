@@ -25,9 +25,9 @@
 // PLAN-DAG: note: 'd8' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ng_ewise5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // PLAN-DAG: note: 'ng_batched' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
-// PLAN-DAG: note: 'ng_skew' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'ng_skew' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 16 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ng_matvec4' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
-// PLAN:     wrote {{.*}} (10 function(s) offloaded
+// PLAN:     wrote {{.*}} (11 function(s) offloaded
 //
 // The software model is not the FPGA: every GEMM reports CPU; the
 // invocations are the same.
@@ -76,8 +76,9 @@
 // SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #13
 // MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #13
 // ALL-NEXT:   [case] ng_batched: equal to the reference, 2 invocation(s)
-// ALL-NEXT:   [systolic-cc] CPU Executed: GEMM #14
-// ALL-NEXT:   [case] ng_skew: equal to the reference, 0 invocation(s)
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #14
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #14
+// ALL-NEXT:   [case] ng_skew: equal to the reference, 16 invocation(s)
 // SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #15
 // MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #15
 // ALL-NEXT:   [case] ng_matvec4: equal to the reference, 8 invocation(s)
@@ -110,7 +111,7 @@
 // written, run on the CPU.
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-8: verified:
+// VERIFY-COUNT-9: verified:
 // VERIFY-NOT:     MISMATCH
 
 #include <stdio.h>
@@ -237,7 +238,11 @@ void ng_batched(float A[restrict 2][4][4], float B[restrict 2][4][4], float C[re
           C[b][i][j] += A[b][i][k] * B[b][k][j];
 }
 
-/* 3 loops, A[i + j][k] * B[k][2 * j] (in bounds): not a GEMM of A and B. */
+/* 3 loops, A[i + j][k] * B[k][2 * j] (in bounds): not one GEMM of A and B --
+   A's row moves with the output column -- but j is read by all three
+   operands, so it is a batch loop: per j a matrix-vector product
+   C[i][j] += A[i + j][k] * B[k][2j], A's view offset by j (ISSUE-007,
+   2026-10-16; stayed on the host before). */
 void ng_skew(float A[restrict 15][8], float B[restrict 8][16], float C[restrict 8][8]) {
   for (int i = 0; i < 8; ++i)
     for (int j = 0; j < 8; ++j)

@@ -36,7 +36,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: the second factor reads one logical coordinate in two of its dimensions (0 and 1)
+ *   reason: a coordinate is read by the first factor only: the other operands would be broadcast along it
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

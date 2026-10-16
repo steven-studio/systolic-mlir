@@ -15960,7 +15960,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the second factor reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_reason": "a coordinate is read by the first factor only: the other operands would be broadcast along it"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -22319,7 +22319,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_reason": "C's dimension 0 mixes a batch coordinate (loop 2, read by all three operands) with another coordinate: the output position would move with the batch (a coupled or skewed placement, not one dense GEMM)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -25639,6 +25639,656 @@
    }
   },
   {
+   "id": "ext_015",
+   "kind": "c",
+   "file": "extended/ext_015.c",
+   "name": "batch_dependent_a_row",
+   "set": "extended",
+   "category": "batched",
+   "kernel": "ext_015_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": false,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 1,
+     "ub_exclusive": 5,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      17,
+      16
+     ],
+     "subscripts": [
+      "4 * i - j",
+      "5 * k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      16,
+      4
+     ],
+     "subscripts": [
+      "5 * k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      33,
+      4
+     ],
+     "subscripts": [
+      "8 * i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "coupled",
+      "stride"
+     ],
+     "B": [
+      "stride",
+      "identity"
+     ],
+     "C": [
+      "stride",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [I]: 1 <= i < 5, step 1, 4 iteration(s)",
+    "j [P]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 4, step 1, 4 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": false,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-007",
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 2362,
+   "math_note": "C[8i][j] += A[4i - j][5k] B[5k][j], i in [1, 5): j is read by all three\noperands -- a batch loop -- and A's row view moves with it (offset -j);\nper j a 4x1x4 matrix-vector product, A's rows 4i - j inside [1, 16].\nOffloaded since ISSUE-007 (four invocations per call).",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_015.c -o ext_015 && ./ext_015",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_015.c -o ext_015 && ./ext_015",
+    "stages": "python3 scripts/run_showcase.py --case ext_015"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (mixed:I+P, K)",
+    "B is indexed by ['K', 'P']; the operand in that position of a GEMM is indexed by exactly ['J', 'K']",
+    "C is indexed by ['I', 'P']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
+   ]
+  },
+  {
+   "id": "ext_016",
+   "kind": "c",
+   "file": "extended/ext_016.c",
+   "name": "batch_dependent_a_row_tiles",
+   "set": "extended",
+   "category": "batched",
+   "kernel": "ext_016_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": false,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 1,
+     "ub_exclusive": 17,
+     "step": 1,
+     "cmp": "<",
+     "trip": 16
+    },
+    {
+     "var": "j",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 16,
+     "step": 1,
+     "cmp": "<",
+     "trip": 16
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      65,
+      76
+     ],
+     "subscripts": [
+      "4 * i - j",
+      "5 * k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      76,
+      4
+     ],
+     "subscripts": [
+      "5 * k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      129,
+      4
+     ],
+     "subscripts": [
+      "8 * i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "coupled",
+      "stride"
+     ],
+     "B": [
+      "stride",
+      "identity"
+     ],
+     "C": [
+      "stride",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [I]: 1 <= i < 17, step 1, 16 iteration(s)",
+    "j [P]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 16, step 1, 16 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": false,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-007",
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 2490,
+   "math_note": "ext_015 with i in [1, 17) and k in [0, 16): a 16x1x16 product per j,\nseveral tiles per batch value, each a slice of the moving view.\nOffloaded since ISSUE-007.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_016.c -o ext_016 && ./ext_016",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_016.c -o ext_016 && ./ext_016",
+    "stages": "python3 scripts/run_showcase.py --case ext_016"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (mixed:I+P, K)",
+    "B is indexed by ['K', 'P']; the operand in that position of a GEMM is indexed by exactly ['J', 'K']",
+    "C is indexed by ['I', 'P']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
+   ]
+  },
+  {
+   "id": "ext_017",
+   "kind": "c",
+   "file": "extended/ext_017.c",
+   "name": "a_rows_skewed_by_column",
+   "set": "extended",
+   "category": "batched",
+   "kernel": "ext_017_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": false,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "j",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 8,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      15,
+      8
+     ],
+     "subscripts": [
+      "i + j",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      8,
+      16
+     ],
+     "subscripts": [
+      "k",
+      "2 * j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      8,
+      8
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "coupled",
+      "identity"
+     ],
+     "B": [
+      "identity",
+      "stride"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [I]: 0 <= i < 8, step 1, 8 iteration(s)",
+    "j [P]: 0 <= j < 8, step 1, 8 iteration(s)",
+    "k [K]: 0 <= k < 8, step 1, 8 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": false,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-007",
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -2879,
+   "math_note": "C[i][j] += A[i + j][k] B[k][2j]: not one GEMM of A and B (A's row moves\nwith the output column), but j is read by all three operands: per j\nthe matrix-vector product C[:, j] += A[j .. j + 7][:] B[:, 2j].\nOffloaded since ISSUE-007 (test/SystolicCC/depth.c ng_skew).",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_017.c -o ext_017 && ./ext_017",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_017.c -o ext_017 && ./ext_017",
+    "stages": "python3 scripts/run_showcase.py --case ext_017"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (mixed:I+P, K)",
+    "B is indexed by ['K', 'P']; the operand in that position of a GEMM is indexed by exactly ['J', 'K']",
+    "C is indexed by ['I', 'P']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
+   ]
+  },
+  {
+   "id": "ext_018",
+   "kind": "c",
+   "file": "extended/ext_018.c",
+   "name": "batch_index_per_operand",
+   "set": "extended",
+   "category": "batched",
+   "kernel": "ext_018_kernel",
+   "mathematical_class": "gemm_batched",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "batched"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "b",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    },
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      3,
+      4,
+      4
+     ],
+     "subscripts": [
+      "b + 1",
+      "i",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      2,
+      4,
+      4
+     ],
+     "subscripts": [
+      "b",
+      "k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      2,
+      4,
+      4
+     ],
+     "subscripts": [
+      "b",
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": {
+    "I": 4,
+    "J": 4,
+    "K": 4
+   },
+   "index_forms": {
+    "operands": {
+     "A": [
+      "offset",
+      "identity",
+      "identity"
+     ],
+     "B": [
+      "identity",
+      "identity",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {
+     "I": {
+      "operands": "A/C",
+      "relation": "identical",
+      "expressions": [
+       "i",
+       "i"
+      ]
+     },
+     "J": {
+      "operands": "B/C",
+      "relation": "identical",
+      "expressions": [
+       "j",
+       "j"
+      ]
+     },
+     "K": {
+      "operands": "A/B",
+      "relation": "identical",
+      "expressions": [
+       "k",
+       "k"
+      ]
+     }
+    }
+   },
+   "loop_summary": [
+    "b [P]: 0 <= b < 2, step 1, 2 iteration(s)",
+    "i [I]: 0 <= i < 4, step 1, 4 iteration(s)",
+    "j [J]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 4, step 1, 4 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-15, ISSUE-006) a batched GEMM, every operand carrying the batch coordinate(s) through one and the same expression: the batch loops are re-emitted around the tiles, one GEMM per batch iteration on its own slice of each operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-007",
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 429,
+   "math_note": "Each operand at its own batch index: A[b + 1] with B[b] and C[b] -- two\n4x4x4 GEMMs.  Refused until ISSUE-007 (one view per operand of a batch\ncoordinate), offloaded since.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_018.c -o ext_018 && ./ext_018",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_018.c -o ext_018 && ./ext_018",
+    "stages": "python3 scripts/run_showcase.py --case ext_018"
+   }
+  },
+  {
    "id": "case_128",
    "kind": "c",
    "file": "extended/case_128.c",
@@ -26496,7 +27146,7 @@
  "counts": {
   "positive": 101,
   "negative": 39,
-  "extended": 21,
+  "extended": 25,
   "mlir": 15
  },
  "spec_questions": {

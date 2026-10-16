@@ -187,12 +187,19 @@ func.func @batch_coupled(%A: memref<2x5x4xf32> {llvm.noalias}, %B: memref<2x4x4x
 
 // -----
 // A batch coordinate read through different expressions (A[b + 1], C[b]):
-// not lowered (one view per operand of a batch coordinate), classified valid.
+// each operand at its own batch index (ISSUE-007, 2026-10-16; refused before
+// as "one per-operand view of a batch coordinate is not lowered").
 // CHECK-LABEL: func.func @batch_views_differ
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: a batch coordinate is read through different expressions by C and the first factor (one per-operand view of a batch coordinate is not lowered)
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %[[B:.*]] = 0 to 2 {
+// CHECK:         %[[A1:.*]] = affine.apply #{{[a-z0-9_]+}}(%[[B]])
+// CHECK:         memref.subview %arg0[%[[A1]], 0, 0] [1, 4, 4] [1, 1, 1]
+// CHECK:         %[[B0:.*]] = affine.apply #{{[a-z0-9_]+}}(%[[B]])
+// CHECK:         memref.subview %arg1[%[[B0]], 0, 0] [1, 4, 4] [1, 1, 1]
+// CHECK:         memref.subview %arg2[%[[B0]], 0, 0] [1, 4, 4] [1, 1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+// DISC:        batch terms A: dimension 0 = 1 + 1*x0
+// DISC:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @batch_views_differ(%A: memref<3x4x4xf32> {llvm.noalias}, %B: memref<2x4x4xf32> {llvm.noalias}, %C: memref<2x4x4xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {
     affine.for %i = 0 to 4 {

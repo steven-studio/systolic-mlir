@@ -483,3 +483,162 @@ Verification (tree of 2026-10-15, after ISSUE-006):
 | regression gate, 800 generated cases | `~/work/integration-backups-20261015/batched-validation/` |
 | `test_permissions.py` | 48/48 |
 | FPGA board, minimizer | NOT RUN (no board) |
+
+## 16. ISSUE-007: batch-dependent operand views (2026-10-16)
+
+### 16.1 The affine model and what the geometric conditions do and do not give
+
+The nest runs over D = Π_s {o_s + σ_s t : 0 ≤ t < n_s} (σ_s ≥ 1; a loop with n_s = 1 is a constant
+on D, Lemma 0, and is folded into the constants below). Operand X ∈ {A, B, C} reads
+X[F_X(x)], F_X(x) = M_X x + m_X, one row per memref dimension. In the notation of the request,
+for rank-2 operands M_C = [c^T; d^T] (Ic, Jc), M_A = [a^T; u^T] (Ia, Ka), M_B = [v^T; b^T]
+(Kb, Jb); every result below is stated for any rank and any number n of loops.
+
+**Readers.** For a loop s with n_s ≥ 2, R(s) = {X : column s of M_X is nonzero}. The class of s:
+
+| R(s) | class | geometric meaning |
+|---|---|---|
+| {A, C} | I | M_B e_s = 0: B constant along e_s |
+| {B, C} | J | M_A e_s = 0 |
+| {A, B} | K | M_C e_s = 0: e_s ∈ null(M_C), a reduction direction |
+| {A, B, C} | batch (P) | every operand moves along e_s |
+| one operand | refused | the other two are broadcast along e_s (§10) |
+
+The reduction directions the request asks for are exactly the K loops: e_s ∈ null(M_C), and,
+by the role conditions below, a^T e_s = 0 and b^T e_s = 0 (A's row and B's column do not move)
+while u^T e_s ≠ 0 and v^T e_s ≠ 0. Only axis directions need to be considered: on a box with all
+n_s ≥ 2, Theorem 3 (S1) forces every logical coordinate onto its own set of loops, so a direction
+mixing loops of two coordinates (r = e_i − e_j for C[i + j][j]) never yields a box of logical
+points. The classification costs O(n · dims) and holds for any n.
+
+**These conditions are necessary, not sufficient** — each of the following satisfies
+rank(M_C) = 2, has a direction r with M_C r = 0, a^T r = b^T r = 0, u^T r ≠ 0, v^T r ≠ 0, and is
+not a GEMM (all in `test/Systolic/affine_gemm_batch_views.mlir`):
+
+1. C[i][j] += A[i][k0] · B[k1][j], r = e_k0 + e_k1: the nest is (Σ_u A[i][u]) · (Σ_v B[v][j]).
+   Each of k0, k1 has one reader: refused by the readers table (a reduction in one factor).
+2. A[i][k0 + k1] · B[k0 + k1][j]: Ka and Kb move together, but K = 1, 2, 3 is visited more than
+   once — a weighted sum. Refused by Theorem 3 (S2): the K loops must number K densely.
+3. K = 3k0 + 2k1 (k0 < 2, k1 < 3): injective (0, 2, 3, 4, 5, 7) but not a strided view: (S2).
+4. C[i + j][j] += A[i + j][k] · B[k][j] (case_087) and C[i + k][j] += A[i][k] · B[k][j]
+   (case_127): a direction of C's row moves with a loop all three operands read — the output
+   position moves with the batch. Refused (C purity, below; case_087 already by Theorem 3 (S1)
+   through the positional form).
+5. The Phase 1 target with i starting at 0: every structural condition holds and A's row index
+   reaches −3. Refused by the bounds check (the program itself is undefined).
+
+### 16.2 The acceptance rule (batch-dependent views)
+
+A nest is accepted as a batched GEMM of batch-dependent views iff, besides (C0), §6 and §7:
+
+1. **Readers.** Every loop with n_s ≥ 2 is in exactly one class of the table; P = the batch loops.
+2. **C purity.** Every dimension of C reads either the loops of one role (I or J) or batch loops
+   only. A batch coordinate may fill several dimensions of C (C[b][b][i][j]); no dimension of C
+   mixes a batch loop with another loop.
+3. **Factor views.** Every dimension of A (B) is the sum of a role part — the loops of one of its
+   roles, I or K (K or J) — a batch part Σ_{s ∈ P} β_{X,d,s} x_s with arbitrary integer β, and a
+   constant. A dimension with no role part is a batch dimension of that factor.
+4. **Per batch, a dense GEMM.** With the batch loops fixed, the role parts satisfy Corollary 4:
+   each role's subscripts are views s·g + o of one coordinate whose loops number it densely
+   (Theorem 3), so (I, J, K) is a bijection of the batch's points onto one box M × N × K, the
+   same for every batch value (the role parts do not depend on the batch loops).
+5. **Bounds.** For every dimension, [min, max] of its role part over the role box plus [min, max]
+   of its batch part over the batch box (exact, the loops being independent:
+   `rangeOnDomain`) lies inside the array, in checked 64-bit arithmetic.
+6. **Unchanged refusals.** Coupled, skewed and element-wise mappings, broadcasts, an operand
+   reading a role in two dimensions, non-dense coordinates, SQ-1, SQ-2, SQ-3, and SQ-5 (two of
+   M, N, K equal to 1 per batch) are refused exactly as before.
+
+**Theorem 5 (batch-dependent views) [proved].** If the rule holds, the lowering — the batch loops
+re-emitted with their own bounds and steps, around the tiles of an exact partition of the role
+box (§8), every operand read through its view at the offset m + Σ β x_P evaluated per batch
+iteration — performs exactly the updates of the nest: for every x ∈ D the one update
+C[F_C(x)] += A[F_A(x)] · B[F_B(x)], and no other. *Proof.* The batch loops are re-emitted
+unchanged, so every batch value p of D occurs exactly once. For a fixed p, condition 4 makes
+(I, J, K) a bijection of D_p = {x ∈ D : x_P = p} onto the box, and the partition of §8 covers
+the box exactly once, so every x ∈ D_p is executed by exactly one tile slot. At that slot, each
+operand's element is its view's element: the role part by (V) of §3 (the views are the
+coordinates' views, Corollary 4), plus the batch part β·p, which the offset adds — equal to
+F_X(x) by condition 3 (C: condition 2, batch part zero in its role dimensions). Condition 5
+keeps every address inside its array, §7 keeps A and B disjoint from C. ∎ With exact
+arithmetic C is therefore identical; in floating point the order of the additions into one C
+element changes (the tiles sum from zero; contributions of different batch iterations to one
+element, possible when C's batch map is not injective, keep the batch loops' order up to the
+K sums), which §6's reassociation permission allows.
+
+### 16.3 The Phase 1 target, C[8i][j] += A[4i − j][5k] · B[5k][j]
+
+x = (i, j, k). M_C = [[8, 0, 0], [0, 1, 0]] (rank 2), M_A = [[4, −1, 0], [0, 0, 5]],
+M_B = [[0, 0, 5], [0, 1, 0]]. null(M_C) = span(e_k): a^T e_k = 0, u^T e_k = 5, v^T e_k = 5,
+b^T e_k = 0. Readers: R(i) = {A, C} → I; R(j) = {A, B, C} → batch; R(k) = {A, B} → K; no loop
+reads only B and C, so N = 1. C: dimension 0 is 8i (I), dimension 1 is j (batch): pure. A:
+dimension 0 is the role part 4i plus the batch part −j; dimension 1 is 5k. B: dimension 0 is
+5k (K), dimension 1 is j (a batch dimension). Per value of j: C'(I) = C[8I][j],
+A'_j(I, K) = A[4I − j][5K], B'_j(K) = B[5K][j] — a 4 × 1 × 4 GEMV on strided views, A's offset
+moving with j. Not one GEMM of A and B (A's row depends on the output column): before ISSUE-007
+it was refused ("C reads one logical coordinate in two of its dimensions", the union of i and j
+through A's row); the executable specification said REJECT ("A has a subscript that couples
+loops of different coordinates").
+
+Bounds: A's row index 4i − j ranges over [4·i_lo − (j_hi − 1), 4·(i_hi − 1) − j_lo]; with
+i ∈ [1, 5), j ∈ [0, 4) that is [1, 16] inside 17 rows; C's row 8i over [8, 32] inside 33; A's
+column and B's row 5k over [0, 15] inside 16. With i ∈ [0, 4) A's row reaches −3: refused
+("A is accessed out of bounds along dimension 0", PROVEN_INVALID).
+
+Lowering (`test/Systolic/affine_gemm_batch_views.mlir` @phase1_target):
+
+    affine.for %j = 0 to 4 {
+      %o = affine.apply affine_map<(d0) -> (-d0 + 4)>(%j)
+      A' = memref.subview %A[%o, 0] [4, 4] [4, 5]          (rows 4I + 4 - j, columns 5K)
+      B' = memref.subview %B[0, %j] [4, 1] [5, 1] -> expand_shape 4 x 1
+      C' = memref.subview %C[8, %j] [4, 1] [8, 1] -> expand_shape 4 x 1
+      systolic.matmul_tile A', B', C' m = 4 n = 1 k = 4
+    }
+
+### 16.4 Implementation and specification changes
+
+- **Analysis** (`recognizeLogicalMatmul`, the analysis by groups): loops are classified by
+  readers first; the batch loops take no part in grouping the role loops (only C's subscripts
+  join batch loops into batch coordinates); a subscript of C mixing a batch loop with another loop
+  is refused; a role group read by all three operands (loops of two roles coupled through one
+  subscript, A[i + k]) is refused; C may read a batch coordinate in several dimensions; the role
+  coordinates are matched on the subscripts without their batch terms; each operand's layout
+  records, per dimension, the batch loops' coefficients (`OperandLayout::batchCoefficients`) and
+  a batch dimension's static index; every dimension of C that reads batch loops only is a row of
+  the partition prefix (so a batch coordinate filling several dimensions of C has every batch
+  loop in some row). The positional form is still tried first (its prefix dimensions recorded
+  the same way, its role dimensions without batch terms); when its reading couples a prefix loop
+  with I, J or K -- never lowerable -- the analysis by groups decides instead (A[b][i][b] with
+  B[b][b][j]: b a batch loop, K = 1), and the positional reading is kept only when that analysis
+  refuses too, so that C[b][b + i][j] is refused by the dense partition with its diagnostic
+  unchanged. Both were found by the oracle (7 of 16,000 nests, all refused valid mappings).
+- **Partitioning**: `rangeOnDomain` — the exact range of an affine form of the loop counters on
+  the normalized box. `getDenseLogicalGemm` is unchanged.
+- **Lowering**: one `affine.apply` per operand dimension with batch terms (identical ones
+  shared), the dynamic subview offsets, every index range widened by its batch terms before the
+  bounds and address checks, and a refusal for a batch term on a loop that is not re-emitted.
+- **Specification**: the executable spec (`casespec.py`) decides such nests by enumerating each
+  batch iteration (`batched_gemm_on_domain`, basis `batched_views`) and its predictor mirrors the
+  new analysis; the oracle decides batched nests per batch iteration and now checks a lowered
+  batched nest's views address by address for every batch value, evaluating the emitted
+  `affine.apply` offsets (two new mutations: a batch offset in a factor's role dimension, valid;
+  in C's, refused).
+- **Expectations that changed by specification** (each now offloaded and verified against the
+  CPU reference): per-operand batch indices (A[b + 1] with B[b], C[b]:
+  `affine_gemm_batched_lowering.mlir` @batch_views_differ, `affine_to_systolic_refused.mlir`
+  @batched replaced by a C-mixing case that stays refused); `test/SystolicCC/depth.c` ng_skew,
+  C[i][j] += A[i + j][k] · B[k][2j] (the Phase 1 class: A's row moves with the output column).
+
+### 16.5 Verification (Phase 1, 2026-10-16; logs in `~/work/integration-backups-20261016/phase1-validation/`)
+
+| test | result |
+|---|---|
+| check-systolic, release and debug (assertions) | 100/100 and 100/100 (97 + `affine_gemm_batch_views.mlir`, `SystolicCC/affine_batch_views.c`, `ISSUE-007/repro_batch_views.mlir`) |
+| oracle, debug build, 40 seeds × 400 (seeds 100–139) | 16,000 nests, 11,579 accepted, 2,200 batched -- 159 of them with a factor's view moving with the batch -- every batched lowering checked address by address per batch value: **0 mismatches**; 1,200 nests without the permission: nothing lowered |
+| executed (`SystolicCC/affine_batch_views.c`) | 7 kernels, the Phase 1 target among them, equal to the CPU reference (soft runtime and the mock board), `--verify` bitwise 7/7 |
+| showcase (165) | rc 0: 158 pass + 7 expected_refusal; ext_015..018 (new) offloaded and verified (4, 16, 16, 2 invocations); no existing case changed |
+| regression gate | rc 0; ISSUE-001..007 reproducers pass; 168 unchanged; 161 pass + 7 expected_refusal |
+| 800 generated cases | identical to the run before Phase 1 except `gen_de03cb2b804b`: REJECT → UNDETERMINED (SQ-5, decided on its domain: `i` runs once, a batch of dot products), refused either way (`pass` → `expected_refusal`) |
+| `test_permissions.py` | 48/48 |
+| found by the oracle during Phase 1 and fixed | a batch coordinate filling several dimensions of C (one partition row per such dimension), and a coupled positional reading pre-empting the analysis by groups (16.4): 7 refused valid mappings, now lowered and verified |
+| FPGA board | NOT RUN (no board) |

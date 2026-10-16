@@ -89,6 +89,16 @@ FailureOr<DenseLogicalGemm>
 getDenseLogicalGemm(const LogicalMatmul &matmul, std::string *why = nullptr,
                     GemmMappingClass *mappingClass = nullptr);
 
+/// The smallest and largest value, on the nest's iteration domain, of
+/// constant + sum over the loops s of coefficients[s] * x_s, x_s the counter
+/// of loop s (the logical mapping's columns): exact on the box of the
+/// normalized domain (x = S z + origin, each term at an end of its loop's
+/// range). Failure when the domain has no static normalized form or the
+/// arithmetic overflows 64 bits.
+FailureOr<std::pair<int64_t, int64_t>>
+rangeOnDomain(const LogicalMatmul &matmul, ArrayRef<int64_t> coefficients,
+              int64_t constant = 0);
+
 /// One exact execution region of a logical GEMM.
 ///
 /// The iteration domain is expressed in source/execution coordinates x.

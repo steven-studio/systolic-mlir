@@ -68,6 +68,7 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
 #include <optional>
@@ -141,21 +142,30 @@ struct LogicalOperand {
   std::array<int, 2> roleDim{-1, -1};
   // The view's shape: the roles' extents.
   std::array<int64_t, 2> shape{1, 1};
-  // The memref dimension of each batch coordinate: read at the batch index
-  // of the enclosing batch loop (a dynamic offset), dropped from the view.
-  SmallVector<int, 2> batchDim;
+  // Per memref dimension, the batch loops' coefficients (the layout's
+  // batchCoefficients): the dimension's offset is offsets[d] plus these
+  // terms of the enclosing batch loops' counters -- a dynamic offset,
+  // computed per batch iteration (ISSUE-006, ISSUE-007).
+  SmallVector<SmallVector<int64_t>> batchCoefficients;
 
+  bool hasBatchTerms() const {
+    return llvm::any_of(batchCoefficients, [](const SmallVector<int64_t> &c) {
+      return llvm::any_of(c, [](int64_t v) { return v != 0; });
+    });
+  }
   bool isWholeMemref() const {
     auto ty = cast<MemRefType>(memref.getType());
     return ty.getRank() == 2 && ty.hasStaticShape() && roleDim[0] == 0 &&
            roleDim[1] == 1 && offsets[0] == 0 && offsets[1] == 0 &&
            strides[0] == 1 && strides[1] == 1 &&
-           sizes[0] == ty.getDimSize(0) && sizes[1] == ty.getDimSize(1);
+           sizes[0] == ty.getDimSize(0) && sizes[1] == ty.getDimSize(1) &&
+           !hasBatchTerms();
   }
   bool sameView(const LogicalOperand &other) const {
     return memref == other.memref && offsets == other.offsets &&
            sizes == other.sizes && strides == other.strides &&
-           roleDim == other.roleDim && batchDim == other.batchDim;
+           roleDim == other.roleDim &&
+           batchCoefficients == other.batchCoefficients;
   }
   bool isTransposed() const {
     return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];
@@ -163,7 +173,8 @@ struct LogicalOperand {
 };
 
 static FailureOr<LogicalOperand>
-getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
+getLogicalOperand(Value memref, const LogicalMatmul &matmul,
+                  const DenseLogicalGemm &dense, unsigned rowDim,
                   unsigned colDim,
                   const std::array<OperandCoordinateView, 2> &views,
                   const OperandLayout &layout, StringRef name,
@@ -207,30 +218,67 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
     return false;
   };
 
+  // What each dimension's batch terms add per batch iteration, as a range on
+  // the domain (zero for a dimension without batch terms). A batch
+  // dimension's index is its fixed index plus these terms; a factor's role
+  // dimension may carry them too (A[4i - j][5k], ISSUE-007). Each range
+  // below is the static one widened by them, in checked arithmetic.
+  operand.batchCoefficients = layout.batchCoefficients;
+  SmallVector<std::pair<int64_t, int64_t>> batchRange(rank, {0, 0});
+  for (unsigned d = 0; d < rank; ++d) {
+    if (!layout.hasBatchTerms(d))
+      continue;
+    // Every batch term must be on a loop the lowering re-emits around the
+    // tiles; a term on any other loop would be dropped from the address.
+    for (auto [s, coefficient] :
+         llvm::enumerate(layout.batchCoefficients[d]))
+      if (coefficient != 0 && !llvm::is_contained(dense.batchLoops, s)) {
+        why = (name + "'s dimension " + llvm::Twine(d) +
+               " has a batch term on loop " + llvm::Twine(s) +
+               ", which is not a batch loop")
+                  .str();
+        mappingClass = GemmMappingClass::Unknown;
+        return failure();
+      }
+    auto range = rangeOnDomain(matmul, layout.batchCoefficients[d]);
+    if (failed(range)) {
+      why = (name + "'s batch offsets along dimension " + llvm::Twine(d) +
+             " overflow 64-bit arithmetic")
+                .str();
+      mappingClass = GemmMappingClass::Unknown;
+      return failure();
+    }
+    batchRange[d] = *range;
+  }
+  auto widened = [&](unsigned d, int64_t lo, int64_t hi)
+      -> std::optional<std::pair<int64_t, int64_t>> {
+    std::optional<int64_t> first = llvm::checkedAdd(lo, batchRange[d].first);
+    std::optional<int64_t> last = llvm::checkedAdd(hi, batchRange[d].second);
+    if (!first || !last) {
+      why = (name + "'s indices along dimension " + llvm::Twine(d) +
+             " overflow 64-bit arithmetic")
+                .str();
+      mappingClass = GemmMappingClass::Unknown;
+      return std::nullopt;
+    }
+    return std::pair<int64_t, int64_t>{*first, *last};
+  };
+
   // The index range of every dimension, for the address check below.
   SmallVector<std::pair<int64_t, int64_t>> indexRange(rank, {0, 0});
   for (unsigned d = 0; d < rank; ++d)
     if (layout.constantIndex[d]) {
-      // An extent-one dimension: one fixed index.
+      // A fixed index (an extent-one dimension), or a batch dimension's
+      // static index with its batch terms added per batch iteration.
       operand.offsets[d] = *layout.constantIndex[d];
-      indexRange[d] = {*layout.constantIndex[d], *layout.constantIndex[d]};
-      if (!inBounds(d, *layout.constantIndex[d], *layout.constantIndex[d]))
+      auto range =
+          widened(d, *layout.constantIndex[d], *layout.constantIndex[d]);
+      if (!range)
+        return failure();
+      indexRange[d] = *range;
+      if (!inBounds(d, range->first, range->second))
         return failure();
     }
-
-  // A batch dimension: the batch coordinate's value, computed per batch
-  // iteration (a dynamic offset); its range on the domain is the bound.
-  if (layout.batchDim.size() != dense.numBatchDims) {
-    why = (name + "'s batch dimensions do not match the batch coordinates").str();
-    mappingClass = GemmMappingClass::Unknown;
-    return failure();
-  }
-  operand.batchDim = layout.batchDim;
-  for (auto [p, dim] : llvm::enumerate(layout.batchDim)) {
-    indexRange[dim] = dense.batchRange[p];
-    if (!inBounds(dim, dense.batchRange[p].first, dense.batchRange[p].second))
-      return failure();
-  }
 
   for (auto [r, logical] :
        llvm::enumerate(std::array<unsigned, 2>{rowDim, colDim})) {
@@ -275,8 +323,11 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
     operand.offsets[dim] = *alpha;
     operand.sizes[dim] = dense.extent[logical];
     operand.strides[dim] = *rho;
-    indexRange[dim] = {std::min(*alpha, *last), std::max(*alpha, *last)};
-    if (!inBounds(dim, std::min(*alpha, *last), std::max(*alpha, *last)))
+    auto range = widened(dim, std::min(*alpha, *last), std::max(*alpha, *last));
+    if (!range)
+      return failure();
+    indexRange[dim] = *range;
+    if (!inBounds(dim, range->first, range->second))
       return failure();
   }
 
@@ -317,11 +368,15 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
 }
 
 /// The operand's rank-2 view (rows x columns of the GEMM), on `builder`;
-/// `batchIndex[p]` is the value of batch coordinate p in the enclosing batch
-/// loops (the offset of the operand's batch dimension, dynamic).
+/// `batchIVs` are the counters of the enclosing batch loops, which re-emit
+/// the nest's loops `batchLoops` (same order). A dimension with batch terms
+/// is read at its static offset plus those terms of the counters -- one
+/// affine.apply per such dimension, a dynamic offset of the subview.
 static Value materializeOperandView(OpBuilder &builder, Location loc,
                                     const LogicalOperand &operand,
-                                    ArrayRef<Value> batchIndex) {
+                                    ArrayRef<Value> batchIVs,
+                                    ArrayRef<unsigned> batchLoops,
+                                    llvm::DenseMap<AffineMap, Value> &applies) {
   if (operand.isWholeMemref())
     return operand.memref;
   auto sourceTy = cast<MemRefType>(operand.memref.getType());
@@ -339,8 +394,32 @@ static Value materializeOperandView(OpBuilder &builder, Location loc,
     sizes.push_back(builder.getIndexAttr(operand.sizes[d]));
     strides.push_back(builder.getIndexAttr(operand.strides[d]));
   }
-  for (auto [p, dim] : llvm::enumerate(operand.batchDim))
-    offsets[dim] = batchIndex[p];
+  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
+    if (size_t(d) >= operand.batchCoefficients.size())
+      continue;
+    AffineExpr expr =
+        getAffineConstantExpr(operand.offsets[d], builder.getContext());
+    bool batched = false;
+    for (auto [j, s] : llvm::enumerate(batchLoops)) {
+      const int64_t coefficient = operand.batchCoefficients[d][s];
+      if (coefficient == 0)
+        continue;
+      expr = expr + getAffineDimExpr(j, builder.getContext()) * coefficient;
+      batched = true;
+    }
+    if (!batched)
+      continue;
+    // One dimension per batch loop, whether or not this offset uses it (the
+    // map's dimension count must match the operands).
+    // Operands that read the batch coordinate through the same expression
+    // share one index (the batch loops' counters are the same values).
+    AffineMap map = AffineMap::get(batchIVs.size(), /*symbolCount=*/0, expr);
+    Value &index = applies[map];
+    if (!index)
+      index =
+          affine::AffineApplyOp::create(builder, loc, map, batchIVs).getResult();
+    offsets[d] = index;
+  }
   MemRefType subviewTy = memref::SubViewOp::inferRankReducedResultType(
       keptShape, sourceTy, offsets, sizes, strides);
   Value view = memref::SubViewOp::create(builder, loc, subviewTy,
@@ -549,17 +628,17 @@ struct AffineMatmulToSystolicPass
     const int64_t N = dense->extent[kLogicalJ];
     const int64_t K = dense->extent[kLogicalK];
 
-    auto lhs = getLogicalOperand(matmul.lhs, *dense, kLogicalI, kLogicalK,
+    auto lhs = getLogicalOperand(matmul.lhs, matmul, *dense, kLogicalI, kLogicalK,
                                  matmul.viewA, matmul.layoutA, "A", why,
                                  mappingClass);
     if (failed(lhs))
       return failure();
-    auto rhs = getLogicalOperand(matmul.rhs, *dense, kLogicalK, kLogicalJ,
+    auto rhs = getLogicalOperand(matmul.rhs, matmul, *dense, kLogicalK, kLogicalJ,
                                  matmul.viewB, matmul.layoutB, "B", why,
                                  mappingClass);
     if (failed(rhs))
       return failure();
-    auto out = getLogicalOperand(matmul.output, *dense, kLogicalI, kLogicalJ,
+    auto out = getLogicalOperand(matmul.output, matmul, *dense, kLogicalI, kLogicalJ,
                                  matmul.viewC, matmul.layoutC, "C", why,
                                  mappingClass);
     if (failed(out))
@@ -662,63 +741,27 @@ struct AffineMatmulToSystolicPass
     // -- are re-emitted around the tiles, so that every batch iteration runs
     // the tiles once on its own slice of each operand: exactly the original
     // iteration domain, whatever the batch coordinate's values (ISSUE-006,
-    // docs/AFFINE_GEMM_MAPPING.md section 2). The batch index of operand
-    // dimension p is the coordinate's expression over the loop counters, an
-    // affine.apply on the new loops' counters.
-    SmallVector<Value> batchIndex;
-    if (dense->numBatchDims) {
-      const auto &T = matmul.logicalMapping.transformation;
-      const auto &c = matmul.logicalMapping.offset;
-      const auto &origin = matmul.logicalMapping.sourceOrigin;
-      // Each batch index's constant: c[p] plus the terms of the loops that
-      // run once (a constant on the domain, their counter at its lower
-      // bound), which are not re-emitted. Checked, and before any IR is
-      // built: a failure leaves the nest untouched.
-      SmallVector<int64_t> batchConstant;
-      for (unsigned p = 0; p < dense->numBatchDims; ++p) {
-        std::optional<int64_t> constant = c[p];
-        for (unsigned s = 0; s < T[p].size() && constant; ++s) {
-          if (T[p][s] == 0 || llvm::is_contained(dense->batchLoops, s))
-            continue;
-          std::optional<int64_t> term = llvm::checkedMul(T[p][s], origin[s]);
-          constant = term ? llvm::checkedAdd(*constant, *term) : std::nullopt;
-        }
-        if (!constant) {
-          why = "a batch index overflows 64-bit arithmetic";
-          mappingClass = GemmMappingClass::Unknown;
-          return failure();
-        }
-        batchConstant.push_back(*constant);
-      }
-      // The batch loops, re-emitted as they are, outermost first.
-      SmallVector<Value> newIVs;
-      SmallVector<AffineExpr> dims;
-      for (unsigned s : dense->batchLoops) {
-        affine::AffineForOp loop = affine::getForInductionVarOwner(
-            matmul.sourceDomain->getValue(s));
-        auto batchLoop = affine::AffineForOp::create(
-            builder, loc, loop.getConstantLowerBound(),
-            loop.getConstantUpperBound(), loop.getStep().getSExtValue());
-        newIVs.push_back(batchLoop.getInductionVar());
-        dims.push_back(getAffineDimExpr(dims.size(), builder.getContext()));
-        builder.setInsertionPointToStart(batchLoop.getBody());
-      }
-      for (unsigned p = 0; p < dense->numBatchDims; ++p) {
-        AffineExpr expr =
-            getAffineConstantExpr(batchConstant[p], builder.getContext());
-        for (auto [j, s] : llvm::enumerate(dense->batchLoops))
-          if (T[p][s] != 0)
-            expr = expr + dims[j] * T[p][s];
-        // One dimension per batch loop, whether or not this coordinate uses
-        // it (the map's dimension count must match the operands).
-        AffineMap map = AffineMap::get(newIVs.size(), /*symbolCount=*/0, expr);
-        batchIndex.push_back(
-            affine::AffineApplyOp::create(builder, loc, map, newIVs));
-      }
+    // docs/AFFINE_GEMM_MAPPING.md section 2). Each operand dimension with
+    // batch terms is read at its static offset plus those terms of the new
+    // loops' counters (materializeOperandView): a batch dimension's index, or
+    // a factor's role view moving with the batch (ISSUE-007). The terms of
+    // loops that run once are constants on the domain, already in the static
+    // offsets (domain forms); such loops are not re-emitted.
+    SmallVector<Value> newIVs;
+    for (unsigned s : dense->batchLoops) {
+      affine::AffineForOp loop =
+          affine::getForInductionVarOwner(matmul.sourceDomain->getValue(s));
+      auto batchLoop = affine::AffineForOp::create(
+          builder, loc, loop.getConstantLowerBound(),
+          loop.getConstantUpperBound(), loop.getStep().getSExtValue());
+      newIVs.push_back(batchLoop.getInductionVar());
+      builder.setInsertionPointToStart(batchLoop.getBody());
     }
 
+    llvm::DenseMap<AffineMap, Value> applies;
     auto view = [&](const LogicalOperand &operand) -> Value {
-      return materializeOperandView(builder, loc, operand, batchIndex);
+      return materializeOperandView(builder, loc, operand, newIVs,
+                                    dense->batchLoops, applies);
     };
     auto asTensor = [&](Value memref, const LogicalOperand &operand,
                         bool writable) -> Value {

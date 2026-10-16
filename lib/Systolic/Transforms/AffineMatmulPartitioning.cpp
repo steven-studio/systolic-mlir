@@ -280,6 +280,55 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
   return dense;
 }
 
+FailureOr<std::pair<int64_t, int64_t>>
+mlir::systolic::rangeOnDomain(const LogicalMatmul &matmul,
+                              ArrayRef<int64_t> coefficients,
+                              int64_t constant) {
+  const AffineLogicalNormalization &norm = matmul.normalization;
+  if (!norm.domain)
+    return failure();
+  const unsigned numSourceDims = norm.domain->getNumDimVars();
+  if (coefficients.size() != numSourceDims ||
+      norm.sourceTransformation.size() != numSourceDims ||
+      norm.sourceOffset.size() != numSourceDims)
+    return failure();
+  // x = S z + origin: the form is constant' + sum over t of c'_t * z_t with
+  // c'_t = sum over s of coefficients[s] * S[s][t]; z_t runs over
+  // [0, n_t - 1], so each term is extreme at an end and, the box being a
+  // product, so is the sum.
+  std::optional<int64_t> lo = constant, hi = constant;
+  for (unsigned s = 0; s < numSourceDims && lo && hi; ++s) {
+    if (coefficients[s] == 0)
+      continue;
+    std::optional<int64_t> term =
+        llvm::checkedMul(coefficients[s], norm.sourceOffset[s]);
+    lo = term ? llvm::checkedAdd(*lo, *term) : std::nullopt;
+    hi = term && hi ? llvm::checkedAdd(*hi, *term) : std::nullopt;
+  }
+  for (unsigned t = 0; t < numSourceDims && lo && hi; ++t) {
+    std::optional<int64_t> scale = int64_t(0);
+    for (unsigned s = 0; s < numSourceDims && scale; ++s) {
+      if (coefficients[s] == 0 || norm.sourceTransformation[s][t] == 0)
+        continue;
+      std::optional<int64_t> product =
+          llvm::checkedMul(coefficients[s], norm.sourceTransformation[s][t]);
+      scale = product ? llvm::checkedAdd(*scale, *product) : std::nullopt;
+    }
+    std::optional<int64_t> ub = norm.domain->getConstantBound64(
+        presburger::BoundType::UB, t);
+    if (!scale || !ub || *ub < 0)
+      return failure();
+    std::optional<int64_t> span = llvm::checkedMul(*scale, *ub);
+    if (!span)
+      return failure();
+    lo = llvm::checkedAdd(*lo, std::min<int64_t>(*span, 0));
+    hi = hi ? llvm::checkedAdd(*hi, std::max<int64_t>(*span, 0)) : hi;
+  }
+  if (!lo || !hi)
+    return failure();
+  return std::pair<int64_t, int64_t>{*lo, *hi};
+}
+
 FailureOr<SmallVector<LogicalPartition, 1>>
 mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul) {
   if (!matmul.sourceDomain)

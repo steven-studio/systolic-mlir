@@ -1823,8 +1823,63 @@ mlir::systolic::recognizeLogicalMatmul(
   };
 
   // 2. Otherwise the coordinates by groups and roles.
-  if (!positional()) {
-  // Groups: union-find over the loops, joined by every subscript's support.
+  // The batch loops (ISSUE-007, docs/AFFINE_GEMM_MAPPING.md section 16): the
+  // loops whose counter all three operands read on the iteration domain. The
+  // positional form takes the loops of its partition prefix; the analysis by
+  // groups classifies every loop by the operands that read it. A factor may
+  // read a batch loop anywhere -- in a dimension of its own or as an affine
+  // offset added to a role's dimension (A[4i - j][5k]) -- each factor through
+  // its own expression; C reads every batch loop alone, in a dimension that
+  // holds nothing else. For each value of the batch loops the role loops
+  // then form an ordinary GEMM of strided views whose base offsets are affine
+  // in the batch counters (OperandLayout::batchCoefficients).
+  SmallVector<bool> isBatchLoop(numIterationDims, false);
+
+  // 2. The analysis by groups and roles (its refusals set why/mappingClass).
+  auto byGroups = [&]() -> LogicalResult {
+  SmallVector<std::array<bool, 3>> readsLoop(numIterationDims,
+                                             {false, false, false});
+  for (const Subscript &sub : subscripts)
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (sub.onDomain.coefficients[d] != 0)
+        readsLoop[d][sub.operand] = true;
+  for (unsigned d = 0; d < numIterationDims; ++d)
+    isBatchLoop[d] = readsLoop[d][0] && readsLoop[d][1] && readsLoop[d][2];
+  // C reads every batch coordinate alone: a subscript of C with a batch loop
+  // and any other loop would move the output position with the batch -- the
+  // coupled and skewed placements (C[i + j][j] with A[i + j][k],
+  // C[i + k][j]) that the specification rejects (not one dense GEMM).
+  for (const Subscript &sub : subscripts) {
+    if (sub.operand != 2)
+      continue;
+    std::optional<unsigned> batchLoop;
+    bool otherLoop = false;
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (sub.onDomain.coefficients[d] == 0)
+        continue;
+      if (isBatchLoop[d])
+        batchLoop = batchLoop.value_or(d);
+      else
+        otherLoop = true;
+    }
+    if (batchLoop && otherLoop)
+      return refuse(llvm::Twine("C's dimension ") + llvm::Twine(sub.dim) +
+                    " mixes a batch coordinate (loop " +
+                    llvm::Twine(*batchLoop) +
+                    ", read by all three operands) with another coordinate: "
+                    "the output position would move with the batch (a "
+                    "coupled or skewed placement, not one dense GEMM)");
+  }
+  // A loop the union-find below joins: a role loop in any subscript; a batch
+  // loop only in C's subscripts (one batch coordinate per dimension of C). A
+  // factor's batch offset joins nothing.
+  auto grouped = [&](const Subscript &sub, unsigned d) {
+    return sub.onDomain.coefficients[d] != 0 &&
+           (!isBatchLoop[d] || sub.operand == 2);
+  };
+
+  // Groups: union-find over the loops, joined by every subscript's support
+  // (without the factors' batch offsets).
   SmallVector<unsigned> parentLoop(numIterationDims);
   std::iota(parentLoop.begin(), parentLoop.end(), 0u);
   auto findLoop = [&](unsigned loop) {
@@ -1835,7 +1890,7 @@ mlir::systolic::recognizeLogicalMatmul(
   for (const Subscript &sub : subscripts) {
     std::optional<unsigned> first;
     for (unsigned d = 0; d < numIterationDims; ++d) {
-      if (sub.onDomain.coefficients[d] == 0)
+      if (!grouped(sub, d))
         continue;
       if (!first)
         first = findLoop(d);
@@ -1843,13 +1898,14 @@ mlir::systolic::recognizeLogicalMatmul(
         parentLoop[findLoop(d)] = *first;
     }
   }
-  // The group of each subscript (-1: constant on the domain), groups in the
-  // order their first subscript appears.
+  // The group of each subscript (-1: constant on the domain, or a factor's
+  // dimension that reads batch loops only), groups in the order their first
+  // subscript appears.
   SmallVector<unsigned> groupRoot;
   SmallVector<int> groupOf(subscripts.size(), -1);
   for (auto [index, sub] : llvm::enumerate(subscripts)) {
     for (unsigned d = 0; d < numIterationDims; ++d) {
-      if (sub.onDomain.coefficients[d] == 0)
+      if (!grouped(sub, d))
         continue;
       unsigned root = findLoop(d);
       auto it = llvm::find(groupRoot, root);
@@ -1867,6 +1923,12 @@ mlir::systolic::recognizeLogicalMatmul(
     if (groupOf[index] < 0)
       continue;
     int &dim = readerDim[groupOf[index]][sub.operand];
+    // C may read a batch coordinate in several dimensions of its own
+    // (C[b][b - 1][i][j]: each one a batch dimension, the output slice a
+    // function of the batch loops alone) -- as the positional form allows
+    // for a prefix that repeats a batch loop.
+    if (dim >= 0 && isBatchLoop[groupRoot[groupOf[index]]])
+      continue;
     if (dim >= 0)
       return refuse(llvm::Twine(kOperandName[sub.operand]) +
                     " reads one logical coordinate in two of its dimensions "
@@ -1881,11 +1943,23 @@ mlir::systolic::recognizeLogicalMatmul(
   SmallVector<unsigned> groupsWithFirst, groupsWithSecond, reductionGroups,
       batchGroups;
   for (unsigned g = 0; g < numGroups; ++g) {
+    // A group of batch loops: one batch coordinate, read alone by one
+    // dimension of C (the factors read it through their own expressions).
+    if (isBatchLoop[groupRoot[g]]) {
+      batchGroups.push_back(g);
+      continue;
+    }
     const bool f0 = readerDim[g][0] >= 0, f1 = readerDim[g][1] >= 0,
                c = readerDim[g][2] >= 0;
+    // Every loop of a role group is read by the same two operands; a group
+    // that all three read merges loops of different roles through one
+    // subscript (A[i + k], I with K): a coupled mapping, no box per role.
     if (f0 && f1 && c)
-      batchGroups.push_back(g);
-    else if (f0 && f1)
+      return refuse("a subscript couples loops of different coordinates "
+                    "(their group is read by both factors and C, but none of "
+                    "its loops is read by all three): a coupled mapping, not "
+                    "one dense GEMM");
+    if (f0 && f1)
       reductionGroups.push_back(g);
     else if (f0 && c)
       groupsWithFirst.push_back(g);
@@ -1900,36 +1974,20 @@ mlir::systolic::recognizeLogicalMatmul(
   }
   // A batch coordinate the positional form did not recognize (one not in
   // the leading dimensions of all three operands): a batched GEMM, lowered
-  // with the batch loops around the tiles (ISSUE-006) when the three
-  // operands read the coordinate through one and the same expression on the
-  // domain -- the batch index is computed once per batch iteration and
-  // addresses the same slice of each operand. An element-wise product (every
-  // coordinate a batch one, M = N = K = 1) is a GEMM of 1 x 1 x 1 tiles in
-  // name only: refused.
+  // with the batch loops around the tiles (ISSUE-006), each operand's view
+  // offset by its own batch terms per batch iteration (ISSUE-007). An
+  // element-wise product (every coordinate a batch one, M = N = K = 1) is a
+  // GEMM of 1 x 1 x 1 tiles in name only: refused.
   if (!batchGroups.empty() && groupsWithFirst.empty() &&
       groupsWithSecond.empty() && reductionGroups.empty())
     return refuse(llvm::Twine(batchGroups.size()) +
                   " coordinate(s) are read by all three operands and none by "
                   "two: an element-wise product (a batched GEMM with "
                   "M = N = K = 1), not a matrix multiplication");
-  auto domainFormOf = [&](unsigned operand, int dim) -> const LinearForm & {
-    for (const Subscript &sub : subscripts)
-      if (sub.operand == operand && int(sub.dim) == dim)
-        return sub.onDomain;
-    llvm_unreachable("every (operand, dimension) has a subscript");
-  };
-  for (unsigned g : batchGroups) {
-    const LinearForm &reference = domainFormOf(2, readerDim[g][2]);
-    for (unsigned operand = 0; operand < 2; ++operand) {
-      const LinearForm &other = domainFormOf(operand, readerDim[g][operand]);
-      if (other.coefficients != reference.coefficients ||
-          other.constant != reference.constant)
-        return unsupported(
-            "a batch coordinate is read through different expressions by C "
-            "and " + llvm::Twine(kOperandName[operand]) +
-            " (one per-operand view of a batch coordinate is not lowered)");
-    }
-  }
+  // The factors read the batch coordinates through their own expressions --
+  // in dimensions of their own or as offsets of their role dimensions
+  // (ISSUE-007): nothing to match against C here. What each dimension adds
+  // per batch value is recorded in the operands' layouts below.
   for (auto [groups, role] :
        {std::pair{&groupsWithFirst, "the first factor and C"},
         std::pair{&groupsWithSecond, "the second factor and C"},
@@ -2004,6 +2062,12 @@ mlir::systolic::recognizeLogicalMatmul(
         return sub.onDomain.constant;
     return 0;
   };
+  auto domainFormOf = [&](unsigned operand, unsigned dim) -> const LinearForm & {
+    for (const Subscript &sub : subscripts)
+      if (sub.operand == operand && sub.dim == dim)
+        return sub.onDomain;
+    llvm_unreachable("every (operand, dimension) has a subscript");
+  };
   auto layoutOf = [&](unsigned operand, std::optional<unsigned> firstGroup,
                       std::optional<unsigned> secondGroup) {
     OperandLayout layout;
@@ -2014,9 +2078,19 @@ mlir::systolic::recognizeLogicalMatmul(
     for (int dim : layout.roleDim)
       if (dim >= 0)
         isConstant[dim] = false;
-    for (unsigned p : batchGroups) {
-      isConstant[readerDim[p][operand]] = false;
-      layout.batchDim.push_back(readerDim[p][operand]);
+    // A batch dimension: one whose subscript reads batch loops only (for C,
+    // the dimension of a batch coordinate). Never taken by a role of extent
+    // one below.
+    for (unsigned dim = 0; dim < rank; ++dim) {
+      const LinearForm &form = domainFormOf(operand, dim);
+      bool batch = false, role = false;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (form.coefficients[d] != 0)
+          (isBatchLoop[d] ? batch : role) = true;
+      if (batch && !role) {
+        isConstant[dim] = false;
+        layout.batchDim.push_back(dim);
+      }
     }
     // A role of extent one takes a constant dimension: the last one before
     // the other role's dimension (role 0), the first one after it (role 1).
@@ -2048,6 +2122,18 @@ mlir::systolic::recognizeLogicalMatmul(
     for (unsigned dim = 0; dim < rank; ++dim)
       if (isConstant[dim])
         layout.constantIndex[dim] = constantIndexOf(operand, dim);
+    // What each dimension adds per batch value: its batch loops' terms. A
+    // batch dimension's static index is its subscript's constant part.
+    layout.batchCoefficients.assign(rank,
+                                    SmallVector<int64_t>(numIterationDims, 0));
+    for (unsigned dim = 0; dim < rank; ++dim) {
+      const LinearForm &form = domainFormOf(operand, dim);
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (isBatchLoop[d])
+          layout.batchCoefficients[dim][d] = form.coefficients[d];
+    }
+    for (int dim : layout.batchDim)
+      layout.constantIndex[dim] = domainFormOf(operand, dim).constant;
     return layout;
   };
   layoutA = layoutOf(chosen.a, roles[0].group, roles[2].group);
@@ -2075,8 +2161,18 @@ mlir::systolic::recognizeLogicalMatmul(
           constantView(role.second, secondDim)};
       continue;
     }
-    AffineExpr x = operandMap[role.first].getResult(firstDim);
-    AffineExpr y = operandMap[role.second].getResult(secondDim);
+    // A role's subscripts without their batch offsets (a factor's dimension
+    // may add batch terms to the role, A[4i - j]; C's role dimensions have
+    // none): the batch loops set to 0, their terms are added per batch value.
+    SmallVector<AffineExpr> withoutBatch;
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      withoutBatch.push_back(isBatchLoop[d]
+                                 ? getAffineConstantExpr(0, mapContext)
+                                 : getAffineDimExpr(d, mapContext));
+    AffineExpr x =
+        operandMap[role.first].getResult(firstDim).replaceDims(withoutBatch);
+    AffineExpr y =
+        operandMap[role.second].getResult(secondDim).replaceDims(withoutBatch);
     std::string reason;
     auto shared = matchSharedCoordinate(x, y, numIterationDims, single, reason);
     if (!shared)
@@ -2090,23 +2186,138 @@ mlir::systolic::recognizeLogicalMatmul(
     coordinate[r] = *shared;
   }
 
-  // Batch coordinates: read by all three operands; the same coordinate in
-  // each (any views). They keep the partition prefix of the logical mapping
-  // y = (P*, I, J, K); the dense partition refuses a batched GEMM.
-  for (unsigned p : batchGroups) {
-    AffineExpr reference = operandMap[2].getResult(readerDim[p][2]);
-    for (unsigned operand = 0; operand < 2; ++operand) {
-      AffineExpr other = operandMap[operand].getResult(readerDim[p][operand]);
-      std::string reason;
-      if (!matchSharedCoordinate(reference, other, numIterationDims, single,
-                                 reason))
-        return unknown("a batch coordinate is read differently by C and " +
-                       llvm::Twine(kOperandName[operand]) + ": " + reason);
-    }
-    logicalPartitions.push_back(reference);
+  // Batch coordinates: every dimension of C that reads batch loops only is a
+  // row of the partition prefix P* of the logical mapping y = (P*, I, J, K)
+  // -- a batch coordinate filling several dimensions of C gives several rows,
+  // so every batch loop is in some row. The factors' own batch expressions
+  // and offsets are in their layouts' batchCoefficients.
+  for (const Subscript &sub : subscripts) {
+    if (sub.operand != 2)
+      continue;
+    bool batch = false, other = false;
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (sub.onDomain.coefficients[d] != 0)
+        (isBatchLoop[d] ? batch : other) = true;
+    if (batch && !other)
+      logicalPartitions.push_back(operandMap[2].getResult(sub.dim));
   }
   numPartitionDims = logicalPartitions.size();
-  } // the analysis by groups
+  return success();
+  };
+
+  // The positional form's partition prefix: read identically by the three
+  // operands; its loops are the batch loops.
+  auto recordPrefix = [&]() -> LogicalResult {
+    // The positional form: its partition prefix is read identically by the
+    // three operands; its loops are the batch loops. The prefix dimensions
+    // are batch dimensions; the role dimensions get no batch terms here (a
+    // role coupled to the prefix, C[b][b + i][j], stays in the logical
+    // mapping, where the dense partition refuses it).
+    for (AffineExpr partition : logicalPartitions) {
+      auto form = extractLinearForm(partition, numIterationDims);
+      std::optional<LinearForm> onDomain =
+          succeeded(form) ? domainForm(*form, single) : std::nullopt;
+      if (!onDomain)
+        return unknown("a partition (batch) subscript's value on the "
+                       "iteration domain overflows 64-bit arithmetic");
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        isBatchLoop[d] = isBatchLoop[d] || onDomain->coefficients[d] != 0;
+    }
+    for (OperandLayout *layout : {&layoutA, &layoutB, &layoutC}) {
+      const AffineMap &access = layout == &layoutA   ? accessA
+                                : layout == &layoutB ? accessB
+                                                     : *normalizedAcc;
+      layout->batchCoefficients.assign(
+          access.getNumResults(), SmallVector<int64_t>(numIterationDims, 0));
+      for (int dim : layout->batchDim) {
+        auto form = extractLinearForm(access.getResult(dim), numIterationDims);
+        std::optional<LinearForm> onDomain =
+            succeeded(form) ? domainForm(*form, single) : std::nullopt;
+        if (!onDomain)
+          return unknown("a partition (batch) subscript's value on the "
+                         "iteration domain overflows 64-bit arithmetic");
+        layout->batchCoefficients[dim] = onDomain->coefficients;
+        layout->constantIndex[dim] = onDomain->constant;
+      }
+    }
+    return success();
+  };
+
+  // Which analysis decides. The positional form is tried first, so that
+  // every nest it recognized keeps its logical mapping, views and
+  // diagnostics. One positional reading is never lowerable: a loop of its
+  // partition prefix that also drives I, J or K (the dense partition refuses
+  // it: "two logical coordinates are driven by the same loop") -- e.g. A[b][k]
+  // and B[b][...][b] read as K although b is the prefix. For such a reading
+  // the analysis by groups decides, classifying every loop by its readers;
+  // the positional reading is kept only when that analysis refuses the nest
+  // too, with its diagnostics unchanged (C[b][b + i][j]).
+  auto positionalCouplesPrefix = [&]() {
+    auto onDomainOf = [&](AffineExpr expr) -> std::optional<LinearForm> {
+      auto form = extractLinearForm(expr, numIterationDims);
+      return succeeded(form) ? domainForm(*form, single) : std::nullopt;
+    };
+    SmallVector<bool> prefixLoop(numIterationDims, false);
+    for (AffineExpr partition : logicalPartitions) {
+      std::optional<LinearForm> form = onDomainOf(partition);
+      if (!form)
+        return false;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        prefixLoop[d] = prefixLoop[d] || form->coefficients[d] != 0;
+    }
+    for (const SharedCoordinate &shared : coordinate) {
+      std::optional<LinearForm> form = onDomainOf(shared.expr);
+      if (!form)
+        return false;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (prefixLoop[d] && form->coefficients[d] != 0)
+          return true;
+    }
+    return false;
+  };
+  if (!positional()) {
+    if (failed(byGroups()))
+      return failure();
+  } else if (positionalCouplesPrefix()) {
+    const unsigned savedPartitionDims = numPartitionDims;
+    const affine::AffineLoadOp savedALoad = aLoad, savedBLoad = bLoad;
+    const AffineMap savedAccessA = accessA, savedAccessB = accessB;
+    const std::array<SharedCoordinate, 3> savedCoordinate = coordinate;
+    const OperandLayout savedLayoutA = layoutA, savedLayoutB = layoutB,
+                        savedLayoutC = layoutC;
+    const SmallVector<AffineExpr> savedPartitions = logicalPartitions;
+    const std::string savedWhy = why ? *why : std::string();
+    const GemmMappingClass savedClass =
+        mappingClass ? *mappingClass : GemmMappingClass::ProvenValid;
+    numPartitionDims = 0;
+    aLoad = lhsLoad;
+    bLoad = rhsLoad;
+    accessA = operandMap[0];
+    accessB = operandMap[1];
+    layoutA = layoutB = layoutC = OperandLayout();
+    logicalPartitions.clear();
+    if (failed(byGroups())) {
+      numPartitionDims = savedPartitionDims;
+      aLoad = savedALoad;
+      bLoad = savedBLoad;
+      accessA = savedAccessA;
+      accessB = savedAccessB;
+      coordinate = savedCoordinate;
+      layoutA = savedLayoutA;
+      layoutB = savedLayoutB;
+      layoutC = savedLayoutC;
+      logicalPartitions = savedPartitions;
+      std::fill(isBatchLoop.begin(), isBatchLoop.end(), false);
+      if (why)
+        *why = savedWhy;
+      if (mappingClass)
+        *mappingClass = savedClass;
+      if (failed(recordPrefix()))
+        return failure();
+    }
+  } else if (failed(recordPrefix())) {
+    return failure();
+  }
 
   AffineExpr logicalI = coordinate[0].expr;
   AffineExpr logicalJ = coordinate[1].expr;
@@ -2140,8 +2351,11 @@ mlir::systolic::recognizeLogicalMatmul(
   // would hold only after wrapping around) is refused instead of lowered
   // through a wrong view. A dimension that a role of extent one took holds
   // its constant (scale * 0 + offset).
+  // A factor's role dimension may add batch terms (ISSUE-007): the subscript
+  // minus those terms is the view; the terms are added per batch value.
   auto subscriptIsView = [&](AffineExpr subscript, const LinearForm &coordinate,
-                             const OperandCoordinateView &view) {
+                             const OperandCoordinateView &view,
+                             ArrayRef<int64_t> batchTerms) {
     if (view.scale == 0)
       return false;
     auto expression = extractLinearForm(subscript, numIterationDims);
@@ -2154,7 +2368,11 @@ mlir::systolic::recognizeLogicalMatmul(
     for (unsigned d = 0; d < numIterationDims; ++d) {
       std::optional<int64_t> expected =
           llvm::checkedMul(view.scale, onDomain->coefficients[d]);
-      if (!expected || *expected != form->coefficients[d])
+      std::optional<int64_t> withBatch =
+          expected && !batchTerms.empty()
+              ? llvm::checkedAdd(*expected, batchTerms[d])
+              : expected;
+      if (!withBatch || *withBatch != form->coefficients[d])
         return false;
     }
     std::optional<int64_t> scaled =
@@ -2166,11 +2384,16 @@ mlir::systolic::recognizeLogicalMatmul(
   auto operandIsView = [&](AffineMap access, const OperandLayout &layout,
                            const LinearForm &first, const LinearForm &second,
                            const std::array<OperandCoordinateView, 2> &view) {
-    for (unsigned r = 0; r < 2; ++r)
-      if (layout.roleDim[r] >= 0 &&
-          !subscriptIsView(access.getResult(layout.roleDim[r]),
-                           r == 0 ? first : second, view[r]))
+    for (unsigned r = 0; r < 2; ++r) {
+      if (layout.roleDim[r] < 0)
+        continue;
+      ArrayRef<int64_t> batchTerms;
+      if (size_t(layout.roleDim[r]) < layout.batchCoefficients.size())
+        batchTerms = layout.batchCoefficients[layout.roleDim[r]];
+      if (!subscriptIsView(access.getResult(layout.roleDim[r]),
+                           r == 0 ? first : second, view[r], batchTerms))
         return false;
+    }
     return true;
   };
   if (!operandIsView(accessA, layoutA, *linearI, *linearK, viewA) ||

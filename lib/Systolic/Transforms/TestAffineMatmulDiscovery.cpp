@@ -214,13 +214,50 @@ struct TestAffineMatmulDiscoveryPass
                      << layout.roleDim[0] << ", " << layout.roleDim[1] << ")"
                      << (layout.isTransposed() ? " transposed" : "");
         for (auto [dim, index] : llvm::enumerate(layout.constantIndex))
-          if (index)
+          if (index && !layout.hasBatchTerms(dim))
             llvm::errs() << ", dimension " << dim << " fixed at " << *index;
         llvm::errs() << "\n";
       };
       printLayout("A", result.layoutA);
       printLayout("B", result.layoutB);
       printLayout("C", result.layoutC);
+      // What each dimension adds per batch value (ISSUE-007): a batch
+      // dimension's index "= static + terms", a role dimension's view
+      // "+= terms"; x_s is the counter of loop s.
+      auto printBatchTerms = [](StringRef operand,
+                                const OperandLayout &layout) {
+        SmallVector<std::string> parts;
+        for (unsigned dim = 0; dim < layout.batchCoefficients.size(); ++dim) {
+          if (!layout.hasBatchTerms(dim))
+            continue;
+          std::string text;
+          llvm::raw_string_ostream os(text);
+          os << "dimension " << dim;
+          const bool role =
+              int(dim) == layout.roleDim[0] || int(dim) == layout.roleDim[1];
+          if (role)
+            os << " +=";
+          else
+            os << " = " << layout.constantIndex[dim].value_or(0) << " +";
+          bool first = true;
+          for (auto [s, coefficient] :
+               llvm::enumerate(layout.batchCoefficients[dim])) {
+            if (coefficient == 0)
+              continue;
+            os << (first ? " " : " + ") << coefficient << "*x" << s;
+            first = false;
+          }
+          parts.push_back(os.str());
+        }
+        if (parts.empty())
+          return;
+        llvm::errs() << "  batch terms " << operand << ": ";
+        llvm::interleave(parts, llvm::errs(), ", ");
+        llvm::errs() << "\n";
+      };
+      printBatchTerms("A", result.layoutA);
+      printBatchTerms("B", result.layoutB);
+      printBatchTerms("C", result.layoutC);
       if (result.reductionMayReassociate)
         llvm::errs() << "  reduction: reassoc permitted\n";
 
