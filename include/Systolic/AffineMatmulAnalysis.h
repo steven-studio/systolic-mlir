@@ -1,6 +1,8 @@
 #ifndef SYSTOLIC_AFFINE_MATMUL_ANALYSIS_H
 #define SYSTOLIC_AFFINE_MATMUL_ANALYSIS_H
 
+#include "Systolic/IntegerLattice.h"
+
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
 #include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -293,6 +295,69 @@ FailureOr<LogicalMatmul>
 recognizeLogicalMatmul(AffineMatmulCandidate candidate,
                        std::string *why = nullptr,
                        GemmMappingClass *mappingClass = nullptr);
+
+/// The geometric screening of a multiply-accumulate nest
+/// (docs/AFFINE_GEMM_MAPPING.md section 19, layer 1): the linear algebra of
+/// its accesses on the integer lattice of its iterations. NECESSARY
+/// conditions only -- nothing here decides that the nest is a GEMM; that is
+/// recognizeLogicalMatmul's job, with the domain, the role decomposition,
+/// C's injectivity per batch and the bounds. The discovery test pass prints
+/// it (geometry=true).
+///
+/// All coefficients are on the loops' ordinals z_s (x_s = lower_s + step_s
+/// z_s): an access coefficient times the loop's step, so that a direction is
+/// a step of the actual iteration lattice. A loop of one iteration is a
+/// constant on the domain (Lemma 0) and takes no part.
+struct AffineGeometryScreening {
+  /// The operands as the product writes them: 0 and 1 the factors, 2 C.
+  enum Operand : unsigned { First = 0, Second = 1, Output = 2 };
+  struct Loop {
+    int64_t trip = 0;
+    /// Bit X set iff some subscript of operand X has a nonzero ordinal
+    /// coefficient on the loop (only for loops of two or more iterations).
+    unsigned readers = 0;
+    /// The loop's class by its readers: 'I' (first factor and C), 'J'
+    /// (second factor and C), 'K' (both factors), 'P' (all three: a batch
+    /// loop), '1' (one reader: a broadcast), '-' (no reader, or one
+    /// iteration).
+    char role = '-';
+  };
+  SmallVector<Loop> loops;
+  /// Per operand, per memref dimension, the ordinal coefficients.
+  std::array<lattice::IntMatrix, 3> ordinal;
+
+  /// Ranks over Q of C's subscripts and of all subscripts, on every loop of
+  /// two or more iterations ('full') and on the role loops only ('roles':
+  /// the batch loops removed -- section 19, the role space).
+  unsigned cRankFull = 0, cRankRoles = 0;
+  unsigned allRankFull = 0, allRankRoles = 0;
+  /// A basis (HNF) of the integer kernel of C's subscripts on the loops of
+  /// two or more iterations, as full-length ordinal vectors: the directions
+  /// along which C stays fixed.
+  lattice::IntMatrix cKernel;
+  /// The kernel basis vectors that join two points of the box (|delta_s| <
+  /// trip_s) and are not combinations of reduction (K) loops: two
+  /// iterations writing one C element that are not one reduction.
+  lattice::IntMatrix cKernelBeyondReduction;
+  /// The reduction loops ('K'): the axes of the reduction lattice.
+  SmallVector<unsigned> reductionLoops;
+
+  /// The six-vector conditions of the task statement, for operands of two
+  /// dimensions each read as stored -- Ic, Jc = C's dimensions, Ia, Ka = the
+  /// first factor's, Kb, Jb = the second's:
+  ///   a: rank(cI, cJ) = 2;  b: rank of the six = 3;
+  ///   c: some d with cI.d = cJ.d = 0, aK.d != 0, bK.d != 0 (the witness);
+  ///   d1, d2, d3: rank(aI, aK) = 2, rank(bK, bJ) = 2, rank(aI, bJ) = 2.
+  struct SixVectorConditions {
+    bool a = false, b = false, c = false, d1 = false, d2 = false, d3 = false;
+    std::optional<lattice::IntVector> reductionDirection;
+  };
+  std::optional<SixVectorConditions> conditionsFull, conditionsRoles;
+};
+
+FailureOr<AffineGeometryScreening>
+screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
+                           std::string *why = nullptr);
 
 } // namespace systolic
 } // namespace mlir

@@ -129,5 +129,6 @@ void mlir::systolic::registerSystolicPasses() {
   registerDeclareFpgaFleetPass();
   registerSystolicScheduleOverlapPass();
   registerTestAffineMatmulDiscoveryPass();
+  registerTestIntegerLatticePass();
   registerSystolicPipelines();
 }

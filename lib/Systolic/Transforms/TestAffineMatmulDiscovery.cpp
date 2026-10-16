@@ -60,6 +60,115 @@ struct TestAffineMatmulDiscoveryPass
       llvm::cl::desc("Regions to verify as a partition: lower I,J,K, "
                      "extent I,J,K per region")};
 
+  Option<bool> geometry{
+      *this, "geometry",
+      llvm::cl::desc("Print the geometric screening of every candidate "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 19: necessary "
+                     "conditions only, not a decision)"),
+      llvm::cl::init(false)};
+
+  static void printVector(const lattice::IntVector &v) {
+    llvm::errs() << "[";
+    llvm::interleaveComma(v, llvm::errs());
+    llvm::errs() << "]";
+  }
+
+  static void printMatrix(const lattice::IntMatrix &m) {
+    llvm::errs() << "[";
+    llvm::interleaveComma(m, llvm::errs(),
+                          [](const lattice::IntVector &v) { printVector(v); });
+    llvm::errs() << "]";
+  }
+
+  static void printGeometry(AffineMatmulCandidate candidate) {
+    std::string why;
+    FailureOr<AffineGeometryScreening> g =
+        screenAffineMatmulGeometry(candidate, &why);
+    llvm::errs() << "geometry screening (necessary conditions only, not a "
+                    "decision):\n";
+    if (failed(g)) {
+      llvm::errs() << "  not screened: " << why << "\n";
+      return;
+    }
+    static const char *const kOperand[3] = {"A", "B", "C"};
+    for (auto [s, loop] : llvm::enumerate(g->loops)) {
+      llvm::errs() << "  loop " << s << ": trip " << loop.trip;
+      if (loop.trip < 2) {
+        llvm::errs() << ", one iteration (a constant)\n";
+        continue;
+      }
+      llvm::errs() << ", readers";
+      for (unsigned x = 0; x < 3; ++x)
+        if (loop.readers & (1u << x))
+          llvm::errs() << " " << kOperand[x];
+      llvm::errs() << " -> ";
+      switch (loop.role) {
+      case 'I':
+        llvm::errs() << "I";
+        break;
+      case 'J':
+        llvm::errs() << "J";
+        break;
+      case 'K':
+        llvm::errs() << "K (reduction)";
+        break;
+      case 'P':
+        llvm::errs() << "batch";
+        break;
+      case '1':
+        llvm::errs() << "one reader (a broadcast)";
+        break;
+      default:
+        llvm::errs() << "no reader";
+        break;
+      }
+      llvm::errs() << "\n";
+    }
+    for (unsigned x = 0; x < 3; ++x) {
+      llvm::errs() << "  " << kOperand[x] << " ordinal rows: ";
+      printMatrix(g->ordinal[x]);
+      llvm::errs() << "\n";
+    }
+    llvm::errs() << "  rank of C: " << g->cRankFull << " (role space "
+                 << g->cRankRoles << "); rank of all subscripts: "
+                 << g->allRankFull << " (role space " << g->allRankRoles
+                 << ")\n";
+    llvm::errs() << "  C kernel: ";
+    printMatrix(g->cKernel);
+    llvm::errs() << "\n  reduction loops:";
+    if (g->reductionLoops.empty())
+      llvm::errs() << " none";
+    for (unsigned s : g->reductionLoops)
+      llvm::errs() << " " << s;
+    llvm::errs() << "\n";
+    for (const lattice::IntVector &v : g->cKernelBeyondReduction) {
+      llvm::errs() << "  C kernel direction ";
+      printVector(v);
+      llvm::errs() << " joins two points of the box and is not a reduction: "
+                      "two iterations write one C element\n";
+    }
+    auto printConditions =
+        [](StringRef space,
+           const std::optional<AffineGeometryScreening::SixVectorConditions>
+               &c) {
+          if (!c)
+            return;
+          auto yn = [](bool b) { return b ? "yes" : "no"; };
+          llvm::errs() << "  six-vector conditions (" << space
+                       << "): A " << yn(c->a) << ", B " << yn(c->b)
+                       << ", C " << yn(c->c);
+          if (c->reductionDirection) {
+            llvm::errs() << " (d = ";
+            printVector(*c->reductionDirection);
+            llvm::errs() << ")";
+          }
+          llvm::errs() << ", D " << yn(c->d1) << " " << yn(c->d2) << " "
+                       << yn(c->d3) << "\n";
+        };
+    printConditions("full space", g->conditionsFull);
+    printConditions("role space", g->conditionsRoles);
+  }
+
   void runOnOperation() override {
     SmallVector<AffineMatmulCandidate> candidates;
 
@@ -81,6 +190,8 @@ struct TestAffineMatmulDiscoveryPass
     SmallVector<LogicalMatmul, 1> logicalMatmuls;
 
     for (AffineMatmulCandidate candidate : candidates) {
+      if (geometry)
+        printGeometry(candidate);
       std::string notRecognized;
       GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
       auto result =

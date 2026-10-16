@@ -2746,3 +2746,321 @@ mlir::systolic::recognizeLogicalMatmul(
 
   return result;
 }
+
+//===----------------------------------------------------------------------===//
+// The geometric screening (docs/AFFINE_GEMM_MAPPING.md section 19, layer 1).
+//===----------------------------------------------------------------------===//
+
+FailureOr<AffineGeometryScreening>
+mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
+                                           std::string *why) {
+  auto fail = [&](const llvm::Twine &reason)
+      -> FailureOr<AffineGeometryScreening> {
+    if (why)
+      *why = reason.str();
+    return failure();
+  };
+
+  // The nest: the perfect chain from the anchor and the one MAC inside it
+  // (the same shape recognizeLogicalMatmul requires).
+  auto outer = dyn_cast_or_null<affine::AffineForOp>(candidate.anchor);
+  if (!outer)
+    return fail("the anchor is not an affine.for");
+  SmallVector<affine::AffineForOp> chain{outer};
+  for (;;) {
+    affine::AffineForOp child;
+    for (Operation &op : *chain.back().getBody()) {
+      if (isa<affine::AffineYieldOp>(op))
+        continue;
+      auto loop = dyn_cast<affine::AffineForOp>(op);
+      if (!loop || child) {
+        child = nullptr;
+        break;
+      }
+      child = loop;
+    }
+    if (!child)
+      break;
+    chain.push_back(child);
+  }
+  SmallVector<affine::AffineLoadOp> loads;
+  SmallVector<affine::AffineStoreOp> stores;
+  for (Operation &op : *chain.back().getBody()) {
+    if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+      loads.push_back(load);
+    else if (auto store = dyn_cast<affine::AffineStoreOp>(op))
+      stores.push_back(store);
+    else if (!isa<arith::MulFOp, arith::AddFOp, affine::AffineYieldOp>(op))
+      return fail("the innermost body is not one multiply-accumulate");
+  }
+  if (loads.size() != 3 || stores.size() != 1)
+    return fail("the innermost body is not one multiply-accumulate");
+  auto add = stores.front().getValue().getDefiningOp<arith::AddFOp>();
+  if (!add)
+    return fail("the stored value is not an arith.addf");
+  affine::AffineLoadOp accLoad;
+  arith::MulFOp mul;
+  for (auto [x, y] : {std::pair{add.getLhs(), add.getRhs()},
+                      std::pair{add.getRhs(), add.getLhs()}}) {
+    auto load = x.getDefiningOp<affine::AffineLoadOp>();
+    auto product = y.getDefiningOp<arith::MulFOp>();
+    if (load && product) {
+      accLoad = load;
+      mul = product;
+      break;
+    }
+  }
+  if (!mul)
+    return fail("the stored value is not a load plus a product");
+  auto firstLoad = mul.getLhs().getDefiningOp<affine::AffineLoadOp>();
+  auto secondLoad = mul.getRhs().getDefiningOp<affine::AffineLoadOp>();
+  if (!firstLoad || !secondLoad)
+    return fail("a factor of the product is not an affine.load");
+
+  AffineGeometryScreening result;
+  SmallVector<Value> ivs;
+  SmallVector<int64_t> steps;
+  for (auto [position, loop] : llvm::enumerate(chain)) {
+    ivs.push_back(loop.getInductionVar());
+    std::optional<int64_t> lower = constantLoopBound(loop, /*lower=*/true);
+    std::optional<int64_t> upper = constantLoopBound(loop, /*lower=*/false);
+    if (!lower)
+      return fail(describeNonConstantBound(loop, position, /*lower=*/true));
+    if (!upper)
+      return fail(describeNonConstantBound(loop, position, /*lower=*/false));
+    if (*upper <= *lower)
+      return fail("loop " + llvm::Twine(position) + " has no iteration");
+    const int64_t step = loop.getStepAsInt();
+    std::optional<int64_t> trip = checkedTripCount(*lower, *upper, step);
+    if (!trip)
+      return fail("loop " + llvm::Twine(position) +
+                  "'s trip count overflows 64-bit arithmetic");
+    AffineGeometryScreening::Loop info;
+    info.trip = *trip;
+    result.loops.push_back(info);
+    steps.push_back(step);
+  }
+  const unsigned n = chain.size();
+
+  // The accesses on the ordinals: coefficient x step.
+  std::array<affine::AffineLoadOp, 3> accesses{firstLoad, secondLoad,
+                                                     accLoad};
+  for (unsigned x = 0; x < 3; ++x) {
+    FailureOr<AffineMap> map = normalizeAccessMap(
+        accesses[x].getMap(), accesses[x].getIndices(), ivs);
+    if (failed(map))
+      return fail("an access index is not a counter of the nest's loops, or "
+                  "an access map has symbols");
+    for (AffineExpr expr : map->getResults()) {
+      FailureOr<LinearForm> form = extractLinearForm(expr, n);
+      if (failed(form))
+        return fail("a subscript is not a linear form of the loop counters");
+      lattice::IntVector row;
+      for (unsigned s = 0; s < n; ++s) {
+        std::optional<int64_t> c =
+            llvm::checkedMul(form->coefficients[s], steps[s]);
+        if (!c)
+          return fail("an ordinal coefficient overflows 64-bit arithmetic");
+        row.push_back(*c);
+      }
+      result.ordinal[x].push_back(std::move(row));
+    }
+  }
+
+  // Readers, classes, the reduction loops.
+  SmallVector<unsigned> fullLoops, roleLoops;
+  for (unsigned s = 0; s < n; ++s) {
+    AffineGeometryScreening::Loop &loop = result.loops[s];
+    if (loop.trip < 2)
+      continue;
+    fullLoops.push_back(s);
+    for (unsigned x = 0; x < 3; ++x)
+      for (const lattice::IntVector &row : result.ordinal[x])
+        if (row[s] != 0)
+          loop.readers |= 1u << x;
+    switch (loop.readers) {
+    case 0b101:
+      loop.role = 'I';
+      break;
+    case 0b110:
+      loop.role = 'J';
+      break;
+    case 0b011:
+      loop.role = 'K';
+      break;
+    case 0b111:
+      loop.role = 'P';
+      break;
+    case 0:
+      loop.role = '-';
+      break;
+    default:
+      loop.role = '1';
+      break;
+    }
+    if (loop.role == 'K')
+      result.reductionLoops.push_back(s);
+    if (loop.role != 'P')
+      roleLoops.push_back(s);
+  }
+
+  auto restrictTo = [&](const lattice::IntMatrix &rows,
+                        ArrayRef<unsigned> columns) {
+    lattice::IntMatrix out;
+    for (const lattice::IntVector &row : rows) {
+      lattice::IntVector v;
+      for (unsigned s : columns)
+        v.push_back(row[s]);
+      out.push_back(std::move(v));
+    }
+    return out;
+  };
+  auto rankOf = [&](const lattice::IntMatrix &m,
+                    unsigned columns) -> std::optional<unsigned> {
+    if (m.empty() || columns == 0)
+      return 0u;
+    std::optional<lattice::ColumnEchelon> e = lattice::columnEchelon(m, columns);
+    return e ? std::optional<unsigned>(e->rank) : std::nullopt;
+  };
+  lattice::IntMatrix all;
+  for (unsigned x = 0; x < 3; ++x)
+    all.append(result.ordinal[x].begin(), result.ordinal[x].end());
+  std::optional<unsigned> cFull =
+      rankOf(restrictTo(result.ordinal[2], fullLoops), fullLoops.size());
+  std::optional<unsigned> cRoles =
+      rankOf(restrictTo(result.ordinal[2], roleLoops), roleLoops.size());
+  std::optional<unsigned> aFull =
+      rankOf(restrictTo(all, fullLoops), fullLoops.size());
+  std::optional<unsigned> aRoles =
+      rankOf(restrictTo(all, roleLoops), roleLoops.size());
+  if (!cFull || !cRoles || !aFull || !aRoles)
+    return fail("a rank computation overflows 64-bit arithmetic");
+  result.cRankFull = *cFull;
+  result.cRankRoles = *cRoles;
+  result.allRankFull = *aFull;
+  result.allRankRoles = *aRoles;
+
+  // C's integer kernel on the loops of two or more iterations.
+  if (!fullLoops.empty()) {
+    lattice::IntMatrix cRows = restrictTo(result.ordinal[2], fullLoops);
+    lattice::IntMatrix basis;
+    if (cRows.empty()) {
+      for (unsigned i = 0; i < fullLoops.size(); ++i) {
+        lattice::IntVector e(fullLoops.size(), 0);
+        e[i] = 1;
+        basis.push_back(std::move(e));
+      }
+    } else {
+      std::optional<lattice::ColumnEchelon> e =
+          lattice::columnEchelon(cRows, fullLoops.size());
+      if (!e)
+        return fail("C's kernel overflows 64-bit arithmetic");
+      basis = e->kernel;
+    }
+    for (const lattice::IntVector &v : basis) {
+      lattice::IntVector expanded(n, 0);
+      bool joins = true, beyondReduction = false;
+      for (auto [i, s] : llvm::enumerate(fullLoops)) {
+        expanded[s] = v[i];
+        std::optional<int64_t> magnitude = lattice::checkedAbs(v[i]);
+        if (!magnitude || *magnitude >= result.loops[s].trip)
+          joins = false;
+        if (v[i] != 0 && result.loops[s].role != 'K')
+          beyondReduction = true;
+      }
+      if (joins && beyondReduction)
+        result.cKernelBeyondReduction.push_back(expanded);
+      result.cKernel.push_back(std::move(expanded));
+    }
+  }
+
+  // The six-vector conditions, for operands of two dimensions each.
+  auto conditions = [&](ArrayRef<unsigned> columns)
+      -> std::optional<AffineGeometryScreening::SixVectorConditions> {
+    auto vector = [&](unsigned x, unsigned d) {
+      lattice::IntVector v;
+      for (unsigned s : columns)
+        v.push_back(result.ordinal[x][d][s]);
+      return v;
+    };
+    const lattice::IntVector cI = vector(2, 0), cJ = vector(2, 1);
+    const lattice::IntVector aI = vector(0, 0), aK = vector(0, 1);
+    const lattice::IntVector bK = vector(1, 0), bJ = vector(1, 1);
+    auto rank = [&](lattice::IntMatrix m) {
+      return rankOf(m, columns.size()).value_or(~0u);
+    };
+    AffineGeometryScreening::SixVectorConditions c;
+    c.a = rank({cI, cJ}) == 2;
+    c.b = rank({cI, cJ, aI, aK, bK, bJ}) == 3;
+    c.d1 = rank({aI, aK}) == 2;
+    c.d2 = rank({bK, bJ}) == 2;
+    c.d3 = rank({aI, bJ}) == 2;
+    // Some d in ker [cI; cJ] with aK.d != 0 and bK.d != 0: exists iff
+    // neither aK nor bK vanishes on the whole kernel; then u + t w works for
+    // all but at most two integers t.
+    auto dot = [](const lattice::IntVector &p, const lattice::IntVector &q)
+        -> std::optional<int64_t> {
+      int64_t sum = 0;
+      for (auto [x, y] : llvm::zip(p, q)) {
+        std::optional<int64_t> product = llvm::checkedMul(x, y);
+        std::optional<int64_t> next =
+            product ? llvm::checkedAdd(sum, *product) : std::nullopt;
+        if (!next)
+          return std::nullopt;
+        sum = *next;
+      }
+      return sum;
+    };
+    lattice::IntMatrix kernel;
+    if (columns.empty())
+      return c;
+    if (std::optional<lattice::ColumnEchelon> e =
+            lattice::columnEchelon({cI, cJ}, columns.size()))
+      kernel = e->kernel;
+    else
+      return std::nullopt;
+    const lattice::IntVector *u = nullptr, *w = nullptr;
+    for (const lattice::IntVector &v : kernel) {
+      std::optional<int64_t> av = dot(aK, v), bv = dot(bK, v);
+      if (!av || !bv)
+        return std::nullopt;
+      if (*av != 0 && !u)
+        u = &v;
+      if (*bv != 0 && !w)
+        w = &v;
+    }
+    if (u && w) {
+      for (int64_t t = 0; t <= 2; ++t) {
+        lattice::IntVector d(columns.size());
+        bool ok = true;
+        for (unsigned i = 0; i < d.size(); ++i) {
+          std::optional<int64_t> tw = llvm::checkedMul(t, (*w)[i]);
+          std::optional<int64_t> sum =
+              tw ? llvm::checkedAdd((*u)[i], *tw) : std::nullopt;
+          if (!sum) {
+            ok = false;
+            break;
+          }
+          d[i] = *sum;
+        }
+        std::optional<int64_t> av = ok ? dot(aK, d) : std::nullopt;
+        std::optional<int64_t> bv = ok ? dot(bK, d) : std::nullopt;
+        if (av && bv && *av != 0 && *bv != 0) {
+          lattice::IntVector expanded(n, 0);
+          for (auto [i, s] : llvm::enumerate(columns))
+            expanded[s] = d[i];
+          c.c = true;
+          c.reductionDirection = std::move(expanded);
+          break;
+        }
+      }
+    }
+    return c;
+  };
+  if (result.ordinal[0].size() == 2 && result.ordinal[1].size() == 2 &&
+      result.ordinal[2].size() == 2) {
+    result.conditionsFull = conditions(fullLoops);
+    result.conditionsRoles = conditions(roleLoops);
+  }
+  return result;
+}

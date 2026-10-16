@@ -848,3 +848,183 @@ computed checked: the domain D of §1 exactly.
 | 800 generated cases | every verdict as in the Phase 2 run (787 pass, 2 expected_refusal, 6 known_false_negative, 5 spec_open); one predicted reason changed with the compiler's: `gen_de03cb2b804b` (`C[i + j][3 + 3j]`, `i` of one iteration; UNDETERMINED, SQ-5) is refused with the SQ-5 reason instead of "loop 4 drives I and J" (18.2) |
 | `test_permissions.py` | 48/48 |
 | FPGA board | NOT RUN (no board) |
+
+## 19. The generalized affine GEMM mapping (2026-10-16)
+
+The decisions of 2026-10-16 (after the Phase A analysis): operand views are general affine
+functions of the operand's roles and of the batch loops -- skewed and merged dimensions,
+transposes, batch-dependent offsets in A, B **and C** (no C purity); C is legal when its view is
+injective per batch; the batched dot products of SQ-5 are not refused a priori; general affine
+loop domains are accepted only with a proof that their integer points correspond to the GEMM's
+(batch, I, J, K) points. Geometric (rank) conditions are a screening, never a proof.
+
+### 19.1 Definition: a batched GEMM of affine views
+
+D is the finite set of iteration vectors; F_X(x) = M_X x + m_X (X = A, B, C) are the accesses.
+With A and B read-only and disjoint from C (§7) and the reassociation permission (§6), the nest
+leaves C = C0 + Σ_{x∈D} e_{F_C(x)} · A[F_A(x)] · B[F_B(x)].
+
+The nest is a **batched GEMM of affine views** iff there are a box Z = Π_t [0, n_t) (n_t ≥ 2), an
+integer affine **bijection** ξ: Z → D, a partition of Z's coordinates into P (batch), I, J, K,
+role ordinals R̂(z) (a bijection of the role's coordinates onto [0, E_R); an absent role has
+E_R = 1) and integer affine views V_C(p, I, J), V_A(p, I, K), V_B(p, K, J) such that
+
+- **(G1)** F_X(ξ(z)) = V_X(p(z), R̂…(z)) for X = A, B, C — the per-iteration update is the GEMM
+  slot's update: output invariance, A and B paired at the same logical K (their physical
+  indices may differ), the (batch, I, J, K) decomposition;
+- **(G2)** for every batch value p, (I, J) ↦ V_C(p, I, J) is injective on [0,E_I) × [0,E_J): a
+  tile reads and writes each C element once (across batches C may overlap: the batch
+  iterations run in order);
+- **(G3)** every index lies inside its array (checked int64);
+- **(G4)** C0 (the C load and store coincide), §7, §6;
+- **non-degeneracy**: at least one of I, J, K is present. (Every MAC nest is a batch of
+  1 × 1 × 1 products with ξ the identity and all coordinates batch: without this the
+  definition would be vacuous. Such a nest is an element-wise product, not a GEMM.)
+
+**Theorem 6 (equivalence) [proved].** Under G1–G4 the nest and the batches of
+C′_p += A′_p · B′_p, run in order, produce the same C as exact sums. *Proof.* ξ is a bijection,
+so the nest's updates are those of the slots (p, I, J, K) of the box, each once (G1); within a
+batch the tile's C elements are distinct (G2), so each receives exactly its K-sum; the batches
+are sequential, so contributions of different batches to one element add up. ∎ Theorems 1 and
+5 are the special cases of role-pure views (one role per dimension) and pure C.
+
+Real-space invertibility is not required (a role split over several loops makes ξ⁻¹ ∘ τ a
+non-square map); what is required is the bijection on the finite Z, and the reduction of an
+output (p, I, J) is its fibre — exactly the K slots.
+
+### 19.2 Structure: roles are loop directions, found by readers
+
+**Theorem 3 applied to the slot map.** For a box D with every loop of two or more iterations,
+τ = (slot map) ∘ ξ⁻¹ is an affine bijection between boxes, so (S1) every loop drives exactly one
+of the batch coordinates, I, J, K and (S2) the loops of each are a signed mixed radix.
+*Readers.* By G1, a loop driving I is not read by B (V_B does not depend on I); one driving J is
+not read by A; one driving K is not read by C. Hence a loop read by A, B and C drives a batch
+coordinate in **every** decomposition; the classification AC → I, BC → J, AB → K, ABC → P is the
+decomposition with the fewest batch coordinates (every other valid one demotes role loops to
+batch loops); a loop with one reader is a broadcast (§10). On a box domain the reduction
+lattice is therefore spanned by the K loops' axes: a direction that keeps C fixed but is not
+an axis combination of K loops (Test 2's d = (5, −3, 1)) joins different batch iterations.
+
+### 19.3 The legality of C
+
+G2 replaces C purity. With the C view V_C(p, I, J) = λ_I I + λ_J J + (batch terms) + c (λ_I, λ_J
+the per-dimension coefficients), injectivity on the box is decided exactly (IntegerLattice.h,
+injectiveOnBox): rank [λ_I λ_J] = 2 is injective; λ_I = 0 needs M = 1 (λ_J: N = 1); for
+λ_I = a u, λ_J = b u (u primitive, g = gcd(a, b)) the smallest collision is (b/g, −a/g), so the
+view is injective iff |b|/g ≥ M or |a|/g ≥ N. Re-decided with it:
+
+- **case_087**, C[i + j][j] += A[i + j][k] · B[k][j]: j is read by all three (batch); per j the
+  GEMV C′(I) = C[I + j][j], A′(I, K) = A[I + j][K], B′(K) = B[K][j]; C′ injective, and different
+  batches write disjoint columns. **A batched GEMM** (was refused by C purity).
+- **case_127**, C[i + k][j] += A[i][k] · B[k][j]: k is read by all three (batch); per k the
+  rank-1 update C′(I, J) = C[I + k][J] += A[I][k] · B[k][J] (K = 1), injective per batch; the
+  windows of different batches overlap and add up in order. **A batched GEMM** (was refused).
+- C[i + j] += A[i][k] · B[k][j] (1-D C, M, N ≥ 2): (0, 1) and (1, 0) write C[1] — G2 fails for
+  the canonical roles (a tile would lose an update). Demoting J to a batch loop gives the valid
+  decomposition C′_j(I) = C[I + j] (a GEMV per j): mathematically a batched GEMM, which the
+  recognizer does not construct (it does not demote) — VALID_BUT_LOWERING_UNSUPPORTED.
+
+### 19.4 The integer lattice
+
+Every direction is taken on the loops' ordinals z (x_s = lower_s + step_s z_s, coefficients
+times steps): the iteration points are then the lattice Z^n itself, and a kernel vector is a
+step between iteration points. The tools (include/Systolic/IntegerLattice.h, checked int64 —
+an overflow is refused, never wrapped): rank and |det| and a basis of the integer kernel by
+unimodular column operations (the kernel in Hermite normal form, unique for the lattice);
+primitive vectors; the common direction of several linear forms (a role's canonical form,
+SQ-1 excluded); Theorem 3 (S2) for one coordinate; the injectivity criterion of 19.3.
+
+### 19.5 Layer 1: the geometric screening (necessary conditions only)
+
+screenAffineMatmulGeometry (printed by --test-affine-matmul-discovery=geometry=true) computes,
+on the ordinals: the readers and class of every loop of two or more iterations; the ranks of
+C's and of all subscripts in the full loop space and in the **role space** (the batch loops
+removed: since D = D_P × D_R is a product, fixing the batch values and taking the quotient by
+the batch coordinates give the same vectors — legitimate exactly when the batch loops are the
+readers-ABC loops of a product domain); C's integer kernel; the reduction loops; the kernel
+directions that join two points of the box and are not reductions; and the task statement's
+conditions A–D on operands of two dimensions read as stored. It decides nothing.
+
+**Conditions A–D are neither sufficient nor necessary** (each case computed by the screening,
+affine_gemm_geometry.mlir, and checked by enumeration):
+
+| case | A–D (full space) | A GEMM of affine views? |
+|---|---|---|
+| Test 2 | all hold, d = (5, −3, 1) | no: every loop is a batch loop (19.6) |
+| Test 3 | all hold, d = e_k | not one GEMM: a batch of dot products (19.6) |
+| C[i][j] += A[i][k0 + k1] · B[k0 + k1][j] | all hold | no: K = 1 is summed twice (S2) |
+| GEMV C[i][0] += A[i][k] · B[k][0] | A and D3 fail | yes (N = 1, SQ-4) |
+| C[4i + j] += A[i][k] · B[k][j], j < 4 | not two dimensions | yes: a flat, injective C view |
+| C[i][j] += A[i + k] · B[k][j] | not two dimensions | yes: a Hankel (overlapping) A view |
+
+In the role space the batch-separated ranks expose the structure: Test 2's role space is empty;
+Test 3 keeps only k (rank 1) — one dot product per (i, j).
+
+### 19.6 The three specified tests
+
+**Test 1, C[i][j] += A[i][i + k] · B[j + k][j]** (i, j, k ∈ [0, 4) in the tests).
+*Mapping.* Ic = i, Jc = j; Ia = i, Ka = i + k; Kb = j + k, Jb = j. *Screening.* Readers AC, BC, AB:
+I = i, J = j, K = k; rank(cI, cJ) = 2, the six vectors rank 3, C's kernel e_k with aK·e_k =
+bK·e_k = 1, D holds — in the full and the role space alike. *Decomposition.* τ = (i, j, k), a
+bijection onto the box; V_C(I, J) = C[I][J] (injective), V_A(I, K) = A[I][I + K],
+V_B(K, J) = B[J + K][J]: the reduction views are offset by the output coordinate (skewed: A's
+dimension 1 combines I and K, B's dimension 0 combines K and J); Ka ≠ Kb physically, the same
+logical K at every iteration. *Bounds.* A's column I + K ≤ M + K − 2, B's row J + K ≤ N + K − 2.
+*Addresses.* For row-major A[M][M+K−1] the view is offset 0, strides (M + K, 1); for
+B[N+K−1][N] strides (N, N + 1) — a strided view (memref.reinterpret_cast), not a subview.
+**A GEMM** (refused before 19: "reads one logical coordinate in two of its dimensions").
+
+**Test 2, C[i+j−2k][i+2j+k] += A[i+j−2k][i+j+k] · B[i+j+k][i+2j+k].** *Mapping.* Ic = Ia =
+(1,1,−2)·x, Jc = Jb = (1,2,1)·x, Ka = Kb = (1,1,1)·x. *Screening.* On a box every loop is read by
+A, B and C: all three are batch loops, the role space is empty. In the full space A–D hold:
+C's integer kernel is d = (5, −3, 1) (aK·d = bK·d = 3), but d is no loop direction.
+T = (Ic, Jc, Ka) has |det| 3, T(Z³) = {K ≡ I (mod 3)}: output rows of different residues mod 3
+use disjoint reduction residues. On i ∈ [2,10), j ∈ [0,6), k ∈ [0,2) (every index ≥ 0; from 0
+the row index i + j − 2k is negative: out of bounds) the 96 iterations write 87 outputs, 78 of
+them once and 9 twice, scattered in a 15 × 19 range. **Not a GEMM on any box domain**: by 19.2
+the only decomposition is all-batch (element-wise), a counterexample to the sufficiency of
+A–D. *The domain on which it is one.* u_I = (1,0,−1) spans B's kernel, u_J = (−1,1,0) A's, d C's;
+on D* = {x0 + a u_I + J′ u_J + b d : (a, J′, b) ∈ box} — an index-3 lattice parallelepiped
+(det [u_I u_J d] = 3; i + j + k is constant mod 3) — the nest is the GEMM
+C′(a, J′) = C[c0 + 3a][c1 + J′] += Σ_b A[c0 + 3a][c2 + 3b] · B[c2 + 3b][c1 + J′]
+(strided views, stride 3; c0, c1, c2 the indices at x0), with reduction direction d: the
+reparametrization (a, J′, b) ↦ x is a bijection onto D*, so the nest over D* and the program
+with loops (a, J′, b) perform the same updates. D* is not a box and not a constant-extent
+parallelotope (the number of k values per (i, j) varies): recognizing it needs a lattice
+parametrization of the domain (19.7).
+
+**Test 3, C[i][j] += A[i][j + k] · B[i + k][j].** *Mapping.* Ic = Ia = i, Jc = Jb = j; Ka = j + k,
+Kb = i + k. *Screening.* i and j are read by all three operands (batch loops), k by A and B
+(the reduction); A–D hold in the full space, the role space keeps k alone (rank 1).
+*Decomposition.* τ = ((i, j), k): per batch (i, j) the dot product C[i][j] += Σ_K A[i][j + K] ·
+B[i + K][j] with the views A′(0, K) = A[i][j + K] (1 × K) and B′(K, 0) = B[i + K][j] (K × 1), offsets
+affine in the batch counters; C′ is one element (injective). **A batched GEMM with M = N = 1**
+(19.8). *Not one GEMM:* the only reparametrization that separates the factors is K′ = I + J + K
+(A′(I, K′) = A[I][K′ − I], B′(K′, J) = B[K′ − J][J]), whose domain {0 ≤ K′ − I − J < K} is not a
+box (S1 fails for the column of i), and no zero-padding of fixed views helps: the outputs that
+receive a product through one K′ form a diagonal band, not a product set ({(0,1), (1,0)}
+without (0,0) for M = N = 2, K = 1).
+
+### 19.7 Non-box loop domains
+
+Accepted only through a parametrization ξ: Z → D proved to be a bijection from a box.
+*Constant-extent parallelotopes* (each loop's lower and upper bound are the same affine form of
+the outer counters plus constants, any step, max/min of such forms with one linear part):
+x_s = ℓ_s(x_<s) + a_s + σ_s z_s is lower triangular with diagonal σ, a bijection onto D that
+preserves the iteration order; the analysis then runs on z (the shifted reduction t ∈ [i, i + K)
+is the GEMM over k = t − i). *Lattice parallelepipeds* such as Test 2's D* need ξ from the
+accesses' kernels and an exact integer-set equality D = ξ(Z) (Presburger); *other* domains
+(triangular: extents that vary) have no constant-extent parametrization and are UNKNOWN, never
+PROVEN_INVALID. Before 19 every non-box domain was labelled PROVEN_INVALID with the argument
+"no bijection onto the GEMM's box can come from a non-box domain (Theorem 3)", which is false
+for parallelotopes (Theorem 3 is about maps between boxes).
+
+### 19.8 SQ-5 and Test 3
+
+A batched nest whose per-batch GEMM has two unit extents (Test 3: M = N = 1; the
+"reduction index in the output" nests: N = K = 1) satisfies 19.1: it is mathematically a batched
+GEMM. Recognition (the readers analysis) and the operand views (batch-dependent offsets,
+ISSUE-007) already handle it; it was stopped only by the SQ-5 refusal in the dense partition.
+Lowering it means removing that refusal: the batch loops run one 1 × 1 × K (or M × 1 × 1) tile
+per batch value — correct, and inefficient on the arrays (the decision is recorded in
+SPEC_QUESTIONS.md).
