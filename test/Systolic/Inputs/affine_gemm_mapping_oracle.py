@@ -39,17 +39,18 @@ equal the oracle's. That is conditions (V) and (B) of section 3 established
 directly on the emitted views, whatever ordinal direction or factor assignment
 the compiler chose.
 
-Batched nests (ISSUE-006, ISSUE-007): the batch loops are, by definition,
-the loops of two or more iterations that all three operands read. C must
-read them alone -- no dimension of C mixes a batch loop with another loop,
-no batch loop in two dimensions of C (the coupled, skewed and diagonal
-outputs the specification rejects); a batch coordinate may fill several
-dimensions of C; the factors may read them anywhere,
-each through its own expression, as a dimension of their own or as an
-offset of a role's dimension (A[4i - j][5k]). Everything else is decided by
-enumeration, per batch iteration: the points with one value of the batch
-loops must form a GEMM of strided views exactly as above, every batch
-iteration the same shape (extents and roles). For a lowered batched nest
+Batched nests (ISSUE-006, ISSUE-007, docs/AFFINE_GEMM_MAPPING.md section 19):
+the batch loops are, by definition, the loops of two or more iterations that
+all three operands read; the other loops' roles are their readers (A and C:
+I, B and C: J, A and B: K, one operand: a broadcast, refused). Every operand
+may read the batch loops anywhere, C included (no C purity since 2026-10-16),
+and a dimension may combine both of its operand's roles (a skewed or merged
+view). Per batch iteration, by enumeration: every subscript's restriction to
+a role's loops is proportional to one direction, that coordinate's values are
+an arithmetic progression taken once per point of the role's loops, (I, J, K)
+is a bijection onto the box, and C's element is injective in (I, J) (else the
+nest is valid only with more batch loops, which the compiler does not
+construct: not lowered); every batch iteration the same shape. For a lowered batched nest
 the emitted batch loops are enumerated, the affine.apply offsets of each
 operand's subview evaluated at every batch value, and the views checked per
 batch iteration on that iteration's points -- the same address-exact check.
@@ -73,6 +74,13 @@ import re
 import subprocess
 import sys
 from math import gcd
+
+
+# Whether the compiler lowers skewed and merged views (a dimension combining two of an
+# operand's roles, or a role in several dimensions: docs/AFFINE_GEMM_MAPPING.md section
+# 19). Recognized since the generalized mapping; until their lowering exists every such
+# GEMM must be refused, never lowered.
+GENERAL_VIEWS_LOWERED = False
 
 
 def trips(lb, ub, step):
@@ -237,7 +245,7 @@ def mutate(rng, loops, trip, ops):
     kind = rng.choice(["radix", "couple", "acc", "broadcast", "double_read",
                        "batch", "batch_shift", "scale_coef", "swap_roles",
                        "add_const_loop", "drop_dim", "batch_offset",
-                       "batch_offset_c", "role_in_k", "batch_once"])
+                       "batch_offset_c", "role_in_k", "batch_once", "skew", "merge_c"])
     cload = None
     many = [s for s in range(len(loops)) if trip[s] >= 2]
     every = [f for fs in ops.values() for f in fs]
@@ -277,9 +285,10 @@ def mutate(rng, loops, trip, ops):
             name = rng.choice("AB")
             ops[name][[id(g) for g in ops[name]].index(id(f))] = [list(f[0]), None]
     elif kind in ("batch_offset", "batch_offset_c"):
-        # a batch loop added to a role's dimension: of a factor -- valid, the
+        # a batch loop added to a role's dimension: of a factor -- the
         # factor's view moves with the batch (ISSUE-007) -- or of C -- the
-        # output position moves with the batch: rejected
+        # output view moves with the batch, valid when C stays injective per
+        # batch (section 19.3, since 2026-10-16)
         shared = [f for f in ops["C"] if any(f is g for g in ops["A"]) and
                   any(f is g for g in ops["B"])]
         names = "AB" if kind == "batch_offset" else "C"
@@ -330,6 +339,26 @@ def mutate(rng, loops, trip, ops):
                 lb, ub, st = loops[s]
                 loops[s] = (lb, lb + rng.randint(1, st), st)
                 trip[s] = 1
+    elif kind in ("skew", "merge_c"):
+        # skew: one dimension of an operand gets a multiple of another of its
+        # dimensions that reads a different role (A[i][i + k], C[i + j][j]):
+        # a skewed view, a GEMM (docs section 19). merge_c: C's two role
+        # dimensions become one, C[a * f_I + b * f_J]: injective or not (G2),
+        # depending on a, b and the extents.
+        name = rng.choice("ABC") if kind == "skew" else "C"
+        role_dims = [d for d, f in enumerate(ops[name]) if f[1] is not None and
+                     any(f[0][s] != 0 for s in many)]
+        if len(role_dims) >= 2:
+            d1, d2 = rng.sample(role_dims, 2)
+            f1, f2 = ops[name][d1], ops[name][d2]
+            if not any(f1 is g or f2 is g for nm in "ABC" if nm != name for g in ops[nm]):
+                if kind == "skew":
+                    c = rng.choice([1, 1, -1, 2])
+                    f1[0] = [x + c * y for x, y in zip(f1[0], f2[0])]
+                else:
+                    a, b = rng.choice([1, 2, 3, 4, 8]), rng.choice([1, 1, 2, 4, -1])
+                    f1[0] = [a * x + b * y for x, y in zip(f1[0], f2[0])]
+                    ops[name].pop(d2)
     elif kind == "scale_coef" and varying:
         f = rng.choice(varying)
         f[0] = [-2 * c for c in f[0]]            # still valid: a reversed, strided view
@@ -405,102 +434,99 @@ def decide(nest):
             if min(vals) < 0 or max(vals) >= shape[d]:
                 return ("REJECT", "%s is accessed out of bounds along dimension %d" % (name, d))
 
+    # The roles by readers (docs/AFFINE_GEMM_MAPPING.md section 19.2, the
+    # definition): a loop of two or more iterations read by all three
+    # operands is a batch loop; by A and C, I; by B and C, J; by A and B, K;
+    # by one operand, a broadcast. C may read batch loops anywhere (no C
+    # purity since 2026-10-16); what C must be is injective per batch (G2).
     n = len(nest.loops)
     many = [trips(*loop) >= 2 for loop in nest.loops]
     reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
              for name in "ABC"}
     batch_loops = sorted(reads["A"] & reads["B"] & reads["C"])
-    if not batch_loops:
-        verdict = gemm_on_points(nest, pts)
-        return verdict if verdict[0] != "ACCEPT" else ("ACCEPT", verdict[1], 0)
-    # C reads every batch loop alone: no dimension of C mixes a batch loop
-    # with another loop (a batch coordinate may fill several dimensions).
-    for d, f in enumerate(nest.ops["C"][1]):
-        if any(f[0][s] != 0 for s in batch_loops) and \
-                any(f[0][s] != 0 and many[s] and s not in batch_loops for s in range(n)):
-            return ("REJECT", "C's dimension %d mixes a batch coordinate with another coordinate" % d)
-    # Per batch iteration: a GEMM of strided views, every iteration the same.
+    role_loops = {"I": sorted((reads["A"] & reads["C"]) - set(batch_loops)),
+                  "J": sorted((reads["B"] & reads["C"]) - set(batch_loops)),
+                  "K": sorted((reads["A"] & reads["B"]) - set(batch_loops))}
+    for s in range(n):
+        if many[s] and s not in batch_loops and not any(s in l for l in role_loops.values()):
+            return ("REJECT", "loop %d is read by one operand only (a broadcast)" % s)
+    if batch_loops and not any(role_loops.values()):
+        return ("REJECT", "an element-wise product (every coordinate a batch one)")
+    # Every subscript's restriction to a role's loops: proportional to one
+    # direction (one coordinate per role; SQ-1 and separate coordinates fail).
+    directions = {}
+    for role, loops in role_loops.items():
+        if not loops:
+            continue
+        forms = [[f[0][s] for s in loops] for name in "ABC" for f in nest.ops[name][1]]
+        nonzero = [f for f in forms if any(f)]
+        if any(a[s] * b[t] != a[t] * b[s] for a in nonzero for b in nonzero
+               for s in range(len(loops)) for t in range(len(loops))):
+            return ("REJECT", "role %s is read through two different combinations of its loops "
+                    "(SQ-1 or separate coordinates)" % role)
+        directions[role] = nonzero[0]
+    # Per batch iteration: a GEMM of affine views, every iteration the same.
     groups = {}
     for x in pts:
         groups.setdefault(tuple(x[s] for s in batch_loops), []).append(x)
-    shape = None
+    shape, general = None, False
     for sub in groups.values():
-        verdict = gemm_on_points(nest, sub)
+        verdict = gemm_on_points(nest, sub, role_loops, directions)
         if verdict[0] != "ACCEPT":
-            return (verdict[0], verdict[1] + " (within a batch iteration)")
-        if not verdict[2]:
-            return ("REJECT", "an element-wise product (every coordinate a batch one)")
+            return (verdict[0], verdict[1] + (" (within a batch iteration)" if batch_loops else ""))
         if shape is None:
-            shape = verdict[1:]
-        elif verdict[1:] != shape:
+            shape = verdict[1]
+        elif verdict[1] != shape:
             return ("REJECT", "the batch iterations are not one GEMM shape")
-    ext = shape[0]
-    # a batched vector-times-scalar (two of M, N, K are 1): valid, not
-    # lowered pending spec question SQ-5
-    if sum(1 for e in ext if e == 1) >= 2:
-        return ("UNSUPPORTED_BATCH", "SQ-5: two of M, N, K are 1 per batch")
-    return ("ACCEPT", ext, len(batch_loops))
+        general = general or verdict[2]
+    return ("ACCEPT", shape, len(batch_loops), general)
 
 
-def gemm_on_points(nest, pts):
-    """The enumeration on a set of points (the whole domain, or one batch
-    iteration): ("ACCEPT", (M, N, K), roles) or ("REJECT", why). `roles`
-    names each role's (operand, dimension, step) readers -- empty when no
-    subscript varies on the points."""
-    # Rank functions; coordinates = classes of rank functions up to mirroring.
-    readers = []        # (operand, dim, ranks, extent, values, step)
-    for name in "ABC":
-        for d, f in enumerate(nest.ops[name][1]):
-            vals = [value(f, x) for x in pts]
-            distinct = sorted(set(vals))
-            if len(distinct) == 1:
-                continue                                   # a constant dimension
-            step = distinct[1] - distinct[0]
-            if any(b - a != step for a, b in zip(distinct, distinct[1:])):
-                return ("REJECT", "%s's dimension %d is not an arithmetic progression (no strided view)" % (name, d))
-            readers.append((name, d, tuple((v - distinct[0]) // step for v in vals), len(distinct),
-                            tuple(vals), step))
-    classes = []
-    for rd in readers:
-        for cl in classes:
-            r0 = cl[0]
-            if r0[3] == rd[3] and (r0[2] == rd[2] or r0[2] == tuple(r0[3] - 1 - v for v in rd[2])):
-                cl.append(rd)
-                break
-        else:
-            classes.append([rd])
-    for first in (nest.order, nest.order[::-1]):
-        a, b = first
-        role = {}
-        ok = True
-        for cl in classes:
-            names = sorted(rd[0] for rd in cl)
-            if len(set(names)) != len(names):
-                ok = False          # one operand reads one coordinate twice
-                break
-            ops_in = set(names)
-            if ops_in == {a, "C"}:
-                key = "I"
-            elif ops_in == {b, "C"}:
-                key = "J"
-            elif ops_in == {a, b}:
-                key = "K"
-            else:
-                key = None          # read by one operand (a broadcast) or all three
-            if key is None or key in role:
-                ok = False
-                break
-            role[key] = cl
-        if not ok:
+def gemm_on_points(nest, pts, role_loops, directions):
+    """The enumeration on one batch iteration's points (or all of them):
+    ("ACCEPT", (M, N, K), general) or ("REJECT" | "UNSUPPORTED", why).
+    `general`: some operand dimension combines two roles or a role spans
+    several dimensions (a skewed or merged view)."""
+    ext, ordinal = {}, {}
+    for role in "IJK":
+        if role not in directions:
+            ext[role], ordinal[role] = 1, (lambda x: 0)
             continue
-        ext = {r: (role[r][0][3] if r in role else 1) for r in "IJK"}
-        ordinal = {r: (role[r][0][2] if r in role else tuple(0 for _ in pts)) for r in "IJK"}
-        box = ext["I"] * ext["J"] * ext["K"]
-        if len({(ordinal["I"][i], ordinal["J"][i], ordinal["K"][i]) for i in range(len(pts))}) == len(pts) == box:
-            roles = tuple((r, tuple(sorted((rd[0], rd[1], rd[5]) for rd in role[r])))
-                          for r in "IJK" if r in role)
-            return ("ACCEPT", (ext["I"], ext["J"], ext["K"]), roles)
-    return ("REJECT", "no mapping onto a GEMM of strided views")
+        loops, g = role_loops[role], directions[role]
+        coordinate = (lambda g, loops: lambda x: sum(c * x[s] for c, s in zip(g, loops)))(g, loops)
+        values = sorted({coordinate(x) for x in pts})
+        step = values[1] - values[0] if len(values) > 1 else 1
+        if any(b - a != step for a, b in zip(values, values[1:])):
+            return ("REJECT", "role %s's values are not an arithmetic progression (no strided view)" % role)
+        count = 1
+        for s in loops:
+            count *= len({x[s] for x in pts})
+        if len(values) != count:
+            return ("REJECT", "role %s takes a value more than once (a weighted sum)" % role)
+        ext[role] = len(values)
+        ordinal[role] = (lambda c, lo, st: lambda x: (c(x) - lo) // st)(coordinate, values[0], step)
+    slots = {(ordinal["I"](x), ordinal["J"](x), ordinal["K"](x)) for x in pts}
+    if len(slots) != len(pts) or len(pts) != ext["I"] * ext["J"] * ext["K"]:
+        return ("REJECT", "(I, J, K) is not a bijection onto the box")
+    # G2: C's element is one per (I, J), and different (I, J) write different elements.
+    written = {}
+    for x in pts:
+        element = tuple(value(f, x) for f in nest.ops["C"][1])
+        if written.setdefault((ordinal["I"](x), ordinal["J"](x)), element) != element:
+            return ("REJECT", "C's element changes along the reduction")
+    if len(set(written.values())) != len(written):
+        return ("UNSUPPORTED", "C's view is not injective on the (I, J) box (a decomposition with more "
+                               "batch loops would be valid and is not constructed)")
+    general = False
+    for name, roles in (("A", "IK"), ("B", "KJ"), ("C", "IJ")):
+        dims = {role: [] for role in roles}
+        for d, f in enumerate(nest.ops[name][1]):
+            used = [role for role in roles if role in directions and any(f[0][s] for s in role_loops[role])]
+            general = general or len(used) > 1
+            for role in used:
+                dims[role].append(d)
+        general = general or any(len(v) > 1 for v in dims.values())
+    return ("ACCEPT", (ext["I"], ext["J"], ext["K"]), general)
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +765,16 @@ def batch_offset_in_role(nest):
                for name in "AB" for f in nest.ops[name][1])
 
 
+def c_has_batch_terms(nest):
+    """Whether a dimension of C mixes a batch loop with another loop (the C
+    'purity' the specification dropped on 2026-10-16)."""
+    batch = set(batch_loops_of(nest))
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    return any(any(f[0][s] for s in batch) and
+               any(f[0][s] and many[s] and s not in batch for s in range(len(nest.loops)))
+               for f in nest.ops["C"][1])
+
+
 def check_batched(nest, got):
     """The batched lowering: the emitted batch loops are the nest's batch
     loops (the same iterations -- origin, step, trip count --, same order),
@@ -795,7 +831,8 @@ def main():
     counts = {"ACCEPT": 0, "REJECT": 0, "SKIP": 0}
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
                "batched": 0, "batch_offset": 0, "both_transposed": 0, "folded": 0,
-               "batch_folded": 0, "role_in_k": 0, "batch_once": 0}
+               "batch_folded": 0, "role_in_k": 0, "batch_once": 0, "c_batch_terms": 0,
+               "two_unit": 0, "general": 0, "c_not_injective": 0}
 
     def is_transposed(view):
         shape, strides = view[0], view[1]
@@ -809,20 +846,28 @@ def main():
     mismatches = []
     for i, (nest, got) in enumerate(zip(nests, results)):
         verdict = decide(nest)
-        counts[verdict[0] if verdict[0] != "UNSUPPORTED_BATCH" else "REJECT"] += 1
+        counts[verdict[0] if verdict[0] != "UNSUPPORTED" else "REJECT"] += 1
         if verdict[0] == "SKIP":
             continue
         if a.fp_default:
             if got is not None:
                 mismatches.append((i, nest, "lowered without the reassociation permission"))
             continue
-        if verdict[0] == "UNSUPPORTED_BATCH":
+        if verdict[0] == "UNSUPPORTED":
             if got is not None:
                 mismatches.append((i, nest, "%s: not lowered by the compiler's rules, compiler lowered %s"
                                             % (verdict[1], got[0])))
+            feature["c_not_injective"] += 1
             continue
         if verdict[0] == "ACCEPT":
             mnk = verdict[1]
+            if verdict[3] and not GENERAL_VIEWS_LOWERED:
+                # a skewed or merged view: a GEMM, recognized, not lowered yet
+                if got is not None:
+                    mismatches.append((i, nest, "a skewed or merged view was lowered %s (its lowering "
+                                                "is not implemented: it must be refused)" % (got[0],)))
+                feature["general"] += 1
+                continue
             if got is None:
                 mismatches.append((i, nest, "oracle ACCEPT %dx%dx%d, compiler did not lower" % mnk))
                 continue
@@ -844,6 +889,8 @@ def main():
                     mismatches.append((i, nest, "batched views: " + bad))
                     continue
                 feature["batched"] += 1
+                feature["c_batch_terms"] += c_has_batch_terms(nest)
+                feature["two_unit"] += sum(e == 1 for e in mnk) >= 2
                 feature["batch_offset"] += batch_offset_in_role(nest)
                 feature["both_transposed"] += both_factors_transposed(got[1])
                 feature["folded"] += has_folded_bound(nest)
@@ -884,6 +931,10 @@ def main():
               "A and B both transposed %(both_transposed)d, "
               "a max/min loop bound %(folded)d (of a batch loop %(batch_folded)d), "
               "mutations role_in_k %(role_in_k)d and batch_once %(batch_once)d" % feature)
+        print("generalized mapping: batched with C reading a batch loop in a role dimension "
+              "%(c_batch_terms)d, batched with two unit extents %(two_unit)d, skewed or merged "
+              "views (recognized, not lowered) %(general)d, C not injective (refused) "
+              "%(c_not_injective)d" % feature)
     print("mismatches: %d" % len(mismatches))
 
 

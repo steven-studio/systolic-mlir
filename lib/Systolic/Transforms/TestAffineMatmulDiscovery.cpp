@@ -321,6 +321,23 @@ struct TestAffineMatmulDiscoveryPass
                          layout.constantIndex.size() == 2;
         if (canonical)
           return;
+        if (layout.general) {
+          // A skewed or merged view (docs section 19): every dimension's
+          // index as constant + coefficients * the operand's two roles.
+          static const char *const kRoles[3][2] = {
+              {"I", "K"}, {"K", "J"}, {"I", "J"}};
+          const unsigned which = operand == "A" ? 0 : operand == "B" ? 1 : 2;
+          llvm::errs() << "  layout " << operand << ": general view";
+          for (auto [dim, c] : llvm::enumerate(layout.roleCoefficients)) {
+            llvm::errs() << (dim ? "; " : ": ") << "dimension " << dim
+                         << " = " << layout.dimConstants[dim];
+            for (unsigned r = 0; r < 2; ++r)
+              if (c[r] != 0)
+                llvm::errs() << " + " << c[r] << "*" << kRoles[which][r];
+          }
+          llvm::errs() << "\n";
+          return;
+        }
         llvm::errs() << "  layout " << operand << ": roles in dimensions ("
                      << layout.roleDim[0] << ", " << layout.roleDim[1] << ")"
                      << (layout.isTransposed() ? " transposed" : "");

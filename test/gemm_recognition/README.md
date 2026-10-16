@@ -139,13 +139,40 @@ A and B: K; all three: a **batch loop**). The factors may read a batch loop thro
 expression -- in a dimension of their own (`A[b + 1]` with `C[b]`) or as an affine offset of a
 role's dimension (`C[8i][j] += A[4i - j][5k] * B[5k][j]`: per `j` a 4 x 1 x 4 product, A's row
 view moving with `j`) -- while C reads every batch loop alone (a dimension of C mixing a batch
-loop with another loop, `C[i + k][j]`, is refused). Per batch value the role loops must be a
-dense GEMM of strided views and every index (role range plus batch range) inside its array; the
-lowering offsets each operand's view per batch iteration (an `affine.apply` per dimension).
-Offloaded since: `depth.c` ng_skew, showcase ext_015..ext_018, and since the review fixes of
-2026-10-16 ext_023..025 (a batch loop the positional reading has drive two coordinates,
-`A[i][k + j] * B[k + j][j]`; a positional prefix that runs once -- a fixed index, not a batch);
-still refused: case_087, case_127.
+loop with another loop, `C[i + k][j]`, is refused -- superseded by ISSUE-008 below). Per batch
+value the role loops must be a dense GEMM of strided views and every index (role range plus
+batch range) inside its array; the lowering offsets each operand's view per batch iteration (an
+`affine.apply` per dimension). Offloaded since: `depth.c` ng_skew, showcase ext_015..ext_018,
+and since the review fixes of 2026-10-16 ext_023..025 (a batch loop the positional reading has
+drive two coordinates, `A[i][k + j] * B[k + j][j]`; a positional prefix that runs once -- a
+fixed index, not a batch); case_087 and case_127 were still refused (offloaded since ISSUE-008).
+
+**Update 2026-10-16 (ISSUE-008, the generalized affine GEMM mapping; `docs/AFFINE_GEMM_MAPPING.md`
+section 19).** The user's decision: the specification and the decision procedure are those of a
+batched GEMM of **affine operand views** (G1: every operand's subscripts are an affine view of
+its two coordinates plus batch terms; G2: C's view is injective per batch; plus the integer
+domain, the reduction correspondence, bounds and the lowering's exactness -- G1 + G2 alone are
+never taken as sufficient). Consequences: (1) **C purity is dropped** -- C may read batch loops
+in its role dimensions as long as its view is injective per batch (`C[i + k][j]`: per `k` a
+rank-1 update, consecutive batches' output windows overlapping and adding up in program order;
+`C[i + j][j]` with `A[i + j][k]`: per `j` a GEMV); (2) **skewed and merged views** -- a dimension
+combining both of an operand's roles (`A[i][i + k]`, `B[j + k][j]`, `C[2i + j][j]`) or one role
+across several dimensions -- are recognized (the readers analysis, `byReaders`) but **not
+lowered yet**: VALID_BUT_LOWERING_UNSUPPORTED ("X has a skewed or merged view ... which is not
+lowered yet"), a FALSE_NEGATIVE of ISSUE-008 until the lowering builds them
+(`memref.reinterpret_cast`); (3) **SQ-5 is decided**: a batched GEMM with two of M, N, K equal
+to 1 per batch (a batch of dot products, `C[i][j] += A[i][j + k] * B[i + k][j]`; a batch of
+scaled vectors) is offloaded; (4) a nest whose canonical decomposition (roles by readers) fails
+but which is a batched GEMM once more loops are demoted to batch loops (a loop read by one
+operand, separate coordinates in one role, a role that is not one dense coordinate, C not
+injective per batch) is **mathematically valid**; the compiler does not construct that
+decomposition: a documented limitation (basis `demotion`), never "not a GEMM"; (5) a positional
+reading in which one loop drives two coordinates is no longer restored when the analyses refuse
+the nest (their refusal is the reason). Re-decided showcase cases (each with its record
+`redecided`): case_087, case_127 (offloaded), case_088, case_126 (skewed views: recognized,
+FALSE_NEGATIVE until the lowering), case_090, case_095, case_123, case_124, case_125 (valid by
+demotion: DOCUMENTED_LIMITATION); case_089 stays REJECT (refused at recognition now:
+element-wise). The three tests of the request are ext_026..028 (section 8, docs section 19.6).
 
 ## 2. Support specification (what a correct compiler must do)
 
@@ -166,7 +193,11 @@ merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initia
 nest or a scalar accumulator, double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
-`failures/resolved/NOTE-001`), and two different views of one array as A and B. (Transposed
+`failures/resolved/NOTE-001`), two different views of one array as A and B, and -- since
+ISSUE-008 -- a nest that is a batched GEMM only with more loops as batch loops than its readers
+give (a loop read by one operand, separate coordinates in one role, a role that is not one dense
+coordinate, C not injective per batch: `docs/AFFINE_GEMM_MAPPING.md` section 19.2, the compiler
+constructs only the canonical decomposition). (Transposed
 operand views, one operand reading a shared coordinate in the direction opposite to the other's
 — a negative-stride view — and matrix-vector products were on this list until 2026-10-15; they are
 inside the specification since ISSUE-005. A coordinate that decreases in every operand is
@@ -190,22 +221,31 @@ opposite directions (a negative-stride view), operands of any rank with fixed di
 roles of extent one (M, N or K = 1: a constant subscript — SQ-4, decided 2026-10-15 — or a
 matrix-vector product); since ISSUE-006 also batched GEMMs (the batch loops run the tiles once
 per batch iteration), and since ISSUE-007 batched GEMMs whose factors read the batch loops
-through their own expressions or as offsets of their role dimensions, C reading every batch
-loop alone (`docs/AFFINE_GEMM_MAPPING.md` section 16).
+through their own expressions or as offsets of their role dimensions (`docs/AFFINE_GEMM_MAPPING.md`
+section 16); since ISSUE-008 (2026-10-16) every GEMM and batched GEMM of **affine operand views**
+(`docs/AFFINE_GEMM_MAPPING.md` section 19: roles by readers, G1, G2, the integer domain): C
+reading batch loops in its role dimensions, injective per batch (`C[i + k][j]`, `C[i + j][j]`
+with `A[i + j][k]`), skewed and merged views (`A[i][i + k]`, `B[j + k][j]`, `C[2i + j][j]`,
+`C[4i + j]` with `j` in [0, 4) -- recognized, their lowering not implemented yet: FALSE_NEGATIVE,
+ISSUE-008), and batched GEMMs with two of M, N, K equal to 1 per batch (SQ-5, decided
+2026-10-16).
 
-**Must be REJECTED (TRUE_NEGATIVE):** element-wise products, nests without a reduction
-coordinate (an outer product `C[i][j] += A[i][3] * B[3][j]`, whose reduction subscript is a
-constant, is the K = 1 GEMM since SQ-4 was decided), the reduction index in the output, coupled (`C[i+j][j]`, `A[i][i+k]`) and skewed
-placements (GEMM values over a non-rectangular region are not one dense GEMM), an output on a
-diagonal (`C[i][i]`) or an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`; a factor
-that reads the output column only through a loop all three operands read, `A[i + j][k]` with
-`B[k][2j]` and `C[i][j]`, is a batched GEMM since ISSUE-007), singular
-mappings, a non-box iteration domain (a bound that depends on another counter), products with a
-third factor or sums, no accumulation; and nests whose subscripts leave a static array dimension
+**Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
+operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=
+A[i][j] * B[i][j]`; the former "singular mappings" `C[x+z][y+z] += A[x+z][x+y+2z] *
+B[x+y+2z][y+z]` and Test 2 on a box: docs section 19.6) --, a non-box iteration domain that is
+not the affine image of a box (the triangle `j >= i`, mlir_009: no (batch, I, J, K) box
+corresponds to its points; one that is, a parallelogram, is a GEMM by docs section 19.7 whose
+parametrization the compiler does not construct: refused as UNKNOWN), products with a third
+factor or sums, no accumulation; and nests whose subscripts leave a static array dimension
 (undefined as programs: there is no GEMM to lower, and the refusal must say "out of bounds" or
 "overflows 64-bit arithmetic", never come from a wrapped-around value — ISSUE-002). The compiler
 must also never offload anything the specification refuses (a FALSE_POSITIVE is the most serious
-finding: wrong code).
+finding: wrong code). Until 2026-10-16 this list also held the reduction index in the output,
+coupled and skewed placements (`C[i+j][j]`, `A[i][i+k]`, `C[i+k][j]`), an output on a diagonal
+(`C[i][i]`) and an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`); by the
+generalized mapping (ISSUE-008) they are GEMMs or batched GEMMs of affine views -- inside the
+specification, or valid by demotion (a documented limitation) -- see section 1.
 
 **UNDETERMINED (spec questions, recorded in `generator/casespec.py: SPEC_QUESTIONS` and in
 `showcase/manifest.json`):** a case whose expectation depends on one is run and its behaviour
@@ -224,17 +264,23 @@ their own in `SPEC_QUESTIONS.md`. Open now:
   injective affine function of the coordinate's loops), the "inside" list does not name it, and
   the operand views are not strided sub-matrices (a rank-2 `memref.subview` cannot express them).
   Inside (with a copy or a rank-3 view) or a documented limitation? Cases case_128, mlir_012.
+  (Mathematically settled since 2026-10-16: with the coarse loop demoted to a batch loop the nest
+  is a batched GEMM, `docs/AFFINE_GEMM_MAPPING.md` section 19.2; open is whether the compiler must
+  construct that decomposition or the copy.)
 - **SQ-2** — an empty GEMM (a loop of zero iterations): offload it with zero invocations, or
   refuse it? Either keeps the result correct. Cases case_129–131, mlir_013. (Refused with its own
   message since 2026-10-15; before, with the message meant for symbolic bounds.)
 - **SQ-3** — a symbolic loop bound (`affine.for 0 to %n`), unreachable from the C front end: is
   the MLIR path's refusal a documented limitation, or must dynamic extents be supported? Case
   mlir_011.
-- **SQ-5** — the reduction index in the output with a single-iteration `j`
-  (`C[i][k] += A[i][k] * B[k][j]`, `j` in [1, 2)): since ISSUE-006 the compiler reads `k` as a
-  batch coordinate and `N = K = 1` — a column scaled by a scalar per batch, correct to lower, but
-  "the reduction index in the output" is on the must-reject list. Refused conservatively
-  (`expected_refusal`). Found by the generated corpus (`gen_04bff9d675c2`).
+Decided: **SQ-4** (2026-10-15, a role of extent one is offloaded) and **SQ-5** (2026-10-16, from
+the user's instruction on Test 3, quoted in `SPEC_QUESTIONS.md`: mathematically legal, so inside
+the specification): a batched GEMM whose per-batch GEMM has two of M, N, K equal to 1 --
+the reduction index in the output with a single-iteration `j` (`C[i][k] += A[i][k] * B[k][j]`,
+`j` in [1, 2): per `k` a column scaled by a scalar), a batch of dot products (Test 3,
+`C[i][j] += A[i][j + k] * B[i + k][j]`, ext_028) -- is inside the specification and offloaded,
+one small tile per batch value (basis `sq5_decided`; refused conservatively as
+`expected_refusal` until then; `docs/AFFINE_GEMM_MAPPING.md` section 19.8).
 
 **Gaps found and closed** (the specification says ACCEPT, the compiler refused): per-operand
 offsets or strides on a shared coordinate — **ISSUE-001**, fixed (`failures/issues/ISSUE-001-*/`,
@@ -244,7 +290,9 @@ coordinate crashed the dense partition — **ISSUE-003**, fixed (refused until S
 decrease in every operand — **ISSUE-004**, supported since 2026-10-15 (README §1, §2); the P0
 operand views (transposes, negative strides, extent-one roles, other ranks) and the
 floating-point policy — **ISSUE-005**, since 2026-10-15; batched GEMMs — **ISSUE-006**, since
-2026-10-15; batch-dependent operand views — **ISSUE-007**, since 2026-10-16. Specification
+2026-10-15; batch-dependent operand views — **ISSUE-007**, since 2026-10-16; the generalized
+affine GEMM mapping (affine operand views, C purity dropped, SQ-5) — **ISSUE-008**, since
+2026-10-16 (recognition; the lowering of skewed and merged views is open). Specification
 refinements made after a measurement (never to make a failing compiler look green; each one
 argued from the mathematics and the documented rule): `failures/resolved/NOTE-*.md`.
 
@@ -412,7 +460,8 @@ specification puts it in, never the set the compiler's behaviour would suggest:
 | an affine loop condition counting down: `for (int i = 100; 2 * i - 3 > 0; i--)` (99 iterations, rows 2..100) | case_132 | ACCEPT |
 | loops that count down (`i -= 2`, `--k`, `j > 0; j -= 3`, mixed directions) | case_119–122 | ACCEPT since ISSUE-004 (OUT_OF_SCOPE before; the cases stay in negative/) |
 | one operand reversed against the other (`A[7 - i]` with `C[i]`) | mlir_010 | OUT_OF_SCOPE (opposite directions) |
-| the output on its diagonal, an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), coupled subscripts (`A[i][i+k]`, `C[i+k][j]`), a triangular domain | case_123–127, mlir_009 | REJECT |
+| the output on its diagonal, an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), coupled subscripts (`A[i][i+k]`, `C[i+k][j]`), a triangular domain | case_123–127, mlir_009 | REJECT until 2026-10-16; since ISSUE-008 (docs/AFFINE_GEMM_MAPPING.md section 19): case_127 ACCEPT (batched rank-1 updates, offloaded), case_126 ACCEPT (a skewed view of A: recognized, FALSE_NEGATIVE until the lowering), case_123–125 OUT_OF_SCOPE (batched GEMMs by demotion, not constructed); mlir_009 REJECT (not the affine image of a box) |
+| the three tests of the 2026-10-16 request: `C[i][j] += A[i][i+k] * B[j+k][j]`; `C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k]` on a box; `C[i][j] += A[i][j+k] * B[i+k][j]` | ext_026–028 | ACCEPT (skewed views of A and B: FALSE_NEGATIVE until the lowering, ISSUE-008); REJECT (element-wise on a box; a GEMM only on the lattice parallelepiped D*, docs section 19.6); ACCEPT (a batch of dot products, SQ-5 decided: offloaded) |
 | out-of-bounds views on static shapes (offset, per-operand stride, offset + extent by one, 2^62 offset) | mlir_001–003, mlir_006 | REJECT (undefined program) |
 | coefficients whose products overflow int64 (scale 2^62 × extent, a per-operand view's last index, the coordinate's exclusive end) | mlir_004, 005, 007, 008 | REJECT; found and fixed ISSUE-002 |
 | per-operand mixed radix of a split coordinate; empty loops (M, N or K = 0, `<=` form); a symbolic bound | case_128–131, mlir_011–013 | UNDETERMINED (SQ-1, SQ-2, SQ-3) |

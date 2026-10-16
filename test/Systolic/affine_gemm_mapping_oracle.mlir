@@ -6,7 +6,8 @@
 // steps, origins, loops that count down, split coordinates and loops that run
 // once adding arbitrary terms, loops with redundant max/min bounds (which the
 // compiler must fold: a bound map's first result runs other iterations), and
-// perturbations of them (a loop of I or J added to both factors' K
+// perturbations of them (a dimension skewed by another of the operand's roles, C's two
+// role dimensions merged into one -- injective or not --, a loop of I or J added to both factors' K
 // subscripts -- a batch loop the positional reading would have drive two
 // coordinates --, a batch loop that runs once -- a fixed index --, other radices,
 // coupling, broadcasts, a coordinate read twice, batches, accumulators at
@@ -31,6 +32,7 @@
 // CHECK-NOT: MISMATCH
 // CHECK:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}
 // CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}, batched {{[1-9][0-9]*}} (a factor's view moving with the batch {{[1-9][0-9]*}}), A and B both transposed {{[1-9][0-9]*}}, a max/min loop bound {{[1-9][0-9]*}} (of a batch loop {{[1-9][0-9]*}}), mutations role_in_k {{[1-9][0-9]*}} and batch_once {{[1-9][0-9]*}}
+// CHECK:     generalized mapping: batched with C reading a batch loop in a role dimension {{[1-9][0-9]*}}, batched with two unit extents {{[1-9][0-9]*}}, skewed or merged views (recognized, not lowered) {{[1-9][0-9]*}}, C not injective (refused) {{[0-9]+}}
 // CHECK:     mismatches: 0
 //
 // Without it (the default, docs/AFFINE_GEMM_MAPPING.md section 6) nothing is

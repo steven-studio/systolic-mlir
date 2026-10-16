@@ -344,7 +344,11 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         C.subs = ("%s + %s" % (C.subs[0], j), C.subs[1])
         C.dims = (C.dims[0] + max(lp.ub for lp in c.loops if lp.var == j), C.dims[1])
         c.math_class = "gemm_values_skewed_placement"
-        c.math_note = "The product's value for (i, j) lands at a skewed row: not a rectangular view of C."
+        c.math_note = ("The product's value for (i, j) lands at a skewed row C[I + j][J]: with J one loop "
+                       "an affine, injective (skewed) view of C, a GEMM by docs/AFFINE_GEMM_MAPPING.md "
+                       "section 19 (recognized; its lowering is not implemented yet, ISSUE-008); with J "
+                       "over several loops C reads J through two combinations (valid only by demotion, "
+                       "not constructed).")
     elif mutation == "coupled_A_and_C_row":
         j = first("J")
         A.subs = ("%s + %s" % (A.subs[0], j), A.subs[1])
@@ -352,13 +356,20 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         C.subs = ("%s + %s" % (C.subs[0], j), C.subs[1])
         C.dims = (C.dims[0] + max(lp.ub for lp in c.loops if lp.var == j), C.dims[1])
         c.math_class = "gemm_nonrectangular_region"
-        c.math_note = "I = i + j couples two loops: GEMM elements over a parallelogram, not a rectangle."
+        c.math_note = ("A[I + j][K], C[I + j][J]: with J one loop, j is read by A, B and C -- a batch "
+                       "loop -- and per j the GEMV C[I + j][j] += A[I + j][K] B[K][j], a batched GEMM of "
+                       "affine views (docs/AFFINE_GEMM_MAPPING.md section 19.3, ISSUE-008); one "
+                       "rectangular GEMM it is not (its outputs form a parallelogram).")
     elif mutation == "singular":
         k = first("K")
         A.subs = ("%s + %s" % (A.subs[0], k), A.subs[1])
         A.dims = (A.dims[0] + max(lp.ub for lp in c.loops if lp.var == k), A.dims[1])
-        c.math_class = "singular_mapping"
-        c.math_note = "A's row index couples the reduction loop: the mapping is singular, not a GEMM."
+        c.math_class = "skewed_a_row"
+        c.math_note = ("A's row index adds the reduction loop: with K one loop, A's view (I, K) -> "
+                       "(I + K, K) is affine, a GEMM by docs/AFFINE_GEMM_MAPPING.md section 19 "
+                       "(recognized; its lowering is not implemented yet, ISSUE-008) -- the old rank test "
+                       "('a singular mapping') does not decide it; with K over several loops A reads K "
+                       "through two combinations (valid only by demotion, not constructed).")
     elif mutation == "elementwise":
         A.subs = C.subs
         A.dims = C.dims
@@ -373,7 +384,12 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         C.subs = (C.subs[0], A.subs[1])
         C.dims = (C.dims[0], A.dims[1])
         c.math_class = "not_gemm_scaled_rows"
-        c.math_note = "The output is indexed by the reduction index; the column loop is summed away."
+        c.math_note = ("The output is indexed by the reduction index; the column loop is summed away: "
+                       "the reduction loop is read by all three operands (a batch loop), the column loop "
+                       "by B only -- a batched GEMM of scaled vectors once the column loop is demoted to "
+                       "a batch loop (docs/AFFINE_GEMM_MAPPING.md section 19.2; not constructed: a "
+                       "documented limitation), lowered directly when it runs once (SQ-5, decided "
+                       "2026-10-16).")
     elif mutation == "no_accumulation":
         c.stmt = "=AB"
         c.math_class = "not_gemm_overwrite"
@@ -560,6 +576,10 @@ def finalize(case: Case):
         reason = case.expect.get("reject_reason", "")
         if "same affine expression" in reason:
             case.issue = "ISSUE-001"
+        elif "has a skewed or merged view" in reason:
+            # a GEMM of general affine views, recognized; their lowering is
+            # not implemented yet (docs/AFFINE_GEMM_MAPPING.md section 19)
+            case.issue = "ISSUE-008"
     return cls
 
 

@@ -1,5 +1,9 @@
 // RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   -split-input-file -verify-diagnostics %s | FileCheck %s
+// A nest refused at recognition gets no remark (it is not reported as a GEMM at all); the
+// discovery pass prints its reason:
+// RUN: systolic-opt --test-affine-matmul-discovery -split-input-file %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s --check-prefix=DISC
 
 // GEMMs --affine-matmul-to-systolic recognizes but cannot show the lowering
 // correct for. Each is left exactly as it was, with a remark saying why.
@@ -28,26 +32,28 @@ func.func @may_alias(%A: memref<4x4xf32>, %B: memref<4x4xf32>,
 
 // -----
 
-// A batched GEMM is lowered since 2026-10-15 (ISSUE-006: the batch loop is
-// re-emitted around the tiles), each operand at its own batch index or with
-// a factor's view moving with the batch since 2026-10-16 (ISSUE-007). What
-// stays refused is C mixing the batch coordinate into an output coordinate
-// (C[b][i + b][j]): the output position would move with the batch.
+// A batched GEMM is lowered since 2026-10-15 (ISSUE-006), with batch-dependent views of
+// the factors since ISSUE-007 and of C too since 2026-10-16 (C[b][i + b][j] is lowered:
+// affine_gemm_batched_lowering.mlir @batch_coupled). What stays refused is a C view that
+// is not injective within one batch: C[b][i + j] writes C[b][1] from (I, J) = (0, 1) and
+// (1, 0) of the same batch.
 // CHECK-LABEL: func.func @batched
 // CHECK-NOT:   systolic.matmul_tile
+// DISC:        reason: C's view is not injective on the (I, J) box: the outputs with ordinals (I, J) and (I + 1, J + -1) write the same element of C
+// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
 func.func @batched(%A: memref<2x4x4xf32> {llvm.noalias},
                    %B: memref<2x4x4xf32> {llvm.noalias},
-                   %C: memref<2x5x4xf32> {llvm.noalias}) {
+                   %C: memref<2x7xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {
     affine.for %i = 0 to 4 {
       affine.for %j = 0 to 4 {
         affine.for %k = 0 to 4 {
           %a = affine.load %A[%b, %i, %k] : memref<2x4x4xf32>
           %bb = affine.load %B[%b, %k, %j] : memref<2x4x4xf32>
-          %c = affine.load %C[%b, %i + %b, %j] : memref<2x5x4xf32>
+          %c = affine.load %C[%b, %i + %j] : memref<2x7xf32>
           %p = arith.mulf %a, %bb : f32
           %s = arith.addf %c, %p : f32
-          affine.store %s, %C[%b, %i + %b, %j] : memref<2x5x4xf32>
+          affine.store %s, %C[%b, %i + %j] : memref<2x7xf32>
         }
       }
     }
@@ -57,23 +63,28 @@ func.func @batched(%A: memref<2x4x4xf32> {llvm.noalias},
 
 // -----
 
-// I = i + j: loop j drives both I and J, so no box of (I, J, K) is a set
-// of whole iterations.
-// CHECK-LABEL: func.func @coupled
+// C[i + j] (one dimension of C for both roles): the outputs (I, J) = (0, 1) and (1, 0)
+// write C[1], so one tile would lose an update -- C's view is not injective (G2, docs/
+// AFFINE_GEMM_MAPPING.md section 19.3). (A batched decomposition over j would be valid;
+// it is not constructed.) Until 2026-10-16 this file held C[i + j][j] with A[i + j][k]
+// here, refused as "loop 1 drives I and J"; that nest is a batched GEMV since then
+// (affine_gemm_batch_views.mlir @c_mixes_batch).
+// CHECK-LABEL: func.func @c_not_injective
 // CHECK-NOT:   systolic.matmul_tile
-func.func @coupled(%A: memref<8x4xf32> {llvm.noalias},
-                   %B: memref<4x4xf32> {llvm.noalias},
-                   %C: memref<8x4xf32> {llvm.noalias}) {
-  // expected-remark @+1 {{two logical coordinates are driven by the same loop (loop 1 drives I and J)}}
+// DISC:        reason: C's view is not injective on the (I, J) box: the outputs with ordinals (I, J) and (I + 1, J + -1) write the same element of C
+// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+func.func @c_not_injective(%A: memref<4x4xf32> {llvm.noalias},
+                           %B: memref<4x4xf32> {llvm.noalias},
+                           %C: memref<7xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {
       affine.for %k = 0 to 4 {
-        %a = affine.load %A[%i + %j, %k] : memref<8x4xf32>
+        %a = affine.load %A[%i, %k] : memref<4x4xf32>
         %b = affine.load %B[%k, %j] : memref<4x4xf32>
-        %c = affine.load %C[%i + %j, %j] : memref<8x4xf32>
+        %c = affine.load %C[%i + %j] : memref<7xf32>
         %p = arith.mulf %a, %b : f32
         %s = arith.addf %c, %p : f32
-        affine.store %s, %C[%i + %j, %j] : memref<8x4xf32>
+        affine.store %s, %C[%i + %j] : memref<7xf32>
       }
     }
   }

@@ -161,12 +161,19 @@ func.func @batch_offset_down_inner(%A: memref<4x5x4xf32> {llvm.noalias}, %B: mem
 }
 
 // -----
-// Coupled: the batch loop also drives I (C[b][b + i]): refused.
+// RE-DECIDED 2026-10-16 (docs/AFFINE_GEMM_MAPPING.md section 19.3, no C purity): C and
+// A read the batch loop b in their I dimension too (C[b][b + i][j], A[b][b + i][k]). Per b
+// the GEMM C'(I, J) = C[b][I + b][J], A'(I, K) = A[b][I + b][K], B'(K, J) = B[b][K][J], C'
+// injective: the batch moves the views, not the coordinates. Lowered (it was refused:
+// "loop 0 drives a batch coordinate and I" in the positional reading I = b + i).
 // CHECK-LABEL: func.func @batch_coupled
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: two logical coordinates are driven by the same loop (loop 0 drives a batch coordinate and I) [PROVEN_INVALID]
-// DISC:        dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 0 drives a batch coordinate and I))
+// CHECK:       affine.for %[[B:.*]] = 0 to 2 {
+// CHECK:         %[[O:.*]] = affine.apply #{{.*}}(%[[B]])
+// CHECK:         memref.subview %arg0[%[[O]], %[[O]], 0] [1, 4, 4] [1, 1, 1]
+// CHECK:         memref.subview %arg2[%[[O]], %[[O]], 0] [1, 4, 4] [1, 1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+// DISC:        batch terms C: dimension 0 = 0 + 1*x0, dimension 1 += 1*x0
 func.func @batch_coupled(%A: memref<2x5x4xf32> {llvm.noalias}, %B: memref<2x4x4xf32> {llvm.noalias}, %C: memref<2x5x4xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {
     affine.for %i = 0 to 4 {
@@ -242,15 +249,18 @@ func.func @elementwise(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {
 // -----
 // The reduction index in the output with a single-iteration j: C[i][k] +=
 // A[i][k] * B[k][1]. Every operand reads k (a batch coordinate), j runs once
-// (N = 1), nothing is reduced (K = 1): per batch a column scaled by a scalar.
-// Correct to lower, but not a matrix multiplication by the specification's
-// list ("the reduction index in the output"): refused conservatively, open
-// spec question SQ-5.
+// (N = 1), nothing is reduced (K = 1): per batch a column scaled by a scalar,
+// C[:, k] += A[:, k] * B[k][1]. SQ-5, decided 2026-10-16 (section 19.8): a batched
+// GEMM with two unit extents is lowered, one 8 x 1 x 1 tile per k (refused before).
 // CHECK-LABEL: func.func @batch_scalar_rows
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: a batched GEMM whose tiles are a vector scaled by a scalar (two of M, N, K are 1) is not lowered pending spec question SQ-5 (the reduction index in the output) [VALID_BUT_LOWERING_UNSUPPORTED]
-// DISC:        dense logical GEMM: no (a batched GEMM whose tiles are a vector scaled by a scalar
+// CHECK:       affine.for %[[K:.*]] = 0 to 8 {
+// CHECK:         %[[O:.*]] = affine.apply #{{.*}}(%[[K]])
+// CHECK:         memref.subview %arg0[0, %[[O]]] [8, 1] [1, 1]
+// CHECK:         memref.subview %arg1[%[[O]], 1] [1, 1] [1, 1]
+// CHECK:         memref.subview %arg2[0, %[[O]]] [8, 1] [1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 8 n = 1 k = 1
+// REMARK:      remark: affine GEMM 8x1x1 lowered as 1 exact region(s), batched: 8 batch iteration(s) of 1 batch loop(s)
+// DISC:        dense logical GEMM: yes, I/J/K on loops 0//, batched over loop(s) 2 (8 batch iteration(s))
 func.func @batch_scalar_rows(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x2xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %i = 0 to 8 {
     affine.for %j = 1 to 2 {

@@ -2,7 +2,7 @@
  * Case ID: case_127
  * Name: c_row_couples_i_and_k
  * Set / category: negative / coupled_mapping
- * Mathematical class: not_gemm_skewed_output
+ * Mathematical class: batched_rank1_moving_rows
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -13,9 +13,16 @@
  *     - C has a subscript that couples loops of different coordinates (mixed:I+K, J)
  *
  *   C[i+k][j] += A[i][k] * B[k][j]: the output row depends on the reduction
- *   index, so no element of C accumulates a full dot product; C[r][j] receives
- *   the sum over the anti-diagonal i + k = r.  Not a GEMM.  Expected rejection at
- *   recognition: C's row expression i + k is not A's row expression i.
+ *   index.  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by
+ *   A, B and C -- a batch loop --, i by A and C (I), j by B and C (J).  Per k it
+ *   is the 8 x 8 x 1 rank-1 update C[I+k][J] += A[I][k] B[k][J]: C's view
+ *   (I, J) -> (I + k, J) is injective per batch; consecutive batches' windows
+ *   overlap and accumulate in program order (section 19.3), so C[r][j] receives
+ *   the sum over i + k = r of A[i][k] B[k][j] -- exactly the nest.  A batched
+ *   GEMM of affine views: offloaded as 8 batches of an 8 x 8 x 1 tile.
+ *   Re-decided 2026-10-16 (ISSUE-008): until then the specification required C
+ *   to read every batch loop alone (C purity) and rejected it ('no element of C
+ *   accumulates a full dot product' -- true, and not required).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[15][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -23,20 +30,18 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.3): REJECT (C purity) before; ACCEPT since -- batched rank-1 updates with overlapping output windows
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: C's dimension 0 mixes a batch coordinate (loop 2, read by all three operands) with another coordinate: the output position would move with the batch (a coupled or skewed placement, not one dense GEMM)
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -129,7 +134,7 @@ int main(void) {
   const long n = 120;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_127 c_row_couples_i_and_k: negative / coupled_mapping, class not_gemm_skewed_output\n");
+  printf("[gemm_recognition] case_127 c_row_couples_i_and_k: negative / coupled_mapping, class batched_rank1_moving_rows\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_127 FAIL (test bug)\n"); return 3;

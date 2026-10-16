@@ -61,7 +61,7 @@
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: no (logical coordinate K is driven by 2 loops that do not enumerate it densely
 // DISC:       unique logical matmul count: 1
-// DISC:       dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 1 drives I and J)
+// DISC:       dense logical GEMM: yes, I/J/K on loops 0//2, batched over loop(s) 1 (8 batch iteration(s))
 // DISC:       reason: {{.*}}the accumulator is loaded and stored at different elements of C
 // DISC:       unique logical matmul count: 0
 // DISC:       reason: a coordinate is read by C only: the other operands would be broadcast along it
@@ -173,7 +173,7 @@
 // CHECK-NOT:   systolic.matmul_tile
 // CHECK-LABEL: func.func @coupled
 // CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:         systolic.matmul_tile {{.*}} m = 8 n = 1 k = 8
 // CHECK-LABEL: func.func @acc_different_element
 // CHECK:       affine.for
 // CHECK-NOT:   systolic.matmul_tile
@@ -219,7 +219,7 @@
 // REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
 // REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate K is driven by 2 loops that do not enumerate it densely
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: two logical coordinates are driven by the same loop (loop 1 drives I and J)
+// REMARK:      remark: affine GEMM 8x1x8 lowered as 1 exact region(s), batched: 8 batch iteration(s) of 1 batch loop(s)
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: C is accessed out of bounds along dimension 0
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A is accessed out of bounds along dimension 0
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)
@@ -663,8 +663,11 @@ func.func @reduction_multiplicity(%A: memref<8x8xf32> {llvm.noalias}, %B: memref
 
 // -----
 
-// coupled: C[i + j][j]: loop j drives I and J; (I, J) covers a parallelogram, not a box (Theorem 3 S1)
-// expected: REJECT
+// coupled: C[i + j][j] with A[i + j][k]. RE-DECIDED 2026-10-16 (docs/AFFINE_GEMM_MAPPING.md
+// section 19.3): j is read by all three operands -- a batch loop -- so the positional
+// reading I = i + j (whose (I, J) points form a parallelogram, Theorem 3 S1) is not the
+// decomposition; per j it is the GEMV C'(I) = C[I + j][j] += A[I + j][K] * B[K][j].
+// expected: ACCEPT (batched, 8 x 1 x 8 per j)
 func.func @coupled(%A: memref<16x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<16x8xf32> {llvm.noalias}) {
   affine.for %x0 = 0 to 8 {
     affine.for %x1 = 0 to 8 {

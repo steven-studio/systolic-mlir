@@ -265,16 +265,21 @@ func.func @prefix_reused_as_k(%A: memref<2x4x2xf32> {llvm.noalias}, %B: memref<2
 }
 
 // -----
-// MUST STAY REJECTED. C[i + j][j] += A[i + j][k] * B[k][j] (showcase case_087,
-// the README's coupled example): A and C spell the row identically, so the
-// positional form recognizes I = i + j, and the dense partition refuses the
-// mapping because loop j drives both I and J -- unchanged by ISSUE-007 (the
-// analysis by groups would refuse it too: C's row mixes the batch loop j
-// with I).
+// RE-DECIDED 2026-10-16 (docs/AFFINE_GEMM_MAPPING.md section 19.3, no C purity):
+// C[i + j][j] += A[i + j][k] * B[k][j] (showcase case_087). j is read by all three
+// operands -- a batch loop -- and C may read it in a role dimension: per j the GEMV
+// C'(I) = C[I + j][j], A'(I, K) = A[I + j][K], B'(K) = B[K][j], C' injective and the
+// batches writing different columns. Lowered, one 4 x 1 x 4 tile per j (it was
+// refused: "loop 1 drives I and J" in the positional reading).
 // CHECK-LABEL: func.func @c_mixes_batch
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: two logical coordinates are driven by the same loop (loop 1 drives I and J) [PROVEN_INVALID]
-// DISC:        dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 1 drives I and J))
+// CHECK:       affine.for %[[J:.*]] = 0 to 4 {
+// CHECK:         %[[O:.*]] = affine.apply #{{.*}}(%[[J]])
+// CHECK:         memref.subview %arg0[%[[O]], 0] [4, 4] [1, 1]
+// CHECK:         memref.subview %arg1[0, %[[O]]] [4, 1] [1, 1]
+// CHECK:         memref.subview %arg2[%[[O]], %[[O]]] [4, 1] [1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// REMARK:      remark: affine GEMM 4x1x4 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+// DISC:        batch terms C: dimension 0 += 1*x1, dimension 1 = 0 + 1*x1
 func.func @c_mixes_batch(%A: memref<8x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<8x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {
@@ -292,12 +297,19 @@ func.func @c_mixes_batch(%A: memref<8x4xf32> {llvm.noalias}, %B: memref<4x4xf32>
 }
 
 // -----
-// MUST STAY REJECTED. C[i + k][j] += A[i][k] * B[k][j] (showcase case_127, a
-// skewed output): k is read by all three operands and C mixes it into its row.
+// RE-DECIDED 2026-10-16 (section 19.3): C[i + k][j] += A[i][k] * B[k][j] (showcase
+// case_127). k is read by all three operands -- a batch loop; per k the rank-1 update
+// C'(I, J) = C[I + k][J] += A[I][k] * B[k][J] (K = 1), injective per batch; the windows
+// of different batches overlap and add up in order. Lowered, one 4 x 4 x 1 tile per k.
 // CHECK-LABEL: func.func @c_skewed
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: C's dimension 0 mixes a batch coordinate (loop 2, read by all three operands) with another coordinate: the output position would move with the batch (a coupled or skewed placement, not one dense GEMM)
-// DISC-NEXT:   class: PROVEN_INVALID
+// CHECK:       affine.for %[[K:.*]] = 0 to 4 {
+// CHECK:         %[[O:.*]] = affine.apply #{{.*}}(%[[K]])
+// CHECK:         memref.subview %arg0[0, %[[O]]] [4, 1] [1, 1]
+// CHECK:         memref.subview %arg1[%[[O]], 0] [1, 4] [1, 1]
+// CHECK:         memref.subview %arg2[%[[O]], 0] [4, 4] [1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 1
+// REMARK:      remark: affine GEMM 4x4x1 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+// DISC:        batch terms C: dimension 0 += 1*x2
 func.func @c_skewed(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<8x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {
@@ -315,10 +327,13 @@ func.func @c_skewed(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llv
 }
 
 // -----
-// MUST STAY REJECTED. A[i][i + k]: A reads I in two dimensions (coupled).
+// RE-DECIDED 2026-10-16 (section 19): A[i][i + k] -- A's dimension 1 combines I and K,
+// the skewed view A'(I, K) = A[I][I + K] of a GEMM (showcase case_126). Recognized by the
+// readers analysis and verified; its view is a memref.reinterpret_cast, not a subview.
 // CHECK-LABEL: func.func @coupled_a
 // CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: the first factor reads one logical coordinate in two of its dimensions (0 and 1)
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A has a skewed or merged view
+// DISC:        layout A: general view: dimension 0 = 0 + 1*I; dimension 1 = 0 + 1*I + 1*K
 func.func @coupled_a(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {

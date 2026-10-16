@@ -877,9 +877,10 @@ E_R = 1) and integer affine views V_C(p, I, J), V_A(p, I, K), V_B(p, K, J) such 
   iterations run in order);
 - **(G3)** every index lies inside its array (checked int64);
 - **(G4)** C0 (the C load and store coincide), §7, §6;
-- **non-degeneracy**: at least one of I, J, K is present. (Every MAC nest is a batch of
-  1 × 1 × 1 products with ξ the identity and all coordinates batch: without this the
-  definition would be vacuous. Such a nest is an element-wise product, not a GEMM.)
+- **non-degeneracy**: a batched nest has at least one of I, J, K. (Every MAC nest is a batch
+  of 1 × 1 × 1 products with ξ the identity and all coordinates batch: without this the
+  definition would be vacuous. Such a nest is an element-wise product, not a GEMM. A nest of
+  one iteration, no batch, is the 1 × 1 × 1 GEMM of extent-one coordinates, SQ-4.)
 
 **Theorem 6 (equivalence) [proved].** Under G1–G4 the nest and the batches of
 C′_p += A′_p · B′_p, run in order, produce the same C as exact sums. *Proof.* ξ is a bijection,
@@ -887,6 +888,13 @@ so the nest's updates are those of the slots (p, I, J, K) of the box, each once 
 batch the tile's C elements are distinct (G2), so each receives exactly its K-sum; the batches
 are sequential, so contributions of different batches to one element add up. ∎ Theorems 1 and
 5 are the special cases of role-pure views (one role per dimension) and pure C.
+
+*Floating point.* Theorem 6 is about exact sums. In floating point the lowered code adds the
+same rounded products in another order -- the reassociation the permission of §6 allows, now
+also across batch iterations whose C windows overlap -- and the arrays may differ beyond
+reassociation: a K-sum started at +0.0 (the sign of a zero), a fused multiply-add, a wider
+accumulator, flush-to-zero. The executed tests use integer-valued data, for which every
+order gives the same bits; with general data the comparison needs a tolerance.
 
 Real-space invertibility is not required (a role split over several loops makes ξ⁻¹ ∘ τ a
 non-square map); what is required is the bijection on the finite Z, and the reduction of an
@@ -904,6 +912,23 @@ decomposition with the fewest batch coordinates (every other valid one demotes r
 batch loops); a loop with one reader is a broadcast (§10). On a box domain the reduction
 lattice is therefore spanned by the K loops' axes: a direction that keeps C fixed but is not
 an axis combination of K loops (Test 2's d = (5, −3, 1)) joins different batch iterations.
+
+*Demotion.* Any loop may be made a batch loop (its terms become batch offsets; per batch its
+coordinate is fixed). Hence on a box domain a nest is a batched GEMM of affine views iff some
+loop of two or more iterations is read by exactly two operands (with C0 and the bounds):
+demote every other loop -- per batch that one loop is a dense role, and C's view of it is
+injective because C reads it (or it is K and C' is one element). The recognizer constructs
+only the canonical decomposition (the fewest batch coordinates); a nest whose canonical
+decomposition fails -- a role that is not one dense coordinate (A[i][k0 + k1], a split radix
+with gaps), two coordinates in one role, an operand-specific decomposition (SQ-1), a
+broadcast, C not injective (G2) -- is still a batched GEMM after demoting loops, with smaller
+tiles, and is refused as VALID_BUT_LOWERING_UNSUPPORTED (not PROVEN_INVALID). Only a nest whose
+loops are all read by A, B and C (Test 2 on a box) has no decomposition at all.
+
+*Non-box domains.* The readers rule is about the box's own loops; on another domain the
+readers are taken after the parametrization ξ, on Z's coordinates. In the original counters a
+loop read by all three operands may then drive a role: C[i][j − i] += A[i][k] · B[k][j − i]
+with i ≤ j < i + N is one GEMM over (i, j − i, k).
 
 ### 19.3 The legality of C
 
@@ -952,7 +977,7 @@ affine_gemm_geometry.mlir, and checked by enumeration):
 |---|---|---|
 | Test 2 | all hold, d = (5, −3, 1) | no: every loop is a batch loop (19.6) |
 | Test 3 | all hold, d = e_k | not one GEMM: a batch of dot products (19.6) |
-| C[i][j] += A[i][k0 + k1] · B[k0 + k1][j] | all hold | no: K = 1 is summed twice (S2) |
+| C[i][j] += A[i][k0 + k1] · B[k0 + k1][j] | all hold | not one GEMM (K = 1 is summed twice, S2); a batched GEMM only with k0 or k1 as a batch loop (19.2), not constructed |
 | GEMV C[i][0] += A[i][k] · B[k][0] | A and D3 fail | yes (N = 1, SQ-4) |
 | C[4i + j] += A[i][k] · B[k][j], j < 4 | not two dimensions | yes: a flat, injective C view |
 | C[i][j] += A[i + k] · B[k][j] | not two dimensions | yes: a Hankel (overlapping) A view |
@@ -989,9 +1014,12 @@ on D* = {x0 + a u_I + J′ u_J + b d : (a, J′, b) ∈ box} — an index-3 latt
 C′(a, J′) = C[c0 + 3a][c1 + J′] += Σ_b A[c0 + 3a][c2 + 3b] · B[c2 + 3b][c1 + J′]
 (strided views, stride 3; c0, c1, c2 the indices at x0), with reduction direction d: the
 reparametrization (a, J′, b) ↦ x is a bijection onto D*, so the nest over D* and the program
-with loops (a, J′, b) perform the same updates. D* is not a box and not a constant-extent
-parallelotope (the number of k values per (i, j) varies): recognizing it needs a lattice
-parametrization of the domain (19.7).
+with loops (a, J′, b) perform the same updates. D* is not the set of integer points of its convex
+hull but that set intersected with the lattice i + j + k ≡ c (mod 3): 8 of the hull's 12 integer
+points at M = N = K = 2, 216 of 516 at 6, 6, 6, every extra point writing a C row of another
+residue, which the GEMM never touches. Neither its bounds nor a real-polyhedral argument suffice:
+an affine.for nest enumerating D* needs a congruence (a stride or a mod in a bound), and
+recognizing it needs a lattice parametrization of the domain (19.7).
 
 **Test 3, C[i][j] += A[i][j + k] · B[i + k][j].** *Mapping.* Ic = Ia = i, Jc = Jb = j; Ka = j + k,
 Kb = i + k. *Screening.* i and j are read by all three operands (batch loops), k by A and B
@@ -1001,9 +1029,14 @@ B[i + K][j] with the views A′(0, K) = A[i][j + K] (1 × K) and B′(K, 0) = B[
 affine in the batch counters; C′ is one element (injective). **A batched GEMM with M = N = 1**
 (19.8). *Not one GEMM:* the only reparametrization that separates the factors is K′ = I + J + K
 (A′(I, K′) = A[I][K′ − I], B′(K′, J) = B[K′ − J][J]), whose domain {0 ≤ K′ − I − J < K} is not a
-box (S1 fails for the column of i), and no zero-padding of fixed views helps: the outputs that
-receive a product through one K′ form a diagonal band, not a product set ({(0,1), (1,0)}
-without (0,0) for M = N = 2, K = 1).
+box (S1 fails for the column of i) -- on the box. (On the skewed domain −i − j ≤ k < K − i − j the
+nest is that single GEMM of the views A[I][κ − I], B[κ − J][J].) Precisely (checked
+exhaustively): with integer-affine operand
+views A[α(I, κ)], B[β(κ, J)] -- even with arbitrary zero masks -- there is no single GEMM,
+already for M = N = 2, K = 1; under 19.1 the only decomposition is batch = (i, j), K = k. (With
+gathered, zero-padded operand matrices, one column per iteration (R = MNK), every MAC nest is a
+single GEMM: data replication, not a view of the operands -- not a mapping this compiler
+considers.)
 
 ### 19.7 Non-box loop domains
 
@@ -1013,9 +1046,16 @@ the outer counters plus constants, any step, max/min of such forms with one line
 x_s = ℓ_s(x_<s) + a_s + σ_s z_s is lower triangular with diagonal σ, a bijection onto D that
 preserves the iteration order; the analysis then runs on z (the shifted reduction t ∈ [i, i + K)
 is the GEMM over k = t − i). *Lattice parallelepipeds* such as Test 2's D* need ξ from the
-accesses' kernels and an exact integer-set equality D = ξ(Z) (Presburger); *other* domains
-(triangular: extents that vary) have no constant-extent parametrization and are UNKNOWN, never
-PROVEN_INVALID. Before 19 every non-box domain was labelled PROVEN_INVALID with the argument
+accesses' kernels and an exact integer-set equality D = ξ(Z) (Presburger) -- on the real
+parallelepiped {0 ≤ cI·x < 3a, 0 ≤ cJ·x < b, 0 ≤ aK·x < 3c} without the congruence, Test 2 is
+a batched GEMM whose batch is I mod 3; *other* domains
+(triangular: extents that vary) have no constant-extent parametrization, and the implementation
+labels them UNKNOWN, never PROVEN_INVALID: it does not decide them. Some are provably not GEMMs
+-- every affine image of a box is centrally symmetric (z ↦ z_min + z_max − z maps the box onto
+itself, so ξ(Z) is symmetric about ξ of the box's centre), and the triangle {0 ≤ i ≤ j < 8} is
+not ((i, j) = (0, 7) is in it, its mirror (7, 0) is not), so no ξ exists and the specification
+says REJECT for it (showcase mlir_009) -- but that is the specification's proof, not the
+compiler's. Before 19 every non-box domain was labelled PROVEN_INVALID with the argument
 "no bijection onto the GEMM's box can come from a non-box domain (Theorem 3)", which is false
 for parallelotopes (Theorem 3 is about maps between boxes).
 
@@ -1028,3 +1068,80 @@ ISSUE-007) already handle it; it was stopped only by the SQ-5 refusal in the den
 Lowering it means removing that refusal: the batch loops run one 1 × 1 × K (or M × 1 × 1) tile
 per batch value — correct, and inefficient on the arrays (the decision is recorded in
 SPEC_QUESTIONS.md).
+
+
+### 19.9 Implementation: Phases B and C (2026-10-16), and the five outcome categories
+
+**Phase B** (commit `8cb8b59`) built the tools of 19.4 and the screening of 19.5 with their own
+tests (`integer_lattice.mlir` by hand; `integer_lattice_random.mlir` against an independent
+Python implementation -- fractions for ranks and determinants, enumeration for kernels, mixed
+radixes and injectivity; `affine_gemm_geometry*.mlir`). Nothing of Phase B decides a nest.
+
+**Phase C** (recognition; ISSUE-008) keeps every earlier decision path and adds one:
+
+1. The positional form, then the analysis by groups, unchanged: every nest they recognized keeps
+   its logical mapping, views and diagnostics.
+2. When the analysis by groups refuses a nest **only** because a subscript is not role-pure --
+   C mixing a batch loop with a role loop, an operand reading one group in two dimensions, a
+   group read by all three operands without a batch loop (`relaxableRefusal`) -- the **readers
+   analysis** (`byReaders`) decides instead, from a reset result: (a) roles by readers (19.2);
+   a loop with one reader is a broadcast, no role at all an element-wise product; (b) each
+   role's direction, the common direction of the subscripts restricted to its loops
+   (`lattice::commonDirection`; not proportional: separate coordinates, or SQ-1); (c) each
+   operand dimension's coefficients on its two roles, its constant and its batch terms
+   (`OperandLayout::roleCoefficients`, `dimConstants`, `batchCoefficients`); a layout with a
+   dimension on both roles, or a role on several dimensions, is `general`; (d) each role a
+   mixed radix of its loops' ordinals (`lattice::mixedRadixExtent`, 19.4), with its scale; (e)
+   G2 by `lattice::injectiveOnBox` with λ = multiplier × scale; (f) the batch rows of P*: C's
+   batch-only dimensions, and one row per batch loop no such dimension covers.
+3. Every dimension of every operand is checked on the domain to be its view of the coordinates
+   plus its batch terms (`dimensionsAreViews`, G1, checked int64).
+4. A positional reading in which a loop drives two coordinates is never lowerable; it is no
+   longer restored when the analyses refuse the nest -- their refusal is the reason.
+5. The dense partition's SQ-5 refusal is removed (19.8).
+6. A role-pure layout is lowered as before (`memref.subview`, batch offsets per dimension, now
+   also on C's role dimensions); a general one is refused by the lowering, VALID_BUT_LOWERING_
+   UNSUPPORTED, until its `memref.reinterpret_cast` view exists (Phase D).
+
+The executable specification decides the same nests independently of the compiler, by
+enumeration (`casespec.generalized_gemm_on_domain`: roles by readers on the box, every role an
+arithmetic progression taken once per point of its loops, (I, J, K) a bijection onto the box per
+batch, C injective per batch, one shape for every batch), and its predictor mirrors the
+compiler's rules (`predict_by_readers`, `groups_or_readers`) so that the regression gate notices
+any behaviour change. The oracle (`affine_gemm_mapping_oracle.py`) decides random nests the same
+way and checks every accepted nest's views address by address.
+
+**The five outcome categories**, kept apart as the request asks:
+
+| category | how it is recorded | examples |
+|---|---|---|
+| mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027); a non-box domain that is not the affine image of a box (the triangle, mlir_009, 19.7); out-of-bounds subscripts; a sum, a third factor, no accumulation |
+| explicitly outside the specification | OUT_OF_SCOPE, DOCUMENTED_LIMITATION | double or mixed precision, operands that may alias C, alpha ≠ 1, an initialisation inside the nest, a repetition loop inside a reduction loop, an operand shared by every batch |
+| recognition not implemented | OUT_OF_SCOPE (`demotion`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only after demotion (19.2): a broadcast loop (case_090, case_095, case_123–125), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1; a parallelogram domain or Test 2's D* written as its own loop nest (19.7: the parametrization is not constructed) |
+| lowering not implemented | ACCEPT, FALSE_NEGATIVE of ISSUE-008; compiler VALID_BUT_LOWERING_UNSUPPORTED ("skewed or merged view") | Test 1 (ext_026), case_088 (`C[2i + j][j]`), case_126 (`A[i][i + k]`), a flat injective C (`C[4i + j]`), a Hankel view (`A[i + k]`) |
+| hardware or runtime not supporting it | the driver's refusal | double arrays (the datapath is fp32); a floating-point nest without the reassociation permission (§6); the FPGA board itself was not run (NOT RUN) |
+
+**Verification of Phase C** (2026-10-16; LLVM 24 toolchain only; logs in
+`~/work/integration-backups-20261016/phaseC-validation/`):
+
+- lit, release and debug (assertions) builds: 108 tests, 107 passed, 1 expectedly failed (ISSUE-008's
+  XFAIL reproducer of the open lowering);
+- the oracle on the debug build, 40 seeds × 400 nests and 3 seeds without the reassociation
+  permission: 17,200 nests, 13,823 accepted, 3,326 rejected, 51 skipped, **0 mismatches**; the new
+  paths: C reading a batch loop in a role dimension 179, two unit extents 386, skewed or merged
+  views (recognized, refused by the lowering) 785, C not injective (refused) 96;
+- the showcase on the software runtime model: 175 cases, 165 pass, 3 known false negatives
+  (case_088, case_126, ext_026: the open lowering of ISSUE-008), 7 expected refusals (SQ-1, SQ-2,
+  SQ-3); case_087 and case_127 offloaded (16 and 8 invocations) and equal to their CPU references,
+  Test 3 (ext_028) offloaded (16 invocations), Test 2 on a box (ext_027) refused at recognition
+  and computed on the host;
+- the regression gate: against the baseline of 2026-10-15 (not re-saved) case_088 and case_126
+  went from pass to known_false_negative (re-decided ACCEPT; their lowering is open) and ext_026
+  is new; the issue reproducers of ISSUE-001..007 unchanged;
+- the six standard generated batches (800 cases): 792 pass, 8 known false negatives (skewed or
+  merged views, ISSUE-008); against the previous run 21 verdicts changed, every one explained:
+  8 pass → known_false_negative (skewed views, ACCEPT since this section), 7 SQ-5 cases
+  (spec_open or expected_refusal → pass, offloaded), 6 batched GEMMs with unit extents
+  (known_false_negative → pass: the SQ-5 refusal had refused them although the specification
+  accepted them);
+- the FPGA board: NOT RUN.

@@ -172,6 +172,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -348,6 +349,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -524,6 +526,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -700,6 +703,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -876,6 +880,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1052,6 +1057,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1228,6 +1234,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1404,6 +1411,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1580,6 +1588,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1756,6 +1765,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -1932,6 +1942,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2108,6 +2119,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2284,6 +2296,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2460,6 +2473,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2636,6 +2650,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2812,6 +2827,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -2988,6 +3004,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -3164,6 +3181,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -3340,6 +3358,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -3516,6 +3535,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -3692,6 +3712,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -3868,6 +3889,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4044,6 +4066,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4220,6 +4243,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4396,6 +4420,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4572,6 +4597,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4748,6 +4774,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -4924,6 +4951,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5100,6 +5128,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5276,6 +5305,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5452,6 +5482,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5628,6 +5659,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5804,6 +5836,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -5980,6 +6013,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -6156,6 +6190,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -6332,6 +6367,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -6508,6 +6544,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -6684,6 +6721,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -6860,6 +6898,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7036,6 +7075,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7212,6 +7252,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7388,6 +7429,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7564,6 +7606,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7740,6 +7783,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -7916,6 +7960,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -8092,6 +8137,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -8268,6 +8314,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -8454,6 +8501,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -8650,6 +8698,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -8856,6 +8905,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -9062,6 +9112,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -9258,6 +9309,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -9444,6 +9496,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -9640,6 +9693,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -9826,6 +9880,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10012,6 +10067,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10200,6 +10256,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10388,6 +10445,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10576,6 +10634,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10774,6 +10833,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -10992,6 +11052,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -11168,6 +11229,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -11344,6 +11406,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -11520,6 +11583,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -11699,6 +11763,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -11873,6 +11938,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12047,6 +12113,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12223,6 +12290,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12399,6 +12467,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12575,6 +12644,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12751,6 +12821,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -12927,6 +12998,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13113,6 +13185,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13289,6 +13362,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13465,6 +13539,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13641,6 +13716,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13817,6 +13893,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -13993,6 +14070,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14169,6 +14247,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14367,6 +14446,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14514,6 +14594,7 @@
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14674,6 +14755,7 @@
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14702,7 +14784,7 @@
    "category": "matrix_vector",
    "kernel": "case_083_kernel",
    "mathematical_class": "matrix_vector",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -14789,7 +14871,7 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
     "basis": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2",
@@ -14809,6 +14891,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-005",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -14836,7 +14919,7 @@
    "category": "matrix_vector",
    "kernel": "case_084_kernel",
    "mathematical_class": "matrix_vector",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -14943,7 +15026,7 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
     "basis": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2",
@@ -14963,6 +15046,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-005",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -15163,6 +15247,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-006",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -15357,6 +15442,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -15380,8 +15466,8 @@
    "set": "negative",
    "category": "coupled_mapping",
    "kernel": "case_087_kernel",
-   "mathematical_class": "gemm_nonrectangular_region",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_gemv_moving_rows",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -15484,10 +15570,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
-    "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -15496,21 +15582,22 @@
     "frontend": "translated",
     "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "unsupported",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "dense_partition",
-    "reject_reason": "two logical coordinates are driven by the same loop (loop 1 drives I and J)"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "TRUE_NEGATIVE",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.3): REJECT (C purity) before; ACCEPT since -- a batched GEMV",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -2524,
-   "math_note": "C[i+j][j] += A[i+j][k] * B[k][j].  With r = i + j every computed element is\nC[r][j] += sum_k A[r][k] B[k][j], an element of the GEMM A B -- but the set of\n(r, j) computed is the parallelogram {j <= r < j + 8}, not a rectangle, so it\nis not one rectangular GEMM C' += A' B' of strided views.  The recognizer\naccepts the nest (I = i + j, J = j, K = k) and getDenseLogicalGemm refuses\nit: 'two logical coordinates are driven by the same loop (loop 1 drives I and\nJ)' -- no box of (I, J, K) is a set of whole iterations.",
+   "math_note": "C[i+j][j] += A[i+j][k] * B[k][j].  j is read by A, B and C: a batch loop\n(docs/AFFINE_GEMM_MAPPING.md section 19.2).  Per j it is the GEMV\nC[I+j][j] += sum_K A[I+j][K] B[K][j] (M = 8, N = 1, K = 8): A's and C's views\nmove with the batch (offset j), C's view I -> (I + j, j) is injective per\nbatch, and the batches write different columns.  A batched GEMM of affine\nviews (section 19.1, 19.3): offloaded as 8 batches of an 8 x 1 x 8 tile.\nRe-decided 2026-10-16 (ISSUE-008): until then the specification required C\nto read every batch loop alone (C purity) and rejected the nest as one GEMM\nover the parallelogram {j <= r < j + 8} -- true of one rectangular GEMM, not\nof the batched one; the user's decision of 2026-10-16 dropped C purity.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_087.c -o case_087 && ./case_087",
@@ -15531,7 +15618,7 @@
    "category": "coupled_mapping",
    "kernel": "case_088_kernel",
    "mathematical_class": "gemm_values_skewed_placement",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -15634,33 +15721,34 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
-    "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
     "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "C reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_stage": "lowering",
+    "reject_reason": "C has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
    },
-   "classification": "TRUE_NEGATIVE",
-   "issue": null,
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM with a skewed view of C",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 119,
-   "math_note": "The user's seed A[2*i+3][k+1], B[k+2][3*j+2], C[2*i+j][j], with 4x4x4 loops.\nP[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views\n(A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views\nof A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]\nis accumulated into C[2i+j][j]: an injective but skewed placement, not a\nstrided sub-matrix of C.  So the computed values are GEMM values; the output\nis not a GEMM operand view.  Expected rejection at recognition: the row\nexpression of A (2i+3) is not the row expression of C (2i+j), and K differs\nbetween A and B.",
+   "math_note": "The user's seed A[2*i+3][k+1], B[k+2][3*j+2], C[2*i+j][j], with 4x4x4 loops.\nP[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views\n(A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views\nof A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]\nis accumulated into C[2i+j][j]: C's view (I, J) -> (2I + J, J) is affine and\ninjective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with\nthat skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).\nRe-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided\nsub-matrix of C).  Recognized since; the lowering of a skewed view (a\nmemref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE, refused\nat the lowering ('C has a skewed or merged view').",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_088.c -o case_088 && ./case_088",
@@ -15793,23 +15881,24 @@
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "accept",
+    "recognition": "reject",
     "hoisting_required": false,
-    "dense_partition": "unsupported",
+    "dense_partition": "not_reached",
     "lowering": "not_reached",
     "driver": "stays_on_host",
-    "reject_stage": "dense_partition",
-    "reject_reason": "two logical coordinates are driven by the same loop (loop 0 drives I and K)"
+    "reject_stage": "recognition",
+    "reject_reason": "1 coordinate(s) are read by all three operands and none by two: an element-wise product"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 473,
-   "math_note": "test/Systolic/affine_gemm_singular_mapping.mlir in C.  The recognizer reads\nI = x + z, J = y + z, K = x + y + 2z = I + J: T = [[1 0 1],[0 1 1],[1 1 2]] is\nsingular.  K is determined by (I, J), so for a fixed output element nothing\nis summed over an independent reduction index; instead several (x, y, z)\nmap to the same (I, J) and the same product is added repeatedly.  Not a GEMM.\nExpected: recognized (the access pattern matches), refused by\ngetDenseLogicalGemm: 'loop 0 drives I and K'.",
+   "math_note": "test/Systolic/affine_gemm_singular_mapping.mlir in C.  The recognizer reads\nI = x + z, J = y + z, K = x + y + 2z = I + J: T = [[1 0 1],[0 1 1],[1 1 2]] is\nsingular.  K is determined by (I, J), so for a fixed output element nothing\nis summed over an independent reduction index; instead several (x, y, z)\nmap to the same (I, J) and the same product is added repeatedly.  Not a GEMM:\nx, y and z are each read by A, B and C, so in every decomposition all three\nare batch loops and no loop is a row, column or reduction loop -- an\nelement-wise product of views (docs/AFFINE_GEMM_MAPPING.md sections 19.1,\n19.2).  Expected rejection at recognition: '1 coordinate(s) are read by all\nthree operands and none by two: an element-wise product'.  (Until 2026-10-16\nthe coupled positional reading was kept and getDenseLogicalGemm refused it,\n'loop 0 drives I and K'; the reading is no longer restored, ISSUE-008.)",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_089.c -o case_089 && ./case_089",
@@ -15830,8 +15919,8 @@
    "set": "negative",
    "category": "singular_mapping",
    "kernel": "case_090_kernel",
-   "mathematical_class": "singular_mapping",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_dot_by_demotion",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -15944,10 +16033,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
+    "mathematical_gemm": true,
+    "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -15962,15 +16051,16 @@
     "reject_stage": "recognition",
     "reject_reason": "a coordinate is read by the first factor only: the other operands would be broadcast along it"
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 113,
-   "math_note": "The user's seed A[2*j+k][p], B[k][j], C[i][j] with four 4-iteration loops.\nThe summed value s[j] = sum_{k,p} A[2j+k][p] B[k][j] does not depend on i: every\nrow of C receives the same vector (C += 1 s^T, a rank-1 update).  The output\nrow coordinate i appears in no input, and A couples j and k.  Not a GEMM of A\nand B.  Expected rejection at recognition: A's row expression 2j+k is not C's\nrow expression i.",
+   "math_note": "The user's seed A[2*j+k][p], B[k][j], C[i][j] with four 4-iteration loops.\nThe summed value s[j] = sum_{k,p} A[2j+k][p] B[k][j] does not depend on i: every\nrow of C receives the same vector (C += 1 s^T).  By the readers\n(docs/AFFINE_GEMM_MAPPING.md section 19.2) j is read by all three operands (a\nbatch loop), k by A and B (K), i by C only and p by A only (broadcasts): the\ncanonical decomposition fails.  With i and p demoted to batch loops it is a\nbatched GEMM: per (i, j, p) the 1 x 1 x 4 dot product C[i][j] +=\nsum_K A[2j+K][p] B[K][j], the p batches accumulating into one element in\nprogram order.  Mathematically valid; the compiler constructs only the\ncanonical decomposition (the demotion is not implemented): a documented\nlimitation.  Expected refusal at recognition: 'a coordinate is read by the\nfirst factor only' (p).  Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_090.c -o case_090 && ./case_090",
@@ -16144,6 +16234,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-005",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16322,6 +16413,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-005",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16500,6 +16592,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-005",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16678,6 +16771,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16701,8 +16795,8 @@
    "set": "negative",
    "category": "reduction_mismatch",
    "kernel": "case_095_kernel",
-   "mathematical_class": "not_gemm_scaled_rows",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_scaled_vectors_by_demotion",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -16805,10 +16899,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
+    "mathematical_gemm": true,
+    "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -16823,15 +16917,16 @@
     "reject_stage": "recognition",
     "reject_reason": "a coordinate is read by the second factor only: the other operands would be broadcast along it"
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 122,
-   "math_note": "C[i][k] += A[i][k] * B[k][j]: the output is indexed by the would-be\nreduction index k and the loop j is summed away: C[i][k] += A[i][k] * (sum_j\nB[k][j]) -- A scaled column-wise by the row sums of B.  Not a GEMM.  Expected\nrejection at recognition: C's column expression k is not B's column j.",
+   "math_note": "C[i][k] += A[i][k] * B[k][j]: the output is indexed by the would-be\nreduction index k and the loop j is summed away: C[i][k] += A[i][k] * (sum_j\nB[k][j]) -- A scaled column-wise by the row sums of B.  By the readers\n(docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by all three operands (a\nbatch loop), i by A and C (I), j by B only (a broadcast): the canonical\ndecomposition fails.  With j demoted to a batch loop it is a batched GEMM:\nper (k, j) the 8 x 1 x 1 tile C[I][k] += A[I][k] B[k][j] (a vector scaled by\na scalar), the j batches accumulating into one column in program order.\nMathematically valid; the demotion is not implemented: a documented\nlimitation.  With a single-iteration j the canonical decomposition is that\nbatched GEMM and it is offloaded (SQ-5, decided 2026-10-16).  Expected\nrefusal at recognition: 'a coordinate is read by the second factor only' (j).\nRe-decided 2026-10-16 (ISSUE-008; REJECT before).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_095.c -o case_095 && ./case_095",
@@ -17005,6 +17100,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -17152,6 +17248,7 @@
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -17332,6 +17429,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -17510,6 +17608,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -17688,6 +17787,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -17864,6 +17964,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18040,6 +18141,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18216,6 +18318,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18392,6 +18495,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18568,6 +18672,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18746,6 +18851,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -18924,6 +19030,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19102,6 +19209,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19280,6 +19388,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19458,6 +19567,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19636,6 +19746,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19814,6 +19925,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -19992,6 +20104,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -20172,6 +20285,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -20348,6 +20462,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -20524,6 +20639,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -20700,6 +20816,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -20876,6 +20993,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -21052,6 +21170,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-004",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -21228,6 +21347,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-004",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -21404,6 +21524,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-004",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -21580,6 +21701,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-004",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -21603,8 +21725,8 @@
    "set": "negative",
    "category": "singular_mapping",
    "kernel": "case_123_kernel",
-   "mathematical_class": "not_gemm_diagonal_output",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_gemv_diagonal_by_demotion",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -21707,10 +21829,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
+    "mathematical_gemm": true,
+    "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -21723,17 +21845,18 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "C reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_reason": "a coordinate is read by the second factor only: the other operands would be broadcast along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md section 10)"
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 293,
-   "math_note": "C[i][i] += A[i][k] * B[k][j]: both subscripts of the output are the row\ncoordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).\nThe output is not indexed by (I, J).  Not a GEMM.  Expected rejection at\nrecognition: C's column expression i is not B's column expression j.",
+   "math_note": "C[i][i] += A[i][k] * B[k][j]: both subscripts of the output are the row\ncoordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).  By\nthe readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C\n(I), k by A and B (K), j by B only (a broadcast): the canonical decomposition\nfails.  With j demoted to a batch loop it is a batched GEMM: per j the\n8 x 1 x 8 GEMV C[I][I] += sum_K A[I][K] B[K][j] -- C's view I -> (I, I) is\ninjective -- the j batches accumulating into the diagonal in program order.\nMathematically valid; the demotion is not implemented: a documented\nlimitation.  Expected refusal at recognition: 'a coordinate is read by the\nsecond factor only' (j; the analysis by groups first finds C reading i in\nboth dimensions, which the readers analysis lifts).  Re-decided 2026-10-16\n(ISSUE-008; REJECT before).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_123.c -o case_123 && ./case_123",
@@ -21752,8 +21875,8 @@
    "set": "negative",
    "category": "coupled_mapping",
    "kernel": "case_124_kernel",
-   "mathematical_class": "not_gemm_rank1_broadcast",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_dot_by_demotion",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -21856,10 +21979,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
+    "mathematical_gemm": true,
+    "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -21874,15 +21997,16 @@
     "reject_stage": "recognition",
     "reject_reason": "a coordinate is read by C only: the other operands would be broadcast along it"
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -20878,
-   "math_note": "C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\nin C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n(A B)[i][i].  Not a GEMM of A and B.  Expected rejection at recognition:\nB's column expression i is not C's column expression j.",
+   "math_note": "C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\nin C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n(A B)[i][i].  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is\nread by all three operands (a batch loop), k by A and B (K), j by C only (a\nbroadcast): the canonical decomposition fails.  With j demoted to a batch\nloop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=\nsum_K A[i][K] B[K][i].  Mathematically valid; the demotion is not\nimplemented: a documented limitation.  Expected refusal at recognition: 'a\ncoordinate is read by C only' (j).  Re-decided 2026-10-16 (ISSUE-008; REJECT\nbefore).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_124.c -o case_124 && ./case_124",
@@ -21901,8 +22025,8 @@
    "set": "negative",
    "category": "singular_mapping",
    "kernel": "case_125_kernel",
-   "mathematical_class": "not_gemm_scaled_rows",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_rank1_by_demotion",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -22005,10 +22129,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
+    "mathematical_gemm": true,
+    "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -22021,17 +22145,18 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_reason": "a coordinate is read by the second factor only: the other operands would be broadcast along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md section 10)"
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 1116,
-   "math_note": "C[i][j] += A[i][i] * B[k][j]: A is read on its diagonal (no K in A), so\nC[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.\nNot a GEMM.  Expected rejection at recognition: A's column expression i is\nnot B's row expression k.",
+   "math_note": "C[i][j] += A[i][i] * B[k][j]: A is read on its diagonal (no K in A), so\nC[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.  By\nthe readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C\n(I), j by B and C (J), k by B only (a broadcast): the canonical decomposition\nfails.  With k demoted to a batch loop it is a batched GEMM: per k the\n8 x 8 x 1 rank-1 update C[I][J] += A[I][I] B[k][J] (A's view I -> (I, I)), the\nk batches accumulating into C in program order.  Mathematically valid; the\ndemotion is not implemented: a documented limitation.  Expected refusal at\nrecognition: 'a coordinate is read by the second factor only' (k).\nRe-decided 2026-10-16 (ISSUE-008; REJECT before).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_125.c -o case_125 && ./case_125",
@@ -22051,7 +22176,7 @@
    "category": "coupled_mapping",
    "kernel": "case_126_kernel",
    "mathematical_class": "gemm_of_skewed_view",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -22154,33 +22279,34 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
-    "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
+    "dense_partition": "supported",
+    "lowering": "unsupported",
     "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
+    "reject_stage": "lowering",
+    "reject_reason": "A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
    },
-   "classification": "TRUE_NEGATIVE",
-   "issue": null,
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (A' not a strided view of A) before; ACCEPT since -- a GEMM with a skewed view of A",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -916,
-   "math_note": "C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(i,k) = A[i][i+k]\n(a Hankel-like gather).  Mathematically C += A' B for that A', but A' is not\nan affine strided view of A: the subscript i + k depends on two coordinates\n(coupled), which the specification's definition excludes.  Not a dense GEMM\nof A.  Expected rejection at recognition: A's column expression i + k is not\nB's row expression k.",
+   "math_note": "C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(I, K) = A[I][I+K]\n(a Hankel-like gather), and C += A' B.  A' is an affine view of A -- its\ndimension 1 combines both of A's roles; in elements A'(I, K) is at 16 I + K\n(row-major strides (16, 1)) -- and C's view is the identity (injective): a\nGEMM by docs/AFFINE_GEMM_MAPPING.md section 19 (G1, G2; Test 1's shape with\nB plain).  Re-decided 2026-10-16 (ISSUE-008; until then rejected: 'A' is not\nan affine strided view of A').  Recognized since; the lowering of a skewed\nview (a memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE,\nrefused at the lowering ('A has a skewed or merged view').",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_126.c -o case_126 && ./case_126",
@@ -22199,8 +22325,8 @@
    "set": "negative",
    "category": "coupled_mapping",
    "kernel": "case_127_kernel",
-   "mathematical_class": "not_gemm_skewed_output",
-   "is_valid_gemm": false,
+   "mathematical_class": "batched_rank1_moving_rows",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -22303,33 +22429,34 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
-    "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "C's dimension 0 mixes a batch coordinate (loop 2, read by all three operands) with another coordinate: the output position would move with the batch (a coupled or skewed placement, not one dense GEMM)"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "TRUE_NEGATIVE",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.3): REJECT (C purity) before; ACCEPT since -- batched rank-1 updates with overlapping output windows",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": 64,
-   "math_note": "C[i+k][j] += A[i][k] * B[k][j]: the output row depends on the reduction\nindex, so no element of C accumulates a full dot product; C[r][j] receives\nthe sum over the anti-diagonal i + k = r.  Not a GEMM.  Expected rejection at\nrecognition: C's row expression i + k is not A's row expression i.",
+   "math_note": "C[i+k][j] += A[i][k] * B[k][j]: the output row depends on the reduction\nindex.  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by\nA, B and C -- a batch loop --, i by A and C (I), j by B and C (J).  Per k it\nis the 8 x 8 x 1 rank-1 update C[I+k][J] += A[I][k] B[k][J]: C's view\n(I, J) -> (I + k, J) is injective per batch; consecutive batches' windows\noverlap and accumulate in program order (section 19.3), so C[r][j] receives\nthe sum over i + k = r of A[i][k] B[k][j] -- exactly the nest.  A batched\nGEMM of affine views: offloaded as 8 batches of an 8 x 8 x 1 tile.\nRe-decided 2026-10-16 (ISSUE-008): until then the specification required C\nto read every batch loop alone (C purity) and rejected it ('no element of C\naccumulates a full dot product' -- true, and not required).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_127.c -o case_127 && ./case_127",
@@ -22502,6 +22629,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -23257,6 +23385,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -23433,6 +23562,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -23609,6 +23739,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -23797,6 +23928,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -23961,6 +24093,7 @@
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24110,6 +24243,7 @@
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24287,6 +24421,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24465,6 +24600,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-001",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24641,6 +24777,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24817,6 +24954,7 @@
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25033,6 +25171,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-006",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25261,6 +25400,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25437,6 +25577,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25623,6 +25764,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25647,7 +25789,7 @@
    "category": "batched",
    "kernel": "ext_015_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -25750,10 +25892,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -25770,6 +25912,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25798,7 +25941,7 @@
    "category": "batched",
    "kernel": "ext_016_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -25901,10 +26044,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -25921,6 +26064,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25949,7 +26093,7 @@
    "category": "batched",
    "kernel": "ext_017_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -26052,10 +26196,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -26072,6 +26216,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26273,6 +26418,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26452,6 +26598,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26631,6 +26778,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26655,7 +26803,7 @@
    "category": "batched",
    "kernel": "ext_021_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -26771,10 +26919,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -26791,6 +26939,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26973,6 +27122,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -26997,7 +27147,7 @@
    "category": "batched",
    "kernel": "ext_023_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -27100,10 +27250,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -27120,6 +27270,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -27148,7 +27299,7 @@
    "category": "batched",
    "kernel": "ext_024_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -27251,10 +27402,10 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)",
+    "basis": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -27271,6 +27422,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -27299,7 +27451,7 @@
    "category": "batched",
    "kernel": "ext_025_kernel",
    "mathematical_class": "not_gemm",
-   "is_valid_gemm": false,
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -27401,7 +27553,7 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
+    "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
     "basis": "(P0.4, P0.5) not a GEMM as written, but its loops that run once are constants on the iteration domain, and there the nest is a dense GEMM of strided views (decided by enumerating the points: casespec.gemm_on_domain; docs/AFFINE_GEMM_MAPPING.md Lemma 0, section 3)",
@@ -27421,6 +27573,7 @@
    },
    "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-007",
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -27438,6 +27591,461 @@
     "A is indexed by ['P', 'I', 'const']; the operand in that position of a GEMM is indexed by exactly ['I', 'K']",
     "B is indexed by ['P', 'const', 'const']; the operand in that position of a GEMM is indexed by exactly ['J', 'K']",
     "C is indexed by ['P', 'I', 'const']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
+   ]
+  },
+  {
+   "id": "ext_026",
+   "kind": "c",
+   "file": "extended/ext_026.c",
+   "name": "test1_skewed_a_and_b",
+   "set": "extended",
+   "category": "generalized_views",
+   "kernel": "ext_026_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      4,
+      7
+     ],
+     "subscripts": [
+      "i",
+      "i + k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      7,
+      4
+     ],
+     "subscripts": [
+      "j + k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      4,
+      4
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "coupled"
+     ],
+     "B": [
+      "coupled",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [I]: 0 <= i < 4, step 1, 4 iteration(s)",
+    "j [J]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 4, step 1, 4 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "unsupported",
+    "driver": "stays_on_host",
+    "reject_stage": "lowering",
+    "reject_reason": "A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
+   },
+   "classification": "FALSE_NEGATIVE",
+   "issue": "ISSUE-008",
+   "redecided": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 1049,
+   "math_note": "Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\nK = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n(each combines both of its operand's roles), C's is the identity: a GEMM\n(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; the lowering of\nskewed views is not implemented yet: a FALSE NEGATIVE ('A has a skewed\nor merged view'), ISSUE-008, Phase D.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_026.c -o ext_026 && ./ext_026",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_026.c -o ext_026 && ./ext_026",
+    "stages": "python3 scripts/run_showcase.py --case ext_026"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (I, mixed:I+K)",
+    "B has a subscript that couples loops of different coordinates (mixed:J+K, J)"
+   ]
+  },
+  {
+   "id": "ext_027",
+   "kind": "c",
+   "file": "extended/ext_027.c",
+   "name": "test2_on_a_box",
+   "set": "extended",
+   "category": "generalized_views",
+   "kernel": "ext_027_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": false,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "X",
+     "lb": 2,
+     "ub_exclusive": 10,
+     "step": 1,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "j",
+     "role": "X",
+     "lb": 0,
+     "ub_exclusive": 6,
+     "step": 1,
+     "cmp": "<",
+     "trip": 6
+    },
+    {
+     "var": "k",
+     "role": "X",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      15,
+      16
+     ],
+     "subscripts": [
+      "i + j - 2 * k",
+      "i + j + k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      16,
+      21
+     ],
+     "subscripts": [
+      "i + j + k",
+      "i + 2 * j + k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      15,
+      21
+     ],
+     "subscripts": [
+      "i + j - 2 * k",
+      "i + 2 * j + k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "reversed",
+      "split"
+     ],
+     "B": [
+      "split",
+      "split"
+     ],
+     "C": [
+      "reversed",
+      "split"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [X]: 2 <= i < 10, step 1, 8 iteration(s)",
+    "j [X]: 0 <= j < 6, step 1, 6 iteration(s)",
+    "k [X]: 0 <= k < 2, step 1, 2 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": false,
+    "recognition": "REJECT",
+    "offload": "stays_on_host",
+    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "reject",
+    "hoisting_required": false,
+    "dense_partition": "not_reached",
+    "lowering": "not_reached",
+    "driver": "stays_on_host",
+    "reject_stage": "recognition",
+    "reject_reason": "1 coordinate(s) are read by all three operands and none by two: an element-wise product"
+   },
+   "classification": "TRUE_NEGATIVE",
+   "issue": null,
+   "redecided": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -1779,
+   "math_note": "Test 2, C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k] on the\nbox i in [2, 10), j in [0, 6), k in [0, 2): every loop is read by all\nthree operands, so on a box all three are batch loops and no loop is a\nrow, column or reduction loop -- an element-wise product of views, not\na GEMM (docs/AFFINE_GEMM_MAPPING.md section 19.6: 96 points, 87 outputs,\n9 written twice).  It is a GEMM only on the lattice parallelepiped D*\n(a different domain, section 19.6; test/Systolic/affine_gemm_generalized.mlir\n@test2_reparametrized).  Expected rejection at recognition (element-wise);\nthe nest runs on the host and its result is checked.",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_027.c -o ext_027 && ./ext_027",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_027.c -o ext_027 && ./ext_027",
+    "stages": "python3 scripts/run_showcase.py --case ext_027"
+   },
+   "why_not_a_dense_gemm": [
+    "A is indexed by ['X', 'X']; the operand in that position of a GEMM is indexed by exactly ['I', 'K']",
+    "B is indexed by ['X', 'X']; the operand in that position of a GEMM is indexed by exactly ['J', 'K']",
+    "C is indexed by ['X', 'X']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
+   ]
+  },
+  {
+   "id": "ext_028",
+   "kind": "c",
+   "file": "extended/ext_028.c",
+   "name": "test3_batch_of_dot_products",
+   "set": "extended",
+   "category": "generalized_views",
+   "kernel": "ext_028_kernel",
+   "mathematical_class": "not_gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "j",
+     "role": "P",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 4,
+     "step": 1,
+     "cmp": "<",
+     "trip": 4
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      4,
+      7
+     ],
+     "subscripts": [
+      "i",
+      "j + k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      7,
+      4
+     ],
+     "subscripts": [
+      "i + k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      4,
+      4
+     ],
+     "subscripts": [
+      "i",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 1,
+   "logical_extents": null,
+   "index_forms": {
+    "operands": {
+     "A": [
+      "identity",
+      "coupled"
+     ],
+     "B": [
+      "coupled",
+      "identity"
+     ],
+     "C": [
+      "identity",
+      "identity"
+     ]
+    },
+    "shared": {}
+   },
+   "loop_summary": [
+    "i [P]: 0 <= i < 4, step 1, 4 iteration(s)",
+    "j [P]: 0 <= j < 4, step 1, 4 iteration(s)",
+    "k [K]: 0 <= k < 4, step 1, 4 iteration(s)"
+   ],
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(SQ-5, decided 2026-10-16: docs/AFFINE_GEMM_MAPPING.md section 19.8) a batched GEMM whose per-batch GEMM has two of M, N, K equal to 1 -- a batch of dot products (C[i][j] += A[i][j + k] B[i + k][j]) or of scaled vectors (the reduction index in the output) -- is a batched GEMM of affine views: lowered, one small tile per batch value",
+    "spec_question": null,
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": false,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-008",
+   "redecided": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 183,
+   "math_note": "Test 3, C[i][j] += A[i][j+k] * B[i+k][j]: i and j are read by all three\noperands (batch loops), k by A and B (K): per (i, j) the 1 x 1 x 4 dot\nproduct C[i][j] += sum_K A[i][j+K] B[i+K][j] -- a batched GEMM of affine\nviews with M = N = 1 (docs/AFFINE_GEMM_MAPPING.md sections 19.6, 19.8;\nSQ-5, decided 2026-10-16: offloaded, 16 batches of a 1 x 1 x 4 tile).  Not\none GEMM with affine views (section 19.6, exhaustive check).",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/extended/ext_028.c -o ext_028 && ./ext_028",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/extended/ext_028.c -o ext_028 && ./ext_028",
+    "stages": "python3 scripts/run_showcase.py --case ext_028"
+   },
+   "why_not_a_dense_gemm": [
+    "A has a subscript that couples loops of different coordinates (P, mixed:K+P)",
+    "B has a subscript that couples loops of different coordinates (mixed:K+P, P)",
+    "C is indexed by ['P', 'P']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']"
    ]
   },
   {
@@ -27613,6 +28221,7 @@
    },
    "classification": "SPEC_OPEN",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -27789,6 +28398,7 @@
    },
    "classification": "SPEC_OPEN",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -27964,6 +28574,7 @@
    },
    "classification": "SPEC_OPEN",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -28139,6 +28750,7 @@
    },
    "classification": "SPEC_OPEN",
    "issue": null,
+   "redecided": null,
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -28298,13 +28910,12 @@
  "counts": {
   "positive": 101,
   "negative": 39,
-  "extended": 32,
+  "extended": 35,
   "mlir": 15
  },
  "spec_questions": {
   "SQ-1": "a coordinate split over several loops with a different mixed radix per operand (A[4*i0 + i1][k] with C[8*i0 + i1][j]): the definition's 'injective affine function of the coordinate's loops' admits it, the 'inside' list does not name it, and the operand views are not strided sub-matrices (a rank-2 memref.subview cannot express them) -- inside the specification (with a copy or a rank-3 view) or a documented limitation?",
   "SQ-2": "an empty GEMM (a loop of zero iterations, M, N or K = 0): the nest computes nothing; must the compiler offload it (zero invocations) or refuse it?  Either keeps the result correct; the specification does not say which",
-  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?",
-  "SQ-5": "a batched nest whose per-batch GEMM has two of M, N, K equal to 1 -- the reduction index in the output with a single-iteration j (C[i][k] += A[i][k] * B[k][j], j in [1, 2)): k is read by every operand (a batch coordinate), N = K = 1, so each batch is a column scaled by a scalar.  The result is correct, but the specification lists 'the reduction index in the output' as not a GEMM; is a batched vector-times-scalar a GEMM to offload, or a documented limitation?"
+  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?"
  }
 }

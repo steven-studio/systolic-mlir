@@ -2,7 +2,9 @@
 // ext_015 (the Phase 1 target, A's row moving with j), ext_017 (A[i + j][k]
 // with B[k][2j]) and ext_018 (each operand at its own batch index) lowered
 // with the batch loop around the tiles; case_127's shape (C's row mixing the
-// batch coordinate) stays refused, without a remark (not recognized).
+// batch coordinate) was refused until 2026-10-16 and is lowered since (docs/
+// AFFINE_GEMM_MAPPING.md section 19.3: per k the rank-1 update C'(I, J) =
+// C[I + k][J], injective per batch, the batches' windows adding up in order).
 //
 // RUN: systolic-opt "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true classify=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s
@@ -10,6 +12,7 @@
 // CHECK:     remark: affine GEMM 4x1x4 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
 // CHECK:     remark: affine GEMM 8x1x8 lowered as 1 exact region(s), batched: 8 batch iteration(s) of 1 batch loop(s)
 // CHECK:     remark: affine GEMM 4x4x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+// CHECK:     remark: affine GEMM 4x4x1 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
 // CHECK-NOT: remark:
 
 // ext_015: C[8i][j] += A[4i - j][5k] * B[5k][j], i in [1, 5)

@@ -392,14 +392,20 @@ Ng(86, "batched_shared_b", "batched",
 Ng(87, "coupled_i_plus_j", "coupled_mapping",
    [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
    arr("A", (15, 8), ("i + j", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (15, 8), ("i + j", "j")),
-   math_class="gemm_nonrectangular_region",
-   math_note="C[i+j][j] += A[i+j][k] * B[k][j].  With r = i + j every computed element is\n"
-             "C[r][j] += sum_k A[r][k] B[k][j], an element of the GEMM A B -- but the set of\n"
-             "(r, j) computed is the parallelogram {j <= r < j + 8}, not a rectangle, so it\n"
-             "is not one rectangular GEMM C' += A' B' of strided views.  The recognizer\n"
-             "accepts the nest (I = i + j, J = j, K = k) and getDenseLogicalGemm refuses\n"
-             "it: 'two logical coordinates are driven by the same loop (loop 1 drives I and\n"
-             "J)' -- no box of (I, J, K) is a set of whole iterations.")
+   math_class="batched_gemv_moving_rows",
+   math_note="C[i+j][j] += A[i+j][k] * B[k][j].  j is read by A, B and C: a batch loop\n"
+             "(docs/AFFINE_GEMM_MAPPING.md section 19.2).  Per j it is the GEMV\n"
+             "C[I+j][j] += sum_K A[I+j][K] B[K][j] (M = 8, N = 1, K = 8): A's and C's views\n"
+             "move with the batch (offset j), C's view I -> (I + j, j) is injective per\n"
+             "batch, and the batches write different columns.  A batched GEMM of affine\n"
+             "views (section 19.1, 19.3): offloaded as 8 batches of an 8 x 1 x 8 tile.\n"
+             "Re-decided 2026-10-16 (ISSUE-008): until then the specification required C\n"
+             "to read every batch loop alone (C purity) and rejected the nest as one GEMM\n"
+             "over the parallelogram {j <= r < j + 8} -- true of one rectangular GEMM, not\n"
+             "of the batched one; the user's decision of 2026-10-16 dropped C purity.",
+   issue="ISSUE-008",
+   redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
+             "19.3): REJECT (C purity) before; ACCEPT since -- a batched GEMV")
 Ng(88, "skewed_output_seed", "coupled_mapping",
    [L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
    arr("A", (10, 5), ("2 * i + 3", "k + 1")), arr("B", (6, 12), ("k + 2", "3 * j + 2")), arr("C", (10, 4), ("2 * i + j", "j")),
@@ -408,11 +414,17 @@ Ng(88, "skewed_output_seed", "coupled_mapping",
              "P[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views\n"
              "(A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views\n"
              "of A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]\n"
-             "is accumulated into C[2i+j][j]: an injective but skewed placement, not a\n"
-             "strided sub-matrix of C.  So the computed values are GEMM values; the output\n"
-             "is not a GEMM operand view.  Expected rejection at recognition: the row\n"
-             "expression of A (2i+3) is not the row expression of C (2i+j), and K differs\n"
-             "between A and B.")
+             "is accumulated into C[2i+j][j]: C's view (I, J) -> (2I + J, J) is affine and\n"
+             "injective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with\n"
+             "that skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).\n"
+             "Re-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided\n"
+             "sub-matrix of C).  Recognized since; the lowering of a skewed view (a\n"
+             "memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE, refused\n"
+             "at the lowering ('C has a skewed or merged view').",
+   issue="ISSUE-008",
+   redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
+             "19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM "
+             "with a skewed view of C")
 Ng(89, "singular_mapping", "singular_mapping",
    [L("x", 0, 4, "X"), L("y", 0, 4, "X"), L("z", 0, 4, "X")],
    arr("A", (7, 13), ("x + z", "x + y + 2 * z")), arr("B", (13, 7), ("x + y + 2 * z", "y + z")), arr("C", (7, 7), ("x + z", "y + z")),
@@ -421,19 +433,31 @@ Ng(89, "singular_mapping", "singular_mapping",
              "I = x + z, J = y + z, K = x + y + 2z = I + J: T = [[1 0 1],[0 1 1],[1 1 2]] is\n"
              "singular.  K is determined by (I, J), so for a fixed output element nothing\n"
              "is summed over an independent reduction index; instead several (x, y, z)\n"
-             "map to the same (I, J) and the same product is added repeatedly.  Not a GEMM.\n"
-             "Expected: recognized (the access pattern matches), refused by\n"
-             "getDenseLogicalGemm: 'loop 0 drives I and K'.")
+             "map to the same (I, J) and the same product is added repeatedly.  Not a GEMM:\n"
+             "x, y and z are each read by A, B and C, so in every decomposition all three\n"
+             "are batch loops and no loop is a row, column or reduction loop -- an\n"
+             "element-wise product of views (docs/AFFINE_GEMM_MAPPING.md sections 19.1,\n"
+             "19.2).  Expected rejection at recognition: '1 coordinate(s) are read by all\n"
+             "three operands and none by two: an element-wise product'.  (Until 2026-10-16\n"
+             "the coupled positional reading was kept and getDenseLogicalGemm refused it,\n"
+             "'loop 0 drives I and K'; the reading is no longer restored, ISSUE-008.)")
 Ng(90, "singular_output_independent_of_i", "singular_mapping",
    [L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K"), L("p", 0, 4, "X")],
    arr("A", (10, 4), ("2 * j + k", "p")), arr("B", (4, 4), ("k", "j")), arr("C", (4, 4), ("i", "j")),
-   math_class="singular_mapping",
+   math_class="batched_dot_by_demotion",
    math_note="The user's seed A[2*j+k][p], B[k][j], C[i][j] with four 4-iteration loops.\n"
              "The summed value s[j] = sum_{k,p} A[2j+k][p] B[k][j] does not depend on i: every\n"
-             "row of C receives the same vector (C += 1 s^T, a rank-1 update).  The output\n"
-             "row coordinate i appears in no input, and A couples j and k.  Not a GEMM of A\n"
-             "and B.  Expected rejection at recognition: A's row expression 2j+k is not C's\n"
-             "row expression i.")
+             "row of C receives the same vector (C += 1 s^T).  By the readers\n"
+             "(docs/AFFINE_GEMM_MAPPING.md section 19.2) j is read by all three operands (a\n"
+             "batch loop), k by A and B (K), i by C only and p by A only (broadcasts): the\n"
+             "canonical decomposition fails.  With i and p demoted to batch loops it is a\n"
+             "batched GEMM: per (i, j, p) the 1 x 1 x 4 dot product C[i][j] +=\n"
+             "sum_K A[2j+K][p] B[K][j], the p batches accumulating into one element in\n"
+             "program order.  Mathematically valid; the compiler constructs only the\n"
+             "canonical decomposition (the demotion is not implemented): a documented\n"
+             "limitation.  Expected refusal at recognition: 'a coordinate is read by the\n"
+             "first factor only' (p).  Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
 Ng(91, "transposed_a", "transposed_operand",
    ijk(8, 8, 8), arr("A", (8, 8), ("k", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_note="C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose\n"
@@ -463,11 +487,21 @@ Ng(94, "operand_specific_stride", "operand_view_mismatch",
 Ng(95, "reduction_index_in_output", "reduction_mismatch",
    [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
    arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "k")),
-   math_class="not_gemm_scaled_rows",
+   math_class="batched_scaled_vectors_by_demotion",
    math_note="C[i][k] += A[i][k] * B[k][j]: the output is indexed by the would-be\n"
              "reduction index k and the loop j is summed away: C[i][k] += A[i][k] * (sum_j\n"
-             "B[k][j]) -- A scaled column-wise by the row sums of B.  Not a GEMM.  Expected\n"
-             "rejection at recognition: C's column expression k is not B's column j.")
+             "B[k][j]) -- A scaled column-wise by the row sums of B.  By the readers\n"
+             "(docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by all three operands (a\n"
+             "batch loop), i by A and C (I), j by B only (a broadcast): the canonical\n"
+             "decomposition fails.  With j demoted to a batch loop it is a batched GEMM:\n"
+             "per (k, j) the 8 x 1 x 1 tile C[I][k] += A[I][k] B[k][j] (a vector scaled by\n"
+             "a scalar), the j batches accumulating into one column in program order.\n"
+             "Mathematically valid; the demotion is not implemented: a documented\n"
+             "limitation.  With a single-iteration j the canonical decomposition is that\n"
+             "batched GEMM and it is offloaded (SQ-5, decided 2026-10-16).  Expected\n"
+             "refusal at recognition: 'a coordinate is read by the second factor only' (j).\n"
+             "Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
 Ng(96, "alpha_scaled", "scaled_product",
    ijk(8, 8, 8), *std_arrays(8, 8, 8), stmt="+=alpha", alpha=2.0,
    math_note="C += alpha A B with a scalar parameter alpha = 2: the BLAS GEMM with alpha\n"
@@ -693,6 +727,44 @@ EXTENDED = [
                        "C[1][:, 0] += A[1][:, 1] B[1][1][0] (SQ-4), not a batched vector times a\n"
                        "scalar (SQ-5).  Refused until the review fix, offloaded since.",
              issue="ISSUE-007"),
+    # The three tests of the 2026-10-16 request (docs/AFFINE_GEMM_MAPPING.md
+    # section 19.6), kept exactly as given.
+    ext_case(26, "test1_skewed_a_and_b", "generalized_views",
+             [L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
+             {"a": arr("A", (4, 7), ("i", "i + k")), "b": arr("B", (7, 4), ("j + k", "j")),
+              "c": arr("C", (4, 4), ("i", "j"))},
+             math_note="Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\n"
+                       "K = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n"
+                       "(each combines both of its operand's roles), C's is the identity: a GEMM\n"
+                       "(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; the lowering of\n"
+                       "skewed views is not implemented yet: a FALSE NEGATIVE ('A has a skewed\n"
+                       "or merged view'), ISSUE-008, Phase D.",
+             issue="ISSUE-008"),
+    ext_case(27, "test2_on_a_box", "generalized_views",
+             [L("i", 2, 10, "X"), L("j", 0, 6, "X"), L("k", 0, 2, "X")],
+             {"a": arr("A", (15, 16), ("i + j - 2 * k", "i + j + k")),
+              "b": arr("B", (16, 21), ("i + j + k", "i + 2 * j + k")),
+              "c": arr("C", (15, 21), ("i + j - 2 * k", "i + 2 * j + k"))},
+             math_note="Test 2, C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k] on the\n"
+                       "box i in [2, 10), j in [0, 6), k in [0, 2): every loop is read by all\n"
+                       "three operands, so on a box all three are batch loops and no loop is a\n"
+                       "row, column or reduction loop -- an element-wise product of views, not\n"
+                       "a GEMM (docs/AFFINE_GEMM_MAPPING.md section 19.6: 96 points, 87 outputs,\n"
+                       "9 written twice).  It is a GEMM only on the lattice parallelepiped D*\n"
+                       "(a different domain, section 19.6; test/Systolic/affine_gemm_generalized.mlir\n"
+                       "@test2_reparametrized).  Expected rejection at recognition (element-wise);\n"
+                       "the nest runs on the host and its result is checked."),
+    ext_case(28, "test3_batch_of_dot_products", "generalized_views",
+             [L("i", 0, 4, "P"), L("j", 0, 4, "P"), L("k", 0, 4, "K")],
+             {"a": arr("A", (4, 7), ("i", "j + k")), "b": arr("B", (7, 4), ("i + k", "j")),
+              "c": arr("C", (4, 4), ("i", "j"))},
+             math_note="Test 3, C[i][j] += A[i][j+k] * B[i+k][j]: i and j are read by all three\n"
+                       "operands (batch loops), k by A and B (K): per (i, j) the 1 x 1 x 4 dot\n"
+                       "product C[i][j] += sum_K A[i][j+K] B[i+K][j] -- a batched GEMM of affine\n"
+                       "views with M = N = 1 (docs/AFFINE_GEMM_MAPPING.md sections 19.6, 19.8;\n"
+                       "SQ-5, decided 2026-10-16: offloaded, 16 batches of a 1 x 1 x 4 tile).  Not\n"
+                       "one GEMM with affine views (section 19.6, exhaustive check).",
+             issue="ISSUE-008"),
 ]
 
 # ==========================================================================
@@ -857,41 +929,82 @@ Bn(122, "mixed_direction_steps", "decreasing_loop",
 #         the wrong coordinate in an operand)
 Bn(123, "output_on_the_diagonal", "singular_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "i")),
-   math_class="not_gemm_diagonal_output",
+   math_class="batched_gemv_diagonal_by_demotion",
    math_note="C[i][i] += A[i][k] * B[k][j]: both subscripts of the output are the row\n"
-             "coordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).\n"
-             "The output is not indexed by (I, J).  Not a GEMM.  Expected rejection at\n"
-             "recognition: C's column expression i is not B's column expression j.")
+             "coordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).  By\n"
+             "the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C\n"
+             "(I), k by A and B (K), j by B only (a broadcast): the canonical decomposition\n"
+             "fails.  With j demoted to a batch loop it is a batched GEMM: per j the\n"
+             "8 x 1 x 8 GEMV C[I][I] += sum_K A[I][K] B[K][j] -- C's view I -> (I, I) is\n"
+             "injective -- the j batches accumulating into the diagonal in program order.\n"
+             "Mathematically valid; the demotion is not implemented: a documented\n"
+             "limitation.  Expected refusal at recognition: 'a coordinate is read by the\n"
+             "second factor only' (j; the analysis by groups first finds C reading i in\n"
+             "both dimensions, which the readers analysis lifts).  Re-decided 2026-10-16\n"
+             "(ISSUE-008; REJECT before).",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
 Bn(124, "b_column_is_the_row_coordinate", "coupled_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "i")), arr("C", (8, 8), ("i", "j")),
-   math_class="not_gemm_rank1_broadcast",
+   math_class="batched_dot_by_demotion",
    math_note="C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\n"
              "in C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n"
-             "(A B)[i][i].  Not a GEMM of A and B.  Expected rejection at recognition:\n"
-             "B's column expression i is not C's column expression j.")
+             "(A B)[i][i].  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is\n"
+             "read by all three operands (a batch loop), k by A and B (K), j by C only (a\n"
+             "broadcast): the canonical decomposition fails.  With j demoted to a batch\n"
+             "loop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=\n"
+             "sum_K A[i][K] B[K][i].  Mathematically valid; the demotion is not\n"
+             "implemented: a documented limitation.  Expected refusal at recognition: 'a\n"
+             "coordinate is read by C only' (j).  Re-decided 2026-10-16 (ISSUE-008; REJECT\n"
+             "before).",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
 Bn(125, "a_on_its_diagonal", "singular_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
-   math_class="not_gemm_scaled_rows",
+   math_class="batched_rank1_by_demotion",
    math_note="C[i][j] += A[i][i] * B[k][j]: A is read on its diagonal (no K in A), so\n"
-             "C[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.\n"
-             "Not a GEMM.  Expected rejection at recognition: A's column expression i is\n"
-             "not B's row expression k.")
+             "C[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.  By\n"
+             "the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C\n"
+             "(I), j by B and C (J), k by B only (a broadcast): the canonical decomposition\n"
+             "fails.  With k demoted to a batch loop it is a batched GEMM: per k the\n"
+             "8 x 8 x 1 rank-1 update C[I][J] += A[I][I] B[k][J] (A's view I -> (I, I)), the\n"
+             "k batches accumulating into C in program order.  Mathematically valid; the\n"
+             "demotion is not implemented: a documented limitation.  Expected refusal at\n"
+             "recognition: 'a coordinate is read by the second factor only' (k).\n"
+             "Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
 Bn(126, "a_column_couples_i_and_k", "coupled_mapping",
    ijk(8, 8, 8), arr("A", (8, 15), ("i", "i + k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_class="gemm_of_skewed_view",
-   math_note="C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(i,k) = A[i][i+k]\n"
-             "(a Hankel-like gather).  Mathematically C += A' B for that A', but A' is not\n"
-             "an affine strided view of A: the subscript i + k depends on two coordinates\n"
-             "(coupled), which the specification's definition excludes.  Not a dense GEMM\n"
-             "of A.  Expected rejection at recognition: A's column expression i + k is not\n"
-             "B's row expression k.")
+   math_note="C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(I, K) = A[I][I+K]\n"
+             "(a Hankel-like gather), and C += A' B.  A' is an affine view of A -- its\n"
+             "dimension 1 combines both of A's roles; in elements A'(I, K) is at 16 I + K\n"
+             "(row-major strides (16, 1)) -- and C's view is the identity (injective): a\n"
+             "GEMM by docs/AFFINE_GEMM_MAPPING.md section 19 (G1, G2; Test 1's shape with\n"
+             "B plain).  Re-decided 2026-10-16 (ISSUE-008; until then rejected: 'A' is not\n"
+             "an affine strided view of A').  Recognized since; the lowering of a skewed\n"
+             "view (a memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE,\n"
+             "refused at the lowering ('A has a skewed or merged view').",
+   issue="ISSUE-008",
+   redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
+             "19): REJECT (A' not a strided view of A) before; ACCEPT since -- a GEMM with a "
+             "skewed view of A")
 Bn(127, "c_row_couples_i_and_k", "coupled_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (15, 8), ("i + k", "j")),
-   math_class="not_gemm_skewed_output",
+   math_class="batched_rank1_moving_rows",
    math_note="C[i+k][j] += A[i][k] * B[k][j]: the output row depends on the reduction\n"
-             "index, so no element of C accumulates a full dot product; C[r][j] receives\n"
-             "the sum over the anti-diagonal i + k = r.  Not a GEMM.  Expected rejection at\n"
-             "recognition: C's row expression i + k is not A's row expression i.")
+             "index.  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by\n"
+             "A, B and C -- a batch loop --, i by A and C (I), j by B and C (J).  Per k it\n"
+             "is the 8 x 8 x 1 rank-1 update C[I+k][J] += A[I][k] B[k][J]: C's view\n"
+             "(I, J) -> (I + k, J) is injective per batch; consecutive batches' windows\n"
+             "overlap and accumulate in program order (section 19.3), so C[r][j] receives\n"
+             "the sum over i + k = r of A[i][k] B[k][j] -- exactly the nest.  A batched\n"
+             "GEMM of affine views: offloaded as 8 batches of an 8 x 8 x 1 tile.\n"
+             "Re-decided 2026-10-16 (ISSUE-008): until then the specification required C\n"
+             "to read every batch loop alone (C purity) and rejected it ('no element of C\n"
+             "accumulates a full dot product' -- true, and not required).",
+   issue="ISSUE-008",
+   redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
+             "19.3): REJECT (C purity) before; ACCEPT since -- batched rank-1 updates with "
+             "overlapping output windows")
 
 # --- B6: open questions of the specification (recorded, not judged)
 Bx(128, "split_coordinate_radix_differs_per_operand", "split_coordinate",

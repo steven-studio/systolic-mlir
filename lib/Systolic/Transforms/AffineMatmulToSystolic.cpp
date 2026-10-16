@@ -179,6 +179,18 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
                   const std::array<OperandCoordinateView, 2> &views,
                   const OperandLayout &layout, StringRef name,
                   std::string &why, GemmMappingClass &mappingClass) {
+  // A skewed or merged view (docs/AFFINE_GEMM_MAPPING.md section 19): no
+  // subview of the memref's dimensions expresses it. Recognized and
+  // verified (G1, G2); its lowering is not implemented yet.
+  if (layout.general) {
+    why = (name + " has a skewed or merged view (a dimension combining both "
+                  "of its roles, or a role across several dimensions: docs/"
+                  "AFFINE_GEMM_MAPPING.md section 19), which is not lowered "
+                  "yet")
+              .str();
+    mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
+    return failure();
+  }
   auto ty = dyn_cast<MemRefType>(memref.getType());
   // The subview needs the memref's strides: an identity layout (its leading
   // dimension may be dynamic -- C's float A[][K]).

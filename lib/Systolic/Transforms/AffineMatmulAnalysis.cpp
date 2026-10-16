@@ -1868,6 +1868,12 @@ mlir::systolic::recognizeLogicalMatmul(
   // in the batch counters (OperandLayout::batchCoefficients).
   SmallVector<bool> isBatchLoop(numIterationDims, false);
 
+  // A refusal of the analysis by groups that the readers analysis (3.,
+  // docs/AFFINE_GEMM_MAPPING.md section 19) lifts: a subscript that is not
+  // role-pure -- C mixing a batch loop with a role, a dimension combining two
+  // roles, an operand reading one coordinate in two dimensions.
+  bool relaxableRefusal = false;
+
   // 2. The analysis by groups and roles (its refusals set why/mappingClass).
   auto byGroups = [&]() -> LogicalResult {
   SmallVector<std::array<bool, 3>> readsLoop(numIterationDims,
@@ -1895,13 +1901,15 @@ mlir::systolic::recognizeLogicalMatmul(
       else
         otherLoop = true;
     }
-    if (batchLoop && otherLoop)
+    if (batchLoop && otherLoop) {
+      relaxableRefusal = true;
       return refuse(llvm::Twine("C's dimension ") + llvm::Twine(sub.dim) +
                     " mixes a batch coordinate (loop " +
                     llvm::Twine(*batchLoop) +
                     ", read by all three operands) with another coordinate: "
                     "the output position would move with the batch (a "
                     "coupled or skewed placement, not one dense GEMM)");
+    }
   }
   // A loop the union-find below joins: a role loop in any subscript; a batch
   // loop only in C's subscripts (one batch coordinate per dimension of C). A
@@ -1962,12 +1970,14 @@ mlir::systolic::recognizeLogicalMatmul(
     // for a prefix that repeats a batch loop.
     if (dim >= 0 && isBatchLoop[groupRoot[groupOf[index]]])
       continue;
-    if (dim >= 0)
+    if (dim >= 0) {
+      relaxableRefusal = true;
       return refuse(llvm::Twine(kOperandName[sub.operand]) +
                     " reads one logical coordinate in two of its dimensions "
                     "(" + llvm::Twine(dim) + " and " + llvm::Twine(sub.dim) +
                     "): two coordinates would share a loop, so the points "
                     "are not a box (Theorem 3, S1)");
+    }
     dim = sub.dim;
   }
 
@@ -1987,11 +1997,13 @@ mlir::systolic::recognizeLogicalMatmul(
     // Every loop of a role group is read by the same two operands; a group
     // that all three read merges loops of different roles through one
     // subscript (A[i + k], I with K): a coupled mapping, no box per role.
-    if (f0 && f1 && c)
+    if (f0 && f1 && c) {
+      relaxableRefusal = true;
       return refuse("a subscript couples loops of different coordinates "
                     "(their group is read by both factors and C, but none of "
                     "its loops is read by all three): a coupled mapping, not "
                     "one dense GEMM");
+    }
     if (f0 && f1)
       reductionGroups.push_back(g);
     else if (f0 && c)
@@ -2238,6 +2250,306 @@ mlir::systolic::recognizeLogicalMatmul(
   return success();
   };
 
+  // 3. The readers analysis (docs/AFFINE_GEMM_MAPPING.md section 19): the
+  // decomposition for the nests the analysis by groups refuses only because
+  // a subscript is not role-pure -- a dimension combining both of an
+  // operand's roles (A[i][i + k], C[i + j][j]), a merged dimension
+  // (C[4 i + j]), C reading batch loops in its role dimensions (C[i + k][j]).
+  // Every loop is classified by its readers alone (AC -> I, BC -> J,
+  // AB -> K, ABC -> batch; by Theorem 3 applied to the slot map, the
+  // decomposition with the fewest batch coordinates, section 19.2); each
+  // role's subscripts, restricted to the role's loops, have one common
+  // direction -- the role's coordinate -- or the nest is refused (separate
+  // coordinates, or SQ-1); every subscript is then an affine view of its
+  // operand's two coordinates plus batch terms (G1, verified below), and C's
+  // view must be injective per batch (G2, section 19.3).
+  auto byReaders = [&]() -> LogicalResult {
+    std::fill(isBatchLoop.begin(), isBatchLoop.end(), false);
+    SmallVector<unsigned> readers(numIterationDims, 0);
+    for (const Subscript &sub : subscripts)
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (sub.onDomain.coefficients[d] != 0)
+          readers[d] |= 1u << sub.operand;
+    // The roles with the factors as written (A = the first factor):
+    // 0 = I (first factor and C), 1 = J (second factor and C), 2 = K.
+    static constexpr const char *kRole[] = {"I", "J", "K"};
+    std::array<SmallVector<unsigned>, 3> roleLoops;
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      switch (readers[d]) {
+      case 0b111:
+        isBatchLoop[d] = true;
+        break;
+      case 0b101:
+        roleLoops[0].push_back(d);
+        break;
+      case 0b110:
+        roleLoops[1].push_back(d);
+        break;
+      case 0b011:
+        roleLoops[2].push_back(d);
+        break;
+      case 0:
+        break; // a loop that runs once: a constant on the domain
+      default:
+        return unsupported(
+            llvm::Twine("a coordinate is read by ") +
+            kOperandName[readers[d] == 1 ? 0 : readers[d] == 2 ? 1 : 2] +
+            " only: the other operands would be broadcast along it (a "
+            "stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md "
+            "section 10)");
+      }
+    }
+    if (roleLoops[0].empty() && roleLoops[1].empty() && roleLoops[2].empty())
+      return refuse("every loop is read by all three operands: no row, "
+                    "column or reduction coordinate -- an element-wise "
+                    "product, not a GEMM (docs/AFFINE_GEMM_MAPPING.md "
+                    "section 19.1)");
+
+    // Each role's coordinate: the common direction of every subscript's
+    // restriction to the role's loops (the zero restriction included: an
+    // operand that does not read the role).
+    std::array<std::optional<lattice::CommonDirection>, 3> direction;
+    for (unsigned r = 0; r < 3; ++r) {
+      if (roleLoops[r].empty())
+        continue;
+      SmallVector<lattice::IntVector> forms;
+      for (const Subscript &sub : subscripts) {
+        lattice::IntVector form(numIterationDims, 0);
+        for (unsigned d : roleLoops[r])
+          form[d] = sub.onDomain.coefficients[d];
+        forms.push_back(std::move(form));
+      }
+      direction[r] = lattice::commonDirection(forms);
+      if (direction[r])
+        continue;
+      // Not proportional: two dimensions of one operand read the role
+      // through different combinations of its loops (separate coordinates in
+      // one role), or two operands do (an operand-specific decomposition).
+      auto proportional = [](const lattice::IntVector &u,
+                             const lattice::IntVector &v) {
+        for (unsigned s = 0; s < u.size(); ++s)
+          for (unsigned t = 0; t < u.size(); ++t) {
+            std::optional<int64_t> x = llvm::checkedMul(u[s], v[t]);
+            std::optional<int64_t> y = llvm::checkedMul(u[t], v[s]);
+            if (!x || !y || *x != *y)
+              return false;
+          }
+        return true;
+      };
+      for (unsigned i = 0; i < forms.size(); ++i)
+        for (unsigned j = i + 1; j < forms.size(); ++j) {
+          if (proportional(forms[i], forms[j]))
+            continue;
+          if (subscripts[i].operand == subscripts[j].operand)
+            return unsupported(
+                llvm::Twine(kOperandName[subscripts[i].operand]) +
+                " reads logical coordinate " + kRole[r] +
+                " through two different combinations of its loops "
+                "(dimensions " + llvm::Twine(subscripts[i].dim) + " and " +
+                llvm::Twine(subscripts[j].dim) + "): separate coordinates "
+                "in one GEMM role need a merged (reshaped) view, not "
+                "lowered");
+          return unknown(
+              llvm::Twine("logical coordinate ") + kRole[r] + " (" +
+              kOperandName[subscripts[i].operand] + "'s dimension " +
+              llvm::Twine(subscripts[i].dim) + " " +
+              exprText(subscripts[i].expr) + ", " +
+              kOperandName[subscripts[j].operand] + "'s dimension " +
+              llvm::Twine(subscripts[j].dim) + " " +
+              exprText(subscripts[j].expr) + "): the subscripts are not "
+              "multiples of one linear form of the role's loops -- "
+              "operand-specific decompositions of one coordinate are not "
+              "lowered (spec question SQ-1)");
+        }
+      return unknown(llvm::Twine("logical coordinate ") + kRole[r] +
+                     ": the common direction overflows 64-bit arithmetic");
+    }
+
+    // The layouts: per memref dimension, the coefficients of the operand's
+    // two roles (GEMM order), the constant and the batch terms.
+    static constexpr std::array<std::array<unsigned, 2>, 3> kRolesOf{
+        {{0, 2}, {2, 1}, {0, 1}}};
+    std::array<OperandLayout, 3> layouts;
+    for (unsigned x = 0; x < 3; ++x) {
+      const unsigned rank = operandMap[x].getNumResults();
+      layouts[x].roleCoefficients.assign(rank, {0, 0});
+      layouts[x].dimConstants.assign(rank, 0);
+      layouts[x].constantIndex.assign(rank, std::nullopt);
+      layouts[x].batchCoefficients.assign(
+          rank, SmallVector<int64_t>(numIterationDims, 0));
+    }
+    for (auto [index, sub] : llvm::enumerate(subscripts)) {
+      OperandLayout &layout = layouts[sub.operand];
+      for (unsigned slot = 0; slot < 2; ++slot) {
+        const unsigned r = kRolesOf[sub.operand][slot];
+        if (direction[r])
+          layout.roleCoefficients[sub.dim][slot] =
+              direction[r]->multipliers[index];
+      }
+      layout.dimConstants[sub.dim] = sub.onDomain.constant;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (isBatchLoop[d])
+          layout.batchCoefficients[sub.dim][d] = sub.onDomain.coefficients[d];
+    }
+    for (OperandLayout &layout : layouts) {
+      const unsigned rank = layout.roleCoefficients.size();
+      std::array<int, 2> dimOfRole{-1, -1};
+      bool rolePure = true;
+      for (unsigned d = 0; d < rank; ++d) {
+        if (layout.roleCoefficients[d][0] != 0 &&
+            layout.roleCoefficients[d][1] != 0)
+          rolePure = false;
+        for (unsigned slot = 0; slot < 2; ++slot) {
+          if (layout.roleCoefficients[d][slot] == 0)
+            continue;
+          if (dimOfRole[slot] >= 0)
+            rolePure = false;
+          dimOfRole[slot] = d;
+        }
+        if (layout.roleCoefficients[d][0] == 0 &&
+            layout.roleCoefficients[d][1] == 0) {
+          // No role: a fixed index, plus its batch terms per batch value.
+          layout.constantIndex[d] = layout.dimConstants[d];
+          if (layout.hasBatchTerms(d))
+            layout.batchDim.push_back(d);
+        }
+      }
+      layout.general = !rolePure;
+      layout.roleDim = rolePure ? dimOfRole : std::array<int, 2>{-1, -1};
+    }
+
+    // G2: C's view injective on the (I, J) box. The roles' ordinals: the
+    // coordinate is scale * ordinal + base with the ordinal a mixed radix of
+    // the role's loops' ordinals (Theorem 3, S2); a role that is not one is
+    // refused here, as the dense partition would.
+    auto roleOrdinal = [&](unsigned r)
+        -> FailureOr<std::pair<int64_t, int64_t>> {
+      if (!direction[r])
+        return std::pair<int64_t, int64_t>{1, 1};
+      lattice::IntVector magnitudes;
+      SmallVector<int64_t> trips;
+      int64_t scale = 0;
+      for (unsigned d : roleLoops[r]) {
+        affine::AffineForOp loop =
+            affine::getForInductionVarOwner(iterationIVs[d]);
+        std::optional<int64_t> lower = constantLoopBound(loop, true);
+        std::optional<int64_t> upper = constantLoopBound(loop, false);
+        std::optional<int64_t> trip =
+            lower && upper ? checkedTripCount(*lower, *upper,
+                                              loop.getStepAsInt())
+                           : std::nullopt;
+        std::optional<int64_t> c = llvm::checkedMul(
+            direction[r]->direction[d], loop.getStepAsInt());
+        std::optional<int64_t> g = c ? lattice::gcd(scale, *c) : std::nullopt;
+        if (!trip || !g)
+          return failure();
+        magnitudes.push_back(*c);
+        trips.push_back(*trip);
+        scale = *g;
+      }
+      for (int64_t &m : magnitudes)
+        m /= scale;
+      std::optional<int64_t> extent =
+          lattice::mixedRadixExtent(magnitudes, trips);
+      if (!extent)
+        return failure();
+      return std::pair<int64_t, int64_t>{scale, *extent};
+    };
+    std::array<std::pair<int64_t, int64_t>, 3> ordinal;
+    for (unsigned r = 0; r < 3; ++r) {
+      FailureOr<std::pair<int64_t, int64_t>> o = roleOrdinal(r);
+      if (failed(o))
+        return unsupported(llvm::Twine("logical coordinate ") + kRole[r] +
+                           " is driven by " + llvm::Twine(roleLoops[r].size()) +
+                           " loops that do not enumerate it densely (or its "
+                           "loops' bounds are not constant): no box of " +
+                           kRole[r] + " values (with all but one of them as "
+                           "batch loops it would be a batched GEMM, which is "
+                           "not constructed)");
+      ordinal[r] = *o;
+    }
+    lattice::IntVector lamI, lamJ;
+    for (const std::array<int64_t, 2> &c : layouts[2].roleCoefficients) {
+      std::optional<int64_t> a = llvm::checkedMul(c[0], ordinal[0].first);
+      std::optional<int64_t> b = llvm::checkedMul(c[1], ordinal[1].first);
+      if (!a || !b)
+        return unknown("C's view overflows 64-bit arithmetic");
+      lamI.push_back(*a);
+      lamJ.push_back(*b);
+    }
+    std::optional<lattice::BoxInjectivity> injective = lattice::injectiveOnBox(
+        lamI, lamJ, ordinal[0].second, ordinal[1].second);
+    if (!injective)
+      return unknown("C's injectivity check overflows 64-bit arithmetic");
+    if (!injective->injective())
+      return unsupported(
+          llvm::Twine("C's view is not injective on the (I, J) box: the "
+                      "outputs with ordinals (I, J) and (I + ") +
+          llvm::Twine(injective->collision->first) + ", J + " +
+          llvm::Twine(injective->collision->second) +
+          ") write the same element of C, so one tile would lose an update "
+          "(G2, docs/AFFINE_GEMM_MAPPING.md section 19.3); a decomposition "
+          "with the J (or I) loops as batch loops would be valid, and is not "
+          "constructed");
+
+    // The result. The coordinates' expressions; each operand's view of a
+    // role, for a role-pure layout, is its role dimension's coefficient and
+    // constant (the general layouts keep theirs in roleCoefficients).
+    auto exprOf = [&](unsigned r) {
+      AffineExpr e = getAffineConstantExpr(0, mapContext);
+      if (direction[r])
+        for (unsigned d = 0; d < numIterationDims; ++d)
+          if (direction[r]->direction[d] != 0)
+            e = e + getAffineDimExpr(d, mapContext) *
+                        direction[r]->direction[d];
+      return e;
+    };
+    auto viewOf = [&](unsigned x, unsigned slot) {
+      const OperandLayout &layout = layouts[x];
+      const int dim = layout.roleDim[slot];
+      if (layout.general || dim < 0)
+        return OperandCoordinateView{1, 0};
+      return OperandCoordinateView{layout.roleCoefficients[dim][slot],
+                                   layout.dimConstants[dim]};
+    };
+    aLoad = lhsLoad;
+    bLoad = rhsLoad;
+    accessA = operandMap[0];
+    accessB = operandMap[1];
+    coordinate[0] = SharedCoordinate{exprOf(0), viewOf(0, 0), viewOf(2, 0)};
+    coordinate[1] = SharedCoordinate{exprOf(1), viewOf(1, 1), viewOf(2, 1)};
+    coordinate[2] = SharedCoordinate{exprOf(2), viewOf(0, 1), viewOf(1, 0)};
+    layoutA = layouts[0];
+    layoutB = layouts[1];
+    layoutC = layouts[2];
+
+    // The batch coordinates: every dimension of C that reads batch loops
+    // only is a row of P* (as in the analysis by groups); a batch loop that
+    // no such dimension covers -- C reads it in a role dimension, or not at
+    // all apart from its factors' views -- is a row of its own.
+    logicalPartitions.clear();
+    SmallVector<bool> covered(numIterationDims, false);
+    for (const Subscript &sub : subscripts) {
+      if (sub.operand != 2)
+        continue;
+      bool batch = false, other = false;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (sub.onDomain.coefficients[d] != 0)
+          (isBatchLoop[d] ? batch : other) = true;
+      if (!batch || other)
+        continue;
+      logicalPartitions.push_back(operandMap[2].getResult(sub.dim));
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (sub.onDomain.coefficients[d] != 0)
+          covered[d] = true;
+    }
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (isBatchLoop[d] && !covered[d])
+        logicalPartitions.push_back(getAffineDimExpr(d, mapContext));
+    numPartitionDims = logicalPartitions.size();
+    return success();
+  };
+
   // The positional form's partition prefix: read identically by the three
   // operands; its loops are the batch loops.
   auto recordPrefix = [&]() -> LogicalResult {
@@ -2325,46 +2637,47 @@ mlir::systolic::recognizeLogicalMatmul(
     }
     return llvm::any_of(drives, [](unsigned n) { return n >= 2; });
   };
-  if (!positional()) {
-    if (failed(byGroups()))
-      return failure();
-  } else if (positionalIsCoupled()) {
-    const unsigned savedPartitionDims = numPartitionDims;
-    const affine::AffineLoadOp savedALoad = aLoad, savedBLoad = bLoad;
-    const AffineMap savedAccessA = accessA, savedAccessB = accessB;
-    const std::array<SharedCoordinate, 3> savedCoordinate = coordinate;
-    const OperandLayout savedLayoutA = layoutA, savedLayoutB = layoutB,
-                        savedLayoutC = layoutC;
-    const SmallVector<AffineExpr> savedPartitions = logicalPartitions;
-    const std::string savedWhy = why ? *why : std::string();
-    const GemmMappingClass savedClass =
-        mappingClass ? *mappingClass : GemmMappingClass::ProvenValid;
+  // The analysis by groups, then -- when it refuses only because a
+  // subscript is not role-pure -- the readers analysis, from a clean result.
+  auto resetResult = [&]() {
     numPartitionDims = 0;
     aLoad = lhsLoad;
     bLoad = rhsLoad;
     accessA = operandMap[0];
     accessB = operandMap[1];
+    coordinate = {};
     layoutA = layoutB = layoutC = OperandLayout();
     logicalPartitions.clear();
-    if (failed(byGroups())) {
-      numPartitionDims = savedPartitionDims;
-      aLoad = savedALoad;
-      bLoad = savedBLoad;
-      accessA = savedAccessA;
-      accessB = savedAccessB;
-      coordinate = savedCoordinate;
-      layoutA = savedLayoutA;
-      layoutB = savedLayoutB;
-      layoutC = savedLayoutC;
-      logicalPartitions = savedPartitions;
-      std::fill(isBatchLoop.begin(), isBatchLoop.end(), false);
-      if (why)
-        *why = savedWhy;
-      if (mappingClass)
-        *mappingClass = savedClass;
-      if (failed(recordPrefix()))
-        return failure();
-    }
+    std::fill(isBatchLoop.begin(), isBatchLoop.end(), false);
+  };
+  auto groupsOrReaders = [&]() -> LogicalResult {
+    const std::string savedWhy = why ? *why : std::string();
+    const GemmMappingClass savedClass =
+        mappingClass ? *mappingClass : GemmMappingClass::ProvenValid;
+    relaxableRefusal = false;
+    if (succeeded(byGroups()))
+      return success();
+    if (!relaxableRefusal)
+      return failure();
+    resetResult();
+    if (failed(byReaders()))
+      return failure();
+    if (why)
+      *why = savedWhy;
+    if (mappingClass)
+      *mappingClass = savedClass;
+    return success();
+  };
+  if (!positional()) {
+    if (failed(groupsOrReaders()))
+      return failure();
+  } else if (positionalIsCoupled()) {
+    // A coupled positional reading is never lowerable (one loop drives two
+    // of its coordinates; that loop is read by all three operands): the
+    // classification by readers decides, and its refusal is the reason.
+    resetResult();
+    if (failed(groupsOrReaders()))
+      return failure();
   } else if (failed(recordPrefix())) {
     return failure();
   }
@@ -2452,6 +2765,62 @@ mlir::systolic::recognizeLogicalMatmul(
     return unknown("an operand's subscript is not its view of the logical "
                    "coordinate on the iteration domain (or the check "
                    "overflows 64-bit arithmetic)");
+  // A layout of the readers analysis records every dimension as an affine
+  // view of the operand's two coordinates (roleCoefficients, dimConstants)
+  // plus its batch terms: checked for every dimension on the domain, in
+  // checked arithmetic (G1: every iteration's update is its slot's).
+  auto dimensionsAreViews = [&](AffineMap access, const OperandLayout &layout,
+                                const LinearForm &first,
+                                const LinearForm &second) {
+    if (layout.roleCoefficients.empty())
+      return true;
+    std::optional<LinearForm> firstOnDomain = domainForm(first, single);
+    std::optional<LinearForm> secondOnDomain = domainForm(second, single);
+    if (!firstOnDomain || !secondOnDomain ||
+        layout.roleCoefficients.size() != access.getNumResults())
+      return false;
+    for (unsigned d = 0; d < access.getNumResults(); ++d) {
+      auto expression =
+          extractLinearForm(access.getResult(d), numIterationDims);
+      if (failed(expression))
+        return false;
+      std::optional<LinearForm> form = domainForm(*expression, single);
+      if (!form)
+        return false;
+      const int64_t l0 = layout.roleCoefficients[d][0];
+      const int64_t l1 = layout.roleCoefficients[d][1];
+      for (unsigned s = 0; s < numIterationDims; ++s) {
+        std::optional<int64_t> t0 =
+            llvm::checkedMul(l0, firstOnDomain->coefficients[s]);
+        std::optional<int64_t> t1 =
+            llvm::checkedMul(l1, secondOnDomain->coefficients[s]);
+        std::optional<int64_t> sum =
+            t0 && t1 ? llvm::checkedAdd(*t0, *t1) : std::nullopt;
+        std::optional<int64_t> withBatch =
+            sum ? llvm::checkedAdd(*sum, layout.batchCoefficients[d][s])
+                : std::nullopt;
+        if (!withBatch || *withBatch != form->coefficients[s])
+          return false;
+      }
+      std::optional<int64_t> c0 =
+          llvm::checkedMul(l0, firstOnDomain->constant);
+      std::optional<int64_t> c1 =
+          llvm::checkedMul(l1, secondOnDomain->constant);
+      std::optional<int64_t> c =
+          c0 && c1 ? llvm::checkedAdd(*c0, *c1) : std::nullopt;
+      std::optional<int64_t> expected =
+          c ? llvm::checkedAdd(*c, layout.dimConstants[d]) : std::nullopt;
+      if (!expected || *expected != form->constant)
+        return false;
+    }
+    return true;
+  };
+  if (!dimensionsAreViews(accessA, layoutA, *linearI, *linearK) ||
+      !dimensionsAreViews(accessB, layoutB, *linearK, *linearJ) ||
+      !dimensionsAreViews(*normalizedAcc, layoutC, *linearI, *linearJ))
+    return unknown("an operand's dimension is not its affine view of the "
+                   "logical coordinates on the iteration domain (or the "
+                   "check overflows 64-bit arithmetic)");
 
 
   dbgOut() << "  affine logical mapping\n";

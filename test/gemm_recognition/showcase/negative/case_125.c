@@ -2,7 +2,7 @@
  * Case ID: case_125
  * Name: a_on_its_diagonal
  * Set / category: negative / singular_mapping
- * Mathematical class: not_gemm_scaled_rows
+ * Mathematical class: batched_rank1_by_demotion
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -13,9 +13,15 @@
  *     - A is indexed by ['I', 'I']; the operand in that position of a GEMM is indexed by exactly ['I', 'K']
  *
  *   C[i][j] += A[i][i] * B[k][j]: A is read on its diagonal (no K in A), so
- *   C[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.
- *   Not a GEMM.  Expected rejection at recognition: A's column expression i is
- *   not B's row expression k.
+ *   C[i][j] += A[i][i] (sum_k B[k][j]) -- the column sums of B scaled per row.  By
+ *   the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C
+ *   (I), j by B and C (J), k by B only (a broadcast): the canonical decomposition
+ *   fails.  With k demoted to a batch loop it is a batched GEMM: per k the
+ *   8 x 8 x 1 rank-1 update C[I][J] += A[I][I] B[k][J] (A's view I -> (I, I)), the
+ *   k batches accumulating into C in program order.  Mathematically valid; the
+ *   demotion is not implemented: a documented limitation.  Expected refusal at
+ *   recognition: 'a coordinate is read by the second factor only' (k).
+ *   Re-decided 2026-10-16 (ISSUE-008; REJECT before).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -23,9 +29,10 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): OUT_OF_SCOPE
+ *   basis: (docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -34,9 +41,10 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: the first factor reads one logical coordinate in two of its dimensions (0 and 1)
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   reason: a coordinate is read by the second factor only: the other operands would be broadcast along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md section 10)
+ * Classification: DOCUMENTED LIMITATION
+ *   A mathematically valid GEMM that the specification excludes explicitly;
+ *   'refused' must never be read as 'not a GEMM'.
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -129,7 +137,7 @@ int main(void) {
   const long n = 64;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_125 a_on_its_diagonal: negative / singular_mapping, class not_gemm_scaled_rows\n");
+  printf("[gemm_recognition] case_125 a_on_its_diagonal: negative / singular_mapping, class batched_rank1_by_demotion\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_125 FAIL (test bug)\n"); return 3;

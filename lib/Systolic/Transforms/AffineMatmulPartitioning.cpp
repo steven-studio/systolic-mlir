@@ -44,13 +44,11 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
     if (matmul.normalizationEmptyLoop)
       return failAs(Class::ProvenValid, "a loop of the nest has no iteration (an empty GEMM: "
                        "M, N or K is 0)");
-    // A bound on another loop's counter: the domain is not a box, which no
-    // bijection onto the GEMM's box can come from (Theorem 3). A symbol: the
-    // extent is unknown here (P1.4).
-    return failAs(matmul.normalizationDetail.find("not a box") !=
-                          std::string::npos
-                      ? Class::ProvenInvalid
-                      : Class::Unknown,
+    // A bound on another loop's counter (the domain is not a box) or a
+    // symbol (the extent is unknown here, P1.4). A non-box domain may still
+    // be the bijective image of a box -- a parallelotope (docs section 19.7)
+    // -- so nothing is proven invalid by it: UNKNOWN.
+    return failAs(Class::Unknown,
                   "the loop bounds are not static, so the iteration "
                   "domain has no static normalized extent");
   }
@@ -234,11 +232,18 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
     int64_t expected = magnitude[loops.front()];
     int64_t extent = 1;
     for (unsigned s : loops) {
+      // Not one dense coordinate -- but with all of its loops but one as
+      // batch loops the nest is a batched GEMM (docs/AFFINE_GEMM_MAPPING.md
+      // section 19.2: a loop of a role may always be demoted), which is not
+      // constructed: valid, not lowered.
       if (magnitude[s] != expected)
-        return failAs(Class::ProvenInvalid, llvm::Twine("logical coordinate ") + kName[d] +
-                             " is driven by " + llvm::Twine(loops.size()) +
-                             " loops that do not enumerate it densely "
-                             "(scales must grow by the finer loops' extents)");
+        return failAs(Class::ValidButLoweringUnsupported,
+                      llvm::Twine("logical coordinate ") + kName[d] +
+                          " is driven by " + llvm::Twine(loops.size()) +
+                          " loops that do not enumerate it densely "
+                          "(scales must grow by the finer loops' extents; "
+                          "with all but one of them as batch loops it would "
+                          "be a batched GEMM, which is not constructed)");
       // The products are what the coordinate's values and the views built
       // from them are computed with; one that does not fit in 64 bits is
       // refused rather than wrapped around (a wrapped value could pass the
@@ -265,18 +270,11 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
       return failAs(Class::Unknown, llvm::Twine("logical coordinate ") + kName[d] +
                            "'s values overflow 64-bit arithmetic");
   }
-  // A batched nest whose per-batch GEMM has two of M, N, K equal to one is a
-  // vector scaled by a scalar per batch (C[i][k] += A[i][k] * B[k][j] with j
-  // of one iteration: the reduction index in the output, which the
-  // specification lists as not a GEMM). Correct to lower, but whether such a
-  // nest is a GEMM to offload is an open specification question (SQ-5):
-  // refused conservatively, as a valid mapping that is not lowered.
-  if (numP > 0 && (dense.extent[0] == 1) + (dense.extent[1] == 1) +
-                          (dense.extent[2] == 1) >= 2)
-    return failAs(Class::ValidButLoweringUnsupported,
-                  "a batched GEMM whose tiles are a vector scaled by a scalar "
-                  "(two of M, N, K are 1) is not lowered pending spec question "
-                  "SQ-5 (the reduction index in the output)");
+  // A batched nest whose per-batch GEMM has two of M, N, K equal to one (a
+  // batch of dot products, C[i][j] += A[i][j + k] * B[i + k][j]; a batch of
+  // scaled vectors, the reduction index in the output) is a batched GEMM of
+  // affine views (docs/AFFINE_GEMM_MAPPING.md section 19.8): lowered, one
+  // small tile per batch value -- SQ-5, decided 2026-10-16.
   return dense;
 }
 

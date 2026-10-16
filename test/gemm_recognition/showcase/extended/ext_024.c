@@ -25,9 +25,9 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
+ * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
- *   basis: (supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C reads every batch coordinate alone: per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters (docs/AFFINE_GEMM_MAPPING.md section 16)
+ *   basis: (supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)
  * Current implementation (commit 6e25528 with the fix of ISSUE-007, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated

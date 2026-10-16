@@ -148,6 +148,21 @@ struct OperandLayout {
   bool isTransposed() const {
     return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];
   }
+
+  /// A general affine view (docs/AFFINE_GEMM_MAPPING.md section 19), set by
+  /// the readers analysis: per memref dimension d, the coefficients of the
+  /// operand's two roles (in GEMM order: A (I, K), B (K, J), C (I, J)) and
+  /// the constant -- the index is
+  ///   dimConstants[d] + roleCoefficients[d][0] * y_0
+  ///                   + roleCoefficients[d][1] * y_1 + the batch terms,
+  /// y_r the value of the role's logical coordinate. Empty for the layouts of
+  /// the positional and group analyses (one role per dimension, roleDim).
+  SmallVector<std::array<int64_t, 2>> roleCoefficients;
+  SmallVector<int64_t> dimConstants;
+  /// A dimension combines both roles, or a role spans several dimensions: a
+  /// skewed or merged view (A[i][i + k], C[4 i + j]), which no subview of the
+  /// memref's own dimensions expresses. roleDim is then {-1, -1}.
+  bool general = false;
 };
 
 struct AffineLogicalNormalization {

@@ -16,11 +16,13 @@
  *   P[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views
  *   (A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views
  *   of A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]
- *   is accumulated into C[2i+j][j]: an injective but skewed placement, not a
- *   strided sub-matrix of C.  So the computed values are GEMM values; the output
- *   is not a GEMM operand view.  Expected rejection at recognition: the row
- *   expression of A (2i+3) is not the row expression of C (2i+j), and K differs
- *   between A and B.
+ *   is accumulated into C[2i+j][j]: C's view (I, J) -> (2I + J, J) is affine and
+ *   injective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with
+ *   that skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).
+ *   Re-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided
+ *   sub-matrix of C).  Recognized since; the lowering of a skewed view (a
+ *   memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE, refused
+ *   at the lowering ('C has a skewed or merged view').
  *
  * Array dimensions: A: float[10][5]   B: float[6][12]   C: float[10][4]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -28,20 +30,25 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): ACCEPT
+ *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM with a skewed view of C
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  unsupported
  *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: C reads one logical coordinate in two of its dimensions (0 and 1)
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   rejection at: lowering
+ *   reason: C has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet
+ * Classification: FALSE NEGATIVE -- see failures/issues/ISSUE-008
+ *   This nest IS a GEMM and the specification requires it to be recognized;
+ *   the current recognizer refuses it.  The expectation is not lowered to match
+ *   the implementation: the test fails until the recognizer is fixed.
+ *   Lowering support: to be verified once recognized.
+ *   FPGA execution support: to be verified once lowered.
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

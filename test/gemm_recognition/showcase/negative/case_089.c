@@ -18,9 +18,14 @@
  *   I = x + z, J = y + z, K = x + y + 2z = I + J: T = [[1 0 1],[0 1 1],[1 1 2]] is
  *   singular.  K is determined by (I, J), so for a fixed output element nothing
  *   is summed over an independent reduction index; instead several (x, y, z)
- *   map to the same (I, J) and the same product is added repeatedly.  Not a GEMM.
- *   Expected: recognized (the access pattern matches), refused by
- *   getDenseLogicalGemm: 'loop 0 drives I and K'.
+ *   map to the same (I, J) and the same product is added repeatedly.  Not a GEMM:
+ *   x, y and z are each read by A, B and C, so in every decomposition all three
+ *   are batch loops and no loop is a row, column or reduction loop -- an
+ *   element-wise product of views (docs/AFFINE_GEMM_MAPPING.md sections 19.1,
+ *   19.2).  Expected rejection at recognition: '1 coordinate(s) are read by all
+ *   three operands and none by two: an element-wise product'.  (Until 2026-10-16
+ *   the coupled positional reading was kept and getDenseLogicalGemm refused it,
+ *   'loop 0 drives I and K'; the reading is no longer restored, ISSUE-008.)
  *
  * Array dimensions: A: float[7][13]   B: float[13][7]   C: float[7][7]
  * Loop order (outer to inner): x [other], y [other], z [other]
@@ -34,12 +39,12 @@
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    ACCEPT
- *   dense partition (getDenseLogicalGemm):   unsupported
+ *   recognition (recognizeLogicalMatmul):    REJECT
+ *   dense partition (getDenseLogicalGemm):   not_reached
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
- *   rejection at: dense_partition
- *   reason: two logical coordinates are driven by the same loop (loop 0 drives I and K)
+ *   rejection at: recognition
+ *   reason: 1 coordinate(s) are read by all three operands and none by two: an element-wise product
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

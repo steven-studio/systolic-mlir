@@ -279,6 +279,8 @@ class Case:
     notes: str = ""
     seed: int = 1
     issue: str = ""                 # e.g. 'ISSUE-001' when the case reproduces a recorded compiler issue
+    redecided: str = ""             # a specification change that moved the expectation: when, where
+                                    # (docs / issue) and what the expectation was before
     # filled in
     analysis: dict = field(default_factory=dict)
     expect: dict = field(default_factory=dict)      # predict(): the current implementation's behaviour
@@ -661,8 +663,10 @@ def predict_by_groups(case, forms, loops):
     not apply: loops that occur together in a subscript form one coordinate;
     its role is fixed by the operands that read it; each role's two
     subscripts must be multiples (either sign) of one linear form.  Returns
-    ((I, J, K, role_dims), None) with None for a role of extent one, or
-    (None, reason)."""
+    ((I, J, K, role_dims, batch_vars, lowering), None, False) with None for a
+    role of extent one, or (None, reason, relaxable): relaxable for the three
+    refusals the readers analysis lifts (a subscript that is not role-pure:
+    AffineMatmulAnalysis.cpp, relaxableRefusal)."""
     trip = {lp.var: lp.trip() for lp in loops}
     dom = {r: [_domain_form(f, loops) for f in forms[r]] for r in ("a", "b", "c")}
     parent = {lp.var: lp.var for lp in loops}
@@ -692,7 +696,7 @@ def predict_by_groups(case, forms, loops):
             return None, ("C's dimension %d mixes a batch coordinate (loop %d, read by all three "
                           "operands) with another coordinate: the output position would move with "
                           "the batch (a coupled or skewed placement, not one dense GEMM)"
-                          % (d, min(index[v] for v in mixed)))
+                          % (d, min(index[v] for v in mixed))), True
 
     def grouped(r, f):
         return [v for v in support(f) if v not in batch_loops or r == "c"]
@@ -702,8 +706,12 @@ def predict_by_groups(case, forms, loops):
             sup = grouped(r, f)
             for v in sup[1:]:
                 parent[find(v)] = find(sup[0])
+    # the groups in the order their first subscript appears, the factors in
+    # the order of the product (the compiler's operands 0, 1, 2)
+    product = ("b", "a", "c") if case.stmt == "+=BA" else ("a", "b", "c")
+    factor = {product[0]: "the first factor", product[1]: "the second factor", "c": "C"}
     readers = {}
-    for r in ("a", "b", "c"):
+    for r in product:
         for d, f in enumerate(dom[r]):
             sup = grouped(r, f)
             if not sup:
@@ -714,8 +722,7 @@ def predict_by_groups(case, forms, loops):
                 if root in batch_loops or find(root) in {find(v) for v in batch_loops}:
                     continue    # C may read a batch coordinate in several dimensions
                 return None, ("%s reads one logical coordinate in two of its dimensions "
-                              "(%d and %d)" % ({"a": "the first factor", "b": "the second factor",
-                                                "c": "C"}[r], g[r], d))
+                              "(%d and %d)" % (factor[r], g[r], d)), True
             g[r] = d
     roles = {"I": [], "J": [], "K": [], "P": []}
     for root, g in readers.items():
@@ -726,12 +733,11 @@ def predict_by_groups(case, forms, loops):
         if ops == frozenset("abc"):
             return None, ("a subscript couples loops of different coordinates (their group is read "
                           "by both factors and C, but none of its loops is read by all three): a "
-                          "coupled mapping, not one dense GEMM")
+                          "coupled mapping, not one dense GEMM"), True
         role = {frozenset("ac"): "I", frozenset("bc"): "J", frozenset("ab"): "K"}.get(ops)
         if role is None:
             return None, ("a coordinate is read by %s only: the other operands would be "
-                          "broadcast along it" % {"a": "the first factor", "b": "the second factor",
-                                                  "c": "C"}[next(iter(ops))])
+                          "broadcast along it" % factor[next(iter(ops))]), False
         roles[role].append(g)
     # A batch coordinate (read by all three): lowered with the batch loops
     # around the tiles (ISSUE-006) when the three operands read it through
@@ -739,14 +745,14 @@ def predict_by_groups(case, forms, loops):
     batch_vars = set()
     if roles["P"] and not (roles["I"] or roles["J"] or roles["K"]):
         return None, ("%d coordinate(s) are read by all three operands and none by two: an "
-                      "element-wise product" % len(roles["P"]))
+                      "element-wise product" % len(roles["P"])), False
     batch_vars = set(batch_loops)
 
     def without_batch(f):
         return LinearForm({v: c for v, c in f.coef.items() if v not in batch_loops}, f.const)
     for role in "IJK":
         if len(roles[role]) > 1:
-            return None, ("%d separate coordinates are read by one GEMM role" % len(roles[role]))
+            return None, ("%d separate coordinates are read by one GEMM role" % len(roles[role])), False
     coords, role_dims = {}, {}
     for role, (x, y) in (("I", ("a", "c")), ("J", ("b", "c")), ("K", ("a", "b"))):
         if not roles[role]:
@@ -758,10 +764,180 @@ def predict_by_groups(case, forms, loops):
                                                            without_batch(dom[y][g[y]]))
         if c is None:
             return None, ("logical coordinate %s: the two subscripts are not multiples of one "
-                          "linear form of the loop counters" % role)
+                          "linear form of the loop counters" % role), False
         coords[role] = c
         role_dims[role] = g
-    return (coords["I"], coords["J"], coords["K"], role_dims, batch_vars), None
+    lowering = {"order": (("a", "A"), ("b", "B"), ("c", "C")),
+                "general": {"a": False, "b": False, "c": False}}
+    return (coords["I"], coords["J"], coords["K"], role_dims, batch_vars, lowering), None, False
+
+
+def _primitive(v):
+    """v divided by the gcd of its entries, its first nonzero entry positive
+    (lattice::primitive)."""
+    g = 0
+    for x in v:
+        g = math.gcd(g, abs(x))
+    if g == 0:
+        return list(v)
+    sign = next((1 if x > 0 else -1 for x in v if x != 0), 1)
+    return [x // g * sign for x in v]
+
+
+def _mixed_radix_extent(magnitudes, trips):
+    """lattice::mixedRadixExtent: the number of values when
+    z -> sum_s c_s z_s on prod_s [0, n_s) is a bijection onto consecutive
+    integers (the magnitudes, sorted ascending with their extents, are 1,
+    n_(1), n_(1) n_(2), ...; digits of extent 1 ignored), else None."""
+    if any(n < 1 for n in trips):
+        return None
+    expected = 1
+    for c, n in sorted((abs(c), n) for c, n in zip(magnitudes, trips) if n != 1):
+        if c != expected:
+            return None
+        expected *= n
+    return expected
+
+
+def predict_by_readers(case, forms, loops):
+    """The compiler's readers analysis (AffineMatmulAnalysis.cpp, byReaders,
+    docs/AFFINE_GEMM_MAPPING.md section 19), run when the analysis by groups
+    refuses a nest only because a subscript is not role-pure: every loop's
+    role is its readers -- the first factor and C: I, the second factor and
+    C: J, both factors: K, all three: a batch loop, one: a broadcast
+    (refused) --; each role's subscripts, restricted to the role's loops, are
+    multiples of one direction (else separate coordinates, or SQ-1); every
+    role is a mixed radix of its loops; C's view is injective on the (I, J)
+    box (G2).  A is the first factor of the product as written.  Returns
+    ((I, J, K, role_dims, batch_vars, lowering), None) -- lowering names the
+    operands A, B, C and which of them have a general (skewed or merged)
+    view -- or (None, reason)."""
+    first, second = ("b", "a") if case.stmt == "+=BA" else ("a", "b")
+    ops = (first, second, "c")
+    name = {first: "the first factor", second: "the second factor", "c": "C"}
+    step = {lp.var: lp.step for lp in loops}
+    dom = {r: [_domain_form(f, loops) for f in forms[r]] for r in ops}
+    # the subscripts in the compiler's order: the first factor's dimensions,
+    # the second's, C's
+    subs = [(r, d, f) for r in ops for d, f in enumerate(dom[r])]
+    readers = {}
+    for r, _, f in subs:
+        for v, c in f.coef.items():
+            if c != 0:
+                readers.setdefault(v, set()).add(r)
+    role_loops = {"I": [], "J": [], "K": []}
+    batch = set()
+    for lp in loops:
+        rs = readers.get(lp.var)
+        if not rs:
+            continue
+        if rs == set(ops):
+            batch.add(lp.var)
+        elif rs == {first, "c"}:
+            role_loops["I"].append(lp)
+        elif rs == {second, "c"}:
+            role_loops["J"].append(lp)
+        elif rs == {first, second}:
+            role_loops["K"].append(lp)
+        else:
+            return None, ("a coordinate is read by %s only: the other operands would be broadcast "
+                          "along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md "
+                          "section 10)" % name[next(iter(rs))])
+    if not any(role_loops.values()):
+        return None, ("every loop is read by all three operands: no row, column or reduction "
+                      "coordinate -- an element-wise product, not a GEMM "
+                      "(docs/AFFINE_GEMM_MAPPING.md section 19.1)")
+    # each role's direction and every subscript's multiplier of it
+    coords, mult, ordinal = {}, {}, {}
+    for role, lps in role_loops.items():
+        if not lps:
+            coords[role] = None
+            mult[role] = [0] * len(subs)
+            ordinal[role] = (1, 1)
+            continue
+        rest = [[f.coef.get(lp.var, 0) for lp in lps] for _, _, f in subs]
+        for p in range(len(rest)):
+            for q in range(p + 1, len(rest)):
+                u, w = rest[p], rest[q]
+                if all(u[x] * w[y] == u[y] * w[x] for x in range(len(lps)) for y in range(len(lps))):
+                    continue
+                (rp, dp, _), (rq, dq, _) = subs[p], subs[q]
+                if rp == rq:
+                    return None, ("%s reads logical coordinate %s through two different "
+                                  "combinations of its loops (dimensions %d and %d): separate "
+                                  "coordinates in one GEMM role need a merged (reshaped) view, "
+                                  "not lowered" % (name[rp], role, dp, dq))
+                return None, ("logical coordinate %s (%s's dimension %d %s, %s's dimension %d %s): "
+                              "the subscripts are not multiples of one linear form of the role's "
+                              "loops -- operand-specific decompositions of one coordinate are not "
+                              "lowered (spec question SQ-1)"
+                              % (role, name[rp], dp, case.arrays[rp].subs[dp], name[rq], dq,
+                                 case.arrays[rq].subs[dq]))
+        g = _primitive(next(x for x in rest if any(x)))
+        lead = next(i for i, x in enumerate(g) if x != 0)
+        coords[role] = LinearForm({lp.var: c for lp, c in zip(lps, g)}, 0)
+        mult[role] = [x[lead] // g[lead] for x in rest]
+        # the role's ordinal: scale * a mixed radix of its loops' ordinals
+        magnitudes = [c * step[lp.var] for lp, c in zip(lps, g)]
+        scale = 0
+        for c in magnitudes:
+            scale = math.gcd(scale, abs(c))
+        extent = _mixed_radix_extent([c // scale for c in magnitudes], [lp.trip() for lp in lps])
+        if extent is None:
+            return None, ("logical coordinate %s is driven by %d loops that do not enumerate it "
+                          "densely (or its loops' bounds are not constant): no box of %s values "
+                          "(with all but one of them as batch loops it would be a batched GEMM, "
+                          "which is not constructed)" % (role, len(lps), role))
+        ordinal[role] = (scale, extent)
+    # every operand's layout: per dimension the multipliers of its two roles
+    roles_of = {first: ("I", "K"), second: ("K", "J"), "c": ("I", "J")}
+    layout = {r: [] for r in ops}
+    for index, (r, d, _) in enumerate(subs):
+        layout[r].append(tuple(mult[role][index] for role in roles_of[r]))
+    general, role_dims = {}, {"I": {}, "J": {}, "K": {}}
+    for r in ops:
+        dims_of = {0: [], 1: []}
+        for d, cs in enumerate(layout[r]):
+            for slot in (0, 1):
+                if cs[slot] != 0:
+                    dims_of[slot].append(d)
+        general[r] = (any(cs[0] != 0 and cs[1] != 0 for cs in layout[r])
+                      or any(len(v) > 1 for v in dims_of.values()))
+        if not general[r]:
+            for slot in (0, 1):
+                if dims_of[slot]:
+                    role_dims[roles_of[r][slot]][r] = dims_of[slot][0]
+    # G2: C's view injective on the (I, J) box
+    lam_i = [cs[0] * ordinal["I"][0] for cs in layout["c"]]
+    lam_j = [cs[1] * ordinal["J"][0] for cs in layout["c"]]
+    M, N = ordinal["I"][1], ordinal["J"][1]
+    seen, collision = {}, None
+    for i in range(M):
+        for j in range(N):
+            key = tuple(a * i + b * j for a, b in zip(lam_i, lam_j))
+            if key in seen and collision is None:
+                collision = (i - seen[key][0], j - seen[key][1])
+            seen.setdefault(key, (i, j))
+    if collision is not None:
+        return None, ("C's view is not injective on the (I, J) box: the outputs with ordinals "
+                      "(I, J) and (I + %d, J + %d) write the same element of C, so one tile would "
+                      "lose an update (G2, docs/AFFINE_GEMM_MAPPING.md section 19.3); a "
+                      "decomposition with the J (or I) loops as batch loops would be valid, and "
+                      "is not constructed" % collision)
+    role_dims = {role: g for role, g in role_dims.items() if g}
+    lowering = {"order": ((first, "A"), (second, "B"), ("c", "C")), "general": general}
+    return (coords["I"], coords["J"], coords["K"], role_dims, batch, lowering), None
+
+
+def groups_or_readers(case, forms, loops):
+    """The analysis by groups, then -- when it refuses only because a
+    subscript is not role-pure -- the readers analysis
+    (AffineMatmulAnalysis.cpp, groupsOrReaders).  Returns (result, None) or
+    (None, reason)."""
+    grouped, why, relaxable = predict_by_groups(case, forms, loops)
+    if grouped is not None or not relaxable:
+        return grouped, why
+    return predict_by_readers(case, forms, loops)
 
 
 def predict(case: Case) -> dict:
@@ -897,9 +1073,9 @@ def predict(case: Case) -> dict:
     # A positional reading in which one loop drives two of its coordinates --
     # the prefix (as one), I, J, K -- is never lowerable (a prefix loop in
     # I, J or K; A[i][k + j] with B[k + j][j], j in K and J): the analysis by
-    # groups decides such a nest, the positional reading kept only when that
-    # analysis refuses it too (ISSUE-007, AffineMatmulAnalysis.cpp,
-    # positionalIsCoupled).
+    # groups (then the readers analysis) decides such a nest, and its refusal
+    # is the reason (ISSUE-007, AffineMatmulAnalysis.cpp, positionalIsCoupled;
+    # since 2026-10-16 the positional reading is no longer restored).
     def coupled(m):
         drives = {}
         for cls in [batch_vars] + [f.vars() for f in m if f is not None]:
@@ -907,11 +1083,9 @@ def predict(case: Case) -> dict:
                 drives[v] = drives.get(v, 0) + 1
         return any(n >= 2 for n in drives.values())
     if m is not None and coupled(m):
-        regrouped, _ = predict_by_groups(case, forms, loops)
-        if regrouped is not None:
-            grouped, npart, m, batch_vars = regrouped, 0, regrouped[:3], regrouped[4]
+        m = None
     if m is None:
-        grouped, why = predict_by_groups(case, forms, loops)
+        grouped, why = groups_or_readers(case, forms, loops)
         if grouped is None:
             ex["recognition"] = "reject"
             return stop("recognition", why)
@@ -990,17 +1164,9 @@ def predict(case: Case) -> dict:
                             "not enumerate it densely (scales must grow by the finer loops' "
                             "extents)" % (name, len(scaled)))
             expected *= ext
-    # a batched nest whose per-batch GEMM has two unit extents: refused
-    # pending SQ-5 (getDenseLogicalGemm)
-    if batch_vars:
-        unit = 0
-        for f in (I, J, K):
-            unit += f is None or all(lp.trip() == 1 for lp in used_loops if lp.var in f.coef)
-        if unit >= 2:
-            ex["dense_partition"] = "unsupported"
-            return stop("dense_partition", "a batched GEMM whose tiles are a vector scaled by a scalar "
-                        "(two of M, N, K are 1) is not lowered pending spec question SQ-5 (the "
-                        "reduction index in the output)")
+    # a batched nest whose per-batch GEMM has two unit extents (a batch of
+    # dot products, or of scaled vectors) is lowered since SQ-5 was decided
+    # (2026-10-16): one small tile per batch value
     ex["dense_partition"] = "supported"
 
     # ---- lowering: --affine-matmul-to-systolic (any rank since P0)
@@ -1009,10 +1175,19 @@ def predict(case: Case) -> dict:
         # (constant) dimensions first, then the roles' -- getLogicalOperand's
         # order; the leading dimension of a C array parameter is dynamic
         role_dims = grouped[3]
-        order = {"a": ("I", "K"), "b": ("K", "J"), "c": ("I", "J")}
-        for r, nm in (("a", "A"), ("b", "B"), ("c", "C")):
+        lowering = grouped[5]
+        order = {lowering["order"][0][0]: ("I", "K"), lowering["order"][1][0]: ("K", "J"),
+                 "c": ("I", "J")}
+        for r, nm in lowering["order"]:
             arr = case.arrays[r]
-            rdims = [role_dims[g][r] for g in order[r] if g in role_dims]
+            if lowering["general"][r]:
+                # a skewed or merged view (docs/AFFINE_GEMM_MAPPING.md section
+                # 19): recognized, its lowering is not implemented yet
+                ex["lowering"] = "unsupported"
+                return stop("lowering", "%s has a skewed or merged view (a dimension combining "
+                            "both of its roles, or a role across several dimensions: "
+                            "docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet" % nm)
+            rdims = [role_dims[g][r] for g in order[r] if g in role_dims and r in role_dims[g]]
             dims = [d for d in range(len(forms[r])) if d not in rdims] + rdims
             for d in dims:
                 lo, hi = _form_range(forms[r][d], loops)
@@ -1022,7 +1197,7 @@ def predict(case: Case) -> dict:
         if case.a.elem != case.c.elem or case.b.elem != case.c.elem:
             ex["lowering"] = "unsupported"
             return stop("lowering", "A, B and C have different element types")
-        for r, nm in (("a", "A"), ("b", "B")):
+        for r, nm in lowering["order"][:2]:
             arr = case.arrays[r]
             if arr.name == case.c.name or not (arr.restrict or case.c.restrict):
                 ex["lowering"] = "unsupported"
@@ -1139,6 +1314,9 @@ def predict(case: Case) -> dict:
 # is recorded, its program must still compute the right result, but neither
 # 'offloaded' nor 'refused' counts as a failure until the question is decided
 # (in README.md, in writing) -- never by the output of the compiler.
+# Decided questions leave this table: SQ-4 (2026-10-15, a role of extent one
+# is offloaded) and SQ-5 (2026-10-16, a batched GEMM whose per-batch GEMM has
+# two of M, N, K equal to 1 is offloaded -- basis 'sq5_decided').
 SPEC_QUESTIONS = {
     "SQ-1": "a coordinate split over several loops with a different mixed radix per operand "
             "(A[4*i0 + i1][k] with C[8*i0 + i1][j]): the definition's 'injective affine function "
@@ -1153,7 +1331,6 @@ SPEC_QUESTIONS = {
             "value): unreachable from the C front end, whose bounds must be constants; is the MLIR "
             "path's refusal ('no static normalized extent') a documented limitation, or must dynamic "
             "extents be supported?",
-    "SQ-5": "a batched nest whose per-batch GEMM has two of M, N, K equal to 1 -- the reduction index in the output with a single-iteration j (C[i][k] += A[i][k] * B[k][j], j in [1, 2)): k is read by every operand (a batch coordinate), N = K = 1, so each batch is a column scaled by a scalar.  The result is correct, but the specification lists 'the reduction index in the output' as not a GEMM; is a batched vector-times-scalar a GEMM to offload, or a documented limitation?",
 }
 
 SPEC_BASIS = {
@@ -1167,12 +1344,29 @@ SPEC_BASIS = {
                "batch coordinate(s) through one and the same expression: the batch loops are "
                "re-emitted around the tiles, one GEMM per batch iteration on its own slice of each "
                "operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)",
-    "batched_views": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose factors read "
+    "batched_views": "(supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read "
                      "the batch coordinate(s) through their own expressions -- in dimensions of "
-                     "their own or as affine offsets of role dimensions (A[4i - j][5k]) -- while C "
-                     "reads every batch coordinate alone: per batch value an ordinary GEMM of "
-                     "strided views whose offsets are affine in the batch counters "
-                     "(docs/AFFINE_GEMM_MAPPING.md section 16)",
+                     "their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] "
+                     "since section 19.3): per batch value an ordinary GEMM of strided views whose "
+                     "offsets are affine in the batch counters, C injective per batch "
+                     "(docs/AFFINE_GEMM_MAPPING.md sections 16, 19)",
+    "sq5_decided": "(SQ-5, decided 2026-10-16: docs/AFFINE_GEMM_MAPPING.md section 19.8) a batched "
+                   "GEMM whose per-batch GEMM has two of M, N, K equal to 1 -- a batch of dot "
+                   "products (C[i][j] += A[i][j + k] B[i + k][j]) or of scaled vectors (the "
+                   "reduction index in the output) -- is a batched GEMM of affine views: lowered, "
+                   "one small tile per batch value",
+    "generalized_views": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a "
+                         "batched GEMM, of general affine operand views -- a dimension combining "
+                         "both of an operand's roles (skewed: A[i][i + k]), both roles in one "
+                         "dimension (merged: C[4 i + j]), C reading batch loops in its role "
+                         "dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: "
+                         "roles by readers, every role one dense coordinate, (I, J, K) a bijection "
+                         "onto the box, C injective per batch)",
+    "demotion": "(docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles "
+                "by readers) fails -- a broadcast, two coordinates in one role, a role that is not "
+                "one dense coordinate, C not injective per batch -- but with more loops as batch "
+                "loops the nest is a batched GEMM of smaller tiles; the compiler constructs only "
+                "the canonical decomposition: a documented limitation",
     "batched_shared": "a batched GEMM with an operand shared by every batch (no batch subscript: "
                       "C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM "
                       "with A reshaped -- but the operand would need a stride-0 or merged view, "
@@ -1223,7 +1417,6 @@ SPEC_BASIS = {
     "SQ-1": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-1"],
     "SQ-2": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-2"],
     "SQ-3": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-3"],
-    "SQ-5": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-5"],
 }
 
 
@@ -1329,9 +1522,9 @@ def batch_loops_of(case: Case):
 def batched_gemm_on_domain(case: Case, max_points: int = 200000) -> Optional[bool]:
     """Whether the nest is a batched GEMM of batch-dependent views
     (ISSUE-007), by enumeration: its batch loops are the loops all three
-    operands read; C reads them alone (no subscript of C mixes a batch loop
-    with another loop of two or more iterations); for every value of the
-    batch loops the remaining points form a GEMM of strided views
+    operands read; any operand may read them anywhere (C included, since
+    2026-10-16); for every value of the batch loops the remaining points form
+    a GEMM of strided views
     (_gemm_on_points), every batch iteration the same shape. The factors'
     subscripts may add batch terms anywhere. Returns the per-batch extents
     {I, J, K}; False when the nest is not such a GEMM; None when there is no
@@ -1340,11 +1533,9 @@ def batched_gemm_on_domain(case: Case, max_points: int = 200000) -> Optional[boo
     batch = batch_loops_of(case)
     if not batch:
         return None
-    trips = {lp.var: lp.trip() for lp in case.loops}
-    for f in case.c.forms():
-        vs = {v for v in f.vars() if trips.get(v, 0) >= 2}
-        if vs & set(batch) and vs - set(batch):
-            return False
+    # C may read the batch loops in its role dimensions too (no C purity
+    # since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19.3): per batch
+    # value its view must still be injective, which _gemm_on_points checks.
     used = set()
     for arr in case.arrays.values():
         for f in arr.forms():
@@ -1372,6 +1563,132 @@ def batched_gemm_on_domain(case: Case, max_points: int = 200000) -> Optional[boo
     return shape[0]       # the per-batch extents (truthy)
 
 
+def generalized_gemm_on_domain(case: Case, max_points: int = 200000):
+    """The generalized definition (docs/AFFINE_GEMM_MAPPING.md section 19), by
+    enumeration on the box domain -- independent of the compiler: a loop of
+    two or more iterations read by all three operands is a batch loop, every
+    other loop's role is its readers (A and C: I, B and C: J, A and B: K); per
+    batch value every role's subscripts, restricted to the role's loops, are
+    multiples of one form whose values are an arithmetic progression taken
+    once per point of the role's loops, (I, J, K) is a bijection onto the box,
+    and C's element is injective in (I, J). Returns
+      {"verdict": "ACCEPT", "ext": {...}, "batched": bool, "general": bool,
+       "two_unit": bool}
+      {"verdict": "DEMOTION", "why": ...}: the canonical decomposition fails
+          but one with more batch loops exists (a broadcast, two coordinates
+          in one role, a role that is not one dense coordinate, C not
+          injective -- section 19.2): a batched GEMM the compiler does not
+          construct;
+      {"verdict": "NOT_GEMM", "why": ...}: every loop is read by all three
+          operands (an element-wise product: no decomposition at all);
+    or None when the domain is too large or empty.  A loop no access uses
+    repeats the whole GEMM (a repetition loop: the caller applies the rule
+    of repeat_in_reduction); it is not enumerated."""
+    import itertools
+    used = set()
+    for arr in case.arrays.values():
+        for f in arr.forms():
+            used |= f.vars()
+    loops = [lp for lp in case.loops if lp.var in used]
+    total = 1
+    for lp in loops:
+        total *= len(lp.values())
+    if total == 0 or total > max_points:
+        return None
+    forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
+    many = {lp.var for lp in loops if lp.trip() >= 2}
+    reads = {r: {v for f in forms[r] for v in f.vars() if v in many} for r in forms}
+    batch = reads["a"] & reads["b"] & reads["c"]
+    roles = {"I": (reads["a"] & reads["c"]) - batch, "J": (reads["b"] & reads["c"]) - batch,
+             "K": (reads["a"] & reads["b"]) - batch}
+    if any(v in many and v not in batch and not any(v in r for r in roles.values())
+           for v in used):
+        return {"verdict": "DEMOTION", "why": "a loop read by one operand only (a broadcast)"}
+    if not any(roles.values()):
+        if batch:
+            return {"verdict": "NOT_GEMM", "why": "every loop is read by all three operands (an "
+                    "element-wise product)"}
+    order = {r: sorted(v) for r, v in roles.items()}
+    direction = {}
+    for role, vs in order.items():
+        if not vs:
+            continue
+        rest = [[f.coef.get(v, 0) for v in vs] for r in forms for f in forms[r]]
+        nonzero = [x for x in rest if any(x)]
+        if any(a[s] * b[t] != a[t] * b[s] for a in nonzero for b in nonzero
+               for s in range(len(vs)) for t in range(len(vs))):
+            return {"verdict": "DEMOTION", "why": "role %s is read through two different "
+                    "combinations of its loops" % role}
+        direction[role] = nonzero[0]
+    names = [lp.var for lp in loops]
+    groups = {}
+    for x in itertools.product(*[lp.values() for lp in loops]):
+        env = dict(zip(names, x))
+        groups.setdefault(tuple(env[v] for v in sorted(batch)), []).append(env)
+    shape, general = None, False
+    for pts in groups.values():
+        ext, ordinal = {}, {}
+        for role in "IJK":
+            if role not in direction:
+                ext[role] = 1
+                ordinal[role] = lambda env: 0
+                continue
+            vs, g = order[role], direction[role]
+            coordinate = (lambda vs, g: lambda env: sum(c * env[v] for c, v in zip(g, vs)))(vs, g)
+            values = sorted({coordinate(env) for env in pts})
+            step = values[1] - values[0] if len(values) > 1 else 1
+            count = 1
+            for v in vs:
+                count *= len({env[v] for env in pts})
+            if any(b2 - a2 != step for a2, b2 in zip(values, values[1:])) or len(values) != count:
+                return {"verdict": "DEMOTION", "why": "role %s is not one dense coordinate of its "
+                        "loops" % role}
+            ext[role] = len(values)
+            ordinal[role] = (lambda c, lo, st: lambda env: (c(env) - lo) // st)(coordinate, values[0], step)
+        slots = {(ordinal["I"](e), ordinal["J"](e), ordinal["K"](e)) for e in pts}
+        if len(slots) != len(pts) or len(pts) != ext["I"] * ext["J"] * ext["K"]:
+            return {"verdict": "DEMOTION", "why": "(I, J, K) is not a bijection onto the box"}
+        written = {}
+        for e in pts:
+            element = tuple(f.eval(e) for f in forms["c"])
+            if written.setdefault((ordinal["I"](e), ordinal["J"](e)), element) != element:
+                return {"verdict": "NOT_GEMM", "why": "C's element changes along the reduction"}
+        if len(set(written.values())) != len(written):
+            return {"verdict": "DEMOTION", "why": "C's view is not injective on the (I, J) box"}
+        if shape is None:
+            shape = (ext["I"], ext["J"], ext["K"])
+        elif shape != (ext["I"], ext["J"], ext["K"]):
+            return {"verdict": "DEMOTION", "why": "the batch iterations are not one GEMM shape"}
+    for r, rl in (("a", "IK"), ("b", "KJ"), ("c", "IJ")):
+        seen = {role: 0 for role in rl}
+        for f in forms[r]:
+            used_roles = [role for role in rl if role in direction and any(f.coef.get(v, 0) for v in order[role])]
+            general = general or len(used_roles) > 1
+            for role in used_roles:
+                seen[role] += 1
+        general = general or any(n > 1 for n in seen.values())
+    return {"verdict": "ACCEPT", "ext": dict(zip("IJK", shape)), "batched": bool(batch),
+            "general": general, "two_unit": bool(batch) and sum(e == 1 for e in shape) >= 2}
+
+
+def repeat_in_reduction(case: Case) -> bool:
+    """A repetition loop (no access uses it) of two or more iterations nested
+    inside a reduction loop of two or more iterations -- a loop that both
+    factors read and C does not (by its readers, docs/AFFINE_GEMM_MAPPING.md
+    section 19): hoisting it outward would reorder the accumulations into one
+    element of C (the rule of the dense GEMMs, spec_expect, applied to the
+    batched and generalized ones)."""
+    readers = {}
+    for r in ("a", "b", "c"):
+        for f in case.arrays[r].forms():
+            for v in f.vars():
+                readers.setdefault(v, set()).add(r)
+    k_idx = [i for i, lp in enumerate(case.loops)
+             if lp.trip() >= 2 and readers.get(lp.var) == {"a", "b"}]
+    return any(lp.var not in readers and lp.trip() >= 2 and any(ki < ri for ki in k_idx)
+               for ri, lp in enumerate(case.loops))
+
+
 def spec_expect(case: Case) -> dict:
     an = case.analysis or analyse(case)
     tags = set(an.get("gemm_tags", []))
@@ -1390,15 +1707,23 @@ def spec_expect(case: Case) -> dict:
     if case.kernel_style == "scalar_acc":
         return done("OUT_OF_SCOPE", "scalar_acc")
     if not an.get("is_gemm"):
+        # legal_gemm: the nest is a GEMM, or a batched GEMM, of affine views
+        # under the generalized definition (docs/AFFINE_GEMM_MAPPING.md
+        # section 19) -- set below when one of the decisions finds one, also
+        # when the specification then excludes it (double, aliasing, a
+        # decomposition the compiler does not construct)
         # a matrix-vector product is the N = 1 GEMM (P0, 2026-10-15)
         if an["math_class"] == "matrix_vector":
+            out["legal_gemm"] = True
             return done("ACCEPT", "matvec")
         # the reduction index in the output with every J loop of one
-        # iteration: the compiler reads K as a batch coordinate and sees a
-        # vector scaled by a scalar per batch (SQ-5, open)
+        # iteration: K is read by every operand (a batch coordinate) and each
+        # batch is a vector scaled by a scalar -- a batched GEMM with two unit
+        # extents (SQ-5, decided 2026-10-16: lowered)
         if (an["math_class"] == "not_gemm_scaled_rows"
                 and all(lp.trip() == 1 for lp in case.loops if lp.role == "J")):
-            return done("UNDETERMINED", "SQ-5")
+            out["legal_gemm"] = True
+            return done("ACCEPT", "sq5_decided")
         # A loop all three operands read is a batch loop (ISSUE-007): the
         # factors may read it through their own expressions or as an offset
         # of a role's subscript (A[4i - j][5k]), C alone. Decided per batch
@@ -1407,22 +1732,25 @@ def spec_expect(case: Case) -> dict:
                        if case.kernel_style not in ("init_inside", "scalar_acc")
                        and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") else None)
         if batched_ext:
-            # two of M, N, K equal to 1 per batch: SQ-5, open
-            if sum(1 for k in "IJK" if batched_ext[k] == 1) >= 2:
-                return done("UNDETERMINED", "SQ-5")
+            out["legal_gemm"] = True
+            two_unit = sum(1 for k in "IJK" if batched_ext[k] == 1) >= 2
             if case.elem != "float":
                 return done("OUT_OF_SCOPE", "double")
             if len({a.elem for a in case.arrays.values()}) > 1:
                 return done("OUT_OF_SCOPE", "mixed_types")
             if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
                 return done("OUT_OF_SCOPE", "aliasing")
-            return done("ACCEPT", "batched_views")
+            if repeat_in_reduction(case):
+                return done("OUT_OF_SCOPE", "repeat_in_reduction")
+            # two of M, N, K equal to 1 per batch: SQ-5, decided 2026-10-16
+            return done("ACCEPT", "sq5_decided" if two_unit else "batched_views")
         # The syntactic analysis and the iteration domain differ only through
         # loops that run once (constants on the domain, Lemma 0): decide such
         # a nest on its domain (P0.4, P0.5).
         if (any(lp.trip() == 1 for lp in case.loops)
                 and case.kernel_style not in ("init_inside", "scalar_acc")
                 and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") and gemm_on_domain(case)):
+            out["legal_gemm"] = True
             if gemm_on_domain(case) == "repeat_in_reduction":
                 return done("OUT_OF_SCOPE", "repeat_in_reduction")
             # the rules that do not depend on the coordinates still apply
@@ -1433,6 +1761,28 @@ def spec_expect(case: Case) -> dict:
             if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
                 return done("OUT_OF_SCOPE", "aliasing")
             return done("ACCEPT", "dense_on_domain")
+        # The generalized definition (docs/AFFINE_GEMM_MAPPING.md section
+        # 19): skewed and merged views, C reading batch loops in its role
+        # dimensions; a nest whose canonical decomposition fails but a
+        # batched one exists is a documented limitation (the compiler does
+        # not demote loops to batch loops).
+        g = (generalized_gemm_on_domain(case)
+             if case.kernel_style not in ("init_inside", "scalar_acc")
+             and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") else None)
+        if g and g["verdict"] in ("ACCEPT", "DEMOTION"):
+            out["legal_gemm"] = True
+        if g and g["verdict"] == "ACCEPT":
+            if case.elem != "float":
+                return done("OUT_OF_SCOPE", "double")
+            if len({a.elem for a in case.arrays.values()}) > 1:
+                return done("OUT_OF_SCOPE", "mixed_types")
+            if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
+                return done("OUT_OF_SCOPE", "aliasing")
+            if repeat_in_reduction(case):
+                return done("OUT_OF_SCOPE", "repeat_in_reduction")
+            return done("ACCEPT", "sq5_decided" if g["two_unit"] else "generalized_views")
+        if g and g["verdict"] == "DEMOTION":
+            return done("OUT_OF_SCOPE", "demotion")
         return done("REJECT", "not_gemm")
     if any(lp.trip() == 0 for lp in case.loops):
         return done("UNDETERMINED", "SQ-2")
@@ -1864,12 +2214,15 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     h.append("")
     spec = case.spec or spec_expect(case)
     cls = case.classification or classify_case(case)
-    h.append("Mathematical GEMM: %s" % ("YES" if an.get("is_gemm") else "NO"))
+    h.append("Mathematical GEMM: %s" % ("YES" if spec.get("legal_gemm") else "NO"))
     h.append("Expected recognition (specification): %s" % spec["recognition"])
     h.append("  basis: %s" % spec["basis"])
+    if case.redecided:
+        h.append("  re-decided: %s" % case.redecided)
     commit_text = compiler_commit
     if case.issue and cls != "FALSE_NEGATIVE":
-        commit_text = "%s with the fix of %s" % (compiler_commit, case.issue)
+        commit_text = "%s with the %s of %s" % (compiler_commit,
+                                                 "changes" if case.redecided else "fix", case.issue)
     h.append("Current implementation (commit %s, predicted from its sources; measured by" % commit_text)
     h.append("scripts/run_showcase.py, never assumed):")
     h.append("  front end (systolic-cfront):             %s" % ex["frontend"])
@@ -1882,7 +2235,11 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     if ex["reject_stage"]:
         h.append("  rejection at: %s" % ex["reject_stage"])
         h.append("  reason: %s" % ex["reject_reason"])
-    if case.issue and cls != "FALSE_NEGATIVE":
+    if case.issue and cls != "FALSE_NEGATIVE" and case.redecided:
+        # a specification change moved the expectation; the case was no
+        # false negative under the specification of its time
+        issue_note = " -- see failures/issues/%s (a specification change)" % case.issue
+    elif case.issue and cls != "FALSE_NEGATIVE":
         issue_note = " -- was a FALSE NEGATIVE of failures/issues/%s (fixed)" % case.issue
     elif case.issue:
         issue_note = " -- see failures/issues/%s" % case.issue
@@ -2373,7 +2730,10 @@ def manifest_entry(case: Case, subdir: str) -> dict:
         "category": case.category,
         "kernel": case.kernel,
         "mathematical_class": an["math_class"],
-        "is_valid_gemm": bool(an.get("is_gemm")),
+        # a GEMM or a batched GEMM of affine views (docs/AFFINE_GEMM_MAPPING.md
+        # section 19): the specification's finding, not only the dense
+        # analysis of the subscripts as written
+        "is_valid_gemm": bool(spec.get("legal_gemm")),
         "gemm_tags": an.get("gemm_tags", []),
         "c_program_valid": True,
         "in_affine_c_subset": ex["frontend"] == "translated",
@@ -2393,7 +2753,7 @@ def manifest_entry(case: Case, subdir: str) -> dict:
         "expected": {
             "_meaning": "the specification: set by the mathematics and the support "
                         "specification (README.md), never by the current compiler's output",
-            "mathematical_gemm": bool(an.get("is_gemm")),
+            "mathematical_gemm": bool(spec.get("legal_gemm")),
             "recognition": spec["recognition"],
             "offload": spec["offload"],
             "basis": spec["basis"],
@@ -2414,6 +2774,7 @@ def manifest_entry(case: Case, subdir: str) -> dict:
         },
         "classification": cls,
         "issue": case.issue or None,
+        "redecided": case.redecided or None,
         "has_independent_reference": True,
         "reference_kinds": ["direct"] + (["logical_view"] if reference_logical_text(case) else [])
                            + ["python_oracle_checksum"],

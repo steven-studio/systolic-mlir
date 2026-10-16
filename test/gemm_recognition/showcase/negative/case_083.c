@@ -25,7 +25,7 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
+ * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
  *   basis: (no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2
  * Current implementation (commit 6e25528 with the fix of ISSUE-005, predicted from its sources; measured by

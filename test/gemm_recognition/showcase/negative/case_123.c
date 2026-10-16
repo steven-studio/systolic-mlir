@@ -2,7 +2,7 @@
  * Case ID: case_123
  * Name: output_on_the_diagonal
  * Set / category: negative / singular_mapping
- * Mathematical class: not_gemm_diagonal_output
+ * Mathematical class: batched_gemv_diagonal_by_demotion
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -13,9 +13,17 @@
  *     - C is indexed by ['I', 'I']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']
  *
  *   C[i][i] += A[i][k] * B[k][j]: both subscripts of the output are the row
- *   coordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).
- *   The output is not indexed by (I, J).  Not a GEMM.  Expected rejection at
- *   recognition: C's column expression i is not B's column expression j.
+ *   coordinate; j is summed away: C[i][i] += sum_k A[i][k] (sum_j B[k][j]).  By
+ *   the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is read by A and C
+ *   (I), k by A and B (K), j by B only (a broadcast): the canonical decomposition
+ *   fails.  With j demoted to a batch loop it is a batched GEMM: per j the
+ *   8 x 1 x 8 GEMV C[I][I] += sum_K A[I][K] B[K][j] -- C's view I -> (I, I) is
+ *   injective -- the j batches accumulating into the diagonal in program order.
+ *   Mathematically valid; the demotion is not implemented: a documented
+ *   limitation.  Expected refusal at recognition: 'a coordinate is read by the
+ *   second factor only' (j; the analysis by groups first finds C reading i in
+ *   both dimensions, which the readers analysis lifts).  Re-decided 2026-10-16
+ *   (ISSUE-008; REJECT before).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -23,9 +31,10 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): OUT_OF_SCOPE
+ *   basis: (docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -34,9 +43,10 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: C reads one logical coordinate in two of its dimensions (0 and 1)
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   reason: a coordinate is read by the second factor only: the other operands would be broadcast along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md section 10)
+ * Classification: DOCUMENTED LIMITATION
+ *   A mathematically valid GEMM that the specification excludes explicitly;
+ *   'refused' must never be read as 'not a GEMM'.
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -129,7 +139,7 @@ int main(void) {
   const long n = 64;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_123 output_on_the_diagonal: negative / singular_mapping, class not_gemm_diagonal_output\n");
+  printf("[gemm_recognition] case_123 output_on_the_diagonal: negative / singular_mapping, class batched_gemv_diagonal_by_demotion\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_123 FAIL (test bug)\n"); return 3;

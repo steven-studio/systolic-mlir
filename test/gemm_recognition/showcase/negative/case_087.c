@@ -2,7 +2,7 @@
  * Case ID: case_087
  * Name: coupled_i_plus_j
  * Set / category: negative / coupled_mapping
- * Mathematical class: gemm_nonrectangular_region
+ * Mathematical class: batched_gemv_moving_rows
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -13,13 +13,16 @@
  *     - A has a subscript that couples loops of different coordinates (mixed:I+J, K)
  *     - C has a subscript that couples loops of different coordinates (mixed:I+J, J)
  *
- *   C[i+j][j] += A[i+j][k] * B[k][j].  With r = i + j every computed element is
- *   C[r][j] += sum_k A[r][k] B[k][j], an element of the GEMM A B -- but the set of
- *   (r, j) computed is the parallelogram {j <= r < j + 8}, not a rectangle, so it
- *   is not one rectangular GEMM C' += A' B' of strided views.  The recognizer
- *   accepts the nest (I = i + j, J = j, K = k) and getDenseLogicalGemm refuses
- *   it: 'two logical coordinates are driven by the same loop (loop 1 drives I and
- *   J)' -- no box of (I, J, K) is a set of whole iterations.
+ *   C[i+j][j] += A[i+j][k] * B[k][j].  j is read by A, B and C: a batch loop
+ *   (docs/AFFINE_GEMM_MAPPING.md section 19.2).  Per j it is the GEMV
+ *   C[I+j][j] += sum_K A[I+j][K] B[K][j] (M = 8, N = 1, K = 8): A's and C's views
+ *   move with the batch (offset j), C's view I -> (I + j, j) is injective per
+ *   batch, and the batches write different columns.  A batched GEMM of affine
+ *   views (section 19.1, 19.3): offloaded as 8 batches of an 8 x 1 x 8 tile.
+ *   Re-decided 2026-10-16 (ISSUE-008): until then the specification required C
+ *   to read every batch loop alone (C purity) and rejected the nest as one GEMM
+ *   over the parallelogram {j <= r < j + 8} -- true of one rectangular GEMM, not
+ *   of the batched one; the user's decision of 2026-10-16 dropped C purity.
  *
  * Array dimensions: A: float[15][8]   B: float[8][8]   C: float[15][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -27,20 +30,18 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported since 2026-10-16, ISSUE-007) a batched GEMM whose operands read the batch coordinate(s) through their own expressions -- in dimensions of their own or as affine offsets of role dimensions (A[4i - j][5k], C[i + k][j] since section 19.3): per batch value an ordinary GEMM of strided views whose offsets are affine in the batch counters, C injective per batch (docs/AFFINE_GEMM_MAPPING.md sections 16, 19)
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.3): REJECT (C purity) before; ACCEPT since -- a batched GEMV
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
- *   dense partition (getDenseLogicalGemm):   unsupported
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: dense_partition
- *   reason: two logical coordinates are driven by the same loop (loop 1 drives I and J)
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -133,7 +134,7 @@ int main(void) {
   const long n = 120;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_087 coupled_i_plus_j: negative / coupled_mapping, class gemm_nonrectangular_region\n");
+  printf("[gemm_recognition] case_087 coupled_i_plus_j: negative / coupled_mapping, class batched_gemv_moving_rows\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_087 FAIL (test bug)\n"); return 3;

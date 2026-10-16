@@ -24,6 +24,15 @@ of the nest.
 
 ## Must stay rejected (checked)
 
+*Superseded in part on 2026-10-16 by ISSUE-008 (the generalized affine GEMM mapping,
+`docs/AFFINE_GEMM_MAPPING.md` section 19), which dropped C purity and admits general affine
+views: `C[i + j][j]` with `A[i + j][k]` (case_087, a batched GEMV) and `C[i + k][j]` (case_127,
+batched rank-1 updates) are lowered since; `A[i][i + k]` is recognized (a skewed view, its
+lowering open); `B[k][i]` with `C[i][j]` and the two one-reader loops are valid by demotion (a
+documented limitation); `A[i][k0 + k1]` stays refused (a non-dense role, valid by demotion); the
+element-wise product and the out-of-bounds target stay rejected. The list below is the state of
+this issue.*
+
 `C[i + j][j] += A[i + j][k] B[k][j]` (case_087: refused by the dense partition, loop j drives I
 and J), `C[i + k][j]` (case_127: C mixes the batch loop k), `A[i][i + k]` (coupled),
 `B[k][i]` with `C[i][j]` (j read by C only), `A[i][k0] B[k1][j]` (two one-reader loops),

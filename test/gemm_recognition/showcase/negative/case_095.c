@@ -2,7 +2,7 @@
  * Case ID: case_095
  * Name: reduction_index_in_output
  * Set / category: negative / reduction_mismatch
- * Mathematical class: not_gemm_scaled_rows
+ * Mathematical class: batched_scaled_vectors_by_demotion
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -14,8 +14,17 @@
  *
  *   C[i][k] += A[i][k] * B[k][j]: the output is indexed by the would-be
  *   reduction index k and the loop j is summed away: C[i][k] += A[i][k] * (sum_j
- *   B[k][j]) -- A scaled column-wise by the row sums of B.  Not a GEMM.  Expected
- *   rejection at recognition: C's column expression k is not B's column j.
+ *   B[k][j]) -- A scaled column-wise by the row sums of B.  By the readers
+ *   (docs/AFFINE_GEMM_MAPPING.md section 19.2) k is read by all three operands (a
+ *   batch loop), i by A and C (I), j by B only (a broadcast): the canonical
+ *   decomposition fails.  With j demoted to a batch loop it is a batched GEMM:
+ *   per (k, j) the 8 x 1 x 1 tile C[I][k] += A[I][k] B[k][j] (a vector scaled by
+ *   a scalar), the j batches accumulating into one column in program order.
+ *   Mathematically valid; the demotion is not implemented: a documented
+ *   limitation.  With a single-iteration j the canonical decomposition is that
+ *   batched GEMM and it is offloaded (SQ-5, decided 2026-10-16).  Expected
+ *   refusal at recognition: 'a coordinate is read by the second factor only' (j).
+ *   Re-decided 2026-10-16 (ISSUE-008; REJECT before).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -23,9 +32,10 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): OUT_OF_SCOPE
+ *   basis: (docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -35,8 +45,9 @@
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
  *   reason: a coordinate is read by the second factor only: the other operands would be broadcast along it
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ * Classification: DOCUMENTED LIMITATION
+ *   A mathematically valid GEMM that the specification excludes explicitly;
+ *   'refused' must never be read as 'not a GEMM'.
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -129,7 +140,7 @@ int main(void) {
   const long n = 64;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_095 reduction_index_in_output: negative / reduction_mismatch, class not_gemm_scaled_rows\n");
+  printf("[gemm_recognition] case_095 reduction_index_in_output: negative / reduction_mismatch, class batched_scaled_vectors_by_demotion\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_095 FAIL (test bug)\n"); return 3;

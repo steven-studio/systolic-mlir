@@ -2,7 +2,7 @@
  * Case ID: case_090
  * Name: singular_output_independent_of_i
  * Set / category: negative / singular_mapping
- * Mathematical class: singular_mapping
+ * Mathematical class: batched_dot_by_demotion
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -14,10 +14,16 @@
  *
  *   The user's seed A[2*j+k][p], B[k][j], C[i][j] with four 4-iteration loops.
  *   The summed value s[j] = sum_{k,p} A[2j+k][p] B[k][j] does not depend on i: every
- *   row of C receives the same vector (C += 1 s^T, a rank-1 update).  The output
- *   row coordinate i appears in no input, and A couples j and k.  Not a GEMM of A
- *   and B.  Expected rejection at recognition: A's row expression 2j+k is not C's
- *   row expression i.
+ *   row of C receives the same vector (C += 1 s^T).  By the readers
+ *   (docs/AFFINE_GEMM_MAPPING.md section 19.2) j is read by all three operands (a
+ *   batch loop), k by A and B (K), i by C only and p by A only (broadcasts): the
+ *   canonical decomposition fails.  With i and p demoted to batch loops it is a
+ *   batched GEMM: per (i, j, p) the 1 x 1 x 4 dot product C[i][j] +=
+ *   sum_K A[2j+K][p] B[K][j], the p batches accumulating into one element in
+ *   program order.  Mathematically valid; the compiler constructs only the
+ *   canonical decomposition (the demotion is not implemented): a documented
+ *   limitation.  Expected refusal at recognition: 'a coordinate is read by the
+ *   first factor only' (p).  Re-decided 2026-10-16 (ISSUE-008; REJECT before).
  *
  * Array dimensions: A: float[10][4]   B: float[4][4]   C: float[4][4]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K], p [other]
@@ -25,9 +31,10 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): OUT_OF_SCOPE
+ *   basis: (docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -37,8 +44,9 @@
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
  *   reason: a coordinate is read by the first factor only: the other operands would be broadcast along it
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ * Classification: DOCUMENTED LIMITATION
+ *   A mathematically valid GEMM that the specification excludes explicitly;
+ *   'refused' must never be read as 'not a GEMM'.
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -133,7 +141,7 @@ int main(void) {
   const long n = 16;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_090 singular_output_independent_of_i: negative / singular_mapping, class singular_mapping\n");
+  printf("[gemm_recognition] case_090 singular_output_independent_of_i: negative / singular_mapping, class batched_dot_by_demotion\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_090 FAIL (test bug)\n"); return 3;

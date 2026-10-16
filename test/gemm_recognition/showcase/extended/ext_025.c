@@ -25,7 +25,7 @@
  * Statement form: C[..] += A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
+ * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
  *   basis: (P0.4, P0.5) not a GEMM as written, but its loops that run once are constants on the iteration domain, and there the nest is a dense GEMM of strided views (decided by enumerating the points: casespec.gemm_on_domain; docs/AFFINE_GEMM_MAPPING.md Lemma 0, section 3)
  * Current implementation (commit 6e25528 with the fix of ISSUE-007, predicted from its sources; measured by
