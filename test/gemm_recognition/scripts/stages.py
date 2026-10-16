@@ -155,7 +155,14 @@ def stage_discovery(tools, mlir, workdir, k8=16, k4=16):
 
 def stage_lowering(tools, mlir, workdir, k8=16, k4=16):
     out = os.path.join(workdir, "20-systolic.mlir")
-    cmd = [tools.opt, FLEET % (k8, k4), "--affine-matmul-to-systolic=report=true", mlir, "-o", out]
+    # The cases are judged with the reassociation permission: the showcase's
+    # predictions (and the specification, README section 2) are about the
+    # mapping; the strict floating-point default (docs/AFFINE_GEMM_MAPPING.md
+    # section 6, since 2026-10-15) keeps every fp GEMM on the host and is
+    # tested on its own (test/Systolic/affine_gemm_p0_views.mlir,
+    # test/SystolicCC/affine_p0.c).
+    cmd = [tools.opt, FLEET % (k8, k4),
+           "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true", mlir, "-o", out]
     r = run(cmd, cwd=workdir)
     res = {"stage": "lowering", "run": r}
     if r["rc"] != 0:
@@ -198,7 +205,7 @@ def stage_lowering(tools, mlir, workdir, k8=16, k4=16):
 def stage_driver(tools, src, kernel, workdir, runtime="soft", extra_flags=(), env=None):
     exe = os.path.join(workdir, "prog")
     keep = os.path.join(workdir, "prog.systolic")
-    cmd = [tools.cc, "--runtime=%s" % runtime, "--explain", "--verify", "-DGEMM_RECOGNITION_STATS",
+    cmd = [tools.cc, "--runtime=%s" % runtime, "--fp-reassociation", "--explain", "--verify", "-DGEMM_RECOGNITION_STATS",
            "--clang", tools.clang, "--build-dir", tools.build_dir, "--llvm-build", tools.llvm_build,
            "--keep-dir", keep, *extra_flags, src, "-o", exe]
     r = run(cmd, cwd=workdir, env=env)

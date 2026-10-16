@@ -14,10 +14,10 @@
  *     - y is indexed by ['I']; the operand in that position of a GEMM is indexed by exactly ['I', 'J']
  *
  *   y[i] += M[i][j] * x[j]: a matrix-vector product (GEMV).  It is the N = 1
- *   special case of a GEMM in the mathematical sense (y and x as 8x1 matrices),
- *   but as written it has two index dimensions and rank-1 operands.
- *   Expected rejection: only two loops; the recognizer looks for three nested
- *   affine.for ops and rank-2 (or batched rank-3) operands.
+ *   special case of a GEMM (y and x as 8x1 matrices), written with two index
+ *   dimensions and rank-1 operands.  Refused until 2026-10-15 (the recognizer
+ *   looked for three nested loops and rank-2 operands); offloaded since ISSUE-005
+ *   (P0: x and y get a unit column, memref.expand_shape).
  *
  * Array dimensions: M: float[8][8]   x: float[8]   y: float[8]
  * Loop order (outer to inner): i [row I], j [reduction K]
@@ -26,20 +26,16 @@
  * Element type: float
  *
  * Mathematical GEMM: NO
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: AffineMatmulAnalysis.cpp collectAffineMatmulCandidates expects a three-deep affine.for nest with rank-2 (or batched rank-3) operands; a GEMV has two index dimensions
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: (no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2
+ * Current implementation (commit 6e25528 with the fix of ISSUE-005, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-005 (fixed)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

@@ -97,6 +97,42 @@ one memref; the fleet plan's tiles proven an exact partition.
 **Driver** (`systolic-cc`): fp32 only (double arrays stay on the host), not `static`/`inline`,
 not from a macro; `--verify` compares every offloaded call with the function as written.
 
+**Update 2026-10-15 (ISSUE-005, the P0 operand views; specification `docs/AFFINE_GEMM_MAPPING.md`
+v2).** The positional form above is tried first, unchanged; when it does not apply, the
+recognizer finds the coordinates by **groups and roles** (loops that occur together in a
+subscript are one coordinate; the operands that read it fix its role), so that operands of
+**any rank**, **transposed** operands (`A[k][i]`, `B[j][k]`, `C[j][i]`), **fixed (extent-one)
+dimensions** anywhere and **roles of extent one** (M, N or K = 1: a constant subscript, SQ-4
+decided; a matrix-vector product's rank-1 operands, also under repetition loops) are
+recognized; two subscripts of a role may run in **opposite directions** (`A[7 - i]` with
+`C[i]`). Nests of one or two loops are candidates when their body is the multiply-accumulate.
+A `min`/`max` of constants in a loop bound is folded. Each operand's view is a rank-reducing
+`memref.subview` with **signed strides** (a dimension read backwards: a negative stride, its
+largest index as the offset), then `memref.transpose` or `memref.expand_shape` as needed; every
+index range and linear element address is checked in 64-bit-checked arithmetic. **Floating
+point:** the systolic execution sums each tile from zero and adds the sum to C — a different
+sequence of IEEE additions than the loop's — so by default no fp GEMM is offloaded; the
+permission is the `reassoc` flag on the accumulation (`systolic-cc --fp-reassociation`,
+`systolic-cfront --fp-reassociation`) or `--affine-matmul-to-systolic=allow-fp-reassociation=true`.
+The showcase and the generated cases are run with the permission (`scripts/stages.py`). Every
+refusal is classified (PROVEN_INVALID, VALID_BUT_LOWERING_UNSUPPORTED, UNKNOWN; an empty GEMM
+and an FP refusal PROVEN_VALID): `--test-affine-matmul-discovery` prints `class:`,
+`--affine-matmul-to-systolic=classify=true` appends it to the remark.
+
+**Update 2026-10-15 (ISSUE-006, batched GEMMs).** A coordinate every operand reads (the
+partition prefix P*, `C[b][i][j] += A[b][i][k] * B[b][k][j]`) is a **batch coordinate**: the
+dense partition takes the P rows of T as such, and the lowering **re-emits the batch loops**
+(the nest's loops that drive a batch coordinate, with their own bounds and steps, in their
+original order) around the tiles, one GEMM per batch iteration on its own slice of each operand
+(the operand's batch dimension at a dynamic offset, an `affine.apply` of the coordinate's
+expression). Nothing is required of a batch coordinate beyond the loops as written (no density,
+no injectivity); a batch loop may not also drive I, J or K (the batches would be coupled:
+refused). The three operands must read a batch coordinate through one and the same expression
+(else VALID_BUT_LOWERING_UNSUPPORTED); an operand without the batch subscript (B shared by
+every batch) is refused as a second coordinate in one GEMM role; the remark's "the enclosing
+loops run it N time(s)" counts the batch iterations, so `systolic-cc` reports the invocations
+per call correctly.
+
 ## 2. Support specification (what a correct compiler must do)
 
 The expectation of every test is set by this section and by the mathematics of the nest —
@@ -110,18 +146,19 @@ elements into a third, and the subscripts of A depend only on (I, K), of B only 
 only on (I, J), each subscript being an injective affine function of its coordinate's loops.
 Then `C'(I,J) += A'(I,K) B'(K,J)` with `A'`, `B'`, `C'` the operands' own views. Mathematically
 the following are *also* GEMMs (and are marked as such) but are **outside** this compiler's
-specification by explicit, documented decision (DOCUMENTED_LIMITATION): batched GEMMs
-(partition prefix), transposed operand views (the operand convention is row-major (I,K)/(K,J)/(I,J)),
-alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the nest or a scalar
-accumulator, double or mixed precision, operands that may alias C, one operand reading a shared
-coordinate in the direction opposite to the other's (`A[7 - i]` with `C[i]`: no strided view of A
-matches; a coordinate that decreases in every operand — a reversed subscript such as `7 - i` on
-both, or a loop that counts down — is a dense GEMM and supported since ISSUE-004: only the order
-in which the nest visits the points differs), a repetition loop of more than
+specification by explicit, documented decision (DOCUMENTED_LIMITATION): a batched GEMM with an
+operand shared by every batch (`C[b] += A[b] B`: B would be broadcast over the batch, or A and C
+merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the
+nest or a scalar accumulator, double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
-`failures/resolved/NOTE-001`), two different views of one array as A and B, and matrix-vector
-products (two loop dimensions, rank-1 operands). The C front end's subset (section 1) refuses
+`failures/resolved/NOTE-001`), and two different views of one array as A and B. (Transposed
+operand views, one operand reading a shared coordinate in the direction opposite to the other's
+— a negative-stride view — and matrix-vector products were on this list until 2026-10-15; they are
+inside the specification since ISSUE-005. A coordinate that decreases in every operand is
+supported since ISSUE-004.) **Floating point:** the specification is about the mapping; an
+offload additionally needs the program's permission to reassociate the floating-point sum
+(section 1, update), which the tests give explicitly. The C front end's subset (section 1) refuses
 some of these before the recognizer sees them (a counting-down loop: "the loop condition must be
 'counter < bound' or 'counter <= bound'"); the stage does not change the classification.
 
@@ -132,10 +169,16 @@ GEMMs: the basis is the compiler's own documentation — `AffineMatmulPartitioni
 origins, access offsets and strides ... are all of this form"; `AffineMatmulAnalysis.h`: one
 factor map `phi` per operand — and the task's index family `c_i i + c_j j + c_k k + c_0` per
 operand), coordinates split over several loops in any order, repetition loops outside the
-reduction, the GEMM inside larger arrays, `A × A`.
+reduction, the GEMM inside larger arrays, `A × A`; since ISSUE-005 also transposed operands,
+opposite directions (a negative-stride view), operands of any rank with fixed dimensions, and
+roles of extent one (M, N or K = 1: a constant subscript — SQ-4, decided 2026-10-15 — or a
+matrix-vector product); since ISSUE-006 also batched GEMMs whose every operand carries every
+batch coordinate through one and the same expression (the batch loops run the tiles once per
+batch iteration).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products, nests without a reduction
-coordinate, the reduction index in the output, coupled (`C[i+j][j]`, `A[i][i+k]`) and skewed
+coordinate (an outer product `C[i][j] += A[i][3] * B[3][j]`, whose reduction subscript is a
+constant, is the K = 1 GEMM since SQ-4 was decided), the reduction index in the output, coupled (`C[i+j][j]`, `A[i][i+k]`) and skewed
 placements (GEMM values over a non-rectangular region are not one dense GEMM), an output on a
 diagonal (`C[i][i]`) or an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), singular
 mappings, a non-box iteration domain (a bound that depends on another counter), products with a
@@ -168,13 +211,21 @@ their own in `SPEC_QUESTIONS.md`. Open now:
 - **SQ-3** — a symbolic loop bound (`affine.for 0 to %n`), unreachable from the C front end: is
   the MLIR path's refusal a documented limitation, or must dynamic extents be supported? Case
   mlir_011.
+- **SQ-5** — the reduction index in the output with a single-iteration `j`
+  (`C[i][k] += A[i][k] * B[k][j]`, `j` in [1, 2)): since ISSUE-006 the compiler reads `k` as a
+  batch coordinate and `N = K = 1` — a column scaled by a scalar per batch, correct to lower, but
+  "the reduction index in the output" is on the must-reject list. Refused conservatively
+  (`expected_refusal`). Found by the generated corpus (`gen_04bff9d675c2`).
 
 **Gaps found and closed** (the specification says ACCEPT, the compiler refused): per-operand
 offsets or strides on a shared coordinate — **ISSUE-001**, fixed (`failures/issues/ISSUE-001-*/`,
 section 11 of the record); the unsound bounds arithmetic — **ISSUE-002**, fixed; a constant
-coordinate crashed the dense partition — **ISSUE-003**, fixed (refused; SQ-4 open). Changed on
-request: loops that count down and coordinates that decrease in every operand — **ISSUE-004**,
-supported since 2026-10-15 (README §1, §2). Specification
+coordinate crashed the dense partition — **ISSUE-003**, fixed (refused until SQ-4 was decided on
+2026-10-15; offloaded since). Changed on request: loops that count down and coordinates that
+decrease in every operand — **ISSUE-004**, supported since 2026-10-15 (README §1, §2); the P0
+operand views (transposes, negative strides, extent-one roles, other ranks) and the
+floating-point policy — **ISSUE-005**, since 2026-10-15; batched GEMMs — **ISSUE-006**, since
+2026-10-15. Specification
 refinements made after a measurement (never to make a failing compiler look green; each one
 argued from the mathematics and the documented rule): `failures/resolved/NOTE-*.md`.
 

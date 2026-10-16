@@ -40,3 +40,10 @@ reason, never a crash"; it does not implement offloading.
 `repro_constant_coordinate.mlir` (this directory; lit, no XFAIL): constant I, J and K, both the
 discovery pass and the lowering pass. It fails on the builds without the fix (measured: HEAD and
 the Mac fix fail both RUN lines) and passes on the fixed release and Debug (assertions) builds.
+
+## Update 2026-10-15 (SQ-4 decided, ISSUE-005)
+
+SQ-4 is decided: a coordinate no loop drives is an extent-one coordinate (M, N or K = 1) and the
+nest is offloaded (the user's P0.5). `repro_constant_coordinate.mlir` now expects 1 x 8 x 16,
+8 x 1 x 16 and 16 x 8 x 1 GEMMs; it still guards the crash (the dense partition never indexes an
+empty loop list).

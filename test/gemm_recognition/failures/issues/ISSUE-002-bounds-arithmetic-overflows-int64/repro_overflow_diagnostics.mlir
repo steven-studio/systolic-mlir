@@ -8,18 +8,21 @@
 // is reported as an empty GEMM (LogicalMatmul::normalizationEmptyLoop, since
 // 2026-10-15; before, it got the wording meant for symbolic bounds); every
 // other nest keeps "the loop bounds are not static ...", which the showcase
-// predictions of SQ-3 check.
+// predictions of SQ-3 check. A min/max of constants is folded since
+// 2026-10-15 (docs/AFFINE_GEMM_MAPPING.md section 1, P0.6): @min_const_ub,
+// `0 to min(8, 16)`, is the loop `0 to 8` and an 8 x 8 x 8 GEMM (before, it
+// was refused as "not static"); a min with a symbol is still refused.
 //
 // No INT64_MIN literal here: parsing it needs MLIR at or after llvm-project
 // e803069070cf (see repro_overflow_int64min_literal.mlir).
 //
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=DISC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
+// RUN: systolic-opt --systolic-declare-fpga-fleet "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SYS
 //
 // DISC-NOT:  normalized form overflows
-// DISC:      dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
+// DISC:      dense logical GEMM: yes, I/J/K on loops 0/1/2
 // DISC-NOT:  normalized form overflows
 // DISC:      dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
 // DISC-NOT:  normalized form overflows
@@ -36,7 +39,7 @@
 // DISC:      dense logical GEMM: no (the iteration domain's normalized form overflows 64-bit arithmetic)
 //
 // SYS-NOT:   normalized form overflows
-// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent
+// SYS:       remark: affine GEMM 8x8x8 lowered as
 // SYS-NOT:   normalized form overflows
 // SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent
 // SYS-NOT:   normalized form overflows
@@ -53,7 +56,7 @@
 // SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the iteration domain's normalized form overflows 64-bit arithmetic
 // SYS-NOT:   lowered as
 
-// upper bound min(8, 16): not one constant bound; no overflow anywhere
+// upper bound min(8, 16): folded to 8 (P0.6), an 8 x 8 x 8 GEMM; no overflow anywhere
 func.func @min_const_ub(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %i = 0 to min affine_map<() -> (8, 16)>() {
     affine.for %j = 0 to 8 {

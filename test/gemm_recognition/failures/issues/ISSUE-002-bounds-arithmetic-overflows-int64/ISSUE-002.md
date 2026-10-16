@@ -122,3 +122,15 @@ Not fixed here, outside this compiler: MLIR's own affine-expression folding wrap
 the pass sees the nest — `(i * 2^62) * 4` is parsed as `0`, `i * INT64_MAX + i` as
 `i * INT64_MIN`. Such a subscript reaches the recognizer already wrapped and cannot be told
 apart from one written that way.
+
+## Update 2026-10-15 (ISSUE-005, P0.6)
+
+A loop bound that is the `min` / `max` of constants is folded (`min(8, 16)` is 8), so
+`repro_overflow_diagnostics.mlir` `@min_const_ub` is an 8 x 8 x 8 GEMM now, not "not static"; a
+`min` with a symbol is still refused. A bound that is not a constant gets a precise qualifier in
+the lowering's remark and in `--test-affine-matmul-discovery` (`bounds: ...`: a symbol, another
+loop's counter -- the domain is not a box -- or a min/max), the reason text itself unchanged.
+The P0 views add one more checked quantity: every view's linear element address (origin and
+corners) must fit in 64 bits (`test/Systolic/affine_gemm_p0_views.mlir` @neg_near_limit,
+@neg_past_limit). Every RUN line here states the floating-point permission
+(`allow-fp-reassociation=true`, docs/AFFINE_GEMM_MAPPING.md section 6).

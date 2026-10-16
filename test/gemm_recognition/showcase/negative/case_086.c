@@ -19,9 +19,11 @@
  *     tags: batched
  *
  *   A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs
- *   (or, stacking the batches, one 8x4x4 GEMM with A reshaped).  The recognizer
- *   requires A, B and C to have the same number of subscripts; B has two, A and
- *   C three, so recognition fails.  Legal, unsupported.
+ *   (or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no
+ *   batch subscript: it would be broadcast over the batch (a stride-0 view), or A
+ *   and C merged over (b, i) -- neither is lowered (the recognizer: b is read by
+ *   A and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers
+ *   batches every operand carries).
  *
  * Array dimensions: A: float[2][4][4]   B: float[4][4]   C: float[2][4][4]
  * Loop order (outer to inner): b [batch P], i [row I], j [column J], k [reduction K]
@@ -31,7 +33,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) ... are not' of the dense form; getDenseLogicalGemm refuses them with a message; test/Systolic/affine_to_systolic_refused.mlir @batched
+ *   basis: a batched GEMM with an operand shared by every batch (no batch subscript: C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM with A reshaped -- but the operand would need a stride-0 or merged view, not lowered (the recognizer: two coordinates read by one GEMM role)
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -40,7 +42,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: A, B and C must have the same number of subscripts (>= 2); they have [3, 2, 3]
+ *   reason: 2 separate coordinates are read by one GEMM role
  * Classification: DOCUMENTED LIMITATION
  *   A mathematically valid GEMM that the specification excludes explicitly;
  *   'refused' must never be read as 'not a GEMM'.

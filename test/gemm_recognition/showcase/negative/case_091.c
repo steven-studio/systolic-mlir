@@ -19,8 +19,8 @@
  *     tags: A_transposed
  *
  *   C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose
- *   left operand is read transposed.  The recognizer requires A = (I, K) with the
- *   row subscript shared with C; A[k][i] is (K, I).  Legal, unsupported.
+ *   left operand is read transposed.  A documented limitation until 2026-10-15;
+ *   offloaded since ISSUE-005 (P0.2: A's view is permuted, memref.transpose).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -29,20 +29,16 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: the documented operand convention A = (I, K), B = (K, J), C = (I, J) as row-major views of identity-layout rank-2 memrefs (AffineMatmulAnalysis.cpp recognizeLogicalMatmul, AffineMatmulToSystolic.cpp getLogicalOperand); the linalg path refuses transposed indexing maps as well (test/Systolic/bad_linalg_to_systolic.mlir)
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand
+ * Current implementation (commit 6e25528 with the fix of ISSUE-005, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-005 (fixed)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

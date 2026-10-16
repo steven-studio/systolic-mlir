@@ -24,7 +24,7 @@
 //
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=DISC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
+// RUN: systolic-opt --systolic-declare-fpga-fleet "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SYS
 //
 // DISC-NOT:  dense logical GEMM: yes

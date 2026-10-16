@@ -14510,7 +14510,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions"
+    "reject_reason": "2 coordinate(s) are read by all three operands and none by two: an element-wise product"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -14670,7 +14670,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "3 coordinate(s) are read by all three operands and none by two: an element-wise product"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -14790,32 +14790,32 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": false,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "AffineMatmulAnalysis.cpp collectAffineMatmulCandidates expects a three-deep affine.for nest with rank-2 (or batched rank-3) operands; a GEMV has two index dimensions",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -363,
-   "math_note": "y[i] += M[i][j] * x[j]: a matrix-vector product (GEMV).  It is the N = 1\nspecial case of a GEMM in the mathematical sense (y and x as 8x1 matrices),\nbut as written it has two index dimensions and rank-1 operands.\nExpected rejection: only two loops; the recognizer looks for three nested\naffine.for ops and rank-2 (or batched rank-3) operands.",
+   "math_note": "y[i] += M[i][j] * x[j]: a matrix-vector product (GEMV).  It is the N = 1\nspecial case of a GEMM (y and x as 8x1 matrices), written with two index\ndimensions and rank-1 operands.  Refused until 2026-10-15 (the recognizer\nlooked for three nested loops and rank-2 operands); offloaded since ISSUE-005\n(P0: x and y get a unit column, memref.expand_shape).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_083.c -o case_083 && ./case_083",
@@ -14944,32 +14944,32 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": false,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "AffineMatmulAnalysis.cpp collectAffineMatmulCandidates expects a three-deep affine.for nest with rank-2 (or batched rank-3) operands; a GEMV has two index dimensions",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), docs/AFFINE_GEMM_MAPPING.md section 2",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -1428,
-   "math_note": "Four loops around a matrix-vector product (test/SystolicCC/depth.c\nng_matvec4): y += 4 M x.  Four loops do not make it a GEMM: only i and j\nindex anything.  Expected rejection: the accesses use two loop counters.",
+   "math_note": "Four loops around a matrix-vector product (test/SystolicCC/depth.c\nng_matvec4): y += 4 M x, r and s repeat it.  The GEMV is the N = 1 GEMM\n(ISSUE-005, P0) and r, s are repetition loops outside it: offloaded since\n2026-10-15, its tiles run four times per call (refused before: two loop\ncounters).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_084.c -o case_084 && ./case_084",
@@ -15144,9 +15144,9 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) ... are not' of the dense form; getDenseLogicalGemm refuses them with a message; test/Systolic/affine_to_systolic_refused.mlir @batched",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-15, ISSUE-006) a batched GEMM, every operand carrying the batch coordinate(s) through one and the same expression: the batch loops are re-emitted around the tiles, one GEMM per batch iteration on its own slice of each operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -15155,14 +15155,14 @@
     "frontend": "translated",
     "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "unsupported",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "dense_partition",
-    "reject_reason": "batched GEMM (a partition prefix P* of 1 coordinates) is not supported"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-006",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -15170,7 +15170,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 559,
-   "math_note": "A batched GEMM: for each b, C[b] += A[b] B[b] (two 4x4x4 GEMMs).  This IS a\nvalid GEMM (a partition coordinate P = b in front of I, J, K).  The recognizer\naccepts it (T is the 4x4 identity with a P row), but getDenseLogicalGemm does\nnot support a partition prefix, so it is not lowered: 'batched GEMM (a\npartition prefix P* of 1 coordinates) is not supported'.  Legal, unsupported.",
+   "math_note": "A batched GEMM: for each b, C[b] += A[b] B[b] (two 4x4x4 GEMMs).  This IS a\nvalid GEMM (a partition coordinate P = b in front of I, J, K).  A documented\nlimitation until 2026-10-15; offloaded since ISSUE-006: the batch loop is\nre-emitted around the tiles, two invocations per call.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_085.c -o case_085 && ./case_085",
@@ -15340,7 +15340,7 @@
     "mathematical_gemm": true,
     "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) ... are not' of the dense form; getDenseLogicalGemm refuses them with a message; test/Systolic/affine_to_systolic_refused.mlir @batched",
+    "basis": "a batched GEMM with an operand shared by every batch (no batch subscript: C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM with A reshaped -- but the operand would need a stride-0 or merged view, not lowered (the recognizer: two coordinates read by one GEMM role)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -15353,7 +15353,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "A, B and C must have the same number of subscripts (>= 2); they have [3, 2, 3]"
+    "reject_reason": "2 separate coordinates are read by one GEMM role"
    },
    "classification": "DOCUMENTED_LIMITATION",
    "issue": null,
@@ -15364,7 +15364,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 90,
-   "math_note": "A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  The recognizer\nrequires A, B and C to have the same number of subscripts; B has two, A and\nC three, so recognition fails.  Legal, unsupported.",
+   "math_note": "A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no\nbatch subscript: it would be broadcast over the batch (a stride-0 view), or A\nand C merged over (b, i) -- neither is lowered (the recognizer: b is read by\nA and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers\nbatches every operand carries).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_086.c -o case_086 && ./case_086",
@@ -15650,7 +15650,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "C reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -15960,7 +15960,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "the second factor reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -16125,25 +16125,25 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "the documented operand convention A = (I, K), B = (K, J), C = (I, J) as row-major views of identity-layout rank-2 memrefs (AffineMatmulAnalysis.cpp recognizeLogicalMatmul, AffineMatmulToSystolic.cpp getLogicalOperand); the linalg path refuses transposed indexing maps as well (test/Systolic/bad_linalg_to_systolic.mlir)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16151,7 +16151,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 296,
-   "math_note": "C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose\nleft operand is read transposed.  The recognizer requires A = (I, K) with the\nrow subscript shared with C; A[k][i] is (K, I).  Legal, unsupported.",
+   "math_note": "C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose\nleft operand is read transposed.  A documented limitation until 2026-10-15;\noffloaded since ISSUE-005 (P0.2: A's view is permuted, memref.transpose).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_091.c -o case_091 && ./case_091",
@@ -16303,25 +16303,25 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "the documented operand convention A = (I, K), B = (K, J), C = (I, J) as row-major views of identity-layout rank-2 memrefs (AffineMatmulAnalysis.cpp recognizeLogicalMatmul, AffineMatmulToSystolic.cpp getLogicalOperand); the linalg path refuses transposed indexing maps as well (test/Systolic/bad_linalg_to_systolic.mlir)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16329,7 +16329,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 1778,
-   "math_note": "C += A B^T (the user's seed A[i][k], B[j][k], C[i][j]): a valid GEMM whose\nright operand is read transposed (B[j][k] is (J, K), the recognizer needs\n(K, J)).  Legal, unsupported.",
+   "math_note": "C += A B^T (the user's seed A[i][k], B[j][k], C[i][j]): a valid GEMM whose\nright operand is read transposed (B[j][k] is (J, K)).  A documented\nlimitation until 2026-10-15; offloaded since ISSUE-005 (P0.2).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_092.c -o case_092 && ./case_092",
@@ -16481,25 +16481,25 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "the documented operand convention A = (I, K), B = (K, J), C = (I, J) as row-major views of identity-layout rank-2 memrefs (AffineMatmulAnalysis.cpp recognizeLogicalMatmul, AffineMatmulToSystolic.cpp getLogicalOperand); the linalg path refuses transposed indexing maps as well (test/Systolic/bad_linalg_to_systolic.mlir)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -16507,7 +16507,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": -379,
-   "math_note": "C^T += A B, i.e. C += B^T A^T: a valid GEMM written into the transposed\noutput.  The recognizer needs C = (I, J); C[j][i] is (J, I).  Legal, unsupported.",
+   "math_note": "C^T += A B, i.e. C += B^T A^T: a valid GEMM written into the transposed\noutput.  A documented limitation until 2026-10-15; offloaded since ISSUE-005\n(P0.2: the factor assignment that transposes least is chosen).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_093.c -o case_093 && ./case_093",
@@ -16821,7 +16821,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "a coordinate is read by the second factor only: the other operands would be broadcast along it"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -21723,7 +21723,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "C reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -21872,7 +21872,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "a coordinate is read by C only: the other operands would be broadcast along it"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -22021,7 +22021,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -22170,7 +22170,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -22319,7 +22319,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "the first factor reads one logical coordinate in two of its dimensions (0 and 1)"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -22962,29 +22962,31 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "two operands run through a shared coordinate in opposite directions (A[7 - i] with C[i]): no strided view of one operand matches the other (a memref.subview has no negative stride); recognizeLogicalMatmul matchSharedCoordinate refuses it. (A coordinate that decreases in every operand is supported: ISSUE-004)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(no longer a limitation since 2026-10-15, P0.3) two operands that run through a shared coordinate in opposite directions (A[7 - i] with C[i]): one operand's view has a negative stride (memref.subview with a negative static stride, its offset the largest index), docs/AFFINE_GEMM_MAPPING.md section 5",
     "spec_question": null,
-    "views": {},
+    "views": {
+     "A": "[-1*I + 7, 1*K + 0]"
+    },
     "runtime": "not applicable: an MLIR-level case is not compiled by systolic-cc nor executed"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from the compiler sources; what scripts/run_showcase.py measures (discovery + lowering) is compared with both layers",
     "frontend": "not_applicable",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "not recognized: A's row expression 7 - i and C's i are not one coordinate"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-005",
    "has_independent_reference": false,
    "reference_kinds": [],
-   "math_note": "C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM\nof a reversed view of A.  I is i on C and 7 - i on A: opposite directions,\nwhich the specification lists as a documented limitation (a negative stride).\nThe recognizer refuses it (the two expressions are not the same coordinate in\nthe same direction); ext_003 is the same limitation with both operands reversed.",
+   "math_note": "C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM\nof a reversed view of A.  I is i on C and 7 - i on A: opposite directions, a\ndocumented limitation until 2026-10-15; lowered since ISSUE-005 (P0.3): A's\nview runs backwards from row 7 (a negative stride), C's forwards.",
    "tested": false,
    "how_to_run": {
     "discovery": "build/bin/systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery showcase/negative/mlir_010.mlir -o /dev/null",
@@ -25012,9 +25014,9 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) ... are not' of the dense form; getDenseLogicalGemm refuses them with a message; test/Systolic/affine_to_systolic_refused.mlir @batched",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-15, ISSUE-006) a batched GEMM, every operand carrying the batch coordinate(s) through one and the same expression: the batch loops are re-emitted around the tiles, one GEMM per batch iteration on its own slice of each operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -25023,14 +25025,14 @@
     "frontend": "translated",
     "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "unsupported",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "dense_partition",
-    "reject_reason": "batched GEMM (a partition prefix P* of 2 coordinates) is not supported"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-006",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -25038,7 +25040,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": -618,
-   "math_note": "Two batch coordinates: four 4x4x4 GEMMs.  Valid; the recognizer\naccepts a two-coordinate partition prefix, getDenseLogicalGemm\ndoes not.  Legal, unsupported.",
+   "math_note": "Two batch coordinates: four 4x4x4 GEMMs.  Valid; a documented\nlimitation until 2026-10-15, offloaded since ISSUE-006 (both batch\nloops re-emitted around the tiles, four invocations per call).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/extended/ext_011.c -o ext_011 && ./ext_011",
@@ -25805,7 +25807,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared coordinate must be the same linear form of the loop counters in both operands (up to each operand's own constant offset and positive stride)"
+    "reject_reason": "logical coordinate I: the two subscripts are not multiples of one linear form of the loop counters"
    },
    "classification": "SPEC_OPEN",
    "issue": null,
@@ -26500,6 +26502,7 @@
  "spec_questions": {
   "SQ-1": "a coordinate split over several loops with a different mixed radix per operand (A[4*i0 + i1][k] with C[8*i0 + i1][j]): the definition's 'injective affine function of the coordinate's loops' admits it, the 'inside' list does not name it, and the operand views are not strided sub-matrices (a rank-2 memref.subview cannot express them) -- inside the specification (with a copy or a rank-3 view) or a documented limitation?",
   "SQ-2": "an empty GEMM (a loop of zero iterations, M, N or K = 0): the nest computes nothing; must the compiler offload it (zero invocations) or refuse it?  Either keeps the result correct; the specification does not say which",
-  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?"
+  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?",
+  "SQ-5": "a batched nest whose per-batch GEMM has two of M, N, K equal to 1 -- the reduction index in the output with a single-iteration j (C[i][k] += A[i][k] * B[k][j], j in [1, 2)): k is read by every operand (a batch coordinate), N = K = 1, so each batch is a column scaled by a scalar.  The result is correct, but the specification lists 'the reduction index in the output' as not a GEMM; is a batched vector-times-scalar a GEMM to offload, or a documented limitation?"
  }
 }

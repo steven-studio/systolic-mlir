@@ -26,14 +26,24 @@
 // --systolic-runtime-to-llvm unchanged. Without a systolic.device the whole
 // domain is one region, lowered to a single unassigned matmul_tile.
 //
+// Each operand's view (docs/AFFINE_GEMM_MAPPING.md section 5) is a
+// rank-reducing memref.subview with signed strides -- a dimension the
+// operand reads backwards has a negative stride -- then memref.transpose
+// when the operand stores its roles in the other order, then
+// memref.expand_shape for a role of extent one it has no dimension for.
+//
 // A nest is left untouched, with a remark saying why, when the lowering
 // cannot be shown correct: a batched or non-permutation mapping, operands
-// that may alias C, provably out-of-bounds or non-identity-layout memrefs, or a
-// partition that is not exact. Semantics: the lowering keeps every product
-// A(i,k) * B(k,j) and accumulates each C(i,j) over K in increasing order of
-// the K-folded invocations, but the array's own summation order inside an
-// invocation is not the loop's, so floating-point results equal the loop's
-// only when the arithmetic is exact (reassociation, as for linalg.matmul).
+// that may alias C, provably out-of-bounds or non-identity-layout memrefs, an
+// address that does not fit in 64 bits, or a partition that is not exact.
+// Semantics: the lowering keeps every product A(i,k) * B(k,j) and accumulates
+// each C(i,j) over K in increasing order of the K-folded invocations, but
+// each invocation sums its products from zero on the device and the host adds
+// the sum to C -- a different sequence of IEEE additions than the loop's (even
+// the sign of a zero may differ). So a nest is lowered only when the program
+// permits reassociating its floating-point sum: the `reassoc` flag on the
+// accumulation, or allow-fp-reassociation (section 6). Results then equal the
+// loop's exactly when the arithmetic is exact.
 //
 //===----------------------------------------------------------------------===//
 
@@ -113,24 +123,42 @@ static bool provablyDisjointFromOutput(Value input, Value output,
   return isNoAliasArgument(outputRoot) || isNoAliasArgument(inputRoot);
 }
 
-/// The logical matrix a memref holds: rows are logical coordinate `rowDim`,
-/// columns `colDim`, element (r, c) at memref[offset_r + scale_r * r,
-/// offset_c + scale_c * c] -- the operand's own view (LogicalMatmul::viewA/B/C)
-/// of the coordinate's dense values offset_d + scale_d * ordinal.
+/// The logical matrix an operand holds (docs/AFFINE_GEMM_MAPPING.md §5): its
+/// two GEMM roles (rows, columns) in GEMM order, each read in one memref
+/// dimension at index alpha + rho * ordinal, rho of either sign (a negative
+/// rho is a view that runs backwards: its origin is the largest index of that
+/// dimension); every other dimension at a fixed index. Built as a
+/// rank-reducing memref.subview of the memref (signed strides), then
+/// memref.transpose when the operand stores the roles in the other order,
+/// then memref.expand_shape for a role of extent one the operand has no
+/// dimension for. Every element of the view is an element the loop nest
+/// itself accesses.
 struct LogicalOperand {
   Value memref;
-  std::array<int64_t, 2> offsets, sizes, strides;
+  // The subview, over every dimension of the memref.
+  SmallVector<int64_t> offsets, sizes, strides;
+  // The memref dimension of each role, -1 for none (a unit dimension).
+  std::array<int, 2> roleDim{-1, -1};
+  // The view's shape: the roles' extents.
+  std::array<int64_t, 2> shape{1, 1};
+  // The memref dimension of each batch coordinate: read at the batch index
+  // of the enclosing batch loop (a dynamic offset), dropped from the view.
+  SmallVector<int, 2> batchDim;
 
   bool isWholeMemref() const {
     auto ty = cast<MemRefType>(memref.getType());
-    return ty.hasStaticShape() && offsets[0] == 0 && offsets[1] == 0 &&
-           strides[0] == 1 &&
-           strides[1] == 1 && sizes[0] == ty.getDimSize(0) &&
-           sizes[1] == ty.getDimSize(1);
+    return ty.getRank() == 2 && ty.hasStaticShape() && roleDim[0] == 0 &&
+           roleDim[1] == 1 && offsets[0] == 0 && offsets[1] == 0 &&
+           strides[0] == 1 && strides[1] == 1 &&
+           sizes[0] == ty.getDimSize(0) && sizes[1] == ty.getDimSize(1);
   }
   bool sameView(const LogicalOperand &other) const {
     return memref == other.memref && offsets == other.offsets &&
-           sizes == other.sizes && strides == other.strides;
+           sizes == other.sizes && strides == other.strides &&
+           roleDim == other.roleDim && batchDim == other.batchDim;
+  }
+  bool isTransposed() const {
+    return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];
   }
 };
 
@@ -138,66 +166,205 @@ static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
                   unsigned colDim,
                   const std::array<OperandCoordinateView, 2> &views,
-                  StringRef name, std::string &why) {
+                  const OperandLayout &layout, StringRef name,
+                  std::string &why, GemmMappingClass &mappingClass) {
   auto ty = dyn_cast<MemRefType>(memref.getType());
-  if (!ty || ty.getRank() != 2 || !ty.getLayout().isIdentity()) {
-    why = (name + " is not a rank-2 memref with the identity layout").str();
+  // The subview needs the memref's strides: an identity layout (its leading
+  // dimension may be dynamic -- C's float A[][K]).
+  if (!ty || ty.getRank() < 1 || !ty.getLayout().isIdentity() ||
+      layout.constantIndex.size() != size_t(ty.getRank())) {
+    why = (name + " is not a memref with the identity layout").str();
+    mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
     return failure();
   }
+  for (int64_t d = 1; d < ty.getRank(); ++d)
+    if (ty.isDynamicDim(d)) {
+      why = (name + " has a dynamic dimension other than the leading one").str();
+      mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
+      return failure();
+    }
 
   static constexpr const char *kName[] = {"I", "J", "K"};
+  const unsigned rank = ty.getRank();
   LogicalOperand operand;
   operand.memref = memref;
-  for (auto [r, d] : llvm::enumerate(std::array<unsigned, 2>{rowDim, colDim})) {
-    // Along this dimension the operand reads view.offset + view.scale * y_d
-    // with y_d = dense.offset[d] + dense.scale[d] * ordinal: a strided view
-    // starting at view.offset + view.scale * dense.offset[d] with stride
-    // view.scale * dense.scale[d]. A memref.subview has no negative stride,
-    // and a coordinate that decreases along its loop is refused by
-    // getDenseLogicalGemm; an operand whose own view decreases is refused
-    // here for the same reason.
-    const OperandCoordinateView &view = views[r];
-    if (view.scale <= 0) {
-      why = (name + "'s view of logical coordinate " + kName[d] +
-             " decreases along it (a negative stride)")
-                .str();
-      return failure();
+  operand.roleDim = layout.roleDim;
+  operand.offsets.assign(rank, 0);
+  operand.sizes.assign(rank, 1);
+  operand.strides.assign(rank, 1);
+
+  // A dimension's accessed indices [lo, hi] must lie inside it: lo >= 0
+  // always, hi < its size when that is static (a dynamic size is the
+  // program's own guarantee). Outside, the nest itself accesses out of
+  // bounds -- undefined, nothing correct to lower it to.
+  auto inBounds = [&](unsigned dim, int64_t lo, int64_t hi) {
+    if (lo >= 0 && (ty.isDynamicDim(dim) || hi < ty.getDimSize(dim)))
+      return true;
+    why = (name + " is accessed out of bounds along dimension " +
+           llvm::Twine(dim))
+              .str();
+    mappingClass = GemmMappingClass::ProvenInvalid;
+    return false;
+  };
+
+  // The index range of every dimension, for the address check below.
+  SmallVector<std::pair<int64_t, int64_t>> indexRange(rank, {0, 0});
+  for (unsigned d = 0; d < rank; ++d)
+    if (layout.constantIndex[d]) {
+      // An extent-one dimension: one fixed index.
+      operand.offsets[d] = *layout.constantIndex[d];
+      indexRange[d] = {*layout.constantIndex[d], *layout.constantIndex[d]};
+      if (!inBounds(d, *layout.constantIndex[d], *layout.constantIndex[d]))
+        return failure();
     }
-    // All of it in checked arithmetic: a wrapped-around offset or stride
-    // could pass the bounds test below and address memory the nest never
-    // touched.
-    std::optional<int64_t> start = llvm::checkedMul(view.scale, dense.offset[d]);
-    std::optional<int64_t> offset =
+
+  // A batch dimension: the batch coordinate's value, computed per batch
+  // iteration (a dynamic offset); its range on the domain is the bound.
+  if (layout.batchDim.size() != dense.numBatchDims) {
+    why = (name + "'s batch dimensions do not match the batch coordinates").str();
+    mappingClass = GemmMappingClass::Unknown;
+    return failure();
+  }
+  operand.batchDim = layout.batchDim;
+  for (auto [p, dim] : llvm::enumerate(layout.batchDim)) {
+    indexRange[dim] = dense.batchRange[p];
+    if (!inBounds(dim, dense.batchRange[p].first, dense.batchRange[p].second))
+      return failure();
+  }
+
+  for (auto [r, logical] :
+       llvm::enumerate(std::array<unsigned, 2>{rowDim, colDim})) {
+    operand.shape[r] = dense.extent[logical];
+    const int dim = layout.roleDim[r];
+    if (dim < 0) {
+      // No dimension for this role: it has extent 1 (a unit dimension).
+      if (dense.extent[logical] != 1) {
+        why = (name + " has no dimension for logical coordinate " +
+               kName[logical])
+                  .str();
+        mappingClass = GemmMappingClass::ProvenInvalid;
+        return failure();
+      }
+      continue;
+    }
+    // Along this dimension the operand reads view.offset + view.scale * y_d
+    // with y_d = dense.offset[d] + dense.scale[d] * ordinal: index alpha +
+    // rho * ordinal with alpha = view.offset + view.scale * dense.offset and
+    // rho = view.scale * dense.scale -- negative when the operand reads the
+    // coordinate backwards. All of it in checked arithmetic: a wrapped-around
+    // offset or stride could pass the bounds test and address memory the
+    // nest never touched.
+    const OperandCoordinateView &view = views[r];
+    std::optional<int64_t> start =
+        llvm::checkedMul(view.scale, dense.offset[logical]);
+    std::optional<int64_t> alpha =
         start ? llvm::checkedAdd(*start, view.offset) : std::nullopt;
-    std::optional<int64_t> stride = llvm::checkedMul(view.scale, dense.scale[d]);
+    std::optional<int64_t> rho =
+        llvm::checkedMul(view.scale, dense.scale[logical]);
     std::optional<int64_t> span =
-        stride ? llvm::checkedMul(*stride, dense.extent[d] - 1) : std::nullopt;
+        rho ? llvm::checkedMul(*rho, dense.extent[logical] - 1) : std::nullopt;
     std::optional<int64_t> last =
-        (offset && span) ? llvm::checkedAdd(*offset, *span) : std::nullopt;
-    if (!offset || !stride || !last) {
-      why = (name + "'s subscripts along dimension " + llvm::Twine(r) +
+        (alpha && span) ? llvm::checkedAdd(*alpha, *span) : std::nullopt;
+    if (!alpha || !rho || !last || *rho == 0) {
+      why = (name + "'s subscripts along dimension " + llvm::Twine(dim) +
              " overflow 64-bit arithmetic")
                 .str();
+      mappingClass = GemmMappingClass::Unknown;
       return failure();
     }
-    operand.offsets[r] = *offset;
-    operand.sizes[r] = dense.extent[d];
-    operand.strides[r] = *stride;
-    // The view holds exactly the elements the loop nest itself accesses
-    // (every row and column of the logical matrix is touched by some
-    // iteration), so it is in bounds whenever the nest was defined. A
-    // dynamic extent -- the leading dimension of a C array parameter,
-    // float A[][K] -- is therefore taken as the nest's own guarantee; a
-    // static one that the accesses provably exceed means the nest was
-    // undefined to begin with, and there is nothing correct to lower it to.
-    if (*offset < 0 || (!ty.isDynamicDim(r) && *last >= ty.getDimSize(r))) {
-      why = (name + " is accessed out of bounds along dimension " +
-             llvm::Twine(r))
-                .str();
+    operand.offsets[dim] = *alpha;
+    operand.sizes[dim] = dense.extent[logical];
+    operand.strides[dim] = *rho;
+    indexRange[dim] = {std::min(*alpha, *last), std::max(*alpha, *last)};
+    if (!inBounds(dim, std::min(*alpha, *last), std::max(*alpha, *last)))
+      return failure();
+  }
+
+  // The view's linear element offsets (what the subview's strided layout and
+  // the memref descriptor hold): sum over the dimensions of index * stride
+  // with the row-major strides of the memref. Every index is in range, but
+  // with a dynamic leading dimension the products are not bounded by an
+  // allocation size: each must fit in 64 bits. The offset is a sum of
+  // independent per-dimension terms, so its smallest and largest values are
+  // the sums of the per-dimension smallest and largest terms (the roles'
+  // extreme indices, a batch dimension's range, a fixed index).
+  SmallVector<int64_t> rowMajor(rank, 1);
+  for (int64_t d = int64_t(rank) - 2; d >= 0; --d) {
+    std::optional<int64_t> stride =
+        llvm::checkedMul(rowMajor[d + 1], ty.getDimSize(d + 1));
+    if (!stride) {
+      why = (name + "'s row-major strides overflow 64-bit arithmetic").str();
+      mappingClass = GemmMappingClass::Unknown;
+      return failure();
+    }
+    rowMajor[d] = *stride;
+  }
+  for (bool largest : {false, true}) {
+    std::optional<int64_t> address = int64_t(0);
+    for (unsigned d = 0; d < rank && address; ++d) {
+      const int64_t index =
+          largest ? indexRange[d].second : indexRange[d].first;
+      std::optional<int64_t> term = llvm::checkedMul(index, rowMajor[d]);
+      address = term ? llvm::checkedAdd(*address, *term) : std::nullopt;
+    }
+    if (!address) {
+      why = (name + "'s element addresses overflow 64-bit arithmetic").str();
+      mappingClass = GemmMappingClass::Unknown;
       return failure();
     }
   }
   return operand;
+}
+
+/// The operand's rank-2 view (rows x columns of the GEMM), on `builder`;
+/// `batchIndex[p]` is the value of batch coordinate p in the enclosing batch
+/// loops (the offset of the operand's batch dimension, dynamic).
+static Value materializeOperandView(OpBuilder &builder, Location loc,
+                                    const LogicalOperand &operand,
+                                    ArrayRef<Value> batchIndex) {
+  if (operand.isWholeMemref())
+    return operand.memref;
+  auto sourceTy = cast<MemRefType>(operand.memref.getType());
+  // The subview keeps the role dimensions (in memref order), drops the rest.
+  SmallVector<int64_t> keptShape;
+  SmallVector<int> kept;
+  for (int64_t d = 0; d < sourceTy.getRank(); ++d)
+    if (d == operand.roleDim[0] || d == operand.roleDim[1]) {
+      kept.push_back(d);
+      keptShape.push_back(operand.sizes[d]);
+    }
+  SmallVector<OpFoldResult> offsets, sizes, strides;
+  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
+    offsets.push_back(builder.getIndexAttr(operand.offsets[d]));
+    sizes.push_back(builder.getIndexAttr(operand.sizes[d]));
+    strides.push_back(builder.getIndexAttr(operand.strides[d]));
+  }
+  for (auto [p, dim] : llvm::enumerate(operand.batchDim))
+    offsets[dim] = batchIndex[p];
+  MemRefType subviewTy = memref::SubViewOp::inferRankReducedResultType(
+      keptShape, sourceTy, offsets, sizes, strides);
+  Value view = memref::SubViewOp::create(builder, loc, subviewTy,
+                                         operand.memref, offsets, sizes,
+                                         strides);
+  // The roles in the other order: swap the two dimensions.
+  if (operand.isTransposed()) {
+    AffineMap swap = AffineMap::getPermutationMap(ArrayRef<unsigned>{1, 0},
+                                                  builder.getContext());
+    view = memref::TransposeOp::create(builder, loc, view,
+                                       AffineMapAttr::get(swap));
+  }
+  // A role the operand has no dimension for: a unit dimension in its place
+  // (both roles: an operand of batch dimensions only, a rank-0 view, becomes
+  // the 1 x 1 matrix).
+  if (kept.size() < 2) {
+    SmallVector<int64_t> shape(operand.shape.begin(), operand.shape.end());
+    SmallVector<ReassociationIndices> reassociation;
+    if (kept.size() == 1)
+      reassociation.push_back(ReassociationIndices{0, 1});
+    view = memref::ExpandShapeOp::create(builder, loc, shape, view,
+                                         reassociation);
+  }
+  return view;
 }
 
 /// How many times the loops enclosing `op` (up to its function) run it, or
@@ -329,6 +496,25 @@ struct AffineMatmulToSystolicPass
                      "takes it (0: every accelerator fills independently)"),
       llvm::cl::init(0.0)};
 
+  Option<bool> allowFpReassociation{
+      *this, "allow-fp-reassociation",
+      llvm::cl::desc("Permit reassociating the floating-point accumulation: "
+                     "the systolic execution sums each tile from zero and adds "
+                     "the sum to C, a different order of IEEE additions than "
+                     "the loop's, so results may differ in rounding and in the "
+                     "sign of a zero (docs/AFFINE_GEMM_MAPPING.md section 6). "
+                     "Without it only nests whose accumulation carries the "
+                     "`reassoc` fast-math flag are lowered"),
+      llvm::cl::init(false)};
+
+  Option<bool> classify{
+      *this, "classify",
+      llvm::cl::desc("Append each refused nest's classification "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 9: PROVEN_VALID, "
+                     "VALID_BUT_LOWERING_UNSUPPORTED, PROVEN_INVALID, UNKNOWN) "
+                     "to its remark, as [CLASS]"),
+      llvm::cl::init(false)};
+
   Option<bool> report{
       *this, "report",
       llvm::cl::desc("Emit a remark per lowered GEMM with its partition and "
@@ -336,34 +522,46 @@ struct AffineMatmulToSystolicPass
       llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<bufferization::BufferizationDialect, tensor::TensorDialect,
-                    memref::MemRefDialect, SystolicDialect>();
+    registry.insert<affine::AffineDialect, bufferization::BufferizationDialect,
+                    tensor::TensorDialect, memref::MemRefDialect,
+                    SystolicDialect>();
   }
 
-  /// Lowers one GEMM, or leaves it untouched and returns why not.
+  /// Lowers one GEMM, or leaves it untouched and returns why not and how the
+  /// nest is classified (docs/AFFINE_GEMM_MAPPING.md section 9).
   LogicalResult lowerOne(const LogicalMatmul &matmul,
                          const SystolicFleet &fleet, std::string &why,
-                         bool &hardError) {
+                         GemmMappingClass &mappingClass, bool &hardError) {
     Operation *anchor = matmul.anchor;
+    mappingClass = GemmMappingClass::ProvenValid;
 
-    FailureOr<DenseLogicalGemm> dense = getDenseLogicalGemm(matmul, &why);
-    if (failed(dense))
+    FailureOr<DenseLogicalGemm> dense =
+        getDenseLogicalGemm(matmul, &why, &mappingClass);
+    if (failed(dense)) {
+      // Which bound is not a constant, and why (a symbol, or a bound on
+      // another loop's counter: not a box).
+      if (!matmul.normalization.domain && !matmul.normalizationDetail.empty())
+        why += " (" + matmul.normalizationDetail + ")";
       return failure();
+    }
 
     const int64_t M = dense->extent[kLogicalI];
     const int64_t N = dense->extent[kLogicalJ];
     const int64_t K = dense->extent[kLogicalK];
 
     auto lhs = getLogicalOperand(matmul.lhs, *dense, kLogicalI, kLogicalK,
-                                 matmul.viewA, "A", why);
+                                 matmul.viewA, matmul.layoutA, "A", why,
+                                 mappingClass);
     if (failed(lhs))
       return failure();
     auto rhs = getLogicalOperand(matmul.rhs, *dense, kLogicalK, kLogicalJ,
-                                 matmul.viewB, "B", why);
+                                 matmul.viewB, matmul.layoutB, "B", why,
+                                 mappingClass);
     if (failed(rhs))
       return failure();
     auto out = getLogicalOperand(matmul.output, *dense, kLogicalI, kLogicalJ,
-                                 matmul.viewC, "C", why);
+                                 matmul.viewC, matmul.layoutC, "C", why,
+                                 mappingClass);
     if (failed(out))
       return failure();
 
@@ -374,6 +572,7 @@ struct AffineMatmulToSystolicPass
         cast<MemRefType>(matmul.rhs.getType()).getElementType() !=
             elementType) {
       why = "A, B and C have different element types";
+      mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
       return failure();
     }
 
@@ -384,6 +583,7 @@ struct AffineMatmulToSystolicPass
                " may overlap C; declare the arguments llvm.noalias (C "
                "restrict) or pass assume-no-alias")
                   .str();
+        mappingClass = GemmMappingClass::Unknown;
         return failure();
       }
     }
@@ -393,6 +593,7 @@ struct AffineMatmulToSystolicPass
     const bool sharedInput = lhs->sameView(*rhs);
     if (!sharedInput && matmul.lhs == matmul.rhs) {
       why = "A and B are different views of the same memref";
+      mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
       return failure();
     }
 
@@ -428,6 +629,25 @@ struct AffineMatmulToSystolicPass
     auto partitions = partitionLogicalMatmul(matmul, boxes, &why);
     if (failed(partitions)) {
       why = "the partition is not exact: " + why;
+      mappingClass = GemmMappingClass::Unknown;
+      return failure();
+    }
+
+    // ------------------------------------------------------------------
+    // Floating point (docs/AFFINE_GEMM_MAPPING.md section 6). The mapping is
+    // valid, but the systolic execution is not the loop's sequence of IEEE
+    // operations: each tile's product is summed from zero (+0) on the device
+    // and the sum added to C -- C + (a1 b1 + a2 b2 + ...) against the loop's
+    // ((C + a1 b1) + a2 b2) + ...; even a one-term tile turns a -0 product
+    // into +0. The program must permit reassociation.
+    // ------------------------------------------------------------------
+    if (!matmul.reductionMayReassociate && !allowFpReassociation) {
+      why = "floating-point reassociation is not permitted: the systolic "
+            "execution sums each tile from zero and adds the sum to C, a "
+            "different order of IEEE additions than the loop's (mark the "
+            "accumulation reassoc -- systolic-cc --fp-reassociation -- or "
+            "pass allow-fp-reassociation)";
+      mappingClass = GemmMappingClass::ProvenValid;
       return failure();
     }
 
@@ -437,16 +657,72 @@ struct AffineMatmulToSystolicPass
     OpBuilder builder(anchor);
     Location loc = anchor->getLoc();
 
+    // A batched GEMM: the batch loops -- the nest's loops that drive a batch
+    // coordinate, with their own bounds and steps, in their original order
+    // -- are re-emitted around the tiles, so that every batch iteration runs
+    // the tiles once on its own slice of each operand: exactly the original
+    // iteration domain, whatever the batch coordinate's values (ISSUE-006,
+    // docs/AFFINE_GEMM_MAPPING.md section 2). The batch index of operand
+    // dimension p is the coordinate's expression over the loop counters, an
+    // affine.apply on the new loops' counters.
+    SmallVector<Value> batchIndex;
+    if (dense->numBatchDims) {
+      const auto &T = matmul.logicalMapping.transformation;
+      const auto &c = matmul.logicalMapping.offset;
+      const auto &origin = matmul.logicalMapping.sourceOrigin;
+      // Each batch index's constant: c[p] plus the terms of the loops that
+      // run once (a constant on the domain, their counter at its lower
+      // bound), which are not re-emitted. Checked, and before any IR is
+      // built: a failure leaves the nest untouched.
+      SmallVector<int64_t> batchConstant;
+      for (unsigned p = 0; p < dense->numBatchDims; ++p) {
+        std::optional<int64_t> constant = c[p];
+        for (unsigned s = 0; s < T[p].size() && constant; ++s) {
+          if (T[p][s] == 0 || llvm::is_contained(dense->batchLoops, s))
+            continue;
+          std::optional<int64_t> term = llvm::checkedMul(T[p][s], origin[s]);
+          constant = term ? llvm::checkedAdd(*constant, *term) : std::nullopt;
+        }
+        if (!constant) {
+          why = "a batch index overflows 64-bit arithmetic";
+          mappingClass = GemmMappingClass::Unknown;
+          return failure();
+        }
+        batchConstant.push_back(*constant);
+      }
+      // The batch loops, re-emitted as they are, outermost first.
+      SmallVector<Value> newIVs;
+      SmallVector<AffineExpr> dims;
+      for (unsigned s : dense->batchLoops) {
+        affine::AffineForOp loop = affine::getForInductionVarOwner(
+            matmul.sourceDomain->getValue(s));
+        auto batchLoop = affine::AffineForOp::create(
+            builder, loc, loop.getConstantLowerBound(),
+            loop.getConstantUpperBound(), loop.getStep().getSExtValue());
+        newIVs.push_back(batchLoop.getInductionVar());
+        dims.push_back(getAffineDimExpr(dims.size(), builder.getContext()));
+        builder.setInsertionPointToStart(batchLoop.getBody());
+      }
+      for (unsigned p = 0; p < dense->numBatchDims; ++p) {
+        AffineExpr expr =
+            getAffineConstantExpr(batchConstant[p], builder.getContext());
+        for (auto [j, s] : llvm::enumerate(dense->batchLoops))
+          if (T[p][s] != 0)
+            expr = expr + dims[j] * T[p][s];
+        // One dimension per batch loop, whether or not this coordinate uses
+        // it (the map's dimension count must match the operands).
+        AffineMap map = AffineMap::get(newIVs.size(), /*symbolCount=*/0, expr);
+        batchIndex.push_back(
+            affine::AffineApplyOp::create(builder, loc, map, newIVs));
+      }
+    }
+
     auto view = [&](const LogicalOperand &operand) -> Value {
-      if (operand.isWholeMemref())
-        return operand.memref;
-      return memref::SubViewOp::create(builder, loc, operand.memref,
-                                       operand.offsets, operand.sizes,
-                                       operand.strides);
+      return materializeOperandView(builder, loc, operand, batchIndex);
     };
     auto asTensor = [&](Value memref, const LogicalOperand &operand,
                         bool writable) -> Value {
-      auto ty = RankedTensorType::get(operand.sizes, elementType);
+      auto ty = RankedTensorType::get(operand.shape, elementType);
       return bufferization::ToTensorOp::create(builder, loc, ty, memref,
                                                /*restrict=*/true, writable);
     };
@@ -485,9 +761,16 @@ struct AffineMatmulToSystolicPass
                << plan->optimization.makespan
                << " cycles (read + compute + write), "
                << plan->blocks.size() << " output block(s)";
+      if (dense->numBatchDims)
+        remark << ", batched: " << dense->batchTrips
+               << " batch iteration(s) of " << dense->batchLoops.size()
+               << " batch loop(s)";
       // Enclosing loops (repeating ones the nest kept or that were moved
-      // out of it) run the tiles more than once per call of the function.
+      // out of it, and the batch loops) run the tiles more than once per
+      // call of the function.
       std::optional<uint64_t> times = enclosingRepetitions(anchor);
+      if (times)
+        times = llvm::checkedMulUnsigned(*times, uint64_t(dense->batchTrips));
       if (!times)
         remark << "; the enclosing loops run it an unknown number of times";
       else if (*times != 1)
@@ -527,15 +810,19 @@ struct AffineMatmulToSystolicPass
 
     for (const LogicalMatmul &matmul : matmuls) {
       std::string why;
+      GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
       bool hardError = false;
-      if (succeeded(lowerOne(matmul, *fleet, why, hardError)))
+      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError)))
         continue;
       if (hardError) {
         signalPassFailure();
         return;
       }
-      matmul.anchor->emitRemark()
-          << "affine GEMM not lowered to systolic.matmul_tile: " << why;
+      auto remark = matmul.anchor->emitRemark()
+                    << "affine GEMM not lowered to systolic.matmul_tile: "
+                    << why;
+      if (classify)
+        remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
     }
   }
 };

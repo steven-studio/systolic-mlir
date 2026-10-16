@@ -616,12 +616,12 @@ def shared_coordinate(a: LinearForm, b: LinearForm) -> Optional[LinearForm]:
 
     Identical expressions share it trivially (the coordinate is that
     expression).  Otherwise both must be s * g + o for one linear form g over
-    the loop counters with integer s > 0: the same loop combination, the same
-    direction, each operand with its own constant offset and positive stride
-    -- then the coordinate is the primitive form g (coefficients divided by
-    their gcd, no constant).  Different loop combinations (4 i0 + i1 against
-    8 i0 + i1), opposite directions (i against 7 - i) and constants are not
-    one coordinate.  This mirrors matchSharedCoordinate in
+    the loop counters with integer s != 0: the same loop combination, in the
+    same or the opposite direction (since 2026-10-15, P0: a negative-stride
+    view, docs/AFFINE_GEMM_MAPPING.md section 5), each operand with its own
+    constant offset and stride -- then the coordinate is the primitive form
+    g.  Different loop combinations (4 i0 + i1 against 8 i0 + i1) and
+    constants are not one coordinate.  This mirrors matchSharedCoordinate in
     AffineMatmulAnalysis.cpp."""
     if a == b:
         return a
@@ -630,9 +630,111 @@ def shared_coordinate(a: LinearForm, b: LinearForm) -> Optional[LinearForm]:
         return None
     pa = {k: v // ga for k, v in a.coef.items()}
     pb = {k: v // gb for k, v in b.coef.items()}
-    if pa != pb:
+    if pa != pb and pa != {k: -v for k, v in pb.items()}:
         return None
     return LinearForm(pa, 0)
+
+
+def _domain_form(f: LinearForm, loops) -> LinearForm:
+    """f on the iteration domain: a loop that runs once is a constant there
+    (its counter has one value) -- the compiler's domain form."""
+    once = {lp.var: lp.lb for lp in loops if lp.trip() == 1}
+    coef = {k: v for k, v in f.coef.items() if k not in once}
+    return LinearForm(coef, f.const + sum(v * once[k] for k, v in f.coef.items() if k in once))
+
+
+def _form_range(f: LinearForm, loops):
+    """The smallest and largest value of f over the box of the loops' values."""
+    vals = {lp.var: lp.values() for lp in loops}
+    lo = hi = f.const
+    for k, v in f.coef.items():
+        ends = (v * min(vals[k]), v * max(vals[k]))
+        lo += min(ends)
+        hi += max(ends)
+    return lo, hi
+
+
+def predict_by_groups(case, forms, loops):
+    """The compiler's analysis by groups and roles (AffineMatmulAnalysis.cpp,
+    recognizeLogicalMatmul, docs/AFFINE_GEMM_MAPPING.md section 2), used when
+    the positional form A = (P*, I, K), B = (P*, K, J), C = (P*, I, J) does
+    not apply: loops that occur together in a subscript form one coordinate;
+    its role is fixed by the operands that read it; each role's two
+    subscripts must be multiples (either sign) of one linear form.  Returns
+    ((I, J, K, role_dims), None) with None for a role of extent one, or
+    (None, reason)."""
+    trip = {lp.var: lp.trip() for lp in loops}
+    dom = {r: [_domain_form(f, loops) for f in forms[r]] for r in ("a", "b", "c")}
+    parent = {lp.var: lp.var for lp in loops}
+
+    def find(v):
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    def support(f):
+        return [v for v in f.coef if trip.get(v, 2) >= 2]
+
+    for r in ("a", "b", "c"):
+        for f in dom[r]:
+            sup = support(f)
+            for v in sup[1:]:
+                parent[find(v)] = find(sup[0])
+    readers = {}
+    for r in ("a", "b", "c"):
+        for d, f in enumerate(dom[r]):
+            sup = support(f)
+            if not sup:
+                continue
+            g = readers.setdefault(find(sup[0]), {})
+            if r in g:
+                return None, ("%s reads one logical coordinate in two of its dimensions "
+                              "(%d and %d)" % ({"a": "the first factor", "b": "the second factor",
+                                                "c": "C"}[r], g[r], d))
+            g[r] = d
+    roles = {"I": [], "J": [], "K": [], "P": []}
+    for g in readers.values():
+        ops = frozenset(g)
+        role = {frozenset("ac"): "I", frozenset("bc"): "J", frozenset("ab"): "K",
+                frozenset("abc"): "P"}.get(ops)
+        if role is None:
+            return None, ("a coordinate is read by %s only: the other operands would be "
+                          "broadcast along it" % {"a": "the first factor", "b": "the second factor",
+                                                  "c": "C"}[next(iter(ops))])
+        roles[role].append(g)
+    # A batch coordinate (read by all three): lowered with the batch loops
+    # around the tiles (ISSUE-006) when the three operands read it through
+    # one and the same expression on the domain.
+    batch_vars = set()
+    if roles["P"] and not (roles["I"] or roles["J"] or roles["K"]):
+        return None, ("%d coordinate(s) are read by all three operands and none by two: an "
+                      "element-wise product" % len(roles["P"]))
+    for g in roles["P"]:
+        ref = dom["c"][g["c"]]
+        for r, who in (("a", "the first factor"), ("b", "the second factor")):
+            if dom[r][g[r]].key() != ref.key():
+                return None, ("a batch coordinate is read through different expressions by C "
+                              "and %s (one per-operand view of a batch coordinate is not lowered)"
+                              % who)
+        batch_vars |= ref.vars()
+    for role in "IJK":
+        if len(roles[role]) > 1:
+            return None, ("%d separate coordinates are read by one GEMM role" % len(roles[role]))
+    coords, role_dims = {}, {}
+    for role, (x, y) in (("I", ("a", "c")), ("J", ("b", "c")), ("K", ("a", "b"))):
+        if not roles[role]:
+            coords[role] = None
+            continue
+        g = roles[role][0]
+        fx, fy = forms[x][g[x]], forms[y][g[y]]
+        c = shared_coordinate(fx, fy) or shared_coordinate(dom[x][g[x]], dom[y][g[y]])
+        if c is None:
+            return None, ("logical coordinate %s: the two subscripts are not multiples of one "
+                          "linear form of the loop counters" % role)
+        coords[role] = c
+        role_dims[role] = g
+    return (coords["I"], coords["J"], coords["K"], role_dims, batch_vars), None
 
 
 def predict(case: Case) -> dict:
@@ -683,6 +785,12 @@ def predict(case: Case) -> dict:
     for fl in forms.values():
         for f in fl:
             used_vars |= f.vars()
+    # The compiler compares subscripts on the iteration domain: a loop that
+    # runs once is a constant there (docs/AFFINE_GEMM_MAPPING.md, Lemma 0).
+    # (used_vars stays syntactic: a loop is a repetition loop when no access
+    # mentions it.)
+    sforms = forms
+    forms = {r: [_domain_form(f, loops) for f in fl] for r, fl in forms.items()}
     if case.stmt in ("+=alpha", "+=triple"):
         ex["recognition"] = "reject"
         return stop("recognition", "both operands of the product must be affine.load results; "
@@ -706,46 +814,67 @@ def predict(case: Case) -> dict:
         ex["recognition"] = "reject"
         return stop("recognition", "the MAC body contains arith.extf/truncf conversions between "
                     "element types; only affine.load/store, arith.mulf and arith.addf are allowed")
-    n_used = len(used_vars)
-    if n_used < 3:
+    # Any number of loops (a role of extent one needs none, P0 since
+    # 2026-10-15): the positional form first -- the checkpoint's rule --,
+    # then the analysis by groups and roles (transposes, extent-one roles,
+    # other ranks).
+    if not used_vars:
         ex["recognition"] = "reject"
-        return stop("recognition", "fewer than three loop counters are used by the accesses: no "
-                    "three-deep affine.for candidate whose loops are all GEMM dimensions")
+        return stop("recognition", "no loop counter is used by the accesses")
     nr = [len(forms[r]) for r in ("a", "b", "c")]
-    if len(set(nr)) != 1 or nr[0] < 2:
-        ex["recognition"] = "reject"
-        return stop("recognition", "A, B and C must have the same number of subscripts (>= 2); "
-                    "they have %s" % nr)
-    npart = nr[0] - 2
+    positional = len(set(nr)) == 1 and nr[0] >= 2
+    npart = nr[0] - 2 if positional else 0
     fa, fb, fc = forms["a"], forms["b"], forms["c"]
 
-    def matches(a, b):
-        """The shared coordinates (I, J, K) as linear forms, or None.  Two
-        operands share a coordinate when their expressions are identical or
-        are both s * g + o of one linear form g (s > 0): matchSharedCoordinate
-        in AffineMatmulAnalysis.cpp (the rule since the fix of ISSUE-001)."""
+    def share(x, y, dx, dy):
+        """matchSharedCoordinate: the expressions first; when they do not
+        match and a loop that runs once is involved, their domain forms --
+        refused when either is constant there."""
+        c = shared_coordinate(x, y)
+        if c is not None or (x == dx and y == dy):
+            return c
+        if dx.is_const() or dy.is_const():
+            return None
+        return shared_coordinate(dx, dy)
+
+    def matches(ka, kb):
+        """The shared coordinates (I, J, K), or None: the positional form
+        A = (P*, I, K), B = (P*, K, J), C = (P*, I, J) on the subscripts as
+        written (AffineMatmulAnalysis.cpp, tried first), with the factors
+        ka, kb.  Returned on the iteration domain (for the dense checks)."""
+        a, b, c = sforms[ka], sforms[kb], sforms["c"]
+        da, db, dc = forms[ka], forms[kb], forms["c"]
         for p in range(npart):
-            if a[p] != fc[p] or b[p] != fc[p]:
+            if a[p] != c[p] or b[p] != c[p]:
                 return None
-        I = shared_coordinate(a[npart], fc[npart])
-        J = shared_coordinate(b[npart + 1], fc[npart + 1])
-        K = shared_coordinate(a[npart + 1], b[npart])
+        I = share(a[npart], c[npart], da[npart], dc[npart])
+        J = share(b[npart + 1], c[npart + 1], db[npart + 1], dc[npart + 1])
+        K = share(a[npart + 1], b[npart], da[npart + 1], db[npart])
         if I is None or J is None or K is None:
             return None
         if I == J or I == K or J == K:
             return None
-        return I, J, K
+        return tuple(_domain_form(f, loops) for f in (I, J, K))
 
-    m = matches(fa, fb)
-    if m is None:
-        m = matches(fb, fa)
+    m = matches("a", "b") if positional else None
+    if m is None and positional:
+        m = matches("b", "a")
         if m is not None:
             fa, fb = fb, fa   # the product's operands swapped: logical A is the C-side's B
+    grouped = None
+    # The loops that drive a batch coordinate (re-emitted around the tiles,
+    # ISSUE-006): with the positional form the prefix subscripts' loops.
+    batch_vars = set()
+    for p in range(npart):
+        batch_vars |= forms["c"][p].vars()
     if m is None:
-        ex["recognition"] = "reject"
-        return stop("recognition", "the accesses are not A(P*,I,K), B(P*,K,J), C(P*,I,J): a shared "
-                    "coordinate must be the same linear form of the loop counters in both "
-                    "operands (up to each operand's own constant offset and positive stride)")
+        grouped, why = predict_by_groups(case, forms, loops)
+        if grouped is None:
+            ex["recognition"] = "reject"
+            return stop("recognition", why)
+        npart = 0
+        m = grouped[:3]
+        batch_vars = grouped[4]
     I, J, K = m
     # repetition loops: outside the used loops they are fine; between them
     # they are hoisted outward when the interchange is legal
@@ -757,7 +886,7 @@ def predict(case: Case) -> dict:
     # see failures/resolved/NOTE-001.)
     used_idx = [i for i, lp in enumerate(loops) if lp.var in used_vars]
     rep_idx = [i for i, lp in enumerate(loops) if lp.var not in used_vars]
-    k_idx = [i for i in used_idx if loops[i].var in K.coef and loops[i].trip() >= 2]
+    k_idx = [i for i in used_idx if K is not None and loops[i].var in K.coef and loops[i].trip() >= 2]
     for ri in rep_idx:
         if loops[ri].trip() >= 2 and any(ki < ri for ki in k_idx):
             ex["recognition"] = "reject"
@@ -769,10 +898,6 @@ def predict(case: Case) -> dict:
     ex["recognition"] = "accept"
 
     # ---- dense partition: getDenseLogicalGemm
-    if npart:
-        ex["dense_partition"] = "unsupported"
-        return stop("dense_partition", "batched GEMM (a partition prefix P* of %d coordinates) "
-                    "is not supported" % npart)
     used_loops = [loops[i] for i in used_idx]
     if any(lp.trip() == 0 for lp in used_loops):
         # normalizeLogicalCoordinates refuses an empty loop (upper <= lower)
@@ -782,7 +907,17 @@ def predict(case: Case) -> dict:
         ex["dense_partition"] = "unsupported"
         return stop("dense_partition", "a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)")
     for s, lp in enumerate(used_loops):
-        drives = [name for name, f in (("I", I), ("J", J), ("K", K)) if lp.var in f.coef]
+        if lp.trip() == 1:
+            continue      # constant on the domain: drives nothing (Theorem 3)
+        drives = [name for name, f in (("I", I), ("J", J), ("K", K)) if f is not None and lp.var in f.coef]
+        if lp.var in batch_vars:
+            # a batch loop: it must drive no I, J or K (the batches would be
+            # coupled); it is not required to enumerate anything densely
+            if drives:
+                ex["dense_partition"] = "unsupported"
+                return stop("dense_partition", "two logical coordinates are driven by the same loop "
+                            "(loop %d drives a batch coordinate and %s)" % (s, " and ".join(drives)))
+            continue
         if len(drives) > 1:
             ex["dense_partition"] = "unsupported"
             return stop("dense_partition", "two logical coordinates are driven by the same loop "
@@ -791,6 +926,8 @@ def predict(case: Case) -> dict:
             ex["dense_partition"] = "unsupported"
             return stop("dense_partition", "loop %d drives no logical coordinate" % s)
     for name, f in (("I", I), ("J", J), ("K", K)):
+        if f is None:
+            continue      # a role of extent one (SQ-4, decided 2026-10-15)
         scaled = []
         for lp in used_loops:
             if lp.var in f.coef:
@@ -799,6 +936,8 @@ def predict(case: Case) -> dict:
                 # by getDenseLogicalGemm: its magnitude enumerates it
                 sc = abs(f.coef[lp.var] * lp.step)
                 scaled.append((sc, lp.trip()))
+        if not scaled:
+            continue      # constant on the domain: an extent-one coordinate
         scaled.sort()
         expected = scaled[0][0]
         for sc, ext in scaled:
@@ -808,19 +947,65 @@ def predict(case: Case) -> dict:
                             "not enumerate it densely (scales must grow by the finer loops' "
                             "extents)" % (name, len(scaled)))
             expected *= ext
+    # a batched nest whose per-batch GEMM has two unit extents: refused
+    # pending SQ-5 (getDenseLogicalGemm)
+    if batch_vars:
+        unit = 0
+        for f in (I, J, K):
+            unit += f is None or all(lp.trip() == 1 for lp in used_loops if lp.var in f.coef)
+        if unit >= 2:
+            ex["dense_partition"] = "unsupported"
+            return stop("dense_partition", "a batched GEMM whose tiles are a vector scaled by a scalar "
+                        "(two of M, N, K are 1) is not lowered pending spec question SQ-5 (the "
+                        "reduction index in the output)")
     ex["dense_partition"] = "supported"
 
-    # ---- lowering: --affine-matmul-to-systolic
-    for r, nm in (("a", "A"), ("b", "B"), ("c", "C")):
-        if len(case.arrays[r].dims) != 2:
+    # ---- lowering: --affine-matmul-to-systolic (any rank since P0)
+    if grouped is not None:
+        # every dimension's index range inside the array: the fixed
+        # (constant) dimensions first, then the roles' -- getLogicalOperand's
+        # order; the leading dimension of a C array parameter is dynamic
+        role_dims = grouped[3]
+        order = {"a": ("I", "K"), "b": ("K", "J"), "c": ("I", "J")}
+        for r, nm in (("a", "A"), ("b", "B"), ("c", "C")):
+            arr = case.arrays[r]
+            rdims = [role_dims[g][r] for g in order[r] if g in role_dims]
+            dims = [d for d in range(len(forms[r])) if d not in rdims] + rdims
+            for d in dims:
+                lo, hi = _form_range(forms[r][d], loops)
+                if lo < 0 or (d >= 1 and hi >= arr.dims[d]):
+                    ex["lowering"] = "unsupported"
+                    return stop("lowering", "%s is accessed out of bounds along dimension %d" % (nm, d))
+        if case.a.elem != case.c.elem or case.b.elem != case.c.elem:
             ex["lowering"] = "unsupported"
-            return stop("lowering", "%s is not a rank-2 memref with the identity layout" % nm)
+            return stop("lowering", "A, B and C have different element types")
+        for r, nm in (("a", "A"), ("b", "B")):
+            arr = case.arrays[r]
+            if arr.name == case.c.name or not (arr.restrict or case.c.restrict):
+                ex["lowering"] = "unsupported"
+                return stop("lowering", "%s may overlap C; declare the arguments llvm.noalias (C restrict) "
+                            "or pass assume-no-alias" % nm)
+        if case.a.name == case.b.name and forms["a"] != forms["b"]:
+            ex["lowering"] = "unsupported"
+            return stop("lowering", "A and B are different views of the same memref")
+        ex["lowering"] = "supported"
+        if case.elem != "float":
+            ex["driver"] = "stays_on_host"
+            ex["reject_stage"] = "driver"
+            ex["reject_reason"] = "the FPGA datapath is fp32 and it uses double arrays"
+            case.expect = ex
+            return ex
+        ex["driver"] = "offloaded"
+        case.expect = ex
+        return ex
 
     def dense_of(f):
         """The view an operand's own subscript f (over the loops of one
         coordinate) spans: (first index, stride, extent) -- getLogicalOperand
         builds the memref.subview from the operand's view of the coordinate."""
         lps = [lp for lp in used_loops if lp.var in f.coef]
+        if not lps:
+            return f.const, 1, 1      # an extent-one coordinate: one index
         # the smallest index: each loop at its first value if the subscript
         # grows along it, at its last value if it shrinks (read backwards)
         off = f.const + sum(f.coef[lp.var] * (lp.lb if f.coef[lp.var] * lp.step > 0
@@ -834,15 +1019,25 @@ def predict(case: Case) -> dict:
     vA = (dense_of(fa[npart]), dense_of(fa[npart + 1]))
     vB = (dense_of(fb[npart]), dense_of(fb[npart + 1]))
     vC = (dense_of(fc[npart]), dense_of(fc[npart + 1]))
+    for r, nm in (("a", "A"), ("b", "B"), ("c", "C")):
+        arr = case.arrays[r]
+        for p in range(npart):
+            # a batch dimension: the batch index's range on the domain (the
+            # leading dimension of a C array parameter is dynamic, unchecked)
+            lo, hi = _form_range(forms[r][p], loops)
+            if lo < 0 or (p >= 1 and hi >= arr.dims[p]):
+                ex["lowering"] = "unsupported"
+                return stop("lowering", "%s is accessed out of bounds along dimension %d" % (nm, p))
     for r, nm, (d0, d1) in (("a", "A", vA), ("b", "B", vB), ("c", "C", vC)):
         arr = case.arrays[r]
         for pos, (off, scale, ext) in enumerate((d0, d1)):
             last = off + scale * (ext - 1)
             # the leading dimension of a C array parameter is dynamic in the
-            # memref (not checked by the pass); the trailing one is static
-            if off < 0 or (pos == 1 and last >= arr.dims[pos]):
+            # memref (not checked by the pass); the others are static
+            dim = npart + pos
+            if off < 0 or (dim >= 1 and last >= arr.dims[dim]):
                 ex["lowering"] = "unsupported"
-                return stop("lowering", "%s is accessed out of bounds along dimension %d" % (nm, pos))
+                return stop("lowering", "%s is accessed out of bounds along dimension %d" % (nm, dim))
     if case.a.elem != case.c.elem or case.b.elem != case.c.elem:
         ex["lowering"] = "unsupported"
         return stop("lowering", "A, B and C have different element types")
@@ -915,6 +1110,7 @@ SPEC_QUESTIONS = {
             "value): unreachable from the C front end, whose bounds must be constants; is the MLIR "
             "path's refusal ('no static normalized extent') a documented limitation, or must dynamic "
             "extents be supported?",
+    "SQ-5": "a batched nest whose per-batch GEMM has two of M, N, K equal to 1 -- the reduction index in the output with a single-iteration j (C[i][k] += A[i][k] * B[k][j], j in [1, 2)): k is read by every operand (a batch coordinate), N = K = 1, so each batch is a column scaled by a scalar.  The result is correct, but the specification lists 'the reduction index in the output' as not a GEMM; is a batched vector-times-scalar a GEMM to offload, or a documented limitation?",
 }
 
 SPEC_BASIS = {
@@ -924,13 +1120,17 @@ SPEC_BASIS = {
                   "AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o "
                   "(P,I,J): one factor map per operand); the task statement's index family "
                   "c_i*i + c_j*j + c_k*k + c_0 per operand",
-    "batched": "include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) "
-               "... are not' of the dense form; getDenseLogicalGemm refuses them with a message; "
-               "test/Systolic/affine_to_systolic_refused.mlir @batched",
-    "transposed": "the documented operand convention A = (I, K), B = (K, J), C = (I, J) as row-major "
-                  "views of identity-layout rank-2 memrefs (AffineMatmulAnalysis.cpp recognizeLogicalMatmul, "
-                  "AffineMatmulToSystolic.cpp getLogicalOperand); the linalg path refuses transposed "
-                  "indexing maps as well (test/Systolic/bad_linalg_to_systolic.mlir)",
+    "batched": "(supported since 2026-10-15, ISSUE-006) a batched GEMM, every operand carrying the "
+               "batch coordinate(s) through one and the same expression: the batch loops are "
+               "re-emitted around the tiles, one GEMM per batch iteration on its own slice of each "
+               "operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)",
+    "batched_shared": "a batched GEMM with an operand shared by every batch (no batch subscript: "
+                      "C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM "
+                      "with A reshaped -- but the operand would need a stride-0 or merged view, "
+                      "not lowered (the recognizer: two coordinates read by one GEMM role)",
+    "transposed": "(no longer a limitation since 2026-10-15, P0.2) a transposed operand is a "
+                  "permuted view (memref.transpose of its subview), docs/AFFINE_GEMM_MAPPING.md "
+                  "section 5; a dense GEMM like any other",
     "alpha": "lib/Systolic/Transforms/AffineMatmulToSystolic.cpp header: the recognized form is "
              "C[..] += A[..] * B[..]; systolic.matmul_tile computes C_in + A B, there is no alpha",
     "init_inside": "AffineMatmulAnalysis.cpp recognizeLogicalMatmul: 'The anchored nest must be a perfect "
@@ -944,18 +1144,23 @@ SPEC_BASIS = {
                    "and arith.addf (no conversions); the datapath is fp32",
     "aliasing": "AffineMatmulToSystolic.cpp provablyDisjointFromOutput: A and B must be provably disjoint "
                 "from C (restrict / fresh allocations); test/Systolic/affine_to_systolic_refused.mlir @may_alias",
-    "negative_scale": "two operands run through a shared coordinate in opposite directions (A[7 - i] "
-                      "with C[i]): no strided view of one operand matches the other (a memref.subview "
-                      "has no negative stride); recognizeLogicalMatmul matchSharedCoordinate refuses "
-                      "it. (A coordinate that decreases in every operand is supported: ISSUE-004)",
+    "negative_scale": "(no longer a limitation since 2026-10-15, P0.3) two operands that run through a "
+                      "shared coordinate in opposite directions (A[7 - i] with C[i]): one operand's "
+                      "view has a negative stride (memref.subview with a negative static stride, its "
+                      "offset the largest index), docs/AFFINE_GEMM_MAPPING.md section 5",
     "repeat_in_reduction": "AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop inside a "
                            "reduction loop (both of more than one iteration) cannot be moved outward -- "
                            "affine::isValidLoopInterchangePermutation refuses it, the accumulation order "
                            "would change; test/SystolicCC/depth.c d4_illegal",
     "same_memref_views": "AffineMatmulToSystolic.cpp: 'A and B are different views of the same memref'",
-    "matvec": "AffineMatmulAnalysis.cpp collectAffineMatmulCandidates expects a three-deep affine.for "
-              "nest with rank-2 (or batched rank-3) operands; a GEMV has two index dimensions",
+    "matvec": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM "
+              "with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), "
+              "docs/AFFINE_GEMM_MAPPING.md section 2",
     "not_gemm": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "dense_on_domain": "(P0.4, P0.5) not a GEMM as written, but its loops that run once are constants "
+                       "on the iteration domain, and there the nest is a dense GEMM of strided views "
+                       "(decided by enumerating the points: casespec.gemm_on_domain; "
+                       "docs/AFFINE_GEMM_MAPPING.md Lemma 0, section 3)",
     "decreasing_loop": "(no longer a limitation since 2026-10-15, ISSUE-004) a loop that counts down "
                        "enumerates its coordinate in decreasing order (i = 5, 3, 1 is I = 5 - 2 "
                        "ordinal); the front end translates it to an ordinal loop and the recognizer "
@@ -969,7 +1174,81 @@ SPEC_BASIS = {
     "SQ-1": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-1"],
     "SQ-2": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-2"],
     "SQ-3": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-3"],
+    "SQ-5": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-5"],
 }
+
+
+def gemm_on_domain(case: Case, max_points: int = 200000) -> Optional[bool]:
+    """Whether the nest is a GEMM of strided views ON ITS ITERATION DOMAIN, by
+    enumerating the points (docs/AFFINE_GEMM_MAPPING.md sections 3, 5; the
+    method of test/Systolic/Inputs/affine_gemm_mapping_oracle.py, independent
+    of the compiler): every non-constant subscript's values form an arithmetic
+    progression; two subscripts address one coordinate iff their ranks agree
+    or mirror; each coordinate is read by exactly two operands (A and C, B and
+    C, A and B -- the factors either way); (I, J, K) is a bijection onto the
+    box.  None when the domain is too large to enumerate."""
+    import itertools
+    # Only the loops an access uses: a repetition loop repeats the whole
+    # GEMM (in scope outside the reduction; the caller checks that).
+    used = set()
+    for arr in case.arrays.values():
+        for f in arr.forms():
+            used |= f.vars()
+    loops = [lp for lp in case.loops if lp.var in used]
+    vals = [lp.values() for lp in loops]
+    total = 1
+    for v in vals:
+        total *= len(v)
+    if total == 0 or total > max_points:
+        return None
+    names = [lp.var for lp in loops]
+    pts = [dict(zip(names, x)) for x in itertools.product(*vals)]
+    readers = []
+    for r in ("a", "b", "c"):
+        for d, f in enumerate(case.arrays[r].forms()):
+            vs = [f.eval(env) for env in pts]
+            dist = sorted(set(vs))
+            if len(dist) == 1:
+                continue
+            step = dist[1] - dist[0]
+            if any(b2 - a2 != step for a2, b2 in zip(dist, dist[1:])):
+                return False
+            readers.append((r, tuple((v - dist[0]) // step for v in vs), len(dist)))
+    classes = []
+    for rd in readers:
+        for cl in classes:
+            r0 = cl[0]
+            if r0[2] == rd[2] and (r0[1] == rd[1] or r0[1] == tuple(r0[2] - 1 - v for v in rd[1])):
+                cl.append(rd)
+                break
+        else:
+            classes.append([rd])
+    for a, b in (("a", "b"), ("b", "a")):
+        role, ok = {}, True
+        for cl in classes:
+            ops = [rd[0] for rd in cl]
+            key = {frozenset((a, "c")): "I", frozenset((b, "c")): "J",
+                   frozenset((a, b)): "K"}.get(frozenset(ops))
+            if len(set(ops)) != len(ops) or key is None or key in role:
+                ok = False
+                break
+            role[key] = cl
+        if not ok:
+            continue
+        ext = {k: (role[k][0][2] if k in role else 1) for k in "IJK"}
+        ordv = {k: (role[k][0][1] if k in role else (0,) * len(pts)) for k in "IJK"}
+        if len(set(zip(ordv["I"], ordv["J"], ordv["K"]))) == len(pts) == ext["I"] * ext["J"] * ext["K"]:
+            # a repetition loop (of two or more iterations) inside a loop
+            # that varies the reduction coordinate: hoisting it would reorder
+            # the accumulation (the rule of spec_expect, repeat_in_reduction)
+            k_loops = [i for i, lp in enumerate(case.loops) if lp.var in used and lp.trip() >= 2
+                       and len({ordv["K"][n] for n, env in enumerate(pts)
+                                if env[lp.var] == lp.values()[0]}) < ext["K"]]
+            for ri, lp in enumerate(case.loops):
+                if lp.var not in used and lp.trip() >= 2 and any(ki < ri for ki in k_loops):
+                    return "repeat_in_reduction"
+            return True
+    return False
 
 
 def spec_expect(case: Case) -> dict:
@@ -990,15 +1269,44 @@ def spec_expect(case: Case) -> dict:
     if case.kernel_style == "scalar_acc":
         return done("OUT_OF_SCOPE", "scalar_acc")
     if not an.get("is_gemm"):
+        # a matrix-vector product is the N = 1 GEMM (P0, 2026-10-15)
         if an["math_class"] == "matrix_vector":
-            return done("OUT_OF_SCOPE", "matvec")
+            return done("ACCEPT", "matvec")
+        # the reduction index in the output with every J loop of one
+        # iteration: the compiler reads K as a batch coordinate and sees a
+        # vector scaled by a scalar per batch (SQ-5, open)
+        if (an["math_class"] == "not_gemm_scaled_rows"
+                and all(lp.trip() == 1 for lp in case.loops if lp.role == "J")):
+            return done("UNDETERMINED", "SQ-5")
+        # The syntactic analysis and the iteration domain differ only through
+        # loops that run once (constants on the domain, Lemma 0): decide such
+        # a nest on its domain (P0.4, P0.5).
+        if (any(lp.trip() == 1 for lp in case.loops)
+                and case.kernel_style not in ("init_inside", "scalar_acc")
+                and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") and gemm_on_domain(case)):
+            if gemm_on_domain(case) == "repeat_in_reduction":
+                return done("OUT_OF_SCOPE", "repeat_in_reduction")
+            # the rules that do not depend on the coordinates still apply
+            if case.elem != "float":
+                return done("OUT_OF_SCOPE", "double")
+            if len({a.elem for a in case.arrays.values()}) > 1:
+                return done("OUT_OF_SCOPE", "mixed_types")
+            if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
+                return done("OUT_OF_SCOPE", "aliasing")
+            return done("ACCEPT", "dense_on_domain")
         return done("REJECT", "not_gemm")
     if any(lp.trip() == 0 for lp in case.loops):
         return done("UNDETERMINED", "SQ-2")
     if "batched" in tags:
-        return done("OUT_OF_SCOPE", "batched")
-    if tags & {"A_transposed", "B_transposed", "C_transposed"}:
-        return done("OUT_OF_SCOPE", "transposed")
+        # a batched GEMM is inside the specification since 2026-10-15
+        # (ISSUE-006) when every operand carries every batch coordinate; an
+        # operand shared by all batches (no batch subscript) is a broadcast
+        # over the batch, not lowered
+        p_count = sum(1 for lp in case.loops if lp.role == "P")
+        for r in ("a", "b"):
+            if sum(1 for f in case.arrays[r].forms() if f.vars() and
+                   f.vars() <= {lp.var for lp in case.loops if lp.role == "P"}) != p_count:
+                return done("OUT_OF_SCOPE", "batched_shared")
     if "alpha_scaled" in tags or "alpha_minus_one" in tags:
         return done("OUT_OF_SCOPE", "alpha")
     if case.kernel_style == "init_inside":
@@ -1022,17 +1330,13 @@ def spec_expect(case: Case) -> dict:
             return done("OUT_OF_SCOPE", "repeat_in_reduction")
     # A coordinate that decreases along its loop -- a loop that counts down,
     # or a reversed subscript such as 7 - i -- is a dense GEMM like any other
-    # since 2026-10-15 (a decision made on request, README.md section 2 and
-    # failures/issues/ISSUE-004-*): only the order in which the nest visits
-    # the (I, J, K) points differs. Two operands that run through a shared
-    # coordinate in OPPOSITE directions (A[7 - i] with C[i]) remain out of
-    # scope: no strided view of one operand matches the other.
+    # since 2026-10-15 (ISSUE-004); since the P0 views (2026-10-15), two
+    # operands that run through a shared coordinate in OPPOSITE directions
+    # (A[7 - i] with C[i]) are too: one operand's view has a negative stride
+    # (docs/AFFINE_GEMM_MAPPING.md section 5). Transposed operands likewise
+    # (section 5: a permuted view).
     forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
     v = an["views"]
-    for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
-        fa_, fb_ = forms[ra][v[ra][g]["position"]], forms[rb][v[rb][g]["position"]]
-        if any(fa_.coef.get(x, 0) * fb_.coef.get(x, 0) < 0 for x in fa_.coef):
-            return done("OUT_OF_SCOPE", "negative_scale")
     # two operands spelling a shared coordinate with different loop
     # combinations (not two views of one strided coordinate): open question
     for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
@@ -1050,7 +1354,7 @@ def spec_expect(case: Case) -> dict:
 
         if key("a", "I") != key("b", "K") or key("a", "K") != key("b", "J"):
             return done("OUT_OF_SCOPE", "same_memref_views")
-    return done("ACCEPT", "dense_gemm")
+    return done("ACCEPT", "batched" if "batched" in tags else "dense_gemm")
 
 
 def classify_case(case: Case) -> str:

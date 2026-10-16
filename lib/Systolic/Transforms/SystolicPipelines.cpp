@@ -82,6 +82,14 @@ void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
   bufferization::buildBufferDeallocationPipeline(pm);
   pm.addPass(createConvertBufferizationToMemRefPass());
 
+  // Affine loops first: expand-strided-metadata rewrites a subview whose
+  // offset is dynamic into an affine.apply with that offset as a symbol, and
+  // an offset computed from an affine.for counter (a batched GEMM's batch
+  // index, ISSUE-006) is an affine dimension, which the apply's verifier
+  // refuses as a symbol. Once the loops are scf.for the operand is neither,
+  // which affine.apply allows; the applies expand-strided-metadata itself
+  // creates are lowered by the second pass.
+  pm.addPass(createLowerAffinePass());
   pm.addPass(memref::createExpandStridedMetadataPass());
   pm.addPass(createLowerAffinePass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());

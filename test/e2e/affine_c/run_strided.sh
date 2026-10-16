@@ -64,7 +64,9 @@ esac
 
 set -x
 "$SYSTOLIC_OPT" "$OUT/20-affine.mlir" -o /dev/null
-"$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true" \
+# allow-fp-reassociation: offloading reassociates the fp sums (the strict
+# default keeps every GEMM on the host; docs/AFFINE_GEMM_MAPPING.md section 6).
+"$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
   "$OUT/20-affine.mlir" -o "$OUT/40-systolic.mlir"
 "$SYSTOLIC_OPT" "$PHYS" "$OUT/40-systolic.mlir" -o "$OUT/50-fpga.mlir"
 "$SYSTOLIC_OPT" --systolic-runtime-to-llvm "$OUT/50-fpga.mlir" \

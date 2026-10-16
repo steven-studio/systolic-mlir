@@ -61,3 +61,11 @@ refuses it at recognition (mlir_010, `negative_scale`).
 - `failures/issues/ISSUE-002-*/repro_overflow_guards.mlir` — `@min_coef_identical` (coefficient
   INT64_MIN on both operands) is now refused because reading it backwards needs `|INT64_MIN|`.
 - showcase case_119–122, ext_003 — offloaded, program check against the Python oracle.
+
+## Update 2026-10-15 (ISSUE-005)
+
+Two operands that run through a shared coordinate in opposite directions (`A[7 - i]` with `C[i]`,
+mlir_010) are supported since ISSUE-005: one operand's view has a negative stride. A coordinate
+runs along its outermost loop's order, so an operand written backwards gets the negative stride
+itself; subscripts spelled identically in both operands keep the form described above (read
+backwards, positive strides). The `negative_scale` basis no longer marks a limitation.

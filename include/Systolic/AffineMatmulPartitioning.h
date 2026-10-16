@@ -47,7 +47,20 @@ struct LogicalBox {
 /// over several loops (tiled nests) and coordinates enumerated downward are
 /// all of this form; batched GEMMs (a
 /// partition prefix P*) and coupled or singular mappings (I = i+j, one loop
-/// driving two coordinates) are not.
+/// driving two coordinates) are not. A loop that runs exactly once (n_s = 1)
+/// is constant on the domain and constrains nothing: it is left out of every
+/// coordinate that a loop of two or more iterations drives. For loops of two
+/// or more iterations the form above is necessary as well as sufficient for
+/// the coordinates to be a bijection onto a box (docs/AFFINE_GEMM_MAPPING.md,
+/// Theorem 3).
+///
+/// A batched GEMM (a partition prefix P*: coordinates every operand reads,
+/// docs/AFFINE_GEMM_MAPPING.md section 2) is dense in I, J, K for every value
+/// of the batch coordinates; the batch loops -- the loops with a nonzero
+/// coefficient in a P row, which then drive no I, J or K -- are not required
+/// to enumerate anything densely: the lowering re-emits them as they are
+/// around the tiles, one GEMM per batch iteration, exactly the original
+/// iteration domain (ISSUE-006).
 struct DenseLogicalGemm {
   /// The finest (smallest-scale) loop of each coordinate.
   std::array<unsigned, 3> sourceDim{};
@@ -56,12 +69,25 @@ struct DenseLogicalGemm {
   std::array<int64_t, 3> scale{};
   std::array<int64_t, 3> offset{};
   std::array<int64_t, 3> extent{};
+
+  /// The batch coordinates P* (0 for a plain GEMM): the source loops of two
+  /// or more iterations with a nonzero coefficient in any P row (outermost
+  /// first; a loop that runs once is a constant, folded into the batch index
+  /// by the lowering), and per coordinate
+  /// its smallest and largest value on the iteration domain (for the bounds
+  /// of the operands' batch dimensions) and the product of the batch loops'
+  /// trip counts (how often the tiles run).
+  unsigned numBatchDims = 0;
+  SmallVector<unsigned, 2> batchLoops;
+  SmallVector<std::pair<int64_t, int64_t>, 2> batchRange;
+  int64_t batchTrips = 1;
 };
 
 /// The dense view of `matmul`, or failure (with the reason in `why`) when
 /// its logical coordinates are not of the form above.
-FailureOr<DenseLogicalGemm> getDenseLogicalGemm(const LogicalMatmul &matmul,
-                                                std::string *why = nullptr);
+FailureOr<DenseLogicalGemm>
+getDenseLogicalGemm(const LogicalMatmul &matmul, std::string *why = nullptr,
+                    GemmMappingClass *mappingClass = nullptr);
 
 /// One exact execution region of a logical GEMM.
 ///

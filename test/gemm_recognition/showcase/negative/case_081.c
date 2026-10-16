@@ -38,7 +38,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: fewer than three loop counters are used by the accesses: no three-deep affine.for candidate whose loops are all GEMM dimensions
+ *   reason: 2 coordinate(s) are read by all three operands and none by two: an element-wise product
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

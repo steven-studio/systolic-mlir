@@ -14,7 +14,7 @@
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
-// RUN: %systolic-cc --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 'dn_i_ge' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'dn_i_gt' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'dn_i_ge_divisible' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
@@ -50,7 +50,7 @@
 //
 // With --verify every offloaded call is also compared with the function as
 // written, run on the CPU.
-// RUN: %systolic-cc --verify %s -o %t.v > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // VERIFY-COUNT-9: verified:
 // VERIFY-NOT:     MISMATCH

@@ -193,7 +193,12 @@ def classify(entry, st):
             mism.append("lowering: predicted %s, got %s (%s)" % (cur["lowering"], low, lo.get("reason", "")))
         if lo["result"] == "lowered" and entry.get("logical_extents"):
             e = entry["logical_extents"]
-            if (lo.get("M"), lo.get("N"), lo.get("K")) != (e["I"], e["J"], e["K"]):
+            # Either factor may be A (P0.2, docs/AFFINE_GEMM_MAPPING.md section
+            # 5): A x B into C, or the transposed problem B^T x A^T into C^T
+            # (M and N exchanged) -- both valid; the program check and --verify
+            # establish the result.
+            if (lo.get("M"), lo.get("N"), lo.get("K")) not in (
+                    (e["I"], e["J"], e["K"]), (e["J"], e["I"], e["K"])):
                 mism.append("lowering: extents %sx%sx%s, the case's logical GEMM is %dx%dx%d" % (
                     lo.get("M"), lo.get("N"), lo.get("K"), e["I"], e["J"], e["K"]))
     else:

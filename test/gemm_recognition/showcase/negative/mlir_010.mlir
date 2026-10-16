@@ -8,24 +8,19 @@
 //
 // Mathematical operation:
 //   C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM
-//   of a reversed view of A.  I is i on C and 7 - i on A: opposite directions,
-//   which the specification lists as a documented limitation (a negative stride).
-//   The recognizer refuses it (the two expressions are not the same coordinate in
-//   the same direction); ext_003 is the same limitation with both operands reversed.
+//   of a reversed view of A.  I is i on C and 7 - i on A: opposite directions, a
+//   documented limitation until 2026-10-15; lowered since ISSUE-005 (P0.3): A's
+//   view runs backwards from row 7 (a negative stride), C's forwards.
 //
 // Mathematical GEMM: YES
-// Expected recognition (specification): OUT_OF_SCOPE
-//   basis: two operands run through a shared coordinate in opposite directions (A[7 - i] with C[i]): no strided view of one operand matches the other (a memref.subview has no negative stride); recognizeLogicalMatmul matchSharedCoordinate refuses it. (A coordinate that decreases in every operand is supported: ISSUE-004)
+// Expected recognition (specification): ACCEPT
+//   basis: (no longer a limitation since 2026-10-15, P0.3) two operands that run through a shared coordinate in opposite directions (A[7 - i] with C[i]): one operand's view has a negative stride (memref.subview with a negative static stride, its offset the largest index), docs/AFFINE_GEMM_MAPPING.md section 5
 // Current implementation (predicted from the compiler sources; measured by
 // scripts/run_showcase.py, never assumed):
-//   recognition (recognizeLogicalMatmul):    REJECT
-//   dense partition (getDenseLogicalGemm):   not_reached
-//   lowering (--affine-matmul-to-systolic):  not_reached
-//   rejection at: recognition
-//   reason: not recognized: A's row expression 7 - i and C's i are not one coordinate
-// Classification: DOCUMENTED LIMITATION
-//   A mathematically valid GEMM that the specification excludes explicitly;
-//   'refused' must never be read as 'not a GEMM'.
+//   recognition (recognizeLogicalMatmul):    ACCEPT
+//   dense partition (getDenseLogicalGemm):   supported
+//   lowering (--affine-matmul-to-systolic):  supported
+// Classification: TRUE POSITIVE -- see failures/issues/ISSUE-005
 //
 // Independent reference: none at this level (no program to run); the checks are the
 // recognizer's result, the dense-partition result, the operand views it reports and

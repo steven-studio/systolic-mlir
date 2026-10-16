@@ -81,10 +81,16 @@ struct TestAffineMatmulDiscoveryPass
     SmallVector<LogicalMatmul, 1> logicalMatmuls;
 
     for (AffineMatmulCandidate candidate : candidates) {
-      auto result = recognizeLogicalMatmul(candidate);
+      std::string notRecognized;
+      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
+      auto result =
+          recognizeLogicalMatmul(candidate, &notRecognized, &notRecognizedClass);
 
       if (failed(result)) {
         llvm::errs() << "recognition result: failure\n";
+        llvm::errs() << "  reason: " << notRecognized << "\n";
+        llvm::errs() << "  class: "
+                     << stringifyGemmMappingClass(notRecognizedClass) << "\n";
         continue;
       }
 
@@ -196,13 +202,35 @@ struct TestAffineMatmulDiscoveryPass
       printView("A", "I", "K", result.viewA);
       printView("B", "K", "J", result.viewB);
       printView("C", "I", "J", result.viewC);
+      // Where the roles sit in each memref, when not the canonical rank-2
+      // (rows, columns): a transposed operand, a constant (extent-one)
+      // dimension, or no dimension for a role of extent one.
+      auto printLayout = [](StringRef operand, const OperandLayout &layout) {
+        bool canonical = layout.roleDim[0] == 0 && layout.roleDim[1] == 1 &&
+                         layout.constantIndex.size() == 2;
+        if (canonical)
+          return;
+        llvm::errs() << "  layout " << operand << ": roles in dimensions ("
+                     << layout.roleDim[0] << ", " << layout.roleDim[1] << ")"
+                     << (layout.isTransposed() ? " transposed" : "");
+        for (auto [dim, index] : llvm::enumerate(layout.constantIndex))
+          if (index)
+            llvm::errs() << ", dimension " << dim << " fixed at " << *index;
+        llvm::errs() << "\n";
+      };
+      printLayout("A", result.layoutA);
+      printLayout("B", result.layoutB);
+      printLayout("C", result.layoutC);
+      if (result.reductionMayReassociate)
+        llvm::errs() << "  reduction: reassoc permitted\n";
 
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);
 
       std::string notDense;
-      auto dense = getDenseLogicalGemm(result, &notDense);
+      GemmMappingClass notDenseClass = GemmMappingClass::ProvenValid;
+      auto dense = getDenseLogicalGemm(result, &notDense, &notDenseClass);
       if (succeeded(dense))
       {
         // Each coordinate's loops, outermost first ("0+3" for a split one).
@@ -213,10 +241,23 @@ struct TestAffineMatmulDiscoveryPass
           llvm::errs() << (d ? "/" : "");
           llvm::interleave(loops, llvm::errs(), "+");
         }
+        // A batched GEMM: the batch loops, re-emitted around the tiles.
+        if (dense->numBatchDims) {
+          llvm::errs() << ", batched over loop(s) ";
+          llvm::interleave(dense->batchLoops, llvm::errs(), "+");
+          llvm::errs() << " (" << dense->batchTrips << " batch iteration(s))";
+        }
         llvm::errs() << "\n";
       }
-      else
+      else {
         llvm::errs() << "  dense logical GEMM: no (" << notDense << ")\n";
+        // Which loop bound is not a constant, and why.
+        if (!result.normalization.domain &&
+            !result.normalizationDetail.empty())
+          llvm::errs() << "  bounds: " << result.normalizationDetail << "\n";
+        llvm::errs() << "  class: " << stringifyGemmMappingClass(notDenseClass)
+                     << "\n";
+      }
 
       auto partitions = partitionLogicalMatmul(result);
       if (failed(partitions)) {

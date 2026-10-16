@@ -278,7 +278,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Affine -> systolic.matmul_tile (partition, devices, schedule).
 if run "Affine -> Systolic dialect" "$OUT/40-systolic.log" \
-    "$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true" \
+    "$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
     "$OUT/20-gemm.affine.mlir" -o "$OUT/40-systolic.mlir"; then
   tiles="$(grep -c 'systolic.matmul_tile' "$OUT/40-systolic.mlir")"
   assigned="$(grep -c 'systolic.matmul_tile.* on @acc_.* est_cycles = [0-9]* start_cycle = [0-9]*' "$OUT/40-systolic.mlir")"

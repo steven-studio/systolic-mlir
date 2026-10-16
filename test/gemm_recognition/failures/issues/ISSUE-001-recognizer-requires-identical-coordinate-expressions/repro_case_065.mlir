@@ -14,7 +14,7 @@
 //
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=DISC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic %s \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true %s \
 // RUN:   | FileCheck %s --check-prefix=SYS
 //
 // DISC: recognition result: success

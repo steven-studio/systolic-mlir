@@ -357,32 +357,38 @@ Ng(83, "matrix_vector", "matrix_vector",
    arr("M", (8, 8), ("i", "j")), arr("x", (8,), ("j",)), arr("y", (8,), ("i",)),
    math_class="matrix_vector",
    math_note="y[i] += M[i][j] * x[j]: a matrix-vector product (GEMV).  It is the N = 1\n"
-             "special case of a GEMM in the mathematical sense (y and x as 8x1 matrices),\n"
-             "but as written it has two index dimensions and rank-1 operands.\n"
-             "Expected rejection: only two loops; the recognizer looks for three nested\n"
-             "affine.for ops and rank-2 (or batched rank-3) operands.")
+             "special case of a GEMM (y and x as 8x1 matrices), written with two index\n"
+             "dimensions and rank-1 operands.  Refused until 2026-10-15 (the recognizer\n"
+             "looked for three nested loops and rank-2 operands); offloaded since ISSUE-005\n"
+             "(P0: x and y get a unit column, memref.expand_shape).",
+   issue="ISSUE-005")
 Ng(84, "matrix_vector_repeated_4", "matrix_vector",
    [L("r", 0, 2, "R"), L("s", 0, 2, "R"), L("i", 0, 8, "I"), L("j", 0, 8, "K")],
    arr("M", (8, 8), ("i", "j")), arr("x", (8,), ("j",)), arr("y", (8,), ("i",)),
    math_class="matrix_vector",
    math_note="Four loops around a matrix-vector product (test/SystolicCC/depth.c\n"
-             "ng_matvec4): y += 4 M x.  Four loops do not make it a GEMM: only i and j\n"
-             "index anything.  Expected rejection: the accesses use two loop counters.")
+             "ng_matvec4): y += 4 M x, r and s repeat it.  The GEMV is the N = 1 GEMM\n"
+             "(ISSUE-005, P0) and r, s are repetition loops outside it: offloaded since\n"
+             "2026-10-15, its tiles run four times per call (refused before: two loop\n"
+             "counters).",
+   issue="ISSUE-005")
 Ng(85, "batched_gemm", "batched",
    [L("b", 0, 2, "P"), L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
    arr("A", (2, 4, 4), ("b", "i", "k")), arr("B", (2, 4, 4), ("b", "k", "j")), arr("C", (2, 4, 4), ("b", "i", "j")),
    math_note="A batched GEMM: for each b, C[b] += A[b] B[b] (two 4x4x4 GEMMs).  This IS a\n"
-             "valid GEMM (a partition coordinate P = b in front of I, J, K).  The recognizer\n"
-             "accepts it (T is the 4x4 identity with a P row), but getDenseLogicalGemm does\n"
-             "not support a partition prefix, so it is not lowered: 'batched GEMM (a\n"
-             "partition prefix P* of 1 coordinates) is not supported'.  Legal, unsupported.")
+             "valid GEMM (a partition coordinate P = b in front of I, J, K).  A documented\n"
+             "limitation until 2026-10-15; offloaded since ISSUE-006: the batch loop is\n"
+             "re-emitted around the tiles, two invocations per call.",
+   issue="ISSUE-006")
 Ng(86, "batched_shared_b", "batched",
    [L("b", 0, 2, "P"), L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
    arr("A", (2, 4, 4), ("b", "i", "k")), arr("B", (4, 4), ("k", "j")), arr("C", (2, 4, 4), ("b", "i", "j")),
    math_note="A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n"
-             "(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  The recognizer\n"
-             "requires A, B and C to have the same number of subscripts; B has two, A and\n"
-             "C three, so recognition fails.  Legal, unsupported.")
+             "(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no\n"
+             "batch subscript: it would be broadcast over the batch (a stride-0 view), or A\n"
+             "and C merged over (b, i) -- neither is lowered (the recognizer: b is read by\n"
+             "A and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers\n"
+             "batches every operand carries).")
 Ng(87, "coupled_i_plus_j", "coupled_mapping",
    [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
    arr("A", (15, 8), ("i + j", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (15, 8), ("i + j", "j")),
@@ -431,17 +437,21 @@ Ng(90, "singular_output_independent_of_i", "singular_mapping",
 Ng(91, "transposed_a", "transposed_operand",
    ijk(8, 8, 8), arr("A", (8, 8), ("k", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_note="C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose\n"
-             "left operand is read transposed.  The recognizer requires A = (I, K) with the\n"
-             "row subscript shared with C; A[k][i] is (K, I).  Legal, unsupported.")
+             "left operand is read transposed.  A documented limitation until 2026-10-15;\n"
+             "offloaded since ISSUE-005 (P0.2: A's view is permuted, memref.transpose).",
+   issue="ISSUE-005")
 Ng(92, "transposed_b", "transposed_operand",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("j", "k")), arr("C", (8, 8), ("i", "j")),
    math_note="C += A B^T (the user's seed A[i][k], B[j][k], C[i][j]): a valid GEMM whose\n"
-             "right operand is read transposed (B[j][k] is (J, K), the recognizer needs\n"
-             "(K, J)).  Legal, unsupported.")
+             "right operand is read transposed (B[j][k] is (J, K)).  A documented\n"
+             "limitation until 2026-10-15; offloaded since ISSUE-005 (P0.2).",
+   issue="ISSUE-005")
 Ng(93, "transposed_c", "transposed_operand",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("j", "i")),
    math_note="C^T += A B, i.e. C += B^T A^T: a valid GEMM written into the transposed\n"
-             "output.  The recognizer needs C = (I, J); C[j][i] is (J, I).  Legal, unsupported.")
+             "output.  A documented limitation until 2026-10-15; offloaded since ISSUE-005\n"
+             "(P0.2: the factor assignment that transposes least is chosen).",
+   issue="ISSUE-005")
 Ng(94, "operand_specific_stride", "operand_view_mismatch",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (16, 8), ("2 * i", "j")),
    math_note="C[2i][j] += A[i][k] B[k][j] (the user's seed C[2*i][j]): the even rows of C\n"
@@ -569,9 +579,10 @@ EXTENDED = [
              [L("b0", 0, 2, "P"), L("b1", 0, 2, "P"), L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
              {"a": arr("A", (2, 2, 4, 4), ("b0", "b1", "i", "k")), "b": arr("B", (2, 2, 4, 4), ("b0", "b1", "k", "j")),
               "c": arr("C", (2, 2, 4, 4), ("b0", "b1", "i", "j"))},
-             math_note="Two batch coordinates: four 4x4x4 GEMMs.  Valid; the recognizer\n"
-                       "accepts a two-coordinate partition prefix, getDenseLogicalGemm\n"
-                       "does not.  Legal, unsupported."),
+             math_note="Two batch coordinates: four 4x4x4 GEMMs.  Valid; a documented\n"
+                       "limitation until 2026-10-15, offloaded since ISSUE-006 (both batch\n"
+                       "loops re-emitted around the tiles, four invocations per call).",
+             issue="ISSUE-006"),
     ext_case(12, "eight_loops_tiled_repeated", "repetition_loop",
              [L("r0", 0, 2, "R"), L("i0", 0, 2, "I"), L("j0", 0, 2, "J"), L("r1", 0, 2, "R"), L("k0", 0, 2, "K"),
               L("i1", 0, 4, "I"), L("j1", 0, 4, "J"), L("k1", 0, 4, "K")],
@@ -996,15 +1007,13 @@ MLIR_CASES = [
     MlirCase("mlir_010", "reversed_coordinate_on_a_only", "negative", "negative_coefficient", "reversed_coordinate_on_a_only",
              gemm_mlir("reversed_coordinate_on_a_only", "A", "B", "C", IJK8, "7 - %i, %k", "%k, %j", "%i, %j"),
              math_note="C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM\n"
-                       "of a reversed view of A.  I is i on C and 7 - i on A: opposite directions,\n"
-                       "which the specification lists as a documented limitation (a negative stride).\n"
-                       "The recognizer refuses it (the two expressions are not the same coordinate in\n"
-                       "the same direction); ext_003 is the same limitation with both operands reversed.",
+                       "of a reversed view of A.  I is i on C and 7 - i on A: opposite directions, a\n"
+                       "documented limitation until 2026-10-15; lowered since ISSUE-005 (P0.3): A's\n"
+                       "view runs backwards from row 7 (a negative stride), C's forwards.",
              is_gemm=True, math_class="gemm",
-             spec_recognition="OUT_OF_SCOPE", spec_basis_key="negative_scale",
-             cur_recognition="reject", cur_dense="not_reached", cur_lowering="not_reached",
-             cur_reject_stage="recognition",
-             cur_reject_reason="not recognized: A's row expression 7 - i and C's i are not one coordinate"),
+             spec_recognition="ACCEPT", spec_basis_key="negative_scale",
+             cur_recognition="accept", cur_dense="supported", cur_lowering="supported",
+             issue="ISSUE-005", expected_views={"A": "[-1*I + 7, 1*K + 0]"}),
     MlirCase("mlir_011", "symbolic_bound", "extended", "symbolic_bound", "symbolic_bound",
              "func.func @symbolic_bound(%A: memref<?x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, "
              "%C: memref<?x8xf32> {llvm.noalias}, %n: index) {\n"

@@ -8,28 +8,31 @@
 // Reachable from C (systolic-cfront translates
 // `C[0][j] += A[0][kk*8+k] * B[kk*8+k][j]` to exactly @const_row_tiled_k).
 //
-// Now refused by the dense partition with its own reason. Whether a constant
-// coordinate (a GEMM with M, N or K = 1 spelled with a constant subscript)
-// should instead be offloaded is an open specification question (SQ-4 in
-// test/gemm_recognition/SPEC_QUESTIONS.md); this test fixes only "refused
-// with a reason, never a crash".
+// Fixed: the empty list is never indexed. Until 2026-10-15 the nest was then
+// refused with its own reason, pending spec question SQ-4; SQ-4 is decided
+// since (test/gemm_recognition/SPEC_QUESTIONS.md, docs/AFFINE_GEMM_MAPPING.md
+// section 2, P0.5): a coordinate no loop drives is an extent-one coordinate,
+// M, N or K = 1, and the nest is offloaded -- 1 x 8 x 16, 8 x 1 x 16 and
+// 16 x 8 x 1 below, the extents the loops give the other two coordinates.
+// The test still guards the crash (the dense partition handles the empty
+// loop list).
 //
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=DISC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
+// RUN: systolic-opt --systolic-declare-fpga-fleet "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=SYS
 //
 // DISC:      recognition result: success
-// DISC:      dense logical GEMM: no (logical coordinate I is driven by no loop (a constant subscript))
+// DISC:      dense logical GEMM: yes, I/J/K on loops /0/1+2
 // DISC:      recognition result: success
-// DISC:      dense logical GEMM: no (logical coordinate J is driven by no loop (a constant subscript))
+// DISC:      dense logical GEMM: yes, I/J/K on loops 0//1+2
 // DISC:      recognition result: success
-// DISC:      dense logical GEMM: no (logical coordinate K is driven by no loop (a constant subscript))
+// DISC:      dense logical GEMM: yes, I/J/K on loops 0+1/2/
 //
-// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate I is driven by no loop (a constant subscript)
-// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate J is driven by no loop (a constant subscript)
-// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate K is driven by no loop (a constant subscript)
-// SYS-NOT:   lowered as
+// SYS:       remark: affine GEMM 1x8x16 lowered as
+// SYS:       remark: affine GEMM 8x1x16 lowered as
+// SYS:       remark: affine GEMM 16x8x1 lowered as
+// SYS-NOT:   not lowered
 
 // I is the constant 0 (A[0][..], C[0][..]); j drives J, kk and k drive K
 func.func @const_row_tiled_k(%A: memref<1x16xf32> {llvm.noalias}, %B: memref<16x8xf32> {llvm.noalias}, %C: memref<1x8xf32> {llvm.noalias}) {

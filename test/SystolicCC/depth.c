@@ -13,7 +13,7 @@
 // stand-in for a successful board run); SOFT_RUNTIME_FAULT=fail makes one
 // invocation fail.
 //
-// RUN: %systolic-cc --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 'd3' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'd4_outer' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'd4_mid' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 3 invocation(s) per call (the loops around them repeat them)
@@ -24,10 +24,10 @@
 // PLAN-DAG: note: 'd7' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 6 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'd8' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ng_ewise5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'ng_batched' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: batched GEMM (a partition prefix P* of 1 coordinates) is not supported)
+// PLAN-DAG: note: 'ng_batched' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ng_skew' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'ng_matvec4' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN:     wrote {{.*}} (8 function(s) offloaded
+// PLAN-DAG: note: 'ng_matvec4' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
+// PLAN:     wrote {{.*}} (10 function(s) offloaded
 //
 // The software model is not the FPGA: every GEMM reports CPU; the
 // invocations are the same.
@@ -73,11 +73,14 @@
 // MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #12
 // ALL-NEXT:   [case] d8: equal to the reference, 4 invocation(s)
 // ALL-NEXT:   [case] ng_ewise5: equal to the reference, 0 invocation(s)
-// ALL-NEXT:   [systolic-cc] CPU Executed: GEMM #13
-// ALL-NEXT:   [case] ng_batched: equal to the reference, 0 invocation(s)
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #13
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #13
+// ALL-NEXT:   [case] ng_batched: equal to the reference, 2 invocation(s)
 // ALL-NEXT:   [systolic-cc] CPU Executed: GEMM #14
 // ALL-NEXT:   [case] ng_skew: equal to the reference, 0 invocation(s)
-// ALL-NEXT:   [case] ng_matvec4: equal to the reference, 0 invocation(s)
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #15
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #15
+// ALL-NEXT:   [case] ng_matvec4: equal to the reference, 8 invocation(s)
 // ALL-NEXT:   PASS: 0 case(s) differ
 // ALL-EMPTY:
 //
@@ -105,7 +108,7 @@
 //
 // With --verify every offloaded call is also compared with the function as
 // written, run on the CPU.
-// RUN: %systolic-cc --verify %s -o %t.v > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // VERIFY-COUNT-8: verified:
 // VERIFY-NOT:     MISMATCH
@@ -224,7 +227,8 @@ void ng_ewise5(float X[restrict 2][2][2][2][2], float Y[restrict 2][2][2][2][2])
             X[a][b][c][d][e] += Y[a][b][c][d][e] * Y[a][b][c][d][e];
 }
 
-/* 4 loops, batched (rank-3 arrays): recognized, not lowered. */
+/* 4 loops, batched (rank-3 arrays): two 4x4x4 GEMMs, the batch loop
+   re-emitted around the tiles (ISSUE-006, 2026-10-15; refused before). */
 void ng_batched(float A[restrict 2][4][4], float B[restrict 2][4][4], float C[restrict 2][4][4]) {
   for (int b = 0; b < 2; ++b)
     for (int i = 0; i < 4; ++i)
@@ -241,7 +245,11 @@ void ng_skew(float A[restrict 15][8], float B[restrict 8][16], float C[restrict 
         C[i][j] += A[i + j][k] * B[k][2 * j];
 }
 
-/* 4 loops around a matrix-vector product: two dimensions only. */
+/* 4 loops around a matrix-vector product: r and s repeat it (y += 4 M x).
+   A matrix-vector product is a GEMM with N = 1 (rank-1 x and y get a unit
+   column, docs/AFFINE_GEMM_MAPPING.md section 2): offloaded since
+   2026-10-15, its tiles run inside the repeating loops (refused before: two
+   dimensions only). */
 void ng_matvec4(float M[restrict 8][8], float x[restrict 8], float y[restrict 8]) {
   for (int r = 0; r < 2; ++r)
     for (int s = 0; s < 2; ++s)

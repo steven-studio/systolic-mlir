@@ -18,9 +18,9 @@
  *     C'(I,J) = C[b0][b1][i][j]   (I index 0..3 via 'i'; J index 0..3 via 'j')
  *     tags: batched
  *
- *   Two batch coordinates: four 4x4x4 GEMMs.  Valid; the recognizer
- *   accepts a two-coordinate partition prefix, getDenseLogicalGemm
- *   does not.  Legal, unsupported.
+ *   Two batch coordinates: four 4x4x4 GEMMs.  Valid; a documented
+ *   limitation until 2026-10-15, offloaded since ISSUE-006 (both batch
+ *   loops re-emitted around the tiles, four invocations per call).
  *
  * Array dimensions: A: float[2][2][4][4]   B: float[2][2][4][4]   C: float[2][2][4][4]
  * Loop order (outer to inner): b0 [batch P], b1 [batch P], i [row I], j [column J], k [reduction K]
@@ -29,20 +29,16 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: include/Systolic/AffineMatmulPartitioning.h: 'batched GEMMs (a partition prefix P*) ... are not' of the dense form; getDenseLogicalGemm refuses them with a message; test/Systolic/affine_to_systolic_refused.mlir @batched
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported since 2026-10-15, ISSUE-006) a batched GEMM, every operand carrying the batch coordinate(s) through one and the same expression: the batch loops are re-emitted around the tiles, one GEMM per batch iteration on its own slice of each operand (docs/AFFINE_GEMM_MAPPING.md section 2; AffineMatmulToSystolic.cpp)
+ * Current implementation (commit 6e25528 with the fix of ISSUE-006, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
- *   dense partition (getDenseLogicalGemm):   unsupported
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: dense_partition
- *   reason: batched GEMM (a partition prefix P* of 2 coordinates) is not supported
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-006 (fixed)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

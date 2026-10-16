@@ -10,7 +10,7 @@
 // is a refusal with its own reason, never a wrapped value.  Permanent
 // regression test (no expected-failure marker: fixed with the issue).
 //
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
+// RUN: systolic-opt --systolic-declare-fpga-fleet "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s
 //
 // CHECK: remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate I's scale or extent overflows 64-bit arithmetic

@@ -13,9 +13,38 @@
 
 #include <array>
 #include <optional>
+#include <string>
 
 namespace mlir {
 namespace systolic {
+
+/// The classification of a candidate nest (docs/AFFINE_GEMM_MAPPING.md §9).
+/// UNKNOWN is never treated as valid; a valid mapping is never called invalid
+/// because a lowering component is missing.
+enum class GemmMappingClass {
+  /// A valid mapping exists and its views are representable.
+  ProvenValid,
+  /// A valid mathematical mapping exists, but a lowering component is missing.
+  ValidButLoweringUnsupported,
+  /// No valid mapping exists (the violated condition is in the reason).
+  ProvenInvalid,
+  /// Correctness cannot be established by the implemented analysis.
+  Unknown,
+};
+
+inline const char *stringifyGemmMappingClass(GemmMappingClass value) {
+  switch (value) {
+  case GemmMappingClass::ProvenValid:
+    return "PROVEN_VALID";
+  case GemmMappingClass::ValidButLoweringUnsupported:
+    return "VALID_BUT_LOWERING_UNSUPPORTED";
+  case GemmMappingClass::ProvenInvalid:
+    return "PROVEN_INVALID";
+  case GemmMappingClass::Unknown:
+    return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
 
 /// A candidate Affine loop nest that may implement a matrix multiplication.
 /// Discovery is intentionally separate from semantic recognition.
@@ -72,9 +101,34 @@ struct AffineLogicalMapping {
 /// spells the shared coordinate differently from the other operand (C[i + 8][j]
 /// with A[i][k]: C's row view has offset 8; C[2i][j] with A[i][k]: scale 2) and
 /// the coordinate is the linear form both subscripts are affine images of.
+///
+/// The scale may be negative: the operand reads the coordinate backwards (a
+/// negative-stride view, docs/AFFINE_GEMM_MAPPING.md §5); never zero.
 struct OperandCoordinateView {
   int64_t scale = 1;
   int64_t offset = 0;
+};
+
+/// Where an operand's memref dimensions sit in the GEMM
+/// (docs/AFFINE_GEMM_MAPPING.md §5). The operand's two GEMM roles, in GEMM
+/// order -- A: (I, K), B: (K, J), C: (I, J) -- are read in dimensions
+/// roleDim[0] and roleDim[1] of the memref, in either order (roleDim[0] >
+/// roleDim[1] is a transposed operand), or roleDim[r] = -1 when the operand
+/// has no dimension for role r (the role has extent 1 and the operand's rank
+/// is lower). Every other dimension d has a subscript that is constant on the
+/// iteration domain: constantIndex[d] (an extent-one dimension). Batch
+/// dimensions (a partition prefix) are not described here.
+struct OperandLayout {
+  std::array<int, 2> roleDim{-1, -1};
+  SmallVector<std::optional<int64_t>> constantIndex;
+  // The memref dimension of each batch coordinate (y = (P*, I, J, K): P* in
+  // order); every operand reads a batch coordinate through the same
+  // expression, in a dimension of its own (ISSUE-006).
+  SmallVector<int, 2> batchDim;
+
+  bool isTransposed() const {
+    return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];
+  }
 };
 
 struct AffineLogicalNormalization {
@@ -147,6 +201,12 @@ struct LogicalMatmul {
   // M, N or K = 0 (spec question SQ-2). Reported as such, not as "not static".
   bool normalizationEmptyLoop = false;
 
+  // When no normalization could be computed because a loop bound is not one
+  // constant: which bound, and why it is not (a symbol, a bound that depends
+  // on another loop's counter -- the domain is not a box -- or the min/max of
+  // non-constant values). Empty otherwise.
+  std::string normalizationDetail;
+
   // Exact source iteration domain D_S over the original iteration
   // coordinates x, in the same order as the columns of logicalMapping.
   std::optional<affine::FlatAffineValueConstraints> sourceDomain;
@@ -183,6 +243,20 @@ struct LogicalMatmul {
   std::array<OperandCoordinateView, 2> viewA;
   std::array<OperandCoordinateView, 2> viewB;
   std::array<OperandCoordinateView, 2> viewC;
+
+  // Which memref dimension of each operand reads which role, and the fixed
+  // index of every other dimension (OperandLayout). For the canonical rank-2
+  // GEMM: roleDim = {0, 1}, no constant dimension.
+  OperandLayout layoutA;
+  OperandLayout layoutB;
+  OperandLayout layoutC;
+
+  // True when the accumulation `arith.addf` carries the `reassoc` fast-math
+  // flag: the program permits reassociating the reduction
+  // (docs/AFFINE_GEMM_MAPPING.md §6). The systolic execution sums each tile
+  // from zero and adds the sum to C, so it is offloaded only with this
+  // permission or the pass's allow-fp-reassociation option.
+  bool reductionMayReassociate = false;
 };
 
 /// Find Affine loop nests worth attempting to recognize.
@@ -194,9 +268,14 @@ void collectAffineMatmulCandidates(
 
 /// Recover logical GEMM coordinates and access factorization.
 ///
-/// Failure means "not recognized"; it is not a compiler error.
+/// Failure means "not recognized"; it is not a compiler error. On failure,
+/// `why` (when given) receives the reason. The subscripts are compared as
+/// functions on the iteration domain, not as expressions: a loop that runs
+/// exactly once contributes a constant (docs/AFFINE_GEMM_MAPPING.md, §1, §4).
 FailureOr<LogicalMatmul>
-recognizeLogicalMatmul(AffineMatmulCandidate candidate);
+recognizeLogicalMatmul(AffineMatmulCandidate candidate,
+                       std::string *why = nullptr,
+                       GemmMappingClass *mappingClass = nullptr);
 
 } // namespace systolic
 } // namespace mlir
