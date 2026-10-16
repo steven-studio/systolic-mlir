@@ -4,7 +4,11 @@
 // run forwards or backwards (negative-stride views), constant (extent-one)
 // dimensions anywhere, roles of extent one (M, N or K = 1), offsets, strides,
 // steps, origins, loops that count down, split coordinates and loops that run
-// once adding arbitrary terms, and perturbations of them (other radices,
+// once adding arbitrary terms, loops with redundant max/min bounds (which the
+// compiler must fold: a bound map's first result runs other iterations), and
+// perturbations of them (a loop of I or J added to both factors' K
+// subscripts -- a batch loop the positional reading would have drive two
+// coordinates --, a batch loop that runs once -- a fixed index --, other radices,
 // coupling, broadcasts, a coordinate read twice, batches, accumulators at
 // another element, out-of-bounds accesses) -- decided by enumerating every
 // iteration point, without the structure theorem the compiler relies on.
@@ -16,19 +20,22 @@
 // triples must be a bijection onto the box, and every view element must lie
 // inside its allocation. Nests the oracle refuses must not be lowered.
 //
+// The oracle runs the systolic-opt of this build tree (lit substitutes the
+// tool's path), not whichever is first on PATH.
+//
 // With the reassociation permission (allow-fp-reassociation=true):
-// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --seed 1 --count 400 | FileCheck %s
-// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --seed 2 --count 400 | FileCheck %s
-// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --seed 3 --count 400 | FileCheck %s
+// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 1 --count 400 | FileCheck %s
+// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 2 --count 400 | FileCheck %s
+// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 3 --count 400 | FileCheck %s
 //
 // CHECK-NOT: MISMATCH
 // CHECK:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}
-// CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}, batched {{[1-9][0-9]*}} (a factor's view moving with the batch {{[1-9][0-9]*}}), A and B both transposed {{[1-9][0-9]*}}
+// CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}, batched {{[1-9][0-9]*}} (a factor's view moving with the batch {{[1-9][0-9]*}}), A and B both transposed {{[1-9][0-9]*}}, a max/min loop bound {{[1-9][0-9]*}} (of a batch loop {{[1-9][0-9]*}}), mutations role_in_k {{[1-9][0-9]*}} and batch_once {{[1-9][0-9]*}}
 // CHECK:     mismatches: 0
 //
 // Without it (the default, docs/AFFINE_GEMM_MAPPING.md section 6) nothing is
 // lowered: the systolic execution is a different order of IEEE additions.
-// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --seed 1 --count 400 --fp-default \
+// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 1 --count 400 --fp-default \
 // RUN:   | FileCheck %s --check-prefix=STRICT
 //
 // STRICT-NOT: MISMATCH

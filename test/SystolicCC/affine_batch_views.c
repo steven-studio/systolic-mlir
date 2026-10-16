@@ -14,6 +14,14 @@
 //   bv_two         A[p][i + q][k], B[k + p][j + q], C[p][q]          two batch coordinates, offsets in both factors
 //   bv_c_shift     C[b + 1] += A[b] B[b]                             C's batch index shifted
 //   bv_neg         C[b][3 - i][j] += A[2b + 3 - i][k] B[k][j + b]    a backwards view with a batch offset
+//   bv_j_in_k      C[i][j] += A[i][k + j] B[k + j][j]                j read by all three: a batch loop, N = 1 per j
+//   bv_i_in_k      C[i][j] += A[i][k + i] B[k + i][j]                i a batch loop, M = 1 per i
+//   bv_const_prefix C[t][i][0] += A[t][i][1] B[t][1][0], t in [1, 2) t runs once: a fixed index, a plain 5 x 1 x 1 GEMM
+//
+// The last three were refused before the review fixes: the positional reading
+// K = k + j, J = j had loop j drive two coordinates ("two logical coordinates
+// are driven by the same loop"), and a prefix constant on the domain counted
+// as a batch coordinate (a batched vector-times-scalar, SQ-5).
 //
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
@@ -26,7 +34,10 @@
 // PLAN-DAG: note: 'bv_two' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 6 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'bv_c_shift' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'bv_neg' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
-// PLAN: wrote {{.*}} (7 function(s) offloaded
+// PLAN-DAG: note: 'bv_j_in_k' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
+// PLAN-DAG: note: 'bv_i_in_k' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
+// PLAN-DAG: note: 'bv_const_prefix' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
+// PLAN: wrote {{.*}} (10 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -39,12 +50,15 @@
 // ALL: [case] bv_two: equal, offloaded (6)
 // ALL: [case] bv_c_shift: equal, offloaded (2)
 // ALL: [case] bv_neg: equal, offloaded (2)
+// ALL: [case] bv_j_in_k: equal, offloaded (4)
+// ALL: [case] bv_i_in_k: equal, offloaded (4)
+// ALL: [case] bv_const_prefix: equal, offloaded (2)
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU:
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-7: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-10: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Without the reassociation permission (the default) nothing is offloaded:
@@ -84,6 +98,18 @@ void bv_neg(float A[restrict 6][4], float B[restrict 4][5], float C[restrict 2][
   for (int b = 0; b < 2; ++b) for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
     C[b][3 - i][j] += A[2 * b + 3 - i][k] * B[k][j + b];
 }
+void bv_j_in_k(float A[restrict 4][8], float B[restrict 8][4], float C[restrict 4][4]) {
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
+    C[i][j] += A[i][k + j] * B[k + j][j];
+}
+void bv_i_in_k(float A[restrict 4][8], float B[restrict 8][4], float C[restrict 4][4]) {
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
+    C[i][j] += A[i][k + i] * B[k + i][j];
+}
+void bv_const_prefix(float A[restrict 2][5][3], float B[restrict 2][3][2], float C[restrict 2][5][2]) {
+  for (int t = 1; t < 2; ++t) for (int i = 0; i < 5; ++i)
+    C[t][i][0] += A[t][i][1] * B[t][1][0];
+}
 
 static float mul(float a, float b) { return a * b; }
 static void bv_target_ref(float A[17][16], float B[16][4], float C[33][4]) {
@@ -115,6 +141,18 @@ static void bv_neg_ref(float A[6][4], float B[4][5], float C[2][4][4]) {
   for (int b = 0; b < 2; ++b) for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
     C[b][3 - i][j] = C[b][3 - i][j] + mul(A[2 * b + 3 - i][k], B[k][j + b]);
 }
+static void bv_j_in_k_ref(float A[4][8], float B[8][4], float C[4][4]) {
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
+    C[i][j] = C[i][j] + mul(A[i][k + j], B[k + j][j]);
+}
+static void bv_i_in_k_ref(float A[4][8], float B[8][4], float C[4][4]) {
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) for (int k = 0; k < 4; ++k)
+    C[i][j] = C[i][j] + mul(A[i][k + i], B[k + i][j]);
+}
+static void bv_const_prefix_ref(float A[2][5][3], float B[2][3][2], float C[2][5][2]) {
+  for (int t = 1; t < 2; ++t) for (int i = 0; i < 5; ++i)
+    C[t][i][0] = C[t][i][0] + mul(A[t][i][1], B[t][1][0]);
+}
 
 static void fill(float *p, int n, int s) { for (int e = 0; e < n; ++e) p[e] = (float)((e * 7 + s) % 9 - 4); }
 static int differ;
@@ -135,5 +173,8 @@ int main(void) {
   RUN(bv_two, 2*6*4, 5*6, 2*3*4*4);
   RUN(bv_c_shift, 2*4*4, 2*4*4, 3*4*4);
   RUN(bv_neg, 6*4, 4*5, 2*4*4);
+  RUN(bv_j_in_k, 4*8, 8*4, 4*4);
+  RUN(bv_i_in_k, 4*8, 8*4, 4*4);
+  RUN(bv_const_prefix, 2*5*3, 2*3*2, 2*5*2);
   printf("%s: %d differ\n", differ ? "FAIL" : "PASS", differ); return differ;
 }

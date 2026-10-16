@@ -455,6 +455,34 @@ func.func @minmax_bounds(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32>
 }
 
 // -----
+// Folded bounds of a stepped loop (P0.6): k1 = max(-2, 0) to 8 step 4 is
+// k1 = 0, 4, and K = k1 + k2 is 0 .. 7. The source domain needs the stride
+// (k1 - 0) mod 4 = 0 from the folded bound: MLIR's own domain keeps a stride
+// only for a lower bound of one constant, and with every k1 in [0, 7] the
+// regions did not cover it -- the nest was refused ("the partition is not
+// exact: the regions do not cover the source iteration domain").
+// CHECK-LABEL: func.func @minmax_bounds_split_k
+// CHECK:       systolic.matmul_tile {{.*}} m = 8 n = 8 k = 8
+// REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
+func.func @minmax_bounds_split_k(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 8 {
+    affine.for %j = 0 to 8 {
+      affine.for %k1 = max affine_map<() -> (-2, 0)>() to 8 step 4 {
+        affine.for %k2 = 0 to 4 {
+          %a = affine.load %A[%i, %k1 + %k2] : memref<8x8xf32>
+          %b = affine.load %B[%k1 + %k2, %j] : memref<8x8xf32>
+          %c = affine.load %C[%i, %j] : memref<8x8xf32>
+          %p = arith.mulf %a, %b : f32
+          %s = arith.addf %c, %p : f32
+          affine.store %s, %C[%i, %j] : memref<8x8xf32>
+        }
+      }
+    }
+  }
+  return
+}
+
+// -----
 // The permission in the IR: the accumulation carries `reassoc` (what
 // systolic-cfront --fp-reassociation emits). Lowered even by default.
 // CHECK-LABEL: func.func @reassoc_flag

@@ -54,6 +54,12 @@ the emitted batch loops are enumerated, the affine.apply offsets of each
 operand's subview evaluated at every batch value, and the views checked per
 batch iteration on that iteration's points -- the same address-exact check.
 
+Some loops are emitted with redundant constant bounds, max(lb, lb - d) to
+min(ub, ub + d) with the effective bound in any position (P0.6): the compiler
+must fold them -- a bound map's first result alone runs other iterations. The
+decoration has its own random stream per nest, so a seed's nests are the
+same with or without it.
+
 With --fp-default the nests go through the pass WITHOUT the reassociation
 permission, and nothing may be lowered (section 6).
 
@@ -85,6 +91,7 @@ class Nest:
         self.cload = cload          # [f, ...] the accumulator load's subscripts
         self.order = order          # ("A", "B") or ("B", "A"): the product's factor order
         self.mode = mode
+        self.bounds = None          # per loop ([lowers], [uppers]) as emitted, or None: lb, ub
 
     def points(self):
         return list(itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
@@ -230,7 +237,7 @@ def mutate(rng, loops, trip, ops):
     kind = rng.choice(["radix", "couple", "acc", "broadcast", "double_read",
                        "batch", "batch_shift", "scale_coef", "swap_roles",
                        "add_const_loop", "drop_dim", "batch_offset",
-                       "batch_offset_c"])
+                       "batch_offset_c", "role_in_k", "batch_once"])
     cload = None
     many = [s for s in range(len(loops)) if trip[s] >= 2]
     every = [f for fs in ops.values() for f in fs]
@@ -283,6 +290,46 @@ def mutate(rng, loops, trip, ops):
             f, b = rng.choice(roles), shared[0]
             c = rng.choice([1, -1, 2])
             f[0] = [x + c * y for x, y in zip(f[0], b[0])]
+    elif kind == "role_in_k":
+        # a loop of I or J added, in proportion, to the K subscripts of both
+        # factors: read by all three operands it is a batch loop, and each
+        # factor reads K at an offset that moves with it (A[i][k + j] with
+        # B[k + j][j]: valid, one dense GEMM per j); the positional reading
+        # K = k + j, J = j has that loop drive two coordinates
+        def reads(name, s):
+            return any(f[0][s] != 0 for f in ops[name])
+        k_loops = [s for s in many if reads("A", s) and reads("B", s) and not reads("C", s)]
+        ij_loops = [s for s in many if reads("C", s) and reads("A", s) != reads("B", s)]
+        ka = [f for f in ops["A"] if k_loops and f[0][k_loops[0]] != 0]
+        kb = [f for f in ops["B"] if k_loops and f[0][k_loops[0]] != 0]
+        if ij_loops and len(ka) == 1 and len(kb) == 1 and ka[0] is not kb[0]:
+            s, k, c = rng.choice(ij_loops), k_loops[0], rng.choice([1, -1, 2])
+            for f in (ka[0], kb[0]):
+                f[0][s] += c * f[0][k]
+    elif kind == "batch_once":
+        # the batch loop runs once: the shared batch subscript is a constant
+        # on the domain -- a fixed index of a plain GEMM, no batch
+        # coordinate; in half of them the loops of two roles run once as
+        # well (M x 1 x 1 and the like: a plain GEMM, not the batched
+        # vector-times-scalar SQ-5 leaves open)
+        shared = [f for f in ops["C"] if any(f is g for g in ops["A"]) and
+                  any(f is g for g in ops["B"])]
+        ss = [s for s in many if shared and shared[0][0][s] != 0]
+        if ss:
+            once = [ss[0]]
+            if rng.random() < 0.5:
+                role_of = {frozenset("AC"): "I", frozenset("BC"): "J", frozenset("AB"): "K"}
+                role = {s: role_of.get(frozenset(nm for nm in "ABC"
+                                                 if any(f[0][s] != 0 for f in ops[nm])))
+                        for s in many}
+                roles = sorted(set(role.values()) - {None})
+                if len(roles) >= 2:
+                    drop = rng.sample(roles, 2)
+                    once += [s for s in many if role[s] in drop]
+            for s in once:
+                lb, ub, st = loops[s]
+                loops[s] = (lb, lb + rng.randint(1, st), st)
+                trip[s] = 1
     elif kind == "scale_coef" and varying:
         f = rng.choice(varying)
         f[0] = [-2 * c for c in f[0]]            # still valid: a reversed, strided view
@@ -297,6 +344,31 @@ def mutate(rng, loops, trip, ops):
         if len(ops[name]) > 1:
             ops[name].pop(rng.randrange(len(ops[name])))
     return kind, cload
+
+
+def decorate_bounds(rng, nest):
+    """Redundant constant bounds for some loops: the lower bound a max, the
+    upper a min, of the effective bound and looser ones, in random order."""
+    bounds = []
+    for lb, ub, _ in nest.loops:
+        lowers, uppers = [lb], [ub]
+        if rng.random() < 0.3:
+            lowers += [lb - rng.randint(1, 3) for _ in range(rng.choice([1, 1, 2]))]
+            rng.shuffle(lowers)
+        if rng.random() < 0.3:
+            uppers += [ub + rng.randint(1, 3) for _ in range(rng.choice([1, 1, 2]))]
+            rng.shuffle(uppers)
+        bounds.append((lowers, uppers))
+    nest.bounds = bounds
+
+
+def has_folded_bound(nest, loops=None):
+    """Whether one of the loops (all, or the given indices) is emitted with a
+    max or min bound."""
+    if not nest.bounds:
+        return False
+    return any(len(lo) > 1 or len(up) > 1
+               for s, (lo, up) in enumerate(nest.bounds) if loops is None or s in loops)
 
 
 def generate(rng):
@@ -453,8 +525,16 @@ def emit(nest, name):
     out = ["func.func @%s(%%A: %s {llvm.noalias}, %%B: %s {llvm.noalias}, %%C: %s {llvm.noalias}) {"
            % (name, ty["A"], ty["B"], ty["C"])]
     ind = "  "
-    for (lb, ub, st), iv in zip(nest.loops, ivs):
-        out.append("%saffine.for %s = %d to %d%s {" % (ind, iv, lb, ub, "" if st == 1 else " step %d" % st))
+    def bound(kind, values):
+        if len(values) == 1:
+            return str(values[0])
+        return "%s affine_map<() -> (%s)>()" % (kind, ", ".join(str(v) for v in values))
+    for s, ((lb, ub, st), iv) in enumerate(zip(nest.loops, ivs)):
+        lowers, uppers = nest.bounds[s] if nest.bounds else ([lb], [ub])
+        assert max(lowers) == lb and min(uppers) == ub
+        out.append("%saffine.for %s = %s to %s%s {" % (ind, iv, bound("max", lowers),
+                                                       bound("min", uppers),
+                                                       "" if st == 1 else " step %d" % st))
         ind += "  "
     idx = lambda fs: ", ".join(expr(f, ivs) for f in fs)
     for k in "AB":
@@ -661,17 +741,19 @@ def batch_offset_in_role(nest):
 
 def check_batched(nest, got):
     """The batched lowering: the emitted batch loops are the nest's batch
-    loops (same bounds and steps, same order), and for every batch value the
-    views -- dynamic offsets evaluated -- pass check_views on that batch
-    iteration's points."""
+    loops (the same iterations -- origin, step, trip count --, same order),
+    and for every batch value the views -- dynamic offsets evaluated -- pass
+    check_views on that batch iteration's points."""
     mnk, views, _, info = got
     batch = batch_loops_of(nest)
     loops = info["loops"]
     if len(loops) != len(batch):
         return "%d batch loop(s) emitted for %d" % (len(loops), len(batch))
     for (iv, lb, ub, st), s in zip(loops, batch):
-        if (lb, ub, st) != tuple(nest.loops[s]):
-            return "emitted batch loop %s is not the nest's loop %d" % (iv, s)
+        nlb, nub, nst = nest.loops[s]
+        if (lb, st, trips(lb, ub, st)) != (nlb, nst, trips(nlb, nub, nst)):
+            return ("emitted batch loop %s = %d to %d step %d does not run the iterations of "
+                    "the nest's loop %d (%d to %d step %d)" % (iv, lb, ub, st, s, nlb, nub, nst))
     pts = nest.points()
     for values in itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
                                       for _, lb, ub, st in loops]):
@@ -699,6 +781,8 @@ def main():
 
     rng = random.Random(a.seed)
     nests = [generate(rng) for _ in range(a.count)]
+    for i, nest in enumerate(nests):
+        decorate_bounds(random.Random("bounds:%d:%d" % (a.seed, i)), nest)
     text = "\n// -----\n".join(emit(nest, "case_%d" % i) for i, nest in enumerate(nests))
     if a.keep:
         with open(a.keep, "w") as f:
@@ -710,7 +794,8 @@ def main():
 
     counts = {"ACCEPT": 0, "REJECT": 0, "SKIP": 0}
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
-               "batched": 0, "batch_offset": 0, "both_transposed": 0}
+               "batched": 0, "batch_offset": 0, "both_transposed": 0, "folded": 0,
+               "batch_folded": 0, "role_in_k": 0, "batch_once": 0}
 
     def is_transposed(view):
         shape, strides = view[0], view[1]
@@ -761,6 +846,9 @@ def main():
                 feature["batched"] += 1
                 feature["batch_offset"] += batch_offset_in_role(nest)
                 feature["both_transposed"] += both_factors_transposed(got[1])
+                feature["folded"] += has_folded_bound(nest)
+                feature["batch_folded"] += has_folded_bound(nest, set(batch_loops_of(nest)))
+                feature["role_in_k"] += nest.mode == "mutated:role_in_k"
                 continue
             if any(v[1] is None or v[1][2] is None for v in got[1]):
                 mismatches.append((i, nest, "a view of a plain GEMM has a dynamic offset"))
@@ -776,6 +864,9 @@ def main():
             feature["extent_one"] += 1 in mnk
             feature["rank_not_2"] += any(len(nest.ops[k][0]) != 2 for k in "ABC")
             feature["once"] += any(trips(*l) == 1 for l in nest.loops)
+            feature["folded"] += has_folded_bound(nest)
+            feature["role_in_k"] += nest.mode == "mutated:role_in_k"
+            feature["batch_once"] += nest.mode == "mutated:batch_once"
         elif got is not None:
             mismatches.append((i, nest, "oracle REJECT (%s), compiler lowered %s" % (verdict[1], got[0])))
 
@@ -790,7 +881,9 @@ def main():
               "M/N/K = 1 %(extent_one)d, an operand of rank != 2 %(rank_not_2)d, "
               "a loop that runs once %(once)d, batched %(batched)d "
               "(a factor's view moving with the batch %(batch_offset)d), "
-              "A and B both transposed %(both_transposed)d" % feature)
+              "A and B both transposed %(both_transposed)d, "
+              "a max/min loop bound %(folded)d (of a batch loop %(batch_folded)d), "
+              "mutations role_in_k %(role_in_k)d and batch_once %(batch_once)d" % feature)
     print("mismatches: %d" % len(mismatches))
 
 

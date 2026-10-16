@@ -730,6 +730,43 @@ struct AffineMatmulToSystolicPass
       return failure();
     }
 
+    // The batch loops' iterations, from the analysis: the origin, step and
+    // trip count of the normalized domain -- the folded bounds (a bound may
+    // be a max or min of constants, P0.6), the ones every check above used;
+    // a bound map's first result would run other iterations. An upper bound
+    // of one constant is re-emitted as written (the same iterations), any
+    // other as the last iteration plus one. Checked before any IR is built.
+    struct BatchLoopBounds {
+      int64_t lower, upper, step;
+    };
+    SmallVector<BatchLoopBounds> batchBounds;
+    for (unsigned s : dense->batchLoops) {
+      affine::AffineForOp loop =
+          affine::getForInductionVarOwner(matmul.sourceDomain->getValue(s));
+      const AffineLogicalNormalization &norm = matmul.normalization;
+      std::optional<int64_t> lastOrdinal =
+          norm.domain ? norm.domain->getConstantBound64(
+                            presburger::BoundType::UB, s)
+                      : std::nullopt;
+      const int64_t step = norm.sourceTransformation[s][s];
+      const int64_t lower = norm.sourceOffset[s];
+      std::optional<int64_t> span =
+          lastOrdinal ? llvm::checkedMul(step, *lastOrdinal) : std::nullopt;
+      std::optional<int64_t> last =
+          span ? llvm::checkedAdd(lower, *span) : std::nullopt;
+      std::optional<int64_t> upper =
+          last ? llvm::checkedAdd(*last, int64_t(1)) : std::nullopt;
+      if (!upper || step <= 0) {
+        why = "a batch loop's bounds overflow 64-bit arithmetic";
+        mappingClass = GemmMappingClass::Unknown;
+        return failure();
+      }
+      batchBounds.push_back(
+          {lower,
+           loop.hasConstantUpperBound() ? loop.getConstantUpperBound() : *upper,
+           step});
+    }
+
     // ------------------------------------------------------------------
     // Materialize. Every check is done; from here on the nest is replaced.
     // ------------------------------------------------------------------
@@ -737,23 +774,21 @@ struct AffineMatmulToSystolicPass
     Location loc = anchor->getLoc();
 
     // A batched GEMM: the batch loops -- the nest's loops that drive a batch
-    // coordinate, with their own bounds and steps, in their original order
-    // -- are re-emitted around the tiles, so that every batch iteration runs
-    // the tiles once on its own slice of each operand: exactly the original
-    // iteration domain, whatever the batch coordinate's values (ISSUE-006,
-    // docs/AFFINE_GEMM_MAPPING.md section 2). Each operand dimension with
-    // batch terms is read at its static offset plus those terms of the new
-    // loops' counters (materializeOperandView): a batch dimension's index, or
-    // a factor's role view moving with the batch (ISSUE-007). The terms of
-    // loops that run once are constants on the domain, already in the static
-    // offsets (domain forms); such loops are not re-emitted.
+    // coordinate, with their own iterations (the bounds above), in their
+    // original order -- are re-emitted around the tiles, so that every batch
+    // iteration runs the tiles once on its own slice of each operand: exactly
+    // the original iteration domain, whatever the batch coordinate's values
+    // (ISSUE-006, docs/AFFINE_GEMM_MAPPING.md section 2). Each operand
+    // dimension with batch terms is read at its static offset plus those
+    // terms of the new loops' counters (materializeOperandView): a batch
+    // dimension's index, or a factor's role view moving with the batch
+    // (ISSUE-007). The terms of loops that run once are constants on the
+    // domain, already in the static offsets (domain forms); such loops are not
+    // re-emitted.
     SmallVector<Value> newIVs;
-    for (unsigned s : dense->batchLoops) {
-      affine::AffineForOp loop =
-          affine::getForInductionVarOwner(matmul.sourceDomain->getValue(s));
+    for (const BatchLoopBounds &bounds : batchBounds) {
       auto batchLoop = affine::AffineForOp::create(
-          builder, loc, loop.getConstantLowerBound(),
-          loop.getConstantUpperBound(), loop.getStep().getSExtValue());
+          builder, loc, bounds.lower, bounds.upper, bounds.step);
       newIVs.push_back(batchLoop.getInductionVar());
       builder.setInsertionPointToStart(batchLoop.getBody());
     }

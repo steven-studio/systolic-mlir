@@ -17,7 +17,9 @@ classifications of §9.
 A perfect chain of n ≥ 1 `affine.for` loops around one statement. Loop s has:
 
 - lower bound λ_s and exclusive upper bound υ_s: constants, or the max/min of constants, which
-  are folded with checked arithmetic (P0.6: `min(8, 16)` = 8);
+  are folded with checked arithmetic (P0.6: `min(8, 16)` = 8); every stage uses the folded
+  values -- the source domain's stride (x_s − λ_s) mod σ_s = 0 and the re-emitted batch loops
+  included (§18.1, §18.4);
 - step σ_s ≥ 1 (the `affine.for` verifier rejects σ ≤ 0).
 
 Its trip count is n_s = 0 if υ_s ≤ λ_s, else (υ_s − λ_s − 1) div σ_s + 1. This is computed
@@ -550,11 +552,11 @@ A nest is accepted as a batched GEMM of batch-dependent views iff, besides (C0),
    M, N, K equal to 1 per batch) are refused exactly as before.
 
 **Theorem 5 (batch-dependent views) [proved].** If the rule holds, the lowering — the batch loops
-re-emitted with their own bounds and steps, around the tiles of an exact partition of the role
-box (§8), every operand read through its view at the offset m + Σ β x_P evaluated per batch
+re-emitted with their own iterations (λ_s + σ_s z, 0 ≤ z < n_s, from the folded bounds of §1:
+§18.1), around the tiles of an exact partition of the role box (§8), every operand read through its view at the offset m + Σ β x_P evaluated per batch
 iteration — performs exactly the updates of the nest: for every x ∈ D the one update
 C[F_C(x)] += A[F_A(x)] · B[F_B(x)], and no other. *Proof.* The batch loops are re-emitted
-unchanged, so every batch value p of D occurs exactly once. For a fixed p, condition 4 makes
+with the same iterations, so every batch value p of D occurs exactly once. For a fixed p, condition 4 makes
 (I, J, K) a bijection of D_p = {x ∈ D : x_P = p} onto the box, and the partition of §8 covers
 the box exactly once, so every x ∈ D_p is executed by exactly one tile slot. At that slot, each
 operand's element is its view's element: the role part by (V) of §3 (the views are the
@@ -612,6 +614,8 @@ Lowering (`test/Systolic/affine_gemm_batch_views.mlir` @phase1_target):
   B[b][b][j]: b a batch loop, K = 1), and the positional reading is kept only when that analysis
   refuses too, so that C[b][b + i][j] is refused by the dense partition with its diagnostic
   unchanged. Both were found by the oracle (7 of 16,000 nests, all refused valid mappings).
+  The review generalized the fallback to any loop that drives two of the positional
+  coordinates (§18.2).
 - **Partitioning**: `rangeOnDomain` — the exact range of an affine form of the loop counters on
   the normalized box. `getDenseLogicalGemm` is unchanged.
 - **Lowering**: one `affine.apply` per operand dimension with batch terms (identical ones
@@ -712,5 +716,135 @@ nests) and its lit test requires that count to be nonzero. C transposed is cover
 | showcase (169) | rc 0: 162 pass + 7 expected_refusal; ext_019..022 (new) offloaded and verified (2, 10, 2, 1 invocations); no existing case changed |
 | regression gate | rc 0; ISSUE-001..007 reproducers pass; 172 unchanged; 165 pass + 7 expected_refusal |
 | 800 generated cases | identical to the Phase 1 run |
+| `test_permissions.py` | 48/48 |
+| FPGA board | NOT RUN (no board) |
+
+## 18. Review-found defects and their fixes (2026-10-16)
+
+An independent review of Phases 1 and 2 (two reviewers; every claim reproduced on the
+compiler) found three defects; making the oracle strong enough to have caught them found a
+fourth. Each is fixed and has a lit test that fails on the tree before the fix (checked with the
+pre-fix debug build) and, where C can express it, an executed test.
+
+### 18.1 Batch loops re-emitted with a bound map's first result (wrong code)
+
+**Defect.** The lowering re-emitted each batch loop with `getConstantLowerBound()` /
+`getConstantUpperBound()`, which for a bound map of several constant results — a max lower
+bound, a min upper bound, inside the domain of §1 (P0.6) — return the map's first result,
+while the analysis, the dense partition and every bounds check use the folded λ (the max of the
+lower results) and υ (the min of the upper ones). `j = 0 to min(4, 3)`, three batch iterations
+in the analysis and in the remark, was re-emitted as `0 to 4`: the iteration j = 3 reads and
+writes column 3 of B and C, which have three columns. Likewise `max(0, 2) to 4` (re-emitted from
+0) and the positional form of ISSUE-006 (`b = 0 to min(4, 2)` over two slices). Present since
+ISSUE-006.
+
+**What must hold** (the premise of Theorem 5): the re-emitted loops enumerate exactly the batch
+loops' values {λ_s + σ_s z : 0 ≤ z < n_s}.
+
+**Fix.** Each batch loop's origin, step and trip count come from the analysis's normalization
+(x_s = S_ss z_s + sourceOrigin_s with z_s ∈ [0, n_s − 1] on the normalized domain), the values
+every check used; the last value λ_s + σ_s (n_s − 1) is computed with checked arithmetic before
+any IR is built (an overflow refuses the nest); the loop is emitted as `λ_s to υ' step σ_s`, υ'
+the written upper bound when it is one constant (the same iterations, the IR as written) and
+λ_s + σ_s (n_s − 1) + 1 otherwise.
+
+**Tests.** `affine_gemm_batch_views.mlir` @batch_min_bound (`0 to 3`), @batch_max_bound
+(`2 to 4`), @positional_batch_min_bound (`0 to 2`), @batch_stepped_split
+(`max(-1, 1) to min(9, 8) step 3`, re-emitted as `1 to 8 step 3`); the oracle (18.5).
+
+### 18.2 A positional reading in which one loop drives two coordinates (false refusal)
+
+**Defect.** The positional form (A = (P*, I, K), B = (P*, K, J), C = (P*, I, J)) is tried first,
+and Phase 1 let the analysis by groups decide only when a prefix loop also drove I, J or K. A
+reading in which another loop drives two of I, J, K was kept and refused by the dense partition
+as PROVEN_INVALID: `C[i][j] += A[i][k + j] · B[k + j][j]` ("loop 1 drives J and K") and
+`A[i][k + i] · B[k + i][j]` — valid batched GEMMs (per j a 4 × 1 × 4 product reading K at the
+offset j).
+
+**Lemma.** If one loop drives two of the positional coordinates — the prefix P* taken as one,
+I, J, K — all three operands read it. *Proof.* The prefix is read by all three operands, I by A
+and C, J by B and C, K by A and B; any two of these four contain A, B and C. ∎ So the loop is a
+batch loop by its readers (§16.2), and the positional reading, in which it drives two
+coordinates, is never lowerable (Theorem 3: a loop drives at most one coordinate).
+
+**Fix.** The fallback is taken when some loop has a nonzero domain coefficient in two or more of
+{P* as one, I, J, K}; the analysis by groups then decides, and the positional reading — with its
+diagnostic — is kept only when that analysis refuses too: case_087,
+`C[i + j][j] += A[i + j][k] · B[k][j]`, is still refused by the dense partition with "loop 1
+drives I and J" (the groups refuse it: C mixes the batch loop j with i). The executable
+specification's predictor mirrors the condition (`casespec.py`, `coupled`).
+
+**Tests.** @j_in_k (4 × 1 × 4 batched over 4), @i_in_k (1 × 4 × 4 batched over 4); executed
+`bv_j_in_k`, `bv_i_in_k` (`SystolicCC/affine_batch_views.c`); showcase ext_023, ext_024; the
+oracle's mutation `role_in_k`.
+
+### 18.3 A positional prefix constant on the domain counted as a batch coordinate (false refusal)
+
+**Defect.** A prefix subscript of the positional form whose value is constant on the domain — a
+literal, or a loop that runs once — became a row of P*: the nest counted as batched, and a plain
+GEMM with two unit extents was refused pending SQ-5 (`C[t][i][0] += A[t][i][1] · B[t][1][0]`,
+t ∈ [1, 2): the 5 × 1 × 1 GEMM at t = 1). Present since ISSUE-006.
+
+**Why it is no batch.** A loop that runs once is a constant on D (Lemma 0), and a subscript
+constant on D is a fixed index, like a constant subscript (SQ-4). A batch coordinate is read
+through a loop of two or more iterations by all three operands (§16.2); without one, P* is
+empty and the nest is one GEMM.
+
+**Fix.** `recordPrefix` keeps as rows of P* only the prefix subscripts that vary on the domain;
+a constant one stays a fixed index of each operand (its dimension's `constantIndex`, no batch
+terms). The analysis by groups already did so (its batch loops run two or more times), and so
+did the executable specification (its domain forms drop the loops that run once).
+
+**Tests.** @constant_prefix (5 × 1 × 1, not batched, every subview at index 1); executed
+`bv_const_prefix`; showcase ext_025.
+
+### 18.4 A stepped loop whose lower bound is a max (false refusal; found by the stronger oracle)
+
+**Defect.** The source iteration domain came from MLIR's `addAffineForOpDomain`, which adds the
+stride (x − λ) mod σ = 0 only for a lower bound of one constant; for `max(...)` with σ > 1 it
+approximates D by every integer between the bounds. The regions hold exactly the loop's
+iterations, so they need not cover that superset, and `checkSourceCover` refused the nest — e.g.
+when such a loop and another drive one coordinate (K = k1 + k2 with
+`k1 = max(-2, 0) to 8 step 4`). Sound — only refusals; the normalized domain the lowering uses
+was exact — but a refusal of nests inside the domain of §1.
+
+**Fix.** For such a loop the domain takes the stride from the folded λ (a local
+q = (x − λ) floordiv σ and the equality x − λ − σ q = 0, as MLIR does for one constant), −λ
+computed checked: the domain D of §1 exactly.
+
+**Tests.** `affine_gemm_p0_views.mlir` @minmax_bounds_split_k and `affine_gemm_batch_views.mlir`
+@batch_stepped_split, both refused before the fix; the oracle.
+
+### 18.5 The oracle, strengthened
+
+- Loops are emitted — on a random stream of their own, so a seed's nests are unchanged — with
+  redundant constant bounds, max(λ, λ − d, ...) and min(υ, υ + d, ...), the effective bound in
+  any position.
+- A lowered batched nest's batch loops are compared with the nest's by their iterations (origin,
+  step, trip count), no longer by the text of their bounds.
+- Two mutations: `role_in_k`, a loop of I or J added in proportion to both factors' K
+  subscripts (a batch loop the positional reading has drive two coordinates), and
+  `batch_once`, the batch loop running once (a fixed index; in half of them the loops of two
+  roles run once too).
+- Its lit test passes the build's own `systolic-opt` (`--opt systolic-opt`, which lit
+  substitutes). Before, the oracle ran the first `systolic-opt` on PATH, so the debug tree's lit
+  run had checked the release binary (the 40-seed sweeps always named the debug binary).
+- On the pre-fix tree (the debug build of commit `39b4d6d`) this oracle reports, for seeds 1–12,
+  372 mismatches: 207 lowered batch loops that do not run the nest's iterations (18.1) and 165
+  refusals of valid nests — among them 12 `role_in_k` nests refused with "two logical
+  coordinates are driven by the same loop" (18.2) and the stepped max lower bounds (18.4). 18.3
+  needs a positional prefix together with two unit extents, which the generator does not
+  produce (no hit in 12 seeds); it is covered by the lit, executed and showcase tests above.
+
+### 18.6 Verification (2026-10-16; logs in `~/work/integration-backups-20261016/review-fix-validation/`)
+
+| test | result |
+|---|---|
+| check-systolic, release and debug (assertions) | 102/102 and 102/102, run with `count` and `not` built from the LLVM 24 sources and no `/usr/lib/llvm-18` on PATH (the runs of 16.5 and 17 had found those two helpers in `/usr/lib/llvm-18/bin`: version-independent programs, but the toolchain rule is LLVM 24 only) |
+| executed (`SystolicCC/affine_batch_views.c`) | 10 kernels (+ `bv_j_in_k`, `bv_i_in_k`, `bv_const_prefix`: 4, 4, 2 invocations) equal to the CPU reference on the soft runtime and the mock board; `--verify` bitwise 10/10 |
+| oracle, debug build, 40 seeds × 400 (seeds 100–139) | 16,000 nests, 11,774 accepted: 2,325 batched (391 with a factor's view moving with the batch), 489 with A and B both transposed, 10,685 with a max/min loop bound (1,206 batched nests whose batch loop has one), 315 `role_in_k` and 451 `batch_once` nests — **0 mismatches**; 1,200 nests without the permission (seeds 100–102): nothing lowered |
+| showcase (172) | rc 0: 165 pass + 7 expected_refusal; ext_023..025 (new) offloaded and verified (4, 4, 2 invocations); no existing case changed |
+| regression gate | rc 0; ISSUE-001..007 reproducers pass; 175 unchanged against baseline 20261015-160426 (not re-saved); 168 pass + 7 expected_refusal |
+| 800 generated cases | every verdict as in the Phase 2 run (787 pass, 2 expected_refusal, 6 known_false_negative, 5 spec_open); one predicted reason changed with the compiler's: `gen_de03cb2b804b` (`C[i + j][3 + 3j]`, `i` of one iteration; UNDETERMINED, SQ-5) is refused with the SQ-5 reason instead of "loop 4 drives I and J" (18.2) |
 | `test_permissions.py` | 48/48 |
 | FPGA board | NOT RUN (no board) |

@@ -425,3 +425,174 @@ func.func @elementwise(%A: memref<8xf32> {llvm.noalias}, %B: memref<8xf32> {llvm
   }
   return
 }
+
+// -----
+// REVIEW 1 (wrong lowering found by review): a batch loop bounded by a min
+// of constants, j in [0, min(4, 3)) = [0, 3). The batch loop must be
+// re-emitted with the folded bound (three iterations): with the bound map's
+// first result it would run j = 3 too, outside B's and C's three columns.
+// CHECK-LABEL: func.func @batch_min_bound
+// CHECK:       affine.for %{{.*}} = 0 to 3 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// REMARK:      remark: affine GEMM 4x1x4 lowered as 1 exact region(s), batched: 3 batch iteration(s) of 1 batch loop(s)
+func.func @batch_min_bound(%A: memref<17x16xf32> {llvm.noalias}, %B: memref<16x3xf32> {llvm.noalias}, %C: memref<33x3xf32> {llvm.noalias}) {
+  affine.for %i = 1 to 5 {
+    affine.for %j = 0 to min affine_map<() -> (4, 3)>() {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i * 4 - %j, %k * 5] : memref<17x16xf32>
+        %b = affine.load %B[%k * 5, %j] : memref<16x3xf32>
+        %c = affine.load %C[%i * 8, %j] : memref<33x3xf32>
+        %m = arith.mulf %a, %b : f32
+        %s = arith.addf %c, %m : f32
+        affine.store %s, %C[%i * 8, %j] : memref<33x3xf32>
+      }
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 1: a batch loop bounded below by a max, j in [max(0, 2), 4) = [2, 4).
+// CHECK-LABEL: func.func @batch_max_bound
+// CHECK:       affine.for %{{.*}} = 2 to 4 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// REMARK:      remark: affine GEMM 4x1x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+func.func @batch_max_bound(%A: memref<17x16xf32> {llvm.noalias}, %B: memref<16x4xf32> {llvm.noalias}, %C: memref<33x4xf32> {llvm.noalias}) {
+  affine.for %i = 1 to 5 {
+    affine.for %j = max affine_map<() -> (0, 2)>() to 4 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i * 4 - %j, %k * 5] : memref<17x16xf32>
+        %b = affine.load %B[%k * 5, %j] : memref<16x4xf32>
+        %c = affine.load %C[%i * 8, %j] : memref<33x4xf32>
+        %m = arith.mulf %a, %b : f32
+        %s = arith.addf %c, %m : f32
+        affine.store %s, %C[%i * 8, %j] : memref<33x4xf32>
+      }
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 1: the positional form's batch loop bounded by a min (ISSUE-006
+// shape): b in [0, min(4, 2)) on two slices.
+// CHECK-LABEL: func.func @positional_batch_min_bound
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+func.func @positional_batch_min_bound(%A: memref<2x4x4xf32> {llvm.noalias}, %B: memref<2x4x4xf32> {llvm.noalias}, %C: memref<2x4x4xf32> {llvm.noalias}) {
+  affine.for %b = 0 to min affine_map<() -> (4, 2)>() {
+    affine.for %i = 0 to 4 {
+      affine.for %j = 0 to 4 {
+        affine.for %k = 0 to 4 {
+          %a = affine.load %A[%b, %i, %k] : memref<2x4x4xf32>
+          %bb = affine.load %B[%b, %k, %j] : memref<2x4x4xf32>
+          %c = affine.load %C[%b, %i, %j] : memref<2x4x4xf32>
+          %m = arith.mulf %a, %bb : f32
+          %s = arith.addf %c, %m : f32
+          affine.store %s, %C[%b, %i, %j] : memref<2x4x4xf32>
+        }
+      }
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 2 (refusal of a valid mapping found by review): the positional form
+// reads K = k + j with J = j -- loop j would drive J and K. j is read by all
+// three operands: a batch loop; per j, C[:, j] += A[:, j .. j + 3] B[j .. j + 3, j],
+// a 4 x 1 x 4 product. The analysis by groups decides.
+// CHECK-LABEL: func.func @j_in_k
+// CHECK:       affine.for %{{.*}} = 0 to 4 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// REMARK:      remark: affine GEMM 4x1x4 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+func.func @j_in_k(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %k + %j] : memref<4x8xf32>
+        %bb = affine.load %B[%k + %j, %j] : memref<8x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %m = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %m : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 2: K = k + i with I = i: loop i is read by all three operands (a
+// batch loop); per i a 1 x 4 x 4 product.
+// CHECK-LABEL: func.func @i_in_k
+// CHECK:       affine.for %{{.*}} = 0 to 4 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 1 n = 4 k = 4
+// REMARK:      remark: affine GEMM 1x4x4 lowered as 1 exact region(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+func.func @i_in_k(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %k + %i] : memref<4x8xf32>
+        %bb = affine.load %B[%k + %i, %j] : memref<8x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %m = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %m : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 3 (refusal of a valid mapping, since ISSUE-006): a positional prefix
+// constant on the domain (t runs once) is no batch coordinate: the nest is
+// the plain 5 x 1 x 1 GEMM C[1][:, 0] += A[1][:, 1] B[1][1][0] (SQ-4), not a
+// batched one, so SQ-5 does not apply.
+// CHECK-LABEL: func.func @constant_prefix
+// CHECK:       systolic.matmul_tile {{.*}} m = 5 n = 1 k = 1
+// REMARK:      remark: affine GEMM 5x1x1 lowered as 1 exact region(s)
+func.func @constant_prefix(%A: memref<2x5x3xf32> {llvm.noalias}, %B: memref<2x3x2xf32> {llvm.noalias}, %C: memref<2x5x2xf32> {llvm.noalias}) {
+  affine.for %t = 1 to 2 {
+    affine.for %i = 0 to 5 {
+      %a = affine.load %A[%t, %i, 1] : memref<2x5x3xf32>
+      %bb = affine.load %B[%t, 1, 0] : memref<2x3x2xf32>
+      %c = affine.load %C[%t, %i, 0] : memref<2x5x2xf32>
+      %m = arith.mulf %a, %bb : f32
+      %s = arith.addf %c, %m : f32
+      affine.store %s, %C[%t, %i, 0] : memref<2x5x2xf32>
+    }
+  }
+  return
+}
+
+// -----
+// REVIEW 1 with P0.6: a stepped batch loop with folded bounds,
+// b = max(-1, 1) to min(9, 8) step 3 = 1, 4, 7, re-emitted as 1 to 8 step 3;
+// K = k1 + k2 with k1 = max(0, -3) to 8 step 4 -- refused before the source
+// domain took the stride from the folded lower bound.
+// CHECK-LABEL: func.func @batch_stepped_split
+// CHECK:       affine.for %{{.*}} = 1 to 8 step 3 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 8
+// REMARK:      remark: affine GEMM 4x4x8 lowered as 1 exact region(s), batched: 3 batch iteration(s) of 1 batch loop(s)
+func.func @batch_stepped_split(%A: memref<8x4x8xf32> {llvm.noalias}, %B: memref<8x8x4xf32> {llvm.noalias}, %C: memref<8x4x4xf32> {llvm.noalias}) {
+  affine.for %b = max affine_map<() -> (-1, 1)>() to min affine_map<() -> (9, 8)>() step 3 {
+    affine.for %i = 0 to 4 {
+      affine.for %j = 0 to 4 {
+        affine.for %k1 = max affine_map<() -> (0, -3)>() to 8 step 4 {
+          affine.for %k2 = 0 to 4 {
+            %a = affine.load %A[%b, %i, %k1 + %k2] : memref<8x4x8xf32>
+            %bb = affine.load %B[%b, %k1 + %k2, %j] : memref<8x8x4xf32>
+            %c = affine.load %C[%b, %i, %j] : memref<8x4x4xf32>
+            %m = arith.mulf %a, %bb : f32
+            %s = arith.addf %c, %m : f32
+            affine.store %s, %C[%b, %i, %j] : memref<8x4x4xf32>
+          }
+        }
+      }
+    }
+  }
+  return
+}

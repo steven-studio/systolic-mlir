@@ -665,6 +665,34 @@ EXTENDED = [
               "c": arr("C", (8, 8), ("i", "j"))},
              math_note="B[7 - j][k]: B transposed and read backwards along J (a negative stride\n"
                        "in B's view, then the transpose).  Offloaded."),
+    ext_case(23, "k_offset_by_column", "batched",
+             [L("i", 0, 4, "I"), L("j", 0, 4, "P"), L("k", 0, 4, "K")],
+             {"a": arr("A", (4, 8), ("i", "k + j")), "b": arr("B", (8, 4), ("k + j", "j")),
+              "c": arr("C", (4, 4), ("i", "j"))},
+             math_note="C[i][j] += A[i][k + j] B[k + j][j]: j is read by all three operands -- a\n"
+                       "batch loop -- and both factors read K at the offset j: per j the\n"
+                       "matrix-vector product C[:, j] += A[:, j .. j + 3] B[j .. j + 3, j].\n"
+                       "The positional reading (K = k + j, J = j) has j drive two coordinates;\n"
+                       "refused until the review fix, offloaded since (4 invocations).",
+             issue="ISSUE-007"),
+    ext_case(24, "k_offset_by_row", "batched",
+             [L("i", 0, 4, "P"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
+             {"a": arr("A", (4, 8), ("i", "k + i")), "b": arr("B", (8, 4), ("k + i", "j")),
+              "c": arr("C", (4, 4), ("i", "j"))},
+             math_note="C[i][j] += A[i][k + i] B[k + i][j]: i is read by all three operands, per i\n"
+                       "the vector-matrix product C[i, :] += A[i, i .. i + 3] B[i .. i + 3, :].\n"
+                       "The positional reading (K = k + i, I = i) has i drive two coordinates;\n"
+                       "refused until the review fix, offloaded since (4 invocations).",
+             issue="ISSUE-007"),
+    ext_case(25, "batch_loop_runs_once", "batched",
+             [L("t", 1, 2, "P"), L("i", 0, 5, "I")],
+             {"a": arr("A", (2, 5, 3), ("t", "i", "1")), "b": arr("B", (2, 3, 2), ("t", "1", "0")),
+              "c": arr("C", (2, 5, 2), ("t", "i", "0"))},
+             math_note="The positional form's prefix t runs once: a constant on the iteration\n"
+                       "domain, a fixed index, no batch coordinate -- the plain 5 x 1 x 1 GEMM\n"
+                       "C[1][:, 0] += A[1][:, 1] B[1][1][0] (SQ-4), not a batched vector times a\n"
+                       "scalar (SQ-5).  Refused until the review fix, offloaded since.",
+             issue="ISSUE-007"),
 ]
 
 # ==========================================================================

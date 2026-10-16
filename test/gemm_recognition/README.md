@@ -122,8 +122,8 @@ and an FP refusal PROVEN_VALID): `--test-affine-matmul-discovery` prints `class:
 **Update 2026-10-15 (ISSUE-006, batched GEMMs).** A coordinate every operand reads (the
 partition prefix P*, `C[b][i][j] += A[b][i][k] * B[b][k][j]`) is a **batch coordinate**: the
 dense partition takes the P rows of T as such, and the lowering **re-emits the batch loops**
-(the nest's loops that drive a batch coordinate, with their own bounds and steps, in their
-original order) around the tiles, one GEMM per batch iteration on its own slice of each operand
+(the nest's loops that drive a batch coordinate, with their own iterations -- a max/min bound
+folded, as the analysis folds it --, in their original order) around the tiles, one GEMM per batch iteration on its own slice of each operand
 (the operand's batch dimension at a dynamic offset, an `affine.apply` of the coordinate's
 expression). Nothing is required of a batch coordinate beyond the loops as written (no density,
 no injectivity); a batch loop may not also drive I, J or K (the batches would be coupled:
@@ -142,7 +142,10 @@ view moving with `j`) -- while C reads every batch loop alone (a dimension of C 
 loop with another loop, `C[i + k][j]`, is refused). Per batch value the role loops must be a
 dense GEMM of strided views and every index (role range plus batch range) inside its array; the
 lowering offsets each operand's view per batch iteration (an `affine.apply` per dimension).
-Offloaded since: `depth.c` ng_skew, showcase ext_015..ext_018; still refused: case_087, case_127.
+Offloaded since: `depth.c` ng_skew, showcase ext_015..ext_018, and since the review fixes of
+2026-10-16 ext_023..025 (a batch loop the positional reading has drive two coordinates,
+`A[i][k + j] * B[k + j][j]`; a positional prefix that runs once -- a fixed index, not a batch);
+still refused: case_087, case_127.
 
 ## 2. Support specification (what a correct compiler must do)
 

@@ -81,6 +81,9 @@ collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
   return iterationIVs;
 }
 
+static std::optional<int64_t> constantLoopBound(affine::AffineForOp loop,
+                                                bool lower);
+
 static FailureOr<affine::FlatAffineValueConstraints>
 recoverSourceDomain(ValueRange iterationIVs) {
   SmallVector<Value> iterationValues(iterationIVs.begin(),
@@ -99,6 +102,36 @@ recoverSourceDomain(ValueRange iterationIVs) {
 
     if (failed(domain.addAffineForOpDomain(loop)))
       return failure();
+
+    // A stepped loop whose lower bound is the max of constants (P0.6):
+    // addAffineForOpDomain adds the stride only for a lower bound of one
+    // constant, and otherwise approximates the domain by every integer
+    // between the bounds -- a superset the regions, which hold the loop's
+    // iterations only, need not cover (checkSourceCover then refused the
+    // nest, e.g. when such a loop and another drive one coordinate). The
+    // folded bound gives the stride, (x - lb) mod step = 0: the domain of
+    // docs/AFFINE_GEMM_MAPPING.md section 1, x = lb + step * z.
+    const int64_t step = loop.getStepAsInt();
+    if (step == 1 || loop.hasConstantLowerBound())
+      continue;
+    std::optional<int64_t> lower = constantLoopBound(loop, /*lower=*/true);
+    if (!lower)
+      continue;
+    std::optional<int64_t> negatedLower =
+        llvm::checkedSub(int64_t(0), *lower);
+    unsigned pos;
+    if (!negatedLower || !domain.findVar(iv, &pos))
+      return failure();
+    // q = (x - lb) floordiv step, then x - lb - step * q = 0.
+    SmallVector<int64_t, 8> dividend(domain.getNumCols(), 0);
+    dividend[pos] = 1;
+    dividend.back() = *negatedLower;
+    const unsigned qPos = domain.addLocalFloorDiv(dividend, step);
+    SmallVector<int64_t, 8> equality(domain.getNumCols(), 0);
+    equality[pos] = 1;
+    equality.back() = *negatedLower;
+    equality[qPos] = -step;
+    domain.addEquality(equality);
   }
 
   return domain;
@@ -2213,6 +2246,11 @@ mlir::systolic::recognizeLogicalMatmul(
     // are batch dimensions; the role dimensions get no batch terms here (a
     // role coupled to the prefix, C[b][b + i][j], stays in the logical
     // mapping, where the dense partition refuses it).
+    // A prefix subscript constant on the domain (a literal, or a loop that
+    // runs once) is no batch coordinate: its dimensions are fixed indices
+    // (constantIndex below) and it is no row of P* -- else a plain GEMM with
+    // such a prefix would count as batched (SQ-5).
+    SmallVector<AffineExpr> batchPartitions;
     for (AffineExpr partition : logicalPartitions) {
       auto form = extractLinearForm(partition, numIterationDims);
       std::optional<LinearForm> onDomain =
@@ -2220,9 +2258,17 @@ mlir::systolic::recognizeLogicalMatmul(
       if (!onDomain)
         return unknown("a partition (batch) subscript's value on the "
                        "iteration domain overflows 64-bit arithmetic");
+      bool varies = false;
       for (unsigned d = 0; d < numIterationDims; ++d)
-        isBatchLoop[d] = isBatchLoop[d] || onDomain->coefficients[d] != 0;
+        if (onDomain->coefficients[d] != 0) {
+          isBatchLoop[d] = true;
+          varies = true;
+        }
+      if (varies)
+        batchPartitions.push_back(partition);
     }
+    logicalPartitions = batchPartitions;
+    numPartitionDims = logicalPartitions.size();
     for (OperandLayout *layout : {&layoutA, &layoutB, &layoutC}) {
       const AffineMap &access = layout == &layoutA   ? accessA
                                 : layout == &layoutB ? accessB
@@ -2245,18 +2291,21 @@ mlir::systolic::recognizeLogicalMatmul(
 
   // Which analysis decides. The positional form is tried first, so that
   // every nest it recognized keeps its logical mapping, views and
-  // diagnostics. One positional reading is never lowerable: a loop of its
-  // partition prefix that also drives I, J or K (the dense partition refuses
-  // it: "two logical coordinates are driven by the same loop") -- e.g. A[b][k]
-  // and B[b][...][b] read as K although b is the prefix. For such a reading
-  // the analysis by groups decides, classifying every loop by its readers;
-  // the positional reading is kept only when that analysis refuses the nest
-  // too, with its diagnostics unchanged (C[b][b + i][j]).
-  auto positionalCouplesPrefix = [&]() {
+  // diagnostics. A positional reading in which one loop drives two of its
+  // coordinates -- the prefix (as one), I, J, K -- is never lowerable (the
+  // dense partition refuses it: "two logical coordinates are driven by the
+  // same loop"), and such a loop is read by all three operands: A[b][i][b]
+  // with B[b][b][j] (K = b, the prefix loop), A[i][k + j] with B[k + j][j]
+  // (K and J both driven by j). For such a reading the analysis by groups
+  // decides, classifying every loop by its readers; the positional reading
+  // is kept only when that analysis refuses the nest too, with its
+  // diagnostics unchanged (C[b][b + i][j], C[i + j][j]).
+  auto positionalIsCoupled = [&]() {
     auto onDomainOf = [&](AffineExpr expr) -> std::optional<LinearForm> {
       auto form = extractLinearForm(expr, numIterationDims);
       return succeeded(form) ? domainForm(*form, single) : std::nullopt;
     };
+    SmallVector<unsigned> drives(numIterationDims, 0);
     SmallVector<bool> prefixLoop(numIterationDims, false);
     for (AffineExpr partition : logicalPartitions) {
       std::optional<LinearForm> form = onDomainOf(partition);
@@ -2265,20 +2314,21 @@ mlir::systolic::recognizeLogicalMatmul(
       for (unsigned d = 0; d < numIterationDims; ++d)
         prefixLoop[d] = prefixLoop[d] || form->coefficients[d] != 0;
     }
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      drives[d] += prefixLoop[d];
     for (const SharedCoordinate &shared : coordinate) {
       std::optional<LinearForm> form = onDomainOf(shared.expr);
       if (!form)
         return false;
       for (unsigned d = 0; d < numIterationDims; ++d)
-        if (prefixLoop[d] && form->coefficients[d] != 0)
-          return true;
+        drives[d] += form->coefficients[d] != 0;
     }
-    return false;
+    return llvm::any_of(drives, [](unsigned n) { return n >= 2; });
   };
   if (!positional()) {
     if (failed(byGroups()))
       return failure();
-  } else if (positionalCouplesPrefix()) {
+  } else if (positionalIsCoupled()) {
     const unsigned savedPartitionDims = numPartitionDims;
     const affine::AffineLoadOp savedALoad = aLoad, savedBLoad = bLoad;
     const AffineMap savedAccessA = accessA, savedAccessB = accessB;

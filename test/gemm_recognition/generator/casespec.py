@@ -894,11 +894,19 @@ def predict(case: Case) -> dict:
     batch_vars = set()
     for p in range(npart):
         batch_vars |= forms["c"][p].vars()
-    # A positional reading that couples a prefix loop with I, J or K is never
-    # lowerable: the analysis by groups decides such a nest, the positional
-    # reading kept only when that analysis refuses it too (ISSUE-007,
-    # AffineMatmulAnalysis.cpp).
-    if m is not None and any(f is not None and set(f.coef) & batch_vars for f in m):
+    # A positional reading in which one loop drives two of its coordinates --
+    # the prefix (as one), I, J, K -- is never lowerable (a prefix loop in
+    # I, J or K; A[i][k + j] with B[k + j][j], j in K and J): the analysis by
+    # groups decides such a nest, the positional reading kept only when that
+    # analysis refuses it too (ISSUE-007, AffineMatmulAnalysis.cpp,
+    # positionalIsCoupled).
+    def coupled(m):
+        drives = {}
+        for cls in [batch_vars] + [f.vars() for f in m if f is not None]:
+            for v in cls:
+                drives[v] = drives.get(v, 0) + 1
+        return any(n >= 2 for n in drives.values())
+    if m is not None and coupled(m):
         regrouped, _ = predict_by_groups(case, forms, loops)
         if regrouped is not None:
             grouped, npart, m, batch_vars = regrouped, 0, regrouped[:3], regrouped[4]
