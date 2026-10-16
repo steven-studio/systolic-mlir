@@ -1,0 +1,485 @@
+# Affine GEMM mapping — mathematical specification (v2: P0 scope)
+
+Status: **implemented** (2026-10-15, uncommitted, on checkpoint `3f21bab`; record:
+`test/gemm_recognition/failures/issues/ISSUE-005-p0-operand-views/`). Written before the source
+changes and corrected where the implementation decided a detail (sections 5, 6, 12). The first
+generalization (v1: the comparison on the iteration domain, the reasons, the brute-force oracle)
+is the starting point; its snapshot is `~/work/integration-backups-20261015/target-pre-p0/`.
+
+Every claim is marked **[proved]** (argument given here), **[tested]** (established only by tests)
+or **[assumed]** (a premise that is relied on but not checked). Words in CAPITALS are the four
+classifications of §9.
+
+---
+
+## 1. The original iteration domain
+
+A perfect chain of n ≥ 1 `affine.for` loops around one statement. Loop s has:
+
+- lower bound λ_s and exclusive upper bound υ_s: constants, or the max/min of constants, which
+  are folded with checked arithmetic (P0.6: `min(8, 16)` = 8);
+- step σ_s ≥ 1 (the `affine.for` verifier rejects σ ≤ 0).
+
+Its trip count is n_s = 0 if υ_s ≤ λ_s, else (υ_s − λ_s − 1) div σ_s + 1. This is computed
+checked; the form avoids the overflow of ⌈(υ − λ)/σ⌉.
+
+**Values versus ordinals.** x_s = λ_s + σ_s z_s with ordinal z_s ∈ [0, n_s).
+
+D = {x : x_s = λ_s + σ_s z_s, 0 ≤ z_s < n_s} is in order-preserving bijection with the ordinal
+box Z = Π [0, n_s) (lexicographic order = execution order). A loop is **degenerate** if n_s = 1,
+**nondegenerate** if n_s ≥ 2. D is **empty** iff some n_s = 0.
+
+**C loops** reach this form through `systolic-cfront`, which computes exact trip counts and
+refuses what could overflow the C type:
+
+- `for (T i = L; i < U | i <= U; i += S)` becomes `affine.for %i = L to U' step S`, with the IV
+  equal to the counter's value;
+- a loop that counts down (`i > B | i >= B`, `--`, `-= S`, `i = i − S`) becomes the ordinal loop
+  `affine.for %t = 0 to N` with the counter **value** `L − S·t` substituted at every use;
+- an affine condition `E OP c`, with E affine in the counter, is first turned into the equivalent
+  counter comparison, exactly over Z.
+
+| C | IV form | n | values |
+|---|---|---|---|
+| `for (int i = 5; i >= 0; i -= 2)` | t ∈ [0,3), i = 5 − 2t | 3 | 5, 3, 1 |
+| `for (int i = 10; i >= 0; i -= 2)` | t ∈ [0,6), i = 10 − 2t | 6 | 10, 8, …, 0 |
+| `for (int i = 100; 2*i - 3 > 0; i--)` | 2i − 3 > 0 ⇔ i ≥ 2; t ∈ [0,99), i = 100 − t | 99 | 100 … 2 |
+
+A *decreasing induction sequence* is therefore an ordinary increasing ordinal with a negative
+coefficient in the accesses. It is not a negative stride by itself (§5).
+
+**Statement.** `X_C[f_C(x)] = X_C[f_C(x)] + X_A[f_A(x)] * X_B[f_B(x)]` (factors and addends in
+either order), where each f_X(x) = (f_X,1(x), …, f_X,r_X(x)) is a tuple of **r_X ≥ 1** affine
+subscripts with integer coefficients. The memrefs are never flattened. The C load and the C store
+must address the same element at every x ∈ D.
+
+**Domain forms (Lemma 0) [proved].** Write f(x) = Σ f_s x_s + f_0. Its domain form is the ordinal
+form Σ (f_s σ_s) z_s + (f_0 + Σ f_s λ_s), with the terms of degenerate loops folded into the
+constant. Two subscripts are equal on D iff their domain forms are identical. The *support* of
+f is the set of nondegenerate loops with a nonzero coefficient. f is **constant on D** iff its
+support is empty.
+
+---
+
+## 2. Logical coordinates
+
+**Coordinate groups.** Join two nondegenerate loops whenever they occur together in the support
+of one subscript (any operand, any dimension). The connected components are the groups G. Every
+non-constant subscript has its support inside exactly one group, by construction.
+
+**Lemma 1 (one coordinate per group) [proved].** In every valid mapping (§3), each coordinate of the
+mapping is driven by its own set of loops (Theorem 3 (S1)). Each non-constant subscript is a nonzero
+multiple of one coordinate plus a constant, and its support is all of that coordinate's loops.
+Hence groups and coordinates coincide, and all subscripts in one group have proportional linear
+parts. The sign of the ratio is free here: a view may run backwards, §5.
+
+**Roles.** A group's role is fixed by the set of operands that read it:
+
+| operands that read G | role | meaning |
+|---|---|---|
+| A and C | I | output row of A·B |
+| B and C | J | output column |
+| A and B | K | reduction |
+| A, B and C | P | batch |
+| C only | free output coordinate | every slice receives the same product: a broadcast of A and B (§10) |
+| A only, or B only | reduction in one factor | Σ_u A(…u…)·B(…) needs B broadcast along u (§10) |
+
+If an operand reads one group in two of its dimensions (`A[i][i]`, `C[i+j][j]` with j's loops
+merged into i's group), two coordinates would share a loop, which Theorem 3 (S1) forbids.
+
+**The mapping y = M z + b.** y = (P*, I, J, K) collects one ordinal per group. M has one row per
+group and one column per loop, so it is 3 × n for a plain GEMM and (3 + |P|) × n when batched. Its
+rank over Q equals the number of groups. It is generally rectangular and never needs to be
+invertible: what matters is injectivity *on the box Z*, which Theorem 3 characterizes. The extra
+coordinates beyond (I, J, K) are needed exactly for batch (P) and are never invented for I/J/K. A
+split coordinate (`4 i0 + i1`) is one row whose mixed-radix digits are its loops. A degenerate
+loop has an all-zero column (z_s ≡ 0). An **extent-one coordinate** (M, N or K = 1) has no group:
+its operands read it through constant subscripts, and its row is the constant 0.
+
+---
+
+## 3. Validity: injectivity, coverage, multiplicity
+
+The nest is a **valid GEMM mapping** iff there are extents E_G ≥ 1 (M, N, K, P*), a map
+φ = (ordinal per role): D → R = Π [0, E) and, for every operand, a view (§5) such that:
+
+- **(V)** every subscript of X equals, on D, the view's index of its role coordinate. For a
+  dimension of X that reads no coordinate of X's roles, it equals a constant (an extent-one
+  dimension, fixed index);
+- **(B)** φ is a bijection D → R, so that every logical point is executed exactly once, with no
+  collisions (injectivity) and no missing points (coverage);
+- **(C0)** the C read and the C write coincide on D.
+
+**Theorem 1 (equivalence, exact arithmetic) [proved].** If (V), (B) and (C0) hold and §7's aliasing
+premise holds, then the nest and the batched or plain C′ += A′·B′ produce identical C, as exact
+sums. *Proof:* as in v1. C's view is injective in (P*, I, J) because each of those coordinates has
+a dimension of C with a nonzero stride, so the contributors of one C element are exactly the K
+values of one (P*, I, J). Each is visited once by (B), with the term A′·B′ by (V). ∎
+
+**Equal counts are not enough.** Each of these has |D| = M·N·K and is still not a GEMM of views:
+
+- `A[i][k+u]` (K = 1, 2, 3 visited twice): violates (B) injectivity, a weighted sum;
+- `C[i+j][j]` (a parallelogram): violates (B) coverage;
+- `A[4i0+i1]` with `C[8i0+i1]`: no strided view (SQ-1).
+
+**Theorem 3 (box bijections) [proved, v1 §4].** An integer affine F(z) = Φz + β on a box with all
+n_s ≥ 2 is a bijection onto a box iff:
+
+- **(S1)** each column of Φ has exactly one nonzero entry;
+- **(S2)** per row, the magnitudes sorted ascending form a mixed radix starting at 1;
+- **(S3)** β puts each coordinate's minimum at 0.
+
+The proof uses unique factorization of the generating functions in the Laurent ring, then an
+induction on the digits. Degenerate loops are unconstrained.
+
+**Corollary 4 (decision procedure) [proved].** For D nonempty, the nest is a valid mapping with
+strided views iff all of the following hold:
+
+1. (C0) holds;
+2. every group has a role among I, J, K, P, and each of I, J, K has at most one group;
+3. no operand reads one group twice;
+4. within each group, all subscripts have proportional linear parts. Let g_G be their primitive
+   direction, signed so that the group's finest-magnitude ordinal coefficient is positive;
+5. the ordinal coefficients of g_G, divided by the finest magnitude, form a signed mixed radix (S2).
+
+A role with no group has extent 1 and constant subscripts. Then
+ω_G = (|g_G|-reading of z), E_G = Π n_s, and each subscript f = s_f·g_G + o_f with s_f ≠ 0 of
+either sign.
+
+---
+
+## 4. The systolic execution model
+
+`systolic.matmul_tile` computes C′ ← C′ + A′·B′ on rank-2 tensors (M×K, K×N, M×N). The lowering
+partitions R into tiles (§8). On the device, every operand tile is *copied* into a contiguous
+row-major scratch buffer (`TileMatmulForFpga.cpp`, `stageOperand`: `memref.copy` from the operand's
+view), so the device never sees the view's layout. Hence the operand views may have **any static
+strides, including negative and permuted (transposed)**, provided MLIR's strided memref can
+represent them. Measured: `memref.subview` with stride −2, `memref.reinterpret_cast` with stride
+−8, and `memref.transpose` all verify. The device computes each invocation's product from a zero
+accumulator, and the host adds it into C (`runtime/fpga_matmul_tiled.cpp:486-493`; the software
+model is identical, `runtime/offload/soft_runtime.c:108-114`).
+
+**Batched GEMMs (P ≠ ∅; ISSUE-006).** The tiles compute one batch; the batch loops — the nest's
+loops with a nonzero coefficient in a P row and two or more iterations — are re-emitted as they
+are (their bounds, steps and original order) around the tiles, and each operand's batch
+dimension is read at the coordinate's value, an `affine.apply` of its expression over the new
+loops' counters (a loop that runs once is a constant, folded in). This reproduces the original
+iteration domain exactly: for each batch iteration, the I, J, K nest on the slice the batch index
+addresses. **No condition is placed on the batch coordinate itself** (not density, not
+injectivity): two batch iterations addressing the same slice accumulate into it twice, as the
+loop does. What is required: a batch loop drives no I, J or K (otherwise the batches are
+coupled, `C[b][b + i]`, and no box of (I, J, K) exists per batch value — PROVEN_INVALID), and
+the three operands read the coordinate through one and the same expression on D (else one view
+per operand of a batch coordinate would be needed — VALID_BUT_LOWERING_UNSUPPORTED). A batch
+loop that sat between I/J/K loops moves outward: a legal interchange, since the iterations of
+distinct batch values touch distinct C elements, and under the reassociation permission (§6) the
+order of the accumulations into one element is free. The regions of §8 constrain only I, J, K, so
+each runs for every batch iteration and the exact-cover proof holds per batch. An operand
+shared by every batch (`C[b] += A[b] B`) has no batch dimension: refused (B broadcast over the
+batch, or A and C merged over (b, i): P1.3 / P1.2). The remark's repeat count includes the
+batch iterations.
+
+---
+
+## 5. Operand views, signed strides, transposes, physical addresses
+
+Distinguish four things that the v1 code conflated:
+
+1. a **decreasing induction sequence**: an ordinal with a negative coefficient in x(t). It is
+   normalized away exactly (§1) and is never a stride;
+2. a **negative access coefficient**: s_f < 0 in f = s_f·g + o, where the operand reads the
+   coordinate backwards;
+3. a **negative physical stride**: the view's stride ρ = s_f·scale_G < 0, the consequence of (2)
+   for the chosen ordinal direction;
+4. a **negative stride with an offset**: the view's origin (logical index 0) is the element of the
+   *largest* physical index along that dimension, not the first one in the allocation.
+
+**Ordinal direction.** Each coordinate's ordinal ω increases along g (g = off + scale·ω,
+scale > 0). Any fixed direction is correct: the GEMM is invariant under reversing a coordinate in
+all operands at once. The implemented choice orients g along the iteration order of its
+outermost loop (its first nonzero coefficient is positive). An operand whose subscript decreases
+in that order therefore gets the negative stride itself (`A[7 − i]`: A's view runs backwards,
+C's forwards). Two exceptions keep the checkpoint's form: subscripts spelled identically in both
+operands, for which the coordinate is that expression, and a role read through the positional
+form with the same direction. There a decreasing loop is read backwards with positive strides
+(ISSUE-004). The direction matters only for floating point (§6).
+
+**The view of operand X**, rank r_X, shape (d_1, …, d_r), identity layout:
+
+- each GEMM role ρ ∈ roles(X) (A: I, K; B: K, J; C: I, J; plus P) is read in exactly one
+  dimension δ(X, ρ) with f = s·g_G + o. Its view index is u_ρ = o + s·off_G + (s·scale_G)·ω, that
+  is, base index α = o + s·off_G and signed stride ρ_ρ = s·scale_G (in index units of dimension δ);
+- every other dimension e of X has a constant subscript c_e on D (an extent-one dimension).
+
+As a rank-preserving MLIR view:
+
+    v0 = memref.subview X[o_1..o_r] [z_1..z_r] [t_1..t_r]   // rank-reducing: size 1 at constant
+         dims; o_δ = α, t_δ = ρ_ρ (signed), z_δ = E_ρ; o_e = c_e, t_e = 1, z_e = 1
+    v  = memref.transpose v0 (if the role order of the view's two dims is not the operand's
+         GEMM order: A (I,K), B (K,J), C (I,J))
+
+**Physical address [proved].** With row-major strides st_d = Π_{e > d} d_e and the base pointer of
+X, element (ω_row, ω_col) of v is at
+
+    base + Σ_e c_e st_e + Σ_{ρ ∈ {row, col}} (α_ρ + ρ_ρ ω_ρ) st_δ(ρ)
+
+which is exactly the address of X[f_X(x)] for the x with φ(x) = (…, ω_row, ω_col, …), by (V). A
+negative ρ_ρ makes the origin α_ρ the largest index of dimension δ; nothing is reversed or
+copied. The subview's offset is the origin's linear offset, and MLIR's descriptor carries the
+signed stride. `memref.copy` (generic strided path) and `memrefCopy` iterate with signed int64
+strides **[assumed: MLIR runtime library; tested end to end]**.
+
+**Bounds and memory safety [proved].** Along dimension δ the view touches exactly
+{α + ρ ω : ω ∈ [0, E)}, which is the set of values f takes on D (by (V) and (B)). Its minimum
+min(α, α + ρ(E−1)) must be ≥ 0, and its maximum max(α, α + ρ(E−1)) must be < d_δ when d_δ is
+static, and likewise for every constant dimension. All products and sums are checked int64; one
+that does not fit is refused, never wrapped. With a dynamic d_δ (`float A[][K]`), the upper bound
+is the program's own guarantee **[assumed: no undefined behaviour in the source]**. The lower bound
+is still checked.
+
+**Transpose [proved].** A role read in X's dimensions in the opposite order (`A[k][i]`) is the
+same view with its two dimensions permuted. `memref.transpose` permutes the descriptor's sizes
+and strides, and the addresses are as above. No data is materialized beyond the per-tile staging
+copy that every operand already gets.
+
+**Output view.** C′ may have negative or permuted strides too, because the host's write-back is a
+`memref.copy` into C's view (`bufferization.materialize_in_destination`).
+
+---
+
+## 6. Floating-point reduction semantics
+
+**Measured fact.** For one C element and one invocation covering K values k_1 … k_m, the device
+returns v = ((0 + a_1 b_1) + a_2 b_2) + … (its own fp32 datapath), and the host computes C ← C + v.
+The loop computes C ← ((C + a_1 b_1) + a_2 b_2) + … . These are different IEEE operations:
+
+- **reassociation:** C + (Σ) versus ((C + p_1) + p_2) …;
+- **signed zero:** even for m = 1, if p_1 = −0 then v = 0 + (−0) = +0, so C = −0 gives +0
+  where the loop gives −0;
+- **NaN payloads and the device's rounding / denormal handling:** not verifiable here (no board,
+  HLS floating-point cores). **[assumed / unverified]**
+
+**Therefore no offload of an fp32 accumulation can be proven equal under strict IEEE semantics
+[proved, given the measured runtime contract].** The original C program does not permit
+reassociation (C11 §5.1.2.3: no `-ffast-math`; `FP_CONTRACT` allows contraction to an FMA, not
+reassociation).
+
+**Policy (P0.8).**
+
+- **Default (strict):** an fp reduction is *not* offloaded. Diagnostic: "the systolic reduction
+  order differs from the loop's; floating-point reassociation is not permitted".
+- **Permitted:** offload when, and only when, reassociation is explicitly allowed:
+  - the `arith.addf` of the nest carries the `reassoc` fast-math flag (the C front end sets it
+    when compiled with `-ffast-math` / `-fassociative-math`), or
+  - the user passes the option (`--affine-matmul-to-systolic=allow-fp-reassociation=true`;
+    `systolic-cc --fp-reassociation`).
+
+  Under permission, results equal the loop's exactly when every partial sum is exact, as in the
+  tests' small-integer data. Otherwise they may differ in rounding, in the sign of a zero sum, and
+  in NaN payload. Infinities and NaNs still propagate as IEEE requires: a NaN or ∞ operand yields
+  NaN or ∞ in both, except ∞ − ∞ ordering effects, which reassociation may change.
+- **Integer reductions:** not recognized (`arith.addf`/`mulf` only). An integer GEMM would need the
+  source language's overflow semantics (C: signed overflow is undefined, unsigned wraps). It is
+  out of scope and refused.
+
+**Within permission** the order of K is immaterial to the result's exactness: the device
+reassociates every tile anyway. No attempt is made to keep the loop's order of K across the K-fold
+invocations; they run in increasing ordinal order.
+
+---
+
+## 7. Aliasing and other memory semantics (P0.7)
+
+The nest writes only C, at C's view. Offload changes the order of the reads of A, B and C and of
+the writes to C: all of A and B are read before C is written back (per tile). This is equivalent to
+the loop iff no element C writes is read through A or B, and A and B are not written.
+
+Policy, conservative **[proved under its premise]**: A and B must be provably disjoint from C.
+
+- **Provably disjoint** means one of:
+  - different root buffers, one of them a fresh `alloc`/`alloca`;
+  - a `llvm.noalias` (C `restrict`) argument on either side (overlap would be UB in C);
+  - the explicit user assertion `assume-no-alias`.
+- **Otherwise** the nest is refused with the reason "A may overlap C". This holds for views of one
+  root buffer even with disjoint regions; bufferization's `restrict` forbids two tensors of one
+  buffer, and region disjointness is not analysed (P1).
+- **A and B the same memref** (read-only) is allowed only through the same view (one tensor).
+  Different views (`A·Aᵀ`) are VALID_BUT_LOWERING_UNSUPPORTED.
+
+Negative-stride and transposed views change none of this: they are views of the same root
+buffers and are traced through `ViewLikeOpInterface` as before.
+
+---
+
+## 8. Execution legality of the tiles
+
+The planner's boxes are proven an exact partition of R: `checkExactCover` on the ordinal grid, and
+for ≤ 64 regions a Presburger check in source coordinates. Each region is D restricted to an
+ordinal box, which is independent of the views' signs and permutation, because the views are
+functions of the ordinals. Hardware limits (array size, k_max, L1, devices) are the planner's;
+they affect feasibility, not equivalence.
+
+---
+
+## 9. Classification and diagnostics (P0.9)
+
+Every candidate nest (a perfect chain around one statement) gets one class and a reason:
+
+| class | meaning | examples |
+|---|---|---|
+| PROVEN_VALID | a valid mapping (§3) exists and its views are representable. Offload still requires the FP permission (§6) and the memory premises (§7); a refusal for those reasons names them | all P0 positives |
+| VALID_BUT_LOWERING_UNSUPPORTED | a valid mathematical mapping is established, but a lowering component is missing; the missing component is named | a batch coordinate read through different expressions per operand; broadcast / stride-0 (P1.3); two I (or J, K) groups needing a merged view; A and B as different views of one memref |
+| PROVEN_INVALID | no valid mapping exists; the violated condition is named | statement not C += A·B; (C0) fails; (B) fails (coupled, multiplicity, missing points, non-box domain); a role read twice by one operand; a static out-of-bounds view (the original program is undefined) |
+| UNKNOWN | correctness cannot be established by the implemented analysis | mod/div subscripts (P2); symbolic bounds (P1.4); SQ-1-type operand-specific decompositions (P1.2); a check that overflows 64-bit arithmetic |
+
+UNKNOWN is never treated as valid. An empty domain is PROVEN_VALID with nothing to compute, and is
+not offloaded (SQ-2 stays open; refusing preserves semantics exactly).
+
+---
+
+## 10. Scope
+
+- **Supported mathematical class 𝒢₀ (completeness claimed, Corollary 4).**
+  - Loops: a perfect chain, constant or constant-foldable bounds, a nonempty domain.
+  - Statement: the fp32 MAC body.
+  - Subscripts: linear in the IVs (no symbols, mod or div), operands of any rank ≥ 1, roles
+    I, J, K with at most one group each (absent = extent 1), no batch.
+  - Views: any signed strides, any dimension order, constant (extent-one) dimensions anywhere.
+  - Every such nest that is a valid mapping is PROVEN_VALID and lowered, subject to §6 and §7.
+  - Batch coordinates (ISSUE-006): any number, read identically by the three operands, in any
+    dimension of each; the batch loops anywhere in the nest, with any bounds and steps.
+- **P1, analysed and classified, not lowered.** A batch coordinate with per-operand views
+  (`A[b + 1]` with `C[b]`) or an operand without it (shared by every batch); a batched nest
+  whose per-batch GEMM has two unit extents (a vector scaled by a scalar: SQ-5); broadcast /
+  stride-0; operand-specific decompositions (SQ-1); merged multi-group roles; symbolic bounds;
+  disjoint regions of one buffer.
+- **P2.** mod/div, quasi-affine, piecewise subscripts: UNKNOWN. Simplification into the affine
+  class is attempted first: MLIR's affine expression simplification already folds e.g.
+  `(4*i) floordiv 4`.
+
+**Soundness [proved modulo the marked assumptions].** Every offloaded nest satisfies (V), (B),
+(C0) and §7, so by Theorem 1 it computes the same exact sums. The FP difference is permitted only
+under explicit reassociation permission.
+
+Completeness is claimed only for 𝒢₀, never for arbitrary affine programs or contractions.
+
+---
+
+## 11. Proof obligations per stage
+
+| stage | obligation | established by |
+|---|---|---|
+| domain (front end, normalization) | exact trip counts, value/ordinal, checked arithmetic, min/max folding | §1 [proved]; CFront tests; new P0.6 test [tested] |
+| groups/roles | Lemma 1, roles table, one group per operand dimension | [proved]; oracle [tested] |
+| bijection | Theorem 3 / Corollary 4 | [proved]; oracle, lit negatives [tested] |
+| views | (V) with signed strides and permutations; addresses (§5) | [proved]; oracle compares offsets, sizes and signed strides; end-to-end numerical tests including the physical bounds of every access [tested] |
+| memory | bounds, overflow, aliasing (§5, §7) | [proved]; lit negatives [tested] |
+| FP policy | default refusal; permission paths | §6 [proved/measured]; lit + end-to-end default vs permitted [tested] |
+| partition | exact cover | §8 [proved, library-checked] |
+
+The **oracle** (`test/Systolic/Inputs/affine_gemm_mapping_oracle.py`) decides by enumeration of D,
+independently of Theorem 3. For P0 it is extended with:
+
+- transposed roles: each subscript's role is found by matching rank functions, not positions;
+- signed strides: a subscript is an arithmetic progression in either direction;
+- ranks other than 2, with constant dimensions;
+- the physical address of every accessed element, checked to lie inside the allocation.
+
+End-to-end tests run the original C loops and the offloaded code on the same data and compare.
+
+---
+
+## 12. Changes made (the plan, as implemented)
+
+1. **Analysis (`AffineMatmulAnalysis.cpp`).**
+   - Replace the positional matching ("results r−2 and r−1, A/B swap") by the group/role analysis
+     of §2, over subscripts of any rank.
+   - Proportionality of either sign.
+   - Constant dimensions recorded per operand.
+   - min/max constant bounds folded (P0.6).
+   - Class + reason in `LogicalMatmul`.
+2. **Dense partition.**
+   - Unchanged math (Theorem 3), driven by groups.
+   - The sign of each view is no longer an obstacle (v1 refused opposite directions at
+     recognition and negative views in the lowering).
+   - SQ-4 / extent-one: a role without a group gets extent 1.
+3. **Lowering (`AffineMatmulToSystolic.cpp`).**
+   - Rank-reducing `memref.subview` with signed strides, then `memref.transpose` when needed.
+   - Bounds on min/max per dimension.
+   - The FP policy: the `reassoc` flag or the pass option.
+4. **Driver / front end.**
+   - `systolic-cfront` emits `reassoc` on the MAC's `arith.addf` under `-ffast-math` /
+     `-fassociative-math` (clang's own flags).
+   - `systolic-cc --fp-reassociation` passes the pass option.
+5. **Tests.**
+   - P0 lit tests (each of the ten negative-stride items of the request, transposes, extent-one,
+     empty, min/max, aliasing, overflow, FP default vs permitted).
+   - The oracle extended.
+   - End-to-end C tests.
+   - Existing tests that offload today must state the FP permission explicitly (§13).
+
+## 13. Decisions (taken by the user, 2026-10-15)
+
+Strict FP default with explicit opt-in. Existing tests and scripts state the permission, and their
+expected values are unchanged. SQ-4 is decided: offloaded. The protected test files that are
+edited are `chmod`ed per file and restored to 0555. The board scripts get the flag. The questions
+as they were put:
+
+- **FP default (P0.8).** By §6 the strict default refuses *every* offload of the existing tests:
+  - 23 lit test files run `--affine-matmul-to-systolic` and 8 `systolic-cc` tests offload;
+  - the showcase, regression and generated corpus all predict offloading;
+  - the board scripts `test/e2e/affine_c/run*.sh` and `test/e2e/systolic_cc/run_board.sh` also
+    offload by default.
+
+  Keeping their results requires adding the explicit permission to their invocations. That
+  changes no expected value, but it does change files the previous rules protect: the generator,
+  scripts and manifest are mode 0555, and the e2e board scripts are FPGA scripts.
+- **SQ-4.** P0.5 ("handle extent-one coordinates correctly") is read as deciding SQ-4 in favour of
+  offloading M, N or K = 1. This changes the expectation of `ISSUE-003/repro_constant_coordinate.mlir`
+  and the SQ-4 entries.
+- **P0.6** changes the expectation of `ISSUE-002/repro_overflow_diagnostics.mlir` (`@min_const_ub`
+  is then an 8-row GEMM, not "not static").
+- **P0.2 / P0.3** change the expectations of showcase case_091–093 (transposed) and mlir_010
+  (opposite directions) from OUT_OF_SCOPE to ACCEPT. Batched case_085/086 stay out: P1.
+
+## 14. Verification (2026-10-15, the final tree)
+
+| test | result |
+|---|---|
+| check-systolic, release and debug (assertions) | 94/94 and 94/94 |
+| oracle, debug build: 40 seeds × 400 nests with the permission | 16,000 nests, 10,291 accepted (2,675 with a transposed view, 9,367 with a negative stride, 4,063 with M/N/K = 1, 7,398 with an operand of rank ≠ 2, 4,000 with a loop that runs once): **0 mismatches** |
+| oracle without the permission | 2,000 nests: nothing lowered, 0 mismatches |
+| oracle sensitivity | catches mirrored rows (165 of 198) and an offset of +1 (198 of 198); against the checkpoint, 197 of 198 valid P0 nests are not lowered |
+| showcase (161) | rc 0: 154 pass + 7 expected_refusal (SQ-1..SQ-3) |
+| regression gate | rc 0: ISSUE-001 2/2, 002 9/9, 003 2/2, 005 2/2 (004: 0/0); 0 regressions |
+| 800 generated cases | 800/800 pass |
+| `scripts/test_permissions.py` | 48/48 |
+| board scripts, FPGA, minimizer | NOT RUN (no board) |
+
+## 15. ISSUE-006: batched GEMMs (2026-10-15)
+
+Changes: `getDenseLogicalGemm` takes the first `numP` rows of T as batch coordinates (every
+other row index is `numP + d`, so a plain GEMM is handled exactly as before), records the batch
+loops, each coordinate's value range and the batch trip count; `restrictToBox` leaves the batch
+coordinates unconstrained; the group analysis accepts a batch group the three operands read
+identically and records each operand's batch dimension (`OperandLayout::batchDim`); the lowering
+emits the batch loops, the `affine.apply` indices and subviews with a dynamic offset (a view of
+batch dimensions only, rank 0, becomes the 1 × 1 matrix); the LLVM pipeline lowers the affine
+loops before `expand-strided-metadata` (a dynamic subview offset computed from an `affine.for`
+counter is an affine dimension, which the `affine.apply` the expansion builds may not use as a
+symbol — found by the generated corpus on multi-tile batches). Snapshot before the change:
+`~/work/integration-backups-20261015/target-pre-batched/`.
+
+Verification (tree of 2026-10-15, after ISSUE-006):
+
+| test | result |
+|---|---|
+| check-systolic, release and debug (assertions) | 97/97 and 97/97 (94 + `affine_gemm_batched_lowering.mlir`, `SystolicCC/affine_batched.c`, `ISSUE-006/repro_batched.mlir`) |
+| oracle, debug build, 40 seeds × 400 | 16,000 nests, 10,561 accepted, 1,776 of them batched: **0 mismatches**; 1,200 nests without the permission: nothing lowered |
+| showcase (161) | rc 0: 154 pass + 7 expected_refusal; case_085 and ext_011 now offloaded (2 and 4 invocations, verified); nothing else changed |
+| SQ-1, SQ-2, SQ-3 | unchanged (`expected_refusal`); `SPEC_QUESTIONS.md` records what each would mean for a batch loop |
+| SQ-5 (new) | a batched nest with two unit extents per batch (`C[i][k] += A[i][k] * B[k][j]`, `j` of one iteration: "the reduction index in the output" read as a batch): correct to lower, refused conservatively pending the question; found by the generated corpus as a false positive of the first batched build (`gen_04bff9d675c2`) |
+| regression gate, 800 generated cases | `~/work/integration-backups-20261015/batched-validation/` |
+| `test_permissions.py` | 48/48 |
+| FPGA board, minimizer | NOT RUN (no board) |

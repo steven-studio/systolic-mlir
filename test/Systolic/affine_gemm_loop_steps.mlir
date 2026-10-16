@@ -12,11 +12,15 @@
 //   down_reduction  k = 7; k >= 0; --k      the reduction reversed
 //   split_fine_down I = 4 ii + (3 - i)      rows 3 2 1 0 7 6 5 4 = 0..7
 //   empty_up / empty_down                   no iteration: refused (SQ-2)
-//   opposite_directions  A[7 - i] with C[i] no strided view of A: refused
+//   opposite_directions  A[7 - i] with C[i]: C row i reads A row 7 - i, a
+//                        negative-stride view (docs/AFFINE_GEMM_MAPPING.md
+//                        section 5): with the ordinal w (i's order), A row
+//                        7 - w (offset 7, stride -1) and C row w (whole C). Refused until the
+//                        P0 negative-stride support (2026-10-15).
 //
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   -split-input-file %s | FileCheck %s
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
+// RUN: systolic-opt --systolic-declare-fpga-fleet "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=REMARK
 //
 // CHECK-LABEL: func.func @up_step2
@@ -50,8 +54,10 @@
 // CHECK:       affine.for
 // CHECK-NOT:   systolic.matmul_tile
 // CHECK-LABEL: func.func @opposite_directions
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK-NOT:   affine.for
+// CHECK:       memref.subview %arg0[7, 0] [8, 8] [-1, 1]
+// CHECK-NOT:   memref.subview %arg2
+// CHECK:       systolic.matmul_tile
 //
 // REMARK: remark: affine GEMM 3x8x8 lowered as
 // REMARK: remark: affine GEMM 3x8x8 lowered as
@@ -61,6 +67,7 @@
 // REMARK: remark: affine GEMM 8x8x8 lowered as
 // REMARK: remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)
 // REMARK: remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)
+// REMARK: remark: affine GEMM 8x8x8 lowered as
 // REMARK-NOT: decreases
 // REMARK-NOT: remark:
 

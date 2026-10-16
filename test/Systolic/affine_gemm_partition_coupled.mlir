@@ -12,7 +12,7 @@
 // CHECK: row extent: unknown
 // CHECK: column extent: static 4
 // CHECK: reduction extent: static 4
-// CHECK: dense logical GEMM: no (batched GEMM (a partition prefix P* of 1 coordinates) is not supported)
+// CHECK: dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 0 drives a batch coordinate and I))
 // CHECK: partition count: 1
 
 func.func @affine_gemm_partition_coupled(

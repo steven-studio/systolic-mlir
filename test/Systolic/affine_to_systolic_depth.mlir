@@ -1,5 +1,5 @@
 // RUN: systolic-opt --systolic-declare-fpga-fleet \
-// RUN:   --affine-matmul-to-systolic=report=true \
+// RUN:   "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
 // RUN:   -split-input-file -verify-diagnostics %s | FileCheck %s
 
 // GEMMs at any depth of an affine loop nest. The logical I, J, K come from

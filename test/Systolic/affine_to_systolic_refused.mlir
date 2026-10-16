@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   -split-input-file -verify-diagnostics %s | FileCheck %s
 
 // GEMMs --affine-matmul-to-systolic recognizes but cannot show the lowering
@@ -28,17 +28,20 @@ func.func @may_alias(%A: memref<4x4xf32>, %B: memref<4x4xf32>,
 
 // -----
 
+// A batched GEMM is lowered since 2026-10-15 (ISSUE-006: the batch loop is
+// re-emitted around the tiles); what stays refused is a batch coordinate the
+// operands read through different expressions (A[b + 1] with C[b]): one view
+// per operand of a batch coordinate is not lowered.
 // CHECK-LABEL: func.func @batched
 // CHECK-NOT:   systolic.matmul_tile
-func.func @batched(%A: memref<2x4x4xf32> {llvm.noalias},
+func.func @batched(%A: memref<3x4x4xf32> {llvm.noalias},
                    %B: memref<2x4x4xf32> {llvm.noalias},
                    %C: memref<2x4x4xf32> {llvm.noalias}) {
-  // expected-remark @+1 {{batched GEMM (a partition prefix P* of 1 coordinates) is not supported}}
   affine.for %b = 0 to 2 {
     affine.for %i = 0 to 4 {
       affine.for %j = 0 to 4 {
         affine.for %k = 0 to 4 {
-          %a = affine.load %A[%b, %i, %k] : memref<2x4x4xf32>
+          %a = affine.load %A[%b + 1, %i, %k] : memref<3x4x4xf32>
           %bb = affine.load %B[%b, %k, %j] : memref<2x4x4xf32>
           %c = affine.load %C[%b, %i, %j] : memref<2x4x4xf32>
           %p = arith.mulf %a, %bb : f32

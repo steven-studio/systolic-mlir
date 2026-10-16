@@ -1,4 +1,4 @@
-// RUN: systolic-opt --affine-matmul-to-systolic -split-input-file %s \
+// RUN: systolic-opt --affine-matmul-to-systolic=allow-fp-reassociation=true -split-input-file %s \
 // RUN:   | FileCheck %s
 
 // Without a systolic.device fleet the whole iteration domain is one region:
