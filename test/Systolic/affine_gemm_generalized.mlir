@@ -273,5 +273,198 @@ func.func @separate_coordinates(%A: memref<2x4x4xf32> {llvm.noalias}, %B: memref
   }
   return
 }
+// -----
+// MUST BE REFUSED (non-degeneracy, section 19.1): a batched product with M = N = K = 1.
+// The positional form reads C[b][1][2] += A[b][1][3] * B[b][3][2] (b the prefix, distinct
+// constants as I, J, K); the dense partition refuses it as element-wise -- every loop is a
+// batch loop (the analyses by groups and by readers refuse the same nest the same way,
+// @test2_box). Lowered by mistake between the SQ-5 decision and 2026-10-18 (review finding).
+// CHECK-LABEL: func.func @elementwise_positional
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: every loop is read by all three operands: a batched product with M = N = K = 1 is an element-wise product, not a GEMM (docs/AFFINE_GEMM_MAPPING.md section 19.1) [PROVEN_INVALID]
+// DISC:        dense logical GEMM: no (every loop is read by all three operands: a batched product with M = N = K = 1 is an element-wise product
+// DISC-NEXT:   class: PROVEN_INVALID
+func.func @elementwise_positional(%A: memref<4x2x4xf32> {llvm.noalias}, %B: memref<4x4x3xf32> {llvm.noalias}, %C: memref<4x2x3xf32> {llvm.noalias}) {
+  affine.for %b = 0 to 4 {
+    %a = affine.load %A[%b, 1, 3] : memref<4x2x4xf32>
+    %bb = affine.load %B[%b, 3, 2] : memref<4x4x3xf32>
+    %c = affine.load %C[%b, 1, 2] : memref<4x2x3xf32>
+    %p = arith.mulf %a, %bb : f32
+    %s = arith.addf %c, %p : f32
+    affine.store %s, %C[%b, 1, 2] : memref<4x2x3xf32>
+  }
+  return
+}
+// -----
+// The same with the role loops running once (constants on the domain, Lemma 0): refused
+// the same way. (A 1 x 1 x 1 GEMM WITHOUT a batch loop stays a GEMM, SQ-4.)
+// CHECK-LABEL: func.func @elementwise_positional_once
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: every loop is read by all three operands: a batched product with M = N = K = 1 is an element-wise product, not a GEMM (docs/AFFINE_GEMM_MAPPING.md section 19.1) [PROVEN_INVALID]
+// DISC:        dense logical GEMM: no (every loop is read by all three operands: a batched product with M = N = K = 1 is an element-wise product
+func.func @elementwise_positional_once(%A: memref<4x4x8xf32> {llvm.noalias}, %B: memref<4x8x4xf32> {llvm.noalias}, %C: memref<4x4x4xf32> {llvm.noalias}) {
+  affine.for %b = 0 to 4 {
+    affine.for %i = 2 to 3 {
+      affine.for %j = 3 to 4 {
+        affine.for %k = 5 to 6 {
+          %a = affine.load %A[%b, %i, %k] : memref<4x4x8xf32>
+          %bb = affine.load %B[%b, %k, %j] : memref<4x8x4xf32>
+          %c = affine.load %C[%b, %i, %j] : memref<4x4x4xf32>
+          %p = arith.mulf %a, %bb : f32
+          %s = arith.addf %c, %p : f32
+          affine.store %s, %C[%b, %i, %j] : memref<4x4x4xf32>
+        }
+      }
+    }
+  }
+  return
+}
+// -----
+// NOT DECIDED (section 19.7): Test 1 on the triangle j >= i. The readers in the original
+// counters decide nothing on a domain that is not a box, so the readers analysis's refusal
+// is UNKNOWN, not a claim of validity by demotion. (The triangle is provably not the affine
+// image of a box -- 19.7 -- but that is the specification's proof, not the compiler's.)
+// CHECK-LABEL: func.func @test1_triangle
+// CHECK-NOT:   systolic.matmul_tile
+// DISC:        reason: logical coordinate J is driven by 1 loops that do not enumerate it densely (or its loops' bounds are not constant){{.*}} -- on a domain that is not a box the readers decide nothing
+// DISC-NEXT:   class: UNKNOWN
+func.func @test1_triangle(%A: memref<8x11xf32> {llvm.noalias}, %B: memref<11x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 8 {
+    affine.for %j = affine_map<(d0) -> (d0)>(%i) to 8 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %i + %k] : memref<8x11xf32>
+        %bb = affine.load %B[%j + %k, %j] : memref<11x8xf32>
+        %c = affine.load %C[%i, %j] : memref<8x8xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<8x8xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// NOT DECIDED (SQ-3 and section 19.7): Test 1 with a symbolic reduction bound.
+// CHECK-LABEL: func.func @test1_symbolic
+// CHECK-NOT:   systolic.matmul_tile
+// DISC:        reason: logical coordinate K is driven by 1 loops that do not enumerate it densely (or its loops' bounds are not constant){{.*}} -- on a domain that is not a box the readers decide nothing
+// DISC-NEXT:   class: UNKNOWN
+func.func @test1_symbolic(%A: memref<4x?xf32> {llvm.noalias}, %B: memref<?x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}, %n: index) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to %n {
+        %a = affine.load %A[%i, %i + %k] : memref<4x?xf32>
+        %bb = affine.load %B[%j + %k, %j] : memref<?x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// NOT DECIDED (section 19.7): a batched GEMM on a constant-extent parallelotope. With
+// j in [i, i + 4) and k in [j, j + 2), xi(I, J, p) = (I, I + J, I + J + p) is a unimodular
+// bijection from the box [0,4) x [0,4) x [0,2) and per p the nest is the 4 x 4 x 1 GEMM
+// C[I][J][p] += A[I][p] * B[J][p]. In the original counters every loop is read by all three
+// operands; on a box that would be element-wise (PROVEN_INVALID), here it is UNKNOWN: the
+// parametrization is not constructed.
+// CHECK-LABEL: func.func @parallelotope_rank1
+// CHECK-NOT:   systolic.matmul_tile
+// DISC:        reason: 1 coordinate(s) are read by all three operands and none by two: an element-wise product (a batched GEMM with M = N = K = 1), not a matrix multiplication -- on a domain that is not a box the readers decide nothing
+// DISC-NEXT:   class: UNKNOWN
+func.func @parallelotope_rank1(%A: memref<4x2xf32> {llvm.noalias}, %B: memref<4x2xf32> {llvm.noalias}, %C: memref<4x4x2xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = affine_map<(d0) -> (d0)>(%i) to affine_map<(d0) -> (d0 + 4)>(%i) {
+      affine.for %k = affine_map<(d0) -> (d0)>(%j) to affine_map<(d0) -> (d0 + 2)>(%j) {
+        %a = affine.load %A[%i, %k - %j] : memref<4x2xf32>
+        %bb = affine.load %B[%j - %i, %k - %j] : memref<4x2xf32>
+        %c = affine.load %C[%i, %j - %i, %k - %j] : memref<4x4x2xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j - %i, %k - %j] : memref<4x4x2xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// An empty role loop (k in [0, 0)) in a nest the readers analysis decides: no box to check
+// the radixes or G2 on; recognized with its layouts and reported by the dense partition as
+// the empty GEMM, as for a role-pure nest (SQ-2: refused, PROVEN_VALID).
+// CHECK-LABEL: func.func @test1_empty
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0) [PROVEN_VALID]
+// DISC:        layout A: general view: dimension 0 = 0 + 1*I; dimension 1 = 0 + 1*I + 1*K
+// DISC:        dense logical GEMM: no (a loop of the nest has no iteration (an empty GEMM: M, N or K is 0))
+// DISC-NEXT:   class: PROVEN_VALID
+func.func @test1_empty(%A: memref<4x7xf32> {llvm.noalias}, %B: memref<7x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 0 {
+        %a = affine.load %A[%i, %i + %k] : memref<4x7xf32>
+        %bb = affine.load %B[%j + %k, %j] : memref<7x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// A repetition loop inside the reduction: the lowering pass cannot move it outward (the
+// interchange would reorder dependent iterations) and the recognizer, which does not
+// analyse a nest with such a loop, labels its refusal UNKNOWN (not PROVEN_INVALID: the
+// specification lists this as a documented limitation, README section 2).
+// CHECK-LABEL: func.func @repetition_inside_reduction
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations)
+// DISC:        reason: loop 3 of the nest is used by no access (it repeats the accumulation; moved outward by the lowering pass when that is a legal interchange -- here it was not, so the mapping is not decided)
+// DISC-NEXT:   class: UNKNOWN
+func.func @repetition_inside_reduction(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 4 {
+        affine.for %r = 0 to 2 {
+          %a = affine.load %A[%i, %k] : memref<4x4xf32>
+          %bb = affine.load %B[%k, %j] : memref<4x4xf32>
+          %c = affine.load %C[%i, %j] : memref<4x4xf32>
+          %p = arith.mulf %a, %bb : f32
+          %s = arith.addf %c, %p : f32
+          affine.store %s, %C[%i, %j] : memref<4x4xf32>
+        }
+      }
+    }
+  }
+  return
+}
+// -----
+// A repetition loop between the two loops of a matrix-vector product, C[i] += A[i][k] *
+// B[k] with r in between: moved outward by the lowering pass (a band of three with two GEMM
+// dimensions; until 2026-10-18 the hoist required a band of four with three dimensions and
+// the nest stayed on the host). Lowered as a 4 x 1 x 4 GEMM run twice.
+// CHECK-LABEL: func.func @matvec_repetition_between
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// REMARK:      remark: affine GEMM 4x1x4 lowered as 1 exact region(s); the enclosing loops run it 2 time(s)
+func.func @matvec_repetition_between(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4xf32> {llvm.noalias}, %C: memref<4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %r = 0 to 2 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %k] : memref<4x4xf32>
+        %bb = affine.load %B[%k] : memref<4xf32>
+        %c = affine.load %C[%i] : memref<4xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i] : memref<4xf32>
+      }
+    }
+  }
+  return
+}
 
 // REMARK-NOT: remark:

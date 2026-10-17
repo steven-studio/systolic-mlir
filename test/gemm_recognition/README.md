@@ -170,9 +170,36 @@ decomposition: a documented limitation (basis `demotion`), never "not a GEMM"; (
 reading in which one loop drives two coordinates is no longer restored when the analyses refuse
 the nest (their refusal is the reason). Re-decided showcase cases (each with its record
 `redecided`): case_087, case_127 (offloaded), case_088, case_126 (skewed views: recognized,
-FALSE_NEGATIVE until the lowering), case_090, case_095, case_123, case_124, case_125 (valid by
-demotion: DOCUMENTED_LIMITATION); case_089 stays REJECT (refused at recognition now:
+FALSE_NEGATIVE until the lowering), case_090, case_095, case_123, case_124, case_125 (valid
+under another decomposition -- a loop read by one operand as a stride-0 role or a batch loop:
+DOCUMENTED_LIMITATION, basis `broadcast`); case_089 stays REJECT (refused at recognition now:
 element-wise). The three tests of the request are ext_026..028 (section 8, docs section 19.6).
+
+**Review fixes 2026-10-18 (the four-lens adversarial review of Phase C, 27 findings, 25
+confirmed; `docs/AFFINE_GEMM_MAPPING.md` section 19.9).** Compiler: a batched product with
+M = N = K = 1 (`C[b][1][2] += A[b][1][3] * B[b][3][2]`, or role loops that run once) was lowered
+through the positional form after the SQ-5 gate went -- now PROVEN_INVALID in the dense
+partition, as the analyses by groups and readers already said; on a domain that is not a box
+(a bound on another counter, a symbol) every verdict of those analyses is UNKNOWN (they decide
+nothing there, docs 19.7) instead of PROVEN_INVALID or VALID_BUT_LOWERING_UNSUPPORTED; an empty
+role loop in the readers path reaches the dense partition's empty-GEMM refusal (SQ-2) instead
+of a false "not dense" reason; a repetition loop the lowering cannot move outward is UNKNOWN,
+not PROVEN_INVALID; the hoist of a repetition loop no longer needs a band of four loops with
+three GEMM dimensions (a matrix-vector product with a repetition loop between its loops is
+offloaded), and its legality test is integer-exact (MLIR's `isValidLoopInterchangePermutation`
+is rational only and refused legal hoists, e.g. a loop of step 2 against a stride-3 placement:
+`i - i' = 3 (l' - l)` has rational but no integer solutions in the box). The screening reports the task algorithm of 2026-10-18 line by line (docs 19.10,
+`affine_gemm_geometry.mlir`). Executable specification (`casespec.py`): the hoist of a
+repetition loop is decided as the compiler decides it (two iterations writing one C element
+differing in an enclosing loop -- a reduction loop, or a batch or role loop whose C windows
+overlap), by enumeration; `generalized_gemm_on_domain` searches every decomposition section
+19.1 allows and proves each OUT_OF_SCOPE `demotion` / `broadcast` by exhibiting one; an
+operand-specific split (SQ-1) is UNDETERMINED whatever roles the author declared; the SQ-5
+shortcut that accepted an element-wise product (M = N = 1) is gone; a skewed GEMM with `-=`,
+`alpha` or an initialisation inside is OUT_OF_SCOPE (a valid GEMM the specification excludes),
+not "not a GEMM"; the predictor mirrors the compiler's factor assignment by transposition cost,
+keeps the swapped factors' arrays in the bounds and alias checks, counts zero-trip loops as
+readers, checks every role's direction before any radix, and reports the same G2 collision.
 
 ## 2. Support specification (what a correct compiler must do)
 
@@ -194,10 +221,11 @@ nest or a scalar accumulator, double or mixed precision, operands that may alias
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
 `failures/resolved/NOTE-001`), two different views of one array as A and B, and -- since
-ISSUE-008 -- a nest that is a batched GEMM only with more loops as batch loops than its readers
-give (a loop read by one operand, separate coordinates in one role, a role that is not one dense
-coordinate, C not injective per batch: `docs/AFFINE_GEMM_MAPPING.md` section 19.2, the compiler
-constructs only the canonical decomposition). (Transposed
+ISSUE-008 -- a nest that is a batched GEMM only under a decomposition other than its readers'
+(a loop read by one operand: a stride-0 role or a batch loop, basis `broadcast`; separate
+coordinates in one role, a role that is not one dense coordinate, C not injective per batch:
+basis `demotion`; `docs/AFFINE_GEMM_MAPPING.md` section 19.2 -- the executable specification
+exhibits the decomposition, the compiler constructs only the canonical one). (Transposed
 operand views, one operand reading a shared coordinate in the direction opposite to the other's
 — a negative-stride view — and matrix-vector products were on this list until 2026-10-15; they are
 inside the specification since ISSUE-005. A coordinate that decreases in every operand is
@@ -232,7 +260,8 @@ ISSUE-008), and batched GEMMs with two of M, N, K equal to 1 per batch (SQ-5, de
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=
-A[i][j] * B[i][j]`; the former "singular mappings" `C[x+z][y+z] += A[x+z][x+y+2z] *
+A[i][j] * B[i][j]`; a batched product whose I, J and K all have extent 1, `C[b][1][2] +=
+A[b][1][3] * B[b][3][2]`; the former "singular mappings" `C[x+z][y+z] += A[x+z][x+y+2z] *
 B[x+y+2z][y+z]` and Test 2 on a box: docs section 19.6) --, a non-box iteration domain that is
 not the affine image of a box (the triangle `j >= i`, mlir_009: no (batch, I, J, K) box
 corresponds to its points; one that is, a parallelogram, is a GEMM by docs section 19.7 whose

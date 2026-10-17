@@ -2,7 +2,7 @@
  * Case ID: ext_027
  * Name: test2_on_a_box
  * Set / category: extended / generalized_views
- * Mathematical class: not_gemm
+ * Mathematical class: elementwise_product_of_views
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -136,7 +136,7 @@ int main(void) {
   const long n = 315;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] ext_027 test2_on_a_box: extended / generalized_views, class not_gemm\n");
+  printf("[gemm_recognition] ext_027 test2_on_a_box: extended / generalized_views, class elementwise_product_of_views\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT ext_027 FAIL (test bug)\n"); return 3;

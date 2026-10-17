@@ -32,7 +32,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop inside a reduction loop (both of more than one iteration) cannot be moved outward -- affine::isValidLoopInterchangePermutation refuses it, the accumulation order would change; test/SystolicCC/depth.c d4_illegal
+ *   basis: AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop of more than one iteration cannot be moved outward when two iterations writing one element of C differ in a loop enclosing it -- a reduction loop, or (since C may read batch loops in its role dimensions, 2026-10-16) a batch or role loop whose C windows overlap, C[i + k][j]: affine::isValidLoopInterchangePermutation refuses it, the accumulation order would change; test/SystolicCC/depth.c d4_illegal; decided by enumeration (casespec.repeat_in_reduction)
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated

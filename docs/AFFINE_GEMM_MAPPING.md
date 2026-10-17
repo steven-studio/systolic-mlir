@@ -170,13 +170,16 @@ loops' counters (a loop that runs once is a constant, folded in). This reproduce
 iteration domain exactly: for each batch iteration, the I, J, K nest on the slice the batch index
 addresses. **No condition is placed on the batch coordinate itself** (not density, not
 injectivity): two batch iterations addressing the same slice accumulate into it twice, as the
-loop does. What is required: a batch loop drives no I, J or K (otherwise the batches are
-coupled, `C[b][b + i]`, and no box of (I, J, K) exists per batch value — PROVEN_INVALID), and
-the three operands read the coordinate through one and the same expression on D (else one view
-per operand of a batch coordinate would be needed — VALID_BUT_LOWERING_UNSUPPORTED). A batch
-loop that sat between I/J/K loops moves outward: a legal interchange, since the iterations of
-distinct batch values touch distinct C elements, and under the reassociation permission (§6) the
-order of the accumulations into one element is free. The regions of §8 constrain only I, J, K, so
+loop does. What was required here until 2026-10-16 -- a batch loop drives no I, J or K
+(`C[b][b + i]` was PROVEN_INVALID), and the three operands read the coordinate through one and
+the same expression -- is **superseded**: by §16 (ISSUE-007) each operand reads a batch
+coordinate through its own expression, and by §19.3 (ISSUE-008) a batch loop may offset any
+operand's role dimensions, C's included (`C[b][b + i][j]` and `C[i + k][j]` are lowered); the
+condition is G2 per batch value (§19.1). A batch loop that sat between I/J/K loops moves
+outward. When distinct batch values touch distinct C elements that is a legal interchange; when
+their C windows overlap (`C[i + k][j]`: (i, k) = (1, 0) and (0, 1) both update C[1][j]) the move
+reorders the accumulations into one element and rests on the reassociation permission (§6)
+alone, as §19.1's floating-point paragraph says. The regions of §8 constrain only I, J, K, so
 each runs for every batch iteration and the exact-cover proof holds per batch. An operand
 shared by every batch (`C[b] += A[b] B`) has no batch dimension: refused (B broadcast over the
 batch, or A and C merged over (b, i): P1.3 / P1.2). The remark's repeat count includes the
@@ -914,16 +917,27 @@ lattice is therefore spanned by the K loops' axes: a direction that keeps C fixe
 an axis combination of K loops (Test 2's d = (5, −3, 1)) joins different batch iterations.
 
 *Demotion.* Any loop may be made a batch loop (its terms become batch offsets; per batch its
-coordinate is fixed). Hence on a box domain a nest is a batched GEMM of affine views iff some
-loop of two or more iterations is read by exactly two operands (with C0 and the bounds):
-demote every other loop -- per batch that one loop is a dense role, and C's view of it is
-injective because C reads it (or it is K and C' is one element). The recognizer constructs
-only the canonical decomposition (the fewest batch coordinates); a nest whose canonical
-decomposition fails -- a role that is not one dense coordinate (A[i][k0 + k1], a split radix
-with gaps), two coordinates in one role, an operand-specific decomposition (SQ-1), a
-broadcast, C not injective (G2) -- is still a batched GEMM after demoting loops, with smaller
-tiles, and is refused as VALID_BUT_LOWERING_UNSUPPORTED (not PROVEN_INVALID). Only a nest whose
-loops are all read by A, B and C (Test 2 on a box) has no decomposition at all.
+coordinate is fixed), and a loop read by one operand may be a role along which the other
+operand's view is constant -- a stride-0 view, which 19.1 admits (V_B need not depend on K).
+Hence on a box domain a nest is a batched GEMM of affine views iff some loop of two or more
+iterations is **not** read by all three operands (with C0 and the bounds): a loop read by
+exactly two operands is that role with every other loop demoted (per batch that one loop is a
+dense role, and C's view of it is injective because C reads it, or it is K and C' is one
+element); a loop read by A only is K with B constant along it (C[i][j] += A[i][k] B[i][j] is,
+per (i, j), the dot product of A's row with a constant), one read by B only is K with A
+constant along it, one read by C only is I (or J) with A and B constant along it (C'(I) +=
+a scalar, injective because C reads it). The executable specification searches these
+decompositions (casespec.generalized_gemm_on_domain: every assignment of the loops to P, I, J,
+K that G1 allows, each role one dense coordinate of its loops, C injective per batch). The
+recognizer constructs only the canonical decomposition (the fewest batch coordinates, no
+stride-0 view); a nest whose canonical decomposition fails -- a role that is not one dense
+coordinate (A[i][k0 + k1], a split radix with gaps), two coordinates in one role, a broadcast,
+C not injective (G2) -- is still a batched GEMM under another decomposition and is refused as
+VALID_BUT_LOWERING_UNSUPPORTED (not PROVEN_INVALID); an operand-specific decomposition (SQ-1,
+A[4 i0 + i1] with C[8 i0 + i1]) is refused UNKNOWN while the question is open. Only a nest
+whose loops are all read by A, B and C (Test 2 on a box, a batched product with
+M = N = K = 1) has no decomposition at all: PROVEN_INVALID, whichever analysis reads it (the
+positional form's dense partition refuses it too, since 2026-10-18).
 
 *Non-box domains.* The readers rule is about the box's own loops; on another domain the
 readers are taken after the parametrization ξ, on Z's coordinates. In the original counters a
@@ -1065,9 +1079,11 @@ A batched nest whose per-batch GEMM has two unit extents (Test 3: M = N = 1; the
 "reduction index in the output" nests: N = K = 1) satisfies 19.1: it is mathematically a batched
 GEMM. Recognition (the readers analysis) and the operand views (batch-dependent offsets,
 ISSUE-007) already handle it; it was stopped only by the SQ-5 refusal in the dense partition.
-Lowering it means removing that refusal: the batch loops run one 1 × 1 × K (or M × 1 × 1) tile
-per batch value — correct, and inefficient on the arrays (the decision is recorded in
-SPEC_QUESTIONS.md).
+Lowering it means removing that refusal: the batch loops run one 1 × 1 × K (or M × 1 × 1) GEMM
+per batch value, partitioned by the planner like any other (§8: several tiles when M exceeds an
+array or K exceeds k_max) — correct, and inefficient on the arrays (the decision is recorded in
+SPEC_QUESTIONS.md). Three unit extents per batch are not SQ-5 but an element-wise product,
+refused (19.1).
 
 
 ### 19.9 Implementation: Phases B and C (2026-10-16), and the five outcome categories
@@ -1115,33 +1131,123 @@ way and checks every accepted nest's views address by address.
 
 | category | how it is recorded | examples |
 |---|---|---|
-| mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027); a non-box domain that is not the affine image of a box (the triangle, mlir_009, 19.7); out-of-bounds subscripts; a sum, a third factor, no accumulation |
+| mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID (or UNKNOWN where it does not decide) | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027, a batched product with M = N = K = 1 -- PROVEN_INVALID); out-of-bounds subscripts (PROVEN_INVALID); a sum, a third factor, no accumulation (PROVEN_INVALID); a non-box domain that is not the affine image of a box (the triangle, mlir_009: REJECT by 19.7's symmetry argument, the compiler says UNKNOWN -- it decides no non-box domain) |
 | explicitly outside the specification | OUT_OF_SCOPE, DOCUMENTED_LIMITATION | double or mixed precision, operands that may alias C, alpha ≠ 1, an initialisation inside the nest, a repetition loop inside a reduction loop, an operand shared by every batch |
-| recognition not implemented | OUT_OF_SCOPE (`demotion`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only after demotion (19.2): a broadcast loop (case_090, case_095, case_123–125), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1; a parallelogram domain or Test 2's D* written as its own loop nest (19.7: the parametrization is not constructed) |
+| recognition not implemented | OUT_OF_SCOPE (`demotion`, `broadcast`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only under another decomposition (19.2): a loop read by one operand (case_090, case_095, case_123–125: a stride-0 view or a batch loop), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1 (UNKNOWN); a parallelogram domain or Test 2's D* written as its own loop nest (19.7: the parametrization is not constructed; every readers verdict is UNKNOWN on a non-box domain); a repetition loop the lowering cannot move outward (UNKNOWN: the mapping is not analysed) |
 | lowering not implemented | ACCEPT, FALSE_NEGATIVE of ISSUE-008; compiler VALID_BUT_LOWERING_UNSUPPORTED ("skewed or merged view") | Test 1 (ext_026), case_088 (`C[2i + j][j]`), case_126 (`A[i][i + k]`), a flat injective C (`C[4i + j]`), a Hankel view (`A[i + k]`) |
 | hardware or runtime not supporting it | the driver's refusal | double arrays (the datapath is fp32); a floating-point nest without the reassociation permission (§6); the FPGA board itself was not run (NOT RUN) |
 
-**Verification of Phase C** (2026-10-16; LLVM 24 toolchain only; logs in
-`~/work/integration-backups-20261016/phaseC-validation/`):
+**Verification of Phase C** (final run 2026-10-18 after the review fixes; LLVM 24 toolchain
+only; logs in `~/work/integration-backups-20261016/phaseC-validation/`: `showcase2`, `oracle2`,
+`gate3`, `test_permissions2.log`, the lit logs in the session scratchpad):
 
-- lit, release and debug (assertions) builds: 108 tests, 107 passed, 1 expectedly failed (ISSUE-008's
-  XFAIL reproducer of the open lowering);
+- lit, release and debug (assertions) builds: 108 tests, 107 passed, 1 expectedly failed
+  (ISSUE-008's XFAIL reproducer of the open lowering, Phase D);
 - the oracle on the debug build, 40 seeds × 400 nests and 3 seeds without the reassociation
   permission: 17,200 nests, 13,823 accepted, 3,326 rejected, 51 skipped, **0 mismatches**; the new
   paths: C reading a batch loop in a role dimension 179, two unit extents 386, skewed or merged
   views (recognized, refused by the lowering) 785, C not injective (refused) 96;
 - the showcase on the software runtime model: 175 cases, 165 pass, 3 known false negatives
-  (case_088, case_126, ext_026: the open lowering of ISSUE-008), 7 expected refusals (SQ-1, SQ-2,
-  SQ-3); case_087 and case_127 offloaded (16 and 8 invocations) and equal to their CPU references,
+  (case_088, case_126, ext_026: the open lowering), 7 expected refusals (SQ-1, SQ-2, SQ-3);
+  case_087 and case_127 offloaded (16 and 8 invocations) and equal to their CPU references,
   Test 3 (ext_028) offloaded (16 invocations), Test 2 on a box (ext_027) refused at recognition
   and computed on the host;
 - the regression gate: against the baseline of 2026-10-15 (not re-saved) case_088 and case_126
   went from pass to known_false_negative (re-decided ACCEPT; their lowering is open) and ext_026
-  is new; the issue reproducers of ISSUE-001..007 unchanged;
+  is new; the issue reproducers of ISSUE-001..007 unchanged, ISSUE-008's fails as its XFAIL
+  says; check-systolic 107 + 1 XFAIL;
 - the six standard generated batches (800 cases): 792 pass, 8 known false negatives (skewed or
-  merged views, ISSUE-008); against the previous run 21 verdicts changed, every one explained:
-  8 pass → known_false_negative (skewed views, ACCEPT since this section), 7 SQ-5 cases
-  (spec_open or expected_refusal → pass, offloaded), 6 batched GEMMs with unit extents
-  (known_false_negative → pass: the SQ-5 refusal had refused them although the specification
-  accepted them);
+  merged views, ISSUE-008), no unexpected stage, no runtime failure, no false positive; against
+  the previous run 21 verdicts changed, every one explained: 8 pass → known_false_negative
+  (skewed views, ACCEPT since this section), 7 SQ-5 cases (spec_open or expected_refusal → pass,
+  offloaded), 6 batched products with every role of extent one (known_false_negative → pass:
+  REJECT as element-wise now, refused by the compiler, where the former specification had
+  accepted them and the SQ-5 refusal had refused them);
+- the review's own instruments on the fixed tree: its 19 constructed cases, 244 formerly flagged
+  random nests and 1,200 fresh random nests give predictor = compiler at every stage (0 flagged);
+  the geometry cross-check 900 nests, 0 failures;
+- the permissions test: 48 checks, 0 failed;
 - the FPGA board: NOT RUN.
+
+### 19.10 The task algorithm of 2026-10-18, line by line
+
+The algorithm as given, on the six coefficient vectors of C[Ic][Jc] += A[Ia][Ka] · B[Kb][Jb]
+(each a row of coefficients over the loop counters), with N = null(Ic, Jc):
+
+```
+if (rank(Ic, Jc) != 2) return error;                       // L1
+if (rank(Ia, Ka) != 2) return error;                       // L2
+if (rank(Kb, Jb) != 2) return error;                       // L3
+if (rank(Ic, Jc, Ia, Ka, Kb, Jb) != 3) return error;       // L4
+if (rank(Ia, Ka, Kb, Jb) != 3) return error;               // L5
+if (dot(Ia, N) == 0 && dot(Ka, N) == 0) return error;      // L6
+if (dot(Kb, N) == 0 && dot(Jb, N) == 0) return error;      // L7
+if (dot(Ia, N) != 0 && dot(Ka, N) == 0) swap(Ia, Ka);      // L8
+if (dot(Kb, N) == 0 && dot(Jb, N) != 0) swap(Kb, Jb);      // L9
+...                                                        // (not given)
+```
+
+**Representation and the conversion to it.** A subscript is `LinearForm{coefficients, constant}`
+over the nest's loop counters x (AffineMatmulAnalysis.cpp, extractLinearForm): exactly the
+"仿射係數向量" of the statement; the constant plays no part in any line. The screening
+(screenAffineMatmulGeometry) works on the loops' ordinals z, x_s = lower_s + step_s z_s, so a
+coefficient vector v on x becomes v S on z (S the diagonal matrix of the steps, all nonzero).
+Every line is invariant under this change of variables: rank(M S) = rank(M); null(M S) =
+S⁻¹ null(M); (v S)·(S⁻¹ w) = v·w, so dot(v S, null(M S)) = 0 iff dot(v, null(M)) = 0. A loop of one
+iteration is a constant on the domain (Lemma 0) and is left out ("full space": the loops of two
+or more iterations); the "role space" leaves the batch loops out as well (19.5). rank is over Q
+(equal to the rank over Z, lattice::columnEchelon); N is a basis of the integer kernel in Hermite
+normal form, which spans the rational null space, so "dot(v, N) == 0" is decided as *v orthogonal
+to every basis vector* ⇔ v in the row space of [Ic; Jc] -- independent of the basis and correct
+for a null space of any dimension (`variesAlongKernel`; the lit case @alg_nullity_two has a
+2-dimensional N in which A varies along one basis vector only). All arithmetic is checked
+64-bit; an overflow is reported as "not screened", never a wrapped value. Transposed or
+differently stored operands need no conversion: the vectors are taken as the subscripts are
+written, and the two swap lines are the statement's own handling of the stored order.
+
+**Where each line is.** Computed in AffineMatmulAnalysis.cpp, `conditions` of
+screenAffineMatmulGeometry (SixVectorConditions: a, d1, d2, b, e, aVaries, bVaries, swapA, swapB,
+passes), printed by `--test-affine-matmul-discovery=geometry=true` as the "task algorithm" line,
+once in the full space and once in the role space, for operands of two dimensions each; checked
+against an independent implementation (fractions, rational kernels) on random nests by
+test/Systolic/Inputs/affine_geometry_check.py (affine_gemm_geometry_random.mlir).
+
+| line | screening | the decision (19.2, 19.3) that carries its content | passes alone / fails alone (affine_gemm_geometry.mlir) |
+|---|---|---|---|
+| L1 rank(Ic, Jc) = 2 | `a` | G2: rank [λ_I λ_J] = 2 is the sufficient case of C's injectivity (19.3); the rank-1 and zero cases are decided by the gcd criterion | fails alone: @alg_fail_rank_c, C[i][i] (valid by demotion) |
+| L2 rank(Ia, Ka) = 2 | `d1` | A reads I and K (readers: an AC loop and an AB loop); each role one dense coordinate (mixedRadixExtent) | fails alone: @alg_fail_rank_a, A[i + k][2i + 2k] (a GEMM of a general view: not necessary) |
+| L3 rank(Kb, Jb) = 2 | `d2` | B reads K and J, likewise | fails alone: @alg_fail_rank_b |
+| L4 rank(six) = 3 | `b` | exactly three roles plus batch loops (the readers classification; a fourth direction is a broadcast or a batch loop) | fails alone: @alg_fail_rank_six, B[k][l] (a broadcast: valid, stride-0 view, not lowered) |
+| L5 rank(Ia, Ka, Kb, Jb) = 3 | `e` | the factors span I, K, J: K read by both factors, I by A, J by B | fails alone: @alg_fail_rank_four, B[k][i] (case_124: valid by demotion) |
+| L6 A varies along N | `aVaries` | the reduction loops are read by A (a loop read by B only is a broadcast, refused) | fails alone: @alg_fail_a_varies, A[i][j] |
+| L7 B varies along N | `bVaries` | likewise for B | fails alone: @alg_fail_b_varies, B[i][j] |
+| L8 swap(Ia, Ka) | `swapA` | A's role dimensions in the other order: `roleDim` = {1, 0}, memref.transpose (P0.2) | @alg_both_swaps (A[k][i]); @test1 no swap |
+| L9 swap(Kb, Jb) | `swapB` | likewise for B | @alg_both_swaps (B[j][k]) |
+
+Positive cases (every line passes, no swap): @test1, @v_skew_a_only, @v_skew_c, @alg_nullity_two
+(N of dimension 2, a repetition loop). Cases the lines do not apply to (operands not of two
+dimensions each): @v_flat, @v_c_not_injective, every batched nest with three-dimensional
+operands (the screening prints no task line; the role space of 19.5 is the analogue).
+
+**What the lines decide, and what they do not.** The lines are necessary for a *plain* GEMM of
+two-dimensional operands with three loops (I, J, K each a loop); they are implemented and
+reported verbatim, and nothing of them was dropped, reordered or replaced. They are *not* the
+decision procedure, because for the specification's class (19.1) they are neither sufficient
+nor necessary -- each statement below is a test:
+
+- not sufficient: Test 2 on a box passes every line (d = (5, −3, 1)) and is an element-wise
+  product (19.6; @test2); Test 3 passes every line and is a batch of dot products, not one
+  GEMM (@test3); the lines see no domain, so they cannot tell the box from D*;
+- not necessary: the K = 1 GEMM (outer product, SQ-4) has N = {0} and fails L2–L7
+  (@alg_outer_product_k1); the N = 1 GEMM (GEMV, SQ-4) fails L1; A[i + k][2i + 2k] fails L2 and
+  is a GEMM of a general view (@alg_fail_rank_a); a one-reader loop fails L4, L6 or L7 and is a
+  batched GEMM with a stride-0 view or a demoted loop (19.2; @alg_fail_rank_six,
+  @alg_fail_a_varies, @alg_fail_b_varies); C[i][i] fails L1 and is valid by demotion
+  (@alg_fail_rank_c).
+
+The decision procedure therefore implements the lines' content in the generalized form of
+19.2–19.3 (the table's third column): readers instead of the three ranks, G2 instead of L1, the
+role dimensions' order instead of the swaps, the broadcast refusal instead of L6–L7, and the
+domain (Theorem 3 on the box, UNKNOWN elsewhere) that the lines lack. Where the two disagree
+on a case, the case is listed above with its proof, as the request asks, rather than one of
+them silently adjusted.

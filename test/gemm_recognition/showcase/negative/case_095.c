@@ -34,7 +34,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: (docs/AFFINE_GEMM_MAPPING.md section 19.2) the canonical decomposition (the roles by readers) fails -- a broadcast, two coordinates in one role, a role that is not one dense coordinate, C not injective per batch -- but with more loops as batch loops the nest is a batched GEMM of smaller tiles; the compiler constructs only the canonical decomposition: a documented limitation
+ *   basis: (docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.2, 10) a loop read by one operand only: a GEMM of affine views in which that loop is a role the other operand's view is constant along (a stride-0 view, C[i][j] += A[i][k] * B[k][i]: j as J with A and B constant along it is excluded by G2 unless N = 1, so j is K with A constant along it, or a batch loop), found by casespec.generalized_gemm_on_domain's search; the compiler refuses the broadcast (section 10: a stride-0 view is not lowered): a documented limitation
  *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):

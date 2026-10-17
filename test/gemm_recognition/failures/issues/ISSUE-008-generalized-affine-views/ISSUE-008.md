@@ -70,13 +70,43 @@ references); this directory's `repro_skewed_views.mlir` (XFAIL until Phase D).
 - **Non-box domains**: the lattice parametrization of section 19.7 (a parallelogram, D* of
   Test 2) is not constructed (refused as UNKNOWN).
 
-## Verification (2026-10-16, Phase C; LLVM 24 only)
+## Review fixes (2026-10-18, before the Phase C commit)
 
-Logs: `~/work/integration-backups-20261016/phaseC-validation/`; the details are in
-`docs/AFFINE_GEMM_MAPPING.md` section 19.9.
+The four-lens adversarial review of Phase C (C++ correctness, lowering safety of the newly
+lowered shapes, predictor fidelity, specification soundness; each finding re-examined by a
+skeptic) reported 27 findings, 25 confirmed, 2 refuted ("one tile per batch value" is a
+wording; SQ-1 in the generalized branch -- fixed anyway, see below). Every confirmed finding is
+fixed here; `docs/AFFINE_GEMM_MAPPING.md` sections 19.2, 19.7-19.10 and README sections 1-2
+record the decisions.
+
+| # | finding | kind | fix | tests |
+|---|---|---|---|---|
+| 1 | a batched product with M = N = K = 1 lowered through the positional form (the SQ-5 gate was the only refusal) | wrong decision (FALSE_POSITIVE by the project's classification; the values were right) | `getDenseLogicalGemm` refuses `numP > 0` with extents (1, 1, 1) as PROVEN_INVALID; casespec predictor and spec mirror it | `affine_gemm_generalized.mlir` @elementwise_positional, @elementwise_positional_once |
+| 2 | readers refusals on non-box or symbolic-bound domains labelled VALID_BUT_LOWERING_UNSUPPORTED / PROVEN_INVALID | wrong class | every groups/readers verdict is UNKNOWN when a bound is not a constant (`refuseRoles`, `unsupportedRoles`) | @test1_triangle, @test1_symbolic, @parallelotope_rank1 |
+| 3 | the general-view refusal ran before the bounds and alias checks | wrong class | Phase D (the general views are lowered through the same bounds and alias checks) | Phase D tests |
+| 4 | an empty role loop in the readers path: a false reason, VALID_BUT_LOWERING_UNSUPPORTED | wrong class | the readers analysis skips the radix and G2 checks on an empty domain; the dense partition reports the empty GEMM (SQ-2) | @test1_empty |
+| 5 | a repetition loop labelled PROVEN_INVALID | wrong class | UNKNOWN (the mapping is not analysed) | @repetition_inside_reduction |
+| 6 | `hoistRepetitionLoops` needed a band of four with three dimensions | false refusal (SQ-4/SQ-5 nests) | a band of two with one dimension suffices | @matvec_repetition_between |
+| 7 | subview rank reduction ambiguous when every kept dimension has size 1 (invalid IR, systolic-cc fails) | wrong code | Phase D (an explicit `memref.reinterpret_cast` view) | Phase D tests |
+| 8 | predictor and spec: only reduction loops block the hoist | spec/predictor mismatch | the C-collision rule by enumeration (`_hoist_blocked`, `repeat_in_reduction`); the compiler's own test made integer-exact (`hoistReordersDependentIterations`: MLIR's dependence polyhedra tested with `isIntegerEmpty`, where `isValidLoopInterchangePermutation` was rational only and refused legal hoists such as a step-2 loop against a stride-3 placement) | review driver r01, r02, r11; the random fuzz (2,000 nests); the gate |
+| 9 | predictor: swapped positional factors checked against the other arrays | predictor | `ka`/`kb` carried into the bounds and alias checks | r18, r19 |
+| 10 | predictor: factor assignment by the author's arrays, compiler by transposition cost | predictor | the cost mirrored in `predict_by_groups` | r06, r07, r16 |
+| 11 | predictor: zero-trip loops dropped from the support | predictor | `support` folds single-iteration loops only | r04, r14 |
+| 12 | predictor: radix checked before all directions; G2 collision in the counter convention | predictor | two passes; the front end's ordinal convention; `_injective_on_box` | r05, r17 |
+| 13 | spec: the SQ-5 shortcut accepted M = N = 1 (element-wise) and skipped the guards | unsound ACCEPT | removed; the batched path decides with the guards | gate (`random:1:51667`) |
+| 14 | spec: broadcast-only nests "valid by demotion" with a false basis text; docs 19.2 "iff two readers" false | docs/spec | `generalized_gemm_on_domain` searches every decomposition of 19.1 (stride-0 roles included) and exhibits one; basis `broadcast`; docs 19.2 corrected ("not read by all three") | showcase case_090/095/123-125 |
+| 15 | spec: a skewed GEMM with `-=`, alpha or init_inside was REJECT | wrong label | decided like the MAC forms, then OUT_OF_SCOPE alpha / init_inside | review nonmac.py |
+| 16 | spec: SQ-1 in the generalized branch was OUT_OF_SCOPE demotion | label depended on declared roles | UNDETERMINED SQ-1 whenever two operands split a role differently | case_128 |
+| 17 | docs: section 4 stale (C[b][b+i] PROVEN_INVALID; distinct batches touch distinct C elements), 19.2 SQ-1 label, 19.8 wording, 19.9 triangle row | docs | corrected | -- |
+| 18 | ext_026/ext_028 math class `not_gemm`; ext_028 claimed a fixed false negative | showcase metadata | explicit classes; `redecided` record | showcase |
+
+## Verification (Phase C, final run 2026-10-18; LLVM 24 only)
+
+Logs: `~/work/integration-backups-20261016/phaseC-validation/` (`showcase2`, `oracle2`, `gate3`);
+the details are in `docs/AFFINE_GEMM_MAPPING.md` section 19.9.
 
 - lit, release and debug builds: 108 tests, 107 passed, 1 expectedly failed (this directory's
-  `repro_skewed_views.mlir`).
+  `repro_skewed_views.mlir`, the open lowering).
 - The oracle (debug build): 17,200 nests over 43 seeds, 0 mismatches.
 - The showcase (soft runtime): 165 pass, 3 known false negatives of this issue (case_088,
   case_126, ext_026), 7 expected refusals (SQ-1, SQ-2, SQ-3); case_087, case_127 and ext_028
@@ -84,7 +114,10 @@ Logs: `~/work/integration-backups-20261016/phaseC-validation/`; the details are 
 - The regression gate: case_088 and case_126 pass → known_false_negative against the baseline of
   2026-10-15 (re-decided ACCEPT; the baseline is not re-saved), ext_026 new; this issue's
   reproducer fails as expected (XFAIL); the other reproducers unchanged.
-- 800 generated cases: 792 pass, 8 known false negatives of this issue (skewed or merged views);
-  21 verdicts changed against the previous run, all from this issue (8 skewed views now ACCEPT,
-  7 SQ-5 cases now offloaded, 6 batched GEMMs with unit extents no longer refused).
+- 800 generated cases: 792 pass, 8 known false negatives of this issue (skewed or merged views),
+  no unexpected stage; 21 verdicts changed against the previous run, all from this issue (8 skewed
+  views now ACCEPT, 7 SQ-5 cases now offloaded, 6 all-unit batched products now REJECT and
+  refused).
+- The review's driver (19 cases), 244 formerly flagged and 1,200 fresh random nests: predictor =
+  compiler, 0 flagged.
 - The FPGA board: NOT RUN.

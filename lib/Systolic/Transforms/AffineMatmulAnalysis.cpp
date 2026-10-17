@@ -1632,11 +1632,18 @@ mlir::systolic::recognizeLogicalMatmul(
   // no access uses repeats the accumulation (C += A*B once per iteration),
   // which a single GEMM over the used IVs would not; an IV from outside the
   // chain is a parameter of the nest, not one of its iteration dimensions.
+  // The lowering pass first moves such a loop outward when that is a legal
+  // interchange (AffineMatmulToSystolic.cpp, hoistRepetitionLoops); a nest
+  // that still has one here is not analysed further, so nothing is decided
+  // about its mapping: UNKNOWN (the specification lists a repetition loop
+  // inside a reduction loop as a documented limitation, README section 2).
   for (auto [position, loop] : llvm::enumerate(chain))
     if (!llvm::is_contained(iterationIVs, loop.getInductionVar()))
-      return refuse("loop " + llvm::Twine(position) +
-                    " of the nest is used by no access (it repeats the "
-                    "accumulation)");
+      return unknown("loop " + llvm::Twine(position) +
+                     " of the nest is used by no access (it repeats the "
+                     "accumulation; moved outward by the lowering pass when "
+                     "that is a legal interchange -- here it was not, so the "
+                     "mapping is not decided)");
   if (iterationIVs.size() != chain.size())
     return refuse("an access uses the counter of a loop outside the nest");
 
@@ -1650,6 +1657,23 @@ mlir::systolic::recognizeLogicalMatmul(
   SingleValues single;
   for (Value iv : iterationIVs)
     single.push_back(singleIterationValue(iv));
+
+  // The shape of the domain. A box: every bound a constant (a symbol or
+  // another loop's counter in a bound makes the domain a non-box, docs/
+  // AFFINE_GEMM_MAPPING.md section 19.7). Empty: a loop with constant bounds
+  // and no iteration (the dense partition reports it, SQ-2).
+  bool boxDomain = true, emptyDomain = false;
+  for (Value iv : iterationIVs) {
+    affine::AffineForOp loop = affine::getForInductionVarOwner(iv);
+    std::optional<int64_t> lower =
+        loop ? constantLoopBound(loop, /*lower=*/true) : std::nullopt;
+    std::optional<int64_t> upper =
+        loop ? constantLoopBound(loop, /*lower=*/false) : std::nullopt;
+    if (!lower || !upper)
+      boxDomain = false;
+    else if (*upper <= *lower)
+      emptyDomain = true;
+  }
 
   dbgOut() << "  source iteration domain:\n";
   sourceDomain->print(dbgOut());
@@ -1874,6 +1898,28 @@ mlir::systolic::recognizeLogicalMatmul(
   // roles, an operand reading one coordinate in two dimensions.
   bool relaxableRefusal = false;
 
+  // The verdicts of the two analyses below -- PROVEN_INVALID (not a GEMM in
+  // any decomposition) and VALID_BUT_LOWERING_UNSUPPORTED (a batched GEMM
+  // after demoting loops, not constructed) -- rest on Theorem 3 for a box
+  // domain (section 19.2). On any other domain the readers taken in the
+  // original counters decide nothing (section 19.7: a loop read by all three
+  // operands may drive a role after the parametrization), so both become
+  // UNKNOWN there, with the same reason.
+  auto refuseRoles = [&](const llvm::Twine &reason) {
+    if (boxDomain)
+      return refuse(reason);
+    return unknown(reason + " -- on a domain that is not a box the readers "
+                            "decide nothing (docs/AFFINE_GEMM_MAPPING.md "
+                            "section 19.7)");
+  };
+  auto unsupportedRoles = [&](const llvm::Twine &reason) {
+    if (boxDomain)
+      return unsupported(reason);
+    return unknown(reason + " -- on a domain that is not a box the readers "
+                            "decide nothing (docs/AFFINE_GEMM_MAPPING.md "
+                            "section 19.7)");
+  };
+
   // 2. The analysis by groups and roles (its refusals set why/mappingClass).
   auto byGroups = [&]() -> LogicalResult {
   SmallVector<std::array<bool, 3>> readsLoop(numIterationDims,
@@ -1903,7 +1949,7 @@ mlir::systolic::recognizeLogicalMatmul(
     }
     if (batchLoop && otherLoop) {
       relaxableRefusal = true;
-      return refuse(llvm::Twine("C's dimension ") + llvm::Twine(sub.dim) +
+      return refuseRoles(llvm::Twine("C's dimension ") + llvm::Twine(sub.dim) +
                     " mixes a batch coordinate (loop " +
                     llvm::Twine(*batchLoop) +
                     ", read by all three operands) with another coordinate: "
@@ -1972,7 +2018,7 @@ mlir::systolic::recognizeLogicalMatmul(
       continue;
     if (dim >= 0) {
       relaxableRefusal = true;
-      return refuse(llvm::Twine(kOperandName[sub.operand]) +
+      return refuseRoles(llvm::Twine(kOperandName[sub.operand]) +
                     " reads one logical coordinate in two of its dimensions "
                     "(" + llvm::Twine(dim) + " and " + llvm::Twine(sub.dim) +
                     "): two coordinates would share a loop, so the points "
@@ -1999,7 +2045,7 @@ mlir::systolic::recognizeLogicalMatmul(
     // subscript (A[i + k], I with K): a coupled mapping, no box per role.
     if (f0 && f1 && c) {
       relaxableRefusal = true;
-      return refuse("a subscript couples loops of different coordinates "
+      return refuseRoles("a subscript couples loops of different coordinates "
                     "(their group is read by both factors and C, but none of "
                     "its loops is read by all three): a coupled mapping, not "
                     "one dense GEMM");
@@ -2011,7 +2057,7 @@ mlir::systolic::recognizeLogicalMatmul(
     else if (f1 && c)
       groupsWithSecond.push_back(g);
     else
-      return unsupported(
+      return unsupportedRoles(
           llvm::Twine("a coordinate is read by ") +
           kOperandName[f0 ? 0 : f1 ? 1 : 2] +
           " only: the other operands would be broadcast along it (a "
@@ -2025,7 +2071,7 @@ mlir::systolic::recognizeLogicalMatmul(
   // GEMM of 1 x 1 x 1 tiles in name only: refused.
   if (!batchGroups.empty() && groupsWithFirst.empty() &&
       groupsWithSecond.empty() && reductionGroups.empty())
-    return refuse(llvm::Twine(batchGroups.size()) +
+    return refuseRoles(llvm::Twine(batchGroups.size()) +
                   " coordinate(s) are read by all three operands and none by "
                   "two: an element-wise product (a batched GEMM with "
                   "M = N = K = 1), not a matrix multiplication");
@@ -2038,7 +2084,7 @@ mlir::systolic::recognizeLogicalMatmul(
         std::pair{&groupsWithSecond, "the second factor and C"},
         std::pair{&reductionGroups, "both factors (the reduction)"}})
     if (groups->size() > 1)
-      return unsupported(llvm::Twine(groups->size()) +
+      return unsupportedRoles(llvm::Twine(groups->size()) +
                          " separate coordinates are read by " + role +
                          ": one GEMM role over several coordinates needs a "
                          "merged (reshaped) view, not lowered");
@@ -2291,7 +2337,7 @@ mlir::systolic::recognizeLogicalMatmul(
       case 0:
         break; // a loop that runs once: a constant on the domain
       default:
-        return unsupported(
+        return unsupportedRoles(
             llvm::Twine("a coordinate is read by ") +
             kOperandName[readers[d] == 1 ? 0 : readers[d] == 2 ? 1 : 2] +
             " only: the other operands would be broadcast along it (a "
@@ -2300,7 +2346,7 @@ mlir::systolic::recognizeLogicalMatmul(
       }
     }
     if (roleLoops[0].empty() && roleLoops[1].empty() && roleLoops[2].empty())
-      return refuse("every loop is read by all three operands: no row, "
+      return refuseRoles("every loop is read by all three operands: no row, "
                     "column or reduction coordinate -- an element-wise "
                     "product, not a GEMM (docs/AFFINE_GEMM_MAPPING.md "
                     "section 19.1)");
@@ -2341,7 +2387,7 @@ mlir::systolic::recognizeLogicalMatmul(
           if (proportional(forms[i], forms[j]))
             continue;
           if (subscripts[i].operand == subscripts[j].operand)
-            return unsupported(
+            return unsupportedRoles(
                 llvm::Twine(kOperandName[subscripts[i].operand]) +
                 " reads logical coordinate " + kRole[r] +
                 " through two different combinations of its loops "
@@ -2455,11 +2501,16 @@ mlir::systolic::recognizeLogicalMatmul(
         return failure();
       return std::pair<int64_t, int64_t>{scale, *extent};
     };
+    // An empty domain (a loop with no iteration) has no box to check the
+    // roles' radixes or C's injectivity on; nothing runs. The nest is
+    // recognized with its layouts and the dense partition reports the empty
+    // GEMM (normalizationEmptyLoop, SQ-2), as for a role-pure nest.
+    if (!emptyDomain) {
     std::array<std::pair<int64_t, int64_t>, 3> ordinal;
     for (unsigned r = 0; r < 3; ++r) {
       FailureOr<std::pair<int64_t, int64_t>> o = roleOrdinal(r);
       if (failed(o))
-        return unsupported(llvm::Twine("logical coordinate ") + kRole[r] +
+        return unsupportedRoles(llvm::Twine("logical coordinate ") + kRole[r] +
                            " is driven by " + llvm::Twine(roleLoops[r].size()) +
                            " loops that do not enumerate it densely (or its "
                            "loops' bounds are not constant): no box of " +
@@ -2482,7 +2533,7 @@ mlir::systolic::recognizeLogicalMatmul(
     if (!injective)
       return unknown("C's injectivity check overflows 64-bit arithmetic");
     if (!injective->injective())
-      return unsupported(
+      return unsupportedRoles(
           llvm::Twine("C's view is not injective on the (I, J) box: the "
                       "outputs with ordinals (I, J) and (I + ") +
           llvm::Twine(injective->collision->first) + ", J + " +
@@ -2491,6 +2542,7 @@ mlir::systolic::recognizeLogicalMatmul(
           "(G2, docs/AFFINE_GEMM_MAPPING.md section 19.3); a decomposition "
           "with the J (or I) loops as batch loops would be valid, and is not "
           "constructed");
+    }
 
     // The result. The coordinates' expressions; each operand's view of a
     // role, for a role-pure layout, is its role dimension's coefficient and
@@ -3364,6 +3416,7 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
     c.d1 = rank({aI, aK}) == 2;
     c.d2 = rank({bK, bJ}) == 2;
     c.d3 = rank({aI, bJ}) == 2;
+    c.e = rank({aI, aK, bK, bJ}) == 3;
     // Some d in ker [cI; cJ] with aK.d != 0 and bK.d != 0: exists iff
     // neither aK nor bK vanishes on the whole kernel; then u + t w works for
     // all but at most two integers t.
@@ -3388,6 +3441,33 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
       kernel = e->kernel;
     else
       return std::nullopt;
+    // The task algorithm's null-space tests, on the whole kernel basis: a
+    // vector is "dot(v, null(Ic, Jc)) != 0" iff some basis vector has a
+    // nonzero dot with it (the basis spans the kernel, so this does not
+    // depend on the basis chosen). An empty kernel (nullity 0) makes every
+    // dot zero: A and B then vary along nothing that keeps C fixed.
+    auto variesAlongKernel = [&](const lattice::IntVector &v)
+        -> std::optional<bool> {
+      for (const lattice::IntVector &k : kernel) {
+        std::optional<int64_t> product = dot(v, k);
+        if (!product)
+          return std::nullopt;
+        if (*product != 0)
+          return true;
+      }
+      return false;
+    };
+    std::optional<bool> aIv = variesAlongKernel(aI),
+                        aKv = variesAlongKernel(aK),
+                        bKv = variesAlongKernel(bK),
+                        bJv = variesAlongKernel(bJ);
+    if (!aIv || !aKv || !bKv || !bJv)
+      return std::nullopt;
+    c.aVaries = *aIv || *aKv;
+    c.bVaries = *bKv || *bJv;
+    c.swapA = *aIv && !*aKv;
+    c.swapB = !*bKv && *bJv;
+    c.passes = c.a && c.d1 && c.d2 && c.b && c.e && c.aVaries && c.bVaries;
     const lattice::IntVector *u = nullptr, *w = nullptr;
     for (const lattice::IntVector &v : kernel) {
       std::optional<int64_t> av = dot(aK, v), bv = dot(bK, v);

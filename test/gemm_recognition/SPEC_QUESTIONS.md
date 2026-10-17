@@ -35,8 +35,10 @@ Inspected again on 2026-10-16 with the generalized mapping (ISSUE-008,
 `i0` demoted to a batch loop the nest is a batched GEMM (per `i0` both operands read `i1` through
 one direction; section 19.2) -- what stays open is whether the compiler must construct that
 decomposition (or a copy); the compiler refuses it as before (UNKNOWN, "operand-specific
-decompositions of one coordinate ... SQ-1"), the specification keeps UNDETERMINED. SQ-2 and SQ-3
-are unchanged.
+decompositions of one coordinate ... SQ-1"), the specification keeps UNDETERMINED -- since
+2026-10-18 for every nest in which two operands split one role differently, whatever roles the
+case's author declared (`casespec.generalized_gemm_on_domain` verdict SQ1). SQ-2 and SQ-3 are
+unchanged.
 
 Inspected again on 2026-10-15 with the batched-GEMM change (ISSUE-006); none of the three is
 decided by it, and none is silently reclassified:

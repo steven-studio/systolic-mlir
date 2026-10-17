@@ -274,7 +274,19 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
   // batch of dot products, C[i][j] += A[i][j + k] * B[i + k][j]; a batch of
   // scaled vectors, the reduction index in the output) is a batched GEMM of
   // affine views (docs/AFFINE_GEMM_MAPPING.md section 19.8): lowered, one
-  // small tile per batch value -- SQ-5, decided 2026-10-16.
+  // small GEMM per batch value, partitioned by the planner like any other --
+  // SQ-5, decided 2026-10-16. All three equal to one is not: every loop of
+  // the nest is then a batch loop (the positional form reads such a nest
+  // when its role subscripts are distinct constants, or loops that run once)
+  // and the product is element-wise -- no row, column or reduction
+  // coordinate in any decomposition (section 19.1, non-degeneracy; the
+  // analyses by groups and by readers refuse the same nest the same way).
+  if (numP > 0 && dense.extent[0] == 1 && dense.extent[1] == 1 &&
+      dense.extent[2] == 1)
+    return failAs(Class::ProvenInvalid,
+                  "every loop is read by all three operands: a batched "
+                  "product with M = N = K = 1 is an element-wise product, "
+                  "not a GEMM (docs/AFFINE_GEMM_MAPPING.md section 19.1)");
   return dense;
 }
 

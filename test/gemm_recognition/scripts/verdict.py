@@ -13,7 +13,10 @@ DENSE_REASON_MARKERS = ("batched GEMM", "two logical coordinates are driven by t
                         "overflows 64-bit arithmetic",
                         # getDenseLogicalGemm's own reasons for an empty GEMM
                         # (SQ-2) and a constant coordinate (ISSUE-003, SQ-4)
-                        "has no iteration (an empty GEMM", "is driven by no loop")
+                        "has no iteration (an empty GEMM", "is driven by no loop",
+                        # a batched product with M = N = K = 1: element-wise
+                        # (docs section 19.1, refused since 2026-10-18)
+                        "a batched product with M = N = K = 1")
 
 
 def classify_mlir(entry, st):

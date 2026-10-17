@@ -20,7 +20,11 @@ screening; this script recomputes every printed fact from the nest itself:
     normal form, generating every kernel vector of a small box (brute force);
   - the 'joins two points and is not a reduction' lines, from the basis;
   - the six-vector conditions A-D (operands of two dimensions each): ranks, and
-    for C the existence of d (rational kernel), and the printed d itself.
+    for C the existence of d (rational kernel), and the printed d itself;
+  - the task algorithm of 2026-10-18 (docs section 19.10) line by line: the five
+    rank conditions, 'A varies along null(Ic, Jc)' (some rational kernel basis
+    vector has a nonzero dot with Ia or Ka -- the whole basis), the same for B,
+    the two swap conditions, and the verdict (every 'return error' line passes).
 
 Prints one line per failure and a summary.
 """
@@ -199,13 +203,39 @@ def check(nest, lines):
         out.append("joining directions %s, expected %s" % (got_joins, joins))
     # Six-vector conditions.
     cond_lines = [l for l in rest if l.startswith("  six-vector conditions")]
+    task_lines = [l for l in rest if l.startswith("  task algorithm")]
     two = all(len(rows[x]) == 2 for x in "ABC")
     if not two:
-        if cond_lines:
+        if cond_lines or task_lines:
             out.append("six-vector conditions printed for operands not of two dimensions")
         return out
-    if len(cond_lines) != 2:
-        return out + ["expected two six-vector lines, got %d" % len(cond_lines)]
+    if len(cond_lines) != 2 or len(task_lines) != 2:
+        return out + ["expected two six-vector and two task-algorithm lines, got %d and %d"
+                      % (len(cond_lines), len(task_lines))]
+    TASK = re.compile(r"  task algorithm \((.*)\): rank\(Ic,Jc\)=2 (yes|no), rank\(Ia,Ka\)=2 (yes|no), "
+                      r"rank\(Kb,Jb\)=2 (yes|no), rank\(six\)=3 (yes|no), rank\(Ia,Ka,Kb,Jb\)=3 (yes|no), "
+                      r"A varies along null\(Ic,Jc\) (yes|no), B varies along null\(Ic,Jc\) (yes|no), "
+                      r"swap\(Ia,Ka\) (yes|no), swap\(Kb,Jb\) (yes|no) -> (passes|error)$")
+    for space, cols, line in (("full space", full, task_lines[0]), ("role space", roles, task_lines[1])):
+        cI, cJ = [[r[s] for s in cols] for r in rows["C"]]
+        aI, aK = [[r[s] for s in cols] for r in rows["A"]]
+        bK, bJ = [[r[s] for s in cols] for r in rows["B"]]
+        rk = lambda *vs: rank_q(list(vs), len(cols))
+        yn = lambda b: "yes" if b else "no"
+        ker = rational_kernel([cI, cJ], len(cols)) if cols else []
+        varies = lambda v: any(dot(v, w) != 0 for w in ker)
+        a_var, b_var = varies(aI) or varies(aK), varies(bK) or varies(bJ)
+        r1, r2, r3, r4, r5 = (rk(cI, cJ) == 2, rk(aI, aK) == 2, rk(bK, bJ) == 2,
+                              rk(cI, cJ, aI, aK, bK, bJ) == 3, rk(aI, aK, bK, bJ) == 3)
+        want = (yn(r1), yn(r2), yn(r3), yn(r4), yn(r5), yn(a_var), yn(b_var),
+                yn(varies(aI) and not varies(aK)), yn(not varies(bK) and varies(bJ)),
+                "passes" if r1 and r2 and r3 and r4 and r5 and a_var and b_var else "error")
+        m = TASK.match(line)
+        if not m or m.group(1) != space:
+            out.append("unparsed task-algorithm line %r" % line)
+            continue
+        if m.groups()[1:] != want:
+            out.append("%s: task algorithm %s, expected %s" % (space, m.groups()[1:], want))
     for space, cols, line in (("full space", full, cond_lines[0]), ("role space", roles, cond_lines[1])):
         cI, cJ = [[r[s] for s in cols] for r in rows["C"]]
         aI, aK = [[r[s] for s in cols] for r in rows["A"]]

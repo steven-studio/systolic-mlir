@@ -2,7 +2,7 @@
  * Case ID: ext_026
  * Name: test1_skewed_a_and_b
  * Set / category: extended / generalized_views
- * Mathematical class: not_gemm
+ * Mathematical class: gemm_of_skewed_views
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -28,7 +28,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
- *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)
+ *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -136,7 +136,7 @@ int main(void) {
   const long n = 16;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] ext_026 test1_skewed_a_and_b: extended / generalized_views, class not_gemm\n");
+  printf("[gemm_recognition] ext_026 test1_skewed_a_and_b: extended / generalized_views, class gemm_of_skewed_views\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT ext_026 FAIL (test bug)\n"); return 3;

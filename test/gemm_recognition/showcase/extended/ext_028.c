@@ -2,7 +2,7 @@
  * Case ID: ext_028
  * Name: test3_batch_of_dot_products
  * Set / category: extended / generalized_views
- * Mathematical class: not_gemm
+ * Mathematical class: batched_dot_products
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -30,14 +30,15 @@
  * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
  *   basis: (SQ-5, decided 2026-10-16: docs/AFFINE_GEMM_MAPPING.md section 19.8) a batched GEMM whose per-batch GEMM has two of M, N, K equal to 1 -- a batch of dot products (C[i][j] += A[i][j + k] B[i + k][j]) or of scaled vectors (the reduction index in the output) -- is a batched GEMM of affine views: lowered, one small tile per batch value
- * Current implementation (commit 6e25528 with the fix of ISSUE-008, predicted from its sources; measured by
+ *   re-decided: 2026-10-16 (SQ-5, SPEC_QUESTIONS.md; failures/issues/ISSUE-008): UNDETERMINED (SQ-5, refused conservatively) before; ACCEPT since -- a batched GEMM with two unit extents, offloaded
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
  *   dense partition (getDenseLogicalGemm):   supported
  *   lowering (--affine-matmul-to-systolic):  supported
  *   driver (systolic-cc):                    offloaded
- * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-008 (fixed)
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -130,7 +131,7 @@ int main(void) {
   const long n = 16;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] ext_028 test3_batch_of_dot_products: extended / generalized_views, class not_gemm\n");
+  printf("[gemm_recognition] ext_028 test3_batch_of_dot_products: extended / generalized_views, class batched_dot_products\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT ext_028 FAIL (test bug)\n"); return 3;

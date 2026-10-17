@@ -733,6 +733,7 @@ EXTENDED = [
              [L("i", 0, 4, "I"), L("j", 0, 4, "J"), L("k", 0, 4, "K")],
              {"a": arr("A", (4, 7), ("i", "i + k")), "b": arr("B", (7, 4), ("j + k", "j")),
               "c": arr("C", (4, 4), ("i", "j"))},
+             math_class="gemm_of_skewed_views",
              math_note="Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\n"
                        "K = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n"
                        "(each combines both of its operand's roles), C's is the identity: a GEMM\n"
@@ -745,6 +746,7 @@ EXTENDED = [
              {"a": arr("A", (15, 16), ("i + j - 2 * k", "i + j + k")),
               "b": arr("B", (16, 21), ("i + j + k", "i + 2 * j + k")),
               "c": arr("C", (15, 21), ("i + j - 2 * k", "i + 2 * j + k"))},
+             math_class="elementwise_product_of_views",
              math_note="Test 2, C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k] on the\n"
                        "box i in [2, 10), j in [0, 6), k in [0, 2): every loop is read by all\n"
                        "three operands, so on a box all three are batch loops and no loop is a\n"
@@ -758,13 +760,17 @@ EXTENDED = [
              [L("i", 0, 4, "P"), L("j", 0, 4, "P"), L("k", 0, 4, "K")],
              {"a": arr("A", (4, 7), ("i", "j + k")), "b": arr("B", (7, 4), ("i + k", "j")),
               "c": arr("C", (4, 4), ("i", "j"))},
+             math_class="batched_dot_products",
              math_note="Test 3, C[i][j] += A[i][j+k] * B[i+k][j]: i and j are read by all three\n"
                        "operands (batch loops), k by A and B (K): per (i, j) the 1 x 1 x 4 dot\n"
                        "product C[i][j] += sum_K A[i][j+K] B[i+K][j] -- a batched GEMM of affine\n"
                        "views with M = N = 1 (docs/AFFINE_GEMM_MAPPING.md sections 19.6, 19.8;\n"
                        "SQ-5, decided 2026-10-16: offloaded, 16 batches of a 1 x 1 x 4 tile).  Not\n"
                        "one GEMM with affine views (section 19.6, exhaustive check).",
-             issue="ISSUE-008"),
+             issue="ISSUE-008",
+             redecided="2026-10-16 (SQ-5, SPEC_QUESTIONS.md; failures/issues/ISSUE-008): UNDETERMINED "
+                       "(SQ-5, refused conservatively) before; ACCEPT since -- a batched GEMM with "
+                       "two unit extents, offloaded"),
 ]
 
 # ==========================================================================

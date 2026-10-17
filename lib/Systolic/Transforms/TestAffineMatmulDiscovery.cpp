@@ -164,6 +164,18 @@ struct TestAffineMatmulDiscoveryPass
           }
           llvm::errs() << ", D " << yn(c->d1) << " " << yn(c->d2) << " "
                        << yn(c->d3) << "\n";
+          // The task algorithm of 2026-10-18, line by line (section 19.10).
+          llvm::errs() << "  task algorithm (" << space
+                       << "): rank(Ic,Jc)=2 " << yn(c->a)
+                       << ", rank(Ia,Ka)=2 " << yn(c->d1)
+                       << ", rank(Kb,Jb)=2 " << yn(c->d2)
+                       << ", rank(six)=3 " << yn(c->b)
+                       << ", rank(Ia,Ka,Kb,Jb)=3 " << yn(c->e)
+                       << ", A varies along null(Ic,Jc) " << yn(c->aVaries)
+                       << ", B varies along null(Ic,Jc) " << yn(c->bVaries)
+                       << ", swap(Ia,Ka) " << yn(c->swapA)
+                       << ", swap(Kb,Jb) " << yn(c->swapB) << " -> "
+                       << (c->passes ? "passes" : "error") << "\n";
         };
     printConditions("full space", g->conditionsFull);
     printConditions("role space", g->conditionsRoles);

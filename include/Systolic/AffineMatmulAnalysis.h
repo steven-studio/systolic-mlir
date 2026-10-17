@@ -366,6 +366,22 @@ struct AffineGeometryScreening {
   struct SixVectorConditions {
     bool a = false, b = false, c = false, d1 = false, d2 = false, d3 = false;
     std::optional<lattice::IntVector> reductionDirection;
+    /// The task statement's algorithm of 2026-10-18, line by line, on the
+    /// same six vectors (docs/AFFINE_GEMM_MAPPING.md section 19.10). N is the
+    /// integer kernel of [Ic; Jc] (its whole basis: "dot(v, N) == 0" means v
+    /// is orthogonal to every basis vector):
+    ///   rank(Ic, Jc) = 2 ................ a
+    ///   rank(Ia, Ka) = 2 ................ d1
+    ///   rank(Kb, Jb) = 2 ................ d2
+    ///   rank(Ic, Jc, Ia, Ka, Kb, Jb) = 3  b
+    ///   rank(Ia, Ka, Kb, Jb) = 3 ........ e
+    ///   not (Ia . N = 0 and Ka . N = 0) . aVaries
+    ///   not (Kb . N = 0 and Jb . N = 0) . bVaries
+    ///   swap(Ia, Ka) iff Ia . N != 0 and Ka . N = 0 ... swapA
+    ///   swap(Kb, Jb) iff Kb . N = 0 and Jb . N != 0 ... swapB
+    /// `passes`: every "return error" line passes (the swaps are not errors).
+    bool e = false, aVaries = false, bVaries = false, swapA = false,
+         swapB = false, passes = false;
   };
   std::optional<SixVectorConditions> conditionsFull, conditionsRoles;
 };

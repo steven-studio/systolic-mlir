@@ -32,7 +32,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
- *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate, (I, J, K) a bijection onto the box, C injective per batch)
+ *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)
  *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM with a skewed view of C
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):

@@ -54,7 +54,10 @@
 #include "Systolic/SystolicOps.h"
 #include "Systolic/SystolicTilePlan.h"
 
+#include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
+#include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
+#include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -490,6 +493,67 @@ static std::optional<uint64_t> enclosingRepetitions(Operation *op) {
 /// the order in which any C element accumulates; one inside it would
 /// interleave the repetitions with the reduction, which the dependences on C
 /// forbid -- such a nest stays on the CPU.
+///
+/// The legality test is exact over the integers (since 2026-10-18). Moving the
+/// repeating loops outward turns a dependence vector lexicographically
+/// negative iff two iterations that access one element of a memref (one of
+/// them a store) differ in a dimension loop that encloses a repeating loop
+/// of two or more iterations: with the repeating loops first, their
+/// components -- free, since no access reads them -- may be made negative
+/// while the original order was positive. So, for every such repeating loop
+/// and every dimension loop before it, the dependence polyhedron of MLIR's
+/// analysis at that loop's depth (equal on the outer loops, strictly ordered
+/// at this one) is built and tested for an integer point.
+/// affine::isValidLoopInterchangePermutation tests the same polyhedra for
+/// rational feasibility only, and refused legal hoists (a loop of step 2
+/// against a stride-3 placement: i - i' = 3 (l' - l) has rational but no
+/// integer solutions in the box).
+static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
+                                             ArrayRef<unsigned> repeating,
+                                             ArrayRef<unsigned> dimensions) {
+  SmallVector<Operation *> memOps;
+  affine::AffineForOp innermost = band.back(), outermost = band.front();
+  for (Operation &op : *innermost.getBody())
+    if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op))
+      memOps.push_back(&op);
+  auto trip = [](affine::AffineForOp loop) -> int64_t {
+    const int64_t lb = loop.getConstantLowerBound();
+    const int64_t ub = loop.getConstantUpperBound();
+    const int64_t step = loop.getStepAsInt();
+    return ub <= lb ? 0 : (ub - lb + step - 1) / step;
+  };
+  // MLIR's loop depth counts every affine.for enclosing the accesses, those
+  // outside the band included.
+  const unsigned outer = affine::getNestingDepth(outermost.getOperation());
+  for (unsigned rho : repeating) {
+    if (trip(band[rho]) < 2)
+      continue;
+    for (unsigned s : dimensions) {
+      if (s >= rho)
+        continue;
+      for (Operation *src : memOps)
+        for (Operation *dst : memOps) {
+          if (!isa<affine::AffineStoreOp>(src) &&
+              !isa<affine::AffineStoreOp>(dst))
+            continue;
+          affine::MemRefAccess srcAccess(src), dstAccess(dst);
+          affine::FlatAffineValueConstraints dependence;
+          affine::DependenceResult result = affine::checkMemrefAccessDependence(
+              srcAccess, dstAccess, /*loopDepth=*/outer + s + 1, &dependence,
+              /*dependenceComponents=*/nullptr, /*allowRAR=*/false);
+          if (!affine::hasDependence(result))
+            continue;
+          // Rationally feasible: the exact question is whether an integer
+          // iteration pair exists.
+          if (dependence.isIntegerEmpty())
+            continue;
+          return true;
+        }
+    }
+  }
+  return false;
+}
+
 static void hoistRepetitionLoops(ModuleOp module) {
   SmallVector<affine::AffineForOp> roots;
   module.walk([&](affine::AffineForOp loop) {
@@ -504,7 +568,10 @@ static void hoistRepetitionLoops(ModuleOp module) {
   for (affine::AffineForOp root : roots) {
     SmallVector<affine::AffineForOp> band;
     affine::getPerfectlyNestedLoops(band, root);
-    if (band.size() < 4)
+    // At least one loop to move and one GEMM dimension (a GEMM may have one
+    // or two loops since roles of extent one are lowered, SQ-4 / SQ-5; a
+    // band of four with three dimensions was required before 2026-10-18).
+    if (band.size() < 2)
       continue;
     // A multiply-accumulate body, rectangular constant bounds (no IV in
     // another loop's bounds).
@@ -529,7 +596,7 @@ static void hoistRepetitionLoops(ModuleOp module) {
       (llvm::is_contained(used, loop.getInductionVar()) ? dimensions
                                                          : repeating)
           .push_back(index);
-    if (repeating.empty() || dimensions.size() < 3)
+    if (repeating.empty() || dimensions.empty())
       continue;
     // Already outside every dimension: nothing to move.
     if (repeating.back() + 1 == repeating.size())
@@ -541,7 +608,7 @@ static void hoistRepetitionLoops(ModuleOp module) {
       permMap[index] = position++;
     for (unsigned index : dimensions)
       permMap[index] = position++;
-    if (!affine::isValidLoopInterchangePermutation(band, permMap)) {
+    if (hoistReordersDependentIterations(band, repeating, dimensions)) {
       root->emitRemark()
           << "affine GEMM not lowered to systolic.matmul_tile: loop "
           << repeating.back() << " of the nest repeats the accumulation "
