@@ -311,6 +311,10 @@ case "$HEADER" in
 esac
 [ "$RTMODE" = async ] && [ "$HEADER" != 1 ] &&
     fail_config "--mode async needs a bitstream with the completion record, and $GIVEN does not say COMPLETION_HEADER=1"
+# PIPELINE_DEPTH: the context's job queue, the asynchronous runtime's
+# descriptor credit per array (docs/ASYNC.md section 9); 1 when not recorded.
+DEPTH=$(cfg_values "$GIVEN" PIPELINE_DEPTH | tail -1)
+[[ "$DEPTH" =~ ^[1-9][0-9]*$ ]] || DEPTH=1
 rest=""
 for key in VARIANT USE_V2 RTL_GIT_REV RTL_TREE_DIRTY RTL_SOURCE TIMING_MET WNS_NS WHS_NS BUILT; do
     v=$(cfg_values "$GIVEN" "$key" | tail -1)
@@ -644,19 +648,33 @@ not_run=$(awk 'END { print NR }' "$OUT/not_run.txt")
 echo | tee -a "$OUT/summary.txt"
 
 # ---- 3. a broken link is reported, not computed around (co-simulation) ---
-# The co-simulation's libftdi fails write #7 of the session: the 5th WRITE32
-# of the first of five descriptors (16x8x4). The MEM_WRITE (9 B and the slab)
-# and four WRITE32s (4 x 6 B) are all that may reach the RTL -- no submit, so
-# no result -- and systolic-matmul must exit 4 with the runtime's -6, a
-# transport failure. 16x8x4 is five invocations as long as every
-# K_MAX >= 4; with a shallower bitstream the count differs and the check is
-# skipped.
+# The co-simulation's libftdi fails write #7 of the session. Synchronous
+# runtime: the 5th WRITE32 of the first of five descriptors (16x8x4) -- the
+# MEM_WRITE (9 B and the slab) and four WRITE32s (4 x 6 B) are all that may
+# reach the RTL -- no submit, so no result -- and systolic-matmul must exit
+# 4 with the runtime's -6, a transport failure. Asynchronous runtime (burst
+# submission, docs/ASYNC.md section 9: every slab a device has room for
+# goes out before its descriptors, each MEM_WRITE as two writes, the 9-byte
+# header and the slab): write #7 is the fourth slab's header, so three slabs
+# reach the RTL and the runtime's -4 is reported; that order holds while
+# the arrays have room for four slabs each (PIPELINE_DEPTH >= 3), else the
+# check is skipped. 16x8x4 is five invocations as long as every K_MAX >= 4;
+# with a shallower bitstream the count differs and the check is skipped.
 df_ok=1
-DF_BYTES=$(( 9 + SLAB + 4 * 6 ))
+if [ "$RTMODE" = async ]; then
+    DF_BYTES=$(( 3 * (9 + SLAB) )); DF_RC=-4
+    DF_WHAT="the fourth slab's MEM_WRITE header (burst submission: slabs first)"
+else
+    DF_BYTES=$(( 9 + SLAB + 4 * 6 )); DF_RC=-6
+    DF_WHAT="the 5th WRITE32 of the first descriptor"
+fi
 if [ "$BACKEND" = cosim ] && [ -n "$SKIP_ALL" ]; then
     echo "dispatch failure reported: NOT RUN ($SKIP_ALL)" | tee -a "$OUT/summary.txt"
+elif [ "$BACKEND" = cosim ] && [ "$RTMODE" = async ] && [ "$DEPTH" -lt 3 ]; then
+    echo "dispatch failure reported: NOT TESTED (PIPELINE_DEPTH = $DEPTH: the asynchronous runtime's write order differs)" \
+        | tee -a "$OUT/summary.txt"
 elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
-    echo "== dispatch failure: write #7 of the session fails (5th WRITE32 of the first descriptor)"
+    echo "== dispatch failure: write #7 of the session fails ($DF_WHAT)"
     d="$OUT/dispatch_failure"
     mkdir -p "$d"
     python3 "$HERE/gen_cases.py" "$d/gen" > /dev/null
@@ -669,10 +687,10 @@ elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
     sed -n -E 's/^ *(DPTI: .*)/   runtime: \1/p; s/^(FPGA dispatch: .*)/   \1/p' "$d/output.txt"
     echo "   exit $frc; RTL received ${frecv:--} B, consumed ${fcons:--} B, sent ${fsent:--} B"
     if [ $frc -eq 4 ] &&
-       grep -q '^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error -6)' "$d/output.txt" &&
+       grep -q "^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error $DF_RC)" "$d/output.txt" &&
        grep -q "DPTI: $DF_BYTES B to the FPGA, 0 B back" "$d/output.txt" &&
        [ "$frecv" = "$DF_BYTES" ] && [ "$fcons" = "$DF_BYTES" ] && [ "$fsent" = 0 ]; then
-        df="PASS (TRANSPORT, rc=-6, as injected)"
+        df="PASS (TRANSPORT, rc=$DF_RC, as injected)"
     else
         df=FAIL; df_ok=0
     fi

@@ -100,7 +100,7 @@ grant 制：`w_grant ∈ {NONE, HS, WB, SD}`，持有者發完 AW 與 W、等到
 | arbiter 單元 bench | `iverilog -g2012 -I ../../../../../test/e2e/cosim -o /tmp/tb_arb tb_dpti_bus_arbiter.sv ../dpti_bus_arbiter.sv && vvp /tmp/tb_arb` | PASS：4 種流量混合各 20 000 byte 雙向、0 次 strobe 違規、雙向都沒餓死 |
 | 直連 bench（新 RTL） | `COMPLETION_HEADER=1 ./run_dpti_direct.sh all` | basic／multi／refused／collision（+w_stall=8）／direction 全 PASS |
 | 直連 bench（舊 RTL 6ebdc6a） | 同上 | direction 有 strobe 違規、collision 有 mem_errors／err_w_owner、refused 鏈路卡死——提案列的四個 hazard 都重現 |
-| `hol` | `COMPLETION_HEADER=1 ./run_dpti_direct.sh hol` | 兩筆 descriptor 送同一顆 device → STALL（descriptor bridge head-of-line；host 不讀結果時 TX buffer 滿）；host 一讀就恢復。這是「一顆 device 一個 outstanding descriptor」這條 credit 規則的依據 |
+| `hol` | `COMPLETION_HEADER=1 ./run_dpti_direct.sh hol` | 當時（2026-10-14 的 RTL）：兩筆 descriptor 送同一顆 device → STALL（descriptor bridge head-of-line；host 不讀結果時 TX buffer 滿）；host 一讀就恢復——這是當時「一顆 device 一個 outstanding descriptor」credit 規則的依據。整合 pipelined context 之後（第 9 節）：24 筆不讀結果也 `DRAINED`，credit 改為 `PIPELINE_DEPTH` |
 | runtime-dispatch-test 對 cosim | `SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt`（COMPLETION_HEADER=1） | 14 invocation 全 PASS，15 638 B 送出、2 080 B 收回（14×16 byte record + 5×256 + 9×64）；`SYSTOLIC_DPTI_SETTLE_US=0` 也 PASS |
 
 協定檢查器 `test/e2e/cosim/dpti_protocol_check.svh` 掛在 `tb_dpti_cosim.sv`、
@@ -132,8 +132,8 @@ int fpga_gemm_wait(fpga_gemm_t *g);
 
 | 東西 | 內容 |
 |---|---|
-| credit | 每顆 device：descriptor 1 + stage 1。一個 descriptor 在飛時，下一個 tile 的 slab 可以先 MEM_WRITE 進另一個 operand slot（`SYSTOLIC_ASYNC_STAGE=1`，預設），它的 descriptor 要等前一筆 completion 讀到才送。依據：descriptor bridge 的 head-of-line（第 2.6 節 `hol`） |
-| DDR slot | 每顆 device 2 個 operand slot（`0x10000 + (dev*2+slot)*slab_bytes`，256 B 對齊）與 2 個 result slot（`0x3000 + (dev*2+slot)*256`，16 B 對齊），輪流用；staged 的 slab 永遠不會覆蓋陣列正在讀的那塊 |
+| credit | 每顆 device：descriptor `depth` + stage 1，`depth` = 設定檔的 `PIPELINE_DEPTH`（context 的 job queue，本樹的 RTL 是 4；沒有這個鍵的舊 bitstream 是 1；`SYSTOLIC_ASYNC_DEPTH` 可往下調，不會高於 `PIPELINE_DEPTH`，上限 8）。預設的 burst 模式（`SYSTOLIC_ASYNC_BURST=1`）先把一顆 device 的 operand slot 全部填滿（`depth + 1` 塊 slab）或等到 `fpga_gemm_wait` 才送它的 descriptor，讓 context 連續收到 job（第 9 節）；`SYSTOLIC_ASYNC_STAGE=0` 時每顆 device 仍然一次一個 descriptor（mode A／B） |
+| DDR slot | 每顆 device `depth + 1` 個 operand slot（`0x10000 + (dev*(depth+1)+slot)*slab_bytes`，256 B 對齊）與 `depth` 個 result slot（`0x3000 + (dev*depth+slot)*256`，16 B 對齊），以 free mask 配置；一個 job 的兩個 slot 在它的 completion record 讀到之後才釋放（context 在 fold 之前就讀完 slab，result tile 在 record 的 payload 之前就離開 DDR），所以 staged 的 slab 永遠不會覆蓋陣列還可能在讀的那塊、result slot 不會在 host 拿到之前被覆蓋；設定檔有 `DDR_BYTES`（co-sim 寫 1 MiB）時 depth 會降到 operand 區域放得下為止 |
 | job_id | `epoch<<24 \| seq`：epoch 每開一次 session +1（1..255），seq 24 bit；上一個 session 遲到的 record 查不到 PJT 就丟掉 |
 | PJT | `job_id → Tile*`（在飛的 tile）；completion 回來依 job_id 找，device／payload 對不上 = 失步（-9，整條 session 停用） |
 | 送出順序 | 各 device 佇列 FIFO，多顆 device 都能 stage 時先給最早 submit 的 tile（全域序號）；沒有優先權反轉，不需要 aging |
@@ -231,7 +231,7 @@ byte 數含 16 byte record）全部成立。
 |---|---|---|
 | 六個 `run_top_sim.sh` gate（新 RTL） | 沙盒 Verilator | PASS 6/6（第 2.6 節） |
 | `tb_dpti_bus_arbiter` | 沙盒 Icarus | PASS |
-| `tb_dpti_direct` basic/multi/refused/collision/direction；hol | 沙盒 Verilator | PASS 5/5；hol 如預期 STALL 後恢復 |
+| `tb_dpti_direct` basic/multi/refused/collision/direction；hol | 沙盒 Verilator | PASS 5/5；hol 如預期 STALL 後恢復（2026-10-14 的 RTL；整合後 `DRAINED`，第 9 節） |
 | 舊 RTL 上重現四個 hazard | 沙盒 Verilator（worktree 6ebdc6a） | 重現（第 2.6 節） |
 | `runtime-dispatch-test`（同步 runtime + completion record） | 沙盒 cosim | PASS 14/14（settle 1000 與 0 µs） |
 | `runtime-async-test` A/B/C/D/X/V 與變體 | 沙盒 cosim | PASS（第 3.5 節的表） |
@@ -301,16 +301,18 @@ test/e2e/run_e2e.sh --backend board --timing                       # 同一顆 b
 
 ## 7. 限制與下一步
 
-- **一顆 device 一個 outstanding descriptor** 是硬體 descriptor bridge 的 head-of-line
-  造成的（第 2.6 節 `hol`）；要更深的 outstanding，需要 bridge 改成 per-device 佇列，
-  先拿到板上 A–D 的數字再決定值不值得。
+- ~~一顆 device 一個 outstanding descriptor~~ 已由 pipelined context 解決（第 9 節）：
+  context 有 `JOB_QUEUE_DEPTH` 深的 job queue，top 在 queue 有空位且尚未讀回的 job 少於
+  `RB_DEPTH = 8` 時就收 descriptor，bridge 不再 head-of-line；runtime 的 credit 跟著
+  `PIPELINE_DEPTH`。
 - `start_cycle` 仍原樣寫進 descriptor；硬體 scheduler 的 `cycle_counter` 只在有 job 忙
   時前進且不歸零，所以它只是下限（最多讓 reset 後最早的幾筆 job 多等 `start_cycle` 個
   cycle），不會卡死，也不是硬體強制的發射時間。
 - 空讀在 FT2232H 上的成本是一個 latency timer 週期，`blocked` 策略讓它只發生在「沒東西
   可寫」的時候；真正的數字要板上量（第 6.3 節三種 policy）。
-- cosim 的 DDR model 128 KiB：非同步 runtime 的 8 個 operand slot 從 0x10000 起，
-  K_MAX ≤ 128 放得下；板子的 DDR 沒有這個限制。
+- cosim 的 DDR model 1 MiB（`DDR_BYTES=1048576` 寫在它的 `fpga_config.txt`）：非同步
+  runtime 的 4 × (depth + 1) 個 operand slot 從 0x10000 起，depth 4 時 K_MAX ≤ 768 放得下，
+  放不下時 runtime 自己把 depth 降低並在 stderr 說明；板子的 DDR（512 MiB）沒有這個限制。
 - 同步與非同步 runtime 各自持有一條 session，不能同時開（同一顆 FT2232H）；
   `runtime-async-test` 的 mode X 是先關一邊再開另一邊。
 - 沒做的選配：RESET 暫存器、frontend timeout、SIWU#、XDC 變更。
@@ -325,3 +327,79 @@ test/e2e/run_e2e.sh --backend board --timing                       # 同一顆 b
 | 3 | `runtime/fpga_async_runtime.{h,cpp}`、`runtime/CMakeLists.txt`、`test/e2e/runtime_async_test.cpp`、`test/e2e/CMakeLists.txt` |
 | 4 | `lib/Systolic/Transforms/SystolicBinarySearchTileMatmulPass.cpp`、`TileMatmulForFpga.cpp`、`SystolicPipelines.cpp`、`include/Systolic/Passes.h`、`tools/systolic-matmul/systolic-matmul.cpp`、`test/Systolic/binary_search_ids.mlir`、`fpga_lowering_async.mlir`、`bad_fpga_lowering_async.mlir`、`test/e2e/run_e2e.sh --mode`、`e2e_verdict.py --mode/--header` |
 | 5 | 這份文件、`docs/E2E.md`、`REPRODUCE.md` |
+
+## 9. 與 pipelined context 的整合（2026-10-18）
+
+main 的 `ff68494`（`docs/COSTMODEL.md` 第 8 節）讓每個 accelerator context 有 4 深的 job
+queue：下一個 invocation 的 fill 在前一個 fold 開始時發出、下一個 fold 在前一個 tile 還在歸約時
+放行（v2 operand path），結果依序寫回、top 每個 context 一個 8 深的 readback FIFO。本節是把它和
+本分支整合後的狀態；所有數字都是 Verilator co-simulation（**板子 NOT RUN**）。
+
+### 9.1 整合的改動
+
+- **RTL（`systolic_dma_top.sv`）**：readback FIFO 的每個 entry 多存 `job_id`（在該 job 的
+  `job_done` 那一拍從 context 的 `job_id_reg` 取得——context 緊接著就處理下一個 queue 裡的
+  job，之後再讀會拿到別的 job），completion record 的 FSM（RB_IDLE/HDR/DATA）在 grant 時 pop
+  FIFO、從 head 取 `job_id` 與 `c_base`；refusal record、FT2232H bus arbiter（只在
+  `DPTI_PHY_SYNC245 = 0` 的 legacy pads path；預設的 registered PHY 自己仲裁方向）、DDR 寫入埠
+  grant arbiter 都保留。grant arbiter 改成 host slab writer 與 write-back engine 在 burst 邊界
+  輪流：slab writer 在前一個 burst 回應後立刻要下一個 burst、資料又以 DPTI 的速度慢慢進來，固定
+  優先權會讓它佔住寫入埠一整塊 slab（K_MAX 16 約 5000 拍、K_MAX 512 約 16 萬拍），其間所有
+  context 的 write-back 都等，pipelined 的 job 又因為 result bank 沒釋放而卡住後面的 fold
+  （co-sim 量到的 cv→done：K_MAX 16 中位數 4787 拍、K_MAX 512 中位數 155 000 拍）。改成在
+  burst 邊界讓給等待的一方（持有者至少送過一個 burst 之後才讓——第一個 burst 之前就讓會兩邊互
+  讓、誰也不發，`tb_dpti_direct` 的 multi／direction 會死住），cv→done 降到中位數 947 拍
+  （一個 host burst 的時間）與 199 拍（K_MAX 512，接近 write-back 本身的 91 拍）。
+  `idle_gap_cycles` 改成「context 的 queue 空著」的拍數。
+- **Compiler**：`emitSystolicTilePlan(..., gemmIndex)` 設 `systolic.gemm/tile/k_index/k_count`
+  （linalg 與 affine 兩條路都編號），`--async` lowering 不變。
+- **Runtime（`fpga_async_runtime.cpp`）**：第 3.2 節的 credit／slot 表；`SYSTOLIC_ASYNC_DEPTH`、
+  `SYSTOLIC_ASYNC_BURST`；每條 trace 行結尾 `@<us>`；timing 行多 `depth= burst= depth2_passes=
+  max_inflight= last_descriptor_us= first_completion_us=`。
+- **設定檔**：`PIPELINE_DEPTH`（main）、`COMPLETION_HEADER`（本分支）、`DDR_BYTES`（新）三個鍵一起
+  寫、一起讀（`check-e2e-config` 107/107）。
+- **證據工具**：`test/e2e/cosim/tb_dpti_cosim.sv` 每個 job 印 `COSIM_JOB ev=fire|fill|fillend|
+  fold|feedend|cv|done|rb|rbdone cyc= dev= job=`，`tools/cosim_overlap_evidence.py --cosim cosim.log
+  --trace host.log --depth 4 [--session N]` 把 RTL 的 stamp 與 host 的 trace 對起來：每顆 device
+  連續兩個 job 的 fold(T+1) 與 cv(T)／feedend(T)／done(T)／rbdone(T) 的先後、queue 最多幾個 job、
+  host 每顆 device 最多幾個 descriptor 在飛、每個 GEMM 第一筆 completion 之前送出了幾筆 descriptor。
+
+### 9.2 實跑結果（co-sim，K_MAX 16／16 除非另註）
+
+| 項目 | 結果 |
+|---|---|
+| lit | 79/79（main 76 + 本分支 3） |
+| `check-e2e-config` | 107/107 |
+| `run_e2e.sh --backend cosim --quick`（sync）／`--mode async --quick` | 26/26、26/26 |
+| `runtime-dispatch-test`、`runtime-async-test --mode all`（v1 與 v2 operand path） | PASS |
+| `eval/pipeline_overlap/run.sh`（main 的 RTL 證據，internal job port） | 14 組全 PASS、cost model 0 mismatch：v2 的 fold(T+1) < cv(T) 對數 dev0 5、dev1 9、chain 3；gapbound 最小 PE 間隔 26 = FEED_GAP；`PE_QUIET_GAP=8` 負對照 FAIL |
+| `run_top_sim.sh` 六個 gate、`run_kmax_sim.sh 16 16` | PASS（kmax 的 refusal 期望改成「被 refusal path 取走、從不 fire」） |
+| `run_dpti_direct.sh all`（兩種 PHY）、`hol`、`tb_dpti_bus_arbiter` | 5/5 PASS ×2、hol `DRAINED`、PASS |
+| backpressure：`SYSTOLIC_ASYNC_QUEUE_LIMIT=4` mode C/D、depth 1、`SYSTOLIC_ASYNC_BURST=0` | PASS，每顆 device 在飛數永遠 ≤ depth |
+
+**Batch submission（host 端）**：mode C 16x16x16（10 tiles）、`SYSTOLIC_ASYNC_READ_POLICY=wait`：
+10 筆 descriptor 全部在第一筆 completion 之前送出（`last_descriptor_us=167 < first_completion_us=
+1962600`）。GEMM 大於 16 個 credit（4 顆 × depth 4）時以 credit 為一批：mode C 32x32x64（160 tiles）
+第一筆 completion 之前送出 16 筆，之後每收一筆 completion 補一筆，`max_inflight=4/4/4/4`。
+
+**硬體 queue（RTL 端）**：K_MAX 512、12 個 k = 512 的 job 送同一顆 8x8（mode C `--devices 0`）：
+runtime 先 stage 5 塊 slab、再連送 4 筆 descriptor，context 的 queue 被填到 4
+（`max_jobs_queued=4`），四筆 descriptor 的 fire 相隔 420 拍（一筆 84 byte 的 descriptor 在鏈路
+上的時間），fill(T+1) 在 fold(T) 後 3 拍就發出、整個蓋住 T 的 compute、write-back 與 readback
+（job 0：fold 830050、cv 830671、done 830762、rbdone 831690；job 1：fill 830053–838245、fold
+838253）。K_MAX 16 時（Test B 的 10-tile run）fold(T+1) < rbdone(T) 出現在 dev 0 與 dev 1：
+下一個 tile 的 compute 與前一個 tile 的 DPTI 讀回重疊，這在舊 RTL（readback 結束前不收新 job）
+做不到。同一個 GEMM 四顆陣列一起跑（30 個 job）：depth 4 的 makespan 265 萬拍、depth 1 462 萬拍
+（1.74×；K_MAX 16 的 160 tiles 兩者都是 85 萬拍——鏈路時間相同，差別只在 host 是否每筆等
+completion 才送下一筆）。
+
+**什麼沒有發生，為什麼**：主機路徑上 fold(T+1) < cv(T)（compute 與前一個 tile 的 reduction
+重疊）在任何 K_MAX 都量不到：k = 16 的 tile 算 125 拍，但一筆 descriptor 要 420 拍、一塊 1 KiB
+slab 約 5000 拍，陣列的 queue 幾乎永遠只有 1 個 job（link-bound：mode C 32x32x64 的 makespan
+85 萬拍，其中陣列真正在算的只有 1.9 萬拍，depth 1／4、burst 0／1 都一樣）；k 大時（512）compute 621
+拍 > descriptor 420 拍，但 v1 的 fill 8203 拍又把 fold 推到 cv 之後（第 8 節的 v1 fill-bound）。
+PE 層的重疊因此只在 `eval/pipeline_overlap/run.sh`（internal job port，host 無限快）上證明；
+主機路徑上整合兌現的是：不必每筆 job 寫→等→讀的序列、四顆陣列同時忙、queue 裡 2–4 個 job
+時 fill／write-back／readback 與下一個 job 重疊。
+
+**板子**：Vivado 合成、新 bitstream、`run_e2e.sh --backend board`：**NOT RUN**。

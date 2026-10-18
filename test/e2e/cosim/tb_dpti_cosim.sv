@@ -36,6 +36,8 @@
  * it -- counted per PE, read-only, by rtl/.../dma/tb/reduction_probe.svh --
  * next to the descriptor's k:
  *   COSIM_STEPS dev=<d> job_k=<k> steps_pe_min=.. steps_pe_max=.. macs=..
+ *   COSIM_JOB ev=<fire|fill|fillend|fold|feedend|cv|done|rb|rbdone> cyc=<n> dev=<d> job=<id>
+ *       (per-job cycle stamps of the context's pipeline, see below)
  *               feed_a=.. feed_b=.. feed_cycles=.. k_dim=.. fire=.. done=..
  */
 
@@ -132,6 +134,61 @@ module tb_dpti_cosim #(
   // ---- reduction steps per job (bench-only, nothing here drives the design) --
   wire clk = sys_clk;   // the array clock: ui_clk is sys_clk in mig_axi_model
 `include "reduction_probe.svh"
+
+  // ---- per-job cycle stamps, keyed by the descriptor's job_id ---------------
+  // One line per event, in array-clock cycles, so a run's log shows how the
+  // jobs of one context overlapped (docs/COSTMODEL.md section 8) and can be
+  // laid against the host's own trace (SYSTOLIC_RUNTIME_TRACE=1):
+  //   fire     the descriptor was accepted into the context's job queue
+  //   fill     the operand read of the tile (DDR -> operand buffer) was
+  //            granted to the shared read engine
+  //   fillend  the operand read's last beat returned (the tile has landed)
+  //   fold     the context's fold began (the array starts computing the tile)
+  //   feedend  the feeder issued the tile's last step; the PEs drain and then
+  //            reduce it while the next fold may start
+  //   cv       the array published the tile (reduction done)
+  //   done     the tile is written back to its c_base
+  //   rb       the readback of the tile was granted (its completion record
+  //            goes out ahead of it)
+  //   rbdone   the readback's last beat left DDR for the DPTI output path
+  //   COSIM_JOB ev=<fire|fill|fillend|fold|feedend|cv|done|rb|rbdone> cyc=<n> dev=<d> job=<id>
+  integer cs_cyc = 0;
+  always_ff @(posedge sys_clk) cs_cyc <= cs_cyc + 1;
+`define COSIM_JOB_STAMPS(D, CTX, FOLD, CV) \
+  logic cs_idle_q_``D = 1'b1; \
+  logic [31:0] cs_rb_job_``D = 32'd0; \
+  always @(posedge sys_clk) begin \
+    if (dut.ctx_job_fire[D]) \
+      $display("COSIM_JOB ev=fire cyc=%0d dev=%0d job=%0d k=%0d", cs_cyc, D, dut.effective_job_id, dut.effective_job_k); \
+    if (dut.rd_desc_valid[D] && dut.rd_desc_ready[D]) \
+      $display("COSIM_JOB ev=fill cyc=%0d dev=%0d job=%0d", cs_cyc, D, \
+               CTX.q_id[int'(CTX.n_filled) % CTX.JOB_QUEUE_DEPTH]); \
+    if (dut.ctx_read_done[D]) \
+      $display("COSIM_JOB ev=fillend cyc=%0d dev=%0d job=%0d", cs_cyc, D, \
+               CTX.q_id[int'(CTX.n_filled) % CTX.JOB_QUEUE_DEPTH]); \
+    if (FOLD) \
+      $display("COSIM_JOB ev=fold cyc=%0d dev=%0d job=%0d", cs_cyc, D, \
+               CTX.q_id[int'(CTX.n_fed) % CTX.JOB_QUEUE_DEPTH]); \
+    if (CTX.compute_idle && !cs_idle_q_``D) \
+      $display("COSIM_JOB ev=feedend cyc=%0d dev=%0d job=%0d", cs_cyc, D, \
+               CTX.q_id[(int'(CTX.n_fed) + CTX.JOB_QUEUE_DEPTH - 1) % CTX.JOB_QUEUE_DEPTH]); \
+    cs_idle_q_``D <= CTX.compute_idle; \
+    if (CV) \
+      $display("COSIM_JOB ev=cv cyc=%0d dev=%0d job=%0d", cs_cyc, D, \
+               CTX.q_id[int'(CTX.n_cv) % CTX.JOB_QUEUE_DEPTH]); \
+    if (dut.ctx_job_done[D]) \
+      $display("COSIM_JOB ev=done cyc=%0d dev=%0d job=%0d", cs_cyc, D, dut.ctx_job_id[D]); \
+    if (dut.rb_take && dut.rb_grant == D) \
+      $display("COSIM_JOB ev=rb cyc=%0d dev=%0d job=%0d", cs_cyc, D, dut.rb_id[D]); \
+    if (dut.rb_done && dut.rb_active && dut.rb_owner == D) \
+      $display("COSIM_JOB ev=rbdone cyc=%0d dev=%0d job=%0d", cs_cyc, D, cs_rb_job_``D); \
+    if (dut.rb_take && dut.rb_grant == D) cs_rb_job_``D <= dut.rb_id[D]; \
+  end
+  `COSIM_JOB_STAMPS(0, dut.ACC_8X8[0].u_ctx, dut.scheduler_fold_start_8x8[0], dut.c_valid_out_8x8[0])
+  `COSIM_JOB_STAMPS(1, dut.ACC_4X4[0].u_ctx, dut.scheduler_fold_start_4x4[0], dut.c_valid_out_4x4[0])
+  `COSIM_JOB_STAMPS(2, dut.ACC_4X4[1].u_ctx, dut.scheduler_fold_start_4x4[1], dut.c_valid_out_4x4[1])
+  `COSIM_JOB_STAMPS(3, dut.ACC_4X4[2].u_ctx, dut.scheduler_fold_start_4x4[2], dut.c_valid_out_4x4[2])
+`undef COSIM_JOB_STAMPS
 
   integer cj_cyc = 0;
   integer cj_k [0:3], cj_fire [0:3];

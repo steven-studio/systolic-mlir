@@ -94,6 +94,11 @@ void fpga_runtime_reset_stats(void);
 //   K_MAX_8X8=<n>  K_MAX_4X4=<n>       required
 //   N=8  NUM_8X8=1  NUM_4X4=3          optional; checked against this
 //                                      runtime's device map if present
+//   DDR_BYTES=<n>                      optional: bytes of DDR behind the
+//                                      bitstream (the co-simulation's model
+//                                      records 1048576); the asynchronous
+//                                      runtime fits its per-device slots in
+//                                      it. Absent: the board, not bounded
 //   PIPELINE_DEPTH=<n>                 optional, 1..64: invocations one
 //                                      accelerator context holds at a time
 //                                      (its job queue). Absent = 1: the
@@ -102,7 +107,10 @@ void fpga_runtime_reset_stats(void);
 //                                      previous result is written back.
 //                                      Read by the compiler (systolic-matmul
 //                                      declares the fleet's pipelining from
-//                                      it); this runtime submits one
+//                                      it) and by the asynchronous runtime
+//                                      (fpga_async_runtime.h: descriptors in
+//                                      flight per device); the scheduled
+//                                      entry point below submits one
 //                                      invocation at a time either way.
 // Without SYSTOLIC_FPGA_CONFIG it is the archived bitstream's
 // (artifacts/fpga/tile_pipelined/1x8x8-3x4x4): K_MAX_8X8 = K_MAX_4X4 = 16,
@@ -114,6 +122,9 @@ typedef struct {
                                ceil(K_MAX / 8) * 8 depths * 64 bytes */
     unsigned pipeline_depth;/* invocations a context holds at a time; 1 =
                                serialized (the archived bitstream) */
+    unsigned ddr_bytes;     /* DDR_BYTES: the DDR the bitstream can address,
+                               when recorded (the co-simulation's model); 0 =
+                               not recorded (the board's 512 MiB) */
     char     source[512];   /* the file, or the built-in default */
     char     error[512];    /* why the configuration is invalid, or "" */
     /* COMPLETION_HEADER=1 in the file: every result the bitstream sends

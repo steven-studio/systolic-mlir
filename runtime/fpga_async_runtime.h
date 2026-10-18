@@ -27,15 +27,20 @@ extern "C" {
  * by the job_id the record carries, never by order, and a refused descriptor
  * comes back as a record with a status instead of wedging the link.
  *
- * Per device the runtime keeps one descriptor in flight and one further
- * slab staged in DDR ("credits": desc 1, stage 1), because the descriptor
- * bridge of the bitstream blocks on a busy device (head-of-line) -- more
- * outstanding descriptors are not an option without a change there. The
- * slab of the next tile is written while the current one computes (the
- * transfer/compute overlap, SYSTOLIC_ASYNC_STAGE=0 turns it off for the
- * measurements of docs/ASYNC.md). Each device owns two operand slots and two
- * result slots in DDR, alternated, so a staged slab never overwrites the
- * slab an array is reading.
+ * Per device the runtime keeps up to `depth` descriptors in flight -- the
+ * bitstream's PIPELINE_DEPTH (fpga_matmul_tiled.h), the job queue of one
+ * accelerator context, so that the context can fill, feed and reduce
+ * consecutive tiles back to back (docs/COSTMODEL.md section 8); 1 for a
+ * bitstream whose record has no such line -- and one further slab staged
+ * in DDR ("credits": desc = depth, stage 1). The slab of the next tile is
+ * written while the current ones compute (the transfer/compute overlap,
+ * SYSTOLIC_ASYNC_STAGE=0 turns it off for the measurements of docs/ASYNC.md,
+ * and with it keeps one descriptor in flight). Each in-flight job owns its
+ * own operand slot (depth + 1 per device, one for the staged slab) and
+ * result slot (depth per device) in DDR; a job's slots are reused only
+ * once its completion record has been parsed, so a staged slab never
+ * overwrites a slab an array may still read and a result tile is never
+ * overwritten before the host has it.
  *
  * Semantics of a tile: C[i*ldc + j] += (A x B)[i][j] for the m x n tile,
  * exactly as fpga_matmul_tiled_auto_scheduled accumulates, and the tiles of
@@ -61,6 +66,15 @@ extern "C" {
  *                                in practice: COMPLETION_HEADER=1)
  *   SYSTOLIC_ASYNC_STAGE=0|1     stage the next slab while a device computes
  *                                (default 1)
+ *   SYSTOLIC_ASYNC_DEPTH=N       descriptors in flight per device (default:
+ *                                the configuration's PIPELINE_DEPTH; never
+ *                                above it, at most 8; A/B measurements)
+ *   SYSTOLIC_ASYNC_BURST=0|1     1 (default): hold a device's descriptors
+ *                                until every one of its operand slots holds
+ *                                a slab (depth + 1) or a GEMM is waited on,
+ *                                so the context gets them back to back and
+ *                                pipelines the tiles; 0: send each descriptor
+ *                                as soon as its slab is in DDR
  *   SYSTOLIC_ASYNC_QUEUE_LIMIT   packed tiles held before a submit blocks on
  *                                the link (default 64)
  *   SYSTOLIC_ASYNC_READ_POLICY   when a non-blocking pump reads the link:
@@ -130,11 +144,25 @@ typedef struct {
     unsigned long long ns_wait;
     unsigned long long ns_span;
     /* Pump passes that saw >= 2 / all 4 devices with a descriptor in
-     * flight, and passes that saw a slab staged behind a running job. */
+     * flight, passes that saw a slab staged behind a running job, and
+     * passes that saw a device with >= 2 descriptors in flight (the
+     * pipelined queue in use). */
     unsigned long long passes;
     unsigned long long passes_2_inflight;
     unsigned long long passes_4_inflight;
     unsigned long long passes_staged_behind;
+    unsigned long long passes_depth2;
+    /* The session's descriptor credit per device and the most descriptors
+     * each device had in flight at once. */
+    unsigned           depth;
+    unsigned long long max_inflight_per_device[4];
+    /* Wall-clock, nanoseconds from the first submit: when the last
+     * descriptor of the session went out, and when the first completion
+     * record came back -- the batch evidence, "submissions precede
+     * collections", is last_descriptor < first_completion for a GEMM that
+     * fits the credits, and per credit-sized batch otherwise. */
+    unsigned long long ns_last_descriptor;
+    unsigned long long ns_first_completion;
     int first_error;
 } fpga_async_stats_t;
 

@@ -185,9 +185,12 @@ The regression fixture checks:
 
 `start_cycle` is compiler-generated scheduling metadata.
 `--lower-systolic-matmul-tile-to-fpga` passes it, with `est_cycles`, into
-the job descriptor the runtime writes (registers 0x18 / 0x1C). The runtime
-submits one invocation at a time and waits for its result, so the value
-should still not be read as hardware-enforced launch timing.
+the job descriptor the runtime writes (registers 0x18 / 0x1C). The
+synchronous runtime submits one invocation at a time and waits for its
+result, and the asynchronous one (section 8b) keeps up to PIPELINE_DEPTH in
+flight per array; either way the value should not be read as
+hardware-enforced launch timing (the hardware scheduler's clock is
+session-global and only a lower bound).
 
 Machine-checkable regression:
 
@@ -327,16 +330,18 @@ It is a simulation: a board run is the only evidence about the board. See
 
 ## 8b. The asynchronous runtime (`docs/ASYNC.md`)
 
-The branch `experiment/batch-gemm-parallelism` adds a second runtime that
-keeps the four arrays busy at once: one descriptor in flight per array, the
-next operand slab staged behind it, results attributed by the job_id of a
-16-byte completion record the bitstream sends ahead of every tile. It needs
-a bitstream built from this branch's RTL (`dma_top_build.tcl` writes
-`COMPLETION_HEADER=1` into its fpga_config.txt); the co-simulation built by
-`test/e2e/cosim/build.sh` from the working tree has it.
+A second runtime keeps the four arrays busy at once: up to PIPELINE_DEPTH
+descriptors in flight per array (the context's job queue, 4 in this tree's
+RTL; docs/COSTMODEL.md section 8), each with its own operand slab and
+result tile in DDR, a further slab staged ahead, results attributed by the
+job_id of a 16-byte completion record the bitstream sends ahead of every
+tile. It needs a bitstream built from this tree's RTL (`dma_top_build.tcl`
+writes `COMPLETION_HEADER=1` and `PIPELINE_DEPTH=4` into its
+fpga_config.txt); the co-simulation built by `test/e2e/cosim/build.sh` from
+the working tree has both (docs/ASYNC.md section 9 has the evidence runs).
 
-    test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1
-    cmake --build build --target check-systolic           # 41 lit tests, three for the async lowering
+    test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1, PIPELINE_DEPTH=4
+    cmake --build build --target check-systolic           # 79 lit tests, three for the async lowering
     test/e2e/run_e2e.sh --backend cosim                   # the synchronous runtime, as before
     test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
     SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
@@ -413,8 +418,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 41
-      Passed: 41 (100.00%)
+    Total Discovered Tests: 79
+      Passed: 79 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

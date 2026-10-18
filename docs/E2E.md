@@ -320,8 +320,9 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 - RTL 預設取自 working tree（`RTL_REV=<tag 或 commit>` 改成某個 revision，例如
   bitstream 的 tag；`RTL_DIR=` 指另一棵樹），source list 與 generics 照 `dma_top_build.tcl`
   （external scheduler、無 legacy job port、v1 operand path；`fpga_config.txt` 寫
-  `COMPLETION_HEADER=1`（RTL 有 completion record 時）與 `PIPELINE_DEPTH=4`（context 的
-  `JOB_QUEUE_DEPTH`），`docs/ASYNC.md`）。K_MAX 預設 16／16；
+  `COMPLETION_HEADER=1`（RTL 有 completion record 時）、`PIPELINE_DEPTH=4`（context 的
+  `JOB_QUEUE_DEPTH`）與 `DDR_BYTES=1048576`（`tb/mig_axi_model.sv` 的 1 MiB），
+  `docs/ASYNC.md` 第 9 節）。K_MAX 預設 16／16；
   有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）可用同名環境變數各自設定
   （十進位、不帶前導零；co-sim 的範圍是 1..1024：DDR model 只有 128 KiB，而 runtime
   把 slab 放在 0x10000，`ceil(K/8)·512` byte 要放得進 64 KiB——這是模擬環境的限制，
@@ -378,10 +379,12 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，`eval/pipeline_overlap/run.sh`）。
 - `run_e2e.sh --mode async`／`systolic-matmul --async` 走非同步 runtime
   （`runtime/fpga_async_runtime.h`，`docs/ASYNC.md`）：同一個 GEMM 的 tile 全部先 submit、
-  之後再收結果，每顆陣列一個 descriptor 在飛、下一個 slab 先 stage、四顆同時忙、多個 GEMM
-  可交錯；要 `COMPLETION_HEADER=1` 的 bitstream（每個結果前有 16 byte 的 completion
-  record）。RTL 的 job queue（`PIPELINE_DEPTH`）這個 runtime 還沒用到。`start_cycle` 有寫進
-  descriptor，但不能讀成硬體強制的發射時間。
+  之後再收結果，每顆陣列最多 `PIPELINE_DEPTH`（設定檔；RTL 的 `JOB_QUEUE_DEPTH`，4）個
+  descriptor 在飛、每個在飛的 job 有自己的 slab 與 result 區域、下一個 slab 先 stage、
+  四顆同時忙、多個 GEMM 可交錯；要 `COMPLETION_HEADER=1` 的 bitstream（每個結果前有
+  16 byte 的 completion record）。設定檔沒有 `PIPELINE_DEPTH`（封存的 bitstream）時每顆
+  陣列一個 outstanding descriptor。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的
+  發射時間。
 - `COMPLETION_HEADER=1` 的 bitstream 配同步 runtime 也可以：runtime 讀設定檔知道要先
   讀 record；舊 bitstream（沒有這個鍵）照舊讀裸 tile。非同步 runtime 只接新 bitstream。
 - 每次 invocation 的 MEM_WRITE 都是整塊 slab（`HOST_SLAB_BYTES`，最深幾何的

@@ -279,13 +279,18 @@ std::string stats_line(const fpga_async_stats_t &s, double wall_ms) {
   std::snprintf(buf, sizeof buf,
                 "tiles=%llu completed=%llu failed=%llu wall_ms=%.1f tiles_per_s=%.1f "
                 "reads=%llu empty=%llu overlap2=%llu overlap4=%llu staged_behind=%llu "
-                "bytes_to=%llu bytes_from=%llu per_device=%llu/%llu/%llu/%llu",
+                "bytes_to=%llu bytes_from=%llu per_device=%llu/%llu/%llu/%llu "
+                "depth=%u depth2_passes=%llu max_inflight=%llu/%llu/%llu/%llu "
+                "last_descriptor_us=%llu first_completion_us=%llu",
                 s.tiles_submitted, s.tiles_completed, s.tiles_failed, wall_ms,
                 wall_ms > 0 ? s.tiles_completed * 1000.0 / wall_ms : 0.0, s.reads,
                 s.empty_reads, s.passes_2_inflight, s.passes_4_inflight,
                 s.passes_staged_behind, s.bytes_to_fpga, s.bytes_from_fpga,
                 s.tiles_per_device[0], s.tiles_per_device[1], s.tiles_per_device[2],
-                s.tiles_per_device[3]);
+                s.tiles_per_device[3], s.depth, s.passes_depth2,
+                s.max_inflight_per_device[0], s.max_inflight_per_device[1],
+                s.max_inflight_per_device[2], s.max_inflight_per_device[3],
+                s.ns_last_descriptor / 1000, s.ns_first_completion / 1000);
   return buf;
 }
 

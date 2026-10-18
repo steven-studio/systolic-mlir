@@ -97,6 +97,10 @@ def main():
                     "max_queued": r.get("max_queued", 0),
                     "stage": r.get("stage", ""),
                     "read_policy": r.get("read_policy", ""),
+                    "depth": r.get("depth", ""),
+                    "max_inflight": r.get("max_inflight", ""),
+                    "last_desc_ms": r.get("last_descriptor_us", 0) / 1000.0,
+                    "first_cmpl_ms": r.get("first_completion_us", 0) / 1000.0,
                     "bytes_to_fpga": r.get("bytes_to_fpga", 0),
                     "bytes_from_fpga": r.get("bytes_from_fpga", 0),
                 })
@@ -130,7 +134,8 @@ def main():
     if async_rows:
         cols = ["case", "exit", "tiles", "wall_ms", "span_ms", "host_other_ms", "tiles_per_s",
                 "us_per_tile", "submit_ms", "wait_ms", "busy2_pct", "busy4_pct", "staged_pct",
-                "reads", "empty_reads", "max_queued", "stage", "read_policy"]
+                "reads", "empty_reads", "max_queued", "stage", "read_policy", "depth",
+                "max_inflight", "last_desc_ms", "first_cmpl_ms"]
         widths = {c: max(len(c), *(len(fmt(r[c])) for r in async_rows)) for c in cols}
         print("host timing, asynchronous runtime (wall-clock of the host; span = first submit to "
               "last wait; busy2/busy4 = pump passes with >= 2 / all 4 arrays in flight; "

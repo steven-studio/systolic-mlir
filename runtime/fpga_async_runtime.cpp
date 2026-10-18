@@ -5,11 +5,23 @@
 // fpga_gemm_wait, in a "pump": write what the credits allow (slabs, then
 // descriptors), read what the link has, attribute every completion record
 // by its job_id, accumulate results in k_index order. The FT2232H's
-// synchronous FIFO carries one direction at a time and the RTL's bus
-// arbiter (dpti_bus_arbiter.sv) alternates them, so the host may write
-// while a result is on its way back; what the host must not do is read
-// in a tight loop, since an empty read costs a latency-timer period on the
-// chip -- hence the read policy below.
+// synchronous FIFO carries one direction at a time and the RTL's PHY
+// (dpti_sync245_phy.sv, or dpti_bus_arbiter.sv on the legacy pads path)
+// alternates them, so the host may write while a result is on its way
+// back; what the host must not do is read in a tight loop, since an empty
+// read costs a latency-timer period on the chip -- hence the read policy
+// below.
+//
+// Per device the host keeps up to `depth` descriptors in flight -- the
+// bitstream's PIPELINE_DEPTH, the job queue of one accelerator context
+// (systolic_accel_context.sv JOB_QUEUE_DEPTH; 1 for a bitstream without the
+// record) -- each with its own operand slab and result tile in DDR, plus
+// one further slab staged ahead. A job's slots are freed when its completion
+// record has been parsed: the context read the slab before it folded the
+// tile, and the result tile left DDR before the record's payload reached
+// the host. Within the depth the hardware never holds a descriptor back
+// (acceptance needs only queue room), so the descriptor bridge's
+// head-of-line never blocks another device's descriptor.
 
 #include "fpga_async_runtime.h"
 #include "dpti_runtime.h"
@@ -34,16 +46,19 @@ namespace {
 using clock_t_ = std::chrono::steady_clock;
 
 /* The DDR layout. OPERAND_BASE and RESULT_BASE are the regions the board
- * runs validated (fpga_matmul_tiled.cpp); each device owns SLOTS operand
- * slabs from OPERAND_BASE + device * SLOTS * slab_bytes (slab_bytes is a
+ * runs validated (fpga_matmul_tiled.cpp); each device owns depth + 1
+ * operand slabs (one per descriptor in flight, one staged ahead) from
+ * OPERAND_BASE + device * operand_slots * slab_bytes (slab_bytes is a
  * multiple of 512, so every slot keeps the MEM_WRITE's 256-byte alignment)
- * and SLOTS result tiles of RESULT_SLOT_BYTES from RESULT_BASE. At
- * K_MAX = 16 that is 0x10000..0x12000 and 0x3000..0x3800; the RTL
- * co-simulation's DDR model holds 128 KiB, so K_MAX up to 128 fits there. */
+ * and depth result tiles of RESULT_SLOT_BYTES from RESULT_BASE. At depth 4
+ * and K_MAX = 16 that is 0x10000..0x15000 and 0x3000..0x4000. MAX_DEPTH
+ * keeps the result region below OPERAND_BASE (0x3000 + 4 * 8 * 256 =
+ * 0x5000); the configuration's DDR_BYTES (the co-simulation's model
+ * records it) bounds the operand region, see resolve_depth. */
 constexpr uint32_t OPERAND_BASE      = 0x00010000u;
 constexpr uint32_t RESULT_BASE       = 0x00003000u;
 constexpr unsigned DEVICES           = 4;
-constexpr unsigned SLOTS             = 2;
+constexpr unsigned MAX_DEPTH         = 8;
 constexpr unsigned RESULT_SLOT_BYTES = 8 * 8 * sizeof(float);
 
 enum class TileState { Queued, Staged, InFlight, Done };
@@ -89,17 +104,21 @@ struct Gemm {
 
 struct Device {
     unsigned P = 0, k_max = 0;
-    std::deque<std::unique_ptr<Tile>> queue;  // packed, not yet in DDR
-    std::unique_ptr<Tile> staged;             // slab in DDR, descriptor not sent
-    std::unique_ptr<Tile> inflight;           // descriptor sent, no completion yet
-    unsigned next_operand_slot = 0;
-    unsigned next_result_slot = 0;
+    std::deque<std::unique_ptr<Tile>> queue;    // packed, not yet in DDR
+    std::deque<std::unique_ptr<Tile>> staged;   // slab in DDR, descriptor not sent (in order)
+    std::deque<std::unique_ptr<Tile>> inflight; // descriptor sent, no completion yet (in order)
+    uint32_t operand_free = 0;                  // bit s: operand slot s is free
+    uint32_t result_free = 0;                   // bit s: result slot s is free
+    unsigned max_inflight = 0;                  // most descriptors in flight at once
 };
 
 enum class ReadPolicy { Blocked, Always, Wait };
 
 struct Settings {
     bool       stage = true;
+    bool       burst = true;                  // SYSTOLIC_ASYNC_BURST: stage every slab a device has
+                                              // room for before its descriptors go out
+    unsigned   depth_env = 0;                 // SYSTOLIC_ASYNC_DEPTH; 0 = the configuration's
     unsigned   queue_limit = 64;
     ReadPolicy policy = ReadPolicy::Blocked;
     bool       violate = false;
@@ -130,6 +149,8 @@ long env_long(const char *name, long dflt, long lo, long hi) {
 Settings read_settings() {
     Settings s;
     s.stage       = env_long("SYSTOLIC_ASYNC_STAGE", 1, 0, 1) == 1;
+    s.depth_env   = static_cast<unsigned>(env_long("SYSTOLIC_ASYNC_DEPTH", 0, 0, MAX_DEPTH));
+    s.burst       = env_long("SYSTOLIC_ASYNC_BURST", 1, 0, 1) == 1;
     s.queue_limit = static_cast<unsigned>(env_long("SYSTOLIC_ASYNC_QUEUE_LIMIT", 64, 1, 1 << 20));
     s.timeout_ms  = static_cast<uint32_t>(env_long("SYSTOLIC_DPTI_TIMEOUT_MS", 5000, 1, 1L << 30));
     s.poll_us     = static_cast<uint32_t>(env_long("SYSTOLIC_ASYNC_POLL_US", 50, 0, 1000000));
@@ -182,6 +203,16 @@ struct Runtime {
     std::unordered_map<uint32_t, Tile *> pjt; // job_id -> the in-flight tile
     unsigned              queued_total = 0;
     unsigned              inflight_total = 0;
+    unsigned              depth = 1;          // descriptors in flight per device
+    unsigned              operand_slots = 2;  // depth + 1
+    const char           *depth_source = "config";
+    bool                  flush = false;      // burst mode: release every staged descriptor now
+
+    // The evidence of the batch semantics (fpga_async_runtime.h): when the
+    // last descriptor went out and when the first completion record came in,
+    // both relative to the first submit.
+    clock_t_::time_point  t_last_descriptor, t_first_completion;
+    bool                  seen_completion = false;
 
     // Receive side: bytes off the link not yet consumed, and the record
     // being assembled.
@@ -210,6 +241,15 @@ Runtime &rt() {
     return r;
 }
 
+/* Every trace line ends in " @<us>", microseconds since the runtime's first
+ * use (std::chrono::steady_clock), so the host-side events of a run --
+ * submit, stage, descriptor, completion, accumulate, wait -- can be ordered
+ * against each other and against the RTL's own cycle stamps. */
+clock_t_::time_point trace_epoch() {
+    static const clock_t_::time_point t0 = clock_t_::now();
+    return t0;
+}
+
 void trace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void trace(const char *fmt, ...) {
     if (!rt().set.trace)
@@ -218,8 +258,62 @@ void trace(const char *fmt, ...) {
     va_start(ap, fmt);
     std::fputs("[fpga-async] ", stderr);
     std::vfprintf(stderr, fmt, ap);
-    std::fputc('\n', stderr);
+    std::fprintf(stderr, " @%llu\n",
+                 static_cast<unsigned long long>(
+                     std::chrono::duration_cast<std::chrono::microseconds>(
+                         clock_t_::now() - trace_epoch()).count()));
     va_end(ap);
+}
+
+/* How many descriptors to keep in flight per device: SYSTOLIC_ASYNC_DEPTH if
+ * set, else the configuration's PIPELINE_DEPTH (1 when not recorded: the
+ * archived bitstream takes a context's next job only after the previous
+ * result is written back), never above that depth -- a deeper host would
+ * park a descriptor in the bridge until the context's queue has room, and
+ * every other device's descriptors behind it -- and never above MAX_DEPTH.
+ * When the configuration records the DDR size (DDR_BYTES, the
+ * co-simulation's model), the depth is lowered until the operand slots fit;
+ * 0, or -16 when even one descriptor per device does not. */
+int resolve_depth(Runtime &r) {
+    const unsigned hw = r.cfg.pipeline_depth < 1 ? 1u : r.cfg.pipeline_depth;
+    const unsigned cap = hw < MAX_DEPTH ? hw : MAX_DEPTH;
+    unsigned want = r.set.depth_env ? r.set.depth_env : hw;
+    r.depth_source = r.set.depth_env ? "SYSTOLIC_ASYNC_DEPTH" : "PIPELINE_DEPTH";
+    if (want > cap) {
+        std::fprintf(stderr,
+                     "[fpga-async] SYSTOLIC_ASYNC_DEPTH=%u clamped to %u: the "
+                     "bitstream's PIPELINE_DEPTH is %u (at most %u)\n",
+                     want, cap, hw, MAX_DEPTH);
+        want = cap;
+    }
+    if (want < 1)
+        want = 1;
+    r.depth = want;
+    r.operand_slots = r.depth + 1;
+    if (r.cfg.ddr_bytes) {
+        auto operand_end = [&](unsigned depth) {
+            return static_cast<unsigned long long>(OPERAND_BASE) +
+                   static_cast<unsigned long long>(DEVICES) * (depth + 1) * r.cfg.slab_bytes;
+        };
+        while (r.depth > 1 && operand_end(r.depth) > r.cfg.ddr_bytes)
+            --r.depth;
+        if (operand_end(r.depth) > r.cfg.ddr_bytes) {
+            std::fprintf(stderr,
+                         "[fpga-async] %s: DDR_BYTES=%u holds no room for one %u-byte "
+                         "operand slab per device above 0x%x\n",
+                         r.cfg.source, r.cfg.ddr_bytes, r.cfg.slab_bytes, OPERAND_BASE);
+            return -16;
+        }
+        if (r.depth != want) {
+            std::fprintf(stderr,
+                         "[fpga-async] depth %u lowered to %u: DDR_BYTES=%u holds %u "
+                         "operand slabs of %u bytes per device\n",
+                         want, r.depth, r.cfg.ddr_bytes, r.depth + 1, r.cfg.slab_bytes);
+            r.depth_source = "DDR_BYTES";
+        }
+        r.operand_slots = r.depth + 1;
+    }
+    return 0;
 }
 
 /* The configuration, loaded once (the same file the scheduled entry point
@@ -242,16 +336,26 @@ int ensure_config(Runtime &r) {
             r.dev[d].P = fpga_runtime_device_geometry(d);
             r.dev[d].k_max = fpga_runtime_device_k_max(&r.cfg, d);
         }
+        if (r.cfg_rc == 0)
+            r.cfg_rc = resolve_depth(r);
     }
     return r.cfg_rc;
 }
 
 uint32_t operand_addr(const Runtime &r, unsigned device, unsigned slot) {
-    return OPERAND_BASE + (device * SLOTS + slot) * r.cfg.slab_bytes;
+    return OPERAND_BASE + (device * r.operand_slots + slot) * r.cfg.slab_bytes;
 }
 
-uint32_t result_addr(unsigned device, unsigned slot) {
-    return RESULT_BASE + (device * SLOTS + slot) * RESULT_SLOT_BYTES;
+uint32_t result_addr(const Runtime &r, unsigned device, unsigned slot) {
+    return RESULT_BASE + (device * r.depth + slot) * RESULT_SLOT_BYTES;
+}
+
+/* The lowest set bit of a free mask: the slot to take. */
+unsigned lowest_free(uint32_t mask) {
+    unsigned s = 0;
+    while (!(mask & (1u << s)))
+        ++s;
+    return s;
 }
 
 void account_bytes(Runtime &r) {
@@ -351,10 +455,18 @@ void fail_link(Runtime &r, int error) {
             dv.queue.pop_front();
             fail_tile(r, std::move(t), error);
         }
-        if (dv.staged)
-            fail_tile(r, std::move(dv.staged), error);
-        if (dv.inflight)
-            fail_tile(r, std::move(dv.inflight), error);
+        while (!dv.staged.empty()) {
+            std::unique_ptr<Tile> t = std::move(dv.staged.front());
+            dv.staged.pop_front();
+            fail_tile(r, std::move(t), error);
+        }
+        while (!dv.inflight.empty()) {
+            std::unique_ptr<Tile> t = std::move(dv.inflight.front());
+            dv.inflight.pop_front();
+            fail_tile(r, std::move(t), error);
+        }
+        dv.operand_free = (1u << r.operand_slots) - 1u;
+        dv.result_free  = (1u << r.depth) - 1u;
     }
     r.pjt.clear();
     r.queued_total = 0;
@@ -365,8 +477,13 @@ void fail_link(Runtime &r, int error) {
 
 /* ---- the write side ------------------------------------------------------ */
 
+bool can_send(const Runtime &r, const Device &dv) {
+    return !dv.staged.empty() && dv.inflight.size() < r.depth && dv.result_free != 0;
+}
+
 bool send_descriptor(Runtime &r, Device &dv, unsigned d) {
-    std::unique_ptr<Tile> &t = dv.staged;
+    std::unique_ptr<Tile> t = std::move(dv.staged.front());
+    dv.staged.pop_front();
     dpti_job_t job = {};
     job.job_id      = t->job_id;
     job.device_id   = d;
@@ -377,23 +494,29 @@ bool send_descriptor(Runtime &r, Device &dv, unsigned d) {
     job.est_cycles  = t->est_cycles;
     job.a_base      = operand_addr(r, d, t->operand_slot);
     job.b_base      = 0;
-    t->result_slot  = dv.next_result_slot;
-    dv.next_result_slot = (dv.next_result_slot + 1) % SLOTS;
-    job.c_base      = result_addr(d, t->result_slot);
+    t->result_slot  = lowest_free(dv.result_free);
+    dv.result_free &= ~(1u << t->result_slot);
+    job.c_base      = result_addr(r, d, t->result_slot);
 
     const int rc = dpti_ftdi_submit_session(r.session, &job);
     ++r.stats.descriptors;
     if (rc != 0) {
+        dv.staged.push_front(std::move(t));
         fail_link(r, rc == -6 ? -6 : -5);
         return false;
     }
-    trace("descriptor job=0x%08x device=%u k=%d a=0x%05x c=0x%05x", t->job_id, d,
-          t->k, static_cast<unsigned>(job.a_base), static_cast<unsigned>(job.c_base));
     t->state = TileState::InFlight;
     r.pjt[t->job_id] = t.get();
-    dv.inflight = std::move(dv.staged);
+    dv.inflight.push_back(std::move(t));
     ++r.inflight_total;
+    if (dv.inflight.size() > dv.max_inflight)
+        dv.max_inflight = static_cast<unsigned>(dv.inflight.size());
     r.last_activity = clock_t_::now();
+    r.t_last_descriptor = r.last_activity;
+    trace("descriptor job=0x%08x device=%u k=%d a=0x%05x c=0x%05x inflight=%zu/%u",
+          dv.inflight.back()->job_id, d, dv.inflight.back()->k,
+          static_cast<unsigned>(job.a_base), static_cast<unsigned>(job.c_base),
+          dv.inflight.size(), r.depth);
     return true;
 }
 
@@ -401,27 +524,50 @@ bool stage_slab(Runtime &r, Device &dv, unsigned d) {
     std::unique_ptr<Tile> t = std::move(dv.queue.front());
     dv.queue.pop_front();
     --r.queued_total;
-    t->operand_slot = dv.next_operand_slot;
-    dv.next_operand_slot = (dv.next_operand_slot + 1) % SLOTS;
+    t->operand_slot = lowest_free(dv.operand_free);
+    dv.operand_free &= ~(1u << t->operand_slot);
     const uint32_t addr = operand_addr(r, d, t->operand_slot);
     const int rc = dpti_ftdi_mem_write_session(
         r.session, addr, t->slab.data(), static_cast<uint32_t>(t->slab.size()));
     ++r.stats.mem_writes;
     if (rc != 0) {
+        dv.queue.push_front(std::move(t));
+        ++r.queued_total;
         fail_link(r, -4);
         return false;
     }
     trace("stage job=0x%08x device=%u slot=%u addr=0x%05x%s", t->job_id, d,
-          t->operand_slot, addr, dv.inflight ? " (behind a running job)" : "");
+          t->operand_slot, addr, dv.inflight.empty() ? "" : " (behind a running job)");
     t->state = TileState::Staged;
-    dv.staged = std::move(t);
+    dv.staged.push_back(std::move(t));
     return true;
 }
 
+/* Slabs are staged ahead of their descriptors: one per device, or, in
+ * burst mode, as many as the device has operand slots for (depth + 1).
+ * With SYSTOLIC_ASYNC_STAGE=0 only while nothing of that device is in
+ * flight, which also keeps at most one descriptor in flight there. */
 bool can_stage(const Runtime &r, const Device &dv) {
-    if (dv.queue.empty() || dv.staged)
+    const size_t ahead = (r.set.burst && r.set.stage) ? r.operand_slots : 1;
+    if (dv.queue.empty() || dv.staged.size() >= ahead || dv.operand_free == 0)
         return false;
-    return r.set.stage || !dv.inflight;
+    return r.set.stage || dv.inflight.empty();
+}
+
+/* Burst mode (the default, with staging on): a device's descriptors are
+ * held back until every operand slot of the device holds a slab (depth + 1
+ * of them), or until a GEMM is waited on (fpga_gemm_wait flushes), so the
+ * context receives them back to back and runs the tiles through its
+ * pipeline (the fill of T+1 at the fold of T, the fold of T+1 while T is
+ * still being written back and read back, and while T reduces where the
+ * fill is short enough: docs/COSTMODEL.md section 8), instead of one
+ * descriptor per slab transfer with the array idle in between (a slab
+ * crosses the DPTI link in several times a tile's compute). The link
+ * carries the same bytes either way; a device's first result comes later by
+ * the slabs staged ahead of it. SYSTOLIC_ASYNC_BURST=0 sends every
+ * descriptor as soon as its slab is in DDR. */
+bool may_release(const Runtime &r, const Device &dv) {
+    return !r.set.burst || !r.set.stage || r.flush || dv.staged.size() >= r.operand_slots;
 }
 
 /* Submit every descriptor that may go, stage the oldest queued slab that
@@ -433,7 +579,7 @@ void pump_writes(Runtime &r) {
         bool progress = false;
         for (unsigned d = 0; d < DEVICES; ++d) {
             Device &dv = r.dev[d];
-            if (dv.staged && !dv.inflight) {
+            while (may_release(r, dv) && can_send(r, dv)) {
                 if (!send_descriptor(r, dv, d))
                     return;
                 progress = true;
@@ -455,14 +601,16 @@ void pump_writes(Runtime &r) {
             break;
     }
     ++r.stats.passes;
-    unsigned inflight = 0, behind = 0;
+    unsigned inflight = 0, behind = 0, deep = 0;
     for (unsigned d = 0; d < DEVICES; ++d) {
-        if (r.dev[d].inflight) ++inflight;
-        if (r.dev[d].inflight && r.dev[d].staged) ++behind;
+        if (!r.dev[d].inflight.empty()) ++inflight;
+        if (!r.dev[d].inflight.empty() && !r.dev[d].staged.empty()) ++behind;
+        if (r.dev[d].inflight.size() >= 2) ++deep;
     }
     if (inflight >= 2) ++r.stats.passes_2_inflight;
     if (inflight == DEVICES) ++r.stats.passes_4_inflight;
     if (behind) ++r.stats.passes_staged_behind;
+    if (deep) ++r.stats.passes_depth2;
 }
 
 /* ---- the read side ------------------------------------------------------- */
@@ -472,15 +620,41 @@ uint32_t le32(const unsigned char *p) {
            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
+/* The in-flight tile `t` (a PJT hit) leaves the link: out of its device's
+ * in-flight list, its DDR slots free again (the context read the slab
+ * before folding the tile; the result tile left DDR before the record's
+ * payload reached the host, or never existed for a refusal). */
+std::unique_ptr<Tile> take_inflight(Runtime &r, Tile *t) {
+    Device &dv = r.dev[t->device];
+    std::unique_ptr<Tile> owned;
+    for (auto it = dv.inflight.begin(); it != dv.inflight.end(); ++it) {
+        if (it->get() == t) {
+            owned = std::move(*it);
+            dv.inflight.erase(it);
+            break;
+        }
+    }
+    if (!owned)
+        return owned;                             // cannot happen: the PJT holds only in-flight tiles
+    --r.inflight_total;
+    dv.operand_free |= 1u << owned->operand_slot;
+    dv.result_free  |= 1u << owned->result_slot;
+    if (!r.seen_completion) {
+        r.seen_completion = true;
+        r.t_first_completion = clock_t_::now();
+    }
+    return owned;
+}
+
 void complete(Runtime &r, uint32_t job_id, const unsigned char *payload) {
     auto it = r.pjt.find(job_id);
     if (it == r.pjt.end())
         return;
     Tile *t = it->second;
     r.pjt.erase(it);
-    Device &dv = r.dev[t->device];
-    std::unique_ptr<Tile> owned = std::move(dv.inflight);
-    --r.inflight_total;
+    std::unique_ptr<Tile> owned = take_inflight(r, t);
+    if (!owned)
+        return;
     owned->state = TileState::Done;
     owned->result.resize(static_cast<size_t>(owned->P) * owned->P);
     for (size_t i = 0; i < owned->result.size(); ++i) {
@@ -536,10 +710,9 @@ void parse_rx(Runtime &r) {
                              status == FPGA_COMPLETION_BAD_K ? "k outside 1..K_MAX" :
                              status == FPGA_COMPLETION_BAD_DEV ? "no such device" : "?");
                 r.pjt.erase(it);
-                Device &dv = r.dev[t->device];
-                std::unique_ptr<Tile> owned = std::move(dv.inflight);
-                --r.inflight_total;
-                fail_tile(r, std::move(owned), -18);
+                std::unique_ptr<Tile> owned = take_inflight(r, t);
+                if (owned)
+                    fail_tile(r, std::move(owned), -18);
             }
             if (payload != 0) {
                 // Not something this RTL sends; stay in step by skipping it.
@@ -598,7 +771,7 @@ bool pump_read(Runtime &r) {
 bool anything_pending(const Runtime &r) {
     return r.inflight_total > 0 || r.queued_total > 0 ||
            std::any_of(std::begin(r.dev), std::end(r.dev),
-                       [](const Device &d) { return d.staged != nullptr; });
+                       [](const Device &d) { return !d.staged.empty(); });
 }
 
 /* Read and write until `done()` holds, the link fails, or nothing is in
@@ -612,11 +785,22 @@ void pump_until(Runtime &r, Pred done) {
         if (!anything_pending(r))
             return;
         if (r.inflight_total == 0) {
-            // Queued or staged tiles that cannot move: only a completion
-            // frees them, and none is coming. (Not reachable with stage
-            // credit 1, kept as a guard.)
-            fail_link(r, -8);
-            return;
+            // Staged descriptors held back by burst mode with nothing in
+            // flight to complete: release them now rather than wait for a
+            // completion that cannot come.
+            const bool was = r.flush;
+            r.flush = true;
+            pump_writes(r);
+            r.flush = was;
+            if (r.link_failed || done())
+                return;
+            if (r.inflight_total == 0) {
+                // Queued or staged tiles that cannot move: only a completion
+                // frees them, and none is coming. (Not reachable, kept as a
+                // guard.)
+                fail_link(r, -8);
+                return;
+            }
         }
         const bool got = pump_read(r);
         if (r.link_failed)
@@ -651,8 +835,15 @@ bool open_session(Runtime &r) {
     r.bytes_written_base = dpti_ftdi_bytes_written(r.session);
     r.bytes_read_base = dpti_ftdi_bytes_read(r.session);
     r.last_activity = clock_t_::now();
-    trace("session opened: epoch %u, stage=%d, queue_limit=%u, read_policy=%s",
-          r.epoch, r.set.stage ? 1 : 0, r.set.queue_limit, policy_name(r.set.policy));
+    r.seen_completion = false;
+    for (unsigned d = 0; d < DEVICES; ++d) {
+        r.dev[d].operand_free = (1u << r.operand_slots) - 1u;
+        r.dev[d].result_free  = (1u << r.depth) - 1u;
+        r.dev[d].max_inflight = 0;
+    }
+    trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s",
+          r.epoch, r.depth, r.depth_source, r.set.stage ? 1 : 0, r.set.burst ? 1 : 0,
+          r.set.queue_limit, policy_name(r.set.policy));
     return true;
 }
 
@@ -669,17 +860,32 @@ void drop_gemm(Runtime &r, Gemm *g) {
                   r.gemms.end());
 }
 
+/* The per-session figures kept outside the counters. */
+void refresh_stats(Runtime &r) {
+    r.stats.depth = r.depth;
+    for (unsigned d = 0; d < DEVICES; ++d)
+        if (r.dev[d].max_inflight > r.stats.max_inflight_per_device[d])
+            r.stats.max_inflight_per_device[d] = r.dev[d].max_inflight;
+    if (r.span_started && r.stats.descriptors > 0)
+        r.stats.ns_last_descriptor = ns_between(r.t_first_submit, r.t_last_descriptor);
+    if (r.span_started && r.seen_completion)
+        r.stats.ns_first_completion = ns_between(r.t_first_submit, r.t_first_completion);
+}
+
 void report_timing(Runtime &r) {
     if (!r.set.timing || r.stats.tiles_submitted == 0)
         return;
     account_bytes(r);
+    refresh_stats(r);
     const fpga_async_stats_t &s = r.stats;
     std::fprintf(stderr,
                  "[fpga-async] timing tiles=%llu completed=%llu failed=%llu gemms=%llu "
                  "span_us=%llu submit_us=%llu wait_us=%llu reads=%llu empty_reads=%llu "
                  "mem_writes=%llu descriptors=%llu bytes_to_fpga=%llu bytes_from_fpga=%llu "
                  "passes=%llu overlap2=%llu overlap4=%llu staged_behind=%llu max_queued=%llu "
-                 "stage=%d read_policy=%s queue_limit=%u per_device=%llu/%llu/%llu/%llu\n",
+                 "stage=%d read_policy=%s queue_limit=%u per_device=%llu/%llu/%llu/%llu "
+                 "depth=%u burst=%d depth2_passes=%llu max_inflight=%llu/%llu/%llu/%llu "
+                 "last_descriptor_us=%llu first_completion_us=%llu\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -687,7 +893,10 @@ void report_timing(Runtime &r) {
                  s.passes_staged_behind, s.max_queued, r.set.stage ? 1 : 0,
                  policy_name(r.set.policy), r.set.queue_limit,
                  s.tiles_per_device[0], s.tiles_per_device[1], s.tiles_per_device[2],
-                 s.tiles_per_device[3]);
+                 s.tiles_per_device[3], s.depth, r.set.burst ? 1 : 0, s.passes_depth2,
+                 s.max_inflight_per_device[0], s.max_inflight_per_device[1],
+                 s.max_inflight_per_device[2], s.max_inflight_per_device[3],
+                 s.ns_last_descriptor / 1000, s.ns_first_completion / 1000);
 }
 
 } // namespace
@@ -826,7 +1035,11 @@ int fpga_gemm_wait(fpga_gemm_t *handle) {
     if (!g)
         return -17;
     g->waited = true;
+    // Burst mode releases every staged descriptor from here on: the caller
+    // wants results, not a fuller burst.
+    r.flush = true;
     pump_until(r, [&] { return g->outstanding == 0; });
+    r.flush = false;
     if (g->outstanding > 0 && g->first_error == 0)
         g->first_error = r.link_failed ? r.link_error : -8;
     const int rc = g->first_error;
@@ -847,6 +1060,7 @@ void fpga_async_runtime_get_stats(fpga_async_stats_t *out) {
     if (!out)
         return;
     account_bytes(rt());
+    refresh_stats(rt());
     *out = rt().stats;
 }
 
@@ -862,10 +1076,10 @@ void fpga_async_runtime_close(void) {
     report_timing(r);
     for (unsigned d = 0; d < DEVICES; ++d) {
         r.dev[d].queue.clear();
-        r.dev[d].staged.reset();
-        r.dev[d].inflight.reset();
-        r.dev[d].next_operand_slot = 0;
-        r.dev[d].next_result_slot = 0;
+        r.dev[d].staged.clear();
+        r.dev[d].inflight.clear();
+        r.dev[d].operand_free = 0;
+        r.dev[d].result_free = 0;
     }
     r.pjt.clear();
     r.gemms.clear();
@@ -881,7 +1095,8 @@ void fpga_async_runtime_close(void) {
     r.link_error = 0;
     r.refusal_reported = false;
     r.span_started = false;
-    // Settings are read again on the next use, so a test can change them
-    // between sessions.
+    // Settings (and with them the depth, which the configuration bounds) are
+    // read again on the next use, so a test can change them between sessions.
     r.settings_read = false;
+    r.cfg_loaded = false;
 }

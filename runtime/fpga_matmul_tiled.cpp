@@ -269,6 +269,14 @@ int load_config(fpga_runtime_config_t &cfg) {
             if (val != "0" && val != "1")
                 return fail(key + " = '" + val + "' is not 0 or 1");
             cfg.completion_header = (val == "1") ? 1u : 0u;
+        } else if (key == "DDR_BYTES") {
+            // The DDR behind the bitstream, when the record says (the
+            // co-simulation's model); the asynchronous runtime sizes its
+            // per-device slots to it.
+            if (!parse_count(val, 0xFFFFFFFFu, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1..4294967295 "
+                            "(no sign, no leading zeros)");
+            cfg.ddr_bytes = v;
         } else if (key == "PIPELINE_DEPTH") {
             // The context's job queue: how many invocations the bitstream
             // holds per accelerator. The compiler declares the fleet's

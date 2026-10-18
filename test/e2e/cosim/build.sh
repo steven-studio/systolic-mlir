@@ -19,13 +19,14 @@
 #   K_MAX_8X8, K_MAX_4X4
 #            the 8x8's and every 4x4's operand depth, independent, plain
 #            decimal (default 16 and 16, the archived bitstream's). The
-#            protocol takes 1..16376; this co-simulation takes 1..1024,
-#            because its DDR model (tb/mig_axi_model.sv) holds 128 KiB and the
-#            runtime stages every slab at 0x10000, so a slab of ceil(K / 8)
-#            * 512 bytes must fit in 64 KiB (the board's DDR has no such
-#            limit). Only an RTL with the split parameters (systolic_dma_top
-#            K_MAX_8X8 / K_MAX_4X4, e.g. the working tree) takes other values;
-#            the archived tag has one K_MAX, built at 16.
+#            protocol takes 1..16376; this co-simulation takes 1..1024: its
+#            DDR model (tb/mig_axi_model.sv) holds 1 MiB, recorded as
+#            DDR_BYTES, and the synchronous runtime stages every slab at
+#            0x10000 (the asynchronous one fits its per-device slots to
+#            DDR_BYTES, lowering its depth if it must; the board's DDR has no
+#            such limit). Only an RTL with the split parameters
+#            (systolic_dma_top K_MAX_8X8 / K_MAX_4X4, e.g. the working tree)
+#            takes other values; the archived tag has one K_MAX, built at 16.
 #
 # Besides Vcosim and the libftdi shim, OUT gets fpga_config.txt: the
 # parameters this simulated bitstream was built with, in the form the
@@ -205,6 +206,12 @@ HOST_SLAB=$(( (S8 > S4 ? S8 : S4) * 64 ))
     # (systolic_dma_top.sv COMPLETION_MAGIC, Oct 2026); the runtime reads
     # them only when told so here.
     echo "COMPLETION_HEADER=$(grep -q COMPLETION_MAGIC "$D/systolic_dma_top.sv" && echo 1 || echo 0)"
+    # The DDR the simulated bitstream has (tb/mig_axi_model.sv MEM_WORDS, in
+    # 32-bit words): the asynchronous runtime fits its per-device operand and
+    # result slots in it, lowering its depth if it must.
+    if words=$(sed -nE 's/^ *parameter integer MEM_WORDS *= *([0-9]+).*/\1/p' "$D/tb/mig_axi_model.sv" | head -1) && [ -n "$words" ]; then
+        echo "DDR_BYTES=$(( words * 4 ))"
+    fi
     # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH):
     # how many invocations one accelerator holds at a time.  An RTL without
     # it takes one job per context and the line is left out (the compiler

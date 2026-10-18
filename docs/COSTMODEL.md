@@ -285,8 +285,13 @@ fill 這一串序列尾巴；v2（beat-wide）上 fill 75 < compute 125，下一
 （8x8 一塊約 850 拍）對 acceptance 的節流（RB_DEPTH = 8）與共用 read engine 的等待，所以
 比 4 次鏈的比例小；兩邊的 bench、job list 與 RTL 以外的環境完全相同。
 
-**仍未解決（量到的）。** (1) runtime 仍是同步的（一次一個 invocation），板子上要兌現這些重疊
-需要 runtime 多個 invocation 在途與每個 invocation 自己的 slab／result 區域；(2) DPTI 結果讀回在
+**仍未解決（量到的）。** (1) 同步 runtime 仍是一次一個 invocation；非同步 runtime
+（`docs/ASYNC.md` 第 9 節，2026-10-18）每顆陣列最多 `PIPELINE_DEPTH` 個 descriptor 在飛、每個在途
+invocation 自己的 slab／result 區域，co-sim 上 context 的 queue 確實被填到 4，但 DPTI 鏈路本身
+（一筆 84 byte 的 descriptor 約 420 拍、一塊 1 KiB slab 約 5000 拍，對上 k = 16 的 tile 約 125 拍
+的 compute）讓同一顆陣列上連續 invocation 的 fold 幾乎不可能在前一個 publish 之前開始；主機路徑能
+兌現的是跨陣列的並行與「不必每筆等結果」，PE 層的重疊要由本節的 bench（internal job port）證明；
+(2) DPTI 結果讀回在
 模擬裡 8x8 一塊約 850 拍（4x4 約 213），是 host 永遠就緒時的物理瓶頸，且讀回的 beat 走同一個 AXI
 read engine，會把同時進行的 fill 擋住數百拍（`compare_timeline.py` 標成 fill-stalled；mitigation
 是把 `dpti_output_cdc` 的 FIFO 加深到能放一整個 burst 並以整個 burst 的空間 gate 讀回）；(3) 多顆

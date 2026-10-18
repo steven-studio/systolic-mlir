@@ -689,6 +689,9 @@ proc write_fpga_config {path bit wns whs dpti_io_ok} {
     # (systolic_dma_top.sv, readback section); the runtime reads it only when
     # this line says so, so a bitstream built before it still works.
     puts $f "COMPLETION_HEADER=1"
+    # The board's DDR3 (Nexys Video: 512 MiB); the asynchronous runtime fits
+    # its per-device operand and result slots in it.
+    puts $f "DDR_BYTES=536870912"
     # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH, the
     # default this build takes): invocations one accelerator holds at a time.
     # The compiler declares the fleet's pipelining from it; the archived

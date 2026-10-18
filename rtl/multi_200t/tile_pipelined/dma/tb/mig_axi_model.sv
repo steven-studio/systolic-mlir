@@ -23,7 +23,9 @@
  */
 
 module mig_7series_0 #(
-  parameter integer MEM_WORDS = 32768,     // 32-bit words: room for K_MAX = 256
+  parameter integer MEM_WORDS = 262144,    // 32-bit words: 1 MiB (test/e2e/cosim/build.sh
+                                           // records it as DDR_BYTES; the asynchronous
+                                           // runtime fits its per-device slots in it)
   parameter integer WB_REGION = 4096       // byte address where results start
                                            // (default; +wb_region=<bytes> overrides,
                                            // because the boundary moves with K_MAX
@@ -144,6 +146,11 @@ module mig_7series_0 #(
       if (s_axi_awvalid && s_axi_awready) begin
         if (w_open) begin
           $display("  FAIL: AW accepted while a burst was still open");
+          errors <= errors + 1;
+        end
+        if (int'(s_axi_awaddr) + (int'(s_axi_awlen) + 1) * BPB > MEM_WORDS * 4) begin
+          $display("  FAIL: write burst beyond the %0d-byte DDR model: addr %0d len %0d",
+                   MEM_WORDS * 4, s_axi_awaddr, s_axi_awlen + 1);
           errors <= errors + 1;
         end
         w_burst_base <= int'(s_axi_awaddr);
