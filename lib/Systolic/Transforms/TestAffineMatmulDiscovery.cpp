@@ -182,6 +182,17 @@ struct TestAffineMatmulDiscoveryPass
   }
 
   void runOnOperation() override {
+    // The domain normalization the lowering pass applies first (docs
+    // sections 19.7, 19.12), reported line by line.
+    SmallVector<DomainNormalization, 1> normalized =
+        normalizeParallelotopeDomains(getOperation().getOperation());
+    if (!normalized.empty()) {
+      llvm::errs() << "domain normalization: " << normalized.size()
+                   << " nest(s)\n";
+      for (const DomainNormalization &dn : normalized)
+        describeDomainNormalization(dn, llvm::errs(), "  ");
+    }
+
     SmallVector<AffineMatmulCandidate> candidates;
 
     collectAffineMatmulCandidates(
@@ -300,6 +311,80 @@ struct TestAffineMatmulDiscoveryPass
       if (result.sourceDomain) {
         llvm::errs() << "  source iteration domain:\n";
         result.sourceDomain->dump();
+      }
+
+      // The task's exact mapping (section 19.12), reported, not decided.
+      {
+        const ExactMapping &em = result.exactMapping;
+        llvm::errs() << "  exact mapping (task of 2026-10-17, over the counters of the nest as analysed): ";
+        if (!em.defined) {
+          llvm::errs() << em.note << "\n";
+        } else {
+          auto printRow = [](llvm::ArrayRef<int64_t> v) {
+            llvm::errs() << "[";
+            llvm::interleaveComma(v, llvm::errs());
+            llvm::errs() << "]";
+          };
+          llvm::errs() << (em.degenerateK ? "2-D (K = 1: a degenerate reduction, "
+                                            "the non-degenerate rule does not apply)"
+                                          : "3-D")
+                       << ", T = [";
+          for (unsigned r = 0; r < em.T.size(); ++r) {
+            if (r)
+              llvm::errs() << ", ";
+            printRow(em.T[r]);
+          }
+          llvm::errs() << "], d = ";
+          printRow(em.d);
+          if (em.singular) {
+            llvm::errs() << ", det 0 (singular: rank(Ic, Jc, q) < " << em.T.size()
+                         << ", the task's mapping has no inverse)\n";
+          } else {
+            llvm::errs() << ", det " << em.det
+                         << (em.unimodular ? ", unimodular" : ", not unimodular")
+                         << ", T diag(step) a signed permutation: "
+                         << (em.boxImage ? "yes (the image of the box is a complete box)"
+                                         : "no (the image is a sublattice, not a complete box in these coordinates)")
+                         << "\n";
+          }
+          if (em.rowsSwapped)
+            llvm::errs() << "    factor order: the recognizer takes the second "
+                            "factor as the row operand (C = B' A')\n";
+          if (!em.degenerateK) {
+            llvm::errs() << "    v = ";
+            if (em.v.empty()) {
+              llvm::errs() << "none (rank(Ic, Jc) < 2 or overflow)\n";
+            } else {
+              printRow(em.v);
+              llvm::errs() << "; Ia.v = " << em.deltas[0] << ", Ka.v = " << em.deltas[1]
+                           << ", Kb.v = " << em.deltas[2] << ", Jb.v = " << em.deltas[3]
+                           << "; A varies along v: " << (em.aVaries ? "yes" : "no")
+                           << ", B varies along v: " << (em.bVaries ? "yes" : "no")
+                           << "\n";
+            }
+          } else {
+            llvm::errs() << "    no reduction direction: K has no loop\n";
+          }
+          llvm::errs() << "    rank(Cmat) " << em.rankC << ", rank(Amat) " << em.rankA
+                       << ", rank(Bmat) " << em.rankB << "\n";
+          auto printLambda = [&](const char *name,
+                                 llvm::ArrayRef<lattice::RationalRow> rows,
+                                 const char *restriction, bool holds) {
+            llvm::errs() << "    lambda(" << name << ") = ";
+            for (unsigned r = 0; r < rows.size(); ++r) {
+              if (r)
+                llvm::errs() << ", ";
+              printRow(rows[r].numerators);
+              llvm::errs() << "/" << rows[r].denominator;
+            }
+            if (rows.empty())
+              llvm::errs() << "undefined";
+            llvm::errs() << " -- " << restriction << ": " << (holds ? "yes" : "no")
+                         << "\n";
+          };
+          printLambda("A", em.lambdaA, "A free of J", em.aFreeOfJ);
+          printLambda("B", em.lambdaB, "B free of I", em.bFreeOfI);
+        }
       }
 
       llvm::errs() << "  phiA: ";
@@ -425,6 +510,10 @@ struct TestAffineMatmulDiscoveryPass
           llvm::errs() << " (" << dense->batchTrips << " batch iteration(s))";
         }
         llvm::errs() << "\n";
+        // The logical extents the partition and the lowering use (a role
+        // with no loop has extent 1: K = 1 is the outer product, SQ-4).
+        llvm::errs() << "  dense extents: M " << dense->extent[0] << ", N "
+                     << dense->extent[1] << ", K " << dense->extent[2] << "\n";
       }
       else {
         llvm::errs() << "  dense logical GEMM: no (" << notDense << ")\n";

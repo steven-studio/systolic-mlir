@@ -132,7 +132,7 @@ void int_value(float a[restrict 64]) {
 }
 
 // Expected diagnostics (absolute positions in this file):
-// SYMBOLIC: unsupported.c:33:23: error: 'n' is not an integer constant (loop bounds and steps must be static)
+// SYMBOLIC: unsupported.c:33:23: error: the loop bound must be an integer constant or an affine expression of the enclosing loop counters
 // WHILE: unsupported.c:38:3: error: local variables are not supported (only for-loop counters)
 // IF: unsupported.c:45:5: error: statement 'IfStmt' is not supported
 // CALL: unsupported.c:52:12: error: expression 'CallExpr' is not supported

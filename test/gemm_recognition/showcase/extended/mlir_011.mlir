@@ -14,7 +14,7 @@
 //
 // Mathematical GEMM: YES
 // Expected recognition (specification): UNDETERMINED
-//   basis: UNDETERMINED -- a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?
+//   basis: UNDETERMINED -- a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds are constants or affine in the enclosing counters, never a runtime value; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?
 // Current implementation (predicted from the compiler sources; measured by
 // scripts/run_showcase.py, never assumed):
 //   recognition (recognizeLogicalMatmul):    ACCEPT
@@ -25,9 +25,10 @@
 // Classification: SPEC OPEN
 //   The specification does not decide this case (SQ-3, README.md section 2):
 //     a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a
-//     runtime value): unreachable from the C front end, whose bounds must be
-//     constants; is the MLIR path's refusal ('no static normalized extent') a
-//     documented limitation, or must dynamic extents be supported?
+//     runtime value): unreachable from the C front end, whose bounds are
+//     constants or affine in the enclosing counters, never a runtime value; is
+//     the MLIR path's refusal ('no static normalized extent') a documented
+//     limitation, or must dynamic extents be supported?
 //   The compiler's behaviour is recorded, not judged, until the question is settled.
 //
 // Independent reference: none at this level (no program to run); the checks are the

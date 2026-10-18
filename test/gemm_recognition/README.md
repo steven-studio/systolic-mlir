@@ -91,11 +91,12 @@ ISSUE-002, fixed — at 6e25528 it wrapped around).
 offset `o + s · offset`, stride `s · scale` (since the fix of ISSUE-001; before, one view per
 coordinate); offsets ≥ 0 and the operand's last index in bounds on static dims, in checked
 arithmetic (ISSUE-002); equal element types; A and B provably disjoint from C (`restrict` /
-fresh allocations, or `assume-no-alias`); `A × A` through one view -- the two factors the same
-element map in some orientation of the coordinates (each enumerated upward or downward; since
-2026-10-18 the lowering tries all eight, `A[3 - i][k] * A[k][j]` is lowered with C written
-through a reversed view) --, not two different views of one memref (`A · Aᵀ`); the fleet plan's
-tiles proven an exact partition.
+fresh allocations, or `assume-no-alias`); `A × A` either through one view (the two factors the
+same element map: one read-only tensor) or through two different views of one memref (`A · Aᵀ`,
+`A[3 - i][k] * A[k][j]`, `A[i][i + k] * A[k][j]`: two read-only tensors of the shared base, every
+tile staged from its own view, C written at its own view; since 2026-10-18, docs section 19.12 --
+the orientation search of the same day, which wrote C through a reversed view, is superseded);
+the fleet plan's tiles proven an exact partition.
 
 **Driver** (`systolic-cc`): fp32 only (double arrays stay on the host), not `static`/`inline`,
 not from a macro; `--verify` compares every offloaded call with the function as written.
@@ -238,8 +239,8 @@ merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initia
 nest or a scalar accumulator, double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
-`failures/resolved/NOTE-001`), two different views of one array as A and B (the same element
-view in some orientation of the coordinates is ONE view and is offloaded, 2026-10-18), a nest
+`failures/resolved/NOTE-001`; two different views of one array as A and B were in this list
+until 2026-10-18 and are offloaded through two read-only tensors since, docs section 19.12), a nest
 whose every loop is a repetition loop of two or more iterations around one scalar
 multiply-accumulate (no loop of a GEMM to anchor on; basis `no_gemm_loop`, 2026-10-18 -- the
 nest of loops that run once is the 1 x 1 x 1 GEMM and is offloaded), and -- since
@@ -286,8 +287,10 @@ A[i][j] * B[i][j]`; a batched product whose I, J and K all have extent 1, `C[b][
 A[b][1][3] * B[b][3][2]`; the former "singular mappings" `C[x+z][y+z] += A[x+z][x+y+2z] *
 B[x+y+2z][y+z]` and Test 2 on a box: docs section 19.6) --, a non-box iteration domain that is
 not the affine image of a box (the triangle `j >= i`, mlir_009: no (batch, I, J, K) box
-corresponds to its points; one that is, a parallelogram, is a GEMM by docs section 19.7 whose
-parametrization the compiler does not construct: refused as UNKNOWN), products with a third
+corresponds to its points; a constant-extent parallelotope -- every bound shifted by one affine
+form of the outer counters, `k in [i, i + 4)` -- is mapped onto a box and offloaded since
+2026-10-18, docs section 19.12, from C through the front end's affine loop bounds; Test 2's
+lattice parallelepiped D* written as its own nest is still refused as UNKNOWN), products with a third
 factor or sums, no accumulation; and nests whose subscripts leave a static array dimension
 (undefined as programs: there is no GEMM to lower, and the refusal must say "out of bounds" or
 "overflows 64-bit arithmetic", never come from a wrapped-around value — ISSUE-002). The compiler

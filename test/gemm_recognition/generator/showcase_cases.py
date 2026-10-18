@@ -584,11 +584,13 @@ EXTENDED = [
              {"a": arr("A", (8, 9), ("i", "k")), "b": arr("A", (8, 9), ("k", "j + 1")),
               "c": arr("C", (8, 8), ("i", "j"))},
              math_note="C += A[:, 0:8] A[:, 1:9]: both operands are views of the same array\n"
-                       "but different ones.  A valid GEMM; the lowering refuses two different\n"
-                       "restrict tensors of one buffer ('A and B are different views of the\n"
-                       "same memref').  Legal, unsupported.  Before that check can even run,\n"
-                       "the recognizer refuses the nest: B's column expression j + 1 is not\n"
-                       "C's j (ISSUE-001's rule).", issue="ISSUE-001"),
+                       "but different ones.  A valid GEMM.  Until 2026-10-18 the lowering\n"
+                       "refused two different views of one memref ('A and B are different\n"
+                       "views of the same memref', a documented limitation); since then\n"
+                       "(docs/AFFINE_GEMM_MAPPING.md sections 7, 19.12) each factor gets its own\n"
+                       "read-only view of the shared base and the nest is offloaded.",
+             redecided="2026-10-18 (docs/AFFINE_GEMM_MAPPING.md sections 7 and 19.12): OUT_OF_SCOPE "
+                       "same_memref_views before; ACCEPT since -- two views of one array are lowered"),
     ext_case(8, "operand_specific_offset", "operand_view_mismatch", ijk(8, 8, 8),
              {"a": arr("A", (10, 8), ("i + 2", "k")), "b": arr("B", (8, 8), ("k", "j")),
               "c": arr("C", (8, 8), ("i", "j"))},

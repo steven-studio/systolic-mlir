@@ -6,6 +6,7 @@
 
 #include "Systolic/IntegerLattice.h"
 
+#include "llvm/ADT/DynamicAPInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
@@ -371,4 +372,205 @@ lattice::injectiveOnBox(llvm::ArrayRef<int64_t> lamI,
   if (*absI < M && *absJ < N)
     result.collision = {dI, dJ};
   return result;
+}
+
+// -----------------------------------------------------------------------
+// Determinants, adjugates, inverses: exact in arbitrary precision
+// (llvm::DynamicAPInt), converted back to 64-bit only when every value fits
+// -- a wider exact intermediate representation with an explicit range check
+// before 64-bit arithmetic. (presburger::IntMatrix::determinant is not used:
+// its row swaps do not flip the sign, so it returns |det| for some inputs.)
+// -----------------------------------------------------------------------
+
+namespace {
+
+using BigMatrix = llvm::SmallVector<llvm::SmallVector<llvm::DynamicAPInt>>;
+
+std::optional<BigMatrix> bigSquare(const IntMatrix &m) {
+  const unsigned n = m.size();
+  if (n == 0)
+    return std::nullopt;
+  BigMatrix out;
+  for (const IntVector &row : m) {
+    if (row.size() != n)
+      return std::nullopt;
+    llvm::SmallVector<llvm::DynamicAPInt> r;
+    for (int64_t v : row)
+      r.push_back(llvm::DynamicAPInt(v));
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+/// The signed determinant by Bareiss' fraction-free elimination: every
+/// division is exact, every intermediate value is a minor of the matrix.
+llvm::DynamicAPInt bareissDeterminant(BigMatrix m) {
+  const unsigned n = m.size();
+  llvm::DynamicAPInt sign(1), previous(1);
+  for (unsigned k = 0; k + 1 < n; ++k) {
+    if (m[k][k] == 0) {
+      unsigned pivot = k;
+      while (pivot < n && m[pivot][k] == 0)
+        ++pivot;
+      if (pivot == n)
+        return llvm::DynamicAPInt(0);
+      std::swap(m[k], m[pivot]);
+      sign = -sign;
+    }
+    for (unsigned i = k + 1; i < n; ++i) {
+      for (unsigned j = k + 1; j < n; ++j)
+        m[i][j] = (m[i][j] * m[k][k] - m[i][k] * m[k][j]) / previous;
+      m[i][k] = llvm::DynamicAPInt(0);
+    }
+    previous = m[k][k];
+  }
+  return sign * m[n - 1][n - 1];
+}
+
+/// A DynamicAPInt as int64_t when it fits.
+std::optional<int64_t> toInt64(const llvm::DynamicAPInt &v) {
+  const llvm::DynamicAPInt hi(std::numeric_limits<int64_t>::max());
+  const llvm::DynamicAPInt lo(std::numeric_limits<int64_t>::min());
+  if (v > hi || v < lo)
+    return std::nullopt;
+  return int64_t(llvm::int64fromDynamicAPInt(v));
+}
+
+/// adj(m) in arbitrary precision: adj[r][c] = (-1)^(r + c) det(m without row
+/// c and column r), so that adj m = m adj = det(m) I.
+BigMatrix bigAdjugate(const BigMatrix &m) {
+  const unsigned n = m.size();
+  BigMatrix adj(n, llvm::SmallVector<llvm::DynamicAPInt>(n, llvm::DynamicAPInt(0)));
+  if (n == 1) {
+    adj[0][0] = llvm::DynamicAPInt(1);
+    return adj;
+  }
+  for (unsigned r = 0; r < n; ++r)
+    for (unsigned c = 0; c < n; ++c) {
+      BigMatrix minor;
+      for (unsigned i = 0; i < n; ++i) {
+        if (i == c)
+          continue;
+        llvm::SmallVector<llvm::DynamicAPInt> row;
+        for (unsigned j = 0; j < n; ++j)
+          if (j != r)
+            row.push_back(m[i][j]);
+        minor.push_back(std::move(row));
+      }
+      llvm::DynamicAPInt cofactor = bareissDeterminant(minor);
+      adj[r][c] = ((r + c) % 2 == 1) ? -cofactor : cofactor;
+    }
+  return adj;
+}
+
+std::optional<IntMatrix> toIntMatrix(const BigMatrix &m) {
+  IntMatrix out;
+  for (const auto &row : m) {
+    IntVector r;
+    for (const llvm::DynamicAPInt &v : row) {
+      std::optional<int64_t> x = toInt64(v);
+      if (!x)
+        return std::nullopt;
+      r.push_back(*x);
+    }
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+} // namespace
+
+std::optional<int64_t> lattice::determinant(const IntMatrix &m) {
+  std::optional<BigMatrix> big = bigSquare(m);
+  if (!big)
+    return std::nullopt;
+  return toInt64(bareissDeterminant(*big));
+}
+
+std::optional<IntMatrix> lattice::adjugate(const IntMatrix &m) {
+  std::optional<BigMatrix> big = bigSquare(m);
+  if (!big)
+    return std::nullopt;
+  return toIntMatrix(bigAdjugate(*big));
+}
+
+std::optional<IntMatrix> lattice::unimodularInverse(const IntMatrix &m) {
+  std::optional<BigMatrix> big = bigSquare(m);
+  if (!big)
+    return std::nullopt;
+  const llvm::DynamicAPInt det = bareissDeterminant(*big);
+  if (det != 1 && det != -1)
+    return std::nullopt;
+  BigMatrix inverse = bigAdjugate(*big);
+  if (det == -1)
+    for (auto &row : inverse)
+      for (llvm::DynamicAPInt &v : row)
+        v = -v;
+  return toIntMatrix(inverse);
+}
+
+std::optional<RationalRow> lattice::rowTimesInverse(llvm::ArrayRef<int64_t> r,
+                                                    const IntMatrix &m) {
+  std::optional<BigMatrix> big = bigSquare(m);
+  if (!big || r.size() != m.size())
+    return std::nullopt;
+  llvm::DynamicAPInt det = bareissDeterminant(*big);
+  if (det == 0)
+    return std::nullopt;
+  const BigMatrix adj = bigAdjugate(*big);
+  const unsigned n = m.size();
+  // (r adj)_c = sum_i r_i adj[i][c]; lambda = (r adj) / det, reduced, with a
+  // positive denominator.
+  llvm::SmallVector<llvm::DynamicAPInt> numerators(n, llvm::DynamicAPInt(0));
+  for (unsigned c = 0; c < n; ++c)
+    for (unsigned i = 0; i < n; ++i)
+      numerators[c] += llvm::DynamicAPInt(r[i]) * adj[i][c];
+  if (det < 0) {
+    det = -det;
+    for (llvm::DynamicAPInt &v : numerators)
+      v = -v;
+  }
+  llvm::DynamicAPInt g = det;
+  for (const llvm::DynamicAPInt &v : numerators)
+    g = llvm::gcd(g, llvm::abs(v));
+  if (g > 1) {
+    det /= g;
+    for (llvm::DynamicAPInt &v : numerators)
+      v /= g;
+  }
+  RationalRow out;
+  std::optional<int64_t> den = toInt64(det);
+  if (!den)
+    return std::nullopt;
+  out.denominator = *den;
+  for (const llvm::DynamicAPInt &v : numerators) {
+    std::optional<int64_t> x = toInt64(v);
+    if (!x)
+      return std::nullopt;
+    out.numerators.push_back(*x);
+  }
+  return out;
+}
+
+bool lattice::isSignedPermutation(const IntMatrix &m) {
+  const unsigned n = m.size();
+  if (n == 0)
+    return false;
+  llvm::SmallVector<bool> columnUsed(n, false);
+  for (const IntVector &row : m) {
+    if (row.size() != n)
+      return false;
+    std::optional<unsigned> nonzero;
+    for (unsigned c = 0; c < n; ++c) {
+      if (row[c] == 0)
+        continue;
+      if (nonzero || (row[c] != 1 && row[c] != -1) || columnUsed[c])
+        return false;
+      nonzero = c;
+    }
+    if (!nonzero)
+      return false;
+    columnUsed[*nonzero] = true;
+  }
+  return true;
 }

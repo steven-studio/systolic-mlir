@@ -24402,9 +24402,9 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "AffineMatmulToSystolic.cpp lowerOne: 'A and B are different views of the same memref' -- one array as both factors is lowered only when one read-only tensor serves both: the first factor's (I, K) view and the second's (K, J) view are the same element map in some orientation of the coordinates (each enumerated upward or downward; LogicalOperand::sameView, the orientation search of 2026-10-18); A . A^T and a skew read by one factor only are two views (docs/AFFINE_GEMM_MAPPING.md section 7, README section 2); decided by enumeration (casespec.one_tensor_serves_both_factors)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -24414,14 +24414,14 @@
     "recognition": "accept",
     "hoisting_required": false,
     "dense_partition": "supported",
-    "lowering": "unsupported",
-    "driver": "stays_on_host",
-    "reject_stage": "lowering",
-    "reject_reason": "A and B are different views of the same memref"
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": "ISSUE-001",
-   "redecided": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "redecided": "2026-10-18 (docs/AFFINE_GEMM_MAPPING.md sections 7 and 19.12): OUT_OF_SCOPE same_memref_views before; ACCEPT since -- two views of one array are lowered",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -24429,7 +24429,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": -4945,
-   "math_note": "C += A[:, 0:8] A[:, 1:9]: both operands are views of the same array\nbut different ones.  A valid GEMM; the lowering refuses two different\nrestrict tensors of one buffer ('A and B are different views of the\nsame memref').  Legal, unsupported.  Before that check can even run,\nthe recognizer refuses the nest: B's column expression j + 1 is not\nC's j (ISSUE-001's rule).",
+   "math_note": "C += A[:, 0:8] A[:, 1:9]: both operands are views of the same array\nbut different ones.  A valid GEMM.  Until 2026-10-18 the lowering\nrefused two different views of one memref ('A and B are different\nviews of the same memref', a documented limitation); since then\n(docs/AFFINE_GEMM_MAPPING.md sections 7, 19.12) each factor gets its own\nread-only view of the shared base and the nest is offloaded.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/extended/ext_007.c -o ext_007 && ./ext_007",
@@ -28784,7 +28784,7 @@
     "mathematical_gemm": true,
     "recognition": "UNDETERMINED",
     "offload": "undetermined",
-    "basis": "UNDETERMINED -- a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?",
+    "basis": "UNDETERMINED -- a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds are constants or affine in the enclosing counters, never a runtime value; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?",
     "spec_question": "SQ-3",
     "views": {},
     "runtime": "not applicable: an MLIR-level case is not compiled by systolic-cc nor executed"
@@ -28916,6 +28916,6 @@
  "spec_questions": {
   "SQ-1": "a coordinate split over several loops with a different mixed radix per operand (A[4*i0 + i1][k] with C[8*i0 + i1][j]): the definition's 'injective affine function of the coordinate's loops' admits it, the 'inside' list does not name it, and the operand views are not strided sub-matrices (a rank-2 memref.subview cannot express them) -- inside the specification (with a copy or a rank-3 view) or a documented limitation?",
   "SQ-2": "an empty GEMM (a loop of zero iterations, M, N or K = 0): the nest computes nothing; must the compiler offload it (zero invocations) or refuse it?  Either keeps the result correct; the specification does not say which",
-  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds must be constants; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?"
+  "SQ-3": "a loop with a symbolic bound (affine.for 0 to %n: a GEMM extent that is a runtime value): unreachable from the C front end, whose bounds are constants or affine in the enclosing counters, never a runtime value; is the MLIR path's refusal ('no static normalized extent') a documented limitation, or must dynamic extents be supported?"
  }
 }

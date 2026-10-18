@@ -19,11 +19,11 @@
  *     tags: J_views_differ, A_times_A
  *
  *   C += A[:, 0:8] A[:, 1:9]: both operands are views of the same array
- *   but different ones.  A valid GEMM; the lowering refuses two different
- *   restrict tensors of one buffer ('A and B are different views of the
- *   same memref').  Legal, unsupported.  Before that check can even run,
- *   the recognizer refuses the nest: B's column expression j + 1 is not
- *   C's j (ISSUE-001's rule).
+ *   but different ones.  A valid GEMM.  Until 2026-10-18 the lowering
+ *   refused two different views of one memref ('A and B are different
+ *   views of the same memref', a documented limitation); since then
+ *   (docs/AFFINE_GEMM_MAPPING.md sections 7, 19.12) each factor gets its own
+ *   read-only view of the shared base and the nest is offloaded.
  *
  * Array dimensions: A: float[8][9]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -32,20 +32,17 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: AffineMatmulToSystolic.cpp lowerOne: 'A and B are different views of the same memref' -- one array as both factors is lowered only when one read-only tensor serves both: the first factor's (I, K) view and the second's (K, J) view are the same element map in some orientation of the coordinates (each enumerated upward or downward; LogicalOperand::sameView, the orientation search of 2026-10-18); A . A^T and a skew read by one factor only are two views (docs/AFFINE_GEMM_MAPPING.md section 7, README section 2); decided by enumeration (casespec.one_tensor_serves_both_factors)
- * Current implementation (commit 6e25528 with the fix of ISSUE-001, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand
+ *   re-decided: 2026-10-18 (docs/AFFINE_GEMM_MAPPING.md sections 7 and 19.12): OUT_OF_SCOPE same_memref_views before; ACCEPT since -- two views of one array are lowered
+ * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
  *   dense partition (getDenseLogicalGemm):   supported
- *   lowering (--affine-matmul-to-systolic):  unsupported
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: lowering
- *   reason: A and B are different views of the same memref
- * Classification: DOCUMENTED LIMITATION -- was a FALSE NEGATIVE of failures/issues/ISSUE-001 (fixed)
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

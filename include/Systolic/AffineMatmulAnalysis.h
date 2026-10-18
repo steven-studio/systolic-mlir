@@ -198,6 +198,42 @@ struct AffineLogicalNormalization {
   bool isIdentity = false;
 };
 
+/// The exact mapping of the task of 2026-10-17 (its Parts 2-6), computed for
+/// the non-degenerate three-loop case and for the degenerate K = 1 case, and
+/// REPORTED (the discovery pass prints it; nothing is decided from it -- the
+/// decision is the role mapping of section 19.2, which is more general: C may
+/// be a skewed view, a role may span several loops, batch coordinates). In
+/// the task's convention the logical coordinates are C's own indices,
+/// I = Ic(x), J = Jc(x), and K the reduction row q of the recognizer:
+///   y = T x + d,  T = [cI; cJ; q] over the loops of two or more iterations,
+///   lambda = r T^-1 for each index row r of A and B (exact rationals),
+/// det T, whether T is unimodular, whether T diag(step) is a signed
+/// permutation (then T(D) + d is a complete integer box), the primitive kernel
+/// v of [cI; cJ] with the reductions' variation Ia.v, Ka.v, Kb.v, Jb.v, and
+/// the role restrictions (A free of J, B free of I). K = 1 (no reduction
+/// loop) is the documented degenerate path: a 2-D mapping [cI; cJ], no
+/// reduction direction, the non-degenerate rule not applied (section 19.12).
+struct ExactMapping {
+  bool defined = false;
+  std::string note;
+  unsigned dims = 0;
+  bool degenerateK = false;
+  SmallVector<SmallVector<int64_t>> T;
+  SmallVector<int64_t> d;
+  int64_t det = 0;
+  bool singular = false;
+  bool unimodular = false;
+  bool boxImage = false;
+  SmallVector<int64_t> v;
+  std::array<int64_t, 4> deltas{0, 0, 0, 0};
+  bool aVaries = false, bVaries = false;
+  SmallVector<lattice::RationalRow> lambdaA, lambdaB;
+  bool aFreeOfJ = false, bFreeOfI = false;
+  unsigned rankA = 0, rankB = 0, rankC = 0;
+  /// The recognizer took the second factor as the row operand (C = B' A').
+  bool rowsSwapped = false;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
   Operation *outputStore = nullptr;
@@ -291,6 +327,9 @@ struct LogicalMatmul {
   // from zero and adds the sum to C, so it is offloaded only with this
   // permission or the pass's allow-fp-reassociation option.
   bool reductionMayReassociate = false;
+
+  // The task's exact mapping (reported by the discovery pass, not decided).
+  ExactMapping exactMapping;
 };
 
 /// Find Affine loop nests worth attempting to recognize.
@@ -310,6 +349,52 @@ FailureOr<LogicalMatmul>
 recognizeLogicalMatmul(AffineMatmulCandidate candidate,
                        std::string *why = nullptr,
                        GemmMappingClass *mappingClass = nullptr);
+
+/// The domain normalization of docs/AFFINE_GEMM_MAPPING.md section 19.7 /
+/// 19.12 (2026-10-18), applied to one perfect multiply-accumulate band whose
+/// loop bounds form a constant-extent parallelotope: every loop's lower and
+/// upper bound are the same linear form l_s of the outer counters plus
+/// constants a_s < b_s (a box has every l_s = 0). The nest is rewritten in
+/// place into the equivalent box nest
+///
+///   x = U x',   U lower unitriangular (unimodular),
+///   x'_s runs a_s, a_s + step_s, ... < b_s,
+///
+/// with U[s][u] = delta_su + sum_{u <= t < s} l_s[t] U[t][u]: the loop bounds
+/// become the constants a_s, b_s and every affine.load / affine.store map is
+/// composed with U. U is a bijection of Z^n taking the original iteration
+/// set onto the box and preserving the lexicographic order, and every access
+/// reads F(x) = F(U x'), so the rewritten nest performs the same sequence of
+/// memory operations as the original: everything a later stage proves about
+/// the box nest holds for the original nest.
+struct DomainNormalization {
+  /// The band's outermost loop (the same op after the rewrite).
+  Operation *outermost = nullptr;
+  /// x = U x', one row per loop of the band, in nesting order.
+  SmallVector<SmallVector<int64_t>> U;
+  /// The shift of each loop as its bounds state it: l_s over the band
+  /// positions (x_s = x_s' + l_s . x_<s); U composes these shifts.
+  SmallVector<SmallVector<int64_t>> shift;
+  /// The box: x'_s in [lower_s, upper_s) with the loop's step.
+  SmallVector<int64_t> lower, upper, step;
+  /// The loops whose bounds depended on outer counters (nonzero l_s).
+  SmallVector<unsigned> shifted;
+};
+
+/// Normalizes every qualifying band under `root` (see DomainNormalization);
+/// bands outside the family -- an extent that varies with an outer counter, a
+/// bound with floordiv/ceildiv/mod or a symbol, max/min of a counter and a
+/// constant, a counter used by anything but the body's loads and stores and
+/// the inner bounds -- are left untouched, and so is every band whose bounds
+/// are already constants. Checked 64-bit arithmetic: a composed coefficient
+/// that does not fit leaves the band untouched. Returns the normalizations
+/// applied, for the diagnostics.
+SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *root);
+
+/// One line per loop of a normalization, for the diagnostics:
+///   loop 1: x1 = x1' + 1*x0, box [0, 4) step 1
+void describeDomainNormalization(const DomainNormalization &normalization,
+                                 llvm::raw_ostream &os, StringRef indent);
 
 /// The geometric screening of a multiply-accumulate nest
 /// (docs/AFFINE_GEMM_MAPPING.md section 19, layer 1): the linear algebra of

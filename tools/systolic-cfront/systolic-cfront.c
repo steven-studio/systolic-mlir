@@ -39,6 +39,12 @@
  *                (S > 0), i = i + S -- with LB, UB, S integer constant
  *                expressions; i declared in the for, never written in the
  *                body. Becomes affine.for LB to UB step S (<=: UB + 1).
+ *                LB and UB may also be affine expressions of the enclosing
+ *                counters with the same counter terms (for (int k = i; k <
+ *                i + 4; ++k): the bounds shift together, the domain is a
+ *                constant-extent parallelotope, docs/AFFINE_GEMM_MAPPING.md
+ *                section 19.12), counting up; becomes affine.for with
+ *                affine_map bounds over the enclosing counters.
  *                Counting down: for (int i = LB; i > B; --i) -- also >=,
  *                i--, i -= S (S > 0), i = i - S. affine.for only counts up,
  *                so it becomes the ordinal loop affine.for %i = 0 to N (N the
@@ -385,6 +391,10 @@ typedef struct {
      the emitted affine.for, and the counter's value is origin - stride * t */
   int descending;
   long long origin, stride;
+  /* ENV_IV of a loop whose bounds are affine in the enclosing counters: the
+     counter is first + step * t plus this shift, a form over the enclosing
+     counters with constant 0 (first and last are the values without it). */
+  linear_form shift;
 } env_entry;
 
 typedef struct {
@@ -685,15 +695,87 @@ static char *affine_index(translator *tr, const json_value *node,
 
 /* Exact (min, max) of a linear form over the enclosing loops' box; 0 if some
    enclosing loop runs zero times (the access never executes). */
-static int form_range(translator *tr, const linear_form *f, long long *lo,
-                      long long *hi, const json_value *node) {
-  long long l = f->constant, h = f->constant;
+/* The linear form of a loop bound over the enclosing counters (affine_index's
+   rules: counters, integer constants, + - and constant *), or 0 when the
+   expression is not one. */
+static int try_bound_form(translator *tr, const json_value *node,
+                          linear_form *form) {
+  jmp_buf saved;
+  memcpy(saved, unsupported_jump, sizeof saved);
+  int ok = 0;
+  if (setjmp(unsupported_jump) == 0) {
+    affine_index(tr, node, form);
+    ok = 1;
+  }
+  memcpy(unsupported_jump, saved, sizeof saved);
+  return ok;
+}
+
+/* The text of an affine.for bound given as a linear form over the enclosing
+   counters: the constant alone, or affine_map<(d0, ...) -> (expr)>(%a, ...)
+   over the counters the form reads (a counting-down counter's value is
+   origin - stride * ordinal, substituted as affine_index does). */
+static char *bound_text(translator *tr, const linear_form *f,
+                        const json_value *node) {
+  long long constant = f->constant;
+  const char *names[MAX_FORM];
+  long long coef[MAX_FORM];
+  size_t n = 0;
   for (size_t i = 0; i < f->n; ++i) {
     env_entry *e = env_find(tr, f->ids[i]);
+    long long c = f->coef[i];
+    if (e->descending) {
+      constant = checked(constant, checked(c, e->origin, '*', node), '+', node);
+      c = checked(0, checked(c, e->stride, '*', node), '-', node);
+    }
+    if (c == 0)
+      continue;
+    names[n] = e->name;
+    coef[n++] = c;
+  }
+  if (n == 0)
+    return format("%lld", constant);
+  char *dims = xstrdup(""), *args = xstrdup("");
+  char *expr = format("%lld", constant);
+  for (size_t i = 0; i < n; ++i) {
+    unsigned long long magnitude =
+        coef[i] < 0 ? 0ULL - (unsigned long long)coef[i]
+                    : (unsigned long long)coef[i];
+    dims = format("%s%sd%zu", dims, i ? ", " : "", i);
+    args = format("%s%s%s", args, i ? ", " : "", names[i]);
+    expr = format("%s %c d%zu * %llu", expr, coef[i] < 0 ? '-' : '+', i,
+                  magnitude);
+  }
+  return format("affine_map<(%s) -> (%s)>(%s)", dims, expr, args);
+}
+
+/* The range [lo, hi] of a form's values over the loops' iterations. Each
+   counter with affine bounds is x = x' + shift(enclosing counters) with x'
+   running first .. last: the shifts are substituted innermost first (a
+   shift's own counters are substituted after it), which leaves a form over
+   independently ranging values, extreme at their ends -- exact on a
+   constant-extent parallelotope, not a hull. */
+static int form_range(translator *tr, const linear_form *f, long long *lo,
+                      long long *hi, const json_value *node) {
+  linear_form g = *f;
+  for (size_t i = tr->env_n; i-- > 0;) {
+    env_entry *e = &tr->env[i];
+    if (e->kind != ENV_IV || e->shift.n == 0)
+      continue;
+    long long c = 0;
+    for (size_t k = 0; k < g.n; ++k)
+      if (strcmp(g.ids[k], e->decl) == 0)
+        c = g.coef[k];
+    if (c != 0)
+      g = form_add(g, form_scale(e->shift, c, node), node);
+  }
+  long long l = g.constant, h = g.constant;
+  for (size_t i = 0; i < g.n; ++i) {
+    env_entry *e = env_find(tr, g.ids[i]);
     if (!e->has_values)
       return 0;
-    long long a = checked(f->coef[i], e->first, '*', node);
-    long long b = checked(f->coef[i], e->last, '*', node);
+    long long a = checked(g.coef[i], e->first, '*', node);
+    long long b = checked(g.coef[i], e->last, '*', node);
     l = checked(l, a < b ? a : b, '+', node);
     h = checked(h, a < b ? b : a, '+', node);
   }
@@ -1109,7 +1191,22 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     unsupported(var, "the loop counter must be an initialized integer "
                      "variable");
   const char *decl = json_string(json_get(var, "id"), "");
-  long long lb = int_constant(child(var, 0));
+  /* The initial value: an integer constant, or an affine expression of the
+     enclosing loop counters (for (int k = i; ...)): its counter terms are
+     the loop's shift, its constant the first value without the shift. */
+  long long lb;
+  linear_form lb_form = {0};
+  int lb_affine = 0;
+  if (try_int_constant(child(var, 0), &lb)) {
+    lb_form.constant = lb;
+  } else {
+    if (!try_bound_form(tr, child(var, 0), &lb_form))
+      unsupported(child(var, 0), "the loop counter's initial value must be an "
+                                 "integer constant or an affine expression of "
+                                 "the enclosing loop counters");
+    lb_affine = lb_form.n != 0;
+    lb = lb_form.constant;
+  }
 
   const char *cop = opcode_of(cond);
   int has_cond = cond && cond->kind == JSON_OBJECT && cond->count;
@@ -1127,13 +1224,24 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     up = cop[0] == '<';
     down = !up;
   }
+  linear_form ub_form = {0};
+  int ub_affine = 0;
   if (!affine_cond) {
     if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
         !is_ref_to(child(cond, 0), decl))
       unsupported(has_cond ? cond : s, "the loop condition must be 'counter < "
                                        "bound', 'counter <= bound', 'counter > "
                                        "bound' or 'counter >= bound'");
-    bound = int_constant(child(cond, 1));
+    /* The bound: an integer constant, or an affine expression of the
+       enclosing loop counters (k < i + 4). */
+    if (!try_int_constant(child(cond, 1), &bound)) {
+      if (!try_bound_form(tr, child(cond, 1), &ub_form))
+        unsupported(child(cond, 1), "the loop bound must be an integer "
+                                    "constant or an affine expression of the "
+                                    "enclosing loop counters");
+      ub_affine = ub_form.n != 0;
+      bound = ub_form.constant;
+    }
   }
 
   /* The signed step: ++ / += S / = i + S count up, -- / -= S / = i - S count
@@ -1191,7 +1299,45 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   __int128 type_min = is_unsigned ? 0 : -(__int128)type_max - 1;
   long long ub = 0;   /* counting up: the exclusive upper bound */
   __int128 trips;
-  if (up) {
+  if (lb_affine || ub_affine) {
+    /* Bounds affine in the enclosing counters: both must have the same
+       counter terms, so that the extent UB - LB is a constant and the
+       domain a constant-extent parallelotope (the compiler maps it onto a
+       box, docs/AFFINE_GEMM_MAPPING.md section 19.12). A varying trip count
+       (a triangle) is not translated. */
+    if (!up)
+      unsupported(s, "a loop whose bounds depend on an enclosing loop counter "
+                     "must count up");
+    ub = bound;
+    if (strcmp(cop, "<=") == 0)
+      ub = checked(ub, 1, '+', cond);
+    linear_form lb_terms = lb_form, ub_terms = ub_form;
+    lb_terms.constant = 0;
+    ub_terms.constant = 0;
+    linear_form extent = form_add(ub_terms, form_scale(lb_terms, -1, s), s);
+    if (extent.n != 0)
+      unsupported(s, "the loop's trip count depends on an enclosing loop "
+                     "counter (its bounds do not shift together): only "
+                     "bounds with the same counter terms are supported");
+    trips = ub > lb ? ((__int128)ub - 1 - lb) / step + 1 : 0;
+    /* At every value of the enclosing counters the bounds must fit the
+       counter's type, the last increment too. An enclosing loop that runs
+       zero times means this one never runs. */
+    if (trips > 0) {
+      long long lb_lo, lb_hi, ub_lo, ub_hi;
+      linear_form ub_full = ub_form;
+      ub_full.constant = ub;
+      if (form_range(tr, &lb_form, &lb_lo, &lb_hi, s) &&
+          form_range(tr, &ub_full, &ub_lo, &ub_hi, s)) {
+        __int128 last_increment = (__int128)ub_hi - 1 + step;
+        if (last_increment > (__int128)type_max || lb_lo < type_min ||
+            lb_lo < -2147483648LL)
+          unsupported(s, "the loop counter could overflow '%s'", vtype);
+      } else {
+        trips = 0;
+      }
+    }
+  } else if (up) {
     ub = bound;
     if (strcmp(cop, "<=") == 0)
       ub = checked(ub, 1, '+', cond);
@@ -1246,6 +1392,11 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     e->first = lb;
     e->last = (long long)((__int128)lb + (__int128)step * (trips - 1));
   }
+  /* The shift of a counter with affine bounds (form_range substitutes it). */
+  if (lb_affine) {
+    e->shift = lb_form;
+    e->shift.constant = 0;
+  }
   if (down) {
     /* affine.for counts up: the ordinal t = 0 .. trips-1, the counter
        lb - |step| * t (see affine_index). */
@@ -1253,11 +1404,18 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     e->origin = lb;
     e->stride = -step;
     emit(tr, indent, "affine.for %s = 0 to %lld {", name, (long long)trips);
-  } else if (step == 1)
-    emit(tr, indent, "affine.for %s = %lld to %lld {", name, lb, ub);
-  else
-    emit(tr, indent, "affine.for %s = %lld to %lld step %lld {", name, lb, ub,
-         step);
+  } else {
+    /* Constant bounds are the numbers; bounds affine in the enclosing
+       counters are affine_map<(d0, ...) -> (...)>(%counters). */
+    ub_form.constant = ub;
+    char *lb_text = bound_text(tr, &lb_form, s);
+    char *ub_text = bound_text(tr, &ub_form, s);
+    if (step == 1)
+      emit(tr, indent, "affine.for %s = %s to %s {", name, lb_text, ub_text);
+    else
+      emit(tr, indent, "affine.for %s = %s to %s step %lld {", name, lb_text,
+           ub_text, step);
+  }
   if (strcmp(kind_of(body), "CompoundStmt") == 0) {
     statements(tr, json_get(body, "inner"), indent + 1, 0);
   } else {

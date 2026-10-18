@@ -377,16 +377,24 @@ func.func @test1_symbolic(%A: memref<4x?xf32> {llvm.noalias}, %B: memref<?x4xf32
   return
 }
 // -----
-// NOT DECIDED (section 19.7): a batched GEMM on a constant-extent parallelotope. With
-// j in [i, i + 4) and k in [j, j + 2), xi(I, J, p) = (I, I + J, I + J + p) is a unimodular
-// bijection from the box [0,4) x [0,4) x [0,2) and per p the nest is the 4 x 4 x 1 GEMM
-// C[I][J][p] += A[I][p] * B[J][p]. In the original counters every loop is read by all three
-// operands; on a box that would be element-wise (PROVEN_INVALID), here it is UNKNOWN: the
-// parametrization is not constructed.
+// RE-DECIDED 2026-10-18 (section 19.12; UNKNOWN between 2026-10-16 and 2026-10-18): a batched
+// GEMM on a constant-extent parallelotope. With j in [i, i + 4) and k in [j, j + 2),
+// xi(I, J, p) = (I, I + J, I + J + p) is a unimodular bijection from the box
+// [0,4) x [0,4) x [0,2) and per p the nest is the 4 x 4 x 1 GEMM C[I][J][p] += A[I][p] * B[J][p].
+// The domain normalization constructs exactly that parametrization (x = U x' with
+// U = [[1,0,0],[1,1,0],[1,1,1]]: loop 1 shifted by x0, loop 2 by x1, i.e. by x0' + x1') and the box nest is
+// the batched GEMM, lowered: per p a rank-1 update of C[:, :, p]. (In the original counters
+// every loop is read by all three operands, which on a box would be element-wise; the readers
+// are taken on the box nest, section 19.2.)
 // CHECK-LABEL: func.func @parallelotope_rank1
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: 1 coordinate(s) are read by all three operands and none by two: an element-wise product (a batched GEMM with M = N = K = 1), not a matrix multiplication -- on a domain that is not a box the readers decide nothing
-// DISC-NEXT:   class: UNKNOWN
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 1
+// REMARK:      iteration domain normalized to a box (x = U x', docs/AFFINE_GEMM_MAPPING.md section 19.12): loop 1: x1 = x1' + 1*x0, box [0, 4) step 1
+// REMARK-NEXT: loop 2: x2 = x2' + 1*x1, box [0, 2) step 1
+// REMARK:      affine GEMM 4x4x1 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+// DISC:        domain normalization: 1 nest(s)
+// DISC-NEXT:   loop 1: x1 = x1' + 1*x0, box [0, 4) step 1
+// DISC-NEXT:   loop 2: x2 = x2' + 1*x1, box [0, 2) step 1
+// DISC:        dense logical GEMM: yes, I/J/K on loops 0/1/, batched over loop(s) 2 (2 batch iteration(s))
 func.func @parallelotope_rank1(%A: memref<4x2xf32> {llvm.noalias}, %B: memref<4x2xf32> {llvm.noalias}, %C: memref<4x4x2xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = affine_map<(d0) -> (d0)>(%i) to affine_map<(d0) -> (d0 + 4)>(%i) {

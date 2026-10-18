@@ -94,3 +94,36 @@ func.func @inject_ignored_ok() attributes {lattice.inject = [[0], [1]], lattice.
 // A coordinate the map ignores collides along itself.
 // CHECK: @inject_ignored: collision (1, 0)
 func.func @inject_ignored() attributes {lattice.inject = [[0], [1]], lattice.box = [2, 5]} { return }
+
+// Determinants, adjugates and inverses (exact; the 2026-10-18 normalization
+// task). The shift x = U x' of a parallelotope: unimodular, inverse the
+// opposite shift.
+// CHECK: @det_shift: det 1, adjugate {{\[\[}}1, 0, 0], [-1, 1, 0], [0, 0, 1]], unimodular, inverse {{\[\[}}1, 0, 0], [-1, 1, 0], [0, 0, 1]]
+// CHECK: @det_shift: row * inverse = [1, 1, 0] / 1
+func.func @det_shift() attributes {lattice.square = [[1, 0, 0], [1, 1, 0], [0, 0, 1]], lattice.row = [2, 1, 0]} { return }
+
+// The task's T for C[2i + j][j]: I = 2i + j, J = j, K = k -- det 2, not
+// unimodular: the (I, J) image of the box is a sublattice, not a complete box.
+// lambda for A's row i: (1, -1, 0) / 2 -- a rational, so the view in these
+// coordinates is not integral.
+// CHECK: @det_skewed_c: det 2, adjugate {{\[\[}}1, -1, 0], [0, 2, 0], [0, 0, 2]]
+// CHECK-NOT: unimodular
+// CHECK: @det_skewed_c: row * inverse = [1, -1, 0] / 2
+func.func @det_skewed_c() attributes {lattice.square = [[2, 1, 0], [0, 1, 0], [0, 0, 1]], lattice.row = [1, 0, 0]} { return }
+
+// A singular matrix: det 0, the adjugate still defined (cofactors), no inverse.
+// CHECK: @det_singular: det 0, adjugate {{\[\[}}1, -1], [-1, 1]]
+// CHECK: @det_singular: row * inverse = undefined
+func.func @det_singular() attributes {lattice.square = [[1, 1], [1, 1]], lattice.row = [1, 0]} { return }
+
+// Signed permutations: the identity and a reversal; a scaled axis is not one.
+// CHECK: @det_perm: det -1, adjugate {{\[\[}}0, -1], [-1, 0]], unimodular, inverse {{\[\[}}0, 1], [1, 0]], a signed permutation
+func.func @det_perm() attributes {lattice.square = [[0, 1], [1, 0]]} { return }
+// CHECK: @det_reversal: det -1, adjugate {{\[\[}}-1, 0], [0, 1]], unimodular, inverse {{\[\[}}1, 0], [0, -1]], a signed permutation
+func.func @det_reversal() attributes {lattice.square = [[1, 0], [0, -1]]} { return }
+// CHECK: @det_scaled: det 2, adjugate {{\[\[}}1, 0], [0, 2]]{{$}}
+func.func @det_scaled() attributes {lattice.square = [[2, 0], [0, 1]]} { return }
+
+// Test 2's T (docs 19.6): det 3, the (I, J) rows and the reduction direction.
+// CHECK: @det_test2_full: det 3
+func.func @det_test2_full() attributes {lattice.square = [[1, 1, -2], [1, 2, 1], [1, 1, 1]]} { return }

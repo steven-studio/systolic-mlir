@@ -229,10 +229,18 @@ func.func @v_c_not_injective(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4x
   return
 }
 // -----
-// A shifted reduction loop, t in [i, i+4): the domain is not a box (a parallelotope),
-// so the box screening does not apply (the recognizer's domain parametrization, section 19).
+// A shifted reduction loop, t in [i, i+4): the domain is a constant-extent parallelotope.
+// Since 2026-10-18 (section 19.12) the domain normalization rewrites it into the box nest
+// x = U x' (t = t' + i, so A[i][t'], B[t'][j]) before anything is screened, and the screening
+// sees the plain 4 x 4 x 4 GEMM. (Until then: "not screened: loop 2's lower bound depends on
+// another loop's counter".)
+// GEO:      domain normalization: 1 nest(s)
+// GEO-NEXT:   loop 2: x2 = x2' + 1*x0, box [0, 4) step 1
 // GEO:      geometry screening (necessary conditions only, not a decision):
-// GEO-NEXT:   not screened: loop 2's lower bound depends on another loop's counter: the iteration domain is not a box
+// GEO-NEXT:   loop 0: trip 4, readers A C -> I
+// GEO-NEXT:   loop 1: trip 4, readers B C -> J
+// GEO-NEXT:   loop 2: trip 4, readers A B -> K (reduction)
+// GEO:        task algorithm (full space): rank(Ic,Jc)=2 yes, rank(Ia,Ka)=2 yes, rank(Kb,Jb)=2 yes, rank(six)=3 yes, rank(Ia,Ka,Kb,Jb)=3 yes, A varies along null(Ic,Jc) yes, B varies along null(Ic,Jc) yes, swap(Ia,Ka) no, swap(Kb,Jb) no -> passes
 func.func @shifted_reduction(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {

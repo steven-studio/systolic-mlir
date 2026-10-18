@@ -1024,70 +1024,22 @@ struct AffineMatmulToSystolicPass
       }
     }
 
-    // A x A: one read-only view serves both operands. Two different views
-    // of one memref would be two restrict tensors of the same buffer. The
-    // GEMM's coordinates may each be enumerated upward or downward (a
-    // relabelling of the ordinals: the same products, the same sums, every
-    // operand's view read in the other direction along it), so when the two
-    // factors are one memref but not one view, the seven other orientations
-    // are tried and the first in which they coincide is used for all three
-    // operands (A[3 - i][k] * A[k][j]: with I enumerated downward both
-    // factors are the whole memref and C is written through a reversed
-    // view; docs/AFFINE_GEMM_MAPPING.md section 7).
-    bool sharedInput = lhs->sameView(*rhs);
-    if (!sharedInput && matmul.lhs == matmul.rhs) {
-      // Bit d of a mask reverses coordinate d (I, J, K). K alone first: it
-      // changes no view of C; then one output coordinate; then pairs.
-      static constexpr unsigned kOrientations[] = {4, 1, 2, 5, 6, 3, 7};
-      for (unsigned mask : kOrientations) {
-        if (sharedInput)
-          break;
-        DenseLogicalGemm flipped = *dense;
-        bool representable = true;
-        for (unsigned d = 0; d < 3 && representable; ++d) {
-          if (!(mask & (1u << d)))
-            continue;
-          // The coordinate's last value becomes its first: offset + scale *
-          // (extent - 1), checked (the partition checked it too).
-          std::optional<int64_t> span =
-              llvm::checkedMul(flipped.scale[d], flipped.extent[d] - 1);
-          std::optional<int64_t> last =
-              span ? llvm::checkedAdd(flipped.offset[d], *span) : std::nullopt;
-          if (!last) {
-            representable = false;
-            break;
-          }
-          flipped.offset[d] = *last;
-          flipped.scale[d] = -flipped.scale[d];
-        }
-        if (!representable)
-          continue;
-        std::string reason;
-        GemmMappingClass cls = GemmMappingClass::ProvenValid;
-        auto flippedLhs = getLogicalOperand(matmul.lhs, matmul, flipped, kLogicalI,
-                                            kLogicalK, matmul.viewA, matmul.layoutA,
-                                            "A", reason, cls);
-        auto flippedRhs = getLogicalOperand(matmul.rhs, matmul, flipped, kLogicalK,
-                                            kLogicalJ, matmul.viewB, matmul.layoutB,
-                                            "B", reason, cls);
-        auto flippedOut = getLogicalOperand(matmul.output, matmul, flipped,
-                                            kLogicalI, kLogicalJ, matmul.viewC,
-                                            matmul.layoutC, "C", reason, cls);
-        if (failed(flippedLhs) || failed(flippedRhs) || failed(flippedOut) ||
-            !flippedLhs->sameView(*flippedRhs))
-          continue;
-        dense = flipped;
-        lhs = flippedLhs;
-        rhs = flippedRhs;
-        out = flippedOut;
-        sharedInput = true;
-      }
-    }
-    if (!sharedInput && matmul.lhs == matmul.rhs) {
-      why = "A and B are different views of the same memref";
-      mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
-      return failure();
-    }
+    // A x A: when the two factors are one read-only view -- the same memref,
+    // the same element map -- one tensor serves both operands (sharedInput).
+    const bool sharedInput = lhs->sameView(*rhs);
+    // Two different views of one memref (A . A^T, A[i][i + k] * A[k][j],
+    // A[i][2k] * A[2k][j]) are two read-only operand views sharing a base
+    // (docs section 7, 19.12, 2026-10-18): each gets its own view and its own
+    // to_tensor below. Both tensors carry `restrict` although their memrefs
+    // alias -- the invariant that keeps this sound: neither is writable,
+    // every use of them is a tensor.extract_slice staged through
+    // bufferization.to_buffer read_only (TileMatmulForFpga) or a read-only
+    // tile operand, and the output is provably disjoint from the shared base
+    // (provablyDisjointFromOutput refuses one root for input and output), so
+    // no write can reach either view through any alias. Until 2026-10-18
+    // (morning) this was refused as VALID_BUT_LOWERING_UNSUPPORTED; an
+    // orientation search that made some pairs one tensor was superseded by
+    // the two views the same day.
 
     // ------------------------------------------------------------------
     // Partition: the hardware plan's tiles (or the whole domain without a
@@ -1281,6 +1233,22 @@ struct AffineMatmulToSystolicPass
       return;
     }
 
+    // A constant-extent parallelotope domain (docs/AFFINE_GEMM_MAPPING.md
+    // sections 19.7, 19.12) becomes the equivalent box nest first, x = U x';
+    // then the repetition loops move outward, then the box pipeline runs.
+    SmallVector<DomainNormalization, 1> normalized =
+        normalizeParallelotopeDomains(module.getOperation());
+    if (report)
+      for (const DomainNormalization &dn : normalized) {
+        std::string lines;
+        llvm::raw_string_ostream os(lines);
+        describeDomainNormalization(dn, os, "");
+        dn.outermost->emitRemark()
+            << "affine multiply-accumulate nest: iteration domain normalized "
+               "to a box (x = U x', docs/AFFINE_GEMM_MAPPING.md section "
+               "19.12): "
+            << llvm::StringRef(lines).rtrim();
+      }
     hoistRepetitionLoops(module);
 
     SmallVector<AffineMatmulCandidate> candidates;

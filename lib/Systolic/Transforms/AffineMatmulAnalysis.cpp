@@ -2,6 +2,7 @@
 
 #include "mlir/Analysis/Presburger/Matrix.h"
 #include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
 #include "llvm/Support/CheckedArithmetic.h"
@@ -3176,6 +3177,163 @@ mlir::systolic::recognizeLogicalMatmul(
   result.reductionExtent =
       recoverLogicalExtent(logicalK, iterationIVs);
 
+
+  // -------------------------------------------------------------------
+  // The exact mapping of the task of 2026-10-17 (Parts 2-6), reported, not
+  // decided: C's own indices as I and J, the reduction row as K, over the
+  // loops of two or more iterations; K = 1 is the degenerate 2-D path.
+  // -------------------------------------------------------------------
+  {
+    ExactMapping &em = result.exactMapping;
+    SmallVector<unsigned> effective;
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (!single[d])
+        effective.push_back(d);
+    auto project = [&](ArrayRef<int64_t> full) {
+      lattice::IntVector v;
+      for (unsigned d : effective)
+        v.push_back(full[d]);
+      return v;
+    };
+    auto hasLoops = [&](const LinearForm &f) {
+      return llvm::any_of(effective,
+                          [&](unsigned d) { return f.coefficients[d] != 0; });
+    };
+    const unsigned cRank = operandMap[2].getNumResults();
+    const bool iHas = hasLoops(*linearI), jHas = hasLoops(*linearJ),
+               kHas = hasLoops(*linearK);
+    const unsigned rolesWithLoops = iHas + jHas + kHas;
+    if (!logicalPartitions.empty())
+      em.note = "batch coordinates: not the task's three-loop case (the role "
+                "mapping decides)";
+    else if (cRank != 2)
+      em.note = "C has " + std::to_string(cRank) +
+                " index(es), not two: not the task's case";
+    else if (effective.size() != rolesWithLoops)
+      em.note = "a role over several loops: not the task's case (the role "
+                "mapping decides)";
+    else if (!iHas || !jHas)
+      em.note = "M = 1 or N = 1: not the task's non-degenerate case (lowered "
+                "by the role mapping, SQ-4)";
+    else {
+      em.defined = true;
+      em.degenerateK = !kHas;
+      em.dims = effective.size();
+      LinearForm cRows[2];
+      SmallVector<LinearForm> aRows, bRows;
+      for (const Subscript &sub : subscripts) {
+        if (sub.operand == 2)
+          cRows[sub.dim] = sub.onDomain;
+        else
+          (sub.operand == 0 ? aRows : bRows).push_back(sub.onDomain);
+      }
+      em.T.push_back(project(cRows[0].coefficients));
+      em.T.push_back(project(cRows[1].coefficients));
+      em.d.push_back(cRows[0].constant);
+      em.d.push_back(cRows[1].constant);
+      if (!em.degenerateK) {
+        em.T.push_back(project(linearK->coefficients));
+        em.d.push_back(linearK->constant);
+      }
+      std::optional<int64_t> det = lattice::determinant(em.T);
+      if (!det) {
+        em.defined = false;
+        em.note = "the determinant does not fit in 64 bits";
+      } else {
+        em.det = *det;
+        em.singular = *det == 0;
+        em.unimodular = *det == 1 || *det == -1;
+        // T diag(step): a signed permutation iff every logical coordinate is
+        // one loop's counter up to sign and the step is one -- then T(D) + d
+        // is a complete integer box.
+        lattice::IntMatrix scaled = em.T;
+        bool fits = true;
+        for (auto &row : scaled)
+          for (unsigned c = 0; c < effective.size() && fits; ++c) {
+            affine::AffineForOp loop =
+                affine::getForInductionVarOwner(iterationIVs[effective[c]]);
+            std::optional<int64_t> product =
+                llvm::checkedMul(row[c], loop ? loop.getStepAsInt() : 1);
+            if (!product)
+              fits = false;
+            else
+              row[c] = *product;
+          }
+        em.boxImage = fits && lattice::isSignedPermutation(scaled);
+        auto rankOfRows = [&](ArrayRef<LinearForm> rows) -> unsigned {
+          lattice::IntMatrix m;
+          for (const LinearForm &r : rows)
+            m.push_back(project(r.coefficients));
+          std::optional<lattice::ColumnEchelon> e =
+              m.empty() ? std::nullopt
+                        : lattice::columnEchelon(m, effective.size());
+          return e ? e->rank : 0;
+        };
+        em.rankC = rankOfRows({cRows[0], cRows[1]});
+        em.rankA = rankOfRows(aRows);
+        em.rankB = rankOfRows(bRows);
+        if (!em.degenerateK) {
+          std::optional<lattice::ColumnEchelon> cEchelon = lattice::columnEchelon(
+              {em.T[0], em.T[1]}, effective.size());
+          if (cEchelon && cEchelon->kernel.size() == 1) {
+            std::optional<lattice::IntVector> v =
+                lattice::primitive(cEchelon->kernel[0]);
+            if (v) {
+              em.v = *v;
+              auto dot = [&](const LinearForm &r) -> std::optional<int64_t> {
+                lattice::IntVector p = project(r.coefficients);
+                int64_t sum = 0;
+                for (unsigned c = 0; c < p.size(); ++c) {
+                  std::optional<int64_t> term = llvm::checkedMul(p[c], (*v)[c]);
+                  std::optional<int64_t> next =
+                      term ? llvm::checkedAdd(sum, *term) : std::nullopt;
+                  if (!next)
+                    return std::nullopt;
+                  sum = *next;
+                }
+                return sum;
+              };
+              std::optional<int64_t> dIa = aRows.size() > 0 ? dot(aRows[0]) : 0,
+                                     dKa = aRows.size() > 1 ? dot(aRows[1]) : 0,
+                                     dKb = bRows.size() > 0 ? dot(bRows[0]) : 0,
+                                     dJb = bRows.size() > 1 ? dot(bRows[1]) : 0;
+              if (dIa && dKa && dKb && dJb) {
+                em.deltas = {*dIa, *dKa, *dKb, *dJb};
+                em.aVaries = !(*dIa == 0 && *dKa == 0);
+                em.bVaries = !(*dKb == 0 && *dJb == 0);
+              }
+            }
+          }
+        }
+        if (*det != 0) {
+          em.aFreeOfJ = true;
+          em.bFreeOfI = true;
+          for (const LinearForm &r : aRows) {
+            std::optional<lattice::RationalRow> lam =
+                lattice::rowTimesInverse(project(r.coefficients), em.T);
+            if (!lam) {
+              em.aFreeOfJ = false;
+              break;
+            }
+            em.aFreeOfJ = em.aFreeOfJ && lam->numerators[1] == 0;
+            em.lambdaA.push_back(*lam);
+          }
+          for (const LinearForm &r : bRows) {
+            std::optional<lattice::RationalRow> lam =
+                lattice::rowTimesInverse(project(r.coefficients), em.T);
+            if (!lam) {
+              em.bFreeOfI = false;
+              break;
+            }
+            em.bFreeOfI = em.bFreeOfI && lam->numerators[0] == 0;
+            em.lambdaB.push_back(*lam);
+          }
+        }
+        em.rowsSwapped = aLoad != lhsLoad;
+      }
+    }
+  }
+
   return result;
 }
 
@@ -3523,4 +3681,361 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
     result.conditionsRoles = conditions(roleLoops);
   }
   return result;
+}
+
+
+// ---------------------------------------------------------------------------
+// Domain normalization (docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12):
+// constant-extent parallelotopes rewritten into box nests, x = U x'.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// A bound of `loop`: its linear form over the band's counters (coefficient
+/// per band position) and constant, when the map has one result (or several
+/// constant results, folded as max / min), no symbols, and every operand is
+/// an outer counter of the band. nullopt otherwise.
+struct BandBound {
+  SmallVector<int64_t> coefficients; // over the band positions
+  int64_t constant = 0;
+};
+
+std::optional<BandBound> bandBound(affine::AffineForOp loop, bool lower,
+                                   ArrayRef<affine::AffineForOp> band,
+                                   unsigned position) {
+  AffineMap map = lower ? loop.getLowerBoundMap() : loop.getUpperBoundMap();
+  ValueRange operands =
+      lower ? loop.getLowerBoundOperands() : loop.getUpperBoundOperands();
+  if (map.getNumSymbols() != 0 || map.getNumResults() == 0)
+    return std::nullopt;
+  // Every result as a linear form over the band's counters; several results
+  // (max of lower bounds, min of upper bounds) must share one linear part
+  // (docs section 19.7: "max/min of such forms with one linear part") and
+  // fold to that part plus the max / min of their constants.
+  std::optional<BandBound> bound;
+  for (AffineExpr result : map.getResults()) {
+    FailureOr<LinearForm> form = extractLinearForm(result, map.getNumDims());
+    if (failed(form))
+      return std::nullopt;
+    BandBound one;
+    one.coefficients.assign(band.size(), 0);
+    one.constant = form->constant;
+    for (auto [j, operand] : llvm::enumerate(operands)) {
+      if (form->coefficients[j] == 0)
+        continue;
+      std::optional<unsigned> at;
+      for (unsigned t = 0; t < position; ++t) {
+        affine::AffineForOp outer = band[t];
+        if (outer.getInductionVar() == operand)
+          at = t;
+      }
+      if (!at)
+        return std::nullopt; // not an outer counter of the band
+      std::optional<int64_t> sum =
+          llvm::checkedAdd(one.coefficients[*at], form->coefficients[j]);
+      if (!sum)
+        return std::nullopt;
+      one.coefficients[*at] = *sum;
+    }
+    if (!bound) {
+      bound = one;
+      continue;
+    }
+    if (bound->coefficients != one.coefficients)
+      return std::nullopt; // max / min of different linear parts: not folded
+    bound->constant = lower ? std::max(bound->constant, one.constant)
+                            : std::min(bound->constant, one.constant);
+  }
+  return bound;
+}
+
+/// The band's position of a counter value, if it is one.
+std::optional<unsigned> bandPosition(Value value,
+                                     ArrayRef<affine::AffineForOp> band) {
+  for (auto [t, loop] : llvm::enumerate(band)) {
+    affine::AffineForOp candidate = loop;
+    if (candidate.getInductionVar() == value)
+      return t;
+  }
+  return std::nullopt;
+}
+
+/// An access rewritten over the band's counters x = U x': the composed map
+/// and its operands -- only the counters the composed map reads, so that
+/// operand membership keeps meaning "the access depends on this counter" for
+/// the hoist of repetition loops, the candidate collection and the
+/// recognizer. Every operand of the original access must be a band counter
+/// and every result a linear form; the composed coefficients are formed in
+/// checked 64-bit arithmetic before any AffineExpr is built (MLIR's own
+/// flattener wraps). nullopt when any of that fails.
+struct ShiftedAccess {
+  AffineMap map;
+  SmallVector<Value> operands;
+};
+
+std::optional<ShiftedAccess>
+composeWithShift(AffineMap map, ValueRange operands,
+                 ArrayRef<affine::AffineForOp> band,
+                 const SmallVector<SmallVector<int64_t>> &U) {
+  if (map.getNumSymbols() != 0)
+    return std::nullopt;
+  const unsigned n = band.size();
+  SmallVector<unsigned> position;
+  for (Value operand : operands) {
+    std::optional<unsigned> at = bandPosition(operand, band);
+    if (!at)
+      return std::nullopt;
+    position.push_back(*at);
+  }
+  SmallVector<SmallVector<int64_t>> coefficients; // per result, over x'
+  SmallVector<int64_t> constants;
+  for (AffineExpr expr : map.getResults()) {
+    FailureOr<LinearForm> form = extractLinearForm(expr, map.getNumDims());
+    if (failed(form))
+      return std::nullopt;
+    SmallVector<int64_t> row(n, 0);
+    for (unsigned j = 0; j < form->coefficients.size(); ++j) {
+      const int64_t c = form->coefficients[j];
+      if (c == 0)
+        continue;
+      for (unsigned u = 0; u < n; ++u) {
+        std::optional<int64_t> term = llvm::checkedMul(c, U[position[j]][u]);
+        std::optional<int64_t> sum =
+            term ? llvm::checkedAdd(row[u], *term) : std::nullopt;
+        if (!sum)
+          return std::nullopt;
+        row[u] = *sum;
+      }
+    }
+    coefficients.push_back(std::move(row));
+    constants.push_back(form->constant);
+  }
+  // The counters the composed access reads, in band order.
+  SmallVector<int> dimOf(n, -1);
+  ShiftedAccess out;
+  for (unsigned u = 0; u < n; ++u)
+    if (llvm::any_of(coefficients, [&](const SmallVector<int64_t> &row) {
+          return row[u] != 0;
+        })) {
+      dimOf[u] = out.operands.size();
+      affine::AffineForOp loop = band[u];
+      out.operands.push_back(loop.getInductionVar());
+    }
+  MLIRContext *ctx = map.getContext();
+  SmallVector<AffineExpr> results;
+  for (auto [row, constant] : llvm::zip_equal(coefficients, constants)) {
+    AffineExpr result = getAffineConstantExpr(constant, ctx);
+    for (unsigned u = 0; u < n; ++u)
+      if (row[u] != 0)
+        result = result + getAffineDimExpr(dimOf[u], ctx) * row[u];
+    results.push_back(result);
+  }
+  out.map = AffineMap::get(out.operands.size(), 0, results, ctx);
+  return out;
+}
+
+} // namespace
+
+void mlir::systolic::describeDomainNormalization(
+    const DomainNormalization &normalization, llvm::raw_ostream &os,
+    StringRef indent) {
+  const unsigned n = normalization.U.size();
+  for (unsigned s = 0; s < n; ++s) {
+    if (!llvm::is_contained(normalization.shifted, s))
+      continue;
+    // The shift as the bounds state it: x_s = x_s' + l_s . x_<s (U's rows
+    // compose these shifts).
+    os << indent << "loop " << s << ": x" << s << " = x" << s << "'";
+    for (unsigned u = 0; u < s; ++u)
+      if (normalization.shift[s][u] != 0)
+        os << (normalization.shift[s][u] < 0 ? " - " : " + ")
+           << std::abs(normalization.shift[s][u]) << "*x" << u;
+    os << ", box [" << normalization.lower[s] << ", " << normalization.upper[s]
+       << ") step " << normalization.step[s] << "\n";
+  }
+}
+
+SmallVector<DomainNormalization, 1>
+mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
+  SmallVector<DomainNormalization, 1> applied;
+  SmallVector<affine::AffineForOp> roots;
+  root->walk([&](affine::AffineForOp loop) {
+    auto parent = dyn_cast<affine::AffineForOp>(loop->getParentOp());
+    if (parent && &parent.getBody()->front() == loop.getOperation() &&
+        std::next(parent.getBody()->begin(), 2) == parent.getBody()->end())
+      return;
+    roots.push_back(loop);
+  });
+
+  for (affine::AffineForOp top : roots) {
+    SmallVector<affine::AffineForOp> band;
+    affine::getPerfectlyNestedLoops(band, top);
+    const unsigned n = band.size();
+    if (n < 2)
+      continue;
+    // Exactly the recognizer's multiply-accumulate body: three loads, one
+    // product of two of them, one sum of the third with the product, one
+    // store of the sum to the third load's element (and the yield). Any
+    // other body -- a nest the recognizer would refuse anyway -- is left as
+    // written.
+    SmallVector<Operation *> accesses;
+    unsigned loads = 0, stores = 0, muls = 0, adds = 0, others = 0;
+    affine::AffineStoreOp store;
+    for (Operation &op : *band.back().getBody()) {
+      if (isa<affine::AffineLoadOp>(op)) {
+        ++loads;
+        accesses.push_back(&op);
+      } else if (auto st = dyn_cast<affine::AffineStoreOp>(op)) {
+        ++stores;
+        store = st;
+        accesses.push_back(&op);
+      } else if (isa<arith::MulFOp>(op)) {
+        ++muls;
+      } else if (isa<arith::AddFOp>(op)) {
+        ++adds;
+      } else if (!isa<affine::AffineYieldOp>(op)) {
+        ++others;
+      }
+    }
+    bool macBody = loads == 3 && stores == 1 && muls == 1 && adds == 1 &&
+                   others == 0;
+    if (macBody) {
+      auto add = store.getValueToStore().getDefiningOp<arith::AddFOp>();
+      affine::AffineLoadOp acc;
+      arith::MulFOp mul;
+      if (add) {
+        for (Value v : {add.getLhs(), add.getRhs()}) {
+          if (auto l = v.getDefiningOp<affine::AffineLoadOp>())
+            acc = l;
+          else if (auto m = v.getDefiningOp<arith::MulFOp>())
+            mul = m;
+        }
+      }
+      macBody = add && acc && mul &&
+                mul.getLhs().getDefiningOp<affine::AffineLoadOp>() &&
+                mul.getRhs().getDefiningOp<affine::AffineLoadOp>() &&
+                acc.getMemRef() == store.getMemRef() &&
+                acc.getAffineMap() == store.getAffineMap() &&
+                llvm::equal(acc.getMapOperands(), store.getMapOperands());
+    }
+    if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
+          return loop.getNumResults() == 0 && loop.getStepAsInt() >= 1;
+        }))
+      continue;
+
+    // The bounds: the same linear form of the outer counters at both ends.
+    SmallVector<BandBound> lowers, uppers;
+    bool inFamily = true, anyShift = false;
+    for (unsigned s = 0; s < n && inFamily; ++s) {
+      std::optional<BandBound> lo = bandBound(band[s], /*lower=*/true, band, s);
+      std::optional<BandBound> hi = bandBound(band[s], /*lower=*/false, band, s);
+      if (!lo || !hi || lo->coefficients != hi->coefficients) {
+        inFamily = false;
+        break;
+      }
+      if (llvm::any_of(lo->coefficients, [](int64_t c) { return c != 0; }))
+        anyShift = true;
+      lowers.push_back(*lo);
+      uppers.push_back(*hi);
+    }
+    if (!inFamily || !anyShift)
+      continue;
+
+    // x = U x': U[s][u] = delta + sum_{u <= t < s} l_s[t] U[t][u].
+    SmallVector<SmallVector<int64_t>> U(n, SmallVector<int64_t>(n, 0));
+    bool fits = true;
+    for (unsigned s = 0; s < n && fits; ++s) {
+      U[s][s] = 1;
+      for (unsigned u = 0; u < s && fits; ++u) {
+        int64_t value = 0;
+        for (unsigned t = u; t < s && fits; ++t) {
+          std::optional<int64_t> term =
+              llvm::checkedMul(lowers[s].coefficients[t], U[t][u]);
+          std::optional<int64_t> sum =
+              term ? llvm::checkedAdd(value, *term) : std::nullopt;
+          if (!sum)
+            fits = false;
+          else
+            value = *sum;
+        }
+        U[s][u] = value;
+      }
+    }
+    if (!fits)
+      continue;
+
+    // Every use of a counter is a bound of an inner band loop or an access of
+    // the body; every access rewrites (checked) before anything changes.
+    bool usesOk = true;
+    for (affine::AffineForOp loop : band)
+      for (OpOperand &use : loop.getInductionVar().getUses()) {
+        Operation *user = use.getOwner();
+        if (auto inner = dyn_cast<affine::AffineForOp>(user)) {
+          if (!llvm::is_contained(band, inner))
+            usesOk = false;
+          continue;
+        }
+        if (!isa<affine::AffineLoadOp, affine::AffineStoreOp>(user) ||
+            user->getParentOp() != band.back().getOperation())
+          usesOk = false;
+      }
+    if (!usesOk)
+      continue;
+    SmallVector<ShiftedAccess> rewritten;
+    for (Operation *op : accesses) {
+      AffineMap map;
+      ValueRange operands;
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op)) {
+        map = load.getAffineMap();
+        operands = load.getMapOperands();
+      } else {
+        auto store = cast<affine::AffineStoreOp>(op);
+        map = store.getAffineMap();
+        operands = store.getMapOperands();
+      }
+      std::optional<ShiftedAccess> composed =
+          composeWithShift(map, operands, band, U);
+      if (!composed) {
+        usesOk = false;
+        break;
+      }
+      rewritten.push_back(std::move(*composed));
+    }
+    if (!usesOk)
+      continue;
+
+    // Rewrite: constant bounds, composed access maps over the band counters.
+    DomainNormalization record;
+    record.outermost = top.getOperation();
+    record.U = U;
+    for (unsigned s = 0; s < n; ++s) {
+      record.shift.push_back(lowers[s].coefficients);
+      record.lower.push_back(lowers[s].constant);
+      record.upper.push_back(uppers[s].constant);
+      record.step.push_back(band[s].getStepAsInt());
+      if (llvm::any_of(lowers[s].coefficients, [](int64_t c) { return c != 0; })) {
+        record.shifted.push_back(s);
+        band[s].setConstantLowerBound(lowers[s].constant);
+        band[s].setConstantUpperBound(uppers[s].constant);
+      }
+    }
+    for (auto [op, access] : llvm::zip_equal(accesses, rewritten)) {
+      OpBuilder builder(op);
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op)) {
+        auto replacement = affine::AffineLoadOp::create(
+            builder, load.getLoc(), load.getMemRef(), access.map,
+            access.operands);
+        load.getResult().replaceAllUsesWith(replacement.getResult());
+        load.erase();
+      } else {
+        auto st = cast<affine::AffineStoreOp>(op);
+        affine::AffineStoreOp::create(builder, st.getLoc(),
+                                      st.getValueToStore(), st.getMemRef(),
+                                      access.map, access.operands);
+        st.erase();
+      }
+    }
+    applied.push_back(std::move(record));
+  }
+  return applied;
 }

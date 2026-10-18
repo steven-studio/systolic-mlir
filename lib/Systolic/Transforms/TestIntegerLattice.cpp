@@ -9,6 +9,9 @@
 //   lattice.forms = [[...], ...]        common direction and multipliers
 //   lattice.radix = [...], lattice.extents = [...]   mixed-radix extent
 //   lattice.inject = [[lamI], [lamJ]], lattice.box = [M, N]  injectivity
+//   lattice.square = [[...], ...]       det, adjugate, inverse if unimodular,
+//                                       signed permutation?
+//   lattice.row = [...] (with .square)  row * inverse as exact rationals
 //
 //===----------------------------------------------------------------------===//
 
@@ -129,6 +132,37 @@ struct TestIntegerLatticePass
           os << "mixed radix, extent " << *extent << "\n";
         else
           os << "not a mixed radix\n";
+      }
+      if (Attribute attr = func->getAttr("lattice.square")) {
+        std::optional<lattice::IntMatrix> m = matrixAttr(attr);
+        os << "@" << name << ": ";
+        std::optional<int64_t> det = m ? lattice::determinant(*m) : std::nullopt;
+        std::optional<lattice::IntMatrix> adj =
+            m ? lattice::adjugate(*m) : std::nullopt;
+        if (!det || !adj) {
+          os << "not square, or overflow\n";
+        } else {
+          os << "det " << *det << ", adjugate ";
+          printMatrix(os, *adj);
+          if (std::optional<lattice::IntMatrix> inv = lattice::unimodularInverse(*m)) {
+            os << ", unimodular, inverse ";
+            printMatrix(os, *inv);
+          }
+          os << (lattice::isSignedPermutation(*m) ? ", a signed permutation" : "");
+          os << "\n";
+          if (Attribute rowAttr = func->getAttr("lattice.row")) {
+            std::optional<lattice::IntVector> r = vectorAttr(rowAttr);
+            std::optional<lattice::RationalRow> q =
+                r ? lattice::rowTimesInverse(*r, *m) : std::nullopt;
+            os << "@" << name << ": row * inverse = ";
+            if (!q) {
+              os << "undefined (singular, wrong length, or overflow)\n";
+            } else {
+              printVector(os, q->numerators);
+              os << " / " << q->denominator << "\n";
+            }
+          }
+        }
       }
       if (Attribute attr = func->getAttr("lattice.inject")) {
         std::optional<lattice::IntMatrix> lam = matrixAttr(attr);

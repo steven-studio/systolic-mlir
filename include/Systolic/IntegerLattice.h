@@ -92,6 +92,36 @@ std::optional<BoxInjectivity> injectiveOnBox(llvm::ArrayRef<int64_t> lamI,
                                              llvm::ArrayRef<int64_t> lamJ,
                                              int64_t M, int64_t N);
 
+/// The determinant of a square matrix, exact (arbitrary-precision arithmetic
+/// inside, presburger::IntMatrix): nullopt when m is not square, has ragged
+/// rows, or the value does not fit in 64 bits.
+std::optional<int64_t> determinant(const IntMatrix &m);
+
+/// The adjugate of a square matrix: adj(m) m = m adj(m) = det(m) I, exact
+/// (arbitrary precision inside); nullopt when m is not square or an entry
+/// does not fit in 64 bits. Defined for a singular m too.
+std::optional<IntMatrix> adjugate(const IntMatrix &m);
+
+/// The inverse of a unimodular matrix, det(m) = +-1: det(m) adj(m), an
+/// integer matrix; nullopt when m is not square, |det| != 1, or on overflow.
+std::optional<IntMatrix> unimodularInverse(const IntMatrix &m);
+
+/// A row of exact rationals with one positive denominator, reduced by the gcd
+/// of all numerators and the denominator.
+struct RationalRow {
+  IntVector numerators;
+  int64_t denominator = 1;
+};
+
+/// r m^-1 for a nonsingular square m: (r adj(m)) / det(m), exact; nullopt when
+/// m is singular or not square, r has the wrong length, or on overflow.
+std::optional<RationalRow> rowTimesInverse(llvm::ArrayRef<int64_t> r,
+                                           const IntMatrix &m);
+
+/// Whether m is a signed permutation matrix: square, one entry +1 or -1 in
+/// every row and every column, zeros elsewhere.
+bool isSignedPermutation(const IntMatrix &m);
+
 } // namespace mlir::systolic::lattice
 
 #endif // SYSTOLIC_INTEGERLATTICE_H
