@@ -1,6 +1,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 
 #include "mlir/Analysis/Presburger/Matrix.h"
+#include "mlir/Analysis/Presburger/PresburgerRelation.h"
 #include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -1656,8 +1657,12 @@ mlir::systolic::recognizeLogicalMatmul(
                      "accumulation; moved outward by the lowering pass when "
                      "that is a legal interchange -- here it was not, so the "
                      "mapping is not decided)");
+  // A counter from outside the chain is a parameter of this candidate: the
+  // band may be a GEMM at each of its values (the inner band of a batched
+  // GEMM, whose enclosing candidate holds that loop), which nothing here
+  // decides -- UNKNOWN, not PROVEN_INVALID (review of 2026-10-19).
   if (iterationIVs.size() != chain.size())
-    return refuse("an access uses the counter of a loop outside the nest");
+    return unknown("an access uses the counter of a loop outside the nest");
 
   auto sourceDomain = recoverSourceDomain(iterationIVs);
   if (failed(sourceDomain))
@@ -3760,6 +3765,452 @@ std::optional<unsigned> bandPosition(Value value,
   return std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// Exact domains (docs/AFFINE_GEMM_MAPPING.md section 19.13): bounds that are
+// not one affine form of the outer counters at both ends -- a triangle that
+// degenerates, a max / min of forms with different linear parts -- whose
+// integer iteration set is nevertheless a constant-extent parallelotope.
+// Decided with the Presburger library, which is integer-exact: the set is
+// built from the bounds, the parallelotope's shift rows are taken from the
+// bounds' own results, and the two sets are compared for equality.
+// ---------------------------------------------------------------------------
+
+/// One result of a loop bound as a linear form over the band positions.
+struct BandForm {
+  SmallVector<int64_t> coefficients; // over the band positions
+  int64_t constant = 0;
+};
+
+/// An expression of a bound map of the loop at band position `position`, over
+/// the map's `operands` (dims only), as a linear form over the band
+/// positions: every operand it reads an outer counter of the band, no
+/// floordiv / ceildiv / mod, checked 64-bit arithmetic. nullopt otherwise.
+std::optional<BandForm> bandFormOf(AffineExpr expr, unsigned numDims,
+                                   ValueRange operands,
+                                   ArrayRef<affine::AffineForOp> band,
+                                   unsigned position) {
+  FailureOr<LinearForm> form = extractLinearForm(expr, numDims);
+  if (failed(form))
+    return std::nullopt;
+  BandForm one;
+  one.coefficients.assign(band.size(), 0);
+  one.constant = form->constant;
+  for (auto [j, operand] : llvm::enumerate(operands)) {
+    if (form->coefficients[j] == 0)
+      continue;
+    std::optional<unsigned> at;
+    for (unsigned t = 0; t < position; ++t) {
+      affine::AffineForOp outer = band[t];
+      if (outer.getInductionVar() == operand)
+        at = t;
+    }
+    if (!at)
+      return std::nullopt; // not an outer counter of the band
+    std::optional<int64_t> sum =
+        llvm::checkedAdd(one.coefficients[*at], form->coefficients[j]);
+    if (!sum)
+      return std::nullopt;
+    one.coefficients[*at] = *sum;
+  }
+  return one;
+}
+
+/// Every result of a loop bound (max of the lower, min of the upper ones) as
+/// a linear form over the outer counters of the band: no symbols, every
+/// operand an outer band counter, no floordiv / ceildiv / mod. nullopt
+/// otherwise.
+std::optional<SmallVector<BandForm>>
+bandBoundResults(affine::AffineForOp loop, bool lower,
+                 ArrayRef<affine::AffineForOp> band, unsigned position) {
+  AffineMap map = lower ? loop.getLowerBoundMap() : loop.getUpperBoundMap();
+  ValueRange operands =
+      lower ? loop.getLowerBoundOperands() : loop.getUpperBoundOperands();
+  if (map.getNumSymbols() != 0 || map.getNumResults() == 0)
+    return std::nullopt;
+  SmallVector<BandForm> out;
+  for (AffineExpr result : map.getResults()) {
+    std::optional<BandForm> one =
+        bandFormOf(result, map.getNumDims(), operands, band, position);
+    if (!one)
+      return std::nullopt;
+    out.push_back(std::move(*one));
+  }
+  return out;
+}
+
+using BigInt = llvm::DynamicAPInt;
+
+/// A row of `cols` zeros.
+SmallVector<BigInt> zeroRow(unsigned cols) {
+  return SmallVector<BigInt>(cols, BigInt(0));
+}
+
+/// The band's iteration set, exactly: a set over its n counters with one
+/// local quotient per stepped loop. Every lower-bound result is a lower bound
+/// (affine.for takes their max), every upper-bound result an exclusive upper
+/// bound (their min), a step sigma > 1 the congruence x_s = lb(x) + sigma q
+/// relative to the lower-bound result `strideBase[s]` -- the one that is the
+/// max at every outer point entering the loop (the caller establishes it). Coefficients are copied exactly; nothing is
+/// approximated (unlike FlatAffineValueConstraints::addAffineForOpDomain,
+/// which drops the stride of a stepped loop with a non-constant bound).
+presburger::IntegerPolyhedron
+exactBandDomain(ArrayRef<SmallVector<BandForm>> lowers,
+                ArrayRef<SmallVector<BandForm>> uppers,
+                ArrayRef<int64_t> steps, ArrayRef<unsigned> strideBase) {
+  const unsigned n = steps.size();
+  const unsigned numLocals =
+      llvm::count_if(steps, [](int64_t step) { return step > 1; });
+  presburger::IntegerPolyhedron set(
+      presburger::PresburgerSpace::getSetSpace(n, 0, numLocals));
+  const unsigned cols = set.getNumCols();
+  unsigned local = 0;
+  for (unsigned s = 0; s < n; ++s) {
+    for (const BandForm &lb : lowers[s]) {
+      SmallVector<BigInt> row = zeroRow(cols); // x_s - lb(x) >= 0
+      row[s] = BigInt(1);
+      for (unsigned t = 0; t < s; ++t)
+        row[t] = -BigInt(lb.coefficients[t]);
+      row.back() = -BigInt(lb.constant);
+      set.addInequality(row);
+    }
+    for (const BandForm &ub : uppers[s]) {
+      SmallVector<BigInt> row = zeroRow(cols); // ub(x) - 1 - x_s >= 0
+      row[s] = BigInt(-1);
+      for (unsigned t = 0; t < s; ++t)
+        row[t] = BigInt(ub.coefficients[t]);
+      row.back() = BigInt(ub.constant) - BigInt(1);
+      set.addInequality(row);
+    }
+    if (steps[s] > 1) {
+      const BandForm &lb = lowers[s][strideBase[s]];
+      SmallVector<BigInt> row = zeroRow(cols); // x_s - lb(x) - sigma q = 0
+      row[s] = BigInt(1);
+      for (unsigned t = 0; t < s; ++t)
+        row[t] = -BigInt(lb.coefficients[t]);
+      row[n + local] = -BigInt(steps[s]);
+      row.back() = -BigInt(lb.constant);
+      set.addEquality(row);
+      ++local;
+    }
+  }
+  return set;
+}
+
+/// `set` over its first `keep` dims, the others existential (an exact
+/// integer projection).
+presburger::IntegerPolyhedron prefixOf(const presburger::IntegerPolyhedron &set,
+                                       unsigned keep) {
+  presburger::IntegerPolyhedron prefix = set;
+  const unsigned dims = prefix.getNumDimVars();
+  if (keep < dims)
+    prefix.convertVarKind(presburger::VarKind::SetDim, keep, dims,
+                          presburger::VarKind::Local);
+  return prefix;
+}
+
+/// The integer minimum of coef . x + constant over `set` (coef over its first
+/// coef.size() dims), exactly: the first coordinate of the lexicographic
+/// integer minimum of the set with the expression inserted as its first
+/// dim. nullopt when the set is empty or the expression unbounded below.
+std::optional<BigInt> integerMinimum(const presburger::IntegerPolyhedron &set,
+                                     ArrayRef<int64_t> coef, int64_t constant) {
+  presburger::IntegerPolyhedron withValue = set;
+  withValue.insertVar(presburger::VarKind::SetDim, 0);
+  SmallVector<BigInt> row = zeroRow(withValue.getNumCols());
+  row[0] = BigInt(1); // t - (coef . x + constant) = 0
+  for (unsigned t = 0; t < coef.size(); ++t)
+    row[1 + t] = -BigInt(coef[t]);
+  row.back() = -BigInt(constant);
+  withValue.addEquality(row);
+  presburger::MaybeOptimum<SmallVector<BigInt, 8>> lexmin =
+      withValue.findIntegerLexMin();
+  if (!lexmin.isBounded())
+    return std::nullopt;
+  return (*lexmin)[0];
+}
+
+std::optional<int64_t> toInt64(const BigInt &value) {
+  if (value > BigInt(std::numeric_limits<int64_t>::max()) ||
+      value < BigInt(std::numeric_limits<int64_t>::min()))
+    return std::nullopt;
+  return int64_t(value);
+}
+
+/// Whether form . x has its exact minimum and maximum over `outer` (a set
+/// over the first `s` band counters, not empty) within 64 bits.
+bool rangeFitsInt64(const presburger::IntegerPolyhedron &outer,
+                    const BandForm &form, unsigned s) {
+  if (s == 0)
+    return true; // a constant
+  SmallVector<int64_t> coef(form.coefficients.begin(),
+                            form.coefficients.begin() + s);
+  SmallVector<int64_t> negated(s, 0);
+  for (unsigned t = 0; t < s; ++t) {
+    std::optional<int64_t> minus = llvm::checkedSub(int64_t(0), coef[t]);
+    if (!minus)
+      return false;
+    negated[t] = *minus;
+  }
+  std::optional<int64_t> negatedConstant =
+      llvm::checkedSub(int64_t(0), form.constant);
+  if (!negatedConstant)
+    return false;
+  std::optional<BigInt> lowest = integerMinimum(outer, coef, form.constant);
+  std::optional<BigInt> negatedHighest =
+      integerMinimum(outer, negated, *negatedConstant);
+  return lowest && negatedHighest && toInt64(*lowest) &&
+         toInt64(-*negatedHighest);
+}
+
+/// The run time evaluates every result of a loop's bounds (affine.for takes
+/// their max / min) at every outer point that enters the loop, in 64-bit
+/// arithmetic: lower-affine emits a coefficient times a counter as
+/// `arith.muli ... overflow<nsw>` -- poison when the product does not fit --
+/// and a sum as a plain `arith.addi`, which wraps and so gives the true value
+/// whenever that fits. So the mathematical set is the one the program runs
+/// when every product and every result of every written bound -- results a
+/// fold drops included -- has its exact range over those outer points within
+/// 64 bits. `outer` is the outer loops' own iteration set (exactBandDomain of
+/// the loops outside `loop`, band position `s`); when it is empty the bounds
+/// are never evaluated.
+bool writtenBoundsFitInt64(affine::AffineForOp loop,
+                           ArrayRef<affine::AffineForOp> band, unsigned s,
+                           const presburger::IntegerPolyhedron &outer) {
+  if (s > 0 && outer.isIntegerEmpty())
+    return true;
+  for (bool lower : {true, false}) {
+    AffineMap map = lower ? loop.getLowerBoundMap() : loop.getUpperBoundMap();
+    ValueRange operands =
+        lower ? loop.getLowerBoundOperands() : loop.getUpperBoundOperands();
+    if (map.getNumSymbols() != 0)
+      return false;
+    for (AffineExpr result : map.getResults()) {
+      bool fits = true;
+      result.walk([&](AffineExpr node) {
+        if (!fits || (node != result && node.getKind() != AffineExprKind::Mul))
+          return;
+        std::optional<BandForm> form =
+            bandFormOf(node, map.getNumDims(), operands, band, s);
+        fits = form && rangeFitsInt64(outer, *form, s);
+      });
+      if (!fits)
+        return false;
+    }
+  }
+  return true;
+}
+
+/// A band's exact iteration set (exactBandDomain) and the bound results it
+/// is built from: per loop every written result of both bounds -- a stepped
+/// loop's lower results folded to one per linear part, the largest constant
+/// -- and the lower result its stride counts from.
+struct ExactBandSet {
+  SmallVector<SmallVector<BandForm>> lowers, uppers;
+  SmallVector<int64_t> steps;
+  SmallVector<unsigned> strideBases;
+  presburger::IntegerPolyhedron domain{
+      presburger::PresburgerSpace::getSetSpace(0)};
+};
+
+/// The band's exact integer iteration set, when it is the set the program
+/// runs. nullopt when a bound result is not a linear form of the band's
+/// outer counters, a step is below 1, a stepped loop has a max of lower
+/// bounds of which none is the max at every outer point entering it, or a
+/// product or result of a written bound can leave 64 bits at such a point
+/// (writtenBoundsFitInt64). An empty set is returned as such.
+std::optional<ExactBandSet> exactBandSet(ArrayRef<affine::AffineForOp> band) {
+  const unsigned n = band.size();
+  ExactBandSet out;
+  for (unsigned s = 0; s < n; ++s) {
+    affine::AffineForOp loop = band[s];
+    std::optional<SmallVector<BandForm>> lo =
+        bandBoundResults(loop, /*lower=*/true, band, s);
+    std::optional<SmallVector<BandForm>> hi =
+        bandBoundResults(loop, /*lower=*/false, band, s);
+    if (!lo || !hi)
+      return std::nullopt;
+    const int64_t step = loop.getStepAsInt();
+    if (step < 1)
+      return std::nullopt;
+    presburger::IntegerPolyhedron outer =
+        exactBandDomain(out.lowers, out.uppers, out.steps, out.strideBases);
+    if (!writtenBoundsFitInt64(loop, band, s, outer))
+      return std::nullopt;
+    // A stepped loop starts at the max of its lower bounds and counts from
+    // there. Results with one linear part fold to the largest constant; with
+    // several linear parts, one of them must be the max at every outer point
+    // that enters the loop -- then the congruence is relative to it at every
+    // such point. Decided exactly: for every other result j, no point of the
+    // outer loops' own iteration set has lb_j(x) >= lb_r(x) + 1.
+    unsigned base = 0;
+    if (step > 1 && lo->size() > 1) {
+      SmallVector<BandForm> folded;
+      for (const BandForm &form : *lo) {
+        auto same = llvm::find_if(folded, [&](const BandForm &f) {
+          return f.coefficients == form.coefficients;
+        });
+        if (same == folded.end())
+          folded.push_back(form);
+        else
+          same->constant = std::max(same->constant, form.constant);
+      }
+      lo = std::move(folded);
+      if (lo->size() > 1) {
+        std::optional<unsigned> dominant;
+        for (unsigned r = 0; r < lo->size() && !dominant; ++r) {
+          bool always = true;
+          for (unsigned j = 0; j < lo->size() && always; ++j) {
+            if (j == r)
+              continue;
+            presburger::IntegerPolyhedron wins = outer;
+            SmallVector<BigInt> row = zeroRow(wins.getNumCols());
+            for (unsigned t = 0; t < s; ++t) // lb_j(x) - lb_r(x) - 1 >= 0
+              row[t] = BigInt((*lo)[j].coefficients[t]) -
+                       BigInt((*lo)[r].coefficients[t]);
+            row.back() = BigInt((*lo)[j].constant) -
+                         BigInt((*lo)[r].constant) - BigInt(1);
+            wins.addInequality(row);
+            always = wins.isIntegerEmpty();
+          }
+          if (always)
+            dominant = r;
+        }
+        if (!dominant)
+          return std::nullopt;
+        base = *dominant;
+      }
+    }
+    out.lowers.push_back(std::move(*lo));
+    out.uppers.push_back(std::move(*hi));
+    out.steps.push_back(step);
+    out.strideBases.push_back(base);
+  }
+  out.domain =
+      exactBandDomain(out.lowers, out.uppers, out.steps, out.strideBases);
+  return out;
+}
+
+/// The constant-extent parallelotope a band's exact iteration set equals,
+/// if any: for every loop s a shift row l_s (zero, or the linear part of one
+/// of the loop's written bound results) and constants a_s <= e_s with
+///   D = { x : a_s <= x_s - l_s . x_<s <= e_s,
+///             x_s - l_s . x_<s - a_s = 0 (mod step_s) }   (exactly).
+/// Found loop by loop, outermost first: the projection of D onto the first
+/// s + 1 counters must equal the projection of the parallelotope -- a_s and
+/// e_s are the exact integer minimum and maximum of x_s - l_s . x_<s on D,
+/// and the equality is the Presburger library's integer-exact test. A choice
+/// that passes fixes nothing beyond the projection, which is D's own, so the
+/// greedy search is complete over these candidates. Returned as the bounds
+/// of the family-F form: lower l_s . x + a_s, exclusive upper l_s . x + e_s +
+/// 1. nullopt when exactBandSet has no set for the band (a bound that is not
+/// a linear form of the band's outer counters, a stepped loop with a max of
+/// lower bounds of which none is the max at every outer point entering it, a
+/// written bound that can leave 64 bits there), D is empty, or no candidate
+/// fits.
+struct ExactParallelotope {
+  SmallVector<BandBound> lowers, uppers;
+};
+
+std::optional<ExactParallelotope>
+findExactParallelotope(ArrayRef<affine::AffineForOp> band) {
+  const unsigned n = band.size();
+  std::optional<ExactBandSet> exactSet = exactBandSet(band);
+  if (!exactSet || exactSet->domain.isIntegerEmpty())
+    return std::nullopt;
+  const presburger::IntegerPolyhedron &domain = exactSet->domain;
+  ArrayRef<SmallVector<BandForm>> lowerResults = exactSet->lowers;
+  ArrayRef<SmallVector<BandForm>> upperResults = exactSet->uppers;
+  ArrayRef<int64_t> steps = exactSet->steps;
+
+  ExactParallelotope found;
+  presburger::IntegerPolyhedron prefix(
+      presburger::PresburgerSpace::getSetSpace(0));
+  for (unsigned s = 0; s < n; ++s) {
+    presburger::IntegerPolyhedron target = prefixOf(domain, s + 1);
+    SmallVector<SmallVector<int64_t>> candidates;
+    auto addCandidate = [&](ArrayRef<int64_t> row) {
+      SmallVector<int64_t> l(n, 0);
+      for (unsigned t = 0; t < s; ++t)
+        l[t] = row[t];
+      if (!llvm::is_contained(candidates, l))
+        candidates.push_back(std::move(l));
+    };
+    addCandidate(SmallVector<int64_t>(n, 0));
+    for (const BandForm &form : lowerResults[s])
+      addCandidate(form.coefficients);
+    for (const BandForm &form : upperResults[s])
+      addCandidate(form.coefficients);
+    bool accepted = false;
+    for (const SmallVector<int64_t> &l : candidates) {
+      // e(x) = x_s - l . x_<s over the first s + 1 counters, and -e(x).
+      SmallVector<int64_t> value(s + 1, 0), negated(s + 1, 0);
+      value[s] = 1;
+      negated[s] = -1;
+      bool fits = true;
+      for (unsigned t = 0; t < s && fits; ++t) {
+        std::optional<int64_t> minus = llvm::checkedSub(int64_t(0), l[t]);
+        if (!minus)
+          fits = false;
+        else {
+          value[t] = *minus;
+          negated[t] = l[t];
+        }
+      }
+      if (!fits)
+        continue;
+      std::optional<BigInt> lowest = integerMinimum(target, value, 0);
+      std::optional<BigInt> negatedHighest = integerMinimum(target, negated, 0);
+      if (!lowest || !negatedHighest)
+        continue;
+      std::optional<int64_t> a = toInt64(*lowest);
+      std::optional<int64_t> e = toInt64(-*negatedHighest);
+      std::optional<int64_t> past = e ? llvm::checkedAdd(*e, int64_t(1)) : std::nullopt;
+      if (!a || !e || !past)
+        continue;
+      // The parallelotope's slice for loop s on the accepted prefix.
+      presburger::IntegerPolyhedron candidate = prefix;
+      candidate.insertVar(presburger::VarKind::SetDim, s);
+      SmallVector<BigInt> lowerRow = zeroRow(candidate.getNumCols());
+      SmallVector<BigInt> upperRow = zeroRow(candidate.getNumCols());
+      lowerRow[s] = BigInt(1); // x_s - l . x - a >= 0
+      upperRow[s] = BigInt(-1); // e - x_s + l . x >= 0
+      for (unsigned t = 0; t < s; ++t) {
+        lowerRow[t] = -BigInt(l[t]);
+        upperRow[t] = BigInt(l[t]);
+      }
+      lowerRow.back() = -BigInt(*a);
+      upperRow.back() = BigInt(*e);
+      candidate.addInequality(lowerRow);
+      candidate.addInequality(upperRow);
+      if (steps[s] > 1) {
+        const unsigned q = candidate.appendVar(presburger::VarKind::Local);
+        SmallVector<BigInt> congruence = zeroRow(candidate.getNumCols());
+        congruence[s] = BigInt(1); // x_s - l . x - a - step q = 0
+        for (unsigned t = 0; t < s; ++t)
+          congruence[t] = -BigInt(l[t]);
+        congruence[q] = -BigInt(steps[s]);
+        congruence.back() = -BigInt(*a);
+        candidate.addEquality(congruence);
+      }
+      if (!candidate.isEqual(target))
+        continue;
+      prefix = std::move(candidate);
+      BandBound lb, ub;
+      lb.coefficients = l;
+      lb.constant = *a;
+      ub.coefficients = l;
+      ub.constant = *past;
+      found.lowers.push_back(std::move(lb));
+      found.uppers.push_back(std::move(ub));
+      accepted = true;
+      break;
+    }
+    if (!accepted)
+      return std::nullopt;
+  }
+  return found;
+}
+
 /// An access rewritten over the band's counters x = U x': the composed map
 /// and its operands -- only the counters the composed map reads, so that
 /// operand membership keeps meaning "the access depends on this counter" for
@@ -3767,7 +4218,13 @@ std::optional<unsigned> bandPosition(Value value,
 /// recognizer. Every operand of the original access must be a band counter
 /// and every result a linear form; the composed coefficients are formed in
 /// checked 64-bit arithmetic before any AffineExpr is built (MLIR's own
-/// flattener wraps). nullopt when any of that fails.
+/// flattener wraps). lower-affine emits each coefficient times a counter as
+/// `arith.muli ... overflow<nsw>` (poison when it does not fit) and the sums
+/// as plain `arith.addi` (they wrap, and their total is the original
+/// subscript's value): so every product must fit over the box `box` (per
+/// band position, the normalized counter's [lower, upper)), or the rewrite
+/// would add an overflow the written access does not have. nullopt when any
+/// of that fails.
 struct ShiftedAccess {
   AffineMap map;
   SmallVector<Value> operands;
@@ -3776,7 +4233,8 @@ struct ShiftedAccess {
 std::optional<ShiftedAccess>
 composeWithShift(AffineMap map, ValueRange operands,
                  ArrayRef<affine::AffineForOp> band,
-                 const SmallVector<SmallVector<int64_t>> &U) {
+                 const SmallVector<SmallVector<int64_t>> &U,
+                 ArrayRef<std::pair<int64_t, int64_t>> box) {
   if (map.getNumSymbols() != 0)
     return std::nullopt;
   const unsigned n = band.size();
@@ -3807,6 +4265,18 @@ composeWithShift(AffineMap map, ValueRange operands,
         row[u] = *sum;
       }
     }
+    // A box with no point runs no access: nothing is evaluated.
+    const bool empty = llvm::any_of(box, [](std::pair<int64_t, int64_t> r) {
+      return r.second <= r.first;
+    });
+    for (unsigned u = 0; u < n && !empty; ++u) {
+      if (row[u] == 0)
+        continue;
+      std::optional<int64_t> last = llvm::checkedSub(box[u].second, int64_t(1));
+      if (!last || !llvm::checkedMul(row[u], box[u].first) ||
+          !llvm::checkedMul(row[u], *last))
+        return std::nullopt;
+    }
     coefficients.push_back(std::move(row));
     constants.push_back(form->constant);
   }
@@ -3836,12 +4306,54 @@ composeWithShift(AffineMap map, ValueRange operands,
 
 } // namespace
 
+std::optional<presburger::IntegerPolyhedron>
+mlir::systolic::exactIterationSet(ArrayRef<affine::AffineForOp> loops) {
+  std::optional<ExactBandSet> set = exactBandSet(loops);
+  if (!set)
+    return std::nullopt;
+  return std::move(set->domain);
+}
+
+std::optional<int64_t>
+mlir::systolic::constantAffineForBound(affine::AffineForOp loop, bool lower) {
+  return constantLoopBound(loop, lower);
+}
+
+std::optional<unsigned>
+mlir::systolic::stackedAccessRank(const LogicalMatmul &matmul) {
+  const AffineMap maps[] = {matmul.accessA, matmul.accessB, matmul.accessC};
+  if (!maps[0] || !maps[1] || !maps[2])
+    return std::nullopt;
+  const unsigned n = maps[2].getNumDims();
+  lattice::IntMatrix rows;
+  for (AffineMap map : maps) {
+    if (map.getNumDims() != n || map.getNumSymbols() != 0)
+      return std::nullopt;
+    for (AffineExpr result : map.getResults()) {
+      FailureOr<LinearForm> form = extractLinearForm(result, n);
+      if (failed(form))
+        return std::nullopt;
+      rows.emplace_back(form->coefficients.begin(), form->coefficients.end());
+    }
+  }
+  std::optional<lattice::ColumnEchelon> echelon =
+      lattice::columnEchelon(rows, n);
+  if (!echelon)
+    return std::nullopt;
+  return echelon->rank;
+}
+
 void mlir::systolic::describeDomainNormalization(
     const DomainNormalization &normalization, llvm::raw_ostream &os,
     StringRef indent) {
   const unsigned n = normalization.U.size();
+  if (normalization.exact)
+    os << indent
+       << "exact iteration set: the written bounds do not shift together, "
+          "their integer points are the parallelotope below (integer-set "
+          "equality, docs section 19.13)\n";
   for (unsigned s = 0; s < n; ++s) {
-    if (!llvm::is_contained(normalization.shifted, s))
+    if (!normalization.exact && !llvm::is_contained(normalization.shifted, s))
       continue;
     // The shift as the bounds state it: x_s = x_s' + l_s . x_<s (U's rows
     // compose these shifts).
@@ -3867,12 +4379,16 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
     roots.push_back(loop);
   });
 
-  for (affine::AffineForOp top : roots) {
-    SmallVector<affine::AffineForOp> band;
-    affine::getPerfectlyNestedLoops(band, top);
+  // One band: the constant-extent family F (both bounds of every loop one
+  // affine form of the outer counters, docs section 19.12) directly, else
+  // the exact path (section 19.13): the band's integer iteration set, if it
+  // equals a constant-extent parallelotope. True when the band was
+  // rewritten.
+  auto normalizeBand = [&](ArrayRef<affine::AffineForOp> band) -> bool {
     const unsigned n = band.size();
     if (n < 2)
-      continue;
+      return false;
+    affine::AffineForOp top = band.front();
     // Exactly the recognizer's multiply-accumulate body: three loads, one
     // product of two of them, one sum of the third with the product, one
     // store of the sum to the third load's element (and the yield). Any
@@ -3881,7 +4397,8 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
     SmallVector<Operation *> accesses;
     unsigned loads = 0, stores = 0, muls = 0, adds = 0, others = 0;
     affine::AffineStoreOp store;
-    for (Operation &op : *band.back().getBody()) {
+    affine::AffineForOp innermost = band.back();
+    for (Operation &op : *innermost.getBody()) {
       if (isa<affine::AffineLoadOp>(op)) {
         ++loads;
         accesses.push_back(&op);
@@ -3927,11 +4444,11 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
     if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
           return loop.getNumResults() == 0 && loop.getStepAsInt() >= 1;
         }))
-      continue;
+      return false;
 
     // The bounds: the same linear form of the outer counters at both ends.
     SmallVector<BandBound> lowers, uppers;
-    bool inFamily = true, anyShift = false;
+    bool inFamily = true, anyShift = false, exact = false;
     for (unsigned s = 0; s < n && inFamily; ++s) {
       std::optional<BandBound> lo = bandBound(band[s], /*lower=*/true, band, s);
       std::optional<BandBound> hi = bandBound(band[s], /*lower=*/false, band, s);
@@ -3944,8 +4461,23 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
       lowers.push_back(*lo);
       uppers.push_back(*hi);
     }
-    if (!inFamily || !anyShift)
-      continue;
+    if (inFamily && !anyShift)
+      return false; // a box already
+    // The shifted set is the one the program runs only when its written
+    // bounds fit in 64 bits at every outer point (exactBandSet; the exact
+    // path below checks the same inside findExactParallelotope).
+    if (inFamily && !exactBandSet(band))
+      return false;
+    if (!inFamily) {
+      // Not in F as written: the exact integer set, if a parallelotope.
+      std::optional<ExactParallelotope> parallelotope =
+          findExactParallelotope(band);
+      if (!parallelotope)
+        return false;
+      lowers = std::move(parallelotope->lowers);
+      uppers = std::move(parallelotope->uppers);
+      exact = true;
+    }
 
     // x = U x': U[s][u] = delta + sum_{u <= t < s} l_s[t] U[t][u].
     SmallVector<SmallVector<int64_t>> U(n, SmallVector<int64_t>(n, 0));
@@ -3968,7 +4500,7 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
       }
     }
     if (!fits)
-      continue;
+      return false;
 
     // Every use of a counter is a bound of an inner band loop or an access of
     // the body; every access rewrites (checked) before anything changes.
@@ -3982,11 +4514,14 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
           continue;
         }
         if (!isa<affine::AffineLoadOp, affine::AffineStoreOp>(user) ||
-            user->getParentOp() != band.back().getOperation())
+            user->getParentOp() != innermost.getOperation())
           usesOk = false;
       }
     if (!usesOk)
-      continue;
+      return false;
+    SmallVector<std::pair<int64_t, int64_t>> box; // x'_s in [lower, upper)
+    for (unsigned s = 0; s < n; ++s)
+      box.push_back({lowers[s].constant, uppers[s].constant});
     SmallVector<ShiftedAccess> rewritten;
     for (Operation *op : accesses) {
       AffineMap map;
@@ -3995,34 +4530,37 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
         map = load.getAffineMap();
         operands = load.getMapOperands();
       } else {
-        auto store = cast<affine::AffineStoreOp>(op);
-        map = store.getAffineMap();
-        operands = store.getMapOperands();
+        auto st = cast<affine::AffineStoreOp>(op);
+        map = st.getAffineMap();
+        operands = st.getMapOperands();
       }
       std::optional<ShiftedAccess> composed =
-          composeWithShift(map, operands, band, U);
-      if (!composed) {
-        usesOk = false;
-        break;
-      }
+          composeWithShift(map, operands, band, U, box);
+      if (!composed)
+        return false;
       rewritten.push_back(std::move(*composed));
     }
-    if (!usesOk)
-      continue;
 
     // Rewrite: constant bounds, composed access maps over the band counters.
+    // On the exact path every loop's bounds are replaced -- the written ones
+    // describe the same set only all together.
     DomainNormalization record;
     record.outermost = top.getOperation();
     record.U = U;
+    record.exact = exact;
     for (unsigned s = 0; s < n; ++s) {
+      affine::AffineForOp loop = band[s];
       record.shift.push_back(lowers[s].coefficients);
       record.lower.push_back(lowers[s].constant);
       record.upper.push_back(uppers[s].constant);
-      record.step.push_back(band[s].getStepAsInt());
-      if (llvm::any_of(lowers[s].coefficients, [](int64_t c) { return c != 0; })) {
+      record.step.push_back(loop.getStepAsInt());
+      const bool shifted =
+          llvm::any_of(lowers[s].coefficients, [](int64_t c) { return c != 0; });
+      if (shifted)
         record.shifted.push_back(s);
-        band[s].setConstantLowerBound(lowers[s].constant);
-        band[s].setConstantUpperBound(uppers[s].constant);
+      if (shifted || exact) {
+        loop.setConstantLowerBound(lowers[s].constant);
+        loop.setConstantUpperBound(uppers[s].constant);
       }
     }
     for (auto [op, access] : llvm::zip_equal(accesses, rewritten)) {
@@ -4042,6 +4580,30 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
       }
     }
     applied.push_back(std::move(record));
+    return true;
+  };
+
+  for (affine::AffineForOp root : roots) {
+    SmallVector<affine::AffineForOp> band;
+    affine::getPerfectlyNestedLoops(band, root);
+    // The whole band, or -- when it is not normalizable -- the band below a
+    // prefix of loops whose counters nothing below them reads (repetition
+    // loops in any shape, a triangle of them included: they only run the
+    // inner band again, docs section 19.13).
+    for (unsigned start = 0; start + 1 < band.size(); ++start) {
+      if (start > 0) {
+        affine::AffineForOp below = band[start];
+        bool independent = true;
+        for (unsigned t = 0; t < start && independent; ++t)
+          for (Operation *user : band[t].getInductionVar().getUsers())
+            if (below->isAncestor(user))
+              independent = false;
+        if (!independent)
+          continue;
+      }
+      if (normalizeBand(ArrayRef<affine::AffineForOp>(band).drop_front(start)))
+        break;
+    }
   }
   return applied;
 }

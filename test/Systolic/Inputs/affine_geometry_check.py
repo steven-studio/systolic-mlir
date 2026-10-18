@@ -320,13 +320,20 @@ def main():
     triangles = 0
     for i, (nest, lines) in enumerate(zip(nests, blocks)):
         if nest.domain_mode == "triangle":
-            # not in the normalized family: the discovery pass must leave the
-            # nest as written and screen nothing
-            triangles += 1
-            if not (lines and lines[0].startswith("  not screened")):
-                failures.append("FAIL case_%d [%s, triangle]: a domain outside the normalized family "
-                                "was screened" % (i, nest.mode))
-            continue
+            # A triangle whose emitted points are a parallelotope with the
+            # documented shift rows (docs section 19.13, decided by
+            # enumeration: oracle.find_parallelotope) is normalized and
+            # screened on its box; any other is outside the normalized family:
+            # the discovery pass must leave it as written and screen nothing.
+            rows = oracle.find_parallelotope(nest, oracle.emitted_points(nest))
+            if rows is not None:
+                nest = oracle.derived_box_nest(nest, rows)
+            else:
+                triangles += 1
+                if not (lines and lines[0].startswith("  not screened")):
+                    failures.append("FAIL case_%d [%s, triangle]: a domain outside the normalized "
+                                    "family was screened" % (i, nest.mode))
+                continue
         screened += not (lines and lines[0].startswith("  not screened"))
         for f in check(nest, lines):
             failures.append("FAIL case_%d [%s]: %s" % (i, nest.mode, f))

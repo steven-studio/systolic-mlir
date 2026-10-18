@@ -18,7 +18,9 @@
 //                                 C[i][j] += A[i][k-2i-1] B[k-2i-1][j]  a shift by a counting-down counter, <=
 //   dn_step2     k in [2i, 2i+8) step 2:
 //                                 C[i][j] += A[i][k-2i] B[k-2i][j]      a shifted loop of step 2: stride-2 views
-//   dn_tri       k in [i, 8):     a triangle: the trip count varies, outside the front end's subset, plain C
+//   dn_tri       k in [i, 8):     a triangle: translated since the front end takes non-box bounds
+//                                 (docs section 19.13), PROVEN_INVALID: the domain is not centrally
+//                                 symmetric, so no affine image of a box; stays on the host
 //   dn_oob       k in [i, i+4) with A[i][k] on a 4 x 4 A: column k reaches 6, PROVEN_INVALID,
 //                                 stays on the host (compiled, not run: the reads are undefined in C)
 //
@@ -32,7 +34,7 @@
 // PLAN-DAG: note: 'dn_chain' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'dn_down' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'dn_step2' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
-// PLAN-DAG: note: 'dn_tri' is outside the supported C subset and is not translated: the loop's trip count depends on an enclosing loop counter
+// PLAN-DAG: note: 'dn_tri' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: the iteration domain is not centrally symmetric
 // PLAN-DAG: note: 'dn_oob' stays on the host: {{.*}}A is accessed out of bounds along dimension 1
 // PLAN: wrote {{.*}} (6 function(s) offloaded
 //

@@ -453,8 +453,9 @@ def mutate(case: Case, mutation: str, rng) -> Case:
 # --------------------------------------------------------------------------
 
 DOMAIN_VARIANTS = ["shift", "shear", "chain", "step_shift", "shift_same_base", "same_base",
-                   "same_view", "k1_const", "triangle", "alias_c", "alias_c_b", "shift_batched"]
-DOMAIN_WEIGHTS = [16, 14, 12, 8, 8, 11, 5, 9, 7, 5, 3, 6]
+                   "same_view", "k1_const", "triangle", "alias_c", "alias_c_b", "shift_batched",
+                   "disguise", "rep_triangle", "shift_cond"]
+DOMAIN_WEIGHTS = [14, 12, 10, 7, 7, 10, 5, 8, 7, 5, 3, 6, 10, 8, 6]
 DOMAIN_NOTES = {
     "shift": "a loop's two bounds shifted by an enclosing counter (k in [i + c, i + c + K)): a "
              "constant-extent parallelotope, the same GEMM on the box x = U x' (docs section 19.12)",
@@ -474,9 +475,19 @@ DOMAIN_NOTES = {
                 "B[c][j]), a GEMM of reduction extent one (SQ-4, decided 2026-10-15; the K = 1 "
                 "requirement of 2026-10-18)",
     "triangle": "the lower bound rises with an enclosing counter, the upper bound does not: the trip "
-                "count varies, the iteration set is a triangle inside the box -- not the affine image "
-                "of a box (docs section 19.7), outside the C front end's subset (the compiler never "
-                "sees it)",
+                "count varies, the iteration set is a triangle inside the box -- not centrally "
+                "symmetric, no affine image of a box (docs section 19.7); translated by the C front end "
+                "since 2026-10-18 (exact subscript ranges by running the loops, docs section 19.13). "
+                "The specification refuses it when its updates (F_A, F_B, F_C over the points) are not "
+                "centrally symmetric either: no GEMM in any decomposition (a split coordinate whose "
+                "loops are read only together can make them symmetric, even a GEMM: k0 - 4 k1 with k0 in "
+                "[k1, 4)). The compiler proves it no GEMM (PROVEN_INVALID) when the accesses tell the "
+                "iterations apart (the stacked access map has rank n, the number of loops of its "
+                "candidate band: the nest below a leading run of loops no access reads whose counters "
+                "no loop below the run reads, their bounds may read each other), the factors and C are "
+                "three "
+                "different arrays, no stepped loop's lower bound reads a counter and every written "
+                "bound stays within 64 bits (docs section 19.13.4); UNKNOWN otherwise",
     "alias_c": "the output is the same array as the first factor (A[i][j] += A[i][k] * B[k][j]): the "
                "factor may alias C, refused ('A may overlap C'); the specification decides by the "
                "addresses whether a product reads an element written earlier (not a GEMM of the "
@@ -486,6 +497,18 @@ DOMAIN_NOTES = {
     "shift_batched": "a batched GEMM (a batch loop around the nest, every operand carrying its "
                      "coordinate) with a loop shifted by an enclosing counter -- the batch loop or "
                      "another: a sheared batched nest through the front end (docs section 19.12)",
+    "disguise": "a box in disguise (docs section 19.13): an inner loop's lower bound rises with an "
+                "enclosing counter so steeply that its range is empty except at that counter's first "
+                "value -- a triangle as written (the bounds do not shift together), whose integer "
+                "points are the box of the positive case with that counter fixed: normalized exactly "
+                "and offloaded",
+    "rep_triangle": "two repetition loops in a triangle (r1 in [0, 3), r0 in [r1, 2): three points) "
+                    "outside or between the GEMM loops: independent of them, so every point of the "
+                    "GEMM runs three times; hoisted around the GEMM (docs section 19.13) when that is "
+                    "a legal interchange",
+    "shift_cond": "a shifted loop written with its condition over the enclosing counters (for (int k "
+                  "= i + c; k - i < c + n; ++k)): the front end canonicalizes it to k < i + c + n, the "
+                  "constant-extent family (docs section 19.12)",
 }
 
 
@@ -641,8 +664,9 @@ def domain_variant(case: Case, variant: str, rng) -> Case:
     elif variant == "triangle":
         # a role loop (a repetition loop's varying count would repeat every
         # point alike when it sums to one number, and the empty iterations of
-        # a collapsed triangle leave a box: those are GEMMs the front end
-        # refuses for their syntax, not the negative this variant is for)
+        # a collapsed triangle leave a box: those are GEMMs -- the families R
+        # and X of docs section 19.13 --, not the negative this variant is
+        # for)
         targets = [(lp, src) for lp, src in _shear_targets(c) if lp.role in "IJK"]
         if not targets:
             raise Rejected("triangle: no role loop to shift")
@@ -657,6 +681,45 @@ def domain_variant(case: Case, variant: str, rng) -> Case:
             raise Rejected("triangle: the shifted loop's trip count does not vary over the "
                            "enclosing counter's values (a box in disguise)")
         c.math_class = "non_box_domain"
+    elif variant == "disguise":
+        # an inner loop s counting up, an enclosing loop t of two or more
+        # values: s's lower bound gains c (x_t - first_t) with |c| step_t >=
+        # s's extent, so only x_t = first_t leaves s non-empty
+        pairs = []
+        for si, lp in enumerate(c.loops):
+            if lp.step <= 0 or lp.cond or not lp.is_box() or lp.trip() < 1:
+                continue
+            for t in c.loops[:si]:
+                if t.trip() >= 2 and not t.cond and not _gap_if_fixed(c, t):
+                    pairs.append((lp, t))
+        if not pairs:
+            raise Rejected("disguise: no loop pair")
+        lp, t = rng.choice(pairs)
+        width = lp.exclusive_ub() - lp.lb
+        first = t.values()[0]
+        mag = (width + abs(t.step) - 1) // abs(t.step) + rng.choice([0, 1])
+        coef = mag if t.step > 0 else -mag
+        lp.lb_terms = {t.var: coef}
+        lp.lb = lp.lb - coef * first
+        lp.ub_terms = {}
+        c.math_class = ""
+    elif variant == "rep_triangle":
+        if any(l.var in ("r0t", "r1t") for l in c.loops):
+            raise Rejected("rep_triangle: names taken")
+        pos = rng.randrange(len(c.loops) + 1)
+        r1 = Loop(var="r1t", lb=0, ub=3, step=1, role="R")
+        r0 = Loop(var="r0t", lb=0, ub=2, step=1, role="R", lb_terms={"r1t": 1})
+        c.loops[pos:pos] = [r1, r0]
+    elif variant == "shift_cond":
+        targets = _shear_targets(c)
+        if not targets:
+            raise Rejected("shift_cond: no loop to shift")
+        lp, sources = rng.choice(targets)
+        src = rng.choice(sources)
+        _apply_shear(c, {lp.var: {src.var: 1}})
+        # the condition written over the enclosing counter: k - src OP ub
+        bound = lp.ub
+        lp.cond = "%s - %s %s %d" % (lp.var, src.var, lp.cmp, bound)
     elif variant in ("alias_c", "alias_c_b"):
         F = A if variant == "alias_c" else c.arrays["b"]
         if len(F.dims) != len(C.dims):
@@ -670,6 +733,28 @@ def domain_variant(case: Case, variant: str, rng) -> Case:
     else:
         raise ValueError(variant)
     return c
+
+
+def _gap_if_fixed(case: Case, t: Loop) -> bool:
+    """Whether fixing loop t to one value (what a box in disguise does: its
+    other values leave an inner loop empty) leaves t's logical coordinate with
+    a gap: t is a middle loop of a split coordinate, a finer and a coarser
+    loop of its role around it in scale (16 * k0 + 8 * k1 + k2 with k1 fixed
+    reads K at 0..7, 16..23, ...). Such a GEMM is not enumerated densely and
+    is refused by the dense partition -- a limitation of its own, not the box
+    in disguise this variant is for."""
+    if t.role not in ("I", "J", "K"):
+        return False
+    for arr in case.arrays.values():
+        for f in arr.forms():
+            if t.var not in f.coef:
+                continue
+            scales = sorted(abs(f.coef[lp.var] * lp.step) for lp in case.loops
+                            if lp.var in f.coef and lp.role == t.role and lp.trip() >= 2)
+            mine = abs(f.coef[t.var] * t.step)
+            if scales and scales[0] < mine < scales[-1]:
+                return True
+    return False
 
 
 def _same_element_map(case: Case) -> bool:
@@ -765,6 +850,10 @@ def features(case: Case, cls):
     # the families of 2026-10-18 (docs/AFFINE_GEMM_MAPPING.md section 19.12)
     if an.get("domain"):
         f.add("domain:" + an["domain"])
+    if any(not lp.is_box() and lp.var not in {v for arr in case.arrays.values()
+                                               for g in arr.forms() for v in g.vars()}
+           for lp in case.loops):
+        f.add("bounds:repetition_triangle")
     shifted = {lp.var for lp in case.loops if not lp.is_box()}
     for lp in case.loops:
         if lp.is_box():
@@ -779,6 +868,8 @@ def features(case: Case, cls):
             f.add("bounds:shifted_step_gt1")
         if not lp.shifts_together():
             f.add("bounds:not_together")
+        if lp.cond:
+            f.add("bounds:written_condition")
     if case.a.name == case.b.name:
         f.add("factors:same_base")
         f.add("factors:" + ("same_view" if _same_element_map(case) else "two_views"))
@@ -875,6 +966,17 @@ def finalize(case: Case):
         if casespec.evaluate(casespec.box_form(case))["c"] != result["c"]:
             raise RuntimeError("%s: the box form computes a different C than the nest as written"
                                % case.id)
+    elif not casespec.is_box_case(case):
+        # family X: the box of the parallelotope its points form (what the
+        # compiler analyses after its exact normalization) computes the same
+        # C -- exact_form must describe exactly the nest's points (review
+        # 2026-10-18 #24: a loop counting down keeps only the values it takes
+        # on the set). (Not for family R: its analysis case is the
+        # two-iteration surrogate, another set by design.)
+        form = casespec.exact_form(case)
+        if form is not None and casespec.evaluate(casespec.box_form(form))["c"] != result["c"]:
+            raise RuntimeError("%s: the box of its exact parallelotope computes a different C than the "
+                               "nest as written" % case.id)
     if cls in ("FALSE_POSITIVE", "UNEXPECTED_ACCEPT"):
         # the prediction itself says the implementation would offload a nest
         # the specification refuses: keep it (the run decides), but flag it

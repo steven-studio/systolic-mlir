@@ -1211,13 +1211,23 @@ MLIR_CASES = [
                        "iteration domain is not a box, so the computed elements are not one\n"
                        "rectangular GEMM of strided views (the specification's definition needs a\n"
                        "box).  Not a dense GEMM; must be refused.  The recognizer accepts the access\n"
-                       "pattern; getDenseLogicalGemm refuses the non-static (counter-dependent)\n"
-                       "bound.  The C front end cannot express this nest (bounds must be constants).",
+                       "pattern; getDenseLogicalGemm refuses the domain -- since 2026-10-18 with a\n"
+                       "proof (docs section 19.13.4): the accesses tell the iterations apart (the\n"
+                       "stacked map (i, k, k, j, i, j) has rank 3), A, B and C are three arrays, no\n"
+                       "loop is stepped, the bounds fit 64 bits and the set is not centrally\n"
+                       "symmetric, so it is no affine image of a box and no GEMM in any\n"
+                       "decomposition (PROVEN_INVALID; 'the loop bounds are not static', UNKNOWN,\n"
+                       "before).  The C front end translates this nest since the same day (a\n"
+                       "triangle: bounds that do not shift together, exact subscript ranges by\n"
+                       "enumeration).",
              is_gemm=False, math_class="gemm_values_triangular_region",
              spec_recognition="REJECT", spec_basis_key="not_gemm",
              cur_recognition="accept", cur_dense="unsupported", cur_lowering="not_reached",
              cur_reject_stage="dense_partition",
-             cur_reject_reason="the loop bounds are not static, so the iteration domain has no static normalized extent"),
+             cur_reject_reason="the iteration domain is not centrally symmetric",
+             notes="re-decided 2026-10-18 (docs/AFFINE_GEMM_MAPPING.md section 19.13): the compiler's "
+                   "refusal was 'the loop bounds are not static' (UNKNOWN); it is proven invalid since "
+                   "(central symmetry); the specification's REJECT is unchanged"),
     MlirCase("mlir_010", "reversed_coordinate_on_a_only", "negative", "negative_coefficient", "reversed_coordinate_on_a_only",
              gemm_mlir("reversed_coordinate_on_a_only", "A", "B", "C", IJK8, "7 - %i, %k", "%k, %j", "%i, %j"),
              math_note="C[i][j] += A[7-i][k] B[k][j]: C += (A with its rows reversed) B, a valid GEMM\n"

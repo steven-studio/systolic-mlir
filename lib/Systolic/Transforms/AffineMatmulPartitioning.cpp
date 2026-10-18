@@ -1,6 +1,8 @@
 #include "Systolic/AffineMatmulPartitioning.h"
 
 #include "mlir/Analysis/Presburger/PresburgerRelation.h"
+#include "mlir/Dialect/Affine/Analysis/Utils.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -18,6 +20,152 @@ static LogicalResult fail(std::string *why, const llvm::Twine &message) {
   if (why)
     *why = message.str();
   return failure();
+}
+
+using BigInt = llvm::DynamicAPInt;
+
+static std::string pointText(ArrayRef<BigInt> point, unsigned count) {
+  std::string text = "(";
+  llvm::raw_string_ostream os(text);
+  for (unsigned i = 0; i < count; ++i)
+    os << (i ? ", " : "") << point[i];
+  os << ")";
+  return text;
+}
+
+/// The buffer a memref is a view of (through subview, cast, reshapes, ...).
+static Value viewRoot(Value memref) {
+  while (auto view = memref.getDefiningOp<ViewLikeOpInterface>())
+    memref = view.getViewSource();
+  return memref;
+}
+
+/// A proof that the nest is no GEMM of affine views, when one is at hand for
+/// an iteration domain that is not a box: the accesses tell the iterations
+/// apart -- the stacked map x -> (F_A(x), F_B(x), F_C(x)) has rank n, so the
+/// nest's updates are an affine copy of its iteration set D -- and D is not
+/// centrally symmetric. A GEMM's updates, in any decomposition, are an affine
+/// image of a box, and every affine image of a box is centrally symmetric
+/// (z -> z_min + z_max - z maps a box onto itself; docs/AFFINE_GEMM_MAPPING.md
+/// section 19.7); an injective affine map keeps central symmetry both ways,
+/// so no decomposition exists. With a lower rank an asymmetric D can map one
+/// to one onto a box -- a strip-mined loop with a remainder, k = 2 k1 + k0 on
+/// {(0, 0), (0, 1), (1, 0)}, is a GEMM -- and nothing is proven. The factors
+/// and C must be three buffers: two views of one buffer may exchange their
+/// roles from point to point (the product commutes), and an output that is a
+/// view of a factor's buffer reads its own updates.
+/// Decided exactly on the set the program runs (exactIterationSet: bounds
+/// that are linear forms of the nest's outer counters, built with checked
+/// arithmetic, every product and result of every written bound within 64
+/// bits at every outer point entering its loop): a symmetric set is
+/// symmetric about the midpoint of its lexicographic minimum and maximum (the
+/// reflection reverses the order), so D is compared with its reflection
+/// p + q - D by the Presburger library's integer-exact equality, and a point
+/// whose mirror is missing is reported, in the source domain's coordinates.
+/// nullopt when nothing is proven: a symbol or a bound outside the nest, a
+/// floordiv / ceildiv / mod in a bound, a stepped loop whose lower bound
+/// reads a counter (not attempted), a bound that can leave 64 bits, a rank
+/// below n (a loop no access reads included), a buffer shared by two
+/// operands, an empty or symmetric domain.
+static std::optional<std::string>
+disproveAffineImageOfBox(const LogicalMatmul &matmul) {
+  if (!matmul.sourceDomain)
+    return std::nullopt;
+  const affine::FlatAffineValueConstraints &domain = *matmul.sourceDomain;
+  const unsigned n = matmul.logicalMapping.transformation.empty()
+                         ? 0
+                         : matmul.logicalMapping.transformation.front().size();
+  if (n == 0 || domain.getNumDimVars() != n || domain.getNumSymbolVars() != 0)
+    return std::nullopt;
+  // The nest's loops, outermost first, with their source-domain dims (those
+  // follow the accesses' counters; a loop that runs once comes last).
+  SmallVector<std::pair<affine::AffineForOp, unsigned>> nest;
+  for (unsigned s = 0; s < n; ++s) {
+    if (!domain.hasValue(s))
+      return std::nullopt;
+    affine::AffineForOp loop = affine::getForInductionVarOwner(domain.getValue(s));
+    if (!loop)
+      return std::nullopt;
+    if (loop.getStepAsInt() != 1 &&
+        !llvm::all_of(loop.getLowerBoundMap().getResults(),
+                      [](AffineExpr e) { return isa<AffineConstantExpr>(e); }))
+      return std::nullopt;
+    nest.push_back({loop, s});
+  }
+  llvm::sort(nest, [](const auto &a, const auto &b) {
+    return affine::getNestingDepth(a.first) < affine::getNestingDepth(b.first);
+  });
+  SmallVector<affine::AffineForOp> loops;
+  for (unsigned t = 0; t < n; ++t) {
+    if (t > 0 && !nest[t - 1].first->isProperAncestor(nest[t].first))
+      return std::nullopt; // not one chain
+    loops.push_back(nest[t].first);
+  }
+  std::optional<unsigned> rank = stackedAccessRank(matmul);
+  if (!matmul.accessC || matmul.accessC.getNumDims() != n || !rank ||
+      *rank != n)
+    return std::nullopt;
+  const Value roots[] = {viewRoot(matmul.lhs), viewRoot(matmul.rhs),
+                         viewRoot(matmul.output)};
+  if (!roots[0] || roots[0] == roots[1] || roots[0] == roots[2] ||
+      roots[1] == roots[2])
+    return std::nullopt;
+  std::optional<presburger::IntegerPolyhedron> exact = exactIterationSet(loops);
+  if (!exact)
+    return std::nullopt;
+  const presburger::IntegerPolyhedron &set = *exact;
+  presburger::MaybeOptimum<SmallVector<BigInt, 8>> lexmin =
+      set.findIntegerLexMin();
+  if (!lexmin.isBounded())
+    return std::nullopt;
+  // { c - x : x in set }: a . x + g . locals + b becomes
+  // -a . y + g . locals + (a . c + b).
+  auto reflected = [&](ArrayRef<BigInt> centre) {
+    presburger::IntegerPolyhedron out(set.getSpace());
+    auto transform = [&](ArrayRef<BigInt> row) {
+      SmallVector<BigInt> next(row.begin(), row.end());
+      for (unsigned s = 0; s < n; ++s) {
+        next.back() += row[s] * centre[s];
+        next[s] = -row[s];
+      }
+      return next;
+    };
+    for (unsigned r = 0; r < set.getNumEqualities(); ++r)
+      out.addEquality(transform(set.getEquality(r)));
+    for (unsigned r = 0; r < set.getNumInequalities(); ++r)
+      out.addInequality(transform(set.getInequality(r)));
+    return out;
+  };
+  // The lexicographic maximum: the minimum of the negated set.
+  SmallVector<BigInt> zero(n, BigInt(0));
+  presburger::MaybeOptimum<SmallVector<BigInt, 8>> negatedMin =
+      reflected(zero).findIntegerLexMin();
+  if (!negatedMin.isBounded())
+    return std::nullopt;
+  SmallVector<BigInt> centre(n, BigInt(0)); // p + q
+  for (unsigned s = 0; s < n; ++s)
+    centre[s] = (*lexmin)[s] - (*negatedMin)[s];
+  presburger::IntegerPolyhedron mirror = reflected(centre);
+  if (mirror.isEqual(set))
+    return std::nullopt;
+  presburger::PresburgerSet missing =
+      presburger::PresburgerSet(set).subtract(presburger::PresburgerSet(mirror));
+  SmallVector<BigInt> witness;
+  if (!missing.findIntegerSample(witness))
+    return std::nullopt; // (cannot happen: the sets differ)
+  // In the source domain's coordinates.
+  SmallVector<BigInt> point(n, BigInt(0)), image(n, BigInt(0));
+  for (unsigned t = 0; t < n; ++t) {
+    point[nest[t].second] = witness[t];
+    image[nest[t].second] = centre[t] - witness[t];
+  }
+  return "the iteration domain is not centrally symmetric -- the point " +
+         pointText(point, n) + " is in it, its mirror " + pointText(image, n) +
+         " about the midpoint of its lexicographic extremes is not --, so "
+         "it is no affine image of a box; the accesses tell the iterations "
+         "apart (their stacked map is injective), so the nest is not a GEMM "
+         "of affine views in any decomposition (docs/AFFINE_GEMM_MAPPING.md "
+         "sections 19.1, 19.7, 19.13)";
 }
 
 FailureOr<DenseLogicalGemm>
@@ -46,8 +194,13 @@ mlir::systolic::getDenseLogicalGemm(const LogicalMatmul &matmul,
                        "M, N or K is 0)");
     // A bound on another loop's counter (the domain is not a box) or a
     // symbol (the extent is unknown here, P1.4). A non-box domain may still
-    // be the bijective image of a box -- a parallelotope (docs section 19.7)
-    // -- so nothing is proven invalid by it: UNKNOWN.
+    // be the bijective image of a box -- a parallelotope (docs section 19.7;
+    // the normalization of sections 19.12 and 19.13 has already rewritten
+    // every one it could prove) -- so it is UNKNOWN, unless it is provably no
+    // affine image of a box while the accesses tell the iterations apart
+    // (disproveAffineImageOfBox): then PROVEN_INVALID.
+    if (std::optional<std::string> proof = disproveAffineImageOfBox(matmul))
+      return failAs(Class::ProvenInvalid, *proof);
     return failAs(Class::Unknown,
                   "the loop bounds are not static, so the iteration "
                   "domain has no static normalized extent");
@@ -540,6 +693,177 @@ checkSourceCover(const LogicalMatmul &matmul,
   return success();
 }
 
+LogicalResult
+mlir::systolic::verifyLogicalBijection(const LogicalMatmul &matmul,
+                                       const DenseLogicalGemm &dense,
+                                       std::string *why) {
+  if (!matmul.sourceDomain || !matmul.normalization.domain)
+    return fail(why, "the GEMM has no exact source iteration domain");
+  const affine::FlatAffineValueConstraints &domain = *matmul.sourceDomain;
+  const auto &T = matmul.logicalMapping.transformation;
+  const auto &c = matmul.logicalMapping.offset;
+  const auto &S = matmul.normalization.sourceTransformation;
+  const auto &origin = matmul.normalization.sourceOffset;
+  const unsigned numP = dense.numBatchDims;
+  const unsigned n = domain.getNumDimVars();
+  if (domain.getNumSymbolVars() != 0 || T.size() != numP + 3 ||
+      c.size() != T.size() || S.size() != n || origin.size() != n ||
+      llvm::any_of(T, [&](const auto &row) { return row.size() != n; }))
+    return fail(why, "the logical mapping does not match the iteration domain");
+  for (unsigned s = 0; s < n; ++s)
+    for (unsigned t = 0; t < n; ++t)
+      if ((s == t) != (S[s][t] != 0) || (s == t && S[s][s] < 1))
+        return fail(why, "the source normalization is not a positive diagonal");
+
+  // (1) The source domain is the image of the box of ordinals z (z_s in
+  // [0, n_s)) under x = S z + origin, exactly: one floordiv local per loop
+  // (the library's division representation), compared for integer
+  // equality.
+  SmallVector<int64_t> extentOf(n, 0);
+  BigInt points(1);
+  for (unsigned s = 0; s < n; ++s) {
+    std::optional<int64_t> ub = matmul.normalization.domain->getConstantBound64(
+        presburger::BoundType::UB, s);
+    if (!ub || *ub < 0)
+      return fail(why, "the normalized iteration domain is not a box");
+    extentOf[s] = *ub + 1;
+    points *= BigInt(extentOf[s]);
+  }
+  presburger::IntegerPolyhedron image(presburger::PresburgerSpace::getSetSpace(n));
+  for (unsigned s = 0; s < n; ++s) {
+    // q = (x_s - origin_s) floordiv step; x_s - origin_s - step q = 0;
+    // 0 <= q <= n_s - 1.
+    SmallVector<BigInt> dividend(image.getNumCols(), BigInt(0));
+    dividend[s] = BigInt(1);
+    dividend.back() = -BigInt(origin[s]);
+    const unsigned q = image.addLocalFloorDiv(dividend, BigInt(S[s][s]));
+    SmallVector<BigInt> equality(image.getNumCols(), BigInt(0));
+    equality[s] = BigInt(1);
+    equality[q] = -BigInt(S[s][s]);
+    equality.back() = -BigInt(origin[s]);
+    image.addEquality(equality);
+    SmallVector<BigInt> lower(image.getNumCols(), BigInt(0));
+    SmallVector<BigInt> upper(image.getNumCols(), BigInt(0));
+    lower[q] = BigInt(1);
+    upper[q] = BigInt(-1);
+    upper.back() = BigInt(extentOf[s]) - BigInt(1);
+    image.addInequality(lower);
+    image.addInequality(upper);
+  }
+  if (!image.isEqual(presburger::IntegerPolyhedron(domain)))
+    return fail(why, "the iteration domain is not the box of its loops' "
+                     "ordinals");
+
+  // (2) The logical ordinals as an integer map of z: o_b = z_b for a batch
+  // loop b, and for I, J, K, from T_d x + c_d = offset_d + scale_d o_d,
+  //   o_d = sum_s (T_ds step_s / scale_d) z_s + (T_d origin + c_d - offset_d)
+  //         / scale_d,
+  // integral at every point of the box iff each term with n_s >= 2 and the
+  // constant are (consecutive z_s differ by one).
+  const unsigned numB = dense.batchLoops.size();
+  const unsigned r = numB + 3;
+  SmallVector<SmallVector<BigInt>> M(r, SmallVector<BigInt>(n, BigInt(0)));
+  SmallVector<BigInt> kappa(r, BigInt(0));
+  SmallVector<int64_t> targetExtent(r, 0);
+  for (unsigned i = 0; i < numB; ++i) {
+    M[i][dense.batchLoops[i]] = BigInt(1);
+    targetExtent[i] = extentOf[dense.batchLoops[i]];
+  }
+  for (unsigned d = 0; d < 3; ++d) {
+    const unsigned row = numB + d;
+    const BigInt scale(dense.scale[d]);
+    if (scale < BigInt(1))
+      return fail(why, "a logical coordinate has a non-positive scale");
+    BigInt constant = BigInt(c[numP + d]) - BigInt(dense.offset[d]);
+    for (unsigned s = 0; s < n; ++s) {
+      constant += BigInt(T[numP + d][s]) * BigInt(origin[s]);
+      if (extentOf[s] < 2)
+        continue;
+      const BigInt term = BigInt(T[numP + d][s]) * BigInt(S[s][s]);
+      if (term % scale != BigInt(0))
+        return fail(why, "a logical coordinate is not integral on the "
+                         "iteration domain");
+      M[row][s] = term / scale;
+    }
+    if (constant % scale != BigInt(0))
+      return fail(why, "a logical coordinate is not integral on the "
+                       "iteration domain");
+    kappa[row] = constant / scale;
+    targetExtent[row] = dense.extent[d];
+  }
+
+  // (3) Inside the box of the GEMM: each ordinal's range over the z box (a
+  // sum of independent terms, extreme at the ends) within [0, extent).
+  BigInt boxPoints(1);
+  for (unsigned i = 0; i < r; ++i) {
+    BigInt lo = kappa[i], hi = kappa[i];
+    for (unsigned s = 0; s < n; ++s) {
+      const BigInt span = M[i][s] * BigInt(extentOf[s] - 1);
+      if (span < BigInt(0))
+        lo += span;
+      else
+        hi += span;
+    }
+    if (lo < BigInt(0) || hi > BigInt(targetExtent[i]) - BigInt(1))
+      return fail(why, "the logical coordinates of the iteration domain leave "
+                       "the box of the GEMM");
+    boxPoints *= BigInt(targetExtent[i]);
+  }
+
+  // (4) Injective on the z box: no nonzero difference delta (|delta_s| <=
+  // n_s - 1) with M delta = 0. With the first nonzero component positive
+  // (the opposite difference otherwise), one integer polytope per position,
+  // each tested for an integer point.
+  SmallVector<unsigned> free;
+  for (unsigned s = 0; s < n; ++s)
+    if (extentOf[s] >= 2)
+      free.push_back(s);
+  for (unsigned first = 0; first < free.size(); ++first) {
+    const unsigned m = free.size();
+    presburger::IntegerPolyhedron kernel(
+        presburger::PresburgerSpace::getSetSpace(m));
+    for (unsigned i = 0; i < r; ++i) {
+      SmallVector<BigInt> row(m + 1, BigInt(0));
+      bool any = false;
+      for (unsigned t = 0; t < m; ++t) {
+        row[t] = M[i][free[t]];
+        any |= row[t] != BigInt(0);
+      }
+      if (any)
+        kernel.addEquality(row);
+    }
+    for (unsigned t = 0; t < m; ++t) {
+      const BigInt bound(extentOf[free[t]] - 1);
+      SmallVector<BigInt> lower(m + 1, BigInt(0)), upper(m + 1, BigInt(0));
+      lower[t] = BigInt(1);
+      upper[t] = BigInt(-1);
+      if (t < first) { // delta_t = 0
+        kernel.addEquality(lower);
+        continue;
+      }
+      // t == first: 1 <= delta_t <= n_t - 1; after: |delta_t| <= n_t - 1
+      lower.back() = t == first ? BigInt(-1) : bound;
+      upper.back() = bound;
+      kernel.addInequality(lower);
+      kernel.addInequality(upper);
+    }
+    if (!kernel.isIntegerEmpty())
+      return fail(why, "two points of the iteration domain have the same "
+                       "logical coordinates: logical iterations would be "
+                       "duplicated");
+  }
+
+  // (5) As many points as the box: with (3) and (4), onto it.
+  if (points != boxPoints) {
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    os << "the iteration domain has " << points << " points and the logical "
+       << "box " << boxPoints << ": logical iterations would be missing";
+    return fail(why, text);
+  }
+  return success();
+}
+
 FailureOr<SmallVector<LogicalPartition, 1>>
 mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul,
                                        ArrayRef<LogicalBox> boxes,
@@ -549,6 +873,11 @@ mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul,
 
   FailureOr<DenseLogicalGemm> dense = getDenseLogicalGemm(matmul, why);
   if (failed(dense))
+    return failure();
+
+  // The logical mapping itself, exactly: a bijection from the iteration
+  // domain onto the box of the GEMM (docs section 19.13).
+  if (failed(verifyLogicalBijection(matmul, *dense, why)))
     return failure();
 
   if (boxes.empty())

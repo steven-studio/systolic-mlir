@@ -60,6 +60,17 @@ struct TestAffineMatmulDiscoveryPass
       llvm::cl::desc("Regions to verify as a partition: lower I,J,K, "
                      "extent I,J,K per region")};
 
+  // Deliberately wrong logical mappings for every verified GEMM: the
+  // bijection certificate must refuse each (a test that it is not vacuous,
+  // docs/AFFINE_GEMM_MAPPING.md section 19.13.4).
+  Option<bool> perturbCertificate{
+      *this, "perturb-certificate",
+      llvm::cl::desc("After a verified logical bijection, check it again on "
+                     "wrong mappings (M + 1, M - 1, I's scale doubled, loop "
+                     "0's origin + 1, I's row of T zero), each of which the "
+                     "certificate must refuse"),
+      llvm::cl::init(false)};
+
   Option<bool> geometry{
       *this, "geometry",
       llvm::cl::desc("Print the geometric screening of every candidate "
@@ -514,6 +525,51 @@ struct TestAffineMatmulDiscoveryPass
         // with no loop has extent 1: K = 1 is the outer product, SQ-4).
         llvm::errs() << "  dense extents: M " << dense->extent[0] << ", N "
                      << dense->extent[1] << ", K " << dense->extent[2] << "\n";
+        // The logical mapping as an exact bijection onto the box (docs
+        // section 19.13): no logical iteration missing or duplicated.
+        std::string notBijective;
+        const bool bijective =
+            succeeded(verifyLogicalBijection(result, *dense, &notBijective));
+        if (bijective)
+          llvm::errs() << "  logical bijection: verified (the iteration domain "
+                          "maps one to one onto the box of the GEMM)\n";
+        else
+          llvm::errs() << "  logical bijection: not verified (" << notBijective
+                       << ")\n";
+        if (bijective && perturbCertificate) {
+          auto check = [&](StringRef what, const LogicalMatmul &matmul,
+                           const DenseLogicalGemm &gemm) {
+            std::string why;
+            llvm::errs() << "  perturbed mapping (" << what << "): ";
+            if (succeeded(verifyLogicalBijection(matmul, gemm, &why)))
+              llvm::errs() << "verified\n";
+            else
+              llvm::errs() << "not verified (" << why << ")\n";
+          };
+          DenseLogicalGemm wider = *dense;
+          wider.extent[0] += 1;
+          check("M + 1", result, wider);
+          if (dense->extent[0] >= 2) {
+            DenseLogicalGemm narrower = *dense;
+            narrower.extent[0] -= 1;
+            check("M - 1", result, narrower);
+          }
+          DenseLogicalGemm coarser = *dense;
+          coarser.scale[0] *= 2;
+          check("I's scale doubled", result, coarser);
+          if (!result.normalization.sourceOffset.empty()) {
+            LogicalMatmul shifted = result;
+            shifted.normalization.sourceOffset[0] += 1;
+            check("loop 0's origin + 1", shifted, *dense);
+          }
+          const unsigned rowI = dense->numBatchDims;
+          if (rowI < result.logicalMapping.transformation.size()) {
+            LogicalMatmul collapsed = result;
+            for (int64_t &entry : collapsed.logicalMapping.transformation[rowI])
+              entry = 0;
+            check("I's row of T zero", collapsed, *dense);
+          }
+        }
       }
       else {
         llvm::errs() << "  dense logical GEMM: no (" << notDense << ")\n";

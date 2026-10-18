@@ -16,7 +16,31 @@ DENSE_REASON_MARKERS = ("batched GEMM", "two logical coordinates are driven by t
                         "has no iteration (an empty GEMM", "is driven by no loop",
                         # a batched product with M = N = K = 1: element-wise
                         # (docs section 19.1, refused since 2026-10-18)
-                        "a batched product with M = N = K = 1")
+                        "a batched product with M = N = K = 1",
+                        # a non-box domain proven no affine image of a box
+                        # (central symmetry, docs section 19.13, since
+                        # 2026-10-18: the front end translates triangles)
+                        "is no affine image of a box")
+
+# The non-box disproof's remark (docs section 19.13.4, PROVEN_INVALID): the
+# claim that no decomposition makes the nest a GEMM of affine views. On a nest
+# the specification finds to be a GEMM ('mathematical_gemm' / 'legal_gemm')
+# the claim is a wrong proof -- a soundness failure, whatever the prediction
+# said (a prediction that mirrors a wrong proof would otherwise hide it, as
+# the 'every loop read' rule did for strip-mined loops with a remainder,
+# review 2026-10-18 #9): reported as a mismatch, so never a pass.
+DISPROOF_MARKER = "is no affine image of a box"
+
+
+def unsound_disproof(spec, *said):
+    """The soundness mismatch when the compiler stated the non-box disproof in
+    one of `said` while the specification finds a GEMM, else None."""
+    text = " | ".join(t for t in said if t)
+    if DISPROOF_MARKER in text and spec.get("mathematical_gemm", spec.get("legal_gemm")):
+        return ("soundness: the compiler proved the nest no GEMM of affine views ('%s', PROVEN_INVALID) "
+                "but the specification finds a GEMM (%s): a wrong proof" % (
+                    DISPROOF_MARKER, (spec.get("basis") or "")[:80]))
+    return None
 
 
 def classify_mlir(entry, st):
@@ -66,6 +90,9 @@ def classify_mlir(entry, st):
         if cur["reject_reason"][:48].lower() not in said:
             mism.append("rejection reason: predicted '%s', the compiler said '%s'" % (
                 cur["reject_reason"], lo.get("reason") or di.get("dense_reason") or "(nothing)"))
+    bad_proof = unsound_disproof(spec, lo.get("reason"), di.get("dense_reason"))
+    if bad_proof:
+        mism.append(bad_proof)
     for operand, want in (spec.get("views") or {}).items():
         got = di.get("views", {}).get(operand)
         if got != want:
@@ -232,6 +259,9 @@ def classify(entry, st):
                 cur["reject_reason"], cur["reject_stage"], dr["reason"]))
         elif cur["reject_stage"] == "recognition":
             notes.append("refused at recognition (the recognizer states no reason; predicted: %s)" % cur["reject_reason"][:60])
+    bad_proof = unsound_disproof(spec, actual.get("dense_reason"), (lo or {}).get("reason"), dr.get("reason"))
+    if bad_proof:
+        mism.append(bad_proof)
 
     exe = st.get("execute", {})
     actual["execute"] = exe.get("result")

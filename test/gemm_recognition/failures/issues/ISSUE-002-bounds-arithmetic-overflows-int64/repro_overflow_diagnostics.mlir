@@ -6,9 +6,12 @@
 // bounds, and so called the first three nests below overflows although no
 // value in them comes near 2^63 (measured 2026-10-15). An empty loop (SQ-2)
 // is reported as an empty GEMM (LogicalMatmul::normalizationEmptyLoop, since
-// 2026-10-15; before, it got the wording meant for symbolic bounds); every
-// other nest keeps "the loop bounds are not static ...", which the showcase
-// predictions of SQ-3 check. A min/max of constants is folded since
+// 2026-10-15; before, it got the wording meant for symbolic bounds); a
+// triangular nest whose every loop an access reads is proven no GEMM since
+// 2026-10-18 (its domain is not centrally symmetric, so no affine image of a
+// box: docs/AFFINE_GEMM_MAPPING.md section 19.13); every other nest keeps
+// "the loop bounds are not static ...", which the showcase predictions of SQ-3
+// check. A min/max of constants is folded since
 // 2026-10-15 (docs/AFFINE_GEMM_MAPPING.md section 1, P0.6): @min_const_ub,
 // `0 to min(8, 16)`, is the loop `0 to 8` and an 8 x 8 x 8 GEMM (before, it
 // was refused as "not static"); a min with a symbol is still refused.
@@ -26,7 +29,7 @@
 // DISC-NOT:  normalized form overflows
 // DISC:      dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
 // DISC-NOT:  normalized form overflows
-// DISC:      dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
+// DISC:      dense logical GEMM: no (the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it
 // DISC-NOT:  normalized form overflows
 // DISC:      dense logical GEMM: no (a loop of the nest has no iteration (an empty GEMM: M, N or K is 0))
 // DISC-NOT:  normalized form overflows
@@ -43,7 +46,7 @@
 // SYS-NOT:   normalized form overflows
 // SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent
 // SYS-NOT:   normalized form overflows
-// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent
+// SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it
 // SYS-NOT:   normalized form overflows
 // SYS:       remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)
 // SYS-NOT:   normalized form overflows

@@ -181,7 +181,10 @@ class Loop:
     # for (int k = i; k < i + 4; ++k) -- make the iteration set a
     # constant-extent parallelotope (family F: translated by the C front end,
     # mapped onto its box by the compiler); different terms (a triangle,
-    # k in [i, 8)) are outside the front end's subset.
+    # k in [i, 8)) are translated too since 2026-10-18 (docs section 19.13:
+    # exact subscript ranges by running the loops) -- the compiler maps such
+    # a set onto a box when its points are a parallelotope (family X), else
+    # leaves it as written.
     lb_terms: Dict[str, int] = field(default_factory=dict)
     ub_terms: Dict[str, int] = field(default_factory=dict)
 
@@ -197,11 +200,19 @@ class Loop:
             raise ValueError("%s: increment %r" % (self.var, self.inc))
         if self.cond and not re.search(r"\b%s\b" % re.escape(self.var), self.cond):
             raise ValueError("%s: condition %r does not use the counter" % (self.var, self.cond))
+        if self.cond and self.ctype.split()[0] == "unsigned":
+            # systolic-cfront evaluates every operation and conversion of a
+            # written condition in its own C type and translates the loop
+            # only when none leaves its type's range where C evaluates it --
+            # for an unsigned counter, when no operation wraps around
+            # (docs/AFFINE_GEMM_MAPPING.md section 19.13.1; it refused every
+            # unsigned one before the review of 2026-10-18). predict() does
+            # not model those types, so such a loop is not a case (#29).
+            raise ValueError("%s: an unsigned counter with a written condition (%r): the C front end "
+                             "translates it only when no operation of the condition wraps around in "
+                             "its C type, which the predictor does not model" % (self.var, self.cond))
         self.lb_terms = {k: v for k, v in self.lb_terms.items() if v}
         self.ub_terms = {k: v for k, v in self.ub_terms.items() if v}
-        if (self.lb_terms or self.ub_terms) and self.cond:
-            raise ValueError("%s: a bound over the enclosing counters cannot be combined with a "
-                             "written condition" % self.var)
         if self.var in self.lb_terms or self.var in self.ub_terms:
             raise ValueError("%s: a bound reads the loop's own counter" % self.var)
 
@@ -271,12 +282,17 @@ class Loop:
         else:
             lo, hi = self.lb_at(env), self._exclusive(self.ub_at(env))
         declared = list(range(lo, hi, self.step))
-        if self.cond:
+        if self.cond and (env is not None or self.is_box()):
+            # (a condition over the enclosing counters is checked where they
+            # have values; without them the box form's values are the
+            # declared ones)
             # run the condition as written (integer + - * and comparisons
-            # mean the same in Python as in C over these values): the
-            # declared equivalent must visit exactly the same values
-            written, v = [], self.lb
-            while eval(self.cond, {"__builtins__": {}}, {self.var: v}):
+            # mean the same in Python as in C over these values), the
+            # enclosing counters at their values: the declared equivalent
+            # must visit exactly the same values
+            written, v = [], lo
+            scope = dict(env or {})
+            while eval(self.cond, {"__builtins__": {}}, dict(scope, **{self.var: v})):
                 written.append(v)
                 v += self.step
                 if len(written) > 10 ** 6:
@@ -490,9 +506,471 @@ def box_form(case: "Case") -> "Case":
     for arr in box.arrays.values():
         arr.subs = tuple(compose(parse_affine(sub)).c_text() for sub in arr.subs)
     for lp in box.loops:
+        if not lp.is_box():
+            # a condition written over the enclosing counters (k - i < 4)
+            # means the declared bound, which the box keeps
+            lp.cond = ""
         lp.lb_terms, lp.ub_terms = {}, {}
     box.analysis, box.expect, box.spec, box.classification = {}, {}, {}, ""
     return box
+
+
+# The C front end computes a non-parallelotope nest's subscript ranges by
+# running its loops (systolic-cfront.c enumerate_points): it refuses the
+# function when one run gives the counters in scope more than this many
+# values -- every level counts, not only the innermost points, so the limit
+# bounds the work (docs/AFFINE_GEMM_MAPPING.md section 19.13.1).
+FRONTEND_ENUMERATION_LIMIT = 1 << 22
+
+
+def frontend_enumeration_values(loops, limit=FRONTEND_ENUMERATION_LIMIT):
+    """The values a run of the nest gives its counters, outermost first (the
+    points of the outermost loop, plus those of the outer two, ... through
+    the full nest), counted up to limit + 1: the front end's measure."""
+    count = 0
+    env = {}
+
+    def rec(depth):
+        nonlocal count
+        if depth == len(loops) or count > limit:
+            return
+        lp = loops[depth]
+        for v in lp.values(env):
+            if count > limit:
+                break
+            count += 1
+            env[lp.var] = v
+            rec(depth + 1)
+        env.pop(lp.var, None)
+
+    rec(0)
+    return count
+
+
+def _loop_vars(case: "Case"):
+    return [lp.var for lp in case.loops]
+
+
+def _used_vars(case: "Case"):
+    used = set()
+    for arr in case.arrays.values():
+        for f in arr.forms():
+            used |= f.vars()
+    return used
+
+
+def exact_form(case: "Case"):
+    """Family X (docs/AFFINE_GEMM_MAPPING.md section 19.13), decided by
+    enumeration -- the twin of the compiler's Presburger search: a case whose
+    bounds do not shift together but whose exact iteration set (all loops,
+    domain_points) is a constant-extent parallelotope with shift rows from
+    {0, the loop's lower-bound terms, its upper-bound terms}: per loop,
+    outermost first, the projection onto the first s + 1 counters equals the
+    parallelotope's (values a + row . x_<s + |step| t up to e). A copy of the
+    case whose bounds are the parallelotope's -- family F, so box_form
+    applies --, or None (also for a case already in F)."""
+    if shifts_together(case):
+        return None
+    import copy
+    pts = domain_points(case.loops)
+    if not pts:
+        return None
+    names = _loop_vars(case)
+    points = [tuple(env[v] for v in names) for env in pts]
+    prev = {()}
+    rows = []
+    for s, lp in enumerate(case.loops):
+        st = abs(lp.step)
+        cands = [{}]
+        for terms in (lp.lb_terms, lp.ub_terms):
+            if terms and dict(terms) not in cands:
+                cands.append(dict(terms))
+        proj = {x[:s + 1] for x in points}
+        hit = None
+        for row in cands:
+            coef = [row.get(v, 0) for v in names[:s]]
+            vals = [x[s] - sum(c * v for c, v in zip(coef, x[:s])) for x in proj]
+            a, e = min(vals), max(vals)
+            if (e - a) % st:
+                continue
+            cand = set()
+            for p in prev:
+                base = sum(c * v for c, v in zip(coef, p))
+                for t in range((e - a) // st + 1):
+                    cand.add(p + (a + base + st * t,))
+            if cand == proj:
+                hit = (row, a, e)
+                break
+        if hit is None:
+            return None
+        rows.append(hit)
+        prev = proj
+    form = copy.deepcopy(case)
+    for lp, (row, a, e) in zip(form.loops, rows):
+        lp.lb_terms, lp.ub_terms = dict(row), dict(row)
+        if lp.step > 0:
+            lp.lb, lp.ub, lp.cmp, lp.cond = a, e + 1, "<", ""
+        else:
+            # a loop counting down runs from e down to a (inclusive): the
+            # values it takes on the set, fewer than the declared ones when
+            # an inner loop is empty at some of them (review 2026-10-18 #24;
+            # the front end refuses a counting-down loop whose bounds read a
+            # counter, so its row is zero in every translated nest)
+            lp.lb, lp.ub, lp.cmp, lp.cond = e, a, ">=", ""
+    form.analysis, form.expect, form.spec, form.classification = {}, {}, {}, ""
+    return form
+
+
+def _independent(case: "Case", rep):
+    """('prefix' | 'interleaved', rep) when the loops `rep` (a nonempty list
+    in nest order) read only each other's counters in their bounds and the
+    other loops only the others' -- the iteration set is then the product of
+    the two groups' sets --, else None."""
+    if not rep:
+        return None
+    names = _loop_vars(case)
+    others = set(names) - set(rep)
+    for lp in case.loops:
+        if not lp.bound_vars() <= (set(rep) if lp.var in rep else others):
+            return None
+    return ("prefix" if names[:len(rep)] == rep else "interleaved"), rep
+
+
+def repetition_structure(case: "Case"):
+    """The repetition loops of a case whose bounds do not shift together, when
+    they are independent of the others (docs section 19.13): the loops no
+    access reads (R), each with bounds over R's counters only, the others (D)
+    with bounds over D's counters only -- the iteration set is then the
+    product of R's and D's, every point of D runs |R| times. ('prefix' |
+    'interleaved', R's vars) or None."""
+    used = _used_vars(case)
+    return _independent(case, [v for v in _loop_vars(case) if v not in used])
+
+
+def _normalizable(case: "Case") -> bool:
+    """A box, a parallelotope as written, or an exact parallelotope."""
+    return is_box_case(case) or shifts_together(case) or exact_form(case) is not None
+
+
+def _without(case: "Case", drop):
+    """The case with the loops of `drop` removed (the band below a prefix of
+    repetition loops)."""
+    import copy
+    sub = copy.deepcopy(case)
+    sub.loops = [lp for lp in sub.loops if lp.var not in drop]
+    sub.analysis, sub.expect, sub.spec, sub.classification = {}, {}, {}, ""
+    return sub
+
+
+def _leading(case: "Case", group):
+    """The outermost loops of the nest that are in `group`, up to the first
+    that is not."""
+    lead = []
+    for v in _loop_vars(case):
+        if v not in group:
+            break
+        lead.append(v)
+    return lead
+
+
+def _in_family_r(case: "Case", rep) -> bool:
+    """Whether independent repetition loops `rep` are in the documented
+    family R (docs section 19.13.3), as the compiler handles them:
+
+    - a prefix of the leading run of them around a band the normalization
+      rewrites AS WRITTEN -- its inner repetition loops included (a box,
+      family F or X). The compiler retries the band below every prefix of
+      the nest whose counters nothing below it reads, shortest first, and
+      takes the first that normalizes (normalizeParallelotopeDomains, its
+      'start' loop; review 2026-10-19: below a shorter prefix too, not only
+      the whole run); the normalization gives the band's loops constant
+      bounds, and the hoist then moves its inner repetition loops out
+      (review 2026-10-18 #21: they need not be part of the run);
+    - or GEMM loops that all have constant bounds, the repetition loops of
+      any shape (the hoist moves them out of the GEMM loops).
+
+    An inner triangle of repetitions inside a shifted band is in neither: the
+    band as written is no parallelotope. A loop of one iteration whose counter
+    a repetition loop's bounds read stops nothing: the hoist takes it for a
+    repetition loop of one iteration and moves it out with its readers
+    (hoistRepetitionLoops' dimension rule since the fourth round of the
+    review of 2026-10-19; it took it for a dimension before, and refused
+    such nests when a repetition loop had to be moved out of the GEMM
+    loops)."""
+    lead = _leading(case, rep)
+    if any(not any(lp.bound_vars() & set(lead[:p]) for lp in case.loops if lp.var not in lead[:p])
+           and _normalizable(_without(case, lead[:p])) for p in range(1, len(lead) + 1)):
+        return True
+    return all(lp.is_box() for lp in case.loops if lp.var not in rep)
+
+
+def _normalized_view(case: "Case"):
+    """The nest as the compiler's normalization leaves it when the nest as a
+    whole is no parallelotope (normalizeParallelotopeDomains' prefix retry):
+    the band below the shortest prefix of loops no access reads whose
+    counters nothing below it reads, rewritten onto its box when it is a
+    parallelotope as written or an exact one (box_form), the prefix as
+    written. None when no such prefix leaves a band to rewrite (the first
+    one's band a box, or none a parallelotope). Its repetition loops may be
+    independent where the nest's are not: s in [i, i + 2) below a repetition
+    triangle reads the GEMM counter i as written and nothing on the box
+    (review of 2026-10-19, round 4: such nests were lowered, and the
+    specification called them OUT_OF_SCOPE)."""
+    import copy
+    names, used = _loop_vars(case), _used_vars(case)
+    lead = _leading(case, set(names) - used)
+    for p in range(1, len(lead) + 1):
+        pre = set(lead[:p])
+        if any(lp.bound_vars() & pre for lp in case.loops if lp.var not in pre):
+            continue
+        sub = _without(case, lead[:p])
+        if is_box_case(sub):
+            return None
+        form = sub if shifts_together(sub) else exact_form(sub)
+        if form is None:
+            continue
+        box = box_form(form)
+        view = copy.deepcopy(case)
+        view.loops = [copy.deepcopy(lp) for lp in case.loops if lp.var in pre] + box.loops
+        view.arrays = box.arrays
+        view.analysis, view.expect, view.spec, view.classification = {}, {}, {}, ""
+        return view
+    return None
+
+
+def repetition_view(case: "Case"):
+    """(structure, view): the documented repetition family's structure --
+    (shape, repetition vars) or None -- and the case it holds on: the nest as
+    written, or its _normalized_view when only that has independent
+    repetition loops (the compiler hoists on the normalized band)."""
+    structure = repetition_structure(case)
+    if structure is not None:
+        return (structure if _in_family_r(case, structure[1]) else None), case
+    view = _normalized_view(case)
+    if view is not None:
+        structure = repetition_structure(view)
+        if structure is not None and _in_family_r(view, structure[1]):
+            return structure, view
+    return None, case
+
+
+def repetition_family(case: "Case"):
+    """The documented repetition family (docs section 19.13), the
+    specification's: the loops no access reads, independent of the others
+    (on the nest as written or as the normalization leaves it,
+    repetition_view) and in family R (_in_family_r). (shape, repetition
+    vars) or None."""
+    return repetition_view(case)[0]
+
+
+def _compiler_dims(case: "Case"):
+    """The loops the compiler reads as iteration dimensions of the GEMM: those
+    an access reads, and a loop with constant bounds and one iteration (a
+    constant on the domain, Lemma 0: recognizeLogicalMatmul's
+    singleIterationValue, and hoistRepetitionLoops since 2026-10-19 -- a
+    one-iteration loop whose bounds read a counter is a repetition loop for
+    both) unless it is in the leading run of loops no access reads (the
+    sub-band retry and the inner-first candidates skip those): the
+    recognizer's view of a nest left as written. The hoist differs on a
+    loop of one iteration whose counter a loop's bounds read (_hoist_dims)."""
+    used = _used_vars(case)
+    lead = set(_leading(case, set(_loop_vars(case)) - used))
+    return used | {lp.var for lp in case.loops if lp.is_box() and lp.trip() == 1 and lp.var not in lead}
+
+
+def _hoist_dims(case: "Case"):
+    """The loops hoistRepetitionLoops takes for GEMM dimensions: those of
+    _compiler_dims but a loop of one iteration whose counter a loop's bounds
+    read, which it takes for a repetition loop of one iteration and moves out
+    with its readers (review of 2026-10-19, round 4)."""
+    read = set().union(*(lp.bound_vars() for lp in case.loops))
+    once = {lp.var for lp in case.loops if lp.is_box() and lp.trip() == 1}
+    return _compiler_dims(case) - ((once & read) - _used_vars(case))
+
+
+def _predictor_family(case: "Case"):
+    """The repetition structure as the compiler finds it (review 2026-10-18
+    #22): its repetition loops are those that are no dimension for the hoist
+    (_hoist_dims) -- a one-iteration loop with constant bounds that no access
+    reads is a dimension unless it leads the nest or a loop's bounds read its
+    counter (then it is a repetition loop of one iteration, moved out with
+    its readers).
+    (family structure or None, structure or None): the first when the
+    compiler normalizes or hoists the nest (family R), the second whenever
+    the repetition loops are independent."""
+    dims = _hoist_dims(case)
+    structure = _independent(case, [v for v in _loop_vars(case) if v not in dims])
+    if structure is None:
+        return None, None
+    return (structure if _in_family_r(case, structure[1]) else None), structure
+
+
+def _predictor_view(case: "Case"):
+    """(family structure, structure, view): _predictor_family on the nest as
+    written, or on its _normalized_view when only that has independent
+    repetition loops, and the case they hold on."""
+    structure, pstructure = _predictor_family(case)
+    if pstructure is not None:
+        return structure, pstructure, case
+    view = _normalized_view(case)
+    if view is not None:
+        structure, pstructure = _predictor_family(view)
+        if pstructure is not None:
+            return structure, pstructure, view
+    return None, None, case
+
+
+def _surrogate(case: "Case", rep):
+    """The case with its repetition loops as plain loops of two iterations at
+    the same places (they repeat the GEMM; the compiler's hoist treats a
+    repetition loop whose bounds do not fix its trip count -- a triangle --
+    as one that may run twice) -- but a loop with constant bounds and one
+    iteration as written: it repeats nothing (a constant on the domain, Lemma
+    0; review 2026-10-19: given two iterations inside the reduction it made a
+    GEMM repeat_in_reduction), and a loop no access reads whose bounds shift
+    together and fix its trip count at 0 or 1 as one of one iteration: it
+    cannot run twice, which is all the hoist asks of it (fixedTripCount,
+    mayRunTwice; review 2026-10-19: k in [r1, r1 + 1) inside the reduction
+    loop is moved out without a test). The count of repetitions is taken from
+    the case, not from the surrogate."""
+    import copy
+    used = _used_vars(case)
+    sur = copy.deepcopy(case)
+    for lp in sur.loops:
+        if lp.var in rep and not (lp.is_box() and lp.trip() == 1):
+            n = 1 if lp.var not in used and lp.shifts_together() and lp.trip() <= 1 else 2
+            lp.lb, lp.ub, lp.step, lp.cmp, lp.inc, lp.cond = 0, n, 1, "<", "++", ""
+            lp.lb_terms, lp.ub_terms = {}, {}
+    sur.analysis, sur.expect, sur.spec, sur.classification = {}, {}, {}, ""
+    return sur
+
+
+def centrally_symmetric(case: "Case"):
+    """Whether the iteration set (all loops, enumerated) is centrally
+    symmetric: equal to its reflection about the midpoint of its
+    lexicographic extremes (docs section 19.7). None when empty."""
+    names = _loop_vars(case)
+    pts = {tuple(env[v] for v in names) for env in domain_points(case.loops)}
+    if not pts:
+        return None
+    lo, hi = min(pts), max(pts)
+    c2 = tuple(a + b for a, b in zip(lo, hi))
+    return all(tuple(c - x for c, x in zip(c2, p)) in pts for p in pts)
+
+
+def stacked_access_rank(case: "Case") -> int:
+    """The rank of the stacked access map x -> (F_A(x), F_B(x), F_C(x)): every
+    subscript of the two factors and of C as a row of its coefficients over
+    ALL the nest's loops (one that runs once included), exactly (Gaussian
+    elimination in fractions.Fraction). The nest's loop count when the
+    accesses tell every two iterations apart -- a loop no access reads is a
+    zero column; strip-mined loops read only through k = 2 k1 + k0 are two
+    proportional columns (docs/AFFINE_GEMM_MAPPING.md section 19.13.4)."""
+    from fractions import Fraction
+    names = _loop_vars(case)
+    rows = [[Fraction(f.coef.get(v, 0)) for v in names]
+            for r in ("a", "b", "c") for f in case.arrays[r].forms()]
+    rank = 0
+    for col in range(len(names)):
+        pivot = next((r for r in range(rank, len(rows)) if rows[r][col] != 0), None)
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        for r in range(len(rows)):
+            if r != rank and rows[r][col] != 0:
+                f = rows[r][col] / rows[rank][col]
+                rows[r] = [x - f * y for x, y in zip(rows[r], rows[rank])]
+        rank += 1
+    return rank
+
+
+INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+
+def written_bounds_fit_int64(case: "Case") -> bool:
+    """Whether every product (coefficient x counter) and every result of every
+    loop's bounds as the front end emits them -- the lower bound and the
+    exclusive upper bound, linear forms of the enclosing counters -- has its
+    exact value within 64 bits at every point of the outer loops that enters
+    the loop (the outer loops' own iteration set: points at which an inner
+    loop is empty included). The compiler takes the exact iteration set as
+    the set the program runs only then (exactIterationSet,
+    writtenBoundsFitInt64: lower-affine's products are nsw, poison on
+    overflow; docs section 19.13.2). The front end checks every operation of
+    a bound as written in its C type (section 19.13.1), but the bounds it
+    emits can be other expressions (a canonicalized condition: k - i < 4
+    becomes k < i + 4), so this is checked, not assumed."""
+    for s, lp in enumerate(case.loops):
+        if lp.is_box():
+            if not (INT64_MIN <= lp.lb <= INT64_MAX and INT64_MIN <= lp.exclusive_ub() <= INT64_MAX):
+                return False
+            continue
+        for env in domain_points(case.loops[:s]):
+            values = [c * env[v] for terms in (lp.lb_terms, lp.ub_terms) for v, c in terms.items()]
+            values += [lp.lb_at(env), lp._exclusive(lp.ub_at(env))]
+            if any(v < INT64_MIN or v > INT64_MAX for v in values):
+                return False
+    return True
+
+
+def disproof_holds(case: "Case") -> bool:
+    """The compiler's proof that a nest left as written is no GEMM of affine
+    views in any decomposition (disproveAffineImageOfBox, docs section
+    19.13.4; review 2026-10-18 #1, #9, #10-#12, #26, #35), for a C nest that
+    is the whole candidate band. All of:
+      (1) every bound a linear form of the nest's outer counters -- true of
+          every translated C nest (the front end emits bounds that are
+          constants or affine in the enclosing counters, rounds a
+          condition with |a| > 1 to a constant, never a floordiv / mod or a
+          symbol), so not tested here;
+      (2) no stepped loop (step != 1 as emitted: a loop counting up -- one
+          counting down becomes an ordinal loop of step 1) whose lower bound
+          reads a counter;
+      (3) the written bounds' products and results within 64 bits at every
+          outer point entering their loop (written_bounds_fit_int64);
+      (4) the stacked access map of rank n: the accesses tell the
+          iterations apart (stacked_access_rank) -- with a lower rank an
+          asymmetric set can map one to one onto a box (strip-mined loops
+          with a remainder: a GEMM); a loop no access reads fails it;
+      (5) the two factors and C three different arrays (two views of one
+          array may exchange their roles from point to point: the product
+          commutes);
+      (6) the iteration set nonempty and not centrally symmetric about the
+          midpoint of its lexicographic extremes (centrally_symmetric)."""
+    if any(lp.step > 1 and lp.lb_terms for lp in case.loops):
+        return False
+    if len({case.arrays[r].name for r in ("a", "b", "c")}) != 3:
+        return False
+    if stacked_access_rank(case) != len(case.loops):
+        return False
+    if centrally_symmetric(case) is not False:
+        return False
+    return written_bounds_fit_int64(case)
+
+
+def analysis_case(case: "Case"):
+    """The box case a nest is analysed on (docs sections 19.12, 19.13): the
+    case itself when it is a box; its box form for a parallelotope as
+    written or an exact one; for the repetition family, that of its
+    surrogate (the repetition loops as plain ones -- the repetition count is
+    the analysis's own). None for a domain outside these."""
+    if is_box_case(case):
+        return case
+    if shifts_together(case):
+        return box_form(case)
+    form = exact_form(case)
+    if form is not None:
+        return box_form(form)
+    structure, view = repetition_view(case)
+    if structure is not None:
+        return analysis_case(_surrogate(view, structure[1]))
+    return None
+
+
+def repetition_points(case: "Case", rep) -> int:
+    """The number of points of the repetition loops `rep` alone (independent
+    of the others: their bounds read only each other)."""
+    return len(domain_points([lp for lp in case.loops if lp.var in rep]))
 
 
 def _aliases_output(case: "Case") -> bool:
@@ -1452,6 +1930,24 @@ def predict(case: Case) -> dict:
     # or reduction reorders nothing (failures/resolved/NOTE-001).
     used_idx = [i for i, lp in enumerate(loops) if lp.var in used_vars or lp.trip() == 1]
     rep_idx = [i for i, lp in enumerate(loops) if i not in used_idx]
+    # The hoist's dependence test sees one memref at a time, so it moves a
+    # repetition loop outward only when every other memref of the body is
+    # provably disjoint from the one it stores to (provablyDisjointFromOutput:
+    # one of the two a restrict argument), and tests that first (review
+    # 2026-10-18 #3: a hoisted nest later refused for 'A may overlap C' ran
+    # its updates permuted on the host). Both tests are needed only when the
+    # interchange reorders iterations -- a repetition loop of two or more
+    # iterations inside a dimension of two or more; past loops that run once
+    # it moves without them (review 2026-10-19: a leading one-iteration loop).
+    reorders = any(loops[ri].trip() >= 2 and any(si < ri and loops[si].trip() >= 2 for si in used_idx)
+                   for ri in rep_idx)
+    if reorders and any(
+            arr.name != case.c.name and not (arr.restrict or case.c.restrict) for arr in (case.a, case.b)):
+        ex["recognition"] = "reject"
+        return stop("recognition", "loop %d of the nest repeats the accumulation inside it, and moving it "
+                    "outward is a legal loop interchange only if the memrefs the nest reads do not "
+                    "overlap the one it writes; declare the arguments llvm.noalias (C restrict)"
+                    % rep_idx[-1])
     blocked = _hoist_blocked(case, loops, used_vars)
     if blocked is not None:
         ex["recognition"] = "reject"
@@ -1800,20 +2296,54 @@ SPEC_BASIS = {
                          "by evaluating the nest against a run that reads the factors' initial values; "
                          "the compiler refuses the aliasing before that ('A may overlap C', docs "
                          "section 7)",
-    "non_box_unenumerated": "a loop nest whose bounds do not shift together and whose iteration set "
-                            "exceeds the enumeration limit of the executable specification (200,000 "
-                            "points): not decided here (the compiler decides no such domain either)",
-    "non_box_domain": "(docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12) a loop nest whose bounds do "
-                      "not shift together (a triangle, k in [i, 8)): its iteration set is not mapped "
-                      "onto a box by the readers' roles -- decided by enumerating its points as written "
-                      "(casespec._spec_domain) --, so it is not a GEMM of affine views; the C front end "
-                      "does not translate it ('the loop's trip count depends on an enclosing loop "
-                      "counter') and the compiler decides no such domain (UNKNOWN)",
-    "non_box_gemm": "a loop nest whose bounds do not shift together but whose points, enumerated as "
-                    "written, the readers' roles map bijectively onto a box: a GEMM of affine views on "
-                    "a domain the compiler does not normalize (docs/AFFINE_GEMM_MAPPING.md section "
-                    "19.12 normalizes constant-extent parallelotopes only) and the C front end does "
-                    "not translate",
+    "non_box_unenumerated": "a loop nest whose bounds do not shift together, outside the normalized "
+                            "and the repetition families, whose iteration set exceeds the enumeration "
+                            "limit of the executable specification (200,000 points): not decided here "
+                            "(the compiler does not normalize such a set; it proves it no GEMM only when "
+                            "its proof's conditions hold -- the accesses tell the iterations apart, the "
+                            "factors and C are three different arrays, no stepped loop's lower bound "
+                            "reads a counter, the written bounds stay within 64 bits and the set is not "
+                            "centrally symmetric --, else UNKNOWN: docs/AFFINE_GEMM_MAPPING.md section "
+                            "19.13.4)",
+    "non_box_domain": "(docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12, 19.13) a loop nest whose "
+                      "bounds do not shift together (a triangle, k in [i, 8)) and whose integer points "
+                      "are no parallelotope with the bounds' shift rows, outside the repetition "
+                      "family: enumerated as written (casespec._spec_domain), the readers' roles do not "
+                      "map its points onto a box, and it is provably no GEMM of affine views in any "
+                      "decomposition -- its updates (F_A(x), F_B(x), F_C(x)), counted over the iteration "
+                      "set, are not centrally symmetric (with one array as both factors: (F_C(x), F_A(x) "
+                      "+ F_B(x)), the product commutes), while a GEMM's are an affine image of a box "
+                      "(casespec._no_gemm_proof); the C "
+                      "front end translates it (since 2026-10-18) and the compiler refuses it: "
+                      "PROVEN_INVALID when the accesses tell the iterations apart (the stacked access "
+                      "map has rank n, the number of loops of the compiler's candidate band: the nest "
+                      "below a leading run of loops no access reads whose counters no loop below the "
+                      "run reads, their bounds may read each other), "
+                      "the factors and C are three different arrays, no stepped loop's "
+                      "lower bound reads a counter, every written bound stays within 64 bits and the set "
+                      "is not centrally symmetric (docs section 19.13.4), UNKNOWN otherwise",
+    "non_box_unnormalized": "a loop nest whose bounds do not shift together, whose integer points are no "
+                            "parallelotope with the bounds' shift rows and which is outside the "
+                            "repetition family (independent repetition loops leading the nest around a "
+                            "band the normalization rewrites, or around GEMM loops with constant "
+                            "bounds; independent as written or once that band is normalized), but "
+                            "whose points, enumerated as written, the readers' roles map "
+                            "bijectively onto a box (every point repeated alike) -- strip-mined loops "
+                            "with a remainder, k = 2 k1 + k0 on {(0, 0), (0, 1), (1, 0)}, whose accesses "
+                            "do not tell the iterations apart: a GEMM of affine views on a domain the "
+                            "compiler does not normalize, a documented limitation "
+                            "(docs/AFFINE_GEMM_MAPPING.md section 19.13; the compiler cannot prove it "
+                            "invalid: its disproof needs accesses that tell the iterations apart, under "
+                            "which a GEMM's iteration set is centrally symmetric)",
+    "non_box_undecided": "a loop nest whose bounds do not shift together, outside the normalized and the "
+                         "repetition families, whose points, enumerated as written, the readers' roles "
+                         "do not map bijectively onto a box (or repeat unevenly), and for which no proof "
+                         "that it is no GEMM is at hand: its updates (F_A(x), F_B(x), F_C(x)), counted "
+                         "over the iteration set (with one array as both factors: (F_C(x), F_A(x) + "
+                         "F_B(x)), the product commutes), are centrally symmetric -- as a GEMM's are, in a "
+                         "decomposition the specification does not search on a non-box domain: not "
+                         "decided here (the compiler cannot prove it invalid either; "
+                         "docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.13.4)",
     "SQ-1": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-1"],
     "SQ-2": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-2"],
     "SQ-3": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-3"],
@@ -2349,14 +2879,38 @@ MAC_STMTS = ("+=", "=C+AB", "=AB+C", "+=BA")
 def _analyse_domain(case: Case) -> dict:
     """A nest whose bounds read the enclosing counters: analysed on its box
     form when the bounds shift together (the computation is the same, and it
-    is what the compiler analyses after normalization), else recorded as a
-    non-box domain -- a triangle: not the affine image of a box, not a GEMM
-    (docs section 19.7)."""
+    is what the compiler analyses after normalization), on the box of its
+    points when they are a parallelotope (family X), on its surrogate in the
+    repetition family; else recorded as a non-box domain left as written --
+    no analysis on a box applies; whether some decomposition makes it a GEMM
+    is the specification's decision on its enumerated points (_spec_domain;
+    docs sections 19.7, 19.13)."""
     if shifts_together(case):
         result = dict(analyse(box_form(case)))
         result["domain"] = "parallelotope"
         result["shifted_loops"] = [lp.var for lp in case.loops if lp.lb_terms]
         result["gemm_tags"] = list(result.get("gemm_tags", [])) + ["parallelotope_domain"]
+        case.analysis = result
+        return result
+    form = exact_form(case)
+    if form is not None:
+        # an exact domain (docs section 19.13): the same points as the
+        # parallelotope, so the same analysis
+        result = dict(analyse(box_form(form)))
+        result["domain"] = "exact_parallelotope"
+        result["gemm_tags"] = list(result.get("gemm_tags", [])) + ["exact_domain"]
+        case.analysis = result
+        return result
+    structure, view = repetition_view(case)
+    if structure is not None:
+        result = dict(analyse(_surrogate(view, structure[1])))
+        result["domain"] = "repetition_" + structure[0]
+        result["gemm_tags"] = list(result.get("gemm_tags", [])) + ["repetition_domain"]
+        # every point of the GEMM runs once per point of the repetition
+        # loops (and of any other repetition loop the surrogate counted)
+        others = [lp for lp in view.loops if lp.var not in structure[1] and lp.role == "R"]
+        result["repetitions"] = repetition_points(view, structure[1]) * \
+            volume([lp.trip() for lp in others])
         case.analysis = result
         return result
     roles = {lp.var: lp.role for lp in case.loops}
@@ -2375,38 +2929,233 @@ def _analyse_domain(case: Case) -> dict:
               "affine": affine_ok, "perfect_nest": case.kernel_style not in ("init_inside", "scalar_acc"),
               "domain": "non_box", "is_gemm": False, "gemm_tags": [],
               "math_class": case.math_class or "non_box_domain",
-              "not_dense_reasons": ["loop %s's bounds do not shift together: the iteration set is not "
-                                    "the affine image of a box (a triangle; docs/AFFINE_GEMM_MAPPING.md "
-                                    "section 19.7)" % lp.var
-                                    for lp in case.loops if not lp.shifts_together()]}
+              "not_dense_reasons": [
+                  "the bounds of loop%s %s do not shift together and the integer points are no "
+                  "parallelotope with the bounds' shift rows, outside the repetition family: the nest is "
+                  "not rewritten onto a box (docs/AFFINE_GEMM_MAPPING.md sections 19.12, 19.13), so no "
+                  "analysis on a box applies" % (
+                      "s" if sum(not lp.shifts_together() for lp in case.loops) > 1 else "",
+                      ", ".join(lp.var for lp in case.loops if not lp.shifts_together())),
+                  "a GEMM in some decomposition only if its updates (F_A(x), F_B(x), F_C(x)), counted "
+                  "over the iteration set, are those of a GEMM -- an affine image of a box, centrally "
+                  "symmetric (docs section 19.7): decided on the enumerated points by the "
+                  "specification below"]}
     case.analysis = result
     return result
 
 
-def _predict_domain(case: Case) -> dict:
-    """The C front end translates a loop whose bounds are affine in the
-    enclosing counters when both bounds have the same counter terms and the
-    loop counts up (systolic-cfront.c for_stmt, 2026-10-18); the compiler
-    then maps the domain onto its box (docs section 19.12) and the box nest's
-    prediction is the case's."""
-    bad = [lp for lp in case.loops if not lp.shifts_together()]
-    down = [lp for lp in case.loops if not lp.is_box() and lp.step < 0]
-    if bad or down:
-        ex = {s: "not_reached" for s in STAGES}
-        ex["frontend"] = "rejected"
-        ex["hoisting_required"] = False
-        ex["reject_stage"] = "frontend"
-        ex["reject_reason"] = (
-            "the loop's trip count depends on an enclosing loop counter (its bounds do not shift "
-            "together): only bounds with the same counter terms are supported" if bad else
-            "a loop whose bounds depend on an enclosing loop counter must count up")
-        ex["driver"] = "not_translated"
-        case.expect = ex
-        return ex
-    ex = dict(predict(box_form(case)))
-    ex["domain_normalized"] = True
+def _refused_by_frontend(case: Case, reason: str) -> dict:
+    ex = {s: "not_reached" for s in STAGES}
+    ex["frontend"] = "rejected"
+    ex["hoisting_required"] = False
+    ex["reject_stage"] = "frontend"
+    ex["reject_reason"] = reason
+    ex["driver"] = "not_translated"
     case.expect = ex
     return ex
+
+
+def _predict_domain(case: Case) -> dict:
+    """The C front end translates a loop counting up whose bounds are affine
+    in the enclosing counters with any terms (systolic-cfront.c for_stmt,
+    2026-10-18; a nest that is no constant-extent parallelotope has its
+    subscript ranges computed by running its loops, up to
+    FRONTEND_ENUMERATION_LIMIT counter values). The compiler then (docs
+    sections 19.12, 19.13):
+    maps a parallelotope as written onto its box; maps a band whose exact
+    integer set is a parallelotope with the bounds' shift rows onto that
+    box; hoists independent repetition loops of any shape around the GEMM
+    loops (box ones; or, as a leading run, around a band it normalizes as
+    written, inner repetition loops included), a loop of one iteration being
+    a dimension unless it leads the nest or a loop's bounds read its counter
+    (_hoist_dims; on the band as the normalization leaves it,
+    _predictor_view); and leaves any
+    other band as written -- PROVEN_INVALID at the dense partition when the
+    disproof's conditions hold (disproof_holds: no stepped loop whose lower
+    bound reads a counter, three different arrays, the stacked access map of
+    rank n, the set nonempty and not centrally symmetric, the written
+    bounds within 64 bits), UNKNOWN otherwise; when only the outermost loops
+    are read by no access and a loop below reads their counters, the band
+    below them is the candidate, UNKNOWN at the dense partition (bounds over
+    outer counters)."""
+    if any(not lp.is_box() and lp.step < 0 for lp in case.loops):
+        return _refused_by_frontend(case, "a loop whose bounds depend on an enclosing loop counter "
+                                          "must count up")
+    if shifts_together(case):
+        ex = dict(predict(box_form(case)))
+        ex["domain_normalized"] = True
+        case.expect = ex
+        return ex
+    if frontend_enumeration_values(case.loops) > FRONTEND_ENUMERATION_LIMIT:
+        return _refused_by_frontend(case, "the iteration domain is not a parallelotope and running "
+                                          "its loops takes more than 4194304 counter values: its "
+                                          "exact subscript ranges are not computed")
+    form = exact_form(case)
+    if form is not None:
+        ex = dict(predict(box_form(form)))
+        ex["domain_normalized"] = True
+        case.expect = ex
+        return ex
+    structure, pstructure, view = _predictor_view(case)
+    if structure is not None:
+        shape, rep = structure
+        ex = dict(predict(_surrogate(view, rep)))
+        # a prefix leaves no repetition loop inside the GEMM loops: nothing
+        # to hoist, although predict() reads a one-iteration loop of the
+        # surrogate as a dimension (review of 2026-10-19, round 4)
+        ex["hoisting_required"] = shape == "interleaved"
+        case.expect = ex
+        return ex
+    structure = pstructure
+    if structure is not None and structure[0] == "prefix":
+        # the band below the prefix is not normalizable: the inner candidate
+        # (the band alone) is the one the compiler decides
+        ex = dict(predict(_without(view, structure[1])))
+        case.expect = ex
+        return ex
+    # left as written
+    ex = {s: "not_reached" for s in STAGES}
+    ex["frontend"] = "translated"
+    ex["hoisting_required"] = False
+    names = _loop_vars(case)
+    used = _compiler_dims(case)
+    unused = [i for i, v in enumerate(names) if v not in used]
+    band = case
+    if unused and unused == list(range(len(unused))):
+        # the loops no access reads are the outermost ones, and a loop below
+        # reads their counters in its bounds (else the prefix branch above):
+        # the compiler's candidate is the band of the loops below them
+        # (collectAffineMatmulCandidates: one anchor per loop, inner ones
+        # first; an anchor above an unused loop fails, one below a read loop
+        # leaves an access's counter outside), whose domain has the prefix's
+        # counters as parameters -- never static, and outside the symmetry
+        # test (its dimensions must be the mapping's columns)
+        band = _without(case, [names[i] for i in unused])
+        unused = []
+    if unused:
+        ex["recognition"] = "reject"
+        ex["reject_stage"] = "recognition"
+        ex["reject_reason"] = ("loop %d of the nest is used by no access (it repeats the "
+                               "accumulation; moved outward by the lowering pass when that is a legal "
+                               "interchange -- here it was not, so the mapping is not decided)" % unused[0])
+        ex["driver"] = "stays_on_host"
+        case.expect = ex
+        return ex
+    # the recognizer reads the subscripts as on a box (the roles by readers);
+    # the dense partition then refuses the domain. The surrogate replaces
+    # only the loops whose bounds read counters: a loop with constant bounds
+    # keeps them -- one of a single iteration is a constant on the domain
+    # (Lemma 0; review 2026-10-18 #23) --, and a refusal of the front end
+    # predicted on it (a scalar accumulator) is the nest's (#25).
+    sur = _surrogate(band, [lp.var for lp in band.loops if not lp.is_box()])
+    sur_ex = predict(sur)
+    if sur_ex.get("frontend") == "rejected":
+        return _refused_by_frontend(case, sur_ex["reject_reason"])
+    if sur_ex.get("recognition") != "accept":
+        ex.update({k: sur_ex[k] for k in ("recognition", "reject_stage", "reject_reason")})
+        ex["driver"] = "stays_on_host"
+        case.expect = ex
+        return ex
+    ex["recognition"] = "accept"
+    ex["dense_partition"] = "unsupported"
+    ex["reject_stage"] = "dense_partition"
+    if band is case and disproof_holds(case):
+        ex["reject_reason"] = ("the iteration domain is not centrally symmetric (a point of it has its "
+                               "mirror about the midpoint of its lexicographic extremes outside it), so "
+                               "it is no affine image of a box; the accesses tell the iterations apart "
+                               "(their stacked map is injective), so the nest is not a GEMM of affine "
+                               "views in any decomposition")
+    else:
+        ex["reject_reason"] = ("the loop bounds are not static, so the iteration domain has no static "
+                               "normalized extent")
+    ex["driver"] = "stays_on_host"
+    case.expect = ex
+    return ex
+
+
+def _no_gemm_proof(case: Case) -> bool:
+    """Whether the nest is provably no GEMM of affine views in any
+    decomposition, repeated or not (docs/AFFINE_GEMM_MAPPING.md sections
+    19.1, 19.7): its updates -- the multiset {(F_A(x), F_B(x), F_C(x)) : x in
+    D} over every iteration point, with multiplicity -- are not centrally
+    symmetric. A GEMM's updates are those of its slots: the image of a box Z
+    under an affine map W, taken once per slot (and as often again per point
+    of independent repetition loops), and z -> z_min + z_max - z maps Z onto
+    itself, so they are symmetric about W of Z's centre; so is every affine
+    projection of them. With one array as both factors the product commutes
+    -- two views may exchange the factors from point to point -- so the
+    projection used is the exchange-invariant (F_C(x), F_A(x) + F_B(x)).
+    The compiler's own disproof (disproof_holds: the stacked access map
+    injective, three arrays, the iteration set not symmetric) implies this
+    one."""
+    fa, fb, fc = (case.arrays[r].forms() for r in ("a", "b", "c"))
+    if case.a.name == case.b.name:
+        if len(fa) != len(fb):
+            return False
+
+        def update(env):
+            return tuple(f.eval(env) for f in fc) + tuple(x.eval(env) + y.eval(env) for x, y in zip(fa, fb))
+    else:
+        def update(env):
+            return tuple(f.eval(env) for f in fa + fb + fc)
+    updates = {}
+    for env in domain_points(case.loops):
+        t = update(env)
+        updates[t] = updates.get(t, 0) + 1
+    if not updates:
+        return False
+    s = tuple(a + b for a, b in zip(min(updates), max(updates)))
+    return any(updates.get(tuple(c - x for c, x in zip(s, t)), 0) != m for t, m in updates.items())
+
+
+def _affine_fit(samples) -> bool:
+    """Whether the integers samples[x] are one affine function of the tuples
+    x: v = w0 + w . x for all of them (exact, fractions.Fraction)."""
+    from fractions import Fraction
+    rows = [[Fraction(1)] + [Fraction(c) for c in x] + [Fraction(v)] for x, v in samples.items()]
+    cols, rank = len(rows[0]) - 1 if rows else 0, 0
+    for col in range(cols):
+        pivot = next((r for r in range(rank, len(rows)) if rows[r][col] != 0), None)
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        for r in range(len(rows)):
+            if r != rank and rows[r][col] != 0:
+                f = rows[r][col] / rows[rank][col]
+                rows[r] = [a - f * b for a, b in zip(rows[r], rows[rank])]
+        rank += 1
+    return all(row[-1] == 0 for row in rows[rank:])
+
+
+def _is_box_image(points) -> bool:
+    """Whether the tuples `points` are the image of a box under an injective
+    integer affine map triangular in their coordinate order -- a box sheared
+    along it: at every value of the earlier coordinates, the next one runs
+    over an arithmetic progression of one step and one length, whose start is
+    an affine function of the earlier ones ({(0, 0), (0, 1), (1, 1), (1, 2)}
+    = {(p1, p1 + p2)}; an axis-aligned box, possibly strided, is one). A
+    sufficient test: an affine image of a box sheared otherwise (both edges
+    of a parallelogram along a diagonal) fails it."""
+    pts = set(points)
+    if not pts:
+        return False
+    for m in range(len(next(iter(pts)))):
+        runs = {}
+        for p in pts:
+            runs.setdefault(p[:m], set()).add(p[m])
+        shapes, starts = set(), {}
+        for prefix, vals in runs.items():
+            vals = sorted(vals)
+            steps = {b - a for a, b in zip(vals, vals[1:])}
+            if len(steps) > 1:
+                return False
+            shapes.add((len(vals), steps.pop() if steps else None))
+            starts[prefix] = vals[0]
+        if len({n for n, _ in shapes}) != 1 or len({s for _, s in shapes if s is not None}) > 1:
+            return False
+        if m and not _affine_fit(starts):
+            return False
+    return True
 
 
 def _spec_domain(case: Case) -> dict:
@@ -2415,17 +3164,57 @@ def _spec_domain(case: Case) -> dict:
     image of a box under x = U x' (U lower unitriangular, order-preserving;
     docs/AFFINE_GEMM_MAPPING.md section 19.12), so the definition of 19.1 --
     a bijection from a box, the roles taken on the box (19.2, 'Non-box
-    domains') -- is decided on the box form, the same computation. Otherwise
-    (a triangle) the points are enumerated as written: a GEMM only if the
-    readers' roles map them bijectively onto a box, every batch iteration the
-    same shape (they never do for a triangle: 19.7's symmetry argument); no
-    other parametrization is searched."""
+    domains') -- is decided on the box form, the same computation; so is a
+    set whose points are a parallelotope (family X, exact_form), and the
+    repetition family on its surrogate. Otherwise the points are enumerated
+    as written: a GEMM (legal, outside the normalized family) when the
+    readers' roles map them bijectively onto a box, every point repeated
+    alike, every batch iteration the same shape; no other parametrization is
+    searched, so a REJECT needs a proof that none exists (_no_gemm_proof:
+    the updates, with multiplicity, not centrally symmetric -- docs section
+    19.7), else the case is not decided ('non_box_undecided'). A nest
+    without iteration points computes nothing: SQ-2, as a box with a loop of
+    zero iterations (review 2026-10-18 #28)."""
     if shifts_together(case):
         out = dict(spec_expect(box_form(case)))
         out["domain"] = "parallelotope"
         out["basis"] = (out["basis"] + " -- on a constant-extent parallelotope domain (the bounds "
                         "shifted together by the enclosing counters), decided on its box x = U x' "
                         "(docs/AFFINE_GEMM_MAPPING.md section 19.12)")
+        case.spec = out
+        return out
+    form = exact_form(case)
+    if form is not None:
+        # the points are a parallelotope's: the same computation, decided on
+        # its box (docs section 19.13)
+        out = dict(spec_expect(box_form(form)))
+        out["domain"] = "exact_parallelotope"
+        out["basis"] = (out["basis"] + " -- on a domain whose bounds do not shift together but whose "
+                        "integer points are a constant-extent parallelotope (enumerated: "
+                        "casespec.exact_form), decided on its box (docs/AFFINE_GEMM_MAPPING.md section "
+                        "19.13)")
+        case.spec = out
+        return out
+    structure, view = repetition_view(case)
+    if structure is not None:
+        # independent repetition loops: every point of the GEMM loops runs
+        # once per point of theirs -- the GEMM repeated, decided with them as
+        # plain repetition loops (the rule of repeat_in_reduction included);
+        # within the documented family when they are a prefix around a
+        # normalizable band or the GEMM loops are a box (docs section 19.13)
+        shape, rep = structure
+        out = dict(spec_expect(_surrogate(view, rep)))
+        if out.get("legal_gemm") and repetition_points(view, rep) == 0:
+            # the surrogate's two-iteration loops hide an empty repetition
+            # set: the nest computes nothing -- SQ-2, as for a box with a
+            # loop of zero iterations (review 2026-10-18 #28)
+            out.update({"recognition": "UNDETERMINED", "basis_key": "SQ-2", "spec_question": "SQ-2",
+                        "basis": SPEC_BASIS["SQ-2"], "offload": "undetermined"})
+        out["domain"] = "repetition_" + shape
+        out["basis"] = (out["basis"] + " -- the repetition loops (no access reads them, their "
+                        "bounds read only each other) form a set of their own, every point of the "
+                        "GEMM loops runs once per point of it (docs/AFFINE_GEMM_MAPPING.md section "
+                        "19.13)")
         case.spec = out
         return out
     an = case.analysis or analyse(case)
@@ -2436,7 +3225,9 @@ def _spec_domain(case: Case) -> dict:
         out["recognition"] = rec
         out["basis_key"] = key
         out["basis"] = SPEC_BASIS[key]
-        out["offload"] = "offloaded" if rec == "ACCEPT" else "stays_on_host"
+        out["offload"] = {"ACCEPT": "offloaded", "UNDETERMINED": "undetermined"}.get(rec, "stays_on_host")
+        if rec == "UNDETERMINED":
+            out["spec_question"] = key
         case.spec = out
         return out
 
@@ -2460,17 +3251,13 @@ def _spec_domain(case: Case) -> dict:
             pts.append(dict(key))
         counts[key] = counts.get(key, 0) + 1
     if len(pts) > 200000:
-        out["spec_question"] = "non_box_unenumerated"
-        out["recognition"] = "UNDETERMINED"
-        out["basis_key"] = "non_box_unenumerated"
-        out["basis"] = SPEC_BASIS["non_box_unenumerated"]
-        out["offload"] = "undetermined"
-        case.spec = out
-        return out
-    if not pts or len(set(counts.values())) != 1:
-        return done("REJECT", "non_box_domain")
-    found = _gemm_on_points(case, pts)
-    if found is None:
+        return done("UNDETERMINED", "non_box_unenumerated")
+    if not pts:
+        # no iteration point: the nest computes nothing -- SQ-2, as for a box
+        # with a loop of zero iterations (review 2026-10-18 #28)
+        return done("UNDETERMINED", "SQ-2")
+    found = None if len(set(counts.values())) != 1 else _gemm_on_points(case, pts)
+    if found is None and len(set(counts.values())) == 1:
         # batched: the loops every operand reads, with two or more values,
         # fix the batch; per batch value one GEMM, all of one shape
         readers = {}
@@ -2478,8 +3265,15 @@ def _spec_domain(case: Case) -> dict:
             for f in case.arrays[r].forms():
                 for v in f.vars():
                     readers.setdefault(v, set()).add(r)
-        batch = [v for v in used if readers.get(v) == {"a", "b", "c"} and len({p[v] for p in pts}) >= 2]
-        if batch:
+        batch = [v for v in _loop_vars(case)
+                 if v in used and readers.get(v) == {"a", "b", "c"} and len({p[v] for p in pts}) >= 2]
+        if batch and _is_box_image([tuple(p[v] for v in batch) for p in pts]):
+            # the batch values must be the image of a box under the
+            # parametrization: Z is a box of all the coordinates, the batch
+            # ones included (docs section 19.1; review 2026-10-19: a triangle
+            # of batch values was called a GEMM) -- sheared along the loops
+            # (b2 in [b1, b1 + 2)) as well as axis-aligned (_is_box_image; it
+            # needed an axis-aligned box before 2026-10-19, review 3)
             groups = {}
             for p in pts:
                 groups.setdefault(tuple(p[v] for v in batch), []).append(p)
@@ -2492,6 +3286,13 @@ def _spec_domain(case: Case) -> dict:
                 shape = res[:2]
             found = shape or None
     if not found:
+        # the readers' roles find no GEMM; another decomposition is searched
+        # nowhere, so the refusal needs its proof (docs section 19.7)
+        return done("REJECT", "non_box_domain") if _no_gemm_proof(case) else \
+            done("UNDETERMINED", "non_box_undecided")
+    # a GEMM found has symmetric updates; the proof is applied all the same
+    # (a correct proof must never meet a GEMM)
+    if _no_gemm_proof(case):
         return done("REJECT", "non_box_domain")
     out["legal_gemm"] = True
     if case.stmt in ("+=alpha", "-="):
@@ -2504,7 +3305,9 @@ def _spec_domain(case: Case) -> dict:
         return done("OUT_OF_SCOPE", "mixed_types")
     if _aliases_output(case):
         return done(*_alias_verdict(case))
-    return done("ACCEPT", "non_box_gemm")
+    # a GEMM on a domain outside the normalized family: a documented
+    # limitation (docs section 19.13), not a false negative
+    return done("OUT_OF_SCOPE", "non_box_unnormalized")
 
 
 # --------------------------------------------------------------------------
@@ -2652,10 +3455,13 @@ def reference_logical_text(case: Case) -> Optional[str]:
     if not an.get("is_gemm"):
         return None
     if not is_box_case(case):
-        # a parallelotope domain: the logical operands are those of its box
-        # form (the same elements, gathered over the box's loops through the
-        # composed subscripts; docs/AFFINE_GEMM_MAPPING.md section 19.12)
-        box = box_form(case)
+        # a non-box domain of the normalized families: the logical operands
+        # are those of its box case (the same elements, gathered over the
+        # box's loops through the composed subscripts; docs/AFFINE_GEMM_MAPPING.md
+        # sections 19.12, 19.13); the repetition count is the analysis's
+        box = analysis_case(case)
+        if box is None:
+            return None
         box.analysis = an
         case = box
     groups = {}
@@ -2790,15 +3596,20 @@ def math_description(case: Case) -> List[str]:
             ", one per value of batch coordinate %s" % ", ".join(lp.var for lp in case.loops if lp.role == "P")
             if an["math_class"] == "gemm_batched" else "",
             ", repeated %d times" % an["repetitions"] if an.get("repetitions", 1) > 1 else ""))
+        # (a non-box domain is described on its box case: docs sections
+        # 19.12, 19.13)
+        described = case if is_box_case(case) else (analysis_case(case) or case)
+        if described is not case:
+            out.append("  on the box of its iteration set: " + "; ".join(loop_summary(described)))
         groups = {}
-        for lp in case.loops:
+        for lp in described.loops:
             groups.setdefault(lp.role, []).append(lp)
         for g in ("I", "J", "K"):
             out.append("  %s is enumerated by loop(s) %s: extent %d" % (
                 g, ", ".join("%s (%d values)" % (lp.var, lp.trip()) for lp in groups[g])
                 if g in groups else "none (a constant subscript: extent one)", ext[g]))
         for role, nm, g0, g1 in (("a", "A'(I,K)", "I", "K"), ("b", "B'(K,J)", "K", "J"), ("c", "C'(I,J)", "I", "J")):
-            arr = case.arrays[role]
+            arr = described.arrays[role]
             vv = v[role]
             txt = arr.name + _sub_text(arr)
             if vv[g0]["first"] is None or vv[g1]["first"] is None:
@@ -2816,7 +3627,8 @@ def math_description(case: Case) -> List[str]:
             out.append("  tags: " + ", ".join(an["gemm_tags"]))
     elif an.get("not_dense_reasons"):
         out.append("")
-        out.append("Not a dense GEMM of these operands because:")
+        out.append("Not analysed as a GEMM on a box:" if an.get("domain") == "non_box"
+                   else "Not a dense GEMM of these operands because:")
         for r in an["not_dense_reasons"]:
             out.append("  - " + r)
     return out
@@ -2913,8 +3725,12 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     elif cls == "TRUE_NEGATIVE":
         h.append("  Not a dense GEMM of these operands; the compiler must keep refusing it.")
     elif cls == "SPEC_OPEN":
-        h.append("  The specification does not decide this case (%s, README.md section 2):" % spec["spec_question"])
-        for ln in _wrap(SPEC_QUESTIONS[spec["spec_question"]], 74):
+        # a recorded spec question, or a case the enumeration does not decide
+        # (non_box_unenumerated, non_box_undecided: their basis says why)
+        q = spec["spec_question"]
+        h.append("  The specification does not decide this case (%s%s):" % (
+            q, ", README.md section 2" if q in SPEC_QUESTIONS else ""))
+        for ln in _wrap(SPEC_QUESTIONS.get(q) or spec.get("basis") or "", 74):
             h.append("    " + ln)
         h.append("  The compiler's behaviour is recorded, not judged, until the question is")
         h.append("  settled in writing; the program's own result check must pass either way.")

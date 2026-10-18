@@ -74,7 +74,7 @@
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: no (a loop of the nest has no iteration (an empty GEMM: M, N or K is 0))
 // DISC:       unique logical matmul count: 1
-// DISC:       dense logical GEMM: no (the loop bounds are not static, so the iteration domain has no static normalized extent)
+// DISC:       dense logical GEMM: no (the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it, its mirror ({{[-0-9, ]+}}) about the midpoint of its lexicographic extremes is not --, so it is no affine image of a box; the accesses tell the iterations apart (their stacked map is injective), so the nest is not a GEMM of affine views in any decomposition
 // DISC-NEXT:  bounds: loop 1's upper bound depends on another loop's counter: the iteration domain is not a box
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: yes
@@ -223,7 +223,7 @@
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: C is accessed out of bounds along dimension 0
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A is accessed out of bounds along dimension 0
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: a loop of the nest has no iteration (an empty GEMM: M, N or K is 0)
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent (loop 1's upper bound depends on another loop's counter: the iteration domain is not a box)
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it, its mirror ({{[-0-9, ]+}}) about the midpoint of its lexicographic extremes is not --, so it is no affine image of a box; the accesses tell the iterations apart (their stacked map is injective), so the nest is not a GEMM of affine views in any decomposition (docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.7, 19.13) (loop 1's upper bound depends on another loop's counter: the iteration domain is not a box)
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A's subscripts along dimension 0 overflow 64-bit arithmetic
 // REMARK:      remark: affine GEMM 1x8x8 lowered as 1 exact region(s)
 // REMARK-NOT:  remark:
@@ -788,7 +788,10 @@ func.func @empty_loop(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {l
 
 // -----
 
-// triangular: j < i: the iteration domain is not a box (Theorem 3 needs one)
+// triangular: j < i: the iteration domain is not a box (Theorem 3 needs one); since 2026-10-18
+// (docs section 19.13) the compiler proves it no GEMM: the accesses tell the iterations apart
+// (their stacked map has rank 3) and the domain is not centrally symmetric, so it is no affine
+// image of a box (PROVEN_INVALID; it was "the loop bounds are not static", UNKNOWN, before)
 // expected: REJECT
 func.func @triangular(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %i = 0 to 8 {

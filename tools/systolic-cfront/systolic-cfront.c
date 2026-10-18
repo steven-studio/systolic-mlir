@@ -40,11 +40,23 @@
  *                expressions; i declared in the for, never written in the
  *                body. Becomes affine.for LB to UB step S (<=: UB + 1).
  *                LB and UB may also be affine expressions of the enclosing
- *                counters with the same counter terms (for (int k = i; k <
- *                i + 4; ++k): the bounds shift together, the domain is a
- *                constant-extent parallelotope, docs/AFFINE_GEMM_MAPPING.md
- *                section 19.12), counting up; becomes affine.for with
- *                affine_map bounds over the enclosing counters.
+ *                counters, counting up; the loop becomes affine.for with
+ *                affine_map bounds over the enclosing counters. With the
+ *                same counter terms (for (int k = i; k < i + 4; ++k)) the
+ *                bounds shift together and the domain is a constant-extent
+ *                parallelotope (docs/AFFINE_GEMM_MAPPING.md section 19.12);
+ *                with different ones (for (int k = i; k < 8; ++k), a
+ *                triangle) the loop is translated as written, and the
+ *                ranges of the subscripts in its scope (the interface's
+ *                extents) and the checks of its loops are computed by
+ *                running the nest's counters -- up to 4194304 values, past
+ *                which the function is refused (section 19.13); on a
+ *                parallelotope they are closed forms. The condition may be
+ *                any comparison L OP R (<, <=, >, >=) with L - R = a * i + g
+ *                + c affine in the counter i and the enclosing counters g
+ *                (a != 0; a = 1 or -1 when g has counter terms): k - i < 4
+ *                and i + 4 > k are k < i + 4, 2 * i - 3 > 0 is i > 1 (exact
+ *                rounding), 8 > k is k < 8.
  *                Counting down: for (int i = LB; i > B; --i) -- also >=,
  *                i--, i -= S (S > 0), i = i - S. affine.for only counts up,
  *                so it becomes the ordinal loop affine.for %i = 0 to N (N the
@@ -53,6 +65,17 @@
  *   subscripts   every array access subscripts all dimensions; each subscript
  *                is an affine expression of the enclosing loop counters and
  *                integer constants (+, -, constant *).
+ *   integers     C evaluates every node of a loop's initial value, bound and
+ *                condition and of a subscript -- each operation and each
+ *                implicit conversion -- in its own C type. The translation
+ *                computes exact integer values, so a function is translated
+ *                only when every such node's exact value lies in its type's
+ *                range wherever C evaluates it: no signed overflow, no
+ *                unsigned wrap-around, no conversion that changes a value
+ *                (unsigned r = -1; k < 8u at k = -5); else it is refused.
+ *                The step S is an integer constant, taken by its value: the
+ *                counter's values, the last one plus S included, must fit
+ *                the counter's type.
  *   arithmetic   + - * / and unary - on float/double, floating literals,
  *                integer constants converted to floating point, and C's own
  *                implicit float <-> double conversions (arith.extf/truncf).
@@ -395,6 +418,18 @@ typedef struct {
      counter is first + step * t plus this shift, a form over the enclosing
      counters with constant 0 (first and last are the values without it). */
   linear_form shift;
+  /* ENV_IV of a loop whose bounds are affine in the enclosing counters with
+     different counter terms (a triangle, docs/AFFINE_GEMM_MAPPING.md section
+     19.13): its values are lb_form, lb_form + step, ... below ub_form
+     (exclusive), both evaluated at the enclosing counters' values. first /
+     last are unused: while such a loop is in scope every range is computed
+     by running the nest's counters (enumerate_points). */
+  int nonbox;
+  linear_form lb_form, ub_form;
+  /* ENV_IV: the signed step of the counter's values, and its value at the
+     current point of an enumeration. */
+  long long step;
+  long long cur;
 } env_entry;
 
 typedef struct {
@@ -628,8 +663,24 @@ static linear_form form_add(linear_form a, linear_form b,
   return a;
 }
 
+/* *f := c * *f, out of line (form_scale's by-value forms would sit in every
+   frame of affine_index's recursion, one per AST level: about 2 KB a level
+   overflowed an 8 MB stack at some 3,800 terms, review of 2026-10-19). */
+static __attribute__((noinline)) void form_scale_in_place(
+    linear_form *f, long long c, const json_value *node) {
+  *f = form_scale(*f, c, node);
+}
+
+/* *f := *f + sign * *g, out of line (form_scale_in_place). */
+static __attribute__((noinline)) void form_add_in_place(
+    linear_form *f, const linear_form *g, long long sign,
+    const json_value *node) {
+  *f = form_add(*f, form_scale(*g, sign, node), node);
+}
+
 /* An affine subscript: the text usable inside affine.load brackets and its
-   linear form. */
+   linear form (built in *form, the right operand's of + and - on the
+   heap: the recursion keeps no form in its frames). */
 static char *affine_index(translator *tr, const json_value *node,
                           linear_form *form) {
   node = strip_parens_and_casts(node, kIndexCasts);
@@ -661,17 +712,17 @@ static char *affine_index(translator *tr, const json_value *node,
                       "counter", referenced_name(node));
   }
   if (strcmp(kind, "UnaryOperator") == 0 && strcmp(op, "-") == 0) {
-    linear_form f;
-    char *t = affine_index(tr, child(node, 0), &f);
-    *form = form_scale(f, -1, node);
+    char *t = affine_index(tr, child(node, 0), form);
+    form_scale_in_place(form, -1, node);
     return format("-(%s)", t);
   }
   if (strcmp(kind, "BinaryOperator") == 0 &&
       (strcmp(op, "+") == 0 || strcmp(op, "-") == 0)) {
-    linear_form fa, fb;
-    char *ta = affine_index(tr, child(node, 0), &fa);
-    char *tb = affine_index(tr, child(node, 1), &fb);
-    *form = form_add(fa, form_scale(fb, op[0] == '+' ? 1 : -1, node), node);
+    linear_form *fb = xmalloc(sizeof *fb);
+    char *ta = affine_index(tr, child(node, 0), form);
+    char *tb = affine_index(tr, child(node, 1), fb);
+    form_add_in_place(form, fb, op[0] == '+' ? 1 : -1, node);
+    free(fb);
     return format("(%s %s %s)", ta, op, tb);
   }
   if (strcmp(kind, "BinaryOperator") == 0 && strcmp(op, "*") == 0) {
@@ -681,9 +732,8 @@ static char *affine_index(translator *tr, const json_value *node,
       long long c;
       if (!try_int_constant(cnode, &c))
         continue;
-      linear_form f;
-      char *t = affine_index(tr, other, &f);
-      *form = form_scale(f, c, node);
+      char *t = affine_index(tr, other, form);
+      form_scale_in_place(form, c, node);
       return first ? format("(%lld * %s)", c, t) : format("(%s * %lld)", t, c);
     }
     unsupported(node, "subscript multiplies two non-constant terms; not an "
@@ -693,8 +743,6 @@ static char *affine_index(translator *tr, const json_value *node,
                     "counters");
 }
 
-/* Exact (min, max) of a linear form over the enclosing loops' box; 0 if some
-   enclosing loop runs zero times (the access never executes). */
 /* The linear form of a loop bound over the enclosing counters (affine_index's
    rules: counters, integer constants, + - and constant *), or 0 when the
    expression is not one. */
@@ -749,14 +797,144 @@ static char *bound_text(translator *tr, const linear_form *f,
   return format("affine_map<(%s) -> (%s)>(%s)", dims, expr, args);
 }
 
+/* ------------------------------------------------- exact iteration domains */
+
+/* A nest whose loops are not a constant-extent parallelotope -- a loop whose
+   two bounds have different counter terms (a triangle) -- has no closed
+   form for the ranges of its subscripts: they are computed exactly by
+   running the nest's counters, every loop's values evaluated at the outer
+   counters' values, up to this many visited values; past it the function is
+   refused (docs/AFFINE_GEMM_MAPPING.md section 19.13). */
+enum { kEnumerationLimit = 1 << 22 };
+
+static const char kEnumerationRefusal[] =
+    "the iteration domain is not a parallelotope and running its loops "
+    "takes more than 4194304 counter values: its exact subscript ranges are "
+    "not computed";
+
+static int env_has_nonbox(translator *tr) {
+  for (size_t i = 0; i < tr->env_n; ++i)
+    if (tr->env[i].kind == ENV_IV && tr->env[i].nonbox)
+      return 1;
+  return 0;
+}
+
+/* The value of a form over the enclosing counters at the current point of an
+   enumeration (each counter's value in its entry's `cur`), exactly; 0 when
+   it does not fit a long long. */
+static int form_value(translator *tr, const linear_form *f, long long *out) {
+  const __int128 kLimit = (__int128)1 << 120;
+  __int128 v = f->constant;
+  for (size_t i = 0; i < f->n; ++i) {
+    env_entry *e = env_find(tr, f->ids[i]);
+    v += (__int128)f->coef[i] * e->cur;
+    if (v > kLimit || v < -kLimit)
+      return 0;
+  }
+  if (v > LLONG_MAX || v < LLONG_MIN)
+    return 0;
+  *out = (long long)v;
+  return 1;
+}
+
+typedef void (*point_fn)(translator *tr, void *ctx);
+
+/* Calls fn at every point of the nest of the environment's loop counters
+   from entry `from` on (outermost first; each counter's value in its entry's
+   `cur`): a loop with constant bounds runs first, first + step, ..., last; a
+   shifted one (constant extent) the same plus its shift at the outer values;
+   a non-box one from its lower to its upper bound at the outer values.
+   *visited counts the values given to counters; past kEnumerationLimit the
+   function is refused at `node`. */
+static void enumerate_points(translator *tr, size_t from, point_fn fn,
+                             void *ctx, size_t *visited,
+                             const json_value *node) {
+  size_t i = from;
+  while (i < tr->env_n && tr->env[i].kind != ENV_IV)
+    ++i;
+  if (i == tr->env_n) {
+    fn(tr, ctx);
+    return;
+  }
+  env_entry *e = &tr->env[i];
+  if (!e->has_values)
+    return;
+  const long long step = e->step;
+  __int128 first, count;
+  if (e->nonbox) {
+    long long lo, hi;
+    if (!form_value(tr, &e->lb_form, &lo) || !form_value(tr, &e->ub_form, &hi))
+      unsupported(node, "integer constant expression overflows");
+    first = lo;
+    count = hi > lo ? ((__int128)hi - 1 - lo) / step + 1 : 0;
+  } else {
+    long long shift = 0;
+    if (e->shift.n && !form_value(tr, &e->shift, &shift))
+      unsupported(node, "integer constant expression overflows");
+    first = (__int128)e->first + shift;
+    count = ((__int128)e->last - e->first) / step + 1;
+  }
+  for (__int128 t = 0; t < count; ++t) {
+    if (++*visited > kEnumerationLimit)
+      unsupported(node, "%s", kEnumerationRefusal);
+    __int128 v = first + (__int128)step * t;
+    if (v > LLONG_MAX || v < LLONG_MIN)
+      unsupported(node, "integer constant expression overflows");
+    e->cur = (long long)v;
+    enumerate_points(tr, i + 1, fn, ctx, visited, node);
+  }
+}
+
+typedef struct {
+  const linear_form *forms;
+  size_t n;
+  long long *lo, *hi;
+  int found;
+  const json_value *node;
+} range_ctx;
+
+static void range_point(translator *tr, void *p) {
+  range_ctx *c = p;
+  for (size_t i = 0; i < c->n; ++i) {
+    long long v;
+    if (!form_value(tr, &c->forms[i], &v))
+      unsupported(c->node, "integer constant expression overflows");
+    if (!c->found || v < c->lo[i])
+      c->lo[i] = v;
+    if (!c->found || v > c->hi[i])
+      c->hi[i] = v;
+  }
+  c->found = 1;
+}
+
+/* The exact ranges [lo, hi] of n forms over the points of the nest of the
+   environment's loops, by running it; 0 when the nest has no point. */
+static int forms_range_enumerated(translator *tr, const linear_form *forms,
+                                  size_t n, long long *lo, long long *hi,
+                                  const json_value *node) {
+  range_ctx c = {forms, n, lo, hi, 0, node};
+  size_t visited = 0;
+  enumerate_points(tr, 0, range_point, &c, &visited, node);
+  return c.found;
+}
+
 /* The range [lo, hi] of a form's values over the loops' iterations. Each
    counter with affine bounds is x = x' + shift(enclosing counters) with x'
    running first .. last: the shifts are substituted innermost first (a
    shift's own counters are substituted after it), which leaves a form over
    independently ranging values, extreme at their ends -- exact on a
-   constant-extent parallelotope, not a hull. */
+   constant-extent parallelotope, not a hull. With a non-box loop in scope
+   (bounds with different counter terms) the nest is run instead
+   (forms_range_enumerated): exact on any domain. 0 when the form has no
+   value: in closed form, when a loop whose counter it reads (shifts
+   substituted) runs zero times -- a form that reads no such counter still
+   gets its range although the nest then has no point (array_access gives
+   such an access no interface range all the same: nest_has_point); a run of
+   the nest returns 0 whenever the nest has no point. */
 static int form_range(translator *tr, const linear_form *f, long long *lo,
                       long long *hi, const json_value *node) {
+  if (env_has_nonbox(tr))
+    return forms_range_enumerated(tr, f, 1, lo, hi, node);
   linear_form g = *f;
   for (size_t i = tr->env_n; i-- > 0;) {
     env_entry *e = &tr->env[i];
@@ -782,6 +960,419 @@ static int form_range(translator *tr, const linear_form *f, long long *lo,
   *lo = l;
   *hi = h;
   return 1;
+}
+
+/* ----------------------------------- integer expressions, node by node */
+
+/* C evaluates every integer node of a loop header -- the counter's initial
+   value, the bound, both sides of the condition -- and of a subscript in
+   that node's own type, the one clang gives it (an operator's promoted or
+   common type; every implicit conversion is a node of its own, of its
+   target type): a signed result outside the type is undefined behaviour, an
+   unsigned one wraps around, a conversion to a type that cannot represent
+   the value changes it. The translation computes with exact integer values,
+   so a loop or an access is translated only when every node's exact value
+   lies in its type's range at every point where C evaluates it -- C's
+   arithmetic is exact arithmetic there, unsigned included. A node is kept
+   with its value, a * counter + form (a loop's own counter; the form over
+   the enclosing counters, with the constant), and its type's range. */
+typedef struct {
+  const json_value *node;
+  long long a;            /* the coefficient of the loop's own counter */
+  linear_form form;       /* the rest: the enclosing counters, the constant */
+  __int128 min, max;      /* the range of the node's C type */
+  int conversion;         /* an implicit integer conversion to that type */
+  int reads;              /* the node reads a loop counter */
+} header_node;
+
+typedef struct {
+  header_node *items;
+  size_t n, cap;
+} header_nodes;
+
+enum { HEADER_INIT, HEADER_BOUND, HEADER_COND, HEADER_SUBSCRIPT };
+
+/* The range of the C type of `node`: one of kIntTypes, or a bit-precise
+   integer type of at most 64 bits, _BitInt(N) or unsigned _BitInt(N) (C23;
+   clang gives a `wb` / `uwb` literal one, and arithmetic on two of them
+   stays in it -- no integer promotion applies). 0 for another type. */
+static int node_type_range(const json_value *node, __int128 *min,
+                           __int128 *max) {
+  char *t = strip_qualifiers(qual_type(node));
+  unsigned long long m;
+  int ok = int_type_max(t, &m);
+  if (ok) {
+    *max = (__int128)m;
+    *min = strncmp(t, "unsigned", 8) == 0 ? 0 : -(__int128)m - 1;
+  } else {
+    const int is_unsigned = strncmp(t, "unsigned ", 9) == 0;
+    const char *b = is_unsigned ? t + 9 : t;
+    int width = 0, used = 0;
+    if (sscanf(b, "_BitInt(%d)%n", &width, &used) == 1 && used > 0 &&
+        b[used] == '\0' && width >= 1 && width <= 64) {
+      ok = 1;
+      if (is_unsigned) {
+        *min = 0;
+        *max = ((__int128)1 << width) - 1;
+      } else {
+        *max = ((__int128)1 << (width - 1)) - 1;
+        *min = -*max - 1;
+      }
+    }
+  }
+  free(t);
+  return ok;
+}
+
+/* -(a * counter + f), in place. Out of line, as header_binary and
+   header_push are: header_expr and cond_side_form recurse once per AST
+   level, and the forms these build by value would otherwise sit in each of
+   their frames (about 2.3 KB a level overflowed an 8 MB stack at some 3,600
+   terms, review of 2026-10-19). */
+static __attribute__((noinline)) void header_negate(long long *a,
+                                                    linear_form *f,
+                                                    const json_value *n) {
+  *f = form_scale(*f, -1, n);
+  *a = checked(0, *a, '-', n);
+}
+
+/* *a, *f := the value of `n` = left OP right, from the left operand's (a0,
+   *f on entry) and the right one's (a1, *f1); 0 when that is not affine. */
+static __attribute__((noinline)) int header_binary(const char *op,
+                                                   long long a0, long long a1,
+                                                   const linear_form *f1,
+                                                   long long *a, linear_form *f,
+                                                   const json_value *n) {
+  const linear_form f0 = *f;
+  if (op[0] != '*') {
+    const long long sign = op[0] == '+' ? 1 : -1;
+    *f = form_add(f0, form_scale(*f1, sign, n), n);
+    *a = checked(a0, checked(a1, sign, '*', n), '+', n);
+  } else if (a0 == 0 && f0.n == 0) {
+    *f = form_scale(*f1, f0.constant, n);
+    *a = checked(a1, f0.constant, '*', n);
+  } else if (a1 == 0 && f1->n == 0) {
+    *f = form_scale(f0, f1->constant, n);
+    *a = checked(a0, f1->constant, '*', n);
+  } else {
+    return 0;
+  }
+  return 1;
+}
+
+/* Appends node `n`, of value a * counter + *f, to *out with its type's
+   range; refuses a type whose range is not known. */
+static __attribute__((noinline)) void header_push(header_nodes *out,
+                                                  const json_value *n,
+                                                  long long a,
+                                                  const linear_form *f,
+                                                  int conversion, int reads) {
+  header_node h;
+  memset(&h, 0, sizeof h);
+  h.node = n;
+  h.a = a;
+  h.form = *f;
+  h.conversion = conversion;
+  h.reads = reads;
+  if (!node_type_range(n, &h.min, &h.max)) {
+    char *t = strip_qualifiers(qual_type(n));
+    unsupported(n, "integer arithmetic in the type '%s' is not supported", t);
+  }
+  if (out->n == out->cap) {
+    out->cap = out->cap ? 2 * out->cap : 16;
+    out->items = realloc(out->items, out->cap * sizeof *out->items);
+    if (!out->items) {
+      fprintf(stderr, "systolic-cfront: out of memory\n");
+      exit(2);
+    }
+  }
+  out->items[out->n++] = h;
+}
+
+/* Walks an integer expression of the loop counters -- literals, references
+   to the loop's own counter `decl` (none may appear when it is NULL) and to
+   enclosing counters, unary + / -, + -, multiplication by a constant,
+   parentheses and implicit integer conversions: the shapes the parsers of a
+   loop header and of a subscript accept -- and appends to *out, every
+   operand before its operator, the nodes whose value can leave their type:
+   the operations, the conversions and the loop's own counter, each with its
+   type's range (a literal fits its type, and an enclosing counter's values
+   fit its own, so neither is kept). The value of `n`, a * counter + form, in
+   *a and *f; in *reads whether it reads a loop counter (its form may still
+   be constant: k - i with k = i - 1). 0 when `n` is not of that shape. */
+static int header_expr(translator *tr, const json_value *n, const char *decl,
+                       header_nodes *out, long long *a, linear_form *f,
+                       int *reads) {
+  const char *kind = kind_of(n);
+  const char *op = opcode_of(n);
+  int conversion = 0, keep = 1;
+  memset(f, 0, sizeof *f);
+  *a = 0;
+  *reads = 0;
+  if (strcmp(kind, "ParenExpr") == 0)
+    return header_expr(tr, child(n, 0), decl, out, a, f, reads);
+  if (strcmp(kind, "ImplicitCastExpr") == 0) {
+    const char *ck = json_string(json_get(n, "castKind"), "");
+    if (strcmp(ck, "LValueToRValue") == 0 || strcmp(ck, "NoOp") == 0)
+      return header_expr(tr, child(n, 0), decl, out, a, f, reads);
+    if (strcmp(ck, "IntegralCast") != 0 ||
+        !header_expr(tr, child(n, 0), decl, out, a, f, reads))
+      return 0;
+    conversion = 1;
+  } else if (strcmp(kind, "IntegerLiteral") == 0) {
+    errno = 0;
+    f->constant = strtoll(json_string(json_get(n, "value"), "0"), NULL, 10);
+    if (errno == ERANGE)
+      return 0;
+    keep = 0;
+  } else if (strcmp(kind, "DeclRefExpr") == 0) {
+    const char *id = referenced_id(n);
+    env_entry *e = env_find(tr, id);
+    if (decl && id && strcmp(id, decl) == 0) {
+      *a = 1;
+    } else if (e && e->kind == ENV_IV) {
+      f->ids[0] = e->decl;
+      f->coef[0] = 1;
+      f->n = 1;
+      keep = 0;
+    } else {
+      return 0;
+    }
+    *reads = 1;
+  } else if (strcmp(kind, "UnaryOperator") == 0 &&
+             (strcmp(op, "-") == 0 || strcmp(op, "+") == 0)) {
+    if (!header_expr(tr, child(n, 0), decl, out, a, f, reads))
+      return 0;
+    if (op[0] == '-')
+      header_negate(a, f, n);
+  } else if (strcmp(kind, "BinaryOperator") == 0 &&
+             (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 ||
+              strcmp(op, "*") == 0)) {
+    /* the left operand's value in *f, the right one's on the heap */
+    linear_form *f1 = xmalloc(sizeof *f1);
+    long long a0, a1;
+    int r0, r1;
+    const int ok = header_expr(tr, child(n, 0), decl, out, &a0, f, &r0) &&
+                   header_expr(tr, child(n, 1), decl, out, &a1, f1, &r1) &&
+                   header_binary(op, a0, a1, f1, a, f, n);
+    free(f1);
+    if (!ok)
+      return 0;
+    *reads = r0 || r1;
+  } else {
+    return 0;
+  }
+  if (keep)
+    header_push(out, n, *a, f, conversion, *reads);
+  return 1;
+}
+
+static char *int128_text(__int128 v) {
+  char buf[48];
+  size_t i = sizeof buf;
+  unsigned __int128 u = v < 0 ? -(unsigned __int128)v : (unsigned __int128)v;
+  buf[--i] = 0;
+  do {
+    buf[--i] = (char)('0' + (int)(u % 10));
+    u /= 10;
+  } while (u);
+  if (v < 0)
+    buf[--i] = '-';
+  return xstrdup(buf + i);
+}
+
+/* Refuses the loop for header node h, whose exact value v at some point where
+   C evaluates it is outside its type's range. A node of the condition that
+   reads a counter is reported at the condition, with the counter values it is
+   evaluated for, k_first .. k_exit; one that reads none (a constant, checked
+   as written) at the node. */
+static _Noreturn void header_refuse(const header_node *h, int role, __int128 v,
+                                    const json_value *cond, __int128 k_first,
+                                    __int128 k_exit) {
+  char *t = strip_qualifiers(qual_type(h->node));
+  char *value = int128_text(v);
+  if (role == HEADER_COND && h->reads) {
+    char *first = int128_text(k_first), *last = int128_text(k_exit);
+    if (h->conversion)
+      unsupported(cond, "the loop condition converts %s to '%s', which cannot "
+                        "represent it (it is evaluated for the counter values "
+                        "%s .. %s)", value, t, first, last);
+    unsupported(cond, "the loop condition could overflow (it is evaluated for "
+                      "the counter values %s .. %s)", first, last);
+  }
+  const char *what = role == HEADER_INIT    ? "the loop counter's initial value"
+                     : role == HEADER_BOUND ? "the loop bound"
+                     : role == HEADER_COND  ? "the loop condition"
+                                            : "the subscript";
+  if (h->conversion)
+    unsupported(h->node, "%s converts %s to '%s', which cannot represent it",
+                what, value, t);
+  unsupported(h->node, "%s %s '%s' (an operation's exact value is %s)", what,
+              h->min == 0 ? "wraps around in" : "overflows", t, value);
+}
+
+/* *v = a * k + w exactly; 0 when that leaves 128 bits. */
+static int header_affine(long long a, __int128 k, long long w, __int128 *v) {
+  __int128 p;
+  return !__builtin_mul_overflow((__int128)a, k, &p) &&
+         !__builtin_add_overflow(p, (__int128)w, v);
+}
+
+/* Checks header nodes at the current point of an enumeration (the enclosing
+   counters at their `cur` values), the loop's own counter at k_first and at
+   k_exit -- each node is affine in it, so its values in between lie between
+   those two. */
+static void header_check_point(translator *tr, const header_nodes *nodes,
+                               int role, __int128 k_first, __int128 k_exit,
+                               const json_value *cond) {
+  for (size_t i = 0; i < nodes->n; ++i) {
+    const header_node *h = &nodes->items[i];
+    long long w;
+    if (!form_value(tr, &h->form, &w))
+      unsupported(h->node, "integer constant expression overflows");
+    for (int end = 0; end < (h->a ? 2 : 1); ++end) {
+      __int128 v;
+      if (!header_affine(h->a, end ? k_exit : k_first, w, &v))
+        unsupported(h->node, "integer constant expression overflows");
+      if (v < h->min || v > h->max)
+        header_refuse(h, role, v, cond, k_first, k_exit);
+    }
+  }
+}
+
+/* Checks the nodes of `nodes` that read no counter at their values as written
+   -- C evaluates such a node to one value wherever the code runs, and it is
+   checked whether the code runs or not, as the other checks of a constant
+   are. For a non-box loop's header that C never evaluates (its enclosing
+   nest has no point), whose other nodes are not checked. */
+static void header_check_constants(const header_nodes *nodes, int role,
+                                   const json_value *cond) {
+  for (size_t i = 0; i < nodes->n; ++i) {
+    const header_node *h = &nodes->items[i];
+    if (h->reads)
+      continue;
+    const __int128 v = h->form.constant;
+    if (v < h->min || v > h->max)
+      header_refuse(h, role, v, cond, 0, 0);
+  }
+}
+
+/* Whether the loops in scope have a point in common, i.e. whether the code
+   they enclose runs: every loop runs -- a non-box loop at some point of its
+   enclosing nest, any other at every point (its trip count is the same at
+   all of them). C evaluates nothing of code that never runs. */
+static int nest_has_point(translator *tr) {
+  for (size_t i = 0; i < tr->env_n; ++i)
+    if (tr->env[i].kind == ENV_IV && !tr->env[i].has_values)
+      return 0;
+  return 1;
+}
+
+/* Checks the nodes of a loop header in closed form, by their exact ranges
+   over the points of the enclosing nest (form_range: closed form on a
+   parallelotope; one run of the nest, for all of them, when a non-box loop
+   is in scope): the initial value's (`init`) and a bound's node at every
+   point; a condition's node with the counter at its first value `first` (a
+   form over the enclosing counters) and at the value that ends the loop,
+   first + `step_trips` (the step times the trip count, the same at every
+   point) -- each node is affine in the counter, so its values in between
+   lie between those two. A node that reads a counter -- the loop's own one
+   included, and also when its counter terms cancel (k - i with k = i - 1) --
+   is checked only where the code runs: when an enclosing loop never runs
+   (nest_has_point), C evaluates no such node. A node that reads none is
+   checked as written, as the other checks of a constant loop are. */
+static void header_check_closed(translator *tr, const header_nodes *init,
+                                const header_nodes *rest, int rest_role,
+                                const linear_form *first, __int128 step_trips,
+                                const json_value *cond,
+                                const json_value *loop) {
+  const header_nodes *lists[2] = {init, rest};
+  const int roles[2] = {HEADER_INIT, rest_role};
+  const size_t total = 1 + init->n + rest->n;
+  linear_form *forms = xmalloc(total * sizeof *forms);
+  linear_form *open = xmalloc(total * sizeof *open);
+  size_t *where = xmalloc(total * sizeof *where);
+  long long *lo = xmalloc(total * sizeof *lo), *hi = xmalloc(total * sizeof *hi);
+  long long *olo = xmalloc(total * sizeof *olo);
+  long long *ohi = xmalloc(total * sizeof *ohi);
+  int *found = xmalloc(total * sizeof *found);
+  /* forms[0]: the first value (for the diagnostic); then every node's value,
+     a condition's at the first value (at the exit value it is that plus
+     a * step_trips) */
+  size_t m = 0, nopen = 0;
+  forms[m++] = *first;
+  for (int l = 0; l < 2; ++l)
+    for (size_t i = 0; i < lists[l]->n; ++i) {
+      const header_node *h = &lists[l]->items[i];
+      forms[m++] = h->a ? form_add(h->form, form_scale(*first, h->a, h->node),
+                                   h->node)
+                        : h->form;
+    }
+  for (size_t j = 0; j < m; ++j) {
+    found[j] = 1;
+    lo[j] = hi[j] = forms[j].constant;
+    if (forms[j].n) {
+      where[nopen] = j;
+      open[nopen++] = forms[j];
+    }
+  }
+  if (nopen && env_has_nonbox(tr)) {
+    int any = forms_range_enumerated(tr, open, nopen, olo, ohi, loop);
+    for (size_t v = 0; v < nopen; ++v) {
+      found[where[v]] = any;
+      if (any) {
+        lo[where[v]] = olo[v];
+        hi[where[v]] = ohi[v];
+      }
+    }
+  } else {
+    for (size_t v = 0; v < nopen; ++v)
+      found[where[v]] = form_range(tr, &open[v], &lo[where[v]],
+                                   &hi[where[v]], loop);
+  }
+  if (!nest_has_point(tr)) {
+    if (forms[0].n)
+      found[0] = 0;
+    size_t q = 1;
+    for (int l = 0; l < 2; ++l)
+      for (size_t i = 0; i < lists[l]->n; ++i, ++q)
+        if (lists[l]->items[i].reads)
+          found[q] = 0;
+  }
+  const __int128 k_first = found[0] ? lo[0] : first->constant;
+  const __int128 k_exit =
+      (__int128)(found[0] ? hi[0] : first->constant) + step_trips;
+  size_t j = 1;
+  for (int l = 0; l < 2; ++l)
+    for (size_t i = 0; i < lists[l]->n; ++i, ++j) {
+      const header_node *h = &lists[l]->items[i];
+      if (!found[j])
+        continue;
+      __int128 low = lo[j], high = hi[j];
+      if (h->a) {
+        __int128 d, low_exit, high_exit;
+        if (__builtin_mul_overflow((__int128)h->a, step_trips, &d) ||
+            __builtin_add_overflow(low, d, &low_exit) ||
+            __builtin_add_overflow(high, d, &high_exit))
+          unsupported(h->node, "integer constant expression overflows");
+        if (low_exit < low)
+          low = low_exit;
+        if (high_exit > high)
+          high = high_exit;
+      }
+      if (low < h->min)
+        header_refuse(h, roles[l], low, cond, k_first, k_exit);
+      if (high > h->max)
+        header_refuse(h, roles[l], high, cond, k_first, k_exit);
+    }
+  free(forms);
+  free(open);
+  free(where);
+  free(lo);
+  free(hi);
+  free(olo);
+  free(ohi);
+  free(found);
 }
 
 static access_info *access_of(translator *tr, const char *decl, int rank) {
@@ -832,15 +1423,83 @@ static env_entry *array_access(translator *tr, const json_value *node,
   for (size_t d = 0; d < count; ++d)   /* outermost subscript first */
     texts[d] = affine_index(tr, indices[count - 1 - d], &forms[d]);
 
+  /* Every operation and conversion of the subscripts in its C type
+     (header_expr): C computes a subscript in its own type, so one that
+     wraps around or overflows addresses another element than its exact
+     value -- the ranges of those nodes are computed with the subscripts'. */
+  header_nodes sub = {0};
+  for (size_t d = 0; d < count; ++d) {
+    long long a_unused;
+    linear_form f_unused;
+    int r_unused;
+    if (!header_expr(tr, indices[count - 1 - d], NULL, &sub, &a_unused,
+                     &f_unused, &r_unused))
+      unsupported(indices[count - 1 - d], "subscript is not an affine "
+                                          "expression of the loop counters");
+  }
+  const size_t nforms = count + sub.n;
+  linear_form *all_forms = xmalloc(nforms * sizeof *all_forms);
+  long long *all_lo = xmalloc(nforms * sizeof *all_lo);
+  long long *all_hi = xmalloc(nforms * sizeof *all_hi);
+  int *found = xmalloc(nforms * sizeof *found);
+  for (size_t d = 0; d < count; ++d)
+    all_forms[d] = forms[d];
+  for (size_t i = 0; i < sub.n; ++i)
+    all_forms[count + i] = sub.items[i].form;
+  if (env_has_nonbox(tr)) {
+    /* one run of the nest for every subscript of the access */
+    int any = forms_range_enumerated(tr, all_forms, nforms, all_lo, all_hi,
+                                     node);
+    for (size_t j = 0; j < nforms; ++j)
+      found[j] = any;
+  } else {
+    for (size_t j = 0; j < nforms; ++j)
+      found[j] = form_range(tr, &all_forms[j], &all_lo[j], &all_hi[j], node);
+  }
+  /* In an access that never runs C evaluates no node that reads a counter,
+     and it touches no element: it gives the interface no range (systolic-cc
+     sizes the memref descriptor and its copies of the caller's array by the
+     extent, review of 2026-10-19). A node that reads none is checked as
+     written, wherever it is (header_check_constants). */
+  const int reached = nest_has_point(tr);
+  for (size_t i = 0; i < sub.n; ++i) {
+    const header_node *h = &sub.items[i];
+    __int128 low = h->form.constant, high = h->form.constant;
+    if (h->reads) {
+      if (!found[count + i] || !reached)
+        continue;
+      low = all_lo[count + i];
+      high = all_hi[count + i];
+    }
+    if (low < h->min)
+      header_refuse(h, HEADER_SUBSCRIPT, low, NULL, 0, 0);
+    if (high > h->max)
+      header_refuse(h, HEADER_SUBSCRIPT, high, NULL, 0, 0);
+  }
   access_info *info = access_of(tr, e->decl, e->rank);
   info->read |= read;
   info->written |= written;
   long long lo[MAX_RANK], hi[MAX_RANK];
-  int all = 1;
-  for (size_t d = 0; d < count; ++d)
-    if (!form_range(tr, &forms[d], &lo[d], &hi[d], node))
-      all = 0;
+  int all = reached;
+  for (size_t d = 0; d < count; ++d) {
+    all = all && found[d];
+    if (found[d]) {
+      lo[d] = all_lo[d];
+      hi[d] = all_hi[d];
+    }
+  }
+  free(all_forms);
+  free(all_lo);
+  free(all_hi);
+  free(found);
+  free(sub.items);
   if (all) {
+    /* The interface gives the leading dimension's extent, the last row
+       reached plus one (interface()). */
+    if (count && hi[0] == LLONG_MAX)
+      unsupported(node, "the access reaches row %lld of '%s', so the array's "
+                        "extent does not fit in 64 bits",
+                  hi[0], referenced_name(base));
     for (size_t d = 0; d < count; ++d) {
       if (!info->has_ranges || lo[d] < info->lo[d])
         info->lo[d] = lo[d];
@@ -1047,50 +1706,6 @@ static int counter_linear(const json_value *n, const char *decl, __int128 *a,
   return *a < kLimit && *a > -kLimit && *b < kLimit && *b > -kLimit;
 }
 
-/* The value of that expression at counter value `i`, every operation checked
-   against the range of the C type clang gives it (the condition is evaluated
-   in C, where a signed overflow is undefined behaviour). 0 if one does not
-   fit, or a type is not a signed integer type. */
-static int counter_eval(const json_value *n, const char *decl, __int128 i,
-                        __int128 *out) {
-  const json_value *s = strip_parens_and_casts(n, kIntConstantCasts);
-  const char *kind = kind_of(s);
-  const char *op = opcode_of(s);
-  long long v;
-  __int128 x, y, r;
-  if (is_ref_to(s, decl)) {
-    r = i;
-  } else if (strcmp(kind, "DeclRefExpr") != 0 && try_int_constant(s, &v)) {
-    r = v;
-  } else if (strcmp(kind, "UnaryOperator") == 0) {
-    if (!counter_eval(child(s, 0), decl, i, &x))
-      return 0;
-    r = op[0] == '-' ? -x : x;
-  } else if (strcmp(kind, "BinaryOperator") == 0) {
-    if (!counter_eval(child(s, 0), decl, i, &x) ||
-        !counter_eval(child(s, 1), decl, i, &y))
-      return 0;
-    if (op[0] == '*') {
-      __int128 lim = (__int128)1 << 64;
-      if (x > lim || x < -lim || y > lim || y < -lim)
-        return 0;
-      r = x * y;
-    } else {
-      r = op[0] == '+' ? x + y : x - y;
-    }
-  } else {
-    return 0;
-  }
-  /* the range of this operation's own C type */
-  char *t = strip_qualifiers(qual_type(s));
-  unsigned long long max;
-  int ok = int_type_max(t, &max) && strncmp(t, "unsigned", 8) != 0 &&
-           r <= (__int128)max && r >= -(__int128)max - 1;
-  free(t);
-  *out = r;
-  return ok;
-}
-
 static __int128 floor_div(__int128 n, __int128 d) {   /* d > 0 */
   return n >= 0 ? n / d : -((-n + d - 1) / d);
 }
@@ -1128,6 +1743,115 @@ static int affine_condition(const json_value *cond, const char *decl,
   *op = kOps[rel == '>'][strict];
   *bound = (long long)q;
   return 1;
+}
+
+/* `cop` with its sides exchanged: a < b is b > a. */
+static const char *flipped_comparison(const char *cop) {
+  if (strcmp(cop, "<") == 0)
+    return ">";
+  if (strcmp(cop, "<=") == 0)
+    return ">=";
+  if (strcmp(cop, ">") == 0)
+    return "<";
+  return "<=";
+}
+
+/* One side of a loop condition as a * counter + f, f a linear form over the
+   enclosing loop counters: integer constants, references to the counter or
+   to enclosing counters, unary + / -, + - and constant *, parentheses and
+   integer casts. 0 when it is not one. It recurses once per AST level, so
+   it keeps no form in its frame: the left operand is built in *f, the right
+   one on the heap, and the arithmetic is header_negate's and
+   header_binary's (as header_expr does). */
+static int cond_side_form(translator *tr, const json_value *n, const char *decl,
+                          linear_form *f, long long *a) {
+  n = strip_parens_and_casts(n, kIntConstantCasts);
+  const char *kind = kind_of(n);
+  const char *op = opcode_of(n);
+  long long v;
+  memset(f, 0, sizeof *f);
+  *a = 0;
+  if (is_ref_to(n, decl)) {
+    *a = 1;
+    return 1;
+  }
+  if (strcmp(kind, "DeclRefExpr") == 0) {
+    env_entry *e = env_find(tr, referenced_id(n));
+    if (!e || e->kind != ENV_IV)
+      return 0;
+    f->ids[0] = e->decl;
+    f->coef[0] = 1;
+    f->n = 1;
+    return 1;
+  }
+  if (try_int_constant(n, &v)) {
+    f->constant = v;
+    return 1;
+  }
+  if (strcmp(kind, "UnaryOperator") == 0 &&
+      (strcmp(op, "-") == 0 || strcmp(op, "+") == 0)) {
+    if (!cond_side_form(tr, child(n, 0), decl, f, a))
+      return 0;
+    if (op[0] == '-')
+      header_negate(a, f, n);
+    return 1;
+  }
+  if (strcmp(kind, "BinaryOperator") != 0)
+    return 0;
+  linear_form *f1 = xmalloc(sizeof *f1);
+  long long a0, a1;
+  const int ok = cond_side_form(tr, child(n, 0), decl, f, &a0) &&
+                 cond_side_form(tr, child(n, 1), decl, f1, &a1) &&
+                 (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 ||
+                  strcmp(op, "*") == 0) &&
+                 header_binary(op, a0, a1, f1, a, f, n);
+  free(f1);
+  return ok;
+}
+
+/* The checks of a non-box loop (bounds that do not shift together, a
+   triangle: its values at each outer point are lb(x), lb(x) + step, ...
+   below ub(x)) at every point of its enclosing nest (enumerate_points): the
+   lower bound and the bound as written fit the counter's type, the last
+   value plus the step too, and every node of the header fits its C type
+   where C evaluates it -- the initial value's and the bound's at that
+   point, the condition's at the first value and at the value that ends the
+   loop. `runs`: the loop runs at some outer point. */
+typedef struct {
+  const json_value *loop, *cond;
+  linear_form lb;         /* the initial value over the enclosing counters */
+  linear_form bound;      /* the bound, before <='s + 1 */
+  int le;                 /* the canonical comparison is <= */
+  long long step;
+  __int128 type_min, type_max;
+  const char *vtype;
+  int check_written;      /* the condition is `counter OP bound` as written */
+  const header_nodes *init_nodes, *bound_nodes, *cond_nodes;
+  int runs;
+  int evaluated;          /* C evaluates the header at some point */
+} loop_check;
+
+static void loop_check_point(translator *tr, void *p) {
+  loop_check *c = p;
+  long long lbv, bw;
+  c->evaluated = 1;
+  if (!form_value(tr, &c->lb, &lbv) || !form_value(tr, &c->bound, &bw))
+    unsupported(c->loop, "the loop counter could overflow '%s'", c->vtype);
+  const __int128 ubx = (__int128)bw + c->le;
+  if (lbv < c->type_min || lbv > c->type_max || lbv < -2147483648LL ||
+      (c->check_written && (bw < c->type_min || bw > c->type_max)))
+    unsupported(c->loop, "the loop counter could overflow '%s'", c->vtype);
+  const __int128 trips = ubx > lbv ? (ubx - 1 - lbv) / c->step + 1 : 0;
+  if (trips > 0) {
+    c->runs = 1;
+    __int128 last = (__int128)lbv + (__int128)c->step * (trips - 1);
+    if (last + c->step > c->type_max)
+      unsupported(c->loop, "the loop counter could overflow '%s'", c->vtype);
+  }
+  const __int128 exit_value = (__int128)lbv + (__int128)c->step * trips;
+  header_check_point(tr, c->init_nodes, HEADER_INIT, lbv, lbv, c->cond);
+  header_check_point(tr, c->bound_nodes, HEADER_BOUND, lbv, lbv, c->cond);
+  header_check_point(tr, c->cond_nodes, HEADER_COND, lbv, exit_value, c->cond);
 }
 
 static void statements(translator *tr, const json_value *stmts, int indent,
@@ -1214,8 +1938,8 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   int down = strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0;
   long long bound;
   /* An affine condition E OP C (2 * i - 3 > 0): the equivalent comparison of
-     the counter with a constant; E itself is checked for overflow below,
-     once the values it is evaluated at are known. */
+     the counter with a constant; both sides are checked below, node by node
+     in their C types, once the values they are evaluated at are known. */
   int affine_cond = 0;
   if (strcmp(kind_of(cond), "BinaryOperator") == 0 && (up || down) &&
       !is_ref_to(child(cond, 0), decl) &&
@@ -1226,7 +1950,64 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   }
   linear_form ub_form = {0};
   int ub_affine = 0;
-  if (!affine_cond) {
+  /* Any other comparison L OP R with L - R = a * counter + g + c affine in
+     the counter and the enclosing counters (a != 0) is its equivalent
+     comparison of the counter itself (docs/AFFINE_GEMM_MAPPING.md section
+     19.13): without counter terms in g, exactly as affine_condition rounds
+     (8 > k is k < 8); with them, a must be 1 or -1 (k - i < 4 is k < i + 4,
+     i + 4 > k likewise). Both sides of such a condition are checked, node by
+     node in their C types, where C evaluates them. */
+  int cond_outer = 0;
+  if (!affine_cond && strcmp(kind_of(cond), "BinaryOperator") == 0 &&
+      (up || down) && !is_ref_to(child(cond, 0), decl)) {
+    linear_form fl, fr;
+    long long al, ar;
+    if (cond_side_form(tr, child(cond, 0), decl, &fl, &al) &&
+        cond_side_form(tr, child(cond, 1), decl, &fr, &ar)) {
+      linear_form g = form_add(fl, form_scale(fr, -1, cond), cond);
+      const long long a = checked(al, ar, '-', cond);
+      if (a != 0 && g.n == 0) {
+        /* a * k + c OP 0: k OP' bound, rounded as affine_condition rounds */
+        __int128 num = -(__int128)g.constant, den = a;
+        char rel = cop[0];
+        int strict = cop[1] == '\0';
+        if (den < 0) {
+          num = -num;
+          den = -den;
+          rel = rel == '<' ? '>' : '<';
+        }
+        __int128 fl_q = floor_div(num, den), ce_q = -floor_div(-num, den);
+        __int128 q = (rel == '<') == strict ? ce_q : fl_q;
+        static const char *const kOps[2][2] = {{"<=", "<"}, {">=", ">"}};
+        if (q <= (__int128)9223372036854775807LL &&
+            q >= -(__int128)9223372036854775807LL - 1) {
+          cop = kOps[rel == '>'][strict];
+          bound = (long long)q;
+          affine_cond = 1;
+          up = cop[0] == '<';
+          down = !up;
+        }
+      } else if (a != 0) {
+        if (a != 1 && a != -1)
+          unsupported(cond, "the loop condition must compare the counter, "
+                            "with coefficient 1 or -1, with an affine "
+                            "expression of the enclosing loop counters");
+        /* k + g + c OP 0 is k OP -(g + c); -k + g + c OP 0 is k OP' g + c */
+        if (a == 1) {
+          ub_form = form_scale(g, -1, cond);
+        } else {
+          ub_form = g;
+          cop = flipped_comparison(cop);
+        }
+        bound = ub_form.constant;
+        ub_affine = 1;
+        cond_outer = 1;
+        up = cop[0] == '<';
+        down = !up;
+      }
+    }
+  }
+  if (!affine_cond && !cond_outer) {
     if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
         !is_ref_to(child(cond, 0), decl))
       unsupported(has_cond ? cond : s, "the loop condition must be 'counter < "
@@ -1293,18 +2074,63 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     unsupported(inc, "the loop step must be negative (the condition '%s' "
                      "counts down)", cop);
 
+  /* The header's integer nodes, each in its C type (header_expr): the
+     initial value's; the bound's, when the condition is `counter OP bound`
+     as written (its left side is the counter itself, so the comparison is
+     in the counter's type); else both sides' of the condition, which read
+     the counter. */
+  const int cond_counter = affine_cond || cond_outer;
+  header_nodes init_nodes = {0}, bound_nodes = {0}, cond_nodes = {0};
+  {
+    long long a_unused;
+    linear_form f_unused;
+    int r_unused;
+    if (!header_expr(tr, child(var, 0), NULL, &init_nodes, &a_unused,
+                     &f_unused, &r_unused))
+      unsupported(child(var, 0), "the loop counter's initial value must be an "
+                                 "integer constant or an affine expression of "
+                                 "the enclosing loop counters");
+    if (cond_counter ? !header_expr(tr, child(cond, 0), decl, &cond_nodes,
+                                    &a_unused, &f_unused, &r_unused) ||
+                           !header_expr(tr, child(cond, 1), decl, &cond_nodes,
+                                        &a_unused, &f_unused, &r_unused)
+                     : !header_expr(tr, child(cond, 1), NULL, &bound_nodes,
+                                    &a_unused, &f_unused, &r_unused))
+      unsupported(cond, "the loop condition must be 'counter < bound', "
+                        "'counter <= bound', 'counter > bound' or 'counter >= "
+                        "bound'");
+  }
+
   /* The values the counter takes, first, first + step, ... while the
      condition holds: `trips` of them (exact integer arithmetic). */
   int is_unsigned = strncmp(vtype, "unsigned", 8) == 0;
   __int128 type_min = is_unsigned ? 0 : -(__int128)type_max - 1;
   long long ub = 0;   /* counting up: the exclusive upper bound */
   __int128 trips;
+  __int128 point_trips = 0;   /* (not non-box) the trip count at each point */
+  int nonbox = 0;
+  loop_check check = {0};
+  check.loop = s;
+  check.cond = cond;
+  check.lb = lb_form;
+  check.bound = ub_form;
+  check.bound.constant = bound;
+  check.le = strcmp(cop, "<=") == 0;
+  check.step = step;
+  check.type_min = type_min;
+  check.type_max = (__int128)type_max;
+  check.vtype = vtype;
+  check.init_nodes = &init_nodes;
+  check.bound_nodes = &bound_nodes;
+  check.cond_nodes = &cond_nodes;
   if (lb_affine || ub_affine) {
-    /* Bounds affine in the enclosing counters: both must have the same
-       counter terms, so that the extent UB - LB is a constant and the
-       domain a constant-extent parallelotope (the compiler maps it onto a
-       box, docs/AFFINE_GEMM_MAPPING.md section 19.12). A varying trip count
-       (a triangle) is not translated. */
+    /* Bounds affine in the enclosing counters, counting up. With the same
+       counter terms the extent UB - LB is a constant and the domain a
+       constant-extent parallelotope (the compiler maps it onto a box,
+       docs/AFFINE_GEMM_MAPPING.md section 19.12). With different ones (a
+       triangle) the loop is translated as written: its values at each outer
+       point are LB(x), LB(x) + S, ... below UB(x), and every subscript range
+       in its scope is computed by running the nest (section 19.13). */
     if (!up)
       unsupported(s, "a loop whose bounds depend on an enclosing loop counter "
                      "must count up");
@@ -1315,11 +2141,25 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     lb_terms.constant = 0;
     ub_terms.constant = 0;
     linear_form extent = form_add(ub_terms, form_scale(lb_terms, -1, s), s);
-    if (extent.n != 0)
-      unsupported(s, "the loop's trip count depends on an enclosing loop "
-                     "counter (its bounds do not shift together): only "
-                     "bounds with the same counter terms are supported");
+    nonbox = extent.n != 0;
+  }
+  if (nonbox) {
+    /* Exactly, at every point of the enclosing nest: the initial value and
+       the bound as written fit the counter's type, its last value plus the
+       step too, every node of the header fits its C type where C evaluates
+       it; the loop runs somewhere. */
+    check.check_written = !cond_counter;
+    size_t visited = 0;
+    enumerate_points(tr, 0, loop_check_point, &check, &visited, s);
+    trips = check.runs;
+    if (!check.evaluated) {
+      header_check_constants(&init_nodes, HEADER_INIT, cond);
+      header_check_constants(cond_counter ? &cond_nodes : &bound_nodes,
+                             cond_counter ? HEADER_COND : HEADER_BOUND, cond);
+    }
+  } else if (lb_affine || ub_affine) {
     trips = ub > lb ? ((__int128)ub - 1 - lb) / step + 1 : 0;
+    point_trips = trips;
     /* At every value of the enclosing counters the bounds must fit the
        counter's type, the last increment too. An enclosing loop that runs
        zero times means this one never runs. */
@@ -1342,6 +2182,7 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     if (strcmp(cop, "<=") == 0)
       ub = checked(ub, 1, '+', cond);
     trips = ub > lb ? ((__int128)ub - 1 - lb) / step + 1 : 0;
+    point_trips = trips;
     /* The counter's last increment must not overflow its type (that would
        be undefined behaviour or wrap-around, neither of which affine.for
        models). */
@@ -1354,6 +2195,7 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     __int128 down_step = -(__int128)step;
     trips = (__int128)lb >= lowest ? ((__int128)lb - lowest) / down_step + 1
                                    : 0;
+    point_trips = trips;
     /* The decrement after the last iteration must not leave the type: for
        an unsigned counter and the condition i >= 0 it would wrap around and
        the loop would never end. */
@@ -1364,20 +2206,18 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
       unsupported(s, "the loop runs more than 2^63 - 1 times");
   }
 
-  /* An affine condition is evaluated before every iteration and once more
-     when the loop ends: at the counter values lb, lb + step, ..., lb + step *
-     trips. Every operation of it is linear in the counter, so its extremes
-     are at the first and the last of those values; it must not overflow its
-     C type at either. */
-  if (affine_cond) {
-    __int128 v;
-    __int128 last_eval = (__int128)lb + (__int128)step * trips;
-    if (!counter_eval(child(cond, 0), decl, lb, &v) ||
-        !counter_eval(child(cond, 0), decl, last_eval, &v))
-      unsupported(cond, "the loop condition could overflow (it is evaluated "
-                        "for the counter values %lld .. %lld)", lb,
-                  (long long)last_eval);
-  }
+  /* Every node of the header in its C type where C evaluates it (a non-box
+     loop's: at every point of the enclosing nest, above), in closed form:
+     the initial value and the bound at every point of the enclosing nest,
+     the condition before every iteration and once more when the loop ends
+     -- at the counter values lb, lb + step, ..., lb + step * trips (trips
+     the same at every point), where each of its nodes, affine in the
+     counter, is extreme at the first or the last of them. */
+  if (!nonbox)
+    header_check_closed(tr, &init_nodes,
+                        cond_counter ? &cond_nodes : &bound_nodes,
+                        cond_counter ? HEADER_COND : HEADER_BOUND, &lb_form,
+                        (__int128)step * point_trips, cond, s);
 
   if (writes_to(body, decl))
     unsupported(body, "the loop counter is modified in the loop body");
@@ -1386,8 +2226,15 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   env_entry *e = env_add(tr, decl, ENV_IV);
   e->name = name;
   /* The counter's first and last values; none for a loop that runs zero
-     times. */
-  if (trips > 0) {
+     times. A non-box loop keeps its bounds instead. */
+  e->step = step;
+  if (nonbox) {
+    e->nonbox = 1;
+    e->has_values = trips > 0;
+    e->lb_form = lb_form;
+    e->ub_form = ub_form;
+    e->ub_form.constant = ub;
+  } else if (trips > 0) {
     e->has_values = 1;
     e->first = lb;
     e->last = (long long)((__int128)lb + (__int128)step * (trips - 1));
@@ -1780,7 +2627,10 @@ static long long for_trip_count(const json_value *n) {
     up = cop[0] == '<';
     down = !up;
   } else if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
+             !is_ref_to(child(cond, 0), decl) ||
              !try_int_constant(child(cond, 1), &bound)) {
+    /* not `counter OP constant`: a condition such as s + r < 3 reads the
+       enclosing counters (its trip count varies; site_executions runs it) */
     return -1;
   }
   const char *iop = opcode_of(inc);
@@ -1817,6 +2667,190 @@ static long long for_trip_count(const json_value *n) {
     return -1;
   }
   return trips > (__int128)9223372036854775807LL ? -1 : (long long)trips;
+}
+
+/* A for loop whose iterations are counted by running it (site_executions):
+   its counter (declared or assigned), its initial value and condition --
+   integer expressions of the counter and the enclosing loops' counters,
+   evaluated at their values --, and its constant step (++, --, += S, -= S,
+   = i + S, = i - S). 0 when it is not of that shape. */
+typedef struct {
+  const json_value *init_expr, *cond;
+  const char *counter;
+  long long step;
+} site_loop;
+
+static int site_loop_of(const json_value *n, site_loop *out) {
+  const json_value *init = child(n, 0), *cond = child(n, 2), *inc = child(n, 3);
+  memset(out, 0, sizeof *out);
+  if (strcmp(kind_of(init), "DeclStmt") == 0 && child_count(init) == 1 &&
+      child_count(child(init, 0)) > 0) {
+    out->init_expr = child(child(init, 0), 0);
+    out->counter = json_string(json_get(child(init, 0), "id"), NULL);
+  } else if (strcmp(kind_of(init), "BinaryOperator") == 0 &&
+             strcmp(opcode_of(init), "=") == 0) {
+    out->init_expr = child(init, 1);
+    out->counter = referenced_id(strip_parens_and_casts(child(init, 0), kNoOp));
+  }
+  const char *cop = opcode_of(cond);
+  if (!out->init_expr || !out->counter ||
+      strcmp(kind_of(cond), "BinaryOperator") != 0 ||
+      !(strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0 ||
+        strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0))
+    return 0;
+  out->cond = cond;
+  const char *iop = opcode_of(inc);
+  long long step = 0;
+  if (strcmp(kind_of(inc), "UnaryOperator") == 0 &&
+      (strcmp(iop, "++") == 0 || strcmp(iop, "--") == 0)) {
+    step = iop[0] == '+' ? 1 : -1;
+  } else if (strcmp(kind_of(inc), "CompoundAssignOperator") == 0 &&
+             (strcmp(iop, "+=") == 0 || strcmp(iop, "-=") == 0)) {
+    if (!try_int_constant(child(inc, 1), &step) ||
+        __builtin_mul_overflow(step, iop[0] == '-' ? -1 : 1, &step))
+      return 0;
+  } else if (strcmp(kind_of(inc), "BinaryOperator") == 0 &&
+             strcmp(iop, "=") == 0) {
+    const json_value *rhs = strip_parens_and_casts(child(inc, 1),
+                                                   kLValueToRValue);
+    const char *rop = opcode_of(rhs);
+    if (strcmp(kind_of(rhs), "BinaryOperator") != 0 ||
+        (strcmp(rop, "+") != 0 && strcmp(rop, "-") != 0) ||
+        !try_int_constant(child(rhs, 1), &step) ||
+        __builtin_mul_overflow(step, rop[0] == '-' ? -1 : 1, &step))
+      return 0;
+  } else {
+    return 0;
+  }
+  if (step == 0)
+    return 0;
+  out->step = step;
+  return 1;
+}
+
+/* The value of an integer expression of the counters ids[0 .. count) at
+   their values: literals, integer constant expressions, references to those
+   counters, unary + / -, + - *, parentheses and integer casts. 0 when it is
+   not one, or a value leaves 2^100. */
+static int site_eval(const json_value *n, const char *const *ids,
+                     const long long *values, size_t count, __int128 *out) {
+  const __int128 kLimit = (__int128)1 << 100;
+  n = strip_parens_and_casts(n, kIntConstantCasts);
+  const char *kind = kind_of(n);
+  const char *op = opcode_of(n);
+  long long v;
+  if (strcmp(kind, "DeclRefExpr") == 0) {
+    const char *id = referenced_id(n);
+    for (size_t d = count; d-- > 0;)
+      if (id && ids[d] && strcmp(ids[d], id) == 0) {
+        *out = values[d];
+        return 1;
+      }
+    return 0;
+  }
+  if (try_int_constant(n, &v)) {
+    *out = v;
+    return 1;
+  }
+  __int128 x, y;
+  if (strcmp(kind, "UnaryOperator") == 0 &&
+      (strcmp(op, "-") == 0 || strcmp(op, "+") == 0)) {
+    if (!site_eval(child(n, 0), ids, values, count, &x))
+      return 0;
+    *out = op[0] == '-' ? -x : x;
+    return 1;
+  }
+  if (strcmp(kind, "BinaryOperator") != 0 ||
+      !(strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0))
+    return 0;
+  if (!site_eval(child(n, 0), ids, values, count, &x) ||
+      !site_eval(child(n, 1), ids, values, count, &y))
+    return 0;
+  if (op[0] == '*') {
+    const __int128 lim = (__int128)1 << 50;
+    if (x > lim || x < -lim || y > lim || y < -lim)
+      return 0;
+    *out = x * y;
+  } else {
+    *out = op[0] == '+' ? x + y : x - y;
+  }
+  return *out < kLimit && *out > -kLimit;
+}
+
+typedef struct {
+  const site_loop *loops;
+  size_t depth;
+  const char *ids[257];
+  long long values[257];
+  size_t visited;
+  long long count;
+  int ok;
+} site_run;
+
+static void site_run_loop(site_run *r, size_t d) {
+  if (!r->ok)
+    return;
+  if (d == r->depth) {
+    ++r->count;
+    return;
+  }
+  const site_loop *l = &r->loops[d];
+  __int128 v;
+  if (!site_eval(l->init_expr, r->ids, r->values, d, &v)) {
+    r->ok = 0;
+    return;
+  }
+  r->ids[d] = l->counter;
+  const char *op = opcode_of(l->cond);
+  for (;;) {
+    if (v > LLONG_MAX || v < LLONG_MIN) {
+      r->ok = 0;
+      return;
+    }
+    r->values[d] = (long long)v;
+    __int128 lhs, rhs;
+    if (!site_eval(child(l->cond, 0), r->ids, r->values, d + 1, &lhs) ||
+        !site_eval(child(l->cond, 1), r->ids, r->values, d + 1, &rhs)) {
+      r->ok = 0;
+      return;
+    }
+    int holds = strcmp(op, "<") == 0    ? lhs < rhs
+                : strcmp(op, "<=") == 0 ? lhs <= rhs
+                : strcmp(op, ">") == 0  ? lhs > rhs
+                                        : lhs >= rhs;
+    if (!holds)
+      return;
+    if (++r->visited > kEnumerationLimit) {
+      r->ok = 0;
+      return;
+    }
+    site_run_loop(r, d + 1);
+    if (!r->ok)
+      return;
+    v += l->step;
+  }
+}
+
+/* The number of points of the nest of the for loops stack[0 .. depth) --
+   how often a site inside them runs per call --, counted by running their
+   counters (each loop's initial value and condition evaluated at the outer
+   counters' values): exact for bounds affine in the enclosing counters,
+   constant extent or not (docs/AFFINE_GEMM_MAPPING.md section 19.13). -1
+   when a loop is not a for loop of site_loop_of's shape, an expression is
+   not evaluable, or more than kEnumerationLimit values are visited. */
+static long long site_executions(const loop_frame *stack, size_t depth) {
+  static site_loop loops[257];
+  for (size_t d = 0; d < depth; ++d)
+    if (strcmp(kind_of(stack[d].loop), "ForStmt") != 0 ||
+        !site_loop_of(stack[d].loop, &loops[d]))
+      return -1;
+  static site_run r;
+  memset(&r, 0, sizeof r);
+  r.loops = loops;
+  r.depth = depth;
+  r.ok = 1;
+  site_run_loop(&r, 0);
+  return r.ok ? r.count : -1;
 }
 
 static void collect_decl_ids(const json_value *n, strvec *ids) {
@@ -1919,15 +2953,21 @@ static void find_sites(const json_value *n, loop_frame *stack, size_t depth,
       reduction |= reduces;
     }
     if (used >= 3 && reduction) {
-      long long executions = 1;
-      for (size_t d = 0; d < top; ++d)
-        executions = executions < 0 || stack[d].trips < 0
-                         ? -1 : executions * stack[d].trips;
       int seen = 0;
       for (size_t s = 0; s < sites->n; ++s)
         if (sites->loops[s] == stack[top].loop)
           seen = 1;
       if (!seen) {
+        /* Once per site: every statement of it has the same enclosing
+           loops. */
+        long long executions = 1;
+        for (size_t d = 0; d < top; ++d)
+          executions = executions < 0 || stack[d].trips < 0
+                           ? -1 : executions * stack[d].trips;
+        /* Loops whose bounds read the enclosing counters (constant extent or
+           a triangle): their points, counted by running them. */
+        if (executions < 0)
+          executions = site_executions(stack, top);
         if (sites->n == sites->cap) {
           sites->cap = sites->cap ? 2 * sites->cap : 8;
           sites->loops = realloc(sites->loops, sites->cap * sizeof *sites->loops);

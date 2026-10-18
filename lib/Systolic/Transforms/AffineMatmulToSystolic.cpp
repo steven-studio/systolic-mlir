@@ -72,8 +72,11 @@
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/Support/CheckedArithmetic.h"
 
+#include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -731,46 +734,359 @@ static Value materializeOperandView(OpBuilder &builder, Location loc,
   return view;
 }
 
+/// The value of an affine expression at constant dims (no symbols), in
+/// checked 64-bit arithmetic; nullopt otherwise.
+static std::optional<int64_t> evaluateAffine(AffineExpr expr,
+                                             ArrayRef<int64_t> dims) {
+  if (auto dim = dyn_cast<AffineDimExpr>(expr))
+    return dim.getPosition() < dims.size()
+               ? std::optional<int64_t>(dims[dim.getPosition()])
+               : std::nullopt;
+  if (auto constant = dyn_cast<AffineConstantExpr>(expr))
+    return constant.getValue();
+  auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+  if (!binary)
+    return std::nullopt;
+  std::optional<int64_t> lhs = evaluateAffine(binary.getLHS(), dims);
+  std::optional<int64_t> rhs = evaluateAffine(binary.getRHS(), dims);
+  if (!lhs || !rhs)
+    return std::nullopt;
+  switch (expr.getKind()) {
+  case AffineExprKind::Add:
+    return llvm::checkedAdd(*lhs, *rhs);
+  case AffineExprKind::Mul:
+    return llvm::checkedMul(*lhs, *rhs);
+  case AffineExprKind::FloorDiv:
+  case AffineExprKind::CeilDiv:
+  case AffineExprKind::Mod: {
+    if (*rhs <= 0)
+      return std::nullopt;
+    int64_t q = *lhs / *rhs, r = *lhs % *rhs;
+    if (r < 0) {
+      q -= 1;
+      r += *rhs;
+    }
+    if (expr.getKind() == AffineExprKind::Mod)
+      return r;
+    if (expr.getKind() == AffineExprKind::CeilDiv && r != 0)
+      return llvm::checkedAdd(q, int64_t(1));
+    return q;
+  }
+  default:
+    return std::nullopt;
+  }
+}
+
+/// An affine expression of a map over `operands` as a linear form over those
+/// values: coefficient per value, constant; checked 64-bit arithmetic.
+/// nullopt for floordiv / ceildiv / mod or on overflow.
+struct ValueForm {
+  llvm::SmallMapVector<Value, int64_t, 4> coefficients;
+  int64_t constant = 0;
+};
+static std::optional<ValueForm> valueForm(AffineExpr expr, AffineMap map,
+                                          ValueRange operands) {
+  ValueForm out;
+  if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+    out.coefficients[operands[dim.getPosition()]] = 1;
+    return out;
+  }
+  if (auto symbol = dyn_cast<AffineSymbolExpr>(expr)) {
+    out.coefficients[operands[map.getNumDims() + symbol.getPosition()]] = 1;
+    return out;
+  }
+  if (auto constant = dyn_cast<AffineConstantExpr>(expr)) {
+    out.constant = constant.getValue();
+    return out;
+  }
+  auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+  if (!binary)
+    return std::nullopt;
+  std::optional<ValueForm> lhs = valueForm(binary.getLHS(), map, operands);
+  if (!lhs)
+    return std::nullopt;
+  if (expr.getKind() == AffineExprKind::Mul) {
+    auto scale = dyn_cast<AffineConstantExpr>(binary.getRHS());
+    if (!scale)
+      return std::nullopt;
+    for (auto &[value, c] : lhs->coefficients) {
+      std::optional<int64_t> product = llvm::checkedMul(c, scale.getValue());
+      if (!product)
+        return std::nullopt;
+      c = *product;
+    }
+    std::optional<int64_t> constant =
+        llvm::checkedMul(lhs->constant, scale.getValue());
+    if (!constant)
+      return std::nullopt;
+    lhs->constant = *constant;
+    return lhs;
+  }
+  if (expr.getKind() != AffineExprKind::Add)
+    return std::nullopt;
+  std::optional<ValueForm> rhs = valueForm(binary.getRHS(), map, operands);
+  if (!rhs)
+    return std::nullopt;
+  for (auto &[value, c] : rhs->coefficients) {
+    std::optional<int64_t> sum = llvm::checkedAdd(lhs->coefficients[value], c);
+    if (!sum)
+      return std::nullopt;
+    lhs->coefficients[value] = *sum;
+  }
+  std::optional<int64_t> constant = llvm::checkedAdd(lhs->constant, rhs->constant);
+  if (!constant)
+    return std::nullopt;
+  lhs->constant = *constant;
+  return lhs;
+}
+
+/// The trip count of `loop` when its bounds fix it whatever the values they
+/// read: one lower result -- or several constants, whose max is the bound as
+/// the recognizer folds it (constantAffineForBound, review of 2026-10-19) --
+/// and upper results that each differ from it by a constant (the min of
+/// those, clamped at 0, over the step; a difference beyond 64 bits is never
+/// the min above the lower bound and means no iteration below it, review of
+/// 2026-10-19, round 4). nullopt otherwise.
+/// affine::getConstantTripCount casts a negative difference to uint64 and
+/// takes an unsigned min over the upper results, so a loop that never runs
+/// got a count near 2^64 (review of 2026-10-18); this is signed and checked.
+static std::optional<uint64_t> fixedTripCount(affine::AffineForOp loop) {
+  const int64_t step = loop.getStepAsInt();
+  AffineMap lbMap = loop.getLowerBoundMap(), ubMap = loop.getUpperBoundMap();
+  if (step < 1 || lbMap.getNumResults() == 0 || ubMap.getNumResults() == 0)
+    return std::nullopt;
+  std::optional<ValueForm> lb;
+  if (lbMap.getNumResults() == 1) {
+    lb = valueForm(lbMap.getResult(0), lbMap, loop.getLowerBoundOperands());
+  } else if (std::optional<int64_t> folded =
+                 constantAffineForBound(loop, /*lower=*/true)) {
+    lb = ValueForm();
+    lb->constant = *folded;
+  }
+  if (!lb)
+    return std::nullopt;
+  std::optional<int64_t> least;
+  for (AffineExpr result : ubMap.getResults()) {
+    std::optional<ValueForm> ub =
+        valueForm(result, ubMap, loop.getUpperBoundOperands());
+    if (!ub)
+      return std::nullopt;
+    for (auto &[value, c] : lb->coefficients)
+      if (ub->coefficients.lookup(value) != c)
+        return std::nullopt;
+    for (auto &[value, c] : ub->coefficients)
+      if (lb->coefficients.lookup(value) != c)
+        return std::nullopt;
+    std::optional<int64_t> span = llvm::checkedSub(ub->constant, lb->constant);
+    if (!span) {
+      if (ub->constant < lb->constant)
+        return 0;
+      continue;
+    }
+    least = least ? std::min(*least, *span) : *span;
+  }
+  if (!least)
+    return std::nullopt;
+  if (*least <= 0)
+    return 0;
+  return uint64_t(*least / step + (*least % step != 0));
+}
+
 /// How many times the loops enclosing `op` (up to its function) run it, or
-/// nullopt when one of them has no constant trip count or the product does
-/// not fit in 64 bits.
+/// nullopt when that is not known exactly: the product of their fixed trip
+/// counts (fixedTripCount); otherwise -- loops whose bounds read outer counters, a
+/// triangle of repetition loops around the tiles (docs section 19.13) --
+/// the number of points of their nest, counted by running it (each bound
+/// evaluated at the outer counters' values) up to a limit. nullopt for a
+/// bound over anything but the enclosing counters, a count past the limit or
+/// past 64 bits.
 static std::optional<uint64_t> enclosingRepetitions(Operation *op) {
-  uint64_t times = 1;
+  SmallVector<affine::AffineForOp> chain; // outermost first
   for (auto loop = op->getParentOfType<affine::AffineForOp>(); loop;
-       loop = loop->getParentOfType<affine::AffineForOp>()) {
-    std::optional<uint64_t> trips = affine::getConstantTripCount(loop);
+       loop = loop->getParentOfType<affine::AffineForOp>())
+    chain.insert(chain.begin(), loop);
+  uint64_t times = 1;
+  bool constant = true;
+  for (affine::AffineForOp loop : chain) {
+    std::optional<uint64_t> trips = fixedTripCount(loop);
     // A product past 64 bits is as unknown as a non-constant trip count.
     std::optional<uint64_t> product =
         trips ? llvm::checkedMulUnsigned(times, *trips) : std::nullopt;
+    if (!trips) {
+      constant = false;
+      break;
+    }
     if (!product)
       return std::nullopt;
     times = *product;
   }
-  return times;
+  if (constant)
+    return times;
+
+  constexpr uint64_t kLimit = uint64_t(1) << 24;
+  uint64_t visited = 0, count = 0;
+  SmallVector<int64_t> values;
+  bool known = true;
+  std::function<void(unsigned)> run = [&](unsigned depth) {
+    if (!known)
+      return;
+    if (depth == chain.size()) {
+      ++count;
+      return;
+    }
+    affine::AffineForOp loop = chain[depth];
+    auto bound = [&](AffineMap map, ValueRange operands,
+                     bool lower) -> std::optional<int64_t> {
+      if (map.getNumSymbols() != 0)
+        return std::nullopt;
+      SmallVector<int64_t> dims;
+      for (Value operand : operands) {
+        auto at = llvm::find_if(chain, [&](affine::AffineForOp outer) {
+          return outer.getInductionVar() == operand;
+        });
+        const unsigned position = at - chain.begin();
+        if (at == chain.end() || position >= depth)
+          return std::nullopt;
+        dims.push_back(values[position]);
+      }
+      std::optional<int64_t> result;
+      for (AffineExpr expr : map.getResults()) {
+        std::optional<int64_t> value = evaluateAffine(expr, dims);
+        if (!value)
+          return std::nullopt;
+        result = !result ? *value
+                         : (lower ? std::max(*result, *value)
+                                  : std::min(*result, *value));
+      }
+      return result;
+    };
+    std::optional<int64_t> lb = bound(loop.getLowerBoundMap(),
+                                      loop.getLowerBoundOperands(), true);
+    std::optional<int64_t> ub = bound(loop.getUpperBoundMap(),
+                                      loop.getUpperBoundOperands(), false);
+    const int64_t step = loop.getStepAsInt();
+    if (!lb || !ub || step < 1) {
+      known = false;
+      return;
+    }
+    for (int64_t v = *lb; v < *ub && known; ) {
+      if (++visited > kLimit) {
+        known = false;
+        return;
+      }
+      values.push_back(v);
+      run(depth + 1);
+      values.pop_back();
+      std::optional<int64_t> next = llvm::checkedAdd(v, step);
+      if (!next)
+        break;
+      v = *next;
+    }
+  };
+  run(0);
+  if (!known)
+    return std::nullopt;
+  return count;
+}
+
+/// Whether `loop` may run two or more times at some point of the loops around
+/// it: not when its bounds fix its trip count at 0 or 1 (fixedTripCount); a
+/// loop whose bounds read outer counters with different coefficients (a
+/// triangle of repetitions) may.
+static bool mayRunTwice(affine::AffineForOp loop) {
+  std::optional<uint64_t> trips = fixedTripCount(loop);
+  return !trips || *trips >= 2;
+}
+
+/// An upper bound on the magnitude of every coefficient and constant that
+/// flattening `expr` gives (sums add, a constant factor multiplies, a
+/// floordiv / ceildiv / mod adds a local with its divisor); nullopt past 64
+/// bits, and for INT64_MIN, whose negation does not fit.
+static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr) {
+  if (isa<AffineDimExpr, AffineSymbolExpr>(expr))
+    return 1;
+  if (auto constant = dyn_cast<AffineConstantExpr>(expr)) {
+    const int64_t value = constant.getValue();
+    if (value == std::numeric_limits<int64_t>::min())
+      return std::nullopt;
+    return uint64_t(value < 0 ? -value : value);
+  }
+  auto binary = cast<AffineBinaryOpExpr>(expr);
+  std::optional<uint64_t> lhs = flattenedMagnitude(binary.getLHS());
+  std::optional<uint64_t> rhs = flattenedMagnitude(binary.getRHS());
+  if (!lhs || !rhs)
+    return std::nullopt;
+  if (expr.getKind() == AffineExprKind::Add)
+    return llvm::checkedAddUnsigned(*lhs, *rhs);
+  if (expr.getKind() == AffineExprKind::Mul)
+    return llvm::checkedMulUnsigned(*lhs, *rhs);
+  return std::max(*lhs, *rhs);
+}
+
+/// Whether MLIR's dependence analysis can decide the hoist of `band`: every
+/// bound map of the loops around the accesses (the band's and the enclosing
+/// ones') and every access map of the body flattens to coefficients and
+/// constants below 2^48 in magnitude. The analysis computes them, their
+/// negations and their sums in 64-bit integers, which wrap beyond that
+/// (review of 2026-10-19, round 4: with the lower bound max(-2^63, 0) it
+/// found no dependence between the iterations of i, j, k, t, so the hoist
+/// moved t out of the reduction loop; under strict floating point the nest
+/// was then refused, and its CPU code ran the accumulation permuted).
+static bool dependenceAnalysisFits(ArrayRef<affine::AffineForOp> band) {
+  constexpr uint64_t kLimit = uint64_t(1) << 48;
+  auto fits = [&](AffineMap map) {
+    return llvm::all_of(map.getResults(), [&](AffineExpr result) {
+      std::optional<uint64_t> magnitude = flattenedMagnitude(result);
+      return magnitude && *magnitude < kLimit;
+    });
+  };
+  affine::AffineForOp innermost = band.back();
+  for (Operation *op = innermost; op; op = op->getParentOp())
+    if (auto loop = dyn_cast<affine::AffineForOp>(op))
+      if (!fits(loop.getLowerBoundMap()) || !fits(loop.getUpperBoundMap()))
+        return false;
+  for (Operation &op : *innermost.getBody()) {
+    if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+      if (!fits(load.getAffineMap()))
+        return false;
+    if (auto store = dyn_cast<affine::AffineStoreOp>(op))
+      if (!fits(store.getAffineMap()))
+        return false;
+  }
+  return true;
 }
 
 /// Loops of a perfect nest around a multiply-accumulate whose IV no access
-/// uses repeat the accumulation rather than being GEMM dimensions. The
+/// uses repeat the accumulation rather than being GEMM dimensions (a loop of
+/// one iteration with constant bounds is a dimension of one value, unless a
+/// loop's bounds read its counter). The
 /// recognizer takes a GEMM as a perfect chain of loops that are all its
 /// dimensions, with any repeating loops outside it (AffineMatmulAnalysis:
 /// recognizeLogicalMatmul); a repeating loop between the dimensions -- at any
 /// depth -- is moved outward here, ahead of them, keeping the relative order
-/// of both groups, when affine dependence analysis shows the interchange
-/// legal (affine::isValidLoopInterchangePermutation). Otherwise the nest is
-/// left as it is, with a remark.
+/// of both groups. When no repeating loop that may run twice lies inside a
+/// dimension that may run twice, the move keeps the order of every two
+/// iterations and is made without a test (review of 2026-10-19). Otherwise
+/// it is made only when every other memref of the body is provably disjoint
+/// from each one it stores to (the alias rule) and the dependence test below
+/// finds no dependent iterations it would reorder (it is not trusted with
+/// constants of 2^48 or more: dependenceAnalysisFits); else the nest is left
+/// as it is, with a remark -- silently when the bounds tie a repetition loop
+/// to a dimension (boundsOk): the recognizer then refuses it, UNKNOWN.
 ///
-/// A repeating loop outside the reduction loop moves out without changing
-/// the order in which any C element accumulates; one inside it would
-/// interleave the repetitions with the reduction, which the dependences on C
-/// forbid -- such a nest stays on the CPU.
+/// A repeating loop that may run twice inside a reduction loop of two or
+/// more iterations would interleave the repetitions with the reduction,
+/// which the dependences on C forbid -- such a nest stays on the CPU; one
+/// outside the reduction loop moves out without changing the order in which
+/// any C element accumulates.
 ///
-/// The legality test is exact over the integers (since 2026-10-18). Moving the
-/// repeating loops outward turns a dependence vector lexicographically
+/// The legality test is exact over the integers (since 2026-10-18). Moving
+/// the repeating loops outward turns a dependence vector lexicographically
 /// negative iff two iterations that access one element of a memref (one of
 /// them a store) differ in a dimension loop that encloses a repeating loop
-/// of two or more iterations: with the repeating loops first, their
-/// components -- free, since no access reads them -- may be made negative
-/// while the original order was positive. So, for every such repeating loop
+/// that may run twice: with the repeating loops first, their components --
+/// free, since no access reads them -- may be made negative while the
+/// original order was positive. So, for every such repeating loop
 /// and every dimension loop before it, the dependence polyhedron of MLIR's
 /// analysis at that loop's depth (equal on the outer loops, strictly ordered
 /// at this one) is built and tested for an integer point.
@@ -786,17 +1102,12 @@ static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
   for (Operation &op : *innermost.getBody())
     if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op))
       memOps.push_back(&op);
-  auto trip = [](affine::AffineForOp loop) -> int64_t {
-    const int64_t lb = loop.getConstantLowerBound();
-    const int64_t ub = loop.getConstantUpperBound();
-    const int64_t step = loop.getStepAsInt();
-    return ub <= lb ? 0 : (ub - lb + step - 1) / step;
-  };
   // MLIR's loop depth counts every affine.for enclosing the accesses, those
   // outside the band included.
   const unsigned outer = affine::getNestingDepth(outermost.getOperation());
   for (unsigned rho : repeating) {
-    if (trip(band[rho]) < 2)
+    // A repeating loop of one iteration (or none) reorders nothing.
+    if (!mayRunTwice(band[rho]))
       continue;
     for (unsigned s : dimensions) {
       if (s >= rho)
@@ -824,7 +1135,8 @@ static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
   return false;
 }
 
-static void hoistRepetitionLoops(ModuleOp module) {
+static void hoistRepetitionLoops(ModuleOp module, bool assumeNoAlias,
+                                 bool classify) {
   SmallVector<affine::AffineForOp> roots;
   module.walk([&](affine::AffineForOp loop) {
     auto parent = dyn_cast<affine::AffineForOp>(loop->getParentOp());
@@ -843,8 +1155,9 @@ static void hoistRepetitionLoops(ModuleOp module) {
     // band of four with three dimensions was required before 2026-10-18).
     if (band.size() < 2)
       continue;
-    // A multiply-accumulate body, rectangular constant bounds (no IV in
-    // another loop's bounds).
+    // A multiply-accumulate body and loops without results; the bounds are
+    // checked below (constants for the GEMM loops, a repeating loop's may
+    // read outer repeating counters).
     bool macBody = true;
     SmallVector<Value> used;
     for (Operation &op : *band.back().getBody()) {
@@ -856,25 +1169,78 @@ static void hoistRepetitionLoops(ModuleOp module) {
         macBody = false;
     }
     if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
-          return loop.hasConstantLowerBound() && loop.hasConstantUpperBound() &&
-                 loop.getNumResults() == 0;
+          return loop.getNumResults() == 0;
         }))
       continue;
 
     // A loop whose counter an access uses is a GEMM dimension; so is a loop
-    // that runs exactly once whatever its uses (a constant on the domain,
-    // docs/AFFINE_GEMM_MAPPING.md Lemma 0: the recognizer reads it as an
-    // iteration dimension of one value, review of 2026-10-18); every other
-    // loop repeats the accumulation.
+    // with constant bounds that runs exactly once whatever its uses (a
+    // constant on the domain, docs/AFFINE_GEMM_MAPPING.md Lemma 0: the
+    // recognizer reads it as an iteration dimension of one value, review of
+    // 2026-10-18) -- constant as the recognizer folds them, a max / min of
+    // constants included (constantAffineForBound, review of 2026-10-19).
+    // Every other loop repeats the accumulation -- one that runs once with
+    // bounds that read outer counters too (k in [r, r + 1)): no constant, the
+    // recognizer does not take it for a dimension (singleIterationValue), and
+    // it repeats nothing (review of 2026-10-19) -- and so does a loop of one
+    // iteration whose counter a loop's bounds read (r1 in [t, 3)): it cannot
+    // run twice, so it moves outward with its readers keeping the program's
+    // order, while as a dimension it made its readers stop the hoist
+    // (boundsOk; review of 2026-10-19, round 4: such nests stayed on the
+    // host, and a max / min spelling of t lost lowerings the previous build
+    // made).
+    auto constantBounds = [](affine::AffineForOp loop) {
+      return constantAffineForBound(loop, /*lower=*/true) &&
+             constantAffineForBound(loop, /*lower=*/false);
+    };
+    auto readByBounds = [&](Value iv) {
+      return llvm::any_of(band, [&](affine::AffineForOp other) {
+        return llvm::is_contained(other.getLowerBoundOperands(), iv) ||
+               llvm::is_contained(other.getUpperBoundOperands(), iv);
+      });
+    };
     SmallVector<unsigned> repeating, dimensions;
     for (auto [index, loop] : llvm::enumerate(band)) {
-      std::optional<uint64_t> trip = affine::getConstantTripCount(loop);
+      std::optional<uint64_t> trip = fixedTripCount(loop);
       const bool dimension =
           llvm::is_contained(used, loop.getInductionVar()) ||
-          (trip && *trip == 1);
+          (trip && *trip == 1 && constantBounds(loop) &&
+           !readByBounds(loop.getInductionVar()));
       (dimension ? dimensions : repeating).push_back(index);
     }
     if (repeating.empty() || dimensions.empty())
+      continue;
+    // Bounds: a dimension's are constants (the box the recognizer reads; a
+    // constant map's operands can only be values outside it, which stay
+    // outside it). A repeating loop's may read the counters of repeating
+    // loops outside it and values defined outside the band -- a triangle of
+    // repetitions (docs section 19.13) -- but never a dimension's counter:
+    // the repetitions and the dimensions are then independent, the iteration
+    // set is their product (every point of the GEMM runs as often as the
+    // repetition loops have points), and the hoist moves no bound operand
+    // inward past its definition. Its operands are checked when its maps are
+    // constant too: a constant map may list operands it does not read, and
+    // the permutation would have moved the loop past their definitions
+    // (review of 2026-10-19: invalid IR).
+    bool boundsOk = true;
+    for (auto [index, loop] : llvm::enumerate(band)) {
+      if (llvm::is_contained(dimensions, unsigned(index))) {
+        if (!constantBounds(loop)) {
+          boundsOk = false;
+          break;
+        }
+        continue;
+      }
+      for (ValueRange operands :
+           {ValueRange(loop.getLowerBoundOperands()),
+            ValueRange(loop.getUpperBoundOperands())})
+        for (Value operand : operands)
+          for (auto [t, outer] : llvm::enumerate(band))
+            if (outer.getInductionVar() == operand &&
+                (t >= index || !llvm::is_contained(repeating, unsigned(t))))
+              boundsOk = false;
+    }
+    if (!boundsOk)
       continue;
     // Already outside every dimension: nothing to move.
     if (repeating.back() + 1 == repeating.size())
@@ -886,12 +1252,91 @@ static void hoistRepetitionLoops(ModuleOp module) {
       permMap[index] = position++;
     for (unsigned index : dimensions)
       permMap[index] = position++;
+    // The interchange changes the order of two iterations only if they differ
+    // in a dimension that runs at least twice and in a repeating loop inside
+    // it that may run twice (the first repeating loop inside the dimension in
+    // which they differ reads only counters on which they agree, so a
+    // one-iteration one takes one value for both). Moving repeating loops
+    // outward past loops that run once -- a leading one-iteration loop --
+    // keeps the program's order, so it needs neither the alias rule nor the
+    // dependence test (review of 2026-10-19: the alias rule refused such a
+    // nest, which the inner GEMM candidate then recognized).
+    bool reorders = false;
+    for (unsigned rho : repeating)
+      for (unsigned s : dimensions)
+        if (s < rho && mayRunTwice(band[rho]) && mayRunTwice(band[s]))
+          reorders = true;
+    if (!reorders) {
+      affine::permuteLoops(band, permMap);
+      continue;
+    }
+    // The dependence test below sees one memref at a time (accesses through
+    // different memref values never depend for checkMemrefAccessDependence),
+    // so it decides the interchange only when every other memref of the body
+    // is provably disjoint from each one the body stores to -- the alias rule
+    // of the lowering (provablyDisjointFromOutput). Otherwise the nest stays
+    // as written: it is not lowered then either, and its CPU code must keep
+    // the program's order (review of 2026-10-18: a hoisted nest refused for
+    // 'A may overlap C' ran its updates permuted).
+    bool disjoint = true;
+    for (Operation &op : *band.back().getBody()) {
+      auto store = dyn_cast<affine::AffineStoreOp>(op);
+      if (!store)
+        continue;
+      for (Operation &other : *band.back().getBody()) {
+        Value memref;
+        if (auto load = dyn_cast<affine::AffineLoadOp>(other))
+          memref = load.getMemRef();
+        else if (auto st = dyn_cast<affine::AffineStoreOp>(other))
+          memref = st.getMemRef();
+        if (memref && memref != store.getMemRef() &&
+            !provablyDisjointFromOutput(memref, store.getMemRef(),
+                                        assumeNoAlias))
+          disjoint = false;
+      }
+    }
+    // Each refusal leaves the nest as written: a repeating loop that may run
+    // twice stays inside a dimension that may run twice, so every GEMM
+    // candidate that covers the accesses' counters holds it, and the
+    // recognizer refuses the nest. Whether it computes a GEMM is not decided
+    // (UNKNOWN, docs section 19.9).
+    if (!disjoint) {
+      auto remark =
+          root->emitRemark()
+          << "affine GEMM not lowered to systolic.matmul_tile: loop "
+          << repeating.back() << " of the nest repeats the accumulation "
+          << "inside it, and moving it outward is a legal loop interchange "
+          << "only if the memrefs the nest reads do not overlap the one it "
+          << "writes; declare the arguments llvm.noalias (C restrict)";
+      if (classify)
+        remark << " ["
+               << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
+      continue;
+    }
+    if (!dependenceAnalysisFits(band)) {
+      auto remark =
+          root->emitRemark()
+          << "affine GEMM not lowered to systolic.matmul_tile: loop "
+          << repeating.back() << " of the nest repeats the accumulation "
+          << "inside it, and whether moving it outward reorders dependent "
+          << "iterations is not decided (a bound or subscript has a constant "
+          << "of 2^48 or more, beyond the dependence analysis' 64-bit "
+          << "arithmetic)";
+      if (classify)
+        remark << " ["
+               << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
+      continue;
+    }
     if (hoistReordersDependentIterations(band, repeating, dimensions)) {
-      root->emitRemark()
+      auto remark =
+          root->emitRemark()
           << "affine GEMM not lowered to systolic.matmul_tile: loop "
           << repeating.back() << " of the nest repeats the accumulation "
           << "inside it, and moving it outward is not a legal loop "
           << "interchange (it would reorder dependent iterations)";
+      if (classify)
+        remark << " ["
+               << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
       continue;
     }
     affine::permuteLoops(band, permMap);
@@ -1236,20 +1681,23 @@ struct AffineMatmulToSystolicPass
     // A constant-extent parallelotope domain (docs/AFFINE_GEMM_MAPPING.md
     // sections 19.7, 19.12) becomes the equivalent box nest first, x = U x';
     // then the repetition loops move outward, then the box pipeline runs.
-    SmallVector<DomainNormalization, 1> normalized =
-        normalizeParallelotopeDomains(module.getOperation());
-    if (report)
-      for (const DomainNormalization &dn : normalized) {
-        std::string lines;
-        llvm::raw_string_ostream os(lines);
-        describeDomainNormalization(dn, os, "");
-        dn.outermost->emitRemark()
-            << "affine multiply-accumulate nest: iteration domain normalized "
-               "to a box (x = U x', docs/AFFINE_GEMM_MAPPING.md section "
-               "19.12): "
-            << llvm::StringRef(lines).rtrim();
-      }
-    hoistRepetitionLoops(module);
+    auto reportNormalizations =
+        [&](ArrayRef<DomainNormalization> normalized) {
+          if (!report)
+            return;
+          for (const DomainNormalization &dn : normalized) {
+            std::string lines;
+            llvm::raw_string_ostream os(lines);
+            describeDomainNormalization(dn, os, "");
+            dn.outermost->emitRemark()
+                << "affine multiply-accumulate nest: iteration domain "
+                   "normalized to a box (x = U x', "
+                   "docs/AFFINE_GEMM_MAPPING.md section 19.12): "
+                << llvm::StringRef(lines).rtrim();
+          }
+        };
+    reportNormalizations(normalizeParallelotopeDomains(module.getOperation()));
+    hoistRepetitionLoops(module, assumeNoAlias, classify);
 
     SmallVector<AffineMatmulCandidate> candidates;
     collectAffineMatmulCandidates(module.getOperation(), candidates);

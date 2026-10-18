@@ -123,17 +123,32 @@ struct LogicalPartition {
 FailureOr<SmallVector<LogicalPartition, 1>>
 partitionLogicalMatmul(const LogicalMatmul &matmul);
 
+/// The logical mapping as an exact bijection (docs section 19.13), checked
+/// independently of the mixed-radix argument that built it: the source
+/// iteration domain is the image of the box of its loops' ordinals z under
+/// x = S z + origin (Presburger integer-set equality); the ordinals o of the
+/// batch loops and of I, J, K (y_d = offset_d + scale_d o_d) are an integer
+/// map of z; their ranges lie in the box batch x [0, M) x [0, N) x [0, K);
+/// the map is injective on the z box (no nonzero bounded integer kernel
+/// vector, Presburger integer emptiness); and the two boxes have as many
+/// points -- so no logical iteration is missing, out of range or
+/// duplicated. `why` on failure.
+LogicalResult verifyLogicalBijection(const LogicalMatmul &matmul,
+                                     const DenseLogicalGemm &dense,
+                                     std::string *why);
+
 /// Partition a dense logical GEMM into the given boxes -- the policy is the
 /// caller's (for the systolic fleet: SystolicTilePlan.h) -- and prove that
 /// they are an exact partition of its iteration domain before returning
-/// them: every box lies inside the domain, together they cover it, and their
+/// them: the logical mapping is an exact bijection (verifyLogicalBijection),
+/// every box lies inside the domain, together they cover it, and their
 /// volumes sum to its volume, so every iteration point is executed by exactly
 /// one region. Each region's iteration domain is the source domain restricted
 /// to its box.
 ///
-/// Failure (with the reason in `why`) means the boxes are not an exact
-/// partition, or `matmul` is not dense; nothing that fails here may be
-/// materialized.
+/// Failure (with the reason in `why`) means the bijection is not verified,
+/// the boxes are not an exact partition, or `matmul` is not dense; nothing
+/// that fails here may be materialized.
 FailureOr<SmallVector<LogicalPartition, 1>>
 partitionLogicalMatmul(const LogicalMatmul &matmul,
                        ArrayRef<LogicalBox> boxes, std::string *why = nullptr);

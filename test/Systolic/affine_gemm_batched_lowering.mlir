@@ -47,6 +47,11 @@
 // CHECK:         bufferization.materialize_in_destination {{.*}} in restrict writable %[[CV]]
 // CHECK-NOT:   affine.for
 // REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), batched: 2 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 2 time(s)
+// The inner candidate (i, j, k) reads b, the counter of a loop outside it: a parameter of that
+// candidate, which may be a GEMM at each of its values -- nothing is decided about it (UNKNOWN;
+// it was PROVEN_INVALID before 2026-10-19). The candidate with b is the batched GEMM.
+// DISC:        reason: an access uses the counter of a loop outside the nest
+// DISC-NEXT:   class: UNKNOWN
 // DISC:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @batched(%A: memref<2x4x4xf32> {llvm.noalias}, %B: memref<2x4x4xf32> {llvm.noalias}, %C: memref<2x4x4xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {

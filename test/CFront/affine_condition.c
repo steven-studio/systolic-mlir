@@ -80,3 +80,21 @@ void long_counter(float a[restrict 128]) {
 }
 // CHECK-LABEL: func.func @long_counter(
 // CHECK:       affine.for %i = 0 to 3 {
+
+// Unsigned arithmetic is exact where it does not wrap around: 2 * i < 10 is
+// i < 5 for an unsigned i (2 * i at most 10).
+void unsigned_affine(float a[restrict 128]) {
+  for (unsigned i = 0; 2 * i < 10; ++i)
+    a[i] = 1.0f;
+}
+// CHECK-LABEL: func.func @unsigned_affine(
+// CHECK:       affine.for %i = 0 to 5 {
+
+// An unsigned char counter (the comparison promotes it to int): its values
+// 0 .. 50 fit unsigned char, so c < 50 is exact.
+void unsigned_char_counter(float a[restrict 128]) {
+  for (unsigned char c = 0; c < 50; ++c)
+    a[c] = 1.0f;
+}
+// CHECK-LABEL: func.func @unsigned_char_counter(
+// CHECK:       affine.for %c = 0 to 50 {

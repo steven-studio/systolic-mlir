@@ -379,17 +379,60 @@ struct DomainNormalization {
   SmallVector<int64_t> lower, upper, step;
   /// The loops whose bounds depended on outer counters (nonzero l_s).
   SmallVector<unsigned> shifted;
+  /// The band was not in the constant-extent family as written (bounds with
+  /// different linear parts at its two ends, a max / min of forms with
+  /// different linear parts); its exact integer iteration set was found
+  /// equal to the parallelotope above -- the Presburger library's
+  /// integer-exact equality (docs section 19.13) -- and every loop's bounds
+  /// were replaced by the box's.
+  bool exact = false;
 };
 
-/// Normalizes every qualifying band under `root` (see DomainNormalization);
-/// bands outside the family -- an extent that varies with an outer counter, a
-/// bound with floordiv/ceildiv/mod or a symbol, max/min of a counter and a
-/// constant, a counter used by anything but the body's loads and stores and
-/// the inner bounds -- are left untouched, and so is every band whose bounds
-/// are already constants. Checked 64-bit arithmetic: a composed coefficient
-/// that does not fit leaves the band untouched. Returns the normalizations
-/// applied, for the diagnostics.
+/// Normalizes every qualifying band under `root` (see DomainNormalization):
+/// a constant-extent parallelotope as written (section 19.12), or a band
+/// whose exact integer iteration set is one (section 19.13: bounds that do
+/// not shift together, a max / min of forms with different linear parts),
+/// or -- when the whole band is neither -- its sub-band below a prefix of
+/// loops whose counters nothing below them reads. Bands outside -- an extent
+/// that genuinely varies with an outer counter (a triangle), a bound with
+/// floordiv/ceildiv/mod or a symbol, a stepped loop with a max of lower
+/// bounds with different linear parts none of which is the max at every
+/// outer point entering it, a counter used by anything but the body's loads
+/// and stores and the inner bounds -- are left untouched, and so is every
+/// band whose bounds are already constants. 64 bits: a written bound whose
+/// products or value can leave 64 bits at an outer point entering its loop
+/// (the program's set is then not the mathematical one), a composed
+/// coefficient or a composed product over the box that does not fit, leave
+/// the band untouched. Returns the normalizations applied, for the
+/// diagnostics.
 SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *root);
+
+/// The exact integer iteration set of `loops` -- a chain of affine.for loops,
+/// outermost first -- over their counters in that order (one local quotient
+/// per stepped loop), when it is the set the program runs: every bound
+/// result a linear form of the chain's outer counters (no symbol, no
+/// floordiv / ceildiv / mod, no value from outside the chain), a stepped
+/// loop's lower results folded per linear part or one of them the max at
+/// every outer point entering it, and every product and every result of
+/// every written bound within 64 bits at every outer point entering its loop
+/// (docs/AFFINE_GEMM_MAPPING.md section 19.13.2). nullopt otherwise; an empty
+/// set is returned as such.
+std::optional<presburger::IntegerPolyhedron>
+exactIterationSet(ArrayRef<affine::AffineForOp> loops);
+
+/// A bound of `loop` that is a constant as the recognizer reads it: one
+/// constant result, or the max (a lower bound) / min (an upper bound) of
+/// results that are all constants -- `min(1, 4)` is 1. nullopt when a result
+/// is not a constant. The map's operands are not looked at: a constant map
+/// may still list some.
+std::optional<int64_t> constantAffineForBound(affine::AffineForOp loop,
+                                              bool lower);
+
+/// The rank of the stacked access map x -> (F_A(x), F_B(x), F_C(x)) of a
+/// recognized nest over its iteration counters: n when the accesses tell
+/// every two iterations apart. Exact (checked 64-bit arithmetic); nullopt
+/// when a subscript is not a linear form of the counters or on overflow.
+std::optional<unsigned> stackedAccessRank(const LogicalMatmul &matmul);
 
 /// One line per loop of a normalization, for the diagnostics:
 ///   loop 1: x1 = x1' + 1*x0, box [0, 4) step 1

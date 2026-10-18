@@ -1076,12 +1076,13 @@ accesses' kernels and an exact integer-set equality D = ξ(Z) (Presburger) -- on
 parallelepiped {0 ≤ cI·x < 3a, 0 ≤ cJ·x < b, 0 ≤ aK·x < 3c} without the congruence, Test 2 is
 a batched GEMM whose batch is I mod 3; *other* domains
 (triangular: extents that vary) have no constant-extent parametrization, and the implementation
-labels them UNKNOWN, never PROVEN_INVALID: it does not decide them. Some are provably not GEMMs
+labelled them UNKNOWN, never PROVEN_INVALID, until 2026-10-18 (§19.13 decides a band whose exact
+integer set is a parallelotope, and proves a non-symmetric one invalid). Some are provably not GEMMs
 -- every affine image of a box is centrally symmetric (z ↦ z_min + z_max − z maps the box onto
 itself, so ξ(Z) is symmetric about ξ of the box's centre), and the triangle {0 ≤ i ≤ j < 8} is
 not ((i, j) = (0, 7) is in it, its mirror (7, 0) is not), so no ξ exists and the specification
-says REJECT for it (showcase mlir_009) -- but that is the specification's proof, not the
-compiler's. Before 19 every non-box domain was labelled PROVEN_INVALID with the argument
+says REJECT for it (showcase mlir_009) -- the specification's proof, which the compiler makes
+too since 2026-10-18 when the accesses tell the iterations apart (§19.13.4). Before 19 every non-box domain was labelled PROVEN_INVALID with the argument
 "no bijection onto the GEMM's box can come from a non-box domain (Theorem 3)", which is false
 for parallelotopes (Theorem 3 is about maps between boxes).
 
@@ -1143,9 +1144,9 @@ way and checks every accepted nest's views address by address.
 
 | category | how it is recorded | examples |
 |---|---|---|
-| mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID (or UNKNOWN where it does not decide) | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027, a batched product with M = N = K = 1 -- PROVEN_INVALID); out-of-bounds subscripts (PROVEN_INVALID); a sum, a third factor, no accumulation (PROVEN_INVALID); a non-box domain that is not the affine image of a box (the triangle, mlir_009: REJECT by 19.7's symmetry argument, the compiler says UNKNOWN -- it decides no non-box domain) |
+| mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID (or UNKNOWN where it does not decide) | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027, a batched product with M = N = K = 1 -- PROVEN_INVALID); out-of-bounds subscripts (PROVEN_INVALID); a sum, a third factor, no accumulation (PROVEN_INVALID); a non-box domain whose updates are not centrally symmetric (the triangle, mlir_009, a clipped parallelogram: REJECT by 19.7's symmetry argument applied to the updates, `casespec._no_gemm_proof` -- an asymmetric set whose accesses do not tell the iterations apart can be a GEMM, the remainder tile: OUT_OF_SCOPE `non_box_unnormalized`; the compiler said UNKNOWN until 2026-10-18 and makes the argument since -- PROVEN_INVALID when the accesses tell the iterations apart (rank n), the factors and C are three buffers, the bounds are linear forms within 64 bits and the set is not centrally symmetric, UNKNOWN otherwise, §19.13.4) |
 | explicitly outside the specification | OUT_OF_SCOPE, DOCUMENTED_LIMITATION | double or mixed precision, operands that may alias C, alpha ≠ 1, an initialisation inside the nest, a repetition loop inside a reduction loop, an operand shared by every batch, a nest whose every loop is a repetition loop around one scalar multiply-accumulate (no GEMM loop to anchor on; the all-once nest is the 1 x 1 x 1 GEMM and is offloaded) |
-| recognition not implemented | OUT_OF_SCOPE (`demotion`, `broadcast`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only under another decomposition (19.2): a loop read by one operand (case_090, case_095, case_123–125: a stride-0 view or a batch loop), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1 (UNKNOWN); Test 2's D* written as its own loop nest, a triangle, a clipped parallelogram (19.7, 19.12: only constant-extent parallelotopes are normalized onto a box; every readers verdict is UNKNOWN on a domain left non-box); a repetition loop the lowering cannot move outward (UNKNOWN: the mapping is not analysed) |
+| recognition not implemented | OUT_OF_SCOPE (`demotion`, `broadcast`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only under another decomposition (19.2): a loop read by one operand (case_090, case_095, case_123–125: a stride-0 view or a batch loop), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1 (UNKNOWN); Test 2's D* written as its own loop nest (19.7, 19.12: a lattice parallelepiped, not normalized onto a box; every readers verdict is UNKNOWN on a domain left non-box), a strip-mined loop with a remainder tile (`k = 2 k1 + k0` on an asymmetric set: a GEMM the accesses do not tell apart, UNKNOWN, §19.13.4); a repetition loop the lowering cannot move outward (UNKNOWN: the mapping is not analysed) |
 | lowering not implemented | ACCEPT, FALSE_NEGATIVE; compiler VALID_BUT_LOWERING_UNSUPPORTED | none known since Phase D (19.11): every GEMM of affine views the recognizer constructs with three distinct operands, or with one array as both factors (§7), is lowered -- Test 1 (ext_026), case_088 (`C[2i + j][j]`), case_126 (`A[i][i + k]`), a flat injective C (`C[4i + j]`), a Hankel view (`A[i + k]`) were in this row between 2026-10-16 and 2026-10-18. One array as both factors through two different views (`A·Aᵀ`, `A[i][i + k] * A[k][j]`) was in this position until 2026-10-18 (refused VALID_BUT_LOWERING_UNSUPPORTED, OUT_OF_SCOPE `same_memref_views` in the specification); it is lowered through two read-only tensors since (§7, §19.12) |
 | hardware or runtime not supporting it | the driver's refusal | double arrays (the datapath is fp32); a floating-point nest without the reassociation permission (§6); the FPGA board itself was not run (NOT RUN) |
 
@@ -1450,10 +1451,10 @@ the shifted loop stays a repetition loop and is hoisted as before (`@shift_over_
 or, when the interchange is illegal, leaves the recognizer's verdict UNKNOWN as before
 (`@shift_repetition_stuck`). The remark `iteration domain normalized to a box (x = U x', ...)`
 states each loop's own shift (`loop 2: x2 = x2' + 1*x1` is ℓ_2 over the original counters; U's
-row composes the shifts, x2 = x2' + x0' + x1'). Not in F, left as written, UNKNOWN downstream: a
-triangle (`k in [i, 8)`: different linear parts), a clipped parallelogram (`max(i − 2, 0)`), a
-floordiv or a symbol in a bound, a symbol in an access (`@shift_symbol_access`), Test 2's lattice
-parallelepiped D* (a congruence, not a shift).
+row composes the shifts, x2 = x2' + x0' + x1'). Not in F, left as written, UNKNOWN downstream (as of
+this section; §19.13 decides more of them): a triangle (`k in [i, 8)`: different linear parts), a
+clipped parallelogram (`max(i − 2, 0)`), a floordiv or a symbol in a bound, a symbol in an access
+(`@shift_symbol_access`), Test 2's lattice parallelepiped D* (a congruence, not a shift).
 
 The C front end (systolic-cfront) translates the family: a loop whose initial value and bound
 are affine in the enclosing counters with the same counter terms (`for (int k = i; k < i + 4;
@@ -1461,13 +1462,15 @@ are affine in the enclosing counters with the same counter terms (`for (int k = 
 `affine_map` bounds over the enclosing counters; every bound is checked against the counter's
 type at every enclosing value; subscript ranges are computed on the box (the shifts substituted
 innermost first), so they are exact, not a hull; a varying trip count (a triangle) is outside
-the subset ("the loop's trip count depends on an enclosing loop counter").
+the subset ("the loop's trip count depends on an enclosing loop counter") -- superseded the same
+evening: §19.13.1 translates such loops.
 
 **19.12.2 Cases.** `test/Systolic/affine_gemm_domain_normalization.mlir`: the shifted J, K and
 both; a shift read by C (a skewed C view); two chained shifts (batched, K = 1 per batch); a
 shifted K of one iteration; a repetition loop between the shift's source and the shifted loop,
 hoisted and run twice; one that cannot move (UNKNOWN); untouched and UNKNOWN: a triangle, a
-floordiv bound, a symbolic bound, a clipped parallelogram, a symbol in an access; in F but not
+floordiv bound, a symbolic bound, a clipped parallelogram, a symbol in an access (the triangle
+and the clipped parallelogram are PROVEN_INVALID since §19.13.4); in F but not
 a GEMM: `C[i + j]` under a shift (not injective after it: VALID_BUT_LOWERING_UNSUPPORTED, the
 demotion candidate named), out of bounds after the shift (PROVEN_INVALID).
 `affine_gemm_generalized.mlir @parallelotope_rank1` (UNKNOWN before: lowered, batched 4 x 4 x 1)
@@ -1477,7 +1480,7 @@ through the front end's affine bounds -- the shifted K, the shifted J, the skewe
 chained shifts batched (2 invocations), a shift by a counting-down counter with `<=`, a shifted
 loop of step 2 (stride-2 views) -- offloaded on the software runtime model and under the
 mock-hardware flag, bitwise equal to CPU references, `--verify` 6 of 6; a triangle stays plain
-C; an out-of-bounds shifted nest stays on the host (PROVEN_INVALID; compiled, not run: undefined
+C (translated since §19.13.1, and kept on the host as PROVEN_INVALID); an out-of-bounds shifted nest stays on the host (PROVEN_INVALID; compiled, not run: undefined
 in C).
 
 **19.12.3 One array as both factors, two views.** Representation: the recognizer's two operand
@@ -1586,12 +1589,13 @@ independently of the compiler:
   compiler's normalization replayed independently) -- the analysis, the prediction and the
   specification of the box, whose equivalence the generator asserts by evaluating both nests (`C`
   identical). A triangle's points are enumerated as written (bounds evaluated at the enclosing
-  counters' values, `domain_points`): a GEMM only if the readers' roles map them bijectively onto a
-  box with every point repeated the same number of times -- REJECT `non_box_domain` otherwise; the
-  specification does accept a non-box domain whose written points form such a box (`non_box_gemm`:
-  a GEMM the front end refuses for its syntax), so the generated triangles are built to vary their
-  trip count genuinely, and above 200,000 points the verdict is UNDETERMINED
-  (`non_box_unenumerated`). The predicted front-end refusal is the front end's own message. An
+  counters' values, `domain_points`). It is a GEMM when the readers' roles map them bijectively
+  onto a box with every point repeated the same number of times: OUT_OF_SCOPE
+  `non_box_unnormalized` since §19.13 (until then ACCEPT, `non_box_gemm`: a GEMM the front end
+  refused for its syntax). It is REJECT `non_box_domain` only with a proof that no decomposition
+  exists (its updates are not centrally symmetric, §19.13.6), and UNDETERMINED otherwise
+  (`non_box_undecided`) and above 200,000 points (`non_box_unenumerated`). The generated
+  triangles are built to vary their trip count genuinely. The predicted front-end refusal is the front end's own message. An
   output that is also a factor is decided by the addresses (`_alias_verdict`): REJECT
   `aliasing_not_gemm` when some product reads an element written at an earlier point of the nest
   (not the GEMM of the operands, whatever the data), OUT_OF_SCOPE `aliasing` otherwise, the
@@ -1607,3 +1611,545 @@ independently of the compiler:
   script (`random 2027 domains 4 x 50`, `enumerate enum domains 2 x 50`); that script is kept with
   the validation logs under `~/work/integration-backups-20261016/generator-ext-validation/`
   (`run_gate_and_loops_ext.sh`), not in the repository, like the six-batch script before it.
+
+### 19.13 Exact non-box domains end to end (2026-10-18, evening)
+
+The gap this section closes: a nest whose bounds do not shift together (§19.12.1's family F
+excludes them) but whose written integer points form a box -- the executable specification
+accepted such a nest (basis `non_box_gemm`), the C front end refused it ("the loop's trip count
+depends on an enclosing loop counter ... only bounds with the same counter terms are
+supported") and the compiler never saw it. The root cause was the front end's bookkeeping, not
+its translation: its value ranges (each counter's first and last value, the shift substituted
+into subscripts, the overflow checks, and the interface's `leading_extent`, which the driver
+uses as the memref descriptor's size and the `--verify` copy size, so it must be exact) were
+computed in closed form, exact only on parallelotopes.
+
+**19.13.1 The front end.** A loop counting up whose initial value and bound are affine in the
+enclosing counters with any counter terms is translated to `affine.for` with `affine_map` bounds
+(C's semantics exactly: lb, lb + S, ... while < ub). Conditions are canonicalized: `L OP R` with
+L − R = a·k + g(enclosing counters) + c becomes `k OP' bound` when a = ±1 (`k - i < 4`, `i + 4 >
+k`, `k + i < 8`); with |a| > 1 only for constant g (the earlier rule). Enclosing-counter terms
+that cancel leave a constant bound: `k + i < 8 + i` is `k < 8` (the previous front end refused
+both spellings of a condition that is not `counter OP bound`). When some loop of the nest is no
+parallelotope, the subscript ranges and that loop's checks are computed by running the loops in
+scope (each loop's bounds evaluated at the outer counters' values), exactly. One run may give
+the counters at most 4,194,304 values, every level counted -- the outermost loop's points, plus
+those of the outer two loops, and so on through the nest -- so the limit bounds the work, not
+only the innermost points. Beyond it the function is refused, "the iteration domain is not a
+parallelotope and running its loops takes more than 4194304 counter values: its exact subscript
+ranges are not computed"; test/CFront/nonbox_bounds_unsupported.c refuses a nest of 2,048
+points for the 4,196,352 values of its outer loops. The predictor of the generated cases counts
+the same way (`casespec.frontend_enumeration_values`). On a parallelotope nest every check is a
+closed form, a canonicalized condition's included: `for (int k = j; k - j < 4; ++k)` around a
+2048 × 2048 GEMM is translated like `k < j + 4`, with the same MLIR, in 0.01 s (the first
+version of this change ran the enclosing loops for such a condition and refused it at the limit
+after 10 to 13 s, with a message that called the domain no parallelotope; review of 2026-10-18,
+#18). The limit thus applies only to a nest with a loop whose bounds do not shift together,
+however a condition is spelled.
+
+*C's integer types* (review of 2026-10-18, #15-#17). C evaluates every integer node of a loop
+header -- the initial value, the bound, both sides of the condition -- and of a subscript in that
+node's own type (an operator's promoted or common type; every implicit conversion is a node of
+its own). The front end computes with exact integer values, so it translates a function only
+when every such node's exact value lies in its type's range at every point where C evaluates
+it: no signed overflow (undefined behaviour), no unsigned wrap-around, no conversion that
+changes a value. C's arithmetic, unsigned included, is then exact arithmetic, and the nest runs
+C's iterations on C's elements. The ranges are exact: in closed form on a parallelotope -- the
+initial value and the bound at every point of the enclosing loops, a condition's nodes at the
+counter's first value and at the value that ends the loop, between which each node, affine in
+the counter, is monotone -- and by running the enclosing loops for a loop whose bounds do not
+shift together (within the limit above). A node that reads a counter -- the loop's own one
+included, and also when its counter terms cancel (`k - i` at k = i − 1) -- is checked only where
+C evaluates it: nowhere in code that never runs (under a loop of no iteration, or in a nest
+that has no point). A node that reads none (a constant: `0 - 1`, a macro `N - 1` with N = 0) is
+checked as written wherever it is, in a nest with a loop whose bounds do not shift together
+too, as the other checks of a constant are; its refusal names its value, not counter values
+(test/CFront/header_reach_bitint_depth.c). The first version of these checks decided "reads a
+counter" from the node's value at the loop's first value, so `for (int k = -5; k < 8u; ++k)`
+and `k - i < 4u` under a loop of no iteration were refused, with counter values C never
+evaluates -- a GEMM followed by such a dead tail stayed on the host --, and a constant node in
+a nest without a point was not checked (review of 2026-10-19). Checked as written, a constant
+still costs code that never runs its translation: a dead tail `C[j][16 - N - 1u]` with N = 16
+keeps its function on the host, in a box nest as in a non-box one. An access that never runs
+touches no element, so it gives the interface no range: an array's extent counts only the rows
+C can reach, as systolic-cc needs -- it sizes the memref descriptor and its snapshot of the
+caller's array by it (since the third review of 2026-10-19: a 16-row C behind a GEMM and a dead
+`for (t = 0; t < 0; ++t) for (k = -5; k < 8; ++k) C[k + 15][0] = 0` got extent 23, and the
+driver's copy read past the array; an array accessed only there now gets extent 0). The previous front end (a5bcda9) stripped the conversions and compared only some final
+values with the counter's type, so it translated the following with other iterations or
+elements than C's, or despite C's undefined behaviour (13 of the 19 refusals of
+test/CFront/header_types_unsupported.c; the other 6 are non-box spellings that only the first
+version of this change translated); they are refused now, with the node's exact value:
+- "the loop counter's initial value converts -1 to 'unsigned int', which cannot represent it"
+  -- `unsigned r = -1; r < 10` (C starts at 4294967295 and runs nothing; the translation ran
+  `affine.for %r = -1 to 10`, 11 iterations); likewise `int r = 3000000000`, and
+  `int c = 2147483649L` counting down;
+- "the loop counter's initial value overflows 'int' (an operation's exact value is 2147483648)"
+  -- `long k = i + 2147483647` (the sum is int arithmetic); "the loop counter's initial value
+  wraps around in 'unsigned int' (an operation's exact value is -2)" -- `long k = u - 2` for an
+  unsigned u that takes the values 0 and 1 (the first version of the non-box translation ran a
+  repetition loop `for (long s = r - 1; s < 1; ++s)`, r unsigned, around a 4 × 4 × 4 GEMM 3
+  times; C runs it once);
+- "the loop bound converts -1 to 'unsigned int', which cannot represent it" -- `unsigned k = 0;
+  k < -1` (C runs 4294967295 iterations, the translation none), and `unsigned k = i + 4; k < i`
+  at i = -3, checked at every point, also where the loop runs zero times; "the loop bound wraps
+  around in 'unsigned int' (...)" -- `k < u - 2`, `k < i - 2u`, and "the loop bound overflows
+  'int' (...)" -- `k < i + 2147483647` (non-box bounds: a5bcda9 refused them for their shape,
+  the first version of this change translated them); inside a constant, `(2147483647 + 1) -
+  2147483645` (a5bcda9 took it as 3; C's int arithmetic overflows);
+- "the loop condition converts -5 to 'unsigned int', which cannot represent it (it is evaluated
+  for the counter values -5 .. 8)" -- `int k = -5; k < 8u` (C compares 4294967291 < 8 and runs
+  nothing; the translation ran 13 iterations; `k < 8ul` alike); as before, "the loop condition
+  could overflow (it is evaluated for the counter values A .. B)" for an operation of either
+  side that reads the counter, and "the loop condition overflows 'int' (an operation's exact
+  value is 2147483648)" for one of a constant side (`-c > -(-2147483647 - 1)`);
+- "the subscript wraps around in 'unsigned int' (an operation's exact value is -1)" -- `A[u - 1]`
+  at u = 0 (C addresses A[4294967295], the translation A[-1]); "the subscript overflows 'int'
+  (...)"; "the subscript converts -3 to 'unsigned int', which cannot represent it".
+The older checks keep their messages ("the loop counter could overflow 'T'" for a counter value
+outside its type, the last increment included). Unsigned arithmetic that does not wrap around
+is exact and is translated now: an unsigned char or unsigned short counter (the comparison
+promotes it to int: `c < 50`), `2 * i < 10` and `k + u < 4` on unsigned counters -- the previous
+front end refused them as a possible overflow.
+
+A `wb` / `uwb` literal has a bit-precise type, `_BitInt(N)` or `unsigned _BitInt(N)` (C23; clang
+accepts it in the front end's default -std=c11 as an extension). A literal fits its type, and an
+enclosing counter its own, so neither is checked or looked up; arithmetic in such a type of at
+most 64 bits is checked in its range like any other -- `i < 7uwb + 2uwb` is refused, "the loop
+bound wraps around in 'unsigned _BitInt(3)' (an operation's exact value is 9)" (C runs one
+iteration; a5bcda9 translated nine). A wider bit-precise type comes only from a literal beyond
+64 bits, which is refused as such ("integer constant expression overflows", or the shape
+message of its position) before its type is looked up. `i < 4wb`, `A[i][1wb]`
+and `int i = 1uwb` translate exactly; the first version of the checks looked every node's type
+up, literals included, and refused them with messages about their shape (review of
+2026-10-19). The checks, the subscript parser and the parser of a condition's sides recurse
+once per AST level with small frames (their linear forms on the heap): an initial value, a
+bound, either side of a condition -- a canonicalized one too (`4 > i + 0 + ...`, `k - i + 0 +
+... < 4`) --, a shifted bound or a subscript of 4,980 terms -- near the most clang's JSON lets
+the front end read ("nesting too deep" beyond about 5,000) -- is translated with an 8 MB stack,
+a 4 MB one too. The first version of the checks overflowed an 8 MB stack at about 3,600 terms,
+the subscript parser at about 3,800 and the condition's parser at about 3,700 (it kept two
+forms per level until the third review of 2026-10-19); a5bcda9's subscript parser overflowed it
+at about 2,200. The interface gives an array's leading extent as the last row reached plus one,
+so an access reaching row 2^63 − 1 is refused ("the access reaches row 9223372036854775807 of
+'A', so the array's extent does not fit in 64 bits"; the interface said -2^63, from a signed
+overflow inside the front end).
+
+The GEMM sites' execution counts in the plan are counted by running the loops too whenever the
+product of trip counts is unknown: a constant-extent shifted repetition loop, which used to
+report an unknown count (-1), now reports the exact one. A site's count is computed once (the
+first version recomputed it for every multiply-accumulate statement of the site: eight
+statements under a 2040 × 2040 pair of repetition loops took 27.6 s, now about 4 s, the time of
+one count; #19). The trip-count helper no longer reads `s + r < 3` as `s < 3` (it ignored a left
+side that was not the counter alone; such loops were refused before the canonicalization, so no
+earlier count was wrong). A counting-down loop whose bounds read a counter is still refused.
+Parallelotope nests keep the closed form. Of the 202 C files under test/ (273 front-end
+invocations, each file with its own RUN lines' flags, the SystolicCC ones as systolic-cc calls
+the front end), 190 translate byte for byte as with the previous front end (a5bcda9): MLIR,
+interface, GEMM sites, diagnostics and exit code -- test/e2e, the regression and failures
+corpora and 157 of the 160 showcase files among them. The twelve others are the four new
+front-end tests (nonbox_bounds.c, nonbox_bounds_unsupported.c, header_types_unsupported.c,
+header_reach_bitint_depth.c), test/CFront/affine_condition.c (two unsigned conditions added),
+test/SystolicCC/affine_exact_domains.c (new), test/SystolicCC/affine_domain_normalization.c,
+whose triangle is now translated, and five whose only change is the interface's extent of an
+array accessed only where C runs nothing (test/CFront/downward.c, test/SystolicCC/downward.c,
+the empty GEMMs of showcase cases 129-131: extent 0). The C-type checks alone change no
+translation but the new tests' functions: against the first version of this change, 238 of the
+260 invocations and 650 freshly generated cases are byte-identical, and the other 22
+invocations are the new functions; the fixes of the review of 2026-10-19 leave 261 of the 272
+invocations byte-identical, the other 11 being the new test's and header_types_unsupported.c's
+constant-side message; those of its third round leave 264 of the 273 byte-identical: 8 differ
+only in the extents of arrays accessed where C runs nothing, and on the DEEP RUN line of
+header_reach_bitint_depth.c the build before them crashed (its 4,000-term conditions) and this
+one translates. (The comparison passes that line's generated file as a flag, so it counted the
+line identical; run as lit runs it, the line differs, and in the second round's count too: the
+build before that round crashed on its deep subscript -- 260 of 272 identical then.)
+
+Gaps that remain:
+- The step S is taken by its value. `i += 2u` on a negative int i is C's unsigned addition
+  converted back, an implementation-defined conversion that clang defines as wrapping, giving
+  i + 2.
+- A conversion or unsigned operation whose wrap-around a later operation undoes is refused,
+  although C's result is exact (`c0 + 2 * c2 + 1` with a negative int c0 and an unsigned long
+  c2, back in range), and so is the well-defined `for (unsigned i = 7; i + 1 > 0; --i)` (the
+  exit-value rule).
+- An exact value beyond 2^63 − 1 (unsigned long long) is refused ("integer constant expression
+  overflows"): the front end's forms are 64-bit signed.
+- A counter of a typedef'd type (`size_t`, `int64_t`) or of a bit-precise type (`_BitInt(8)`) is
+  refused, as before ("the loop counter must be an initialized integer variable").
+- An expression nested more deeply than clang's JSON output lets the front end read (about 5,000
+  terms) is refused ("cannot read clang's AST: nesting too deep"); clang's JSON dump of that many
+  terms needs about 2.5 MB of stack when the hard limit is that low (with only the soft limit
+  lowered, clang raises its own).
+- The execution count of a site in a function the front end refuses ignores C's types; these
+  counts only label offloaded functions.
+
+**19.13.2 Family X: exact parallelotopes.** For a perfect multiply-accumulate band (the body
+test of 19.12.1) whose bounds are max / min of linear forms of the outer counters (no symbols,
+no floordiv), the band's iteration set D is built exactly -- one inequality per bound result,
+one local quotient per stepped loop -- and compared with candidate parallelotopes
+  P = { x : a_s <= x_s − l_s·x_<s <= e_s,  x_s − l_s·x_<s ≡ a_s (mod step_s) }
+where each loop's shift row l_s is zero or the linear part of one of its own written bound
+results, tried in that order (zero, the lower results' rows, the upper results' rows; the first
+that passes is taken, so a loop whose shift source runs once keeps its written coordinates).
+Loop by loop, outermost first: a_s and e_s are the exact integer minimum and maximum of x_s −
+l_s·x_<s on D (integer lexicographic minimum, `findIntegerLexMin`), and the projection of D
+onto x_0..x_s must equal P's (the Presburger library's integer-exact set equality); a choice
+that passes fixes nothing beyond the projection, which is D's own, so the greedy search is
+complete over the candidates. If D = P, every loop's bounds are replaced by P's -- the same
+counters, the same points, hence the same iteration order -- and the band is normalized onto
+P's box by 19.12's x = U x'. Conditions: a stepped loop starts at the max of its lower bounds,
+so several lower results with different linear parts must have one of them the max at every
+outer point that enters the loop (an exact emptiness test on the outer loops' own set); and the
+64-bit rule below holds. Typical members: a triangle that degenerates (`for i in [2, 25) step 2, for j in [i, 4)`: only
+i = 2 has points -- the set is {2} × {2, 3}), a max / min of forms that never wins on the
+domain, a shifted loop written with a redundant second bound.
+
+*The 64-bit rule, families F and X* (`exactBandSet`, review of 2026-10-18). The run time
+evaluates every result of a loop's bounds -- affine.for takes their max / min, so a result a
+fold drops is evaluated too -- at every outer point that enters the loop, in 64-bit arithmetic:
+lower-affine emits a coefficient times a counter as `arith.muli ... overflow<nsw>` (poison when
+the product does not fit) and a sum as a plain `arith.addi` (it wraps, and so gives the true
+value whenever that fits). The mathematical set is the program's only when every product and
+every result of every written bound has its exact range within 64 bits over the outer loops'
+own iteration set -- not over D's counter ranges: a bound is evaluated also at outer points
+where the loops below it run nothing. Both families check this before anything is rewritten;
+before the review family F did not (`@shifted_bound_overflow`: an upper bound of 2^63 + 2 that
+the run time wraps negative was normalized and lowered), and family X skipped the results a
+stepped loop's fold drops (`@fold_drops_overflowing_result`). The rewritten accesses obey the
+same rule: a composed product (a coefficient of x'_u times x'_u over the box) that does not fit
+leaves the band as written (`@composed_product_overflow`), so the rewrite adds no overflow the
+written nest does not have.
+
+**19.13.3 Family R: repetition loops of any shape.** Loops no access reads, whose bounds read
+only each other (a triangle of repetitions, `r1 in [0, 3), r0 in [r1, 2)`), with the GEMM loops'
+bounds reading only GEMM loops: the iteration set is the product of the two, every GEMM point
+runs once per repetition point. `hoistRepetitionLoops` now moves such loops outward too (its
+legality test -- an integer-exact dependence check at each enclosing GEMM loop -- treats a loop
+whose bounds do not fix its trip count as one that may run twice), the GEMM loops must have
+constant bounds there; a prefix of such loops around a band the normalization can rewrite is
+handled by normalizing the band below the prefix (a retry below every prefix whose counters
+nothing below it reads, shortest first); the hoist then moves out any repetition loop left
+inside the normalized band. It runs on the whole band, the prefix included, and moves nothing
+when a repetition loop's bounds read a dimension's counter (`boundsOk`, silently: the recognizer
+then refuses the nest, UNKNOWN) -- also through an operand that a constant bound map lists
+without reading it (`affine_map<(d0) -> (0)>(%i)`): the permutation would move the loop past
+that operand's definition (third review of 2026-10-19: "operand #0 does not dominate this use",
+and with the dimension's band lowered a crash; `@dead_operand_once`, `@dead_operand_inside`). (A second
+normalization after the hoist, in the first version, could change nothing -- a hoisted band's
+GEMM loops have constant bounds -- and was removed by the review.) The hoist's dependence test
+(`checkMemrefAccessDependence`) sees one memref at a time: accesses through different memref
+values never depend for it. So the interchange is decided only when every other memref of the
+body is provably disjoint from each one it stores to -- the lowering's alias rule: distinct
+allocations, `llvm.noalias` (C `restrict`) arguments, or `assume-no-alias`; otherwise the nest
+stays as written, with a remark ("moving it outward is a legal loop interchange only if the
+memrefs the nest reads do not overlap the one it writes", `@alias_hoist_triangle`). Before the
+review such a nest was hoisted, then refused for "A may overlap C", and its permuted loop order
+ran on the CPU: with aliasing arguments, a different result than C's. The dependence analysis
+flattens the bound and access maps in 64-bit arithmetic, which wraps for constants near 2^63:
+with a lower bound max(-2^63, 0) it found no dependence, and a repetition loop of two iterations
+moved out of the reduction loop, reordering the accumulation (under strict floating point the
+nest was then refused, and its CPU code ran permuted). So a bound or subscript of the loops
+around the accesses that flattens to a coefficient or constant of 2^48 or more leaves the nest
+as written, UNKNOWN ("whether moving it outward reorders dependent iterations is not decided",
+`@min_folded`; round 4 of the review of 2026-10-19). Both tests matter only
+when the interchange reorders iterations: two iterations change their order only if they differ
+in a dimension of two or more iterations and in a repetition loop inside it that may run twice
+(the first repetition loop inside that dimension in which they differ reads only counters on
+which they agree, so one of a single iteration takes one value for both). Moving repetition
+loops outward past loops that run once -- a leading loop of one iteration -- keeps the program's
+order and permutes the band without either test (`@leading_once_alias`, `@leading_once_read`;
+review of 2026-10-19: the alias rule refused such a nest with its remark, and the inner GEMM
+candidate was then recognized and refused again for "A may overlap C"). A loop of one iteration
+is a dimension when its bounds are constant (a constant on the domain, Lemma 0, as the
+recognizer's `singleIterationValue` reads it: a max / min of constants folded, `max(0, -1) to
+min(1, 4)` -- the hoist took that for a repetition loop that may run twice until the third
+review of 2026-10-19, and refused a nest the recognizer then lowered, `@maxmin_once_inner`,
+`@maxmin_once_alias`; a difference to the lower bound beyond 64 bits, `-1 to min(0, 2^63 -
+1)`, is never the min, `@ovf_once_inner`), unless a loop's bounds read its counter: then it is
+a repetition loop of one iteration, which cannot run twice and moves out with its readers
+(round 4: as a dimension it made `boundsOk` refuse its readers, so `t, r1 in [0, 3), r0 in
+[r1 + t, 2), i, q, j, k` stayed on the host, and folding a max / min spelling of t lost
+lowerings the previous build made; `@once_read_by_repetition`, run 6 times, `@once_read_alias`,
+`@maxmin_once_read`). One whose bounds read an outer repetition counter,
+`r0 in [r1, r1 + 1)`, is a repetition loop of one iteration -- it was taken for a dimension with
+bounds that are not constant, and the nest stayed as written, unrecognized
+(`@shifted_once_repetition`, lowered now and run 6 times; inside the reduction loop it moves out
+too, `@once_inside_reduction`, `@once_inside_reduction_restrict`). A repetition loop whose trip
+count its bounds do not fix (`0 to %n`, a triangle) may run twice (`@symbol_range_inside`).
+Under `classify=true` the hoist's two
+refusals carry the class UNKNOWN, as every refusal remark does (§19.9; they carried none). The number of tile
+invocations per call is the number of repetition points, counted exactly (`enclosingRepetitions`:
+a loop whose bounds differ by a constant has that many trips, clamped at 0 -- a negative
+difference was cast to uint64 before, `@rep_never_runs`; other bounds are evaluated by running
+the enclosing loops), so the driver checks the invocation count as usual.
+
+**19.13.4 Proofs, both ways.**
+- *Bijection certificate, every lowered GEMM* (`verifyLogicalBijection`, AffineMatmulPartitioning):
+  independently of the mixed-radix argument that built the logical mapping, (1) the source
+  domain equals x = S z + origin over the box of its loops' ordinals (Presburger equality, the
+  strides as floordiv locals), (2) the logical ordinals of the batch loops and of I, J, K are an
+  integer map of z (each term divisible by the coordinate's scale), (3) their ranges lie in the
+  box batch × [0, M) × [0, N) × [0, K), (4) the map is injective on the z box (no nonzero integer
+  kernel vector with |δ_s| < n_s: one integer-emptiness test per leading position), (5) the two
+  boxes have as many points -- hence onto. No logical iteration is missing (surjective), out of
+  range, or duplicated (injective). The discovery pass prints it ("logical bijection: verified");
+  every recognized GEMM of the lit inputs verifies, and so does every lowered nest of the oracle
+  sweep. The certificate is shown not to be vacuous: the discovery pass's test option
+  `perturb-certificate` re-checks each verified mapping with five wrong ones -- M + 1, M − 1, I's
+  scale doubled, loop 0's origin + 1, I's row of T zero -- each refused by a different one of the
+  tests (5), (3), (2), (1), (4) (`affine_gemm_exact_domains_partition.mlir`, which also partitions
+  a 20 × 20 × 24 GEMM in disguise into 26 regions and A·Aᵀ in disguise into 10, and takes A·Aᵀ
+  through the tile lowering: per-tile slab copies of A and Aᵀ only, no copy of the matrix).
+- *Disproof, non-box domains left as written* (`disproveAffineImageOfBox`): a GEMM's updates, in
+  any decomposition, are an affine image of a box (the C, A and B elements each update touches,
+  as affine functions of the box coordinates), and every affine image of a box's integer points
+  is centrally symmetric. When the accesses tell the iterations apart -- the stacked map
+  x ↦ (F_A(x), F_B(x), F_C(x)) has rank n, so the nest's updates are an injective affine copy of
+  D, and an injective affine map keeps central symmetry both ways (n the candidate band's loops;
+  C's map is the accumulator load's, which the recognizer accepts when it equals the store's on
+  D: a band whose store alone has full rank, which proves the same, is left UNKNOWN,
+  conservatively; `@load_rank_full`, `@store_rank_full`) -- and the two factors and C
+  are three buffers, a D that is not centrally symmetric is no GEMM's. A symmetric set is
+  symmetric about the midpoint of its lexicographic extremes p, q (the reflection reverses the
+  order), so D is compared with p + q − D exactly; when they differ, a point whose mirror is
+  missing is reported and the class is PROVEN_INVALID ("the iteration domain is not centrally
+  symmetric -- the point (6, 7, 0) is in it, its mirror (1, 0, 7) ... is not --, so it is no
+  affine image of a box; the accesses tell the iterations apart (their stacked map is
+  injective), so ..."). The set reasoned on is the one the program runs: built from checked
+  linear forms of the bounds (`exactIterationSet`; MLIR's flattening wraps -- `(3i + 1)·2^62`
+  became the coefficient −2^62, a set of phantom points, `@flattening_wraps`), under the 64-bit
+  rule of §19.13.2 at the outer points (`@outer_point_overflow`, `@overflow_bound_asymmetric`).
+  Not attempted (UNKNOWN): a rank below n -- a loop no access reads, and the strip-mined
+  remainder: k = 2·k1 + k0 on {(0, 0), (0, 1), (1, 0)} takes 0, 1, 2 once each, the 4 × 4 × 3
+  GEMM on an asymmetric set (`@remainder_tile_k`, executed as `ex_remainder`); a buffer shared by
+  two operands (A × A: the product commutes, two views of one buffer may exchange roles from
+  point to point, `@axa_triangle`); a bound with floordiv / ceildiv / mod (`@mod_bound`) or a
+  symbol; a stepped loop whose lower bound reads a counter (a max of constants is fine,
+  `@stepped_max_of_constants`); a bound outside 64 bits; a symmetric set (a hexagon: symmetry
+  does not exclude every parametrization). Before the review of 2026-10-18 the premise was
+  "every loop is read by an access" (syntactic, `isFunctionOfDim`), the set was the flattened
+  source domain, and the 64-bit guard bounded intervals over D's counter ranges with a wrong
+  interval for `mod`: the remainder tiles, the phantom set, the `mod` bound and the outer-point
+  overflow were all PROVEN_INVALID -- wrongly. Re-decided by this: the triangle of `affine_gemm_mapping.mlir`,
+  `affine_gemm_domain_normalization.mlir` @triangle and @max_bound (a clipped parallelogram, rows
+  of 2, 3, 4, 4, ... points), the ISSUE-002 reproducer's triangular nest and showcase mlir_009 --
+  UNKNOWN before, PROVEN_INVALID since; the specification's REJECT for them is unchanged.
+- *Candidates the recognizer does not decide.* A candidate whose access reads the counter of a
+  loop outside it -- the inner band (i, j, k) of a batched GEMM C[b][i][j] -- has that counter as
+  a parameter: it may be a GEMM at each of its values, which the recognizer does not analyse, so
+  it is UNKNOWN ("an access uses the counter of a loop outside the nest"); the discovery pass
+  called it PROVEN_INVALID before the third review of 2026-10-19 (`affine_gemm_batched_lowering.mlir`
+  @batched; the lowering pass never reported it: the enclosing candidate is the one lowered or
+  refused).
+
+**19.13.5 The classes, as tested** (`test/Systolic/affine_gemm_exact_domains.mlir`, 48 nests).
+Lowered (PROVEN_VALID): a degenerate triangle (1 × 2 × 4), an inactive max / min (4 × 4 × 4), a
+sheared box in disguise, a stepped loop with a dominant max, repetition triangles between GEMM
+loops and as a prefix around a shifted band (run 3 times), det T = 2 with a stride-2 C view (the
+determinant decides nothing: the certificate does), A·Aᵀ through two views and A·A through one
+view on domains in disguise, K = 1 in disguise. Refused: PROVEN_INVALID for a genuine triangle
+(missing logical iterations), K = 1 out of bounds, out of bounds after the normalization;
+VALID_BUT_LOWERING_UNSUPPORTED for duplicated logical iterations on a box (K read as k + l: a
+batched GEMM only by demotion, which stays deferred); UNKNOWN for a repetition loop whose bound
+reads a GEMM loop (each row accumulated a different number of times), a symmetric hexagon, a
+bound that overflows 64 bits, and C aliasing a factor ("A may overlap C", conservative). Added by
+the review of 2026-10-18: the 64-bit rule (a dropped fold result, family F, a composed product,
+the flattening, `mod`, the outer points, the asymmetric overflow variant: UNKNOWN), the rank
+condition (the remainder tile: UNKNOWN), A × A on a triangle (UNKNOWN), a stepped max of
+constants (PROVEN_INVALID), a stepped max with no dominant result (UNKNOWN), the hoist under
+possible aliasing (not hoisted), a repetition loop that never runs (counted 0). Added by the
+review of 2026-10-19: a leading loop of one iteration around a repetition loop, with aliasing
+arguments (one refusal, the GEMM's "A may overlap C", UNKNOWN) and with restrict ones and an
+access reading it (lowered, run twice), and a repetition loop of one iteration with shifted
+bounds (lowered, run 6 times). Added by its third round: a loop of one iteration whose bounds
+are a max / min of constants, innermost (lowered, no hoist remark) and between i and j with
+aliasing arguments (one refusal, "A may overlap C"); a repetition loop with a symbol range
+inside i, aliasing arguments (not hoisted, the hoist's remark: an unknown trip count may be
+two); a repetition loop of one iteration inside the reduction loop (moved out without a test:
+one refusal with aliasing arguments, lowered and run 6 times with restrict ones); a repetition
+loop whose constant bounds list a dimension's counter as an unread operand, leading one-
+iteration loop (not hoisted, valid IR, one refusal) and inside i (not hoisted, unrecognized, no
+remark); a triangle whose accumulator load and store differ off the domain, the load's stacked
+map of full rank (PROVEN_INVALID) and the store's (UNKNOWN). Added by its fourth round: a
+repetition loop reading a leading loop of one iteration, with a repetition loop to move out of
+i (lowered, run 6 times; with aliasing arguments one refusal, the hoist's); a max / min loop of
+one iteration read by a repetition triangle inside i (lowered, run 6 times); a loop of one
+iteration whose upper bound's second result is 2^63 - 1 (lowered, no hoist remark); a repetition
+loop inside the reduction loop with a lower bound max(-2^63, 0) (not hoisted, the order kept,
+UNKNOWN).
+
+**19.13.6 Specification, predictor, generator, oracle** (revised by the review of 2026-10-18,
+#21-#30 and #40). *Specification* (`casespec._spec_domain`). A non-box nest is decided on a box
+when one exists: on its box form when its bounds shift together (family F, `box_form`); on the
+box of its points when they are a parallelotope with the bounds' shift rows (family X,
+`exact_form`, the enumeration twin of the compiler's search: the same candidates, decided on the
+enumerated points; a loop counting down keeps only the values it takes on the set, from e down
+to a, and `gen_cases.finalize` asserts that the box computes the same C, #24); on its surrogate
+in family R (the repetition loops as plain two-iteration loops, the repetition count the exact
+number of their points). Family R: independent repetition loops (no access reads them, their
+bounds read only each other) a prefix of which leads the nest around a band the normalization
+rewrites as written, inner repetition loops included (the compiler's sub-band retry normalizes
+the band, whose inner repetition loops then have constant bounds, and the hoist moves them out,
+#21), or that sit anywhere around GEMM loops with constant bounds. A nest with no iteration point is
+UNDETERMINED (SQ-2), as a box with a loop of zero iterations, also when only its repetition set
+is empty, which the surrogate hides (#28). Any other nest is enumerated as written. When the
+readers' roles map its points bijectively onto a box, every point repeated alike (per batch
+value, one shape), it is a GEMM on a domain the compiler does not normalize: OUT_OF_SCOPE
+`non_box_unnormalized` (strip-mined loops with a remainder, k = 2 k1 + k0 on {(0, 0), (0, 1),
+(1, 0)}). Otherwise no other decomposition is searched, so a refusal needs a proof
+(`_no_gemm_proof`): the nest's updates, the multiset {(F_A(x), F_B(x), F_C(x)) : x ∈ D} over
+every iteration point with multiplicity, are not centrally symmetric. A GEMM's updates are those
+of its slots (19.1: ξ is an affine bijection of a box Z onto D, so they are the image of Z under
+the affine map F ∘ ξ), once per slot and as often again per point of independent repetition
+loops; they are therefore symmetric about the image of Z's centre, and so is every affine
+projection of them. With one array as both factors the product commutes, and the
+exchange-invariant projection (F_C(x), F_A(x) + F_B(x)) is used. With the proof the verdict is
+REJECT `non_box_domain`; without it UNDETERMINED `non_box_undecided` (the updates are symmetric
+while the canonical decomposition fails, and a decomposition the specification does not search
+may exist) -- a limit of the executable specification, not a spec question, like
+`non_box_unenumerated` above 200,000 points. The compiler's PROVEN_INVALID implies the proof
+(rank n makes the updates an injective affine copy of D, and three arrays exclude the exchange),
+so no nest the specification calls a GEMM can be predicted PROVEN_INVALID; the proof is applied
+to a GEMM found too, and a batched one needs its batch values to be the image of a box under the
+parametrization (Z is a box of all the coordinates, 19.1; review of 2026-10-19: a triangle of
+batch values, one 2 × 2 × 2 GEMM per value, was called a GEMM, and the compiler's correct
+PROVEN_INVALID a wrong proof). The test, `_is_box_image`, accepts a box sheared along the loop
+order -- at every value of the earlier batch counters the next one runs over an arithmetic
+progression of one step and length whose start is affine in them (b2 in [b1, b1 + 2)) -- as well
+as an axis-aligned one, which is all it accepted until the third review of 2026-10-19 (a
+parallelogram of batch values was UNDETERMINED); an image sheared otherwise (a diamond) stays
+undecided. The surrogate keeps a loop of one iteration with constant bounds as written: it
+repeats nothing (given two iterations inside the reduction it made a repeated GEMM
+`repeat_in_reduction`); a loop no access reads whose shifted bounds fix its trip count at 0 or 1
+gets one iteration: it cannot run twice, so the hoist moves it without a test (third review of
+2026-10-19: given two, r0 in [r1, r1 + 1) inside the reduction loop made the specification
+`repeat_in_reduction` and a correct offload false_positive). Family R's retry is the compiler's:
+below the shortest prefix of the leading run whose counters nothing below it reads and whose
+band normalizes (the whole run only until the third review of 2026-10-19: r1, r0 in [r1, 2), q
+and below them s in [q, q + 2) -- normalized below r1, r0 and lowered 12 times -- was
+OUT_OF_SCOPE and the run false_positive; a repetition loop below the run reading the run's
+counter had made the band ill-defined before, a KeyError). A loop of one iteration that a
+repetition loop's bounds read is a repetition loop for the hoist too (§19.13.3), so it stops
+nothing; the third round's model of the hoist taking it for a dimension made correct offloads
+false_positive (`t, r1, r0 in [r1 + t, 2), i, w in [0, 1), j, k`: nothing to move) and was
+removed in the fourth. Independence is decided on the nest as written and, failing that, on the
+nest as the normalization leaves it (`_normalized_view`: the band below the shortest such prefix
+on its box when it is a parallelotope): an inner repetition loop `s in [i, i + 2)` reads the GEMM
+counter i as written and nothing on the box, where the compiler hoists it (round 4: the
+specification called such nests OUT_OF_SCOPE, false_positive).
+
+*Predictor* (`casespec._predict_domain`). The compiler's dimensions are the loops an access reads
+and the one-iteration loops with constant bounds unless they lead the nest (`_compiler_dims`;
+Lemma 0, recognizeLogicalMatmul; #22), and for the hoist not those whose counter a loop's bounds
+read (`_hoist_dims`): the repetition structure is decided with the hoist's, on the nest as
+written or as the normalization leaves it (`_predictor_view`). A prefix of repetition loops needs
+no hoist: `hoisting_required` is set only for interleaved ones (round 4: predict() read a
+surrogate's one-iteration loop in the prefix as a dimension and set it). A band left as written is
+recognized on a surrogate that replaces
+only the loops whose bounds read counters (#23), and a front-end refusal predicted on it is the
+nest's (#25). The dense partition is predicted PROVEN_INVALID, with the remark's wording,
+exactly when `disproof_holds`: (2) no stepped loop's lower bound reads a counter (a loop
+counting down is an ordinal loop of step 1); (3) every product (coefficient × counter) and every
+result of every loop's bounds as emitted (the lower bound, the exclusive upper bound) is within
+64 bits at every point of the outer loops entering that loop (`written_bounds_fit_int64`; the
+front end checks the bounds as written in their C types, §19.13.1, but emits canonicalized
+ones, so this is checked, not assumed); (4) the stacked access map has rank n -- every
+subscript of A, B and C as a row over all n loops, one-iteration loops included, computed
+exactly in fractions (`stacked_access_rank`; a loop no access reads is a zero column); (5) the
+two factors and C are three different arrays; (6) the iteration set is nonempty and not
+centrally symmetric. Condition (1), bounds that are linear forms of the nest's outer counters,
+holds for every translated C nest. A leading run of unread loops whose counters a loop below
+reads leaves the band below as the candidate, UNKNOWN. Otherwise the reason is UNKNOWN's: "the
+loop bounds are not static ...". The predictor mirrors the hoist's alias rule (§19.13.3; review
+#3): a repetition loop inside a dimension is moved only when each factor other than C is
+provably disjoint from C (one of the two a restrict argument), tested before the interchange's
+dependence test; otherwise the nest stays on the host with the hoist's remark ("loop N of the
+nest repeats the accumulation inside it, and moving it outward is a legal loop interchange only
+if the memrefs the nest reads do not overlap the one it writes; ..."), when the interchange
+reorders iterations -- a repetition loop that may run twice (two or more iterations, or a trip
+count its bounds do not fix) inside a dimension of two or more (2026-10-19; at any position
+before). An unsigned counter with a written condition is not a case (`Loop` raises
+ValueError): the front end translates it only when no operation of the condition wraps around
+(§19.13.1), which the predictor does not model (#29).
+
+*Verdicts* (`scripts/verdict.py`). A refusal that states the disproof ("is no affine image of a
+box") on a case the specification calls a GEMM (`mathematical_gemm` / `legal_gemm`) is a
+soundness mismatch -- `unexpected_stage`, whatever the prediction. (Under the former "every loop
+read" rule the predictor mirrored the compiler's PROVEN_INVALID on the remainder tile, and such
+a run passed.)
+
+*Generator.* The `domains` family has `disguise` (a degenerate triangle), `rep_triangle` and
+`shift_cond` (a shifted loop written `k - i < c`); `DOMAIN_NOTES['triangle']` states the
+specification's rule and the compiler's conditions.
+
+*MLIR oracle.* It emits boxes in disguise (an inactive extra bound result with another linear
+part, or an unsheared outer loop extended by values that empty an inner loop: asserted point for
+point) and decides every emitted triangle by enumeration. A parallelotope with the bounds' shift
+rows is the GEMM of its box (`find_parallelotope`, independent of the compiler): it must be
+lowered and is checked address by address ("a degenerate triangle"). Any other triangle must
+not be lowered. The pass runs with classify=true (the IR is unchanged); each refusal remark is
+mapped to its nest by its line (with `-split-input-file` the lines are the whole input's), and
+every refused triangle's class is checked against its points (#30): PROVEN_INVALID only on a set
+that is not centrally symmetric, with a stacked access map of full column rank (C's subscripts
+the store's or the accumulator load's, which agree on the points) and three different memrefs,
+and with a correct witness -- the remark's point in the set, its stated mirror the reflection
+about the midpoint of the lexicographic extremes and outside the set; conversely, a recognized
+triangle meeting those conditions with the load's map (the compiler's), with no stepped loop
+whose lower bound reads a counter, must be PROVEN_INVALID. The summary counts the classes
+("refused triangles by class: ..."), pinned by the lit test, which requires PROVEN_INVALID
+triangles on seeds 2 and 3. Review of 2026-10-19: ranking the store's subscripts gave false
+mismatches on 3 of 415 seeds (153, 255, 333), both ways; and since the generator makes no
+nonempty symmetric refused triangle (a triangle's rows grow with the outer counters), the
+witness check is what exercises the symmetry test on generated nests -- a symmetric set is
+covered by @symmetric_hexagon only. The checks are made on the compiler's candidate band, the
+loops from the outermost one an access reads inward, whose points, ranks and witness they are:
+a leading loop no access reads only runs it again (third review of 2026-10-19: seed 877's
+case_347, a correct PROVEN_INVALID under such a loop, was a false mismatch -- rank 3 below the
+nest's 4, a witness of 3 coordinates -- outside the lit seeds and the 1-415 sweep; a band whose
+bounds read such a loop's counter has parameters, and the disproof never claims it). No lit seed
+has a recognized triangle whose load and store maps differ in rank, so the load rule is pinned
+by @load_rank_full and @store_rank_full (§19.13.5). The band's points are its own, enumerated
+alone (`band_points`): a leading run with no point runs the band zero times, and the projection
+of the nest's points was then empty -- a correct PROVEN_INVALID a mismatch, a wrong UNKNOWN
+unnoticed (round 4). A lowered triangle is a mismatch unless it is a GEMM over a parallelotope
+repeated by independent repetition loops (family R, `repetition_family_nest`: the repetition
+loops read only each other and nothing reads them, and the GEMM loops' points form a box sheared
+along the loop order), which is SKIPped as `decide()` SKIPs a repetition loop on a box (round 4:
+a box GEMM under a repetition triangle, which the compiler lowers, was a mismatch).
+
+*Validation of the specification changes* (2026-10-18, the build with the rank condition).
+3,467 generated `domains` cases (random seeds 2027, 1, 3, 7, indices 0-599; the enumerate mode,
+indices 0-1,499) and the 175 showcase cases: the review's changes moved 33 predictions from
+PROVEN_INVALID to UNKNOWN (triangles over split coordinates read only together, stacked rank 3
+of 4 to 8 loops), reworded 38 PROVEN_INVALID predictions and changed no other prediction,
+specification, analysis or classification; the 158 triangle cases have new header and basis
+texts, and mlir_009 a new note. All 71 changed predictions agree with the compiler, stage and
+reason; 12 of them were also run end to end through systolic-cc and the program. Every REJECT
+`non_box_domain` (158) carries an independently computed proof, and no predicted PROVEN_INVALID
+(38) is a legal GEMM. Oracle seeds 1-16 × 400: 0 mismatches; refused triangles 22
+PROVEN_INVALID, 72 UNKNOWN, 199 not recognized. Fabricated classes are all flagged
+(PROVEN_INVALID on 61 rank-deficient and 18 shared-memref triangles, UNKNOWN on 26 provable
+ones, seeds 1-8). Seed 5's case_68 is a rank-deficient triangle that is a GEMM: J = 9 x0 + 3 x3
+on {(0, 0), (0, 1), (1, -1), (1, 0), (1, 1)} takes 0, 3, 6, 9, 12 once each. It is UNKNOWN; a
+disproof without the rank condition would claim PROVEN_INVALID, which is false.
+
+**19.13.7 Limits that remain.** Non-box domains outside the families F, X and R are not lowered:
+the compiler proves them no GEMM (PROVEN_INVALID) under the conditions of §19.13.4 or leaves them
+UNKNOWN -- among them genuine GEMMs such as the strip-mined remainder tile, which only a lattice
+parametrization of the domain would recognize; demotion stays deferred (§19.12.6). A repetition
+loop whose bounds read the counter of a one-iteration loop is hoisted with it since the fourth
+round of the review of 2026-10-19 (it was a limitation before). A repetition loop whose constant
+bound map lists an unread operand naming a dimension is not hoisted (conservative: dropping the
+operand first would let it move). A hoist that needs the dependence test is not made when a bound
+or subscript around the accesses flattens to a constant or coefficient of 2^48 or more (UNKNOWN;
+the analysis' 64-bit arithmetic). A band whose C store alone has full stacked rank is UNKNOWN, not
+PROVEN_INVALID (§19.13.4). The specification's batch test is sufficient only: batch values that
+are an affine image of a box sheared otherwise than along the loop order are undecided
+(UNDETERMINED), never called a GEMM or refused. Transposed operand views are correct but costly downstream:
+`bufferization.to_buffer` of a strided [1, N] view into an identity layout makes
+`--systolic-runtime-to-llvm` materialize the transposed matrix once per tile (ten 16 × 16 copies
+for a 10-tile A·Aᵀ, and the same for a plain Bᵀ) -- a cost of the existing tile lowering, not of
+this change. The front end's gaps are listed in §19.13.1, the executable specification's limits
+(`non_box_undecided`, `non_box_unenumerated`) in §19.13.6. The FPGA board was not run for any of
+this section's results.

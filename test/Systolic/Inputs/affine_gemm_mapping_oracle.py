@@ -71,10 +71,29 @@ order (x' = L x with L lower unitriangular; an access c . x' is c . L . x).
 The DECISION stays the box nest's (the roles are taken after the bijection,
 section 19.2 / 19.12), and the compiler's views are checked on the box
 points: a lowering of the sheared nest is right iff it is the box nest's. A
-'triangle' (the two bounds shifted by different forms) is outside the family
-the compiler normalizes: it must not be lowered. Sheared nests are emitted
-in every mode, so an out-of-bounds access or a non-injective C under a shear
-is a rejection / refusal like any other.
+'triangle' (the two bounds shifted by different forms) is decided by
+enumerating its points as emitted (section 19.13): when they are a
+constant-extent parallelotope whose shift rows are those of the bounds
+(find_parallelotope -- a degenerate triangle), the nest is the GEMM of that
+parallelotope's box (derived_box_nest), which the compiler's exact path must
+lower and whose views are checked on its points; any other triangle is
+outside the family the compiler normalizes: it must not be lowered. Sheared
+nests are emitted in every mode, so an out-of-bounds access or a
+non-injective C under a shear is a rejection / refusal like any other.
+
+Boxes in disguise (section 19.13): some box or sheared nests are emitted with
+the same points written as a non-parallelotope -- an extra max / min bound
+result with another linear part that never wins on the domain, or an
+unsheared outer loop whose range is extended by values for which an extra
+upper result of an inner loop empties it (disguise; check_shear asserts the
+points and accesses unchanged, and only disguises inside the documented
+family are kept). The compiler's exact path must find the parallelotope
+again and lower it; the nest is decided, and the lowering checked, on the box
+of the parallelotope its points form (find_parallelotope, the shift rows tried
+in the documented order -- zero, then the lower and the upper results' rows --,
+and derived_box_nest): the original box, or, when a shear's source loop runs
+once and the zero row already fits, the same points in the written
+coordinates.
 
 One memref as both factors (section 7, 19.12.3): some nests read A's memref
 for B too -- through two different views (A[i][k] * A[k][j], transposed,
@@ -86,6 +105,22 @@ the compiler must refuse them ("A may overlap C").
 K = 1 (a reduction of extent one: a loop that runs once read by both
 factors, or no reduction loop at all) is counted explicitly: such a GEMM
 must stay eligible and lowered.
+
+The pass runs with classify=true: every refusal remark ends in its class (docs
+section 9; the hoist's two refusals, UNKNOWN, since 2026-10-19), and the IR is
+the same. A nest's remark is the first one located in its lines. A refused
+triangle's class is checked against its enumerated points (section 19.13.4):
+PROVEN_INVALID -- the claim that no decomposition makes the nest a GEMM --
+only on a point set that is not centrally symmetric, no parallelotope of the
+family, whose stacked access map x -> (F_A(x), F_B(x), F_C(x)) has full
+column rank (the accesses tell the iterations apart; with the C store's
+subscripts or the accumulator load's, which agree on the points) and whose
+two factors and C are three different memrefs, and with the witness its
+remark states -- a point of the set whose mirror about the midpoint of the
+lexicographic extremes is outside it; conversely, a recognized triangle
+meeting those conditions with the load's map, the compiler's (and with no
+stepped loop whose lower bound reads a counter), must be PROVEN_INVALID. The
+classes are counted in the summary.
 
 With --fp-default the nests go through the pass WITHOUT the reassociation
 permission, and nothing may be lowered (section 6).
@@ -99,6 +134,7 @@ import random
 import re
 import subprocess
 import sys
+from fractions import Fraction
 from math import gcd
 
 
@@ -140,6 +176,16 @@ class Nest:
         self.domain_mode = "box"    # "box" | "shear" | "triangle"
         self.arg_of = {"A": 0, "B": 1, "C": 2}   # the emitted memref argument of each operand
         self.shared = None          # None | "two_views" | "same_view" | "alias_c"
+        # A box (or sheared box) in disguise (docs section 19.13): per loop,
+        # extra lower / upper bound results with other linear parts that are
+        # inactive on the domain ([(row over the outer emitted counters,
+        # constant)]), and an extension of a loop's upper bound whose new
+        # values leave an inner loop empty -- the same points, written as a
+        # non-parallelotope.
+        self.extra_lower = None     # per loop [(row, constant)], or None
+        self.extra_upper = None
+        self.ub_extend = None       # per loop: added to every upper constant, or None
+        self.disguised = False
 
     def points(self):
         return list(itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
@@ -173,6 +219,20 @@ def emitted_row(f, L):
     return ([sum(coefs[s] * L[s][t] for s in range(n)) for t in range(n)], const)
 
 
+def emitted_results(nest, s):
+    """Loop s's bound results as emitted: ([(row, constant)] lower, [(row,
+    constant)] upper), rows over the outer emitted counters (the max of the
+    lower results and the min of the upper ones is the bound)."""
+    lb, ub, _ = nest.loops[s]
+    lowers, uppers = nest.bounds[s] if nest.bounds else ([lb], [ub])
+    lo_row = list(nest.shear[s]) if nest.shear else [0] * s
+    up_row = list(nest.shear_ub[s]) if nest.shear_ub else lo_row
+    extend = nest.ub_extend[s] if nest.ub_extend else 0
+    lo = [(lo_row, c) for c in lowers] + (list(nest.extra_lower[s]) if nest.extra_lower else [])
+    up = [(up_row, c + extend) for c in uppers] + (list(nest.extra_upper[s]) if nest.extra_upper else [])
+    return lo, up
+
+
 def emitted_points(nest):
     """The emitted nest's iteration points (bounds depending on the outer
     counters), in iteration order."""
@@ -183,15 +243,177 @@ def emitted_points(nest):
         if s == n:
             out.append(tuple(x))
             return
-        lb, ub, st = nest.loops[s]
-        lo_row = nest.shear[s] if nest.shear else []
-        up_row = nest.shear_ub[s] if nest.shear_ub else lo_row
-        lo = lb + sum(c * x[t] for t, c in enumerate(lo_row))
-        up = ub + sum(c * x[t] for t, c in enumerate(up_row))
+        st = nest.loops[s][2]
+        lo_res, up_res = emitted_results(nest, s)
+        lo = max(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in lo_res)
+        up = min(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in up_res)
         for z in range(trips(lo, up, st)):
             rec(s + 1, x + [lo + st * z])
     rec(0, [])
     return out
+
+
+def emitted_prefixes(nest, depth):
+    """The points of the emitted nest truncated to its first `depth` loops:
+    the outer points at which loop `depth` is entered."""
+    out = []
+
+    def rec(s, x):
+        if s == depth:
+            out.append(tuple(x))
+            return
+        st = nest.loops[s][2]
+        lo_res, up_res = emitted_results(nest, s)
+        lo = max(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in lo_res)
+        up = min(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in up_res)
+        for z in range(trips(lo, up, st)):
+            rec(s + 1, x + [lo + st * z])
+    rec(0, [])
+    return out
+
+
+def find_parallelotope(nest, pts):
+    """The documented exact family (docs section 19.13), decided by
+    enumeration, independently of the compiler's Presburger search: the
+    emitted point set `pts` is a constant-extent parallelotope whose shift row
+    for each loop is zero or the linear part of one of the loop's emitted
+    bound results -- per loop s, outermost first, the projection of `pts` onto
+    x_0..x_s equals {x_<s in the previous projection, a <= x_s - l . x_<s <=
+    e, x_s - l . x_<s = a (mod step)} with a, e the extremes on `pts`. A
+    stepped loop whose lower results have different rows is in the family
+    only when one of them is the max at every outer point entering the loop
+    (its start, and so its congruence, is then that result's). [(l, a, e,
+    step)] per loop, or None."""
+    if not pts:
+        return None
+    n = len(nest.loops)
+    prev = {()}
+    found = []
+    for s in range(n):
+        step = nest.loops[s][2]
+        lo_res, up_res = emitted_results(nest, s)
+        if step > 1 and len({tuple(row) for row, _ in lo_res}) > 1:
+            # one result must be the max at every outer point entering loop s
+            entered = emitted_prefixes(nest, s)
+            def at(res, x):
+                row, c = res
+                return c + sum(a * v for a, v in zip(row, x))
+            if not any(all(at(r, x) >= at(j, x) for x in entered for j in lo_res) for r in lo_res):
+                return None
+        cands = [[0] * s]
+        for row, _ in lo_res + up_res:
+            r = (list(row) + [0] * s)[:s]
+            if r not in cands:
+                cands.append(r)
+        proj = {x[:s + 1] for x in pts}
+        hit = None
+        for l in cands:
+            vals = [x[s] - sum(c * v for c, v in zip(l, x[:s])) for x in proj]
+            a, e = min(vals), max(vals)
+            cand = set()
+            for p in prev:
+                base = sum(c * v for c, v in zip(l, p))
+                for t in range((e - a) // step + 1):
+                    cand.add(p + (a + base + step * t,))
+            if cand == proj:
+                hit = (l, a, e, step)
+                break
+        if hit is None:
+            return None
+        found.append(hit)
+        prev = proj
+    return found
+
+
+def derived_box_nest(nest, rows):
+    """The box nest of an emitted parallelotope (find_parallelotope): loops
+    [a_s, e_s] with the step, every subscript of the emitted nest composed
+    with x = U x' (x_s = x'_s + l_s . x_<s). The same computation on the same
+    elements, point for point."""
+    n = len(nest.loops)
+    L = shear_matrix(nest)
+    # U as rows over x': x_s = x'_s + sum_t l_s[t] x_t, x_t already over x'.
+    U = []
+    for s, (l, _, _, _) in enumerate(rows):
+        row = [1 if u == s else 0 for u in range(n)]
+        for t, c in enumerate(l):
+            if c:
+                row = [a + c * b for a, b in zip(row, U[t])]
+        U.append(row)
+
+    def compose(f):
+        g = emitted_row(f, L)            # over the emitted counters x
+        coefs, const = g
+        return [[sum(coefs[s] * U[s][u] for s in range(n)) for u in range(n)], const]
+    ops = {k: (shape, [compose(f) for f in fs]) for k, (shape, fs) in nest.ops.items()}
+    box = Nest([(a, e + 1, st) for _, a, e, st in rows], ops, [compose(f) for f in nest.cload],
+               nest.order, nest.mode + "/as its box")
+    box.arg_of, box.shared = nest.arg_of, nest.shared
+    return box
+
+
+def disguise(rng, nest):
+    """Write a box or sheared nest as a non-parallelotope with the same points
+    (docs section 19.13): an inactive extra lower or upper bound result with
+    another linear part (on the domain it never wins the max / min), or an
+    unsheared outer loop's range extended by values for which an inner loop's
+    extra upper result empties it. The compiler's exact path must find the
+    parallelotope again; check_shear asserts the points are unchanged."""
+    n = len(nest.loops)
+    if n < 2 or nest.domain_mode not in ("box", "shear"):
+        return
+    pts = emitted_points(nest)
+    if not pts:
+        return
+    nest.extra_lower = [[] for _ in range(n)]
+    nest.extra_upper = [[] for _ in range(n)]
+    nest.ub_extend = [0] * n
+    s = rng.randrange(1, n)
+    t = rng.randrange(s)
+    lo_res, up_res = emitted_results(nest, s)
+    hi_t = max(x[t] for x in pts)
+    lo_t = min(x[t] for x in pts)
+    kind = rng.choice(["lower", "upper", "extend"])
+    sheared_t = nest.shear and any(nest.shear[t])
+    if kind == "extend" and (sheared_t or nest.shear_ub):
+        kind = "upper"
+    c = rng.choice([1, 2])
+    if kind == "lower":
+        # lb_s(x) + c (x_t - hi_t) <= lb_s(x) on the domain
+        row, const = lo_res[0]
+        row = list(row) + [0] * (s - len(row))
+        row[t] += c
+        best = max(cc for _, cc in lo_res)
+        nest.extra_lower[s].append((row, best - c * hi_t))
+    elif kind == "upper":
+        # ub_s(x) + c (x_t - lo_t) >= ub_s(x) on the domain
+        row, const = up_res[0]
+        row = list(row) + [0] * (s - len(row))
+        row[t] += c
+        least = min(cc for _, cc in up_res)
+        nest.extra_upper[s].append((row, least - c * lo_t))
+    else:
+        # loop t runs k more values; for them loop s is empty: ub_s(x) - W (x_t
+        # - hi_t) with W step_t >= the widest range of loop s
+        st_t = nest.loops[t][2]
+        k = rng.choice([1, 2])
+        nest.ub_extend[t] = k * st_t
+        row, _ = up_res[0]
+        row = list(row) + [0] * (s - len(row))
+        lo_c = max(cc for _, cc in lo_res)
+        up_c = min(cc for _, cc in up_res)
+        W = (max(up_c - lo_c, 0) + st_t) // st_t + 1
+        row[t] -= W
+        nest.extra_upper[s].append((row, up_c + W * hi_t))
+    nest.disguised = True
+    check_shear(nest)
+    # Only disguises inside the documented family (find_parallelotope, by
+    # enumeration): an extra result that wins the max / min at an outer point
+    # with no full point below it (a stepped loop's start then depends on
+    # it) is reverted.
+    if find_parallelotope(nest, emitted_points(nest)) is None:
+        nest.extra_lower = nest.extra_upper = nest.ub_extend = None
+        nest.disguised = False
 
 
 def check_shear(nest):
@@ -821,30 +1043,32 @@ def emit(nest, name):
     ind = "  "
     L = shear_matrix(nest)
 
-    def bound(kind, values, row):
-        """Constants `values` (one, or several folded by max/min), each shifted
-        by row . x_<s: affine_map<(d..) -> (..)>(outer counters)."""
-        dims = [t for t, c in enumerate(row) if c]
+    def bound(kind, results):
+        """The results [(row, constant)] of a bound (one, or several folded by
+        max/min), each row . x_<s + constant: affine_map<(d..) -> (..)>(outer
+        counters)."""
+        dims = sorted({t for row, _ in results for t, c in enumerate(row) if c})
         if not dims:
-            if len(values) == 1:
-                return str(values[0])
-            return "%s affine_map<() -> (%s)>()" % (kind, ", ".join(str(v) for v in values))
-        names = ["d%d" % i for i in range(len(dims))]
-        results = []
-        for v in values:
-            terms = [nm if row[t] == 1 else "%s * %d" % (nm, row[t]) for nm, t in zip(names, dims)]
-            text = " + ".join(terms) + (" + %d" % v if v else "")
-            results.append(text.replace("+ -", "- "))
-        return "%saffine_map<(%s) -> (%s)>(%s)" % (kind + " " if len(values) > 1 else "",
-                                                   ", ".join(names), ", ".join(results),
+            if len(results) == 1:
+                return str(results[0][1])
+            return "%s affine_map<() -> (%s)>()" % (kind, ", ".join(str(v) for _, v in results))
+        names = {t: "d%d" % i for i, t in enumerate(dims)}
+        texts = []
+        for row, v in results:
+            terms = [names[t] if c == 1 else "%s * %d" % (names[t], c) for t, c in enumerate(row) if c]
+            text = " + ".join(terms)
+            if v or not terms:
+                text = (text + " + " if text else "") + str(v)
+            texts.append(text.replace("+ -", "- "))
+        return "%saffine_map<(%s) -> (%s)>(%s)" % (kind + " " if len(results) > 1 else "",
+                                                   ", ".join(names[t] for t in dims), ", ".join(texts),
                                                    ", ".join(ivs[t] for t in dims))
     for s, ((lb, ub, st), iv) in enumerate(zip(nest.loops, ivs)):
         lowers, uppers = nest.bounds[s] if nest.bounds else ([lb], [ub])
         assert max(lowers) == lb and min(uppers) == ub
-        lo_row = nest.shear[s] if nest.shear else []
-        up_row = nest.shear_ub[s] if nest.shear_ub else lo_row
-        out.append("%saffine.for %s = %s to %s%s {" % (ind, iv, bound("max", lowers, lo_row),
-                                                       bound("min", uppers, up_row),
+        lo_res, up_res = emitted_results(nest, s)
+        out.append("%saffine.for %s = %s to %s%s {" % (ind, iv, bound("max", lo_res),
+                                                       bound("min", up_res),
                                                        "" if st == 1 else " step %d" % st))
         ind += "  "
     idx = lambda fs: ", ".join(expr(emitted_row(f, L), ivs) for f in fs)
@@ -896,13 +1120,23 @@ def parse_view(type_text):
     return shape, strides, offset
 
 
+# A refusal remark with its class (classify=true), located at the nest's anchor loop:
+# with -split-input-file the line numbers are those of the whole input.
+REMARK = re.compile(r"^<stdin>:(\d+):\d+: remark: affine GEMM not lowered to systolic\.matmul_tile: (.*) "
+                    r"\[(PROVEN_VALID|VALID_BUT_LOWERING_UNSUPPORTED|PROVEN_INVALID|UNKNOWN)\]$", re.M)
+
+
 def compiler_results(opt, text, permit):
-    option = "--affine-matmul-to-systolic" + ("=allow-fp-reassociation=true" if permit else "")
+    """The lowered views of every nest (None when not lowered), and the refusal
+    remarks [(line, class, reason)]. classify=true only appends each refused
+    nest's class to its remark; the IR is the same."""
+    option = "--affine-matmul-to-systolic=classify=true" + (" allow-fp-reassociation=true" if permit else "")
     run = subprocess.run([opt, option, "-split-input-file", "-"], input=text,
                          capture_output=True, text=True)
     if run.returncode != 0:
         sys.stdout.write("systolic-opt failed (rc %d):\n%s\n" % (run.returncode, run.stderr[-4000:]))
         sys.exit(1)
+    remarks = [(int(m.group(1)), m.group(3), m.group(2)) for m in REMARK.finditer(run.stderr)]
     results = []
     for chunk in run.stdout.split("// -----"):
         if "func.func" not in chunk:
@@ -951,7 +1185,206 @@ def compiler_results(opt, text, permit):
         results.append((tuple(int(v) for v in tile.groups()[3:]), views,
                         len(batch_loops), {"loops": batch_loops, "applies": applies,
                                            "operands": list(tile.groups()[:3])}))
-    return results
+    return results, remarks
+
+
+def column_rank(rows, n):
+    """The exact rank of integer rows over n columns (Gaussian elimination in
+    fractions)."""
+    m = [[Fraction(v) for v in row] for row in rows]
+    rank = 0
+    for col in range(n):
+        pivot = next((r for r in range(rank, len(m)) if m[r][col] != 0), None)
+        if pivot is None:
+            continue
+        m[rank], m[pivot] = m[pivot], m[rank]
+        for r in range(len(m)):
+            if r != rank and m[r][col] != 0:
+                f = m[r][col] / m[rank][col]
+                m[r] = [a - f * b for a, b in zip(m[r], m[rank])]
+        rank += 1
+    return rank
+
+
+def centrally_symmetric(pts):
+    """Whether a nonempty point set equals its reflection about the midpoint
+    of its lexicographic extremes (the only centre a symmetric set can have:
+    the reflection reverses the order)."""
+    s = set(pts)
+    c = tuple(a + b for a, b in zip(min(s), max(s)))
+    return all(tuple(ci - x for ci, x in zip(c, p)) in s for p in s)
+
+
+def band_points(nest, first):
+    """The points of the band of loops first.. alone, the leading counters at
+    their box lower bounds: no band bound reads them, so any value gives the
+    same set -- also when the leading run has no point at all (review of
+    2026-10-19, round 4: the projection of the nest's points was then empty,
+    and a correct PROVEN_INVALID on the band a mismatch)."""
+    n = len(nest.loops)
+    out = set()
+
+    def rec(s, x):
+        if s == n:
+            out.add(tuple(x[first:]))
+            return
+        st = nest.loops[s][2]
+        lo_res, up_res = emitted_results(nest, s)
+        lo = max(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in lo_res)
+        up = min(c + sum(a * x[t] for t, a in enumerate(row)) for row, c in up_res)
+        for z in range(trips(lo, up, st)):
+            rec(s + 1, x + [lo + st * z])
+    rec(first, [nest.loops[t][0] for t in range(first)])
+    return sorted(out)
+
+
+def sheared_box(points):
+    """Whether the tuples `points` are a box sheared along their coordinate
+    order -- at every value of the earlier coordinates the next one runs over
+    an arithmetic progression of one length and step whose start is an
+    affine function of the earlier ones (exact, fractions): the points of a
+    constant-extent parallelotope nest. Sufficient, not necessary."""
+    from fractions import Fraction
+    pts = set(points)
+    if not pts:
+        return False
+    for m in range(len(next(iter(pts)))):
+        runs = {}
+        for p in pts:
+            runs.setdefault(p[:m], set()).add(p[m])
+        shapes, rows = set(), []
+        for prefix, vals in runs.items():
+            vals = sorted(vals)
+            steps = {b - a for a, b in zip(vals, vals[1:])}
+            if len(steps) > 1:
+                return False
+            shapes.add((len(vals), steps.pop() if steps else None))
+            rows.append([Fraction(1)] + [Fraction(c) for c in prefix] + [Fraction(vals[0])])
+        if len({k for k, _ in shapes}) != 1 or len({st for _, st in shapes if st is not None}) > 1:
+            return False
+        rank = 0
+        for col in range(len(rows[0]) - 1):
+            pivot = next((r for r in range(rank, len(rows)) if rows[r][col] != 0), None)
+            if pivot is None:
+                continue
+            rows[rank], rows[pivot] = rows[pivot], rows[rank]
+            for r in range(len(rows)):
+                if r != rank and rows[r][col] != 0:
+                    f = rows[r][col] / rows[rank][col]
+                    rows[r] = [a - f * b for a, b in zip(rows[r], rows[rank])]
+            rank += 1
+        if any(row[-1] != 0 for row in rows[rank:]):
+            return False
+    return True
+
+
+def repetition_family_nest(nest):
+    """Whether the nest is a GEMM over a parallelotope repeated by independent
+    repetition loops (family R, docs section 19.13.3), which the compiler
+    lowers: loops no access reads (as emitted), whose bounds read only each
+    other and whose counters no other loop's bounds read, around GEMM loops
+    whose points form a box sheared along the loop order (review of
+    2026-10-19, round 4: such a nest under a repetition triangle was called
+    a lowered triangle, a mismatch)."""
+    n = len(nest.loops)
+    L = shear_matrix(nest)
+    rows = [emitted_row(f, L)[0] for k in "ABC" for f in nest.ops[k][1]] + \
+           [emitted_row(f, L)[0] for f in nest.cload]
+    unread = {t for t in range(n) if not any(r[t] for r in rows)}
+    if not unread:
+        return False
+    for s in range(n):
+        lo, up = emitted_results(nest, s)
+        reads = {t for row, _ in lo + up for t, c in enumerate(row) if c}
+        if (s in unread and not reads <= unread) or (s not in unread and reads & unread):
+            return False
+    gemm = [t for t in range(n) if t not in unread]
+    return sheared_box([tuple(p[t] for t in gemm) for p in emitted_points(nest)])
+
+
+# The disproof's witness in its remark (disproveAffineImageOfBox).
+WITNESS = re.compile(r"the point \(([-0-9, ]+)\) is in it, its mirror \(([-0-9, ]+)\) about the "
+                     r"midpoint of its lexicographic extremes is not")
+
+
+def check_triangle_class(nest, remark):
+    """A refused triangle (no parallelotope of the family, as emitted) and its
+    remark (class, reason), or None when the nest was not recognized: the
+    class, and a mismatch or None. PROVEN_INVALID (docs section 19.13.4)
+    claims that no decomposition makes the nest a GEMM; the oracle confirms it
+    from the enumerated points: not centrally symmetric (every affine image
+    of a box is), the stacked access map of full column rank (the updates are
+    then an affine copy of the points: with a lower rank an asymmetric set can
+    map one to one onto a box -- strip-mined loops with a remainder), and
+    three different memrefs (two views of one may exchange the factors). The
+    converse, for a recognized nest: those conditions with no stepped loop
+    whose lower bound reads a counter (the compiler does not attempt that
+    one) must give PROVEN_INVALID. The compiler ranks the accumulator load's
+    subscripts (accessC); the recognizer accepts a load and a store that
+    differ off the domain (terms of loops that run once, finalize), so a
+    full rank of either map proves the accesses tell the points apart, and
+    the converse asks for the load's (review of 2026-10-19). The remark's
+    witness is checked too: a point of the set whose reflection about the
+    midpoint of the lexicographic extremes -- the mirror it states -- is not
+    in the set (the generated triangles are never symmetric, so this is what
+    exercises the symmetry test on them).
+
+    All of it on the compiler's candidate band: the loops from the outermost
+    one an access reads inward (collectAffineMatmulCandidates tries the inner
+    anchors first, and the first that covers every counter the accesses read
+    is the one recognized). Leading loops no access reads run the band zero
+    or more times; the points (band_points: the band's own, enumerated
+    alone), the ranks and the witness are the band's (review of 2026-10-19:
+    a leading loop no access reads made a correct PROVEN_INVALID a
+    mismatch). A band whose bounds read such a loop's counter has a domain
+    with parameters, which the disproof never claims."""
+    n = len(nest.loops)
+    L = shear_matrix(nest)
+    rows_ab = [emitted_row(f, L)[0] for name in "AB" for f in nest.ops[name][1]]
+    rows_load = [emitted_row(f, L)[0] for f in nest.cload]
+    rows_store = [emitted_row(f, L)[0] for f in nest.ops["C"][1]]
+    read = [t for t in range(n) if any(row[t] for row in rows_ab + rows_load + rows_store)]
+    first = min(read) if read else 0
+    nb = n - first
+    parametric = any(row[t] for s in range(first, n) for side in emitted_results(nest, s)
+                     for row, _ in side for t in range(min(first, len(row))))
+    pts = sorted({p[first:] for p in emitted_points(nest)}) if parametric else band_points(nest, first)
+    full_load = column_rank([row[first:] for row in rows_ab + rows_load], nb) == nb
+    full_store = column_rank([row[first:] for row in rows_ab + rows_store], nb) == nb
+    three = len({nest.arg_of[name] for name in "ABC"}) == 3
+    asymmetric = bool(pts) and not centrally_symmetric(pts)
+    stepped = any(nest.loops[s][2] > 1 and any(any(row) for row, _ in emitted_results(nest, s)[0])
+                  for s in range(first, n))
+    if remark is None:
+        return "not recognized", None
+    cls, reason = remark
+    if cls == "PROVEN_INVALID":
+        failed = [what for what, ok in (("the bounds of its candidate band read the counter of a loop "
+                                         "outside it", not parametric),
+                                        ("its point set is centrally symmetric or empty", asymmetric),
+                                        ("its stacked access map has rank below %d" % nb,
+                                         full_load or full_store),
+                                        ("two of its operands share a memref", three)) if not ok]
+        witness = WITNESS.search(reason)
+        if not witness:
+            failed.append("its remark states no witness point")
+        elif pts:
+            p, q = (tuple(int(v) for v in witness.group(g).split(",")) for g in (1, 2))
+            s = set(pts)
+            if len(p) != nb or len(q) != nb:
+                failed.append("its witness %s / %s does not have the %d coordinates of the candidate "
+                              "band" % (p, q, nb))
+            else:
+                mirror = tuple(a + b - x for a, b, x in zip(min(s), max(s), p))
+                if p not in s or q != mirror or q in s:
+                    failed.append("its witness is wrong (the point %s must be in it, and %s must be its "
+                                  "mirror %s and outside it)" % (p, q, mirror))
+        if failed:
+            return cls, "a triangle classified PROVEN_INVALID although %s (%s)" % ("; ".join(failed), reason)
+    elif asymmetric and full_load and three and not stepped and not parametric:
+        return cls, ("a triangle that is not centrally symmetric, with a stacked access map of rank %d "
+                     "and three memrefs, classified %s, not PROVEN_INVALID (%s)" % (nb, cls, reason))
+    return cls, None
 
 
 def name_views(nest, raw, swap=False):
@@ -1148,14 +1581,30 @@ def main():
     nests = [generate(rng) for _ in range(a.count)]
     for i, nest in enumerate(nests):
         decorate_bounds(random.Random("bounds:%d:%d" % (a.seed, i)), nest)
+    for i, nest in enumerate(nests):
+        dr = random.Random("disguise:%d:%d" % (a.seed, i))
+        if dr.random() < 0.15:
+            disguise(dr, nest)
     text = "\n// -----\n".join(emit(nest, "case_%d" % i) for i, nest in enumerate(nests))
     if a.keep:
         with open(a.keep, "w") as f:
             f.write(text + "\n")
-    results = compiler_results(a.opt, text, permit=not a.fp_default)
+    results, remarks = compiler_results(a.opt, text, permit=not a.fp_default)
     if len(results) != len(nests):
         print("systolic-opt returned %d functions for %d nests" % (len(results), len(nests)))
         sys.exit(1)
+    # each nest's first line in the joined input; a remark belongs to the nest
+    # whose lines hold its location (its anchor loop)
+    starts, line = [], 1
+    for i, nest in enumerate(nests):
+        starts.append(line)
+        line += emit(nest, "case_%d" % i).count("\n") + 2
+    remark_of = {}
+    for at, cls, reason in remarks:
+        i = max(j for j, first in enumerate(starts) if first <= at)
+        remark_of.setdefault(i, (cls, reason))
+    triangle_class = {c: 0 for c in ("PROVEN_INVALID", "UNKNOWN", "VALID_BUT_LOWERING_UNSUPPORTED",
+                                     "PROVEN_VALID", "not recognized")}
 
     counts = {"ACCEPT": 0, "REJECT": 0, "SKIP": 0}
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
@@ -1166,7 +1615,9 @@ def main():
                "sheared": 0, "chained": 0, "shear_step": 0, "shear_folded": 0,
                "shared": 0, "two_views": 0, "same_view": 0, "same_view_one_tensor": 0,
                "k1": 0, "k1_noloop": 0,
-               "triangle": 0, "alias_c": 0, "shear_oob": 0, "shear_c_not_injective": 0}
+               "triangle": 0, "alias_c": 0, "shear_oob": 0, "shear_c_not_injective": 0,
+               # since the exact domains (section 19.13)
+               "disguised": 0, "degenerate_triangle": 0}
 
     def is_transposed(view):
         shape, strides = view[0], view[1]
@@ -1178,13 +1629,15 @@ def main():
         return all(nm in named and named[nm] is not None and is_transposed(named[nm])
                    for nm in "AB")
 
-    def count_new_families(nest, mnk, got):
-        """The features of section 19.12 on a lowered, verified nest."""
-        if nest.domain_mode == "shear":
+    def count_new_families(emitted, nest, mnk, got):
+        """The features of section 19.12 on a lowered, verified nest: the
+        domain's as emitted, the GEMM's on the nest it was decided on (its
+        box, for a triangle or a box in disguise)."""
+        if emitted.domain_mode == "shear":
             feature["sheared"] += 1
-            feature["chained"] += nest.chained()
-            feature["shear_step"] += any(nest.loops[s][2] > 1 for s in nest.sheared_loops())
-            feature["shear_folded"] += has_folded_bound(nest, set(nest.sheared_loops()))
+            feature["chained"] += emitted.chained()
+            feature["shear_step"] += any(emitted.loops[s][2] > 1 for s in emitted.sheared_loops())
+            feature["shear_folded"] += has_folded_bound(emitted, set(emitted.sheared_loops()))
         if nest.shared in ("two_views", "same_view"):
             feature["shared"] += 1
             feature[nest.shared] += 1
@@ -1195,17 +1648,45 @@ def main():
             feature["k1_noloop"] += not reduction_once_loop(nest)
 
     mismatches = []
+    shown = {}       # case index -> the nest as emitted, when decided on its box
     for i, (nest, got) in enumerate(zip(nests, results)):
+        # A triangle's points are enumerated as emitted: a parallelotope with
+        # the documented shift rows (find_parallelotope) is a GEMM decided on
+        # its box (derived_box_nest) -- the compiler's exact path must lower
+        # it; any other triangle is outside the compiler's domain family and
+        # must not be lowered (a conservative refusal, not a mathematical
+        # verdict: counted apart, never a pass) -- but a GEMM over a
+        # parallelotope repeated by independent repetition loops of any shape
+        # (family R) may be, and is SKIPped as decide() SKIPs a repetition
+        # loop on a box.
+        # A box in disguise is decided the same way, on the parallelotope its
+        # points form: when a shear's source runs once, the zero row already
+        # fits and the exact path keeps the written coordinates -- the same
+        # points and accesses as the original box, another parametrization.
+        degenerate = False
+        emitted = nest
+        if nest.domain_mode == "triangle" or nest.disguised:
+            rows = find_parallelotope(nest, emitted_points(nest))
+            if rows is None and nest.disguised:
+                raise RuntimeError("case_%d: a disguise outside the family was kept" % i)
+            if rows is None:
+                feature["triangle"] += 1
+                if got is not None and repetition_family_nest(nest):
+                    counts["SKIP"] += 1
+                    continue
+                if got is not None:
+                    mismatches.append((i, nest, "a triangle (bounds not shifting together) was lowered %s"
+                                                % (got[0],)))
+                    continue
+                cls, bad = check_triangle_class(nest, remark_of.get(i))
+                triangle_class[cls] += 1
+                if bad:
+                    mismatches.append((i, nest, bad))
+                continue
+            nest = derived_box_nest(nest, rows)
+            degenerate = emitted.domain_mode == "triangle"
+            shown[i] = emitted
         verdict = decide(nest)
-        # Outside the compiler's domain family, or an output aliasing a factor:
-        # never lowered, whatever the box nest is (a conservative refusal, not
-        # a mathematical verdict: counted apart, never a pass).
-        if nest.domain_mode == "triangle":
-            feature["triangle"] += 1
-            if got is not None:
-                mismatches.append((i, nest, "a triangle (bounds not shifting together) was lowered %s"
-                                            % (got[0],)))
-            continue
         if nest.shared == "alias_c":
             feature["alias_c"] += 1
             if got is not None:
@@ -1223,7 +1704,7 @@ def main():
                 mismatches.append((i, nest, "%s: not lowered by the compiler's rules, compiler lowered %s"
                                             % (verdict[1], got[0])))
             feature["c_not_injective"] += 1
-            feature["shear_c_not_injective"] += nest.domain_mode == "shear"
+            feature["shear_c_not_injective"] += emitted.domain_mode == "shear"
             continue
         if verdict[0] == "ACCEPT":
             mnk = verdict[1]
@@ -1270,16 +1751,18 @@ def main():
             if bad:
                 mismatches.append((i, nest, bad))
                 continue
-            count_new_families(nest, mnk, got)
+            count_new_families(emitted, nest, mnk, got)
+            feature["degenerate_triangle"] += degenerate
+            feature["disguised"] += emitted.disguised
             if verdict[2]:
                 feature["batched"] += 1
                 feature["c_batch_terms"] += c_has_batch_terms(nest)
                 feature["two_unit"] += sum(e == 1 for e in mnk) >= 2
                 feature["batch_offset"] += batch_offset_in_role(nest)
                 feature["both_transposed"] += both_factors_transposed(named)
-                feature["folded"] += has_folded_bound(nest)
-                feature["batch_folded"] += has_folded_bound(nest, set(batch_loops_of(nest)))
-                feature["role_in_k"] += nest.mode == "mutated:role_in_k"
+                feature["folded"] += has_folded_bound(emitted)
+                feature["batch_folded"] += has_folded_bound(emitted, set(batch_loops_of(nest)))
+                feature["role_in_k"] += emitted.mode == "mutated:role_in_k"
                 continue
             views = dict((nm, v) for nm, v, _ in named)
             feature["transposed"] += any(abs(v[1][0]) < abs(v[1][1]) and v[0][0] > 1 and v[0][1] > 1 for v in views.values())
@@ -1288,19 +1771,21 @@ def main():
             feature["extent_one"] += 1 in mnk
             feature["rank_not_2"] += any(len(nest.ops[k][0]) != 2 for k in "ABC")
             feature["once"] += any(trips(*l) == 1 for l in nest.loops)
-            feature["folded"] += has_folded_bound(nest)
-            feature["role_in_k"] += nest.mode == "mutated:role_in_k"
-            feature["batch_once"] += nest.mode == "mutated:batch_once"
+            feature["folded"] += has_folded_bound(emitted)
+            feature["role_in_k"] += emitted.mode == "mutated:role_in_k"
+            feature["batch_once"] += emitted.mode == "mutated:batch_once"
         else:
-            if nest.domain_mode == "shear" and "out of bounds" in verdict[1]:
+            if emitted.domain_mode == "shear" and "out of bounds" in verdict[1]:
                 feature["shear_oob"] += 1
             if got is not None:
                 mismatches.append((i, nest, "oracle REJECT (%s), compiler lowered %s" % (verdict[1], got[0])))
 
     for i, nest, what in mismatches:
-        print("MISMATCH case_%d [%s%s%s]: %s" % (i, nest.mode,
+        nest = shown.get(i, nest)
+        print("MISMATCH case_%d [%s%s%s%s]: %s" % (i, nest.mode,
                                                   ", " + nest.domain_mode if nest.domain_mode != "box" else "",
-                                                  ", " + nest.shared if nest.shared else "", what))
+                                                  ", " + nest.shared if nest.shared else "",
+                                                  ", disguised" if nest.disguised else "", what))
         print(emit(nest, "case_%d" % i))
     print("oracle: %d nests, accept %d, reject %d, skipped %d, refused by rule %d (triangles %d, "
           "C aliasing a factor %d)%s"
@@ -1319,7 +1804,8 @@ def main():
               "with a max/min bound %(shear_folded)d), one array as both factors %(shared)d "
               "(through two different views %(two_views)d, through one view %(same_view)d, "
               "served by one tensor %(same_view_one_tensor)d), "
-              "K = 1 %(k1)d (without a reduction loop %(k1_noloop)d)" % feature)
+              "K = 1 %(k1)d (without a reduction loop %(k1_noloop)d), "
+              "a box in disguise %(disguised)d, a degenerate triangle %(degenerate_triangle)d" % feature)
         print("generalized mapping: batched with C reading a batch loop in a role dimension "
               "%(c_batch_terms)d, batched with two unit extents %(two_unit)d, skewed or merged "
               "views (%(general_state)s) %(general)d, C not injective (refused) "
@@ -1331,6 +1817,11 @@ def main():
     else:
         print("not lowered (strict mode): %d outside the normalized family, %d with C the base of a factor"
               % (feature["triangle"], feature["alias_c"]))
+    print("refused triangles by class: PROVEN_INVALID %(PROVEN_INVALID)d (each checked: not centrally "
+          "symmetric with the stated witness, the stacked access map of full rank, three memrefs), "
+          "UNKNOWN %(UNKNOWN)d, "
+          "VALID_BUT_LOWERING_UNSUPPORTED %(VALID_BUT_LOWERING_UNSUPPORTED)d, PROVEN_VALID "
+          "%(PROVEN_VALID)d, not recognized %(not recognized)d" % triangle_class)
     print("mismatches: %d" % len(mismatches))
 
 

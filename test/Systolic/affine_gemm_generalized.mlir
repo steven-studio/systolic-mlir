@@ -442,7 +442,7 @@ func.func @test1_empty(%A: memref<4x7xf32> {llvm.noalias}, %B: memref<7x4xf32> {
 // specification lists this as a documented limitation, README section 2).
 // CHECK-LABEL: func.func @repetition_inside_reduction
 // CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations)
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations) [UNKNOWN]
 // DISC:        reason: loop 3 of the nest is used by no access (it repeats the accumulation; moved outward by the lowering pass when that is a legal interchange -- here it was not, so the mapping is not decided)
 // DISC-NEXT:   class: UNKNOWN
 func.func @repetition_inside_reduction(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {

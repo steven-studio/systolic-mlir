@@ -3,10 +3,15 @@
 // constant-extent parallelotope -- every loop's lower and upper bound the same
 // linear form of the outer counters plus constants -- is rewritten into the
 // equivalent box nest x = U x' (U lower unitriangular: a bijection of Z^n that
-// preserves the lexicographic order), and the box pipeline runs on it. Every
-// other non-box domain (an extent that varies with an outer counter, a
-// floordiv bound, a symbol, max/min of a counter and a constant) is untouched
-// and stays UNKNOWN, never PROVEN_INVALID.
+// preserves the lexicographic order), and the box pipeline runs on it. A
+// written bound whose products or value can leave 64 bits at an outer point
+// entering its loop leaves the band untouched. Since section 19.13 (the same
+// day) a band whose exact integer set is such a parallelotope is normalized
+// too, and a non-box domain left as written is PROVEN_INVALID when the
+// accesses tell the iterations apart, the factors and C are three buffers and
+// the set is not centrally symmetric (@triangle, @max_bound); every other one
+// (a floordiv bound, a symbol, a symmetric set, a rank below the loop count)
+// stays UNKNOWN.
 //
 // RUN: systolic-opt "--affine-matmul-to-systolic=allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s | FileCheck %s
@@ -168,13 +173,16 @@ func.func @shift_k1(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llv
 
 // -----
 // NOT IN THE FAMILY: the extent varies with the outer counter (a triangle,
-// j in [i, 8)): untouched, UNKNOWN (showcase mlir_009: provably not a GEMM by
-// 19.7's symmetry argument, which the compiler does not make).
+// j in [i, 8)): untouched. Provably not a GEMM by 19.7's symmetry argument,
+// which the compiler makes since 2026-10-18 (docs section 19.13): the accesses
+// tell the iterations apart (rank 3) and the domain is not centrally symmetric,
+// so it is no affine image of a box -- PROVEN_INVALID (UNKNOWN before; showcase
+// mlir_009).
 // CHECK-LABEL: func.func @triangle
 // CHECK-NOT:   systolic.matmul_tile
-// REMARK:      affine GEMM not lowered to systolic.matmul_tile: the loop bounds are not static, so the iteration domain has no static normalized extent (loop 1's lower bound depends on another loop's counter: the iteration domain is not a box) [UNKNOWN]
+// REMARK:      affine GEMM not lowered to systolic.matmul_tile: the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it, its mirror ({{[-0-9, ]+}}) about the midpoint of its lexicographic extremes is not --, so it is no affine image of a box; the accesses tell the iterations apart (their stacked map is injective), so the nest is not a GEMM of affine views in any decomposition (docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.7, 19.13) (loop 1's lower bound depends on another loop's counter: the iteration domain is not a box) [PROVEN_INVALID]
 // DISC-NOT:    domain normalization
-// DISC:        class: UNKNOWN
+// DISC:        class: PROVEN_INVALID
 func.func @triangle(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %i = 0 to 8 {
     affine.for %j = affine_map<(d0) -> (d0)>(%i) to 8 {
@@ -238,22 +246,27 @@ func.func @symbol_bound(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> 
 }
 
 // -----
-// NOT IN THE FAMILY: max of a counter and a constant (a clipped parallelogram);
-// untouched, UNKNOWN.
+// NOT IN THE FAMILY: max of a counter and a constant (a clipped parallelogram:
+// j's trip counts 2, 3, 4, 4, ... grow at the start only); untouched. The
+// accesses tell the iterations apart (rank 3) and the set is not centrally
+// symmetric, so it is no affine image of a box: PROVEN_INVALID since 2026-10-18
+// (docs section 19.13; UNKNOWN before). B and C have 10 columns: j reaches
+// i + 1 = 8 at i = 7, so no access is out of bounds (the class is the symmetry
+// argument's alone).
 // CHECK-LABEL: func.func @max_bound
 // CHECK-NOT:   systolic.matmul_tile
-// REMARK:      [UNKNOWN]
+// REMARK:      the iteration domain is not centrally symmetric -- the point ({{[-0-9, ]+}}) is in it, its mirror ({{[-0-9, ]+}}) {{.*}} [PROVEN_INVALID]
 // DISC-NOT:    domain normalization
-func.func @max_bound(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
+func.func @max_bound(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x10xf32> {llvm.noalias}, %C: memref<8x10xf32> {llvm.noalias}) {
   affine.for %i = 0 to 8 {
     affine.for %j = max affine_map<(d0) -> (d0 - 2, 0)>(%i) to affine_map<(d0) -> (d0 + 2)>(%i) {
       affine.for %k = 0 to 8 {
         %a = affine.load %A[%i, %k] : memref<8x8xf32>
-        %b = affine.load %B[%k, %j] : memref<8x8xf32>
-        %c = affine.load %C[%i, %j] : memref<8x8xf32>
+        %b = affine.load %B[%k, %j] : memref<8x10xf32>
+        %c = affine.load %C[%i, %j] : memref<8x10xf32>
         %p = arith.mulf %a, %b : f32
         %s = arith.addf %c, %p : f32
-        affine.store %s, %C[%i, %j] : memref<8x8xf32>
+        affine.store %s, %C[%i, %j] : memref<8x10xf32>
       }
     }
   }
@@ -377,7 +390,7 @@ func.func @shift_over_repetition(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<
 // CHECK-LABEL: func.func @shift_repetition_stuck
 // CHECK-NOT:   systolic.matmul_tile
 // REMARK:      loop 2: x2 = x2' + 1*x0, box [0, 4) step 1
-// REMARK:      loop 1 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange
+// REMARK:      loop 1 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations) [UNKNOWN]
 // DISC:        domain normalization: 1 nest(s)
 // DISC:        class: UNKNOWN
 func.func @shift_repetition_stuck(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<16xf32> {llvm.noalias}) {

@@ -38,14 +38,25 @@ Stage by stage. "Documented" means the sources or the existing tests say so expl
 **Front end** (`tools/systolic-cfront`, clang 24 AST): `void` functions; parameters
 `float|double A[M][K]` (`restrict` → `llvm.noalias`), scalar float/double; `for (int|long i = LB;
 i < UB | i <= UB; ++i | i++ | i += S | i = i + S)` with integer-constant bounds, or (since
-2026-10-18, docs section 19.12) bounds affine in the enclosing counters that shift together --
-`for (int k = 2 * i + 1; k < 2 * i + 5; ++k)`, the same counter terms in both, counting up: a
-constant-extent parallelotope the compiler maps onto its box; subscripts that
+2026-10-18, docs sections 19.12, 19.13) bounds affine in the enclosing counters, counting up --
+the same counter terms in both (`for (int k = 2 * i + 1; k < 2 * i + 5; ++k)`: a constant-extent
+parallelotope the compiler maps onto its box) or different ones (`for (int j = i; j < 8; ++j)`, a
+triangle: translated with exact subscript ranges by running the nest's loops, up to 4,194,304
+counter values over all levels; the compiler normalizes it when its integer points are a
+parallelotope, and proves it no GEMM (PROVEN_INVALID) only when the accesses tell the iterations
+apart -- the stacked access map has rank n, the number of loops of the candidate band (the nest
+below a leading run of loops no access reads whose counters no loop below the run reads -- their
+bounds may read each other) --, the factors and C
+are three different arrays, no
+stepped loop's lower bound reads a counter, every written bound stays within 64 bits and the
+set is not centrally symmetric; UNKNOWN otherwise, docs section 19.13.4) -- and conditions
+canonicalized when the counter's coefficient is 1 or -1 (`k - i < 4` is `k < i + 4`); subscripts that
 are affine expressions of the enclosing counters (`+`, `-`, constant `*`); assignments to array
 elements (`=`, `+=`, `-=`, `*=`, `/=`); `+ - * /` and unary `-` on float/double. Outside the
 subset (an error, never an approximation): local variables, `if`, `while`, calls, pointer
 arithmetic, globals, integer arrays, non-affine or symbolic subscripts, symbolic bounds, a loop
-whose trip count varies with an enclosing counter (`k in [i, 8)`: the bounds do not shift together),
+counting down whose bounds read an enclosing counter, a condition comparing the counter with a
+coefficient other than 1 or -1 with an expression of the enclosing counters (`2 * k - i < 4`),
 `!=` conditions, `return` with a value. Loops that count down (`i > B | i >= B; --i | i-- |
 i -= S | i = i - S`, since 2026-10-15, ISSUE-004) are translated to the ordinal loop
 `affine.for %i = 0 to N` (N the trip count) with the counter `LB - S * %i` (affine.for only
@@ -54,7 +65,8 @@ would wrap below 0 are errors. A condition may also compare an affine expression
 with a constant (`2 * i - 3 > 0`, `100 - 3 * i > 0`): it is translated as the equivalent
 comparison of the counter (exact over the integers: `i > 1`, `i <= 33`), and refused when the
 expression could overflow its C type at any counter value it is evaluated at -- including the
-evaluation that ends the loop -- or is unsigned.
+evaluation that ends the loop, and an unsigned operation that wraps around (an unsigned expression
+that does not wrap is translated, docs section 19.13.1).
 
 **Recognizer** (`recognizeLogicalMatmul`): a perfect chain of `affine.for` ops (from some anchor
 down to the innermost) whose innermost body holds exactly three `affine.load`, one
@@ -75,7 +87,11 @@ loop are not one coordinate (refused at recognition). I, J, K pairwise distinct;
 expressions are linear forms (no mod/floordiv). At 6e25528 the rule was expression identity
 (ISSUE-001, fixed). Static or symbolic (`0 to %n`) bounds. A repetition loop (used by no
 access) must be outside the chain — the lowering pass first moves one that sits between the
-GEMM's loops outward when the interchange is legal (not inside a reduction loop).
+GEMM's loops outward when the interchange is legal (not when one that may run twice sits inside
+a reduction loop of two or more iterations) and, when it reorders iterations (a repetition loop
+that may run twice -- two or more iterations, or a trip count its bounds do not fix -- inside a
+dimension of two or more), only when the memrefs the nest reads provably do not overlap the one it
+writes (`restrict`; docs section 19.13.3).
 
 **Dense partition** (`getDenseLogicalGemm`): no partition prefix (batched is refused with a
 message); static bounds (a loop of zero iterations has no normalized extent either and is
@@ -289,9 +305,14 @@ M, N, K equal to 1 per batch (SQ-5, decided 2026-10-16).
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=
 A[i][j] * B[i][j]`; a batched product whose I, J and K all have extent 1, `C[b][1][2] +=
 A[b][1][3] * B[b][3][2]`; the former "singular mappings" `C[x+z][y+z] += A[x+z][x+y+2z] *
-B[x+y+2z][y+z]` and Test 2 on a box: docs section 19.6) --, a non-box iteration domain that is
-not the affine image of a box (the triangle `j >= i`, mlir_009: no (batch, I, J, K) box
-corresponds to its points; a constant-extent parallelotope -- every bound shifted by one affine
+B[x+y+2z][y+z]` and Test 2 on a box: docs section 19.6) --, a non-box iteration domain whose
+updates `(F_A(x), F_B(x), F_C(x))`, counted over its points, are not centrally symmetric (the
+triangle `j >= i`, mlir_009: its accesses tell the iterations apart and its set is not the
+affine image of a box, so no (batch, I, J, K) box corresponds to its points; strip-mined loops
+with a remainder, `k = 2 k1 + k0` on `{(0, 0), (0, 1), (1, 0)}`, are a GEMM although their set is
+no affine image of a box -- OUT_OF_SCOPE, `non_box_unnormalized` --, and a non-box nest whose
+updates are symmetric while its canonical decomposition fails is not decided,
+`non_box_undecided`; a constant-extent parallelotope -- every bound shifted by one affine
 form of the outer counters, `k in [i, i + 4)` -- is mapped onto a box and offloaded since
 2026-10-18, docs section 19.12, from C through the front end's affine loop bounds; Test 2's
 lattice parallelepiped D* written as its own nest is still refused as UNKNOWN), products with a third
@@ -331,6 +352,12 @@ their own in `SPEC_QUESTIONS.md`. Open now:
 - **SQ-3** — a symbolic loop bound (`affine.for 0 to %n`), unreachable from the C front end: is
   the MLIR path's refusal a documented limitation, or must dynamic extents be supported? Case
   mlir_011.
+Not questions but limits of the executable specification, recorded the same way (UNDETERMINED,
+judged `expected_refusal` / `spec_open`): a non-box nest left as written whose points exceed its
+enumeration limit (`non_box_unenumerated`), and one whose canonical decomposition fails while
+its updates, counted over its points, are centrally symmetric -- no proof excludes a GEMM in
+another decomposition, which is not searched on a non-box domain (`non_box_undecided`, since
+2026-10-18; the compiler cannot prove such a nest invalid either).
 Decided: **SQ-4** (2026-10-15, a role of extent one is offloaded) and **SQ-5** (2026-10-16, from
 the user's instruction on Test 3, quoted in `SPEC_QUESTIONS.md`: mathematically legal, so inside
 the specification): a batched GEMM whose per-batch GEMM has two of M, N, K equal to 1 --
@@ -409,10 +436,17 @@ scalar accumulator, double, no restrict, reversed rows, repetition inside the re
 sum, batched), and `domains` (since 2026-10-18, docs section 19.12.7: variants of a positive case
 -- a loop's bounds shifted by an enclosing counter, sheared by a multiple or by two counters,
 chained shifts, a shifted loop of step > 1, a shifted batched nest, one array as both factors
-through two views or through one view, the reduction index a constant (K = 1 without a loop), and
-the negatives: a triangle, whose trip count varies -- outside the front end's subset --, and the
-output aliasing a factor; the specification decides a sheared case on its box form,
-`casespec.box_form`, and an aliasing output by the addresses -- a product reading an element
+through two views or through one view, the reduction index a constant (K = 1 without a loop), a
+box in disguise (a degenerate triangle whose points are a box: section 19.13), a triangle of
+repetition loops, a shifted loop written with its condition over the enclosing counter, and the
+negatives: a triangle whose trip count genuinely varies -- translated since section 19.13; the
+specification refuses it when its updates are not centrally symmetric either (no GEMM in any
+decomposition), the compiler proves it no GEMM under the conditions of section 19.13.4 (the
+accesses tell the iterations apart, three different arrays, no stepped loop whose lower bound
+reads a counter, bounds within 64 bits) and leaves it UNKNOWN otherwise --, and the output
+aliasing a factor; the specification decides a sheared case on its box
+form (`casespec.box_form`), an exact parallelotope on its box (`casespec.exact_form`),
+and an aliasing output by the addresses -- a product reading an element
 written earlier --, `casespec._alias_verdict`). Every case is validated (in bounds via the Python oracle; the author's roles
 checked against the subscripts), classified, de-duplicated against `generated/registry.json`
 (canonical signature), written in the showcase format with its references, and counted in

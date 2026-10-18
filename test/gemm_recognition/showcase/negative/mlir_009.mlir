@@ -11,8 +11,15 @@
 //   iteration domain is not a box, so the computed elements are not one
 //   rectangular GEMM of strided views (the specification's definition needs a
 //   box).  Not a dense GEMM; must be refused.  The recognizer accepts the access
-//   pattern; getDenseLogicalGemm refuses the non-static (counter-dependent)
-//   bound.  The C front end cannot express this nest (bounds must be constants).
+//   pattern; getDenseLogicalGemm refuses the domain -- since 2026-10-18 with a
+//   proof (docs section 19.13.4): the accesses tell the iterations apart (the
+//   stacked map (i, k, k, j, i, j) has rank 3), A, B and C are three arrays, no
+//   loop is stepped, the bounds fit 64 bits and the set is not centrally
+//   symmetric, so it is no affine image of a box and no GEMM in any
+//   decomposition (PROVEN_INVALID; 'the loop bounds are not static', UNKNOWN,
+//   before).  The C front end translates this nest since the same day (a
+//   triangle: bounds that do not shift together, exact subscript ranges by
+//   enumeration).
 //
 // Mathematical GEMM: NO
 // Expected recognition (specification): REJECT
@@ -23,7 +30,7 @@
 //   dense partition (getDenseLogicalGemm):   unsupported
 //   lowering (--affine-matmul-to-systolic):  not_reached
 //   rejection at: dense_partition
-//   reason: the loop bounds are not static, so the iteration domain has no static normalized extent
+//   reason: the iteration domain is not centrally symmetric
 // Classification: TRUE NEGATIVE
 //   Not a dense GEMM the compiler may lower; it must keep refusing it, for the
 //   reason above (the lowering pass's remark is compared with it).
@@ -38,6 +45,8 @@
 //   build/bin/systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=report=true \
 //     showcase/negative/mlir_009.mlir -o /dev/null
 //   Stage by stage, results collected: scripts/run_showcase.py --case mlir_009
+//
+// re-decided 2026-10-18 (docs/AFFINE_GEMM_MAPPING.md section 19.13): the compiler's refusal was 'the loop bounds are not static' (UNKNOWN); it is proven invalid since (central symmetry); the specification's REJECT is unchanged
 
 func.func @triangular_bounds(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %i = 0 to 8 {
