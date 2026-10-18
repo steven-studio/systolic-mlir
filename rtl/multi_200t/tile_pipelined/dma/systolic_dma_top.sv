@@ -462,6 +462,7 @@ module systolic_dma_top #(
   // The grant.
   localparam [1:0] WG_NONE = 2'd0, WG_HS = 2'd1, WG_WB = 2'd2, WG_SD = 2'd3;
   logic [1:0] w_grant;
+  logic [1:0] w_last;          // the owner before the last release: loses the next tie
   logic [3:0] w_open;          // bursts the owner has issued whose B is still to come
   logic       err_w_owner;
 
@@ -473,6 +474,18 @@ module systolic_dma_top #(
   wire g_wb = (w_grant == WG_WB);
   wire g_sd = (w_grant == WG_SD);
 
+  // The owner yields at a burst boundary when another master waits, once
+  // it has had at least one burst since it was granted (w_served; without
+  // that the two would hand the channel back and forth without either
+  // issuing anything): its next AW is held back (not presented to the
+  // controller, not accepted) for the one cycle the grant takes to move,
+  // so a boundary can be seen at all -- the slab writer asks for its next
+  // burst in the very cycle the previous one is answered.
+  logic w_served;              // the owner has issued a burst since the grant
+  wire w_quiet  = (w_open == 4'd0) && !(bvalid && bready);
+  wire hs_yield = g_hs && w_served && w_quiet && (wb_wants || sd_wants);
+  wire wb_yield = g_wb && w_served && w_quiet && (hs_wants || sd_wants);
+
   assign awid       = g_hs ? hs_awid    : g_wb ? wb_awid    : sd_awid;
   assign awaddr     = g_hs ? hs_awaddr  : g_wb ? wb_awaddr  : sd_awaddr;
   assign awlen      = g_hs ? hs_awlen   : g_wb ? wb_awlen   : sd_awlen;
@@ -482,10 +495,10 @@ module systolic_dma_top #(
   assign awcache    = g_hs ? hs_awcache : g_wb ? wb_awcache : sd_awcache;
   assign awprot     = g_hs ? hs_awprot  : g_wb ? wb_awprot  : sd_awprot;
   assign awqos      = g_hs ? hs_awqos   : g_wb ? wb_awqos   : sd_awqos;
-  assign awvalid    = g_hs ? hs_awvalid : g_wb ? wb_awvalid : g_sd ? sd_awvalid : 1'b0;
+  assign awvalid    = g_hs ? (hs_awvalid && !hs_yield) : g_wb ? (wb_awvalid && !wb_yield) : g_sd ? sd_awvalid : 1'b0;
 
-  assign hs_awready = g_hs && awready;
-  assign wb_awready = g_wb && awready;
+  assign hs_awready = g_hs && !hs_yield && awready;
+  assign wb_awready = g_wb && !wb_yield && awready;
   assign sd_awready = g_sd && awready;
 
   assign wdata_axi  = g_hs ? hs_wdata  : g_wb ? wb_wdata  : sd_wdata;
@@ -506,9 +519,15 @@ module systolic_dma_top #(
   wire aw_hs = awvalid && awready;
   wire b_hs  = bvalid  && bready;
 
+  // A burst boundary of the owner: nothing open, no handshake in this very
+  // cycle.  The grant moves only there, so a burst is never interleaved.
+  wire w_boundary = w_quiet && !aw_hs;
+
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       w_grant     <= WG_NONE;
+      w_last      <= WG_NONE;
+      w_served    <= 1'b0;
       w_open      <= 4'd0;
       err_w_owner <= 1'b0;
     end
@@ -516,18 +535,31 @@ module systolic_dma_top #(
       // Bursts in flight for the owner: +1 at its AW, -1 at its B.
       if (aw_hs && !b_hs)      w_open <= w_open + 4'd1;
       else if (b_hs && !aw_hs) w_open <= w_open - 4'd1;
+      if (w_grant == WG_NONE)  w_served <= 1'b0;
+      else if (aw_hs)          w_served <= 1'b1;
 
       case (w_grant)
+        // Round robin between the host slab writer and the write-back
+        // engine: the one that held the channel last loses the tie.  The
+        // slab writer asks for its next burst the moment the previous one
+        // is answered and dribbles each burst's beats in at the DPTI link's
+        // pace, so a fixed priority would hold the channel for a whole slab
+        // (thousands of cycles) while the contexts' finished tiles waited to
+        // be written back -- and, with jobs pipelined, their result banks
+        // and then their folds behind them (systolic_accel_context.sv
+        // result_bank_free).  Alternating at burst boundaries costs the slab
+        // writer nothing it is not already waiting for.
         WG_NONE: begin
-          if (hs_wants)      w_grant <= WG_HS;
-          else if (wb_wants) w_grant <= WG_WB;
-          else if (sd_wants) w_grant <= WG_SD;
+          if (hs_wants && wb_wants) w_grant <= (w_last == WG_HS) ? WG_WB : WG_HS;
+          else if (hs_wants)        w_grant <= WG_HS;
+          else if (wb_wants)        w_grant <= WG_WB;
+          else if (sd_wants)        w_grant <= WG_SD;
         end
-        // Release at a burst boundary: nothing pending, nothing open, and no
-        // handshake in this very cycle.
-        WG_HS: if (!hs_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
-        WG_WB: if (!wb_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
-        WG_SD: if (!sd_wants && w_open == 4'd0 && !aw_hs && !b_hs) w_grant <= WG_NONE;
+        // Release at a burst boundary: when the owner has nothing pending,
+        // or when another master is waiting for its turn.
+        WG_HS: if (w_boundary && (!hs_wants || hs_yield)) begin w_grant <= WG_NONE; w_last <= WG_HS; end
+        WG_WB: if (w_boundary && (!wb_wants || wb_yield)) begin w_grant <= WG_NONE; w_last <= WG_WB; end
+        WG_SD: if (w_boundary && !sd_wants)                             begin w_grant <= WG_NONE; w_last <= WG_SD; end
         default: w_grant <= WG_NONE;
       endcase
 
