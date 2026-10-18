@@ -634,6 +634,20 @@ proc build_body {} {
 # KEY=VALUE form the runtime reads (runtime/fpga_matmul_tiled.h,
 # fpga_runtime_get_config).  The runtime reads K_MAX_8X8, K_MAX_4X4, N,
 # NUM_8X8 and NUM_4X4; every other line is for people.
+# JOB_QUEUE_DEPTH as systolic_accel_context.sv declares it (this build does
+# not override the parameter).
+proc get_job_queue_depth {} {
+    global SCRIPT_DIR
+    set depth 1
+    catch {
+        set f [open $SCRIPT_DIR/systolic_accel_context.sv r]
+        set text [read $f]
+        close $f
+        regexp {parameter integer JOB_QUEUE_DEPTH\s*=\s*(\d+)} $text -> depth
+    }
+    return $depth
+}
+
 proc write_fpga_config {path bit wns whs dpti_io_ok} {
     global K8 K4 KDIM NARR NUM_8X8 NUM_4X4 VARIANT USE_V2 SCRIPT_DIR DPTI_CLK_PHASE
     global PLACE_DIRECTIVE ROUTE_DIRECTIVE INCR_REF
@@ -666,6 +680,11 @@ proc write_fpga_config {path bit wns whs dpti_io_ok} {
     puts $f "VARIANT=$VARIANT"
     puts $f "USE_V2=$USE_V2"
     puts $f "HOST_SLAB_BYTES=[expr {$slab * 8 * $NARR}]"
+    # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH, the
+    # default this build takes): invocations one accelerator holds at a time.
+    # The compiler declares the fleet's pipelining from it; the archived
+    # bitstream's record has no such line and is modelled serialized.
+    puts $f "PIPELINE_DEPTH=[get_job_queue_depth]"
     puts $f "BITSTREAM=$bit"
     puts $f "BITSTREAM_SHA256=$sha"
     puts $f "RTL_GIT_REV=$rev"

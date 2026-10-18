@@ -80,9 +80,11 @@ window 的補零變少。所以 makespan 對 K_MAX_8X8、K_MAX_4X4 都是非遞�
 
 ## 3. Overlap 與共用資源：RTL 實際有的
 
-- **同一顆加速器：沒有 overlap。** context 只有在 `!ctx_job_busy && !result_readback_busy`
-  時才接下一個 job（`systolic_dma_top.sv`，`core_job_ready`），每次 invocation 是一個獨立
-  的 job。所以 `T_overlap = 0`、`T_tile = sum T_seq`。
+- **同一顆加速器：封存的 bitstream 沒有 overlap。** 它的 context 只有在
+  `!ctx_job_busy && !result_readback_busy` 時才接下一個 job（`systolic_dma_top.sv`，
+  `core_job_ready`），每次 invocation 是一個獨立的 job。所以 `T_overlap = 0`、
+  `T_tile = sum T_seq`。2026-10-18 之後的 RTL 把連續 invocation pipeline 起來（第 8 節）；
+  device 宣告 `pipeline_depth` 時模型用那一節的 timeline，否則用這裡的序列模型。
 - **同一顆的兩次 invocation 之間：result readback。** 上一次的結果從 DDR 讀回 DPTI 輸出
   路徑（done -> rb）做完之前，top 不收這個 context 的下一個 descriptor。模擬（host 永遠
   可收）：8x8 **212～214 cycles**、4x4 **11 cycles**。物理上：結果經 `dpti_output_cdc`
@@ -205,3 +207,88 @@ build/bin/systolic-cost check-monotone --m 100 --n 36 --k 147 --k8 24 --k4 12
 python3 eval/cost_model_validation/validate.py --jobs 2
 python3 eval/cost_model_validation/start_cycle_check.py
 ```
+
+## 8. 同一顆加速器上連續 invocation 的 pipeline（2026-10-18）
+
+**問題。** PE（`core/systolic_pe.sv`）有兩組 accumulator bank 與兩顆加法器，設計目的是讓
+tile T+1 的累加（feed）與 tile T 的 bank 歸約（H = 95 裡的 67 + 2 cycles）重疊；PE 只要求
+兩個 tile 的運算元之間有 MUL + ADD + 2 拍的安靜間隔（fp_model 9/12：23；IP 8/11：21，
+`tb_pe_overlap.sv`）。但上層把這段重疊全部序列化掉：context 的 compute FSM 在
+`ST_WAIT_RESULT` 等 `c_valid_out`（歸約結束之後）才能收下一次 fold；phase FSM 的
+`tile_handoff` 也等 `c_done_fold`；硬體 scheduler 的 slot 在 `ST_RUN` 等 `accelerator_done`
+（= `c_valid_out`）才收下一個 request；adapter 在 `ST_RUN` 期間丟掉新的 start；top 的
+`core_job_ready` 要 `!ctx_job_busy`（上一個 job 寫回完成）且 `!result_readback_busy`。所以同一
+顆加速器上每一次 invocation 都是 read → compute → reduce → write → readback 之後才開始下一個
+（第 3 節「同一顆加速器：沒有 overlap」描述的就是這個狀態）。
+
+**修正（RTL，`USE_EXTERNAL_SCHEDULER` 路徑）。** `systolic_accel_context.sv` 改成
+`JOB_QUEUE_DEPTH = 4` 的 job queue 與三個以計數器銜接的 stage（fill / compute / write-back）：
+下一個 job 的 operand fill 在前一個 job 的 fold 開始時就發出（既有的「最多一個填好的 tile 在等」
+規則，保證 ping-pong operand buffer 不會被覆寫）；fold 的放行條件是運算元已落地、陣列輸入已
+安靜 `FEED_GAP = PE_QUIET_GAP(23) + FEED_GAP_MARGIN(3) = 26` 拍、tile j-2 已發佈（每個 PE 的兩組
+accumulator set：PE 沒有 back-pressure，太早餵會把兩個 tile 加在一起）、result bank j%2 已寫回；
+陣列依序發佈，結果 n_cv 進 bank n_cv%2；write-back 依序寫回各 job 自己的 c_base。
+`systolic_hw_scheduler.sv` 的 slot 在送出 start 之後就釋放（outstanding counter 維持 busy 與
+schedule_done）；adapter 轉送每個 start、計數完成；top 的 acceptance 改成「queue 有空位且尚未讀回
+的 job 少於 RB_DEPTH = 8」，result readback 每個 context 一個 FIFO，讀回的 slot 在 context 之間
+round-robin（固定優先權會讓一條長鏈的 8x8 餓死其他 context 的讀回）。legacy bring-up 路徑
+（`USE_EXTERNAL_SCHEDULER = 0`）逐字保留。單一 invocation 的時序不變：fire → fold = T_read、
+fold → cv = T_compute、cv → done = T_write，與第 1、2 節完全相同（`tb_cost_phases` 逐 cycle 相同）。
+
+**模型（`CostModel.h` `AcceleratorTimeline`）。** device 多三個屬性（三個一起宣告，缺省 = 序列化
+硬體，所有既有 fixture 不變）：`pipeline_depth`（4）、`reduce_cycles`（69 = 67 + 2，連續兩次
+發佈的最小間隔，`tb_pipeline_overlap` 4x4 k=1 鏈量到 69）、`feed_gap`（26）。同一顆加速器上
+第 j 次 invocation 的事件：
+
+```
+accept_j     = max(accept_j-1, writeEnd_j-D + 2)          （2 = 計數器更新 + registered accept）
+fillStart_j  = max(accept_j, fillEnd_j-1, feedStart_j-1)
+fillEnd_j    = fillStart_j + T_read(k_j)                 （c_read 含放行）
+feedStart_j  = max(fillEnd_j, feedStart_j-1 + k_j-1 + feed_gap,
+                   computeEnd_j-2 + 3, writeEnd_j-2 + 3)  （3 = ready → start → fold）
+computeEnd_j = max(feedStart_j + T_compute(k_j), computeEnd_j-1 + reduce_cycles)
+writeEnd_j   = max(computeEnd_j, writeEnd_j-1) + T_write
+```
+
+D = 1 時逐 cycle 等於第 1 節的序列模型。binary search 的 capacity 改成「該幾何的 tile stream
+在 T 之前完成幾個」（序列化時 = floor(T / cost)），tile 的區間取自同一條 timeline，
+`SystolicTilePlan` 的 `start_cycle` 是 transfers-free 的 `feedStart_j`（序列化時仍是前面
+compute term 的加總），`systolic-cost --verify` 重算 stream 比對區間。`systolic-cost --pipelined`
+/ `timeline` 印出事件；`systolic-matmul` 從 `fpga_config.txt` 的 `PIPELINE_DEPTH` 決定宣告哪一種
+fleet（封存的 bitstream 沒有這一行 → 序列化）。
+
+**驗證（`eval/pipeline_overlap/run.sh`）。** `tb_pipeline_overlap.sv` 把 K-fold 鏈以硬體願意接受的
+速度送進去，逐 job 蓋章（fire / grant / fill / fold / feed / cv / wbacc / done / rb），每塊結果
+tile 與鏈的總和逐元素精確、每個 PE 每 job 的 MAC 數 = k、每個 fold 恰一次 `c_valid_out`、PE(0,0)
+看到的 tile 間安靜間隔 ≥ 21，並要求量到的重疊對數不低於這份 RTL 做到的。`compare_timeline.py`
+用觀測到的 accept 餵模型，要求 fold / cv / done 逐 cycle 相同；唯一允許的差異是共用 read / write
+engine 等待其他 context 或 readback（第 3 節已知、模型沒有的效應），而且只在 job 本身仍顯示
+「落地即 fold」「grant 即寫」的特徵時才算；一次一個 job 的 serial run 不允許任何等待。單一裝置
+4 組（8x8/4x4 × v1/v2，各 14 個 invocation）、混合 2 組、各自的 serial run：0 mismatch。
+`jobs/gapbound.svh`（4x4、K_MAX 32、v2、k = 32,1 交替）讓安靜間隔規則成為放行條件：PE(0,0)
+的間隔恰為 FEED_GAP = 26；同一份 list 以 `PE_QUIET_GAP=8` 建出來的 context 把兩個 tile 加在一起
+（8 個 fold 只發佈 7 次）、bench FAIL——這是邊界檢查有效的負對照。
+
+**量化（同一支 bench，HEAD d854c40 的 RTL vs 修正後，K_MAX 16/16，cycles）：**
+
+| 案例 | 修正前 makespan（first fire → last done） | 修正後 | fold_j+1 < cv_j 的對數 |
+|---|---|---|---|
+| 8x8，K=64 四次 k=16 鏈，v1 | 3073 | 1645 | 0（v1 fill-bound：T_read 267 > T_compute 125） |
+| 8x8，K=64 四次 k=16 鏈，v2 | 2669 | 954 | 1（fold 1 於 371 < cv 0 於 421） |
+| 8x8，14 invocation（4 條鏈），v1 / v2 | 11656 / 11202 | 5653 / 6928 | 0 / 4 |
+| 4x4，14 invocation（4 條鏈），v1 / v2 | 5225 / 3017 | 3403 / 1885 | 0 / 7 |
+
+v1（封存 bitstream 的 operand path，1 word/cycle）上 fill 是最長的 stage，fold_j+1 永遠在
+cv_j 之後：PE 層的累加／歸約重疊在 v1 上碰不到，省下的是 cv → write-back → readback → accept →
+fill 這一串序列尾巴；v2（beat-wide）上 fill 75 < compute 125，下一個 fold 在前一個發佈之前
+50 拍開始，PE 的 ping-pong 真正被用到。14-invocation 的數字含 host 永遠就緒時的 DPTI 讀回
+（8x8 一塊約 850 拍）對 acceptance 的節流（RB_DEPTH = 8）與共用 read engine 的等待，所以
+比 4 次鏈的比例小；兩邊的 bench、job list 與 RTL 以外的環境完全相同。
+
+**仍未解決（量到的）。** (1) runtime 仍是同步的（一次一個 invocation），板子上要兌現這些重疊
+需要 runtime 多個 invocation 在途與每個 invocation 自己的 slab／result 區域；(2) DPTI 結果讀回在
+模擬裡 8x8 一塊約 850 拍（4x4 約 213），是 host 永遠就緒時的物理瓶頸，且讀回的 beat 走同一個 AXI
+read engine，會把同時進行的 fill 擋住數百拍（`compare_timeline.py` 標成 fill-stalled；mitigation
+是把 `dpti_output_cdc` 的 FIFO 加深到能放一整個 burst 並以整個 burst 的空間 gate 讀回）；(3) 多顆
+同時 fill / 寫回時共用 engine 的等待仍在模型之外（第 3、5 節）；(4) `cyc_latched` 只對沒有重疊
+的 transaction 有意義。

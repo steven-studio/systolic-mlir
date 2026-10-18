@@ -195,6 +195,13 @@ HOST_SLAB=$(( (S8 > S4 ? S8 : S4) * 64 ))
     echo "VARIANT=$([ "$USE_V2" = 1 ] && echo v2 || echo v1)"
     echo "USE_V2=$USE_V2"
     echo "HOST_SLAB_BYTES=$HOST_SLAB"
+    # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH):
+    # how many invocations one accelerator holds at a time.  An RTL without
+    # it takes one job per context and the line is left out (the compiler
+    # then models the serialized hardware, as for the archived bitstream).
+    if grep -q "parameter integer JOB_QUEUE_DEPTH" "$D/systolic_accel_context.sv" 2>/dev/null; then
+        echo "PIPELINE_DEPTH=$(sed -nE 's/^ *parameter integer JOB_QUEUE_DEPTH *= *([0-9]+).*/\1/p' "$D/systolic_accel_context.sv" | head -1)"
+    fi
     echo "RTL_SOURCE=$RTL_DESC"
     echo "BUILT=$(date -Iseconds)"
 } > "$OUT/fpga_config.txt"

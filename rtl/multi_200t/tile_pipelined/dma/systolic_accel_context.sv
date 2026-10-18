@@ -17,6 +17,48 @@
 // overlap inside a context (tile N's fold under tile N-1's write-back) is kept
 // exactly as it was.
 //
+// PIPELINED JOBS (Oct 2026, USE_EXTERNAL_SCHEDULER only)
+//   Every PE holds two accumulator sets and two adders (core/systolic_pe.sv)
+//   so that tile T+1 can be fed and accumulated while tile T's bank reduction
+//   -- 67 of the 95 cycles of H -- still runs; the PE only needs the array
+//   input quiet for 22 cycles between the two (tb/tb_pe_overlap.sv).  This
+//   context used to throw that away: its compute FSM waited for c_valid_out
+//   (after the reduction) before it could take another fold, P_FOLD waited for
+//   the same before handing the tile to write-back, and the top accepted a
+//   context's next job only once the previous one was written back and read
+//   back.  Every invocation of one accelerator therefore ran read -> compute
+//   -> reduce -> write strictly after the previous one.
+//
+//   Now the external-scheduler path runs a queue of JOB_QUEUE_DEPTH jobs
+//   through three stages that share nothing but the counters below:
+//
+//     fill     operand descriptor for job n_filled, as soon as no completely
+//              filled tile is waiting (the ping-pong buffer it writes was last
+//              read by job n_filled - 2, whose feed ended before job
+//              n_filled - 1's fold started)
+//     compute  one scheduler request per job; the release is taken when the
+//              job's operands have landed, the array input has been idle for
+//              the PE quiet gap after the previous job's k steps, and the
+//              result bank it will publish into (n_fed % 2) has been written
+//              back (job n_fed - 2 done).  The feed of job n_fed+1 therefore
+//              starts while job n_fed is still being reduced.
+//     write    the array publishes in order; c_valid_out of result n_cv lands
+//              in bank n_cv % 2; the stage scans and writes back result n_wb
+//              to that job's own c_base and completes the job (job_done).
+//
+//   Nothing about the datapath changes: the same feeder, buffers, array and
+//   result banks; the legacy bring-up (USE_EXTERNAL_SCHEDULER = 0, n_inv tiles
+//   of one slab) keeps its phase FSM verbatim.  What a job may NOT do is
+//   unchanged too: run past its k, read a buffer being written, publish into
+//   a bank being written back, or start before the PE has seen the boundary.
+//
+//   Status that still describes ONE transaction, not a pipelined run:
+//   cyc_latched / cyc_total (first ST_FEED beat to the publish of the same
+//   fold; skipped for a fold that starts while the previous one is being
+//   measured), t_span (first fill to the first write-back of the run) and
+//   wr_match (tabulated for k = 16 and 32 only).  words_written is the last
+//   fill's payload.  The per-job evidence is in tb_pipeline_overlap.sv.
+//
 // What is per context and what is shared:
 //
 //   per context     feeder (N_ARRAY lanes), operand buffers (N_ARRAY banks x
@@ -67,7 +109,21 @@ module systolic_accel_context #(
 
   parameter integer AXI_DATA_W = 128,
   parameter integer AXI_ADDR_W = 29,
-  parameter integer BEAT_W     = 16
+  parameter integer BEAT_W     = 16,
+
+  // Jobs one context holds at a time (accepted, not yet written back), a
+  // power of two.  3 are ever active -- one filling, one feeding or reducing,
+  // one writing back -- the fourth entry lets the host stay a descriptor ahead.
+  parameter integer JOB_QUEUE_DEPTH = 4,
+  // The PE detects a tile boundary as a quiet gap on its operand inputs of
+  // MUL_LATENCY + ADD_LATENCY + 2 idle cycles between the last operand pair of
+  // one tile and the first of the next (systolic_pe.sv: acc_handoff needs the
+  // multiplier and the accumulate adder drained): 23 with tb/fp_model.sv's
+  // 9 / 12, 21 with the IP's 8 / 11 (tb_pe_overlap.sv: GAP = idle - 1 passes
+  // at 22 / 20 and merges the two tiles one below).  The margin is cycles on
+  // top of the larger of the two.
+  parameter integer PE_QUIET_GAP    = 23,
+  parameter integer FEED_GAP_MARGIN = 3
 ) (
   input  wire        clk,                 // ui_clk
   input  wire        ui_rst_n,
@@ -90,7 +146,8 @@ module systolic_accel_context #(
 
   output logic        job_busy,
   output logic        job_active,
-  output wire         job_done,            // one cycle: last tile's wb_done
+  output wire         job_accept_ready,    // the queue can take a job now
+  output wire         job_done,            // one cycle: a job's result tile is in DDR
   output logic [31:0] job_id_reg,
   output logic [31:0] job_device_id_reg,
   output logic [31:0] job_k_reg,
@@ -168,6 +225,11 @@ module systolic_accel_context #(
 );
 
   // ---- geometry -------------------------------------------------------------
+  // The array input must be idle for FEED_GAP cycles after an invocation's k
+  // steps before the next invocation's first step: PE(r, c) sees both tiles
+  // r + c cycles later, so the gap is the same at every PE.
+  localparam integer FEED_GAP   = PE_QUIET_GAP + FEED_GAP_MARGIN;
+  localparam int     QIDX_W     = (JOB_QUEUE_DEPTH > 1) ? $clog2(JOB_QUEUE_DEPTH) : 1;
   localparam integer WIN_K      = 8;                     // steps per wire window
   localparam integer SLAB_K     = ((K_MAX + WIN_K - 1) / WIN_K) * WIN_K;
   localparam integer RX_BYTES   = SLAB_K * 8 * N_WIRE;   // one physical slab
@@ -199,11 +261,72 @@ module systolic_accel_context #(
   } phase_t;
   phase_t phase;
   assign phase_o   = phase;
-  assign run_clear = (phase == P_CALIB);
+  // The run boundary.  Legacy: P_CALIB, which the external path also used to
+  // pass through between every two jobs (P_DONE -> P_CALIB -> P_READ).  With
+  // jobs pipelined there is no such pass; a run is the jobs the context holds
+  // without going idle, and the boundary is a job accepted into an empty
+  // queue.  What run_clear resets is run-scoped status (checksums, counters,
+  // sticky flags), never the state of a job in flight -- the queue is empty.
+  wire run_boundary;
+  assign run_clear = (phase == P_CALIB) || run_boundary;
 
   // ---- job registers --------------------------------------------------------
   logic [63:0] job_a_base_reg;
   logic [63:0] job_b_base_reg;
+
+  // ---- the job queue (external scheduler) ------------------------------------
+  // Written at job_fire into entry n_accepted; read by the fill stage
+  // (n_filled), the scheduler request (n_req), the feed (n_fed) and the
+  // write-back (n_wb).  The counters only ever increase and wrap at 256; a
+  // stage's index is the counter modulo JOB_QUEUE_DEPTH, and occupancy is the
+  // difference n_accepted - n_wb.
+  logic [31:0]           q_k          [0:JOB_QUEUE_DEPTH-1];
+  logic [31:0]           q_k_slab     [0:JOB_QUEUE_DEPTH-1];
+  logic [31:0]           q_start_cycle[0:JOB_QUEUE_DEPTH-1];
+  logic [31:0]           q_est_cycles [0:JOB_QUEUE_DEPTH-1];
+  logic [31:0]           q_id         [0:JOB_QUEUE_DEPTH-1];
+  logic [AXI_ADDR_W-1:0] q_a_base     [0:JOB_QUEUE_DEPTH-1];
+  logic [AXI_ADDR_W-1:0] q_c_base     [0:JOB_QUEUE_DEPTH-1];
+
+  logic [7:0] n_accepted;   // jobs taken from the ingress
+  logic [7:0] n_filled;     // jobs whose operand tile has completely landed
+  logic [7:0] n_req;        // jobs whose scheduler request was acknowledged
+  logic [7:0] n_fed;        // jobs whose fold has started
+  logic [7:0] n_cv;         // results published by the array (in order)
+  logic [7:0] n_wb;         // results written back (= jobs completed)
+
+  wire [QIDX_W-1:0] qi_fill = n_filled[QIDX_W-1:0];
+  wire [QIDX_W-1:0] qi_req  = n_req[QIDX_W-1:0];
+  wire [QIDX_W-1:0] qi_fed  = n_fed[QIDX_W-1:0];
+  wire [QIDX_W-1:0] qi_wb   = n_wb[QIDX_W-1:0];
+  wire [QIDX_W-1:0] qi_acc  = n_accepted[QIDX_W-1:0];
+
+  logic [AXI_ADDR_W-1:0] last_c_base;   // the last completed job's c_base
+  logic [31:0]           last_id;       // and id (status while idle)
+
+  wire [7:0] q_occupancy  = n_accepted - n_wb;
+  assign run_boundary = USE_EXTERNAL_SCHEDULER && job_fire && (q_occupancy == 8'd0);
+  wire       q_full       = (q_occupancy == 8'(JOB_QUEUE_DEPTH));
+  wire       fill_pending = (n_accepted != n_filled);   // a job waits for its fill
+  wire       tile_waiting = (n_filled != n_fed);        // a filled tile waits for the array
+  wire       feed_pending = (n_accepted != n_fed);      // a job has not been fed yet
+  wire       wb_pending   = (n_cv != n_wb);             // a published result waits for write-back
+
+  // Job n_fed publishes into result bank n_fed % 2, last used by job
+  // n_fed - 2: free once that job is written back (n_fed - n_wb < 2).
+  wire result_bank_free = ((n_fed - n_wb) < 8'd2);
+
+  // The array holds at most two tiles: every PE has two accumulator sets, and
+  // the PE has no back-pressure -- if tile j+1's operands arrive while tile
+  // j's set is still waiting for tile j-1's reduction to finish
+  // (acc_handoff needs red_state == RED_IDLE), the PE keeps summing them into
+  // tile j's set, silently.  So fold n_fed is released only once tile
+  // n_fed - 2 has been published (every PE's reduction of it done): n_cv >=
+  // n_fed - 1.  The quiet gap below covers the other half of the boundary,
+  // the drain of tile n_fed - 1's own products.  (result_bank_free implies
+  // this today, because a tile is written back only after it is published;
+  // the guard stands on its own so that neither rule depends on the other.)
+  wire array_slot_free = ((n_fed - n_cv) < 8'd2);
 
   // ---- invocation bookkeeping ----------------------------------------------
   wire  [3:0] n_inv_next = (n_inv_probe == 4'd0) ? 4'd1 : n_inv_probe;
@@ -213,8 +336,11 @@ module systolic_accel_context #(
   logic [3:0] wb_fi;
   logic [3:0] filled_fi;
 
-  wire fill_bank    = read_fi[0];
-  wire compute_bank = compute_fi[0];
+  // The ping-pong operand buffers: the one being written and the one being
+  // read.  External: by job counter; legacy: by tile index.
+  logic compute_idx_lsb;   // external: the fed job's parity, latched at fold_start
+  wire fill_bank    = USE_EXTERNAL_SCHEDULER ? n_filled[0] : read_fi[0];
+  wire compute_bank = USE_EXTERNAL_SCHEDULER ? compute_idx_lsb : compute_fi[0];
 
   wire fi_last         = (fi         == n_inv - 4'd1);
   wire read_fi_last    = (read_fi    == n_inv - 4'd1);
@@ -231,8 +357,9 @@ module systolic_accel_context #(
   // descriptor (job_k_reg stays 0; a zero-beat descriptor is ignored by
   // dma_engine) and uses K_DIM.
   logic [31:0] job_k_slab_reg;
+  // The fill stage moves the job it is filling (queue entry n_filled).
   wire [31:0] job_rx_bytes =
-      USE_EXTERNAL_SCHEDULER ? (job_k_slab_reg * N_WIRE * 8) : (K_DIM_SLAB * N_WIRE * 8);
+      USE_EXTERNAL_SCHEDULER ? (q_k_slab[qi_fill] * N_WIRE * 8) : (K_DIM_SLAB * N_WIRE * 8);
   wire [31:0] job_n_beats  = job_rx_bytes / (AXI_DATA_W / 8);
   wire [31:0] job_rx_words = job_rx_bytes / 4;
 
@@ -268,49 +395,135 @@ module systolic_accel_context #(
   // =========================================================================
   // Job lifetime
   // =========================================================================
-  assign job_done =
-      USE_EXTERNAL_SCHEDULER && job_active && wb_done && wb_fi_last;
+  // External: one job per tile; it is complete when its own write-back
+  // returns (the write-back stage runs the jobs in order).  job_c_base_reg is
+  // the c_base of the job being written back / completed -- what the top's
+  // readback takes at job_done -- and job_start_cycle_reg / job_est_cycles_reg
+  // are the next request's schedule (queue entry n_req), what the scheduler
+  // latches at tile_ack.  job_id_reg / job_k_reg are the most recently
+  // accepted job's, for status.
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : JOB_PIPE
+    assign job_done         = job_active && wb_done && wb_pending;
+    assign job_accept_ready = !q_full;
 
-  always_ff @(posedge clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) begin
-      job_busy            <= 1'b0;
-      job_active          <= 1'b0;
-      job_id_reg          <= 32'd0;
-      job_device_id_reg   <= DEVICE_ID;
-      job_k_reg           <= 32'd0;
-      job_k_slab_reg      <= 32'd0;
-      job_start_cycle_reg <= 32'd0;
-      job_est_cycles_reg  <= 32'd0;
-      job_a_base_reg      <= 64'd0;
-      job_b_base_reg      <= 64'd0;
-      job_c_base_reg      <= 64'd0;
-    end else begin
-      if (job_fire) begin
-        // Acceptance is the job boundary.
-        job_busy            <= 1'b1;
-        job_active          <= 1'b1;
-        job_id_reg          <= in_job_id;
-        job_device_id_reg   <= in_device_id;
-        job_k_reg           <= in_k;
-        job_k_slab_reg      <= (in_k + 32'(WIN_K - 1)) & ~32'(WIN_K - 1);
-        job_start_cycle_reg <= in_start_cycle;
-        job_est_cycles_reg  <= in_est_cycles;
-        job_a_base_reg      <= in_a_base;
-        job_b_base_reg      <= in_b_base;
-        job_c_base_reg      <= in_c_base;
-      end
-      // Completion closes exactly the job that was accepted.
-      if (job_done) begin
-        job_busy   <= 1'b0;
-        job_active <= 1'b0;
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        n_accepted        <= 8'd0;
+        job_device_id_reg <= DEVICE_ID;
+        job_k_reg         <= 32'd0;
+        job_k_slab_reg    <= 32'd0;
+        job_a_base_reg    <= 64'd0;
+        job_b_base_reg    <= 64'd0;
+        for (int e = 0; e < JOB_QUEUE_DEPTH; e++) begin
+          q_k[e]           <= 32'd0;
+          q_k_slab[e]      <= 32'd0;
+          q_start_cycle[e] <= 32'd0;
+          q_est_cycles[e]  <= 32'd0;
+          q_id[e]          <= 32'd0;
+          q_a_base[e]      <= '0;
+          q_c_base[e]      <= '0;
+        end
+      end else if (job_fire) begin
+        // Acceptance is the job boundary: the top only fires into a queue
+        // with room (job_accept_ready).
+        n_accepted             <= n_accepted + 8'd1;
+        q_k[qi_acc]            <= in_k;
+        q_k_slab[qi_acc]       <= (in_k + 32'(WIN_K - 1)) & ~32'(WIN_K - 1);
+        q_start_cycle[qi_acc]  <= in_start_cycle;
+        q_est_cycles[qi_acc]   <= in_est_cycles;
+        q_id[qi_acc]           <= in_job_id;
+        q_a_base[qi_acc]       <= AXI_ADDR_W'(in_a_base);
+        q_c_base[qi_acc]       <= AXI_ADDR_W'(in_c_base);
+        job_device_id_reg      <= in_device_id;
+        job_k_reg              <= in_k;
+        job_k_slab_reg         <= (in_k + 32'(WIN_K - 1)) & ~32'(WIN_K - 1);
+        job_a_base_reg         <= in_a_base;
+        job_b_base_reg         <= in_b_base;
       end
     end
-  end
 
-  // Scheduler-facing completion is a one-cycle JOB event, not the raw c_done
-  // level: arm after the real transaction has started, consume one completion.
+    always_comb begin
+      job_busy            = (q_occupancy != 8'd0);
+      job_active          = (q_occupancy != 8'd0);
+      job_start_cycle_reg = q_start_cycle[qi_req];
+      job_est_cycles_reg  = q_est_cycles[qi_req];
+      // The job being written back / completed: what the top's readback and
+      // the benches sample at job_done.  Idle, the last completed job's.
+      job_c_base_reg      = 64'(wb_pending ? q_c_base[qi_wb] : last_c_base);
+      job_id_reg          = wb_pending ? q_id[qi_wb] : last_id;
+    end
+
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        last_c_base <= '0;
+        last_id     <= 32'd0;
+      end else if (job_done) begin
+        last_c_base <= q_c_base[qi_wb];
+        last_id     <= q_id[qi_wb];
+      end
+    end
+
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) begin
+      if (ui_rst_n && job_fire && q_full)
+        $fatal(1, "context %0d: job %0d accepted into a full queue", DEVICE_ID, in_job_id);
+    end
+`endif
+  end else begin : JOB_LEGACY
+    assign job_done =
+        USE_EXTERNAL_SCHEDULER && job_active && wb_done && wb_fi_last;
+    assign job_accept_ready = 1'b0;
+
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        job_busy            <= 1'b0;
+        job_active          <= 1'b0;
+        job_id_reg          <= 32'd0;
+        job_device_id_reg   <= DEVICE_ID;
+        job_k_reg           <= 32'd0;
+        job_k_slab_reg      <= 32'd0;
+        job_start_cycle_reg <= 32'd0;
+        job_est_cycles_reg  <= 32'd0;
+        job_a_base_reg      <= 64'd0;
+        job_b_base_reg      <= 64'd0;
+        job_c_base_reg      <= 64'd0;
+      end else begin
+        if (job_fire) begin
+          // Acceptance is the job boundary.
+          job_busy            <= 1'b1;
+          job_active          <= 1'b1;
+          job_id_reg          <= in_job_id;
+          job_device_id_reg   <= in_device_id;
+          job_k_reg           <= in_k;
+          job_k_slab_reg      <= (in_k + 32'(WIN_K - 1)) & ~32'(WIN_K - 1);
+          job_start_cycle_reg <= in_start_cycle;
+          job_est_cycles_reg  <= in_est_cycles;
+          job_a_base_reg      <= in_a_base;
+          job_b_base_reg      <= in_b_base;
+          job_c_base_reg      <= in_c_base;
+        end
+        // Completion closes exactly the job that was accepted.
+        if (job_done) begin
+          job_busy   <= 1'b0;
+          job_active <= 1'b0;
+        end
+      end
+    end
+
+    // The queue is not used on this path; keep its counters quiet.
+    always_comb begin
+      n_accepted = 8'd0;
+    end
+  end
+  endgenerate
+
+  // Scheduler-facing completion is a one-cycle event per invocation: the
+  // array's publish pulse while a job is in flight (the array publishes one
+  // result per fold, in order).  The legacy arming below is kept for the
+  // single-fold path.
   assign scheduler_c_done =
-      USE_EXTERNAL_SCHEDULER && job_active && c_done_armed && c_done && !c_done_seen;
+      USE_EXTERNAL_SCHEDULER && job_active && c_valid_out;
 
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
@@ -339,18 +552,69 @@ module systolic_accel_context #(
   // =========================================================================
   wire tile_handoff;
 
-  always_ff @(posedge clk or negedge ui_rst_n) begin
-    if (!ui_rst_n)
-      tile_req <= 1'b0;
-    else if (USE_EXTERNAL_SCHEDULER &&
-             (job_fire || (job_active && tile_handoff && !compute_fi_last)))
-      tile_req <= 1'b1;
-    else if (tile_req && tile_ack)
-      tile_req <= 1'b0;
+  // External: one request per job, in job order.  The request for job n_req
+  // is raised as soon as that job is in the queue and the previous request's
+  // release has been consumed (fold_start seen), so the scheduler slot holds
+  // at most one request of this context and latches that job's start_cycle /
+  // est_cycles at tile_ack.  The release itself waits for accelerator_ready.
+  logic req_inflight;
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : REQ_PIPE
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        tile_req     <= 1'b0;
+        req_inflight <= 1'b0;
+        n_req        <= 8'd0;
+      end else begin
+        if (tile_req && tile_ack) begin
+          tile_req     <= 1'b0;
+          req_inflight <= 1'b1;
+          n_req        <= n_req + 8'd1;
+        end else if (!tile_req && !req_inflight && (n_req != n_accepted)) begin
+          tile_req <= 1'b1;
+        end
+        if (fold_start)
+          req_inflight <= 1'b0;
+      end
+    end
+  end else begin : REQ_LEGACY
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)
+        tile_req <= 1'b0;
+      else if (USE_EXTERNAL_SCHEDULER &&
+               (job_fire || (job_active && tile_handoff && !compute_fi_last)))
+        tile_req <= 1'b1;
+      else if (tile_req && tile_ack)
+        tile_req <= 1'b0;
+    end
+    always_comb begin
+      req_inflight = 1'b0;
+      n_req        = 8'd0;
+    end
   end
+  endgenerate
 
-  // The release is meaningful only once the FSM is in P_GO with a landed tile.
-  assign accelerator_ready = (phase == P_GO) && compute_ready;
+  // The release: legacy, only once the FSM is in P_GO with a landed tile.
+  // External, the next job's operands have landed, the array input has been
+  // idle long enough for every PE to see the boundary, and the result bank
+  // the job will publish into is free (feed_gap_ok / result_bank_free, from
+  // the compute core below).
+  wire feed_gap_ok;
+  wire compute_idle;
+  // A landed tile is offered one registered cycle after it lands, where the
+  // legacy path offered it (fill_complete -> compute_ready -> P_GO): an
+  // isolated job's fold starts exactly where it did, so the calibrated read
+  // term (c_read = 11, descriptor + first beat + release) is unchanged.
+  logic tile_waiting_d;
+  always_ff @(posedge clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) tile_waiting_d <= 1'b0;
+    else           tile_waiting_d <= tile_waiting;
+  end
+  assign accelerator_ready =
+      USE_EXTERNAL_SCHEDULER
+          ? (tile_waiting && tile_waiting_d && compute_idle && feed_gap_ok &&
+             result_bank_free && array_slot_free)
+          : ((phase == P_GO) && compute_ready);
 
   // =========================================================================
   // Addresses
@@ -368,7 +632,7 @@ module systolic_accel_context #(
 
   wire [AXI_ADDR_W-1:0] read_slab_addr =
       USE_EXTERNAL_SCHEDULER
-          ? AXI_ADDR_W'(job_a_base_reg)
+          ? q_a_base[qi_fill]
           : AXI_ADDR_W'(BASE_ADDR) + AXI_ADDR_W'(read_fi) * AXI_ADDR_W'(RX_BYTES);
 
   assign wb_region_base =
@@ -377,8 +641,11 @@ module systolic_accel_context #(
           : AXI_ADDR_W'(BASE_ADDR) + AXI_ADDR_W'(n_inv) * AXI_ADDR_W'(RX_BYTES) +
             AXI_ADDR_W'(WB_GAP_BYTES);
 
-  // Result tile stride is this array's own tile size.
-  assign wb_desc_addr  = wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT);
+  // Result tile stride is this array's own tile size.  External: one tile per
+  // job, at that job's own c_base.
+  assign wb_desc_addr  = USE_EXTERNAL_SCHEDULER
+                             ? wb_region_base
+                             : wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT);
   assign wb_desc_beats = BEAT_W'(WB_BEATS);
 
   // =========================================================================
@@ -402,12 +669,29 @@ module systolic_accel_context #(
   // the previous fill has long completed and no new descriptor has been
   // accepted yet).  read_done_fold can only be set again by a later
   // descriptor's read_done, by which time the register holds the new value.
+  //
+  // External: every job has its own k, so the writer's count is cleared when
+  // a job's descriptor is taken (the previous fill has completely landed by
+  // then: fill_complete) and the finishing line is that job's own words.
   logic [31:0] words_want;
-  always_ff @(posedge clk or negedge ui_rst_n) begin
-    if (!ui_rst_n) words_want <= 32'd0;
-    else           words_want <= (32'(read_fi) + 32'd1) * job_rx_words;
+  wire         desc_accept = desc_valid && op_desc_ready;
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : WANT_PIPE
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)        words_want <= 32'd0;
+      else if (desc_accept) words_want <= job_rx_words;
+    end
+  end else begin : WANT_LEGACY
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) words_want <= 32'd0;
+      else           words_want <= (32'(read_fi) + 32'd1) * job_rx_words;
+    end
   end
+  endgenerate
   wire fill_complete = read_done_fold && (words_written == words_want);
+  // What clears the operand writer's word count: the run boundary (legacy)
+  // or each descriptor (external).
+  wire wr_clear = USE_EXTERNAL_SCHEDULER ? desc_accept : run_clear;
 
   // =========================================================================
   // Compute / write-back overlap
@@ -422,6 +706,58 @@ module systolic_accel_context #(
   assign tile_handoff = (phase == P_FOLD) && !fold_start && c_done_fold &&
                         (wb_phase == W_IDLE);
 
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : CTL_PIPE
+    // -----------------------------------------------------------------------
+    // The pipelined control.  No phase FSM: the three stages run on the
+    // counters, and `phase` is derived from them in the old encoding for the
+    // benches and the board scripts (P_CALIB until memory is up; P_FOLD while
+    // the array is feeding or has a result outstanding; P_GO while a landed
+    // tile waits for its release; P_READ while a fill is in flight or queued;
+    // P_WB while only a write-back is left; P_DONE when idle).  run_clear
+    // (= P_CALIB) therefore happens once, at power-up, and never between
+    // jobs: the counters this file keeps per run (chk_wr, want_wr, chk_c,
+    // want_c, fill_cycles, ...) now accumulate over every job of the context.
+    // -----------------------------------------------------------------------
+    wire compute_outstanding = (n_fed != n_cv);
+    always_comb begin
+      if (!init_calib_complete)                           phase = P_CALIB;
+      else if (!compute_idle || compute_outstanding)      phase = P_FOLD;
+      else if (tile_waiting)                              phase = P_GO;
+      else if (fill_pending || read_active)               phase = P_READ;
+      else if (wb_pending || (wb_phase != W_IDLE))        phase = P_WB;
+      else                                                phase = P_DONE;
+      n_inv          = 4'd1;
+      fi             = 4'd0;
+      seed_start     = 1'b0;
+      fsm_fold_start = 1'b0;
+    end
+
+    // The fill stage: one descriptor at a time, for the next unfilled job,
+    // once memory is up and no completely filled tile is waiting -- the
+    // one-tile-waiting rule the legacy path has, which keeps the ping-pong
+    // buffer being written (n_filled % 2) distinct from the one being fed
+    // (n_fed % 2 = (n_filled - 1) % 2 while a tile waits).
+    //
+    // fill_ok is registered once before it raises desc_valid so that an
+    // isolated job's descriptor goes out exactly where it did on the legacy
+    // path (job_fire -> P_READ -> desc_valid: granted three cycles after
+    // acceptance), which is what the cost model's c_read = 11 was calibrated
+    // on; the overlap comes from WHEN the rule lets the fill start, not from
+    // shaving the latency of the request.
+    logic fill_ok_d;
+    wire  fill_ok = init_calib_complete && fill_pending && !tile_waiting &&
+                    !desc_started && !read_active;
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        fill_ok_d  <= 1'b0;
+        desc_valid <= 1'b0;
+      end else begin
+        fill_ok_d  <= fill_ok;
+        desc_valid <= fill_ok && fill_ok_d;
+      end
+    end
+  end else begin : CTL_LEGACY
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       phase          <= P_CALIB;
@@ -501,6 +837,8 @@ module systolic_accel_context #(
         desc_valid <= 1'b1;
     end
   end
+  end
+  endgenerate
 
   // ---- phase trace: one line per transition --------------------------------
   phase_t phase_prev;
@@ -515,6 +853,51 @@ module systolic_accel_context #(
   end
 
   // ---- write-back stage ------------------------------------------------------
+  // External: result n_wb (bank n_wb % 2) as soon as the array has published
+  // it, in order; wb_done completes job n_wb.  Legacy: the tile handed off
+  // from P_FOLD, as before.
+  logic wb_pending_d;
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : WB_PIPE
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n) begin
+        wb_phase      <= W_IDLE;
+        wb_bank       <= 1'b0;
+        wb_fi         <= 4'd0;
+        scan_c        <= '0;
+        wb_desc_valid <= 1'b0;
+        wb_pending_d  <= 1'b0;
+        n_wb          <= 8'd0;
+      end else begin
+        wb_desc_valid <= 1'b0;
+        wb_pending_d  <= wb_pending && (wb_phase == W_IDLE);
+        case (wb_phase)
+          // One registered cycle after the result is published, where the
+          // legacy hand-off (c_done -> c_done_fold -> tile_handoff) started
+          // the scan, so the write term stays the calibrated c_write; and the
+          // same registered cycle after a previous write-back's wb_done, so
+          // back-to-back write-backs are spaced exactly one write term apart
+          // (the cost model's writeEnd_j = max(computeEnd_j, writeEnd_j-1) +
+          // T_write).
+          W_IDLE: if (wb_pending && wb_pending_d) begin
+                    wb_bank  <= n_wb[0];
+                    scan_c   <= '0;
+                    wb_phase <= W_SCAN;
+                  end
+          W_SCAN: if (scan_c_last) wb_phase <= W_WB;
+                  else             scan_c   <= scan_c + 1'b1;
+          W_WB:   begin
+                    if (!wb_desc_started) wb_desc_valid <= 1'b1;
+                    if (wb_done) begin
+                      n_wb     <= n_wb + 8'd1;
+                      wb_phase <= W_IDLE;
+                    end
+                  end
+          default: wb_phase <= W_IDLE;
+        endcase
+      end
+    end
+  end else begin : WB_LEGACY
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear) begin
       wb_phase      <= W_IDLE;
@@ -543,6 +926,12 @@ module systolic_accel_context #(
       endcase
     end
   end
+  always_comb begin
+    n_wb         = 8'd0;
+    wb_pending_d = 1'b0;
+  end
+  end
+  endgenerate
 
   assign wb_active = (wb_phase == W_WB);
 
@@ -559,6 +948,41 @@ module systolic_accel_context #(
   end
 
   // ---- read pipeline flags ---------------------------------------------------
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : FLAGS_PIPE
+    // The stage counters: a landed tile, a started fold.  (desc_started,
+    // read_active and read_done_fold below are shared with the legacy path.)
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)          n_filled <= 8'd0;
+      else if (fill_complete) n_filled <= n_filled + 8'd1;
+    end
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)       n_fed <= 8'd0;
+      else if (fold_start) n_fed <= n_fed + 8'd1;
+    end
+    always_comb begin
+      read_pipeline_started = 1'b1;
+      reads_complete        = 1'b0;
+      read_fi               = 4'd0;
+      compute_fi            = 4'd0;
+      compute_ready         = tile_waiting;
+      filled_fi             = 4'd0;
+    end
+`ifndef SYNTHESIS
+    // The one-tile-waiting rule and the result-bank rule, checked as they
+    // happen: a fold must find a landed tile and a free bank; a fill must
+    // not start into the buffer being fed.
+    always_ff @(posedge clk) begin
+      if (ui_rst_n && fold_start && (!tile_waiting || !result_bank_free || !array_slot_free))
+        $fatal(1, "context %0d: fold %0d released without a landed tile, a free result bank or a free accumulator set",
+               DEVICE_ID, n_fed);
+      // The fill writes buffer n_filled % 2; the feed in progress reads
+      // buffer (n_fed - 1) % 2.
+      if (ui_rst_n && desc_accept && (n_filled[0] != n_fed[0]) && !compute_idle)
+        $fatal(1, "context %0d: fill %0d into the operand buffer being fed", DEVICE_ID, n_filled);
+    end
+`endif
+  end else begin : FLAGS_LEGACY
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear) read_pipeline_started <= 1'b0;
     else if (phase == P_READ)   read_pipeline_started <= 1'b1;
@@ -591,6 +1015,12 @@ module systolic_accel_context #(
       compute_ready <= 1'b0;
     end
   end
+  always_comb begin
+    n_filled = 8'd0;
+    n_fed    = 8'd0;
+  end
+  end
+  endgenerate
 
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear)             desc_started <= 1'b0;
@@ -703,7 +1133,7 @@ module systolic_accel_context #(
       .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
       .dst_full (dst_full), .dst_almost_full (dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr_slab), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
+      .words_written (words_written), .err_range (wr_err_range), .clear (wr_clear)
     );
 
     wire lane_in_array = (N_ARRAY >= N_WIRE) ? 1'b1 : (wsel < LANE_W_W'(N_ARRAY));
@@ -723,7 +1153,7 @@ module systolic_accel_context #(
 
     logic [31:0] chk_wr_q;
     always_ff @(posedge clk) begin
-      if (phase == P_CALIB) chk_wr_q <= '0;
+      if (run_clear)        chk_wr_q <= '0;
       else if (a_wr)        chk_wr_q <= chk_wr_q + (wdata_buf ^ wpos);
       else if (b_wr)        chk_wr_q <= chk_wr_q + (wdata_buf ^ (32'h8000_0000 | wpos));
     end
@@ -773,11 +1203,11 @@ module systolic_accel_context #(
       .dst_wr_en (dst_wr_en), .dst_wr_beat (dst_wr_beat), .dst_wr_data (dst_wr_data),
       .dst_full (dst_full), .dst_almost_full (dst_almost_full),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
-      .words_written (words_written), .err_range (wr_err_range), .clear (run_clear)
+      .words_written (words_written), .err_range (wr_err_range), .clear (wr_clear)
     );
 
     dma_wr_checksum_v2 #(.N (N_WIRE), .K_MAX (K_MAX), .AXI_DATA_W (AXI_DATA_W)) u_chk_wr (
-      .clk (clk), .rst_n (ui_rst_n), .clear (phase == P_CALIB),
+      .clk (clk), .rst_n (ui_rst_n), .clear (run_clear),
       .a_wr (a_wr), .b_wr (b_wr), .wsel (wsel), .waddr (waddr), .wdata (wdata_buf),
       .chk (chk_wr));
 
@@ -817,8 +1247,6 @@ module systolic_accel_context #(
   // C register, cycle counter.  Unchanged except that the array it feeds is
   // this context's own.
   // =========================================================================
-  wire [FEED_W-1:0] k_dim =
-      USE_EXTERNAL_SCHEDULER ? FEED_W'(job_k_reg) : FEED_W'(K_DIM);
 
   typedef enum logic [2:0] {
     ST_IDLE        = 3'd0,
@@ -828,6 +1256,17 @@ module systolic_accel_context #(
   } state_t;
   state_t            state;
   logic [FEED_W-1:0] feed_t;
+
+  // External: the depth of the job being fed -- the queue entry of the job
+  // about to be released while the array is idle (so the depth is already on
+  // k_dim in the fold_start cycle, where the benches' probes sample it), and
+  // the value latched at that fold_start while the feed runs (the queue
+  // entry may be overwritten by a later job meanwhile).
+  logic [31:0] feed_k;
+  wire [FEED_W-1:0] k_dim =
+      USE_EXTERNAL_SCHEDULER
+          ? ((state == ST_FEED) ? FEED_W'(feed_k) : FEED_W'(q_k[qi_fed]))
+          : FEED_W'(K_DIM);
 
   systolic_tile_feeder #(
     .N (N_ARRAY), .K_W (K_W), .FEED_W (FEED_W), .KDIM_W (FEED_W)
@@ -842,12 +1281,18 @@ module systolic_accel_context #(
 
   // ---- store final results ---------------------------------------------------
   // C is the live result image.  The write-back stage consumes an immutable
-  // snapshot: tile i publishes into bank i%2 (compute_fi[0], stable for the
-  // fold); the stage latches that index at tile_handoff and reads only its
-  // own bank.  Bank i%2 is rewritten by tile i+2 at the earliest, whose fold
-  // cannot start before tile i+1 was handed off, i.e. after tile i's
-  // write-back completed.
+  // snapshot.  Legacy: tile i publishes into bank i%2 (compute_fi[0], stable
+  // for the fold); the stage latches that index at tile_handoff and reads
+  // only its own bank.  Bank i%2 is rewritten by tile i+2 at the earliest,
+  // whose fold cannot start before tile i+1 was handed off, i.e. after tile
+  // i's write-back completed.
+  // External: the array publishes in fold order, so result n_cv goes to bank
+  // n_cv % 2 whatever fold is in flight by then; the fold of job j is only
+  // released once job j-2 -- the previous user of bank j % 2 -- has been
+  // written back (result_bank_free), so the bank is never overwritten under
+  // the write-back stage.
   logic [31:0] result_bank [0:1][0:N_ARRAY-1][0:N_ARRAY-1];
+  wire result_bank_sel = USE_EXTERNAL_SCHEDULER ? n_cv[0] : compute_fi[0];
 
   integer rr, cc;
   always_ff @(posedge clk) begin
@@ -858,15 +1303,85 @@ module systolic_accel_context #(
       if (c_valid_out) begin
         for (rr = 0; rr < N_ARRAY; rr = rr + 1)
           for (cc = 0; cc < N_ARRAY; cc = cc + 1) begin
-            C[rr][cc]                         <= c_out[rr][cc];
-            result_bank[compute_fi[0]][rr][cc] <= c_out[rr][cc];
+            C[rr][cc]                          <= c_out[rr][cc];
+            result_bank[result_bank_sel][rr][cc] <= c_out[rr][cc];
           end
         c_done <= 1'b1;
       end
     end
   end
 
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : CV_PIPE
+    always_ff @(posedge clk or negedge ui_rst_n) begin
+      if (!ui_rst_n)        n_cv <= 8'd0;
+      else if (c_valid_out) n_cv <= n_cv + 8'd1;
+    end
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) begin
+      if (ui_rst_n && c_valid_out && (n_cv == n_fed))
+        $fatal(1, "context %0d: the array published a result with no fold outstanding", DEVICE_ID);
+      if (ui_rst_n && c_valid_out && ((n_cv - n_wb) >= 8'd2))
+        $fatal(1, "context %0d: result %0d published into a bank still owned by write-back",
+               DEVICE_ID, n_cv);
+    end
+`endif
+  end else begin : CV_LEGACY
+    always_comb n_cv = 8'd0;
+  end
+  endgenerate
+
   // ---- main state progression --------------------------------------------------
+  // Legacy: ST_FEED -> ST_WAIT_RESULT (until the array publishes) -> ST_DONE
+  // -> ST_IDLE, one fold at a time.  External: ST_FEED -> ST_IDLE as soon as
+  // the last operand has been issued; the result is collected by the
+  // write-back stage when the array publishes it, and the next fold is held
+  // off by feed_gap_ok -- FEED_GAP idle cycles of the array input after this
+  // fold's k steps -- not by the publish.  That is the overlap the PE was
+  // built for: tile n_fed+1 accumulates while tile n_fed reduces.
+  logic [7:0] since_feed;   // cycles since the array input went idle (saturating)
+  generate
+  if (USE_EXTERNAL_SCHEDULER) begin : CORE_PIPE
+    // ST_FEED ends at feed_t = k + N - 2 (the last skewed boundary step),
+    // i.e. N - 1 cycles after the last step of row 0; the release that
+    // follows takes three cycles to reach ST_FEED (scheduler start, adapter,
+    // this FSM).  So the gap PE(0, 0) sees between the two tiles is
+    // (since_feed at release) + (N - 1) + 3 -- hold the release until that
+    // reaches FEED_GAP.  Every other PE sees the same gap, r + c later.
+    localparam integer GAP_IDLE_RAW = FEED_GAP - (N_ARRAY - 1) - 3;
+    localparam integer GAP_IDLE     = (GAP_IDLE_RAW > 0) ? GAP_IDLE_RAW : 0;
+
+    always_ff @(posedge clk) begin
+      if (rst_i) begin
+        state      <= ST_IDLE;
+        feed_t     <= '0;
+        feed_k     <= 32'd0;
+        since_feed <= 8'hFF;
+        compute_idx_lsb <= 1'b0;
+      end else begin
+        if (state == ST_FEED)       since_feed <= 8'd0;
+        else if (since_feed != 8'hFF) since_feed <= since_feed + 8'd1;
+        case (state)
+          ST_IDLE: begin
+            feed_t <= '0;
+            if (fold_start) begin
+              state           <= ST_FEED;
+              feed_t          <= '0;
+              feed_k          <= q_k[qi_fed];
+              compute_idx_lsb <= n_fed[0];
+            end
+          end
+          ST_FEED: begin
+            if (feed_t == k_dim + FEED_W'(N_ARRAY - 2)) state <= ST_IDLE;
+            else                                        feed_t <= feed_t + 1'b1;
+          end
+          default: state <= ST_IDLE;
+        endcase
+      end
+    end
+    assign compute_idle = (state == ST_IDLE);
+    assign feed_gap_ok  = (since_feed >= 8'(GAP_IDLE));
+  end else begin : CORE_LEGACY
   always_ff @(posedge clk) begin
     if (rst_i) begin
       state  <= ST_IDLE;
@@ -890,6 +1405,15 @@ module systolic_accel_context #(
       endcase
     end
   end
+  always_comb begin
+    feed_k          = 32'd0;
+    since_feed      = 8'd0;
+    compute_idx_lsb = 1'b0;
+  end
+  assign compute_idle = (state == ST_IDLE);
+  assign feed_gap_ok  = 1'b1;
+  end
+  endgenerate
 
   // ---- transaction cycle counter -------------------------------------------------
   // First beat of ST_FEED to the publish pulse, both ends inclusive -- the
@@ -979,7 +1503,7 @@ module systolic_accel_context #(
       scan_r_d   <= scan_r_i;
       scan_c_d   <= scan_c_i;
       c_rd       <= result_bank[wb_bank][scan_r_i][scan_c_i];
-      if (phase == P_CALIB)  chk_c <= '0;
+      if (run_clear)         chk_c <= '0;
       else if (scan_val_d)   chk_c <= chk_c + (c_rd ^ cpos);
     end
   end
@@ -994,14 +1518,16 @@ module systolic_accel_context #(
     endcase
   endfunction
 
+  // External: the constant belongs to the job whose fill just completed
+  // (queue entry n_filled, before the counter advances).
   wire [31:0] active_expected_wr_chk =
-      USE_EXTERNAL_SCHEDULER ? expected_wr_chk_for_k(job_k_reg) : EXPECT_WR_CHK;
+      USE_EXTERNAL_SCHEDULER ? expected_wr_chk_for_k(q_k[qi_fill]) : EXPECT_WR_CHK;
 
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
       want_wr <= '0;
       want_c  <= '0;
-    end else if (phase == P_CALIB) begin
+    end else if (run_clear) begin
       want_wr <= '0;
       want_c  <= '0;
     end else begin
@@ -1021,6 +1547,10 @@ module systolic_accel_context #(
   generate
     if (K_MAX < 1)
       $error("systolic_accel_context: K_MAX must be a positive integer");
+    if (JOB_QUEUE_DEPTH < 2 || (JOB_QUEUE_DEPTH & (JOB_QUEUE_DEPTH - 1)) != 0)
+      $error("systolic_accel_context: JOB_QUEUE_DEPTH must be a power of two, at least 2");
+    if (PE_QUIET_GAP < 0 || FEED_GAP_MARGIN < 0)
+      $error("systolic_accel_context: PE_QUIET_GAP and FEED_GAP_MARGIN must be non-negative");
     if (K_DIM < 1 || K_DIM > K_MAX)
       $error("systolic_accel_context: K_DIM must be in 1..K_MAX");
     if (RX_BYTES / (AXI_DATA_W / 8) > (1 << BEAT_W) - 1)

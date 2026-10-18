@@ -28,9 +28,13 @@ struct ExactSystolicOptimizationResult {
   llvm::SmallVector<SystolicExecutionTask> decomposition;
 
   /// The physical schedule of that decomposition: a tile occupies its
-  /// accelerator over [startCycle, endCycle), every invocation's read,
-  /// compute and write back to back (the RTL overlaps nothing within one
-  /// accelerator).
+  /// accelerator over [startCycle, endCycle) on the cost model's
+  /// per-accelerator timeline (::systolic::AcceleratorTimeline): the tiles
+  /// of one accelerator run in this order, each one's invocations after the
+  /// previous tile's. Serialized (pipeline_depth = 1) that is every
+  /// invocation's read, compute and write back to back and the intervals of
+  /// one accelerator do not overlap; on a pipelined accelerator consecutive
+  /// tiles' invocations overlap and so do the intervals.
   llvm::SmallVector<ScheduledSystolicTile> schedule;
 
   /// The smallest deadline T the search found feasible: every tile ends by
@@ -42,8 +46,9 @@ struct ExactSystolicOptimizationResult {
   /// shared read bandwidth, not an accelerator, decides T).
   int64_t scheduleEnd = 0;
 
-  /// The same schedule with only the compute terms: for each accelerator
-  /// the sum of its tiles' T_compute, maximized over the fleet. What the
+  /// The same schedule with transfers free: for each accelerator the end of
+  /// its tile stream on the compute-only timeline (the sum of its tiles'
+  /// T_compute when serialized), maximized over the fleet. What the
   /// schedule costs if reads and writes were free.
   int64_t computeOnlyMakespan = 0;
 
@@ -60,16 +65,20 @@ struct ExactSystolicOptimizationResult {
 /// whose reduction is `reduction` steps deep.
 ///
 /// Searches for the minimum feasible makespan T by binary search. For
-/// geometry g, one spatial tile costs
+/// geometry g, one accelerator runs its spatial tiles as one stream of
+/// invocations on the cost model's per-accelerator timeline
+/// (::systolic::AcceleratorTimeline). Serialized hardware: every tile costs
 ///
 ///   cost(g) = ::systolic::estimateTileCost(reduction, config(g)).sequential()
 ///           = sum over its I(g) = ceil(K / k_max(g)) invocations of
 ///             T_read + T_compute + T_write
 ///
-/// -- the cost model's number, not one kept here -- and for m physical
-/// accelerators of that geometry
+/// and the stream is those back to back; pipelined hardware overlaps
+/// consecutive invocations. The cost model's numbers, not ones kept here.
+/// For m physical accelerators of that geometry
 ///
-///   capacity(T) = m * floor(T / cost(g)).
+///   capacity(T) = m * (tiles of the stream that end by T)
+///               = m * floor(T / cost(g)) when serialized.
 ///
 /// All accelerators of one geometry must price a tile identically.
 ///
