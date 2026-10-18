@@ -341,7 +341,7 @@ fpga_config.txt); the co-simulation built by `test/e2e/cosim/build.sh` from
 the working tree has both (docs/ASYNC.md section 9 has the evidence runs).
 
     test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1, PIPELINE_DEPTH=4
-    cmake --build build --target check-systolic           # 81 lit tests, five for the async lowering
+    cmake --build build --target check-systolic           # 86 lit tests, eight for the async lowering and dynamic offsets
     test/e2e/run_e2e.sh --backend cosim                   # --mode sync: systolic-matmul --sync on every case
     test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
     SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
@@ -361,7 +361,17 @@ job, D two GEMMs interleaved, X the fold order checked bit for bit against
 the synchronous entry point, V the refusals, S the submission semantics --
 every submit back before the first completion, descriptors queued behind
 in-flight ones -- Q backpressure with the host queue cut to one, M three
-GEMMs waited for out of order); `--gemm MxNxK` sizes them. The
+GEMMs waited for out of order, P the poll / timed-wait / release API, F a
+transport failure in the middle of a submission); `--gemm MxNxK` sizes
+them. The runtime drives the link from a transfer thread of its own
+(docs/ASYNC.md section 11): fpga_tile_submit packs and queues, fpga_gemm_poll
+and fpga_tile_poll never block, fpga_gemm_wait_for takes a timeout,
+fpga_gemm_release frees a polled GEMM. The software model (soft_runtime.c)
+implements the same API, so `systolic-cc --runtime soft --submission async`
+checks a program's asynchronous lowering without the board
+(test/SystolicCC/async.c). A GEMM whose output view is placed by an
+integer parameter (C[r0 + i][j], a dynamic offset) is lowered end to end
+(test/SystolicCC/dynoffset.c; docs/ASYNC.md section 11.2). The
 RTL changes have their own benches:
 
     rtl/multi_200t/tile_pipelined/dma/tb/run_top_sim.sh v1 16 1 1          # the six regression gates, as before

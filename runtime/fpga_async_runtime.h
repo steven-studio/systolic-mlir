@@ -9,18 +9,44 @@ extern "C" {
 
 /*
  * The asynchronous FPGA runtime: many invocations in flight across the
- * 1x8x8 + 3x4x4 bitstream, on one DPTI session, from one host thread.
+ * 1x8x8 + 3x4x4 bitstream, on one DPTI session, driven by a transfer thread
+ * of its own.
  *
  * The scheduled entry point (fpga_matmul_tiled.h) is synchronous: every
  * call stages one operand slab, submits one descriptor and reads the result
  * before it returns, so the four accelerators run one at a time and the
- * link is idle while the host waits. This runtime separates the three
- * steps. A GEMM is opened with fpga_gemm_begin; its invocations ("tiles")
- * are handed over with fpga_tile_submit, which packs the operand slab at
- * once and returns; the runtime stages slabs, submits descriptors and
- * collects completion records whenever it is called (there is no thread of
- * its own -- a submit or a wait pumps the link); fpga_gemm_wait returns once
- * every tile of the GEMM has been accumulated into its C.
+ * link is idle while the host waits. This runtime separates the steps. A
+ * GEMM is opened with fpga_gemm_begin; its invocations ("tiles") are handed
+ * over with fpga_tile_submit, which packs the operand slab, queues the tile
+ * and returns -- it never waits for any tile's computation, only, with the
+ * host queue full, for room in it; the runtime's transfer thread stages
+ * slabs, submits descriptors and collects completion records on its own,
+ * attributing every result by the job_id of its record and accumulating it
+ * into C; fpga_gemm_poll and fpga_tile_poll report the state without
+ * blocking; fpga_gemm_wait_for waits for the GEMM's results with a timeout;
+ * fpga_gemm_wait waits for them all and releases the GEMM; fpga_gemm_release
+ * releases a GEMM that was polled or waited for.
+ *
+ * Ownership and lifetimes (2026-10-19):
+ *   A, B      read and packed inside fpga_tile_submit; the caller may reuse
+ *             or free them as soon as it returns.
+ *   C         the caller's; the transfer thread adds the tile's result into
+ *             it when the completion record arrives. It must stay allocated
+ *             and must not be read or written by the caller from the submit
+ *             until fpga_gemm_poll / fpga_tile_poll reports the tile done
+ *             (or failed), fpga_gemm_wait_for returns 0 (or an error), or
+ *             fpga_gemm_wait returns -- each of which orders the thread's
+ *             writes before the caller's reads.
+ *   gemm      valid from fpga_gemm_begin until fpga_gemm_wait returns or
+ *             fpga_gemm_release / fpga_async_runtime_close; a handle is
+ *             never reused while another GEMM is open.
+ *   slabs, descriptors, DDR slots, completion records, job_ids: the
+ *             runtime's; a job_id (epoch << 24 | sequence) is unique within
+ *             a session and reported by fpga_tile_poll and the trace.
+ * The API may be called from several caller threads; every call is
+ * serialized on the runtime's lock. The transport is used by the transfer
+ * thread only, so no caller's call waits for a slab write or a link read
+ * other than through the host queue.
  *
  * It needs a bitstream with the completion record (COMPLETION_HEADER=1 in
  * SYSTOLIC_FPGA_CONFIG, docs/ASYNC.md phase 2): every result is attributed
@@ -58,6 +84,9 @@ extern "C" {
  *        BAD_DEV): this tile ran nowhere; the link stays in step
  *   -19  the bitstream has no completion record (COMPLETION_HEADER is not
  *        1 in the configuration): this runtime cannot drive it
+ *   -20  fpga_gemm_wait_for: the timeout passed with tiles still outstanding
+ *        (the GEMM stays open)
+ *   -21  fpga_gemm_release: tiles still outstanding (nothing released)
  * A link failure (-3, -4, -6, -7, -8, -9) fails every tile in flight and
  * everything submitted afterwards (-14) until fpga_async_runtime_close.
  *
@@ -75,12 +104,22 @@ extern "C" {
  *                                so the context gets them back to back and
  *                                pipelines the tiles; 0: send each descriptor
  *                                as soon as its slab is in DDR
- *   SYSTOLIC_ASYNC_QUEUE_LIMIT   packed tiles held before a submit blocks on
- *                                the link (default 64)
- *   SYSTOLIC_ASYNC_READ_POLICY   when a non-blocking pump reads the link:
- *                                blocked (default: only once nothing more
- *                                can be written), always, wait (only in
- *                                fpga_gemm_wait and at the queue limit)
+ *   SYSTOLIC_ASYNC_QUEUE_LIMIT   packed tiles the host queue holds before a
+ *                                submit waits for room (default 64)
+ *   SYSTOLIC_ASYNC_BURST_HOLD_US burst mode: a device's first descriptors,
+ *                                held for a full burst, go out anyway once
+ *                                no tile has been submitted for this long
+ *                                (default 1000), so a polled GEMM completes
+ *   SYSTOLIC_ASYNC_READ_POLICY   when the transfer thread reads the link:
+ *                                blocked (default: once nothing more can be
+ *                                written), always (between writes too),
+ *                                wait (only while a caller waits or the
+ *                                host queue is full)
+ *   SYSTOLIC_ASYNC_POLL_US       the thread's pause after an empty read
+ *                                (default 50; the FT2232H itself paces an
+ *                                empty read by its latency timer), doubling
+ *                                with each further empty read up to
+ *   SYSTOLIC_ASYNC_POLL_MAX_US   (default 1000)
  *   SYSTOLIC_ASYNC_VIOLATE=1     send k = K_MAX + 1 to the bitstream instead
  *                                of refusing it on the host (tests of the
  *                                refusal path only)
@@ -114,11 +153,66 @@ int fpga_tile_submit(fpga_gemm_t *gemm,
                      unsigned start_cycle,
                      unsigned est_cycles);
 
-/* Pump the link until every tile of gemm has been accumulated (or failed),
- * then release gemm. 0, or the first error of any of its tiles: C then
- * holds the tiles that did complete, accumulated in order, and nothing of
- * the ones that did not. */
+/* Wait until every tile of gemm has been accumulated (or failed), then
+ * release gemm. 0, or the first error of any of its tiles: C then holds the
+ * tiles that did complete, accumulated in order, and nothing of the ones
+ * that did not. Equivalent to fpga_gemm_wait_for(gemm, FPGA_ASYNC_WAIT_FOREVER)
+ * followed by fpga_gemm_release(gemm). */
 int fpga_gemm_wait(fpga_gemm_t *gemm);
+
+/* ---- observing the work without blocking ------------------------------ */
+
+/* The state of one tile of a GEMM, by the identity the caller gave it
+ * (tile_id, k_index). */
+typedef enum {
+    FPGA_TILE_UNKNOWN = 0,   /* no tile of that identity in this GEMM */
+    FPGA_TILE_QUEUED,        /* packed on the host, waiting for an operand slot */
+    FPGA_TILE_STAGED,        /* operand slab in DDR, descriptor not yet sent */
+    FPGA_TILE_IN_FLIGHT,     /* descriptor sent, completion record pending */
+    FPGA_TILE_HELD,          /* result received, waiting for an earlier fold */
+    FPGA_TILE_DONE,          /* accumulated into C */
+    FPGA_TILE_FAILED         /* refused or failed: error says why */
+} fpga_tile_state_t;
+
+typedef struct {
+    fpga_tile_state_t state;
+    unsigned          job_id;   /* the descriptor's job_id (epoch << 24 | sequence) */
+    int               error;    /* FPGA_TILE_FAILED: the code; otherwise 0 */
+} fpga_tile_status_t;
+
+typedef struct {
+    unsigned submitted;         /* tiles fpga_tile_submit accepted */
+    unsigned queued, staged, in_flight, held;
+    unsigned completed;         /* accumulated into C */
+    unsigned failed;
+    int      first_error;       /* of the GEMM's tiles so far, 0 if none */
+    int      done;              /* every submitted tile completed or failed */
+    int      link_failed;       /* the session's link has failed (nothing more completes) */
+} fpga_gemm_status_t;
+
+/* The GEMM's progress, at once, without touching the link (the transfer
+ * thread does that). 0, or -17 for a handle that is not an open GEMM. */
+int fpga_gemm_poll(fpga_gemm_t *gemm, fpga_gemm_status_t *out);
+
+/* One tile's state, likewise. 0 (state FPGA_TILE_UNKNOWN when no such tile
+ * was submitted), or -17 for a handle that is not an open GEMM. */
+int fpga_tile_poll(fpga_gemm_t *gemm, unsigned tile_id, unsigned k_index,
+                   fpga_tile_status_t *out);
+
+/* Wait until every tile of gemm has been accumulated or failed, at most
+ * timeout_ms (FPGA_ASYNC_WAIT_FOREVER: no limit). 0 when they all
+ * completed; the first error of the GEMM's tiles (or the link's) when some
+ * failed; -20 when the timeout passed first. The GEMM stays open in every
+ * case: release it with fpga_gemm_release (or wait with fpga_gemm_wait). No
+ * tile may be submitted to the GEMM after its first wait. */
+#define FPGA_ASYNC_WAIT_FOREVER 0xffffffffu
+int fpga_gemm_wait_for(fpga_gemm_t *gemm, unsigned timeout_ms);
+
+/* Release a GEMM whose tiles are all over (completed or failed) or whose
+ * session's link has failed: its handle becomes invalid. -21 while a tile
+ * is still outstanding (nothing is released: C would still be written),
+ * -17 for a handle that is not an open GEMM. */
+int fpga_gemm_release(fpga_gemm_t *gemm);
 
 /* The last error fpga_gemm_begin reported, 0 if none. */
 int fpga_async_runtime_last_error(void);
@@ -185,13 +279,30 @@ typedef struct {
     unsigned long long submits_blocked;
     unsigned long long ns_submit_blocked;
     int first_error;
+    /* Where the time went, nanoseconds (2026-10-19, the transfer thread):
+     *   ns_submit         inside fpga_tile_submit, packing and queueing,
+     *                     without the time spent waiting for host-queue
+     *                     room (that is ns_submit_blocked);
+     *   ns_link_write     the transfer thread inside the transport's slab
+     *                     writes and descriptor submits;
+     *   ns_link_read      the transfer thread inside the transport's reads;
+     *   ns_collect        the transfer thread accumulating results into C;
+     *   ns_wait           callers inside fpga_gemm_wait / _wait_for.
+     * polls counts fpga_gemm_poll + fpga_tile_poll calls, waits_timed_out
+     * the fpga_gemm_wait_for calls that returned -20. */
+    unsigned long long ns_link_write;
+    unsigned long long ns_link_read;
+    unsigned long long ns_collect;
+    unsigned long long polls;
+    unsigned long long waits_timed_out;
 } fpga_async_stats_t;
 
 void fpga_async_runtime_get_stats(fpga_async_stats_t *out);
 void fpga_async_runtime_reset_stats(void);
 
-/* Close the session; every GEMM still open is dropped (its tiles are not
- * accumulated) and the link is left as it is. The next begin opens afresh
+/* Stop the transfer thread and close the session; every GEMM still open is
+ * dropped (its tiles are not accumulated; nothing is written to any C after
+ * this returns) and the link is left as it is. The next begin opens afresh
  * with a new job_id epoch, so a late completion of the old session is
  * recognised and discarded. */
 void fpga_async_runtime_close(void);

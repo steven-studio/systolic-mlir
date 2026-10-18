@@ -174,6 +174,7 @@ C 沒被碰、之後的 GEMM 正常）。2026-10-18 多了三個（第 10 節）
 `SYSTOLIC_ASYNC_QUEUE_LIMIT=1`、GEMM 放大四倍，submit 必須等空位——等的是任一舊 job 的
 completion 騰出的 operand slot，不是前一筆 job；在飛數永不超過 depth）、M（三個不同形狀的
 GEMM 輪流送、反序 wait，每個 GEMM 在自己的 wait 回來後、其他兩個還在飛時就逐元素檢查）。
+2026-10-19 再加 P（poll／wait_for／release 的語意，第 11.1 節）與 F（提交中途鏈路失敗）。
 A–D 用小整數，逐元素對 int64 參考。`--gemm MxNxK`、
 `--devices`、`--stage` 可調；每個 mode 自己開關一個 session。
 
@@ -448,6 +449,130 @@ completion 立刻補上。
 - `fpga_tile_submit` 的 wall time 含 pump 的鏈路寫入（上面）；真正的非阻塞要把寫入搬到另一條 thread，
   沒做。
 
+
+## 11. 完整的非同步 Runtime API 與 Dynamic Offset 的 FPGA lowering（2026-10-19）
+
+### 11.1 Runtime：transfer thread 與 poll／wait_for／release
+
+第 10 節的 runtime 把所有鏈路工作放在呼叫者的 thread 上（`fpga_tile_submit` 裡 pump）：submit
+不等 job 完成，但它的 wall time 含 slab 寫入，`fpga_gemm_wait` 是唯一的觀察方式，GEMM 在 wait 時
+一併釋放。現在（`runtime/fpga_async_runtime.{h,cpp}`）：
+
+- **一條 transfer thread 持有 DPTI session**：stage slab、送 descriptor、讀 completion record、
+  依 job_id 對回 tile、k_index 順序累加進 C，都在它上面；呼叫者的 thread 只打包 slab 與排隊。一個
+  mutex 保護兩邊共用的結構，thread 在每次傳輸呼叫**之前**放鎖、之後再取，所以 submit／poll 從不等
+  一筆 slab 寫入或一次鏈路讀取（mode P 量到：worker 正在寫 slab 時 `fpga_gemm_poll` 最長 10.5 µs、
+  `fpga_tile_poll` 59.6 µs）。兩個 condition variable：`cv_worker`（新 tile、有人在等、關閉）、
+  `cv_caller`（completion、host queue 有空位、鏈路失敗）；沒事做時 thread 睡在 cv 上，空讀之後的
+  暫停從 `SYSTOLIC_ASYNC_POLL_US`（50）起每次加倍到 `SYSTOLIC_ASYNC_POLL_MAX_US`（1000）——板上
+  FT2232H 本來就以 latency timer 節流空讀，co-sim 上每個 request 都花模擬時間——不忙等。
+- **API**（都在 runtime 的鎖上序列化，可從多個呼叫者 thread 呼叫）：
+  | 呼叫 | 語意 |
+  |---|---|
+  | `fpga_gemm_begin` | 開一個 GEMM，回 handle（session 內不重用） |
+  | `fpga_tile_submit` | 打包 A／B、排隊、回來；只在 host queue 滿（`SYSTOLIC_ASYNC_QUEUE_LIMIT`，64）時等**任一** completion 騰出的空位，從不等某筆 job |
+  | `fpga_gemm_poll` | 不阻塞：submitted／queued／staged／in_flight／held／completed／failed、first_error、done、link_failed |
+  | `fpga_tile_poll` | 不阻塞：某個 (tile_id, k_index) 的狀態（queued → staged → in_flight → [held] → done｜failed）、它的 job_id、錯誤碼 |
+  | `fpga_gemm_wait_for(gemm, ms)` | 等到全部 tile 完成或失敗，最多 ms（`FPGA_ASYNC_WAIT_FOREVER` 不限）；逾時回 -20，GEMM 仍開著 |
+  | `fpga_gemm_wait` | = wait_for(forever) + release（原本的契約，compiler 生的程式碼用這個） |
+  | `fpga_gemm_release` | 釋放已完成（或鏈路已失敗）的 GEMM；還有 tile 在飛回 -21、什麼都不動 |
+  | `fpga_async_runtime_close` | 停 thread、關 session；所有還開著的 GEMM 丟掉，之後不會再寫任何 C |
+- **擁有權**（header 第一段）：A、B 在 submit 裡讀完、回來後可重用；C 是呼叫者的，transfer thread
+  在 completion 到時寫它，從 submit 到 poll／wait 回報 done 之前呼叫者不能讀寫；handle 從 begin 到
+  wait／release／close 有效；slab、descriptor、DDR slot、record、job_id 是 runtime 的。
+- **錯誤**：submit 後鏈路失敗（mode F，`SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`）：失敗前收下的 submit
+  全部以 -4 失敗、之後的 submit 回 -14、wait 回 -4、`fpga_tile_poll` 每筆都是 failed/-4、C 一個元素
+  都沒被碰、鏈路上只有三塊 slab（3099 B）、之後的 begin 回 NULL/-14，close 之後新 session 正常。
+  refusal（mode V）、k-ordered 累加（mode X）、多 GEMM（mode D／M）都不變。
+- **時間拆開算**（`fpga_async_stats_t`、timing 行、`systolic-matmul` 的 `time:` 行）：
+  `ns_submit`（打包＋排隊）、`ns_submit_blocked`（等 host queue 空位）、`ns_link_write`（thread 在
+  slab／descriptor 寫入裡）、`ns_link_read`（thread 在讀取裡）、`ns_collect`（累加進 C）、`ns_wait`
+  （呼叫者在 wait 裡）、`polls`、`waits_timed_out`。
+- **burst 的放行順序**：有人在等（或 `SYSTOLIC_ASYNC_BURST_HOLD_US`=1000 µs 沒有新 submit）時先把
+  放得下的 slab 全部 stage 再送 descriptor（slabs first，與第 9 節單 thread 時 submit 同步 stage 的順
+  序相同——e2e 注入失敗的檢查靠它），其餘時間空出的 credit 先用。
+
+**軟體模型**（`runtime/offload/soft_runtime.c`）實作同一組 API：submit 複製 A／B、排隊、不算；
+poll 跑一筆、wait 跑完該 GEMM 需要的；k_index 順序累加；`SOFT_RUNTIME_FAULT=fail` 讓第 N 筆
+submit（process 內計數）以 -8 失敗並把「鏈路」標成失敗直到 close（與真 runtime 相同）。
+`fpga_matmul_tiled_auto_scheduled` 現在是它上面的 wrapper（一個 GEMM 一個 tile，submit + wait，
+每次呼叫後重開「鏈路」，所以一個 fault 只花那一次 invocation——舊語意不變）。`systolic-cc --runtime
+soft --submission async` 因此可用（預設仍是 sync，lit 的 `test/SystolicCC` 舊期望不變）；
+`test/SystolicCC/async.c` 跑 program.c 的程式走非同步 lowering：37 個 `fpga_tile_submit`、2 個 wait、
+輸出與 clang 相同、`--verify` 逐位元、fault 之後整個 session 的 GEMM 都 fallback 到 CPU（真 runtime
+的語意）。板上的 `fpga_matmul_tiled_auto_scheduled`（`fpga_matmul_tiled.cpp`）**沒有**改成 wrapper：它
+是沒有 completion record 的 bitstream 唯一能用的路，而且 e2e sync 模式逐 byte 比對它的鏈路序列。
+
+### 11.2 Dynamic Offset：從 C 原始碼到 runtime 的指標
+
+之前「C view 的 offset 是動態的就走 per-tile fallback」其實到不了 lowering——整條路在更前面就拒絕：
+
+| 階段 | 之前 | 現在 |
+|---|---|---|
+| C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式），shim 用它們在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數 |
+| 辨識（`AffineMatmulAnalysis.cpp`） | access map 有 symbol → failure | `separateSymbols`：每個 result 拆成 loop 部分 + symbol 部分（+ 常數），symbol 部分非線性（symbol×dim、floordiv）→ failure；loop 部分照舊辨識；symbol 部分存成 `LogicalMatmul::symbolicA/B/C`（0 dim、S symbol、每個 memref 維度一個 result）+ `symbolsA/B/C` |
+| view（`AffineMatmulToSystolic.cpp`） | `std::array<int64_t,2> offsets` 靜態 subview | `LogicalOperand::symbolic`：有 symbol 的維度以 `arith` 運算算出 index 值，`memref.subview %C[%off, 0] [8, 16] [1, 1]` → `memref<8x16xf32, strided<[16, 1], offset: ?>>`；有 symbol 的維度不做靜態邊界檢查（與動態 extent 同一條規則：nest 自己的保證，tile 不碰 nest 沒碰的元素）；A×A 的 `sameView` 連 symbol 一起比 |
+| lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset／stride 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代 |
+| runtime | 指標 + ldc | 不變 |
+
+同一個編譯出的函式可以用任何 offset 呼叫（`dynoffset.c`：同一函式 0／8／16／24／5 等呼叫，每次
+verify 的元素數 `(r0 + 8) × 16` 不同）。邊界 tile、K fold（40 = 16+16+8）、access stride（`C[2i + r0]`）、
+兩個 GEMM 在同一函式都走完整路徑；仍拒絕的：A 與 C 是同一 memref 的 view（「A may overlap C」，不
+因 offset 運算式不同就當成不重疊）、無號參數、`off + i*ldc`（symbol × counter）、符號化的 loop 邊界。
+
+**GEMM 之間的順序**：front end 在每個 nest 後面立刻 `materialize_in_destination`，它是結果的第一
+個 reader，所以同一函式的兩個 nest 一前一後各自 wait。lowering 另外把「後面的 GEMM 的 view 可能
+碰到前面 GEMM 寫的 buffer」（同一 root memref、不是兩個靜態不相交的 box——動態 offset 的 view 一律
+視為可能重疊）當成前者的 reader：手寫 IR 把 write-back 延後也保住記憶體依賴；靜態不相交的 view 兩
+個 GEMM 同時在飛（`affine_to_fpga_two_gemms.mlir`）。另一個修掉的 bug：直接用 to_tensor 的 memref
+（第 10 節）曾把「後一個 GEMM 的 A 是前一個 GEMM 的結果」的 SSA 依賴也跳掉，`fpga_lowering_async.mlir`
+的 `@dependent` 抓到——現在只對非本 lowering 結果的 to_tensor 走捷徑。
+
+### 11.3 證據（co-sim，K_MAX 16／16，depth 4；板子 NOT RUN）
+
+| 執行 | 結果 |
+|---|---|
+| lit | 86/86（新：`affine_gemm_symbolic_offset.mlir`、`affine_to_fpga_symbolic.mlir`、`affine_to_fpga_two_gemms.mlir`、`SystolicCC/async.c`、`SystolicCC/dynoffset.c`） |
+| `check-e2e-config` | 107/107 |
+| `runtime-async-test --mode all`（11 個 mode：A B C D X V S Q M P F） | PASS |
+| mode P | 20 submit 後第一次 poll：submitted 20、done 0；`wait_for(1 ms)` -20；wait 後 submit -17；poll 到 done（queued → staged → in_flight → done）；release 0、再 poll -17；有 tile 在飛時 release -21；最長 poll 10.5 µs／59.6 µs |
+| mode F | 收下 10 筆後鏈路失敗：wait -4、completed 0、failed 10、之後 submit -14、tile_poll 全 failed/-4、C 未被寫、鏈路 3099 B、begin NULL/-14、close 後新 GEMM PASS |
+| mode S 64x64x64（640 tiles，threaded） | 16 筆在第一筆 completion 前、622 筆排在在飛的後面、568 筆等 credit、557 筆 submit 等 host queue；host trace `--strict` 過（waited_for_previous 0） |
+| `run_e2e.sh --backend cosim --quick` sync／async | 26/26、26/26（注入失敗 -6／-4 如預期） |
+| `dynoffset.c` on cosim（`systolic-cc --runtime board`，預設非同步） | 12 個 GEMM、91 tiles 全在 FPGA、11 次 verify 逐位元、輸出與 clang 相同；`--submission sync` 同 |
+| `run_board.sh --board-is-free`（cosim）program／faults／fallback／dynoffset／async | 5/5 PASS、0 fallback |
+
+### 11.4 量測（同一個 co-sim、同一組輸入；wall-clock 是 Verilator 的速度，不是板子）
+
+| 問題 | 路徑 | tiles | 第一筆 completion 前的 descriptor | 等 host queue 的 submit | submit 時間 | 鏈路寫／讀（thread） | wait | 總 wall | RTL makespan（拍） |
+|---|---|---|---|---|---|---|---|---|---|
+| 16x16x16 | `--sync` | 10 | — | — | — | — | — | 2.415 s | 58 630 |
+| 16x16x16 | 預設（async） | 10 | 10 | 0 | 3.8 ms | 0.11 / 3.9 ms | 2.20 s | 2.208 s | 7 002 |
+| 13x11x37（邊界 tile、K fold） | `--sync` | 18 | — | — | — | — | — | 4.337 s | 111 063 |
+| 13x11x37 | async | 18 | 14 | 0 | 0.22 ms | 0.21 / 7.4 ms | 3.97 s | 3.974 s | 49 743 |
+| 32x32x64 | `--sync` | 148 | — | — | — | — | — | 35.74 s | 953 410 |
+| 32x32x64 | async | 148 | 16 | 65（15.2 s） | 1.7 ms | 2.0 / 61.7 ms | 17.8 s | 33.01 s | 847 313 |
+| `runtime-async-test --mode S` 32x32x32 | async | 80 | 16 | 0 | 最後一筆 submit 0.67 ms 回來 | | | 17.7 s | |
+| `--mode M` 三個 GEMM 同時 | async | 242 | 16 | 159 | | | | 53.6 s | GEMM 2 在 159/242 完成時已驗證 |
+| `dynoffset.c`（12 GEMM、91 tiles） | sync／async | 91 | | | | | | 23.16 s／20.52 s | |
+
+讀法：submit 本身只要打包（µs 級），鏈路寫入全在 thread 上（ms 級）；wait 是等硬體；co-sim 的
+wall-clock 幾乎都是 Verilator 跑 RTL 的時間，所以 sync 與 async 相差不大（8–10%），而 RTL 端的
+makespan（descriptor 連續到達、queue 被餵滿）小 1.1–8 倍——板上的 wall-clock 才會反映這個差距，
+**沒有量**。
+
+### 11.5 限制
+
+- 板子：NOT RUN（bitstream、`run_e2e.sh --backend board`、`run_board.sh`、dynoffset 真板）。
+- context 的 job queue 在這條鏈路上最多 2 個 job（第 10.3 節的結論不變）。
+- 同一 memref 的兩個動態 offset view 在同一函式 → 一律序列化（lowering 無法證明不相交）；front end
+  的 nest 本來就逐個 write-back。
+- 辨識器的 logical coordinate 是所有 operand 共用的：只有 C 有常數 offset（`C[i+1][j] += A[i][k]…`）或
+  只有 C 有 stride 仍不被辨識（與 symbol 無關的既有邊界）。
+- symbol 只能是加法項（常數係數）；symbol × counter、symbol 在 loop 邊界、無號參數：拒絕。
+- 軟體模型的非同步 API 在 poll／wait 時才算（沒有 thread）；它是契約的模型，不是硬體。
+- `fpga_tile_submit` 在 host queue 滿時仍會等（等空位，不是等 job）；沒有「立即回 EAGAIN」的變體。
+
 ## 8. 檔案
 
 | 階段 | 檔案 |
@@ -458,6 +583,7 @@ completion 立刻補上。
 | 3 | `runtime/fpga_async_runtime.{h,cpp}`、`runtime/CMakeLists.txt`、`test/e2e/runtime_async_test.cpp`、`test/e2e/CMakeLists.txt` |
 | 4 | `lib/Systolic/Transforms/SystolicBinarySearchTileMatmulPass.cpp`、`TileMatmulForFpga.cpp`、`SystolicPipelines.cpp`、`include/Systolic/Passes.h`、`tools/systolic-matmul/systolic-matmul.cpp`、`test/Systolic/binary_search_ids.mlir`、`fpga_lowering_async.mlir`、`bad_fpga_lowering_async.mlir`、`test/e2e/run_e2e.sh --mode`、`e2e_verdict.py --mode/--header` |
 | 5 | 這份文件、`docs/E2E.md`、`REPRODUCE.md` |
+| 11 | `runtime/fpga_async_runtime.{h,cpp}`（transfer thread、poll／wait_for／release、時間拆分）、`runtime/offload/soft_runtime.c`（非同步 API 的模型 + 同步 wrapper）、`tools/systolic-cfront/systolic-cfront.c`（整數參數 = affine symbol、extent 運算式）、`lib/Systolic/Transforms/AffineMatmulAnalysis.cpp`（`separateSymbols`）、`AffineMatmulToSystolic.cpp`（動態 offset 的 view）、`TileMatmulForFpga.cpp`（動態 layout 的指標、GEMM 間的記憶體順序）、`tools/systolic-cc/systolic-cc.c`（`--submission async` on soft、`leading_extent_expr`）、`test/e2e/runtime_async_test.cpp`（P／F）、`test/SystolicCC/{async,dynoffset}.c`、`test/Systolic/affine_{gemm_symbolic_offset,to_fpga_symbolic,to_fpga_two_gemms}.mlir` |
 | 10 | `lib/Systolic/Transforms/TileMatmulForFpga.cpp`（strided 根、segmentation）、`runtime/fpga_async_runtime.{h,cpp}`（burst 放行、計數器、trace）、`runtime/offload/board_stats.c`、`tools/systolic-matmul/systolic-matmul.cpp`（預設非同步、`--sync`）、`tools/systolic-cc/systolic-cc.c`（`--submission`）、`test/e2e/runtime_dispatch_test.cpp`（`COMPLETION_HEADER=`）、`test/e2e/runtime_async_test.cpp`（S／Q／M）、`test/e2e/run_e2e.sh`、`test/e2e/affine_c/run.sh`、`test/e2e/systolic_cc/run_board.sh`、`test/e2e/test_e2e_config.sh`、`tools/cosim_overlap_evidence.py`、`test/Systolic/affine_to_fpga_pipeline_async.mlir`、`fpga_lowering_async_split.mlir`、`bad_fpga_lowering_async.mlir` |
 
 ## 9. 與 pipelined context 的整合（2026-10-18）

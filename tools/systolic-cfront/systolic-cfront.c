@@ -34,8 +34,17 @@
  *                expressions; i declared in the for, never written in the
  *                body. Becomes affine.for LB to UB step S (<=: UB + 1).
  *   subscripts   every array access subscripts all dimensions; each subscript
- *                is an affine expression of the enclosing loop counters and
- *                integer constants (+, -, constant *).
+ *                is an affine expression of the enclosing loop counters,
+ *                integer constants and the function's signed integer
+ *                parameters (+, -, constant *): C[r0 + i][j] with int r0.
+ *                A parameter is an affine symbol of the nest -- its value
+ *                is whatever the caller passed, the view of the array the
+ *                nest touches is offset by it at run time (a "dynamic
+ *                offset"), and nothing in the translation fixes it. C
+ *                evaluates r0 + i in int, where overflow is undefined, so
+ *                the index arithmetic (exact, in index) agrees with every
+ *                defined execution; unsigned parameters, whose arithmetic
+ *                wraps, are not accepted in subscripts.
  *   arithmetic   + - * / and unary - on float/double, floating literals,
  *                integer constants converted to floating point, and C's own
  *                implicit float <-> double conversions (arith.extf/truncf).
@@ -367,6 +376,13 @@ typedef struct {
   int inner_dims[MAX_RANK];
   /* ENV_SCALAR */
   /* (elem above) */
+  /* ENV_INTSCALAR: the index-typed copy usable as an affine symbol, its C
+     name (for the interface's extent expressions), and whether the C type
+     is signed (only signed parameters may offset a subscript) */
+  char *sym_name;
+  const char *cname;
+  int is_signed;
+  int bits;                    /* 32 or 64, as the parameter is passed */
   /* ENV_IV: the counter's first and last values, unless it runs zero times */
   int has_values;
   long long first, last;
@@ -378,6 +394,11 @@ typedef struct {
   int has_ranges;
   int rank;
   long long lo[MAX_RANK], hi[MAX_RANK];
+  /* Subscripts that use a parameter: the range of the leading subscript is
+     a C expression of the parameters (what the caller-side shim needs to
+     size the array it snapshots), lo_expr / hi_expr, or NULL while every
+     range is static. */
+  char *lo_expr, *hi_expr;
 } access_info;
 
 typedef struct {
@@ -625,8 +646,21 @@ static char *affine_index(translator *tr, const json_value *node,
       form->n = 1;
       return xstrdup(e->name);
     }
+    if (e && e->kind == ENV_INTSCALAR) {
+      if (!e->is_signed)
+        unsupported(node, "subscript uses the unsigned parameter '%s'; only "
+                          "signed integer parameters can offset a subscript "
+                          "(unsigned arithmetic wraps, which is not affine)",
+                    referenced_name(node));
+      memset(form, 0, sizeof *form);
+      form->ids[0] = e->decl;
+      form->coef[0] = 1;
+      form->n = 1;
+      return format("symbol(%s)", e->sym_name);
+    }
     unsupported(node, "subscript uses '%s', which is not an enclosing loop "
-                      "counter", referenced_name(node));
+                      "counter or a signed integer parameter",
+                referenced_name(node));
   }
   if (strcmp(kind, "UnaryOperator") == 0 && strcmp(op, "-") == 0) {
     linear_form f;
@@ -662,14 +696,27 @@ static char *affine_index(translator *tr, const json_value *node,
 }
 
 /* Exact (min, max) of a linear form over the enclosing loops' box; 0 if some
-   enclosing loop runs zero times (the access never executes). */
+   enclosing loop runs zero times (the access never executes). The terms in
+   parameters (symbols) are left out of lo / hi and returned as a C
+   expression in *sym ("+ (r0) * 2", NULL when there are none): the range
+   is then lo + sym .. hi + sym at run time. */
 static int form_range(translator *tr, const linear_form *f, long long *lo,
-                      long long *hi, const json_value *node) {
+                      long long *hi, char **sym, const json_value *node) {
   long long l = f->constant, h = f->constant;
+  char *symbolic = NULL;
   for (size_t i = 0; i < f->n; ++i) {
     env_entry *e = env_find(tr, f->ids[i]);
-    if (!e->has_values)
+    if (e->kind == ENV_INTSCALAR) {
+      char *more = format("%s + (%s) * %lldLL", symbolic ? symbolic : "",
+                          e->cname, f->coef[i]);
+      free(symbolic);
+      symbolic = more;
+      continue;
+    }
+    if (!e->has_values) {
+      free(symbolic);
       return 0;
+    }
     long long a = checked(f->coef[i], e->first, '*', node);
     long long b = checked(f->coef[i], e->last, '*', node);
     l = checked(l, a < b ? a : b, '+', node);
@@ -677,6 +724,10 @@ static int form_range(translator *tr, const linear_form *f, long long *lo,
   }
   *lo = l;
   *hi = h;
+  if (sym)
+    *sym = symbolic;
+  else
+    free(symbolic);
   return 1;
 }
 
@@ -732,9 +783,10 @@ static env_entry *array_access(translator *tr, const json_value *node,
   info->read |= read;
   info->written |= written;
   long long lo[MAX_RANK], hi[MAX_RANK];
+  char *sym[MAX_RANK] = {0};
   int all = 1;
   for (size_t d = 0; d < count; ++d)
-    if (!form_range(tr, &forms[d], &lo[d], &hi[d], node))
+    if (!form_range(tr, &forms[d], &lo[d], &hi[d], &sym[d], node))
       all = 0;
   if (all) {
     for (size_t d = 0; d < count; ++d) {
@@ -743,8 +795,37 @@ static env_entry *array_access(translator *tr, const json_value *node,
       if (!info->has_ranges || hi[d] > info->hi[d])
         info->hi[d] = hi[d];
     }
+    /* The leading subscript's range as a C expression of the parameters:
+       the extreme over the accesses, each "constant + symbolic terms". */
+    if (sym[0] || info->lo_expr) {
+      char *lo_e = format("(%lldLL%s)", lo[0], sym[0] ? sym[0] : "");
+      char *hi_e = format("(%lldLL%s)", hi[0], sym[0] ? sym[0] : "");
+      if (!info->lo_expr) {
+        if (info->has_ranges) {
+          /* earlier accesses were static: fold their range in */
+          char *l2 = format("((%lldLL) < %s ? (%lldLL) : %s)", info->lo[0], lo_e,
+                            info->lo[0], lo_e);
+          char *h2 = format("((%lldLL) > %s ? (%lldLL) : %s)", info->hi[0], hi_e,
+                            info->hi[0], hi_e);
+          free(lo_e); free(hi_e);
+          lo_e = l2; hi_e = h2;
+        }
+        info->lo_expr = lo_e;
+        info->hi_expr = hi_e;
+      } else {
+        char *l2 = format("(%s < %s ? %s : %s)", info->lo_expr, lo_e,
+                          info->lo_expr, lo_e);
+        char *h2 = format("(%s > %s ? %s : %s)", info->hi_expr, hi_e,
+                          info->hi_expr, hi_e);
+        free(info->lo_expr); free(info->hi_expr); free(lo_e); free(hi_e);
+        info->lo_expr = l2;
+        info->hi_expr = h2;
+      }
+    }
     info->has_ranges = 1;
   }
+  for (size_t d = 0; d < count; ++d)
+    free(sym[d]);
 
   size_t len = 1;
   for (size_t d = 0; d < count; ++d)
@@ -1133,15 +1214,19 @@ static char *parameter(translator *tr, const json_value *p) {
       return format("%s: %s %s", name, ft, loc_text(tr, p));
     }
     if (int_type_max(t, NULL)) {
-      /* Accepted as a parameter, so that a use of it is reported where it is
-         used (a symbolic bound, a subscript) -- every use is outside the
-         subset. */
+      /* An integer parameter: an affine symbol of the function's nests
+         (usable as an additive subscript term when signed), passed as i32 /
+         i64 and cast to index at the function's entry (see function()). A
+         use as a loop bound is still outside the subset. */
       char *name = unique(tr, pname);
       env_entry *e = env_add(tr, json_string(json_get(p, "id"), ""),
                              ENV_INTSCALAR);
       e->name = name;
-      return format("%s: i%d %s", name, strstr(t, "long") ? 64 : 32,
-                    loc_text(tr, p));
+      e->cname = xstrdup(pname);
+      e->is_signed = strstr(t, "unsigned") == NULL && strcmp(t, "_Bool") != 0;
+      e->sym_name = format("%s_idx", name);
+      e->bits = strstr(t, "long") ? 64 : 32;
+      return format("%s: i%d %s", name, e->bits, loc_text(tr, p));
     }
     unsupported(p, "parameter '%s' of type '%s' is not a float/double array "
                    "or scalar", pname, qual_type(p));
@@ -1243,9 +1328,20 @@ static void interface(translator *tr, const json_value *fn,
          accesses reach (0: never accessed). */
       int ranges = info && info->has_ranges;
       fprintf(out, ", \"elem\": \"%s\", \"leading_extent\": %lld, "
-                   "\"leading_min\": %lld, \"inner_dims\": [",
+                   "\"leading_min\": %lld",
               e->elem, ranges ? info->hi[0] + 1 : 0,
               ranges ? info->lo[0] : 0);
+      /* Subscripts in parameters: the leading extent and minimum as C
+         expressions of the parameters, exact at run time. */
+      if (ranges && info->hi_expr) {
+        fprintf(out, ", \"leading_extent_expr\": ");
+        char *ext = format("(%s + 1LL)", info->hi_expr);
+        json_escape(out, ext);
+        free(ext);
+        fprintf(out, ", \"leading_min_expr\": ");
+        json_escape(out, info->lo_expr);
+      }
+      fprintf(out, ", \"inner_dims\": [");
       for (int d = 0; d < e->rank - 1; ++d)
         fprintf(out, "%s%d", d ? ", " : "", e->inner_dims[d]);
       fprintf(out, "], \"read\": %s, \"written\": %s, \"noalias\": %s",
@@ -1312,6 +1408,14 @@ static void function(translator *tr, const json_value *fn) {
   }
   emit(tr, 1, "func.func @%s%s(%s) {", json_string(json_get(fn, "name"), ""),
        tr->symbol_suffix, args);
+  /* Every integer parameter as an index at the top of the function: a
+     top-level value, hence a valid affine symbol for the nests below. */
+  for (size_t i = 0; i < tr->env_n; ++i) {
+    env_entry *e = &tr->env[i];
+    if (e->kind == ENV_INTSCALAR)
+      emit(tr, 2, "%s = arith.index_cast %s : i%d to index %s", e->sym_name,
+           e->name, e->bits, loc_text(tr, fn));
+  }
   statements(tr, json_get(body, "inner"), 2, 1);
   emit(tr, 2, "func.return %s", loc_text(tr, body));
   emit(tr, 1, "} %s", loc_text(tr, fn));

@@ -37,8 +37,23 @@
 //       result checked right after its own wait, while the others are still
 //       outstanding -- completions are matched to jobs, not to the order
 //       GEMMs were opened or waited for
+//   P   the observing API (fpga_async_runtime.h, 2026-10-19): fpga_gemm_poll
+//       and fpga_tile_poll never block (each call timed while the transfer
+//       thread writes slabs), the first poll after the submits sees every
+//       tile submitted and none done, a tile is seen queued / staged / in
+//       flight / done, fpga_gemm_wait_for with a 1 ms timeout returns -20
+//       and leaves the GEMM open, a submit after a wait is -17, release
+//       while a tile is outstanding is -21, release after the wait is 0 and
+//       the handle is then invalid (-17)
+//   F   a transport failure in the middle of a submission (the
+//       co-simulation's SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7: the 4th slab's
+//       MEM_WRITE header fails): the submits accepted before it stay
+//       accepted, the wait reports -4, every tile is failed (none done, none
+//       lost), nothing but the 3 slabs crossed the link, a further begin is
+//       refused (-14), and after fpga_async_runtime_close a new session runs
+//       a GEMM correctly
 //
-//   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M | all] [--gemm MxNxK]
+//   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F | all] [--gemm MxNxK]
 //                      [--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]
 //
 // Every mode is reported as PASS, MISMATCH, TRANSPORT (link failure),
@@ -59,6 +74,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -239,7 +255,7 @@ int run_gemm(Gemm &g, const std::vector<TileSpec> &tiles, int *submit_rc,
 }
 
 struct Options {
-  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M'};
+  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'};
   int M = 16, N = 16, K = 32;
   std::vector<unsigned> devices = {0, 1, 2, 3};
   int stage = -1;     // -1: the mode decides
@@ -256,10 +272,10 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v) return false;
       o.modes.clear();
-      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M'}; continue; }
+      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'}; continue; }
       for (const char *p = v; *p; ++p)
         if (*p != ',') {
-          if (!std::strchr("ABCDXVSQM", *p)) return false;
+          if (!std::strchr("ABCDXVSQMPF", *p)) return false;
           o.modes.push_back(*p);
         }
     } else if (a == "--gemm") {
@@ -297,7 +313,8 @@ std::string stats_line(const fpga_async_stats_t &s, double wall_ms) {
                 "depth=%u depth2_passes=%llu max_inflight=%llu/%llu/%llu/%llu "
                 "last_descriptor_us=%llu first_completion_us=%llu "
                 "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
-                "submits_blocked=%llu blocked_us=%llu",
+                "submits_blocked=%llu blocked_us=%llu "
+                "submit_us=%llu link_write_us=%llu link_read_us=%llu collect_us=%llu wait_us=%llu polls=%llu",
                 s.tiles_submitted, s.tiles_completed, s.tiles_failed, wall_ms,
                 wall_ms > 0 ? s.tiles_completed * 1000.0 / wall_ms : 0.0, s.reads,
                 s.empty_reads, s.passes_2_inflight, s.passes_4_inflight,
@@ -308,8 +325,22 @@ std::string stats_line(const fpga_async_stats_t &s, double wall_ms) {
                 s.max_inflight_per_device[2], s.max_inflight_per_device[3],
                 s.ns_last_descriptor / 1000, s.ns_first_completion / 1000,
                 s.descriptors_before_first_completion, s.descriptors_behind_inflight,
-                s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000);
+                s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000,
+                s.ns_submit / 1000, s.ns_link_write / 1000, s.ns_link_read / 1000,
+                s.ns_collect / 1000, s.ns_wait / 1000, s.polls);
   return buf;
+}
+
+const char *tile_state_name(fpga_tile_state_t s) {
+  switch (s) {
+  case FPGA_TILE_QUEUED:    return "queued";
+  case FPGA_TILE_STAGED:    return "staged";
+  case FPGA_TILE_IN_FLIGHT: return "in_flight";
+  case FPGA_TILE_HELD:      return "held";
+  case FPGA_TILE_DONE:      return "done";
+  case FPGA_TILE_FAILED:    return "failed";
+  default:                  return "unknown";
+  }
 }
 
 // Tiles per device of a decomposition.
@@ -326,7 +357,7 @@ int main(int argc, char **argv) {
   Options o;
   if (!parse_options(argc, argv, o)) {
     std::fprintf(stderr,
-                 "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M|all] [--gemm MxNxK] "
+                 "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F|all] [--gemm MxNxK] "
                  "[--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]\n");
     return 2;
   }
@@ -377,6 +408,8 @@ int main(int argc, char **argv) {
     case 'S': plans.push_back({m, "submission semantics: every submit returns before the first completion, descriptors queued behind in-flight ones", 1}); break;
     case 'Q': plans.push_back({m, "backpressure: SYSTOLIC_ASYNC_QUEUE_LIMIT=1 on a 4x larger GEMM, submits wait for room, never for the previous job", 1}); break;
     case 'M': plans.push_back({m, "three GEMMs of different shapes interleaved, waited for out of order, each checked while the others are outstanding", 1}); break;
+    case 'P': plans.push_back({m, "poll / timed wait / release semantics: never blocking, states observed, -20 / -17 / -21 where due", 1}); break;
+    case 'F': plans.push_back({m, "transport failure mid-submission (SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7): nothing lost, -4, -14 after, recovery after close", 1}); break;
     }
   }
   if (o.list) {
@@ -718,6 +751,204 @@ int main(int argc, char **argv) {
       if (c == TRANSPORT) link_failed = true;
       detail = stats_line(s, wall) + "\n    " + detail;
       report(p, c, submit_rc ? submit_rc : rc, detail);
+    } else if (p.mode == 'P') {
+      std::string detail;
+      bool ok = true;
+      auto expect = [&](const char *what, long long got, long long want) {
+        char b[200];
+        std::snprintf(b, sizeof b, "%s%s: %lld (expected %lld)", detail.empty() ? "" : "\n    ",
+                      what, got, want);
+        detail += b;
+        if (got != want) ok = false;
+      };
+      Gemm g = make_gemm(o.M, o.N, o.K, true);
+      const std::vector<TileSpec> tiles = decompose(o.M, o.N, o.K, o.devices, cfg, false);
+      fpga_gemm_t *h = fpga_gemm_begin(g.M, g.N, g.K, static_cast<unsigned>(tiles.size()));
+      int submit_rc = 0;
+      if (!h) {
+        expect("begin", fpga_async_runtime_last_error(), 0);
+      } else {
+        std::vector<float> a, b;
+        double max_poll_us = 0, max_tile_poll_us = 0;
+        std::vector<std::string> seen;   // the states tile 0 fold 0 was seen in, in order
+        auto observe = [&]() {
+          fpga_gemm_status_t st;
+          const clock_t_::time_point t1 = clock_t_::now();
+          fpga_gemm_poll(h, &st);
+          max_poll_us = std::max(max_poll_us, std::chrono::duration<double, std::micro>(clock_t_::now() - t1).count());
+          fpga_tile_status_t ts;
+          const clock_t_::time_point t2 = clock_t_::now();
+          fpga_tile_poll(h, tiles[0].tile_id, tiles[0].k_index, &ts);
+          max_tile_poll_us = std::max(max_tile_poll_us, std::chrono::duration<double, std::micro>(clock_t_::now() - t2).count());
+          const char *name = tile_state_name(ts.state);
+          if (seen.empty() || seen.back() != name) seen.push_back(name);
+          return st;
+        };
+        for (const TileSpec &t : tiles) {
+          tile_operands(g, t, a, b);
+          const int rc = fpga_tile_submit(h, t.tile_id, t.k_index, t.k_count, t.m, t.k, t.n,
+                                          a.data(), b.data(),
+                                          &g.C[static_cast<size_t>(t.row) * g.N + t.col], g.N,
+                                          t.device, 0, est_cycles_of(t.device));
+          if (rc != 0 && submit_rc == 0) submit_rc = rc;
+          observe();   // polls interleaved with the submits: never blocking
+        }
+        fpga_gemm_status_t first = observe();
+        expect("first poll after the submits: submitted", first.submitted, static_cast<long long>(tiles.size()));
+        expect("first poll after the submits: done", first.done, 0);
+        expect("first poll after the submits: completed", first.completed, 0);
+        // A 1 ms wait cannot see 20 tiles through the co-simulation: -20,
+        // and the GEMM stays open.
+        expect("wait_for(1 ms)", fpga_gemm_wait_for(h, 1), -20);
+        fpga_gemm_status_t after_timeout;
+        expect("poll after the timed-out wait", fpga_gemm_poll(h, &after_timeout), 0);
+        expect("submit after a wait", fpga_tile_submit(h, 99, 0, 1, 4, 1, 4, a.data(), b.data(), g.C.data(), g.N, 1, 0, 101), -17);
+        // Poll until done, bounded.
+        fpga_gemm_status_t st{};
+        for (int i = 0; i < 600000; ++i) {
+          st = observe();
+          if (st.done) break;
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        expect("polled to done", st.done, 1);
+        expect("polled: completed", st.completed, static_cast<long long>(tiles.size()));
+        expect("polled: failed", st.failed, 0);
+        expect("polled: in_flight + staged + queued at the end", st.in_flight + st.staged + st.queued + st.held, 0);
+        expect("wait_for after done", fpga_gemm_wait_for(h, 1), 0);
+        int first_bad = -1;
+        expect("mismatches", mismatches_vs_ref(g, &first_bad), 0);
+        expect("release after done", fpga_gemm_release(h), 0);
+        expect("poll after release", fpga_gemm_poll(h, &st), -17);
+        expect("release again", fpga_gemm_release(h), -17);
+        char b2[400];
+        std::snprintf(b2, sizeof b2, "\n    tile 0 fold 0 was seen: %s; longest fpga_gemm_poll %.1f us, longest fpga_tile_poll %.1f us",
+                      [&] { std::string x; for (auto &n : seen) x += (x.empty() ? "" : " -> ") + n; return x; }().c_str(),
+                      max_poll_us, max_tile_poll_us);
+        detail += b2;
+        if (max_poll_us > 5000 || max_tile_poll_us > 5000) {
+          ok = false;
+          detail += "\n    a poll took more than 5 ms: it blocked on the link";
+        }
+        if (seen.empty() || seen.back() != std::string("done")) {
+          ok = false;
+          detail += "\n    tile 0 fold 0 was never seen done";
+        }
+        // Release with a tile outstanding: refused, nothing released.
+        Gemm g2 = make_gemm(8, 8, cfg.k4, true);
+        const std::vector<TileSpec> t2 = decompose(8, 8, cfg.k4, {1, 2, 3}, cfg, false);
+        fpga_gemm_t *h2 = fpga_gemm_begin(g2.M, g2.N, g2.K, static_cast<unsigned>(t2.size()));
+        if (!h2) {
+          expect("second begin", fpga_async_runtime_last_error(), 0);
+        } else {
+          for (const TileSpec &t : t2) {
+            tile_operands(g2, t, a, b);
+            const int rc = fpga_tile_submit(h2, t.tile_id, t.k_index, t.k_count, t.m, t.k, t.n,
+                                            a.data(), b.data(),
+                                            &g2.C[static_cast<size_t>(t.row) * g2.N + t.col], g2.N,
+                                            t.device, 0, est_cycles_of(t.device));
+            if (rc != 0 && submit_rc == 0) submit_rc = rc;
+          }
+          fpga_gemm_status_t s2;
+          fpga_gemm_poll(h2, &s2);
+          if (!s2.done)
+            expect("release with tiles outstanding", fpga_gemm_release(h2), -21);
+          else
+            detail += "\n    (the second GEMM completed before the release test could run)";
+          expect("wait_for(forever) of the second GEMM", fpga_gemm_wait_for(h2, FPGA_ASYNC_WAIT_FOREVER), 0);
+          expect("its mismatches", mismatches_vs_ref(g2, &first_bad), 0);
+          expect("its release", fpga_gemm_release(h2), 0);
+        }
+      }
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      detail += "\n    " + stats_line(s, wall);
+      Class c = submit_rc ? class_of_rc(submit_rc) : ok ? PASS : UNKNOWN;
+      if (c == TRANSPORT || c == NOT_RUN) { link_failed = true; c = TRANSPORT; }
+      report(p, c, submit_rc, detail);
+    } else if (p.mode == 'F') {
+      std::string detail;
+      bool ok = true;
+      auto expect = [&](const char *what, long long got, long long want) {
+        char b[200];
+        std::snprintf(b, sizeof b, "%s%s: %lld (expected %lld)", detail.empty() ? "" : "\n    ",
+                      what, got, want);
+        detail += b;
+        if (got != want) ok = false;
+      };
+      // A fresh session whose 7th write fails: the header of the 4th
+      // operand slab (each slab is a header write and a payload write).
+      fpga_async_runtime_close();
+      setenv("SYSTOLIC_DPTI_COSIM_FAIL_WRITE", "7", 1);
+      set_stage(o, p.stage);
+      fpga_async_runtime_reset_stats();
+      Gemm g = make_gemm(o.M, o.N, o.K, true);
+      const std::vector<float> c0 = g.C;
+      const std::vector<TileSpec> tiles = decompose(o.M, o.N, o.K, o.devices, cfg, false);
+      fpga_gemm_t *h = fpga_gemm_begin(g.M, g.N, g.K, static_cast<unsigned>(tiles.size()));
+      if (!h) {
+        expect("begin", fpga_async_runtime_last_error(), 0);
+      } else {
+        std::vector<float> a, b;
+        unsigned accepted = 0, refused = 0;
+        int first_refusal = 0;
+        for (const TileSpec &t : tiles) {
+          tile_operands(g, t, a, b);
+          const int rc = fpga_tile_submit(h, t.tile_id, t.k_index, t.k_count, t.m, t.k, t.n,
+                                          a.data(), b.data(),
+                                          &g.C[static_cast<size_t>(t.row) * g.N + t.col], g.N,
+                                          t.device, 0, est_cycles_of(t.device));
+          if (rc == 0) ++accepted; else { ++refused; if (!first_refusal) first_refusal = rc; }
+        }
+        const int wrc = fpga_gemm_wait_for(h, FPGA_ASYNC_WAIT_FOREVER);
+        expect("wait after the failure", wrc, -4);
+        fpga_gemm_status_t st;
+        expect("poll", fpga_gemm_poll(h, &st), 0);
+        expect("link_failed", st.link_failed, 1);
+        expect("completed (no result can have come back)", st.completed, 0);
+        expect("failed == submitted (nothing lost)", st.failed, st.submitted);
+        expect("submitted == accepted submits", st.submitted, accepted);
+        if (refused) expect("refused submits after the failure: code", first_refusal, -14);
+        unsigned failed_4 = 0, failed_14 = 0, other = 0;
+        for (const TileSpec &t : tiles) {
+          fpga_tile_status_t ts;
+          fpga_tile_poll(h, t.tile_id, t.k_index, &ts);
+          if (ts.state == FPGA_TILE_FAILED && ts.error == -4) ++failed_4;
+          else if (ts.state == FPGA_TILE_FAILED && ts.error == -14) ++failed_14;
+          else if (ts.state != FPGA_TILE_UNKNOWN) ++other;
+        }
+        expect("tiles polled failed with -4 (accepted before the failure)", failed_4, accepted);
+        expect("tiles in any other state", other, 0);
+        fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+        expect("bytes on the link: three slabs", static_cast<long long>(s.bytes_to_fpga), 3LL * (9 + cfg.slab));
+        expect("bytes back", static_cast<long long>(s.bytes_from_fpga), 0);
+        expect("release after the failure", fpga_gemm_release(h), 0);
+        fpga_gemm_t *h2 = fpga_gemm_begin(8, 8, cfg.k4, 1);
+        expect("a begin on the failed link is NULL", h2 == nullptr, 1);
+        expect("its reason", fpga_async_runtime_last_error(), -14);
+        int touched = 0;
+        for (size_t i = 0; i < g.C.size(); ++i) if (g.C[i] != c0[i]) ++touched;
+        expect("elements of C written by the failed GEMM", touched, 0);
+      }
+      // Recovery: close, lift the injection, run a GEMM.
+      fpga_async_runtime_close();
+      unsetenv("SYSTOLIC_DPTI_COSIM_FAIL_WRITE");
+      set_stage(o, p.stage);
+      fpga_async_runtime_reset_stats();
+      {
+        Gemm g3 = make_gemm(o.M, o.N, o.K, true);
+        const std::vector<TileSpec> t3 = decompose(o.M, o.N, o.K, o.devices, cfg, false);
+        int submit_rc = 0;
+        const int rc = run_gemm(g3, t3, &submit_rc);
+        expect("after close: a GEMM's submits", submit_rc, 0);
+        expect("after close: its wait", rc, 0);
+        int first = -1;
+        if (rc == 0 && submit_rc == 0) expect("after close: its mismatches", mismatches_vs_ref(g3, &first), 0);
+        if (rc != 0 && class_of_rc(rc) == TRANSPORT) link_failed = true;
+      }
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      detail += "\n    " + stats_line(s, wall);
+      report(p, ok ? PASS : (link_failed ? TRANSPORT : UNKNOWN), ok ? 0 : -1, detail);
     } else if (p.mode == 'V') {
       std::string detail;
       bool ok = true;

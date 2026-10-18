@@ -150,6 +150,22 @@ struct LogicalMatmul {
   AffineMap phiA;
   AffineMap phiB;
   AffineMap phiC;
+
+  // The run-time parts of the access functions. An access may add affine
+  // symbols of the nest (a function's integer parameters: C[r0 + i][j]) to
+  // its indices; those terms are separated off before recognition, so that
+  // everything above is over the loops alone, and kept here: per operand, a
+  // map of no dims and the access's symbols whose result r is the
+  // symbol-only part of memref index r (the constant 0 where there is
+  // none), with the symbol operands. The view of the operand the nest
+  // touches is offset by these at run time (a "dynamic offset"). A null map
+  // when the operand's access has no symbol.
+  AffineMap symbolicA;
+  AffineMap symbolicB;
+  AffineMap symbolicC;
+  SmallVector<Value> symbolsA;
+  SmallVector<Value> symbolsB;
+  SmallVector<Value> symbolsC;
 };
 
 /// Find Affine loop nests worth attempting to recognize.

@@ -58,6 +58,7 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
+#include <functional>
 #include <string>
 
 using namespace mlir;
@@ -117,23 +118,70 @@ static bool provablyDisjointFromOutput(Value input, Value output,
 struct LogicalOperand {
   Value memref;
   std::array<int64_t, 2> offsets, sizes, strides;
+  // Per memref dimension, the run-time offset the access adds through the
+  // nest's symbols (LogicalMatmul::symbolicA/B/C: C[r0 + i][j] offsets the
+  // rows by the parameter r0), as a map of no dims over `symbols` -- a
+  // "dynamic offset": the view is taken at run time, offset by the symbols'
+  // values. Null when the access has none.
+  AffineMap symbolic;
+  SmallVector<Value> symbols;
 
+  bool hasSymbolicOffset(unsigned r) const {
+    if (!symbolic)
+      return false;
+    AffineExpr e = symbolic.getResult(r);
+    return !isa<AffineConstantExpr>(e) ||
+           cast<AffineConstantExpr>(e).getValue() != 0;
+  }
+  bool hasSymbolicOffsets() const {
+    return hasSymbolicOffset(0) || hasSymbolicOffset(1);
+  }
   bool isWholeMemref() const {
     auto ty = cast<MemRefType>(memref.getType());
-    return ty.hasStaticShape() && offsets[0] == 0 && offsets[1] == 0 &&
-           strides[0] == 1 &&
+    return ty.hasStaticShape() && !hasSymbolicOffsets() && offsets[0] == 0 &&
+           offsets[1] == 0 && strides[0] == 1 &&
            strides[1] == 1 && sizes[0] == ty.getDimSize(0) &&
            sizes[1] == ty.getDimSize(1);
   }
   bool sameView(const LogicalOperand &other) const {
     return memref == other.memref && offsets == other.offsets &&
-           sizes == other.sizes && strides == other.strides;
+           sizes == other.sizes && strides == other.strides &&
+           symbolic == other.symbolic && symbols == other.symbols;
   }
 };
 
+/// `expr` (over `symbols`, no dims) plus `constant`, as index arithmetic at
+/// the builder's point: the run-time offset of a view dimension.
+static Value materializeOffset(OpBuilder &builder, Location loc,
+                               AffineExpr expr, ArrayRef<Value> symbols,
+                               int64_t constant) {
+  std::function<Value(AffineExpr)> build = [&](AffineExpr e) -> Value {
+    if (auto c = dyn_cast<AffineConstantExpr>(e))
+      return arith::ConstantIndexOp::create(builder, loc, c.getValue());
+    if (auto sym = dyn_cast<AffineSymbolExpr>(e))
+      return symbols[sym.getPosition()];
+    auto bin = cast<AffineBinaryOpExpr>(e);
+    Value lhs = build(bin.getLHS()), rhs = build(bin.getRHS());
+    switch (e.getKind()) {
+    case AffineExprKind::Add:
+      return arith::AddIOp::create(builder, loc, lhs, rhs);
+    case AffineExprKind::Mul:
+      return arith::MulIOp::create(builder, loc, lhs, rhs);
+    default:
+      llvm_unreachable("separateSymbols keeps only sums and constant products");
+    }
+  };
+  Value v = build(expr);
+  if (constant != 0)
+    v = arith::AddIOp::create(
+        builder, loc, v, arith::ConstantIndexOp::create(builder, loc, constant));
+  return v;
+}
+
 static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
-                  unsigned colDim, StringRef name, std::string &why) {
+                  unsigned colDim, AffineMap symbolic, ArrayRef<Value> symbols,
+                  StringRef name, std::string &why) {
   auto ty = dyn_cast<MemRefType>(memref.getType());
   if (!ty || ty.getRank() != 2 || !ty.getLayout().isIdentity()) {
     why = (name + " is not a rank-2 memref with the identity layout").str();
@@ -142,10 +190,17 @@ getLogicalOperand(Value memref, const DenseLogicalGemm &dense, unsigned rowDim,
 
   LogicalOperand operand;
   operand.memref = memref;
+  operand.symbolic = symbolic;
+  operand.symbols.assign(symbols.begin(), symbols.end());
   for (auto [r, d] : llvm::enumerate(std::array<unsigned, 2>{rowDim, colDim})) {
     operand.offsets[r] = dense.offset[d];
     operand.sizes[r] = dense.extent[d];
     operand.strides[r] = dense.scale[d];
+    // A dimension with a run-time offset is the nest's own guarantee, as a
+    // dynamic extent below: where its symbols put the view is not known
+    // here, and the tiles touch no element the nest did not.
+    if (operand.hasSymbolicOffset(r))
+      continue;
     // The view holds exactly the elements the loop nest itself accesses
     // (every row and column of the logical matrix is touched by some
     // iteration), so it is in bounds whenever the nest was defined. A
@@ -320,15 +375,15 @@ struct AffineMatmulToSystolicPass
     const int64_t K = dense->extent[kLogicalK];
 
     auto lhs = getLogicalOperand(matmul.lhs, *dense, kLogicalI, kLogicalK,
-                                 "A", why);
+                                 matmul.symbolicA, matmul.symbolsA, "A", why);
     if (failed(lhs))
       return failure();
     auto rhs = getLogicalOperand(matmul.rhs, *dense, kLogicalK, kLogicalJ,
-                                 "B", why);
+                                 matmul.symbolicB, matmul.symbolsB, "B", why);
     if (failed(rhs))
       return failure();
     auto out = getLogicalOperand(matmul.output, *dense, kLogicalI, kLogicalJ,
-                                 "C", why);
+                                 matmul.symbolicC, matmul.symbolsC, "C", why);
     if (failed(out))
       return failure();
 
@@ -405,9 +460,22 @@ struct AffineMatmulToSystolicPass
     auto view = [&](const LogicalOperand &operand) -> Value {
       if (operand.isWholeMemref())
         return operand.memref;
-      return memref::SubViewOp::create(builder, loc, operand.memref,
-                                       operand.offsets, operand.sizes,
-                                       operand.strides);
+      // Offsets: the static part, plus the run-time part of a dimension the
+      // access offsets through the nest's symbols (a dynamic offset).
+      SmallVector<OpFoldResult> offsets, sizes, strides;
+      for (unsigned r = 0; r < 2; ++r) {
+        if (operand.hasSymbolicOffset(r))
+          offsets.push_back(materializeOffset(builder, loc,
+                                              operand.symbolic.getResult(r),
+                                              operand.symbols,
+                                              operand.offsets[r]));
+        else
+          offsets.push_back(builder.getIndexAttr(operand.offsets[r]));
+        sizes.push_back(builder.getIndexAttr(operand.sizes[r]));
+        strides.push_back(builder.getIndexAttr(operand.strides[r]));
+      }
+      return memref::SubViewOp::create(builder, loc, operand.memref, offsets,
+                                       sizes, strides);
     };
     auto asTensor = [&](Value memref, const LogicalOperand &operand,
                         bool writable) -> Value {

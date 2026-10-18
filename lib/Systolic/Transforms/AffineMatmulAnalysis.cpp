@@ -102,21 +102,68 @@ recoverSourceDomain(ValueRange iterationIVs) {
   return domain;
 }
 
+/// The symbol-only terms of an access map, separated from the loop terms:
+/// each result e of `map` must be e = d(dims) + s(symbols) + c, and the
+/// returned map has results s (over the same symbols, no dims) while
+/// `stripped` gets d + c (over the dims, no symbols). Failure when a result
+/// is not of that form (a product of a symbol and a loop counter, a floordiv
+/// or a mod involving a symbol): there is no view offset that stands for it.
+static FailureOr<AffineMap> separateSymbols(AffineMap map,
+                                            AffineMap &stripped) {
+  MLIRContext *context = map.getContext();
+  const unsigned nd = map.getNumDims(), ns = map.getNumSymbols();
+  AffineExpr zero = getAffineConstantExpr(0, context);
+  SmallVector<AffineExpr> zeroDims(nd, zero), zeroSyms(ns, zero);
+  SmallVector<AffineExpr> dimParts, symParts;
+  for (AffineExpr e : map.getResults()) {
+    AffineExpr dimPart = simplifyAffineExpr(
+        e.replaceDimsAndSymbols(/*dimReplacements=*/{}, zeroSyms), nd, ns);
+    AffineExpr symPlusConst = simplifyAffineExpr(
+        e.replaceDimsAndSymbols(zeroDims, /*symReplacements=*/{}), nd, ns);
+    AffineExpr constPart =
+        simplifyAffineExpr(e.replaceDimsAndSymbols(zeroDims, zeroSyms), nd, ns);
+    AffineExpr symPart = simplifyAffineExpr(symPlusConst - constPart, nd, ns);
+    if (simplifyAffineExpr(dimPart + symPart, nd, ns) !=
+        simplifyAffineExpr(e, nd, ns))
+      return failure();
+    dimParts.push_back(dimPart);
+    symParts.push_back(symPart);
+  }
+  stripped = AffineMap::get(nd, 0, dimParts, context);
+  return AffineMap::get(0, ns, symParts, context);
+}
+
+static bool hasSymbolTerm(AffineMap symbolic) {
+  if (!symbolic)
+    return false;
+  for (AffineExpr e : symbolic.getResults())
+    if (!isa<AffineConstantExpr>(e) || cast<AffineConstantExpr>(e).getValue() != 0)
+      return true;
+  return false;
+}
+
+/// The loop part of an access, over the common iteration domain; the
+/// symbol part, if any, in `symbolic` (over `symbols`, the map's symbol
+/// operands), else a null map.
 static FailureOr<AffineMap>
 normalizeAccessMap(AffineMap map,
                    ValueRange operands,
-                   ValueRange iterationIVs) {
+                   ValueRange iterationIVs,
+                   AffineMap &symbolic,
+                   SmallVector<Value> &symbols) {
   MLIRContext *context = map.getContext();
 
   SmallVector<AffineExpr> dimReplacements;
-  dimReplacements.reserve(operands.size());
+  dimReplacements.reserve(map.getNumDims());
 
   // Rewrite each map-local dimension into a common iteration domain:
   //
   //   iterationIVs[p] -> common dp
   //
   // The common domain may have any number of access-related loop IVs.
-  for (Value operand : operands) {
+  if (operands.size() != map.getNumDims() + map.getNumSymbols())
+    return failure();
+  for (Value operand : operands.take_front(map.getNumDims())) {
     auto it = llvm::find(iterationIVs, operand);
     if (it == iterationIVs.end())
       return failure();
@@ -130,12 +177,23 @@ normalizeAccessMap(AffineMap map,
   if (dimReplacements.size() != map.getNumDims())
     return failure();
 
-  // First checkpoint: handle dim-only affine accesses. Symbol support can
-  // be added later without complicating the initial normalization logic.
-  if (map.getNumSymbols() != 0)
-    return failure();
+  // Symbols -- the nest's parameters -- are additive offsets of the access,
+  // separated off here and carried as the operand's run-time offset; the
+  // recognition below sees the loop part alone.
+  symbolic = AffineMap();
+  symbols.clear();
+  AffineMap loopPart = map;
+  if (map.getNumSymbols() != 0) {
+    FailureOr<AffineMap> sym = separateSymbols(map, loopPart);
+    if (failed(sym))
+      return failure();
+    if (hasSymbolTerm(*sym)) {
+      symbolic = *sym;
+      symbols.assign(operands.begin() + map.getNumDims(), operands.end());
+    }
+  }
 
-  return map.replaceDimsAndSymbols(
+  return loopPart.replaceDimsAndSymbols(
       dimReplacements,
       /*symReplacements=*/{},
       /*numResultDims=*/iterationIVs.size(),
@@ -1234,15 +1292,17 @@ mlir::systolic::recognizeLogicalMatmul(
   //   C = (I, J)
   //
   // This first checkpoint handles direct loop-IV operands only.
+  AffineMap symbolicLhs, symbolicRhs, symbolicAcc;
+  SmallVector<Value> symbolsLhs, symbolsRhs, symbolsAcc;
   auto normalizedLhs =
       normalizeAccessMap(lhsLoad.getMap(), lhsLoad.getIndices(),
-                         iterationIVs);
+                         iterationIVs, symbolicLhs, symbolsLhs);
   auto normalizedRhs =
       normalizeAccessMap(rhsLoad.getMap(), rhsLoad.getIndices(),
-                         iterationIVs);
+                         iterationIVs, symbolicRhs, symbolsRhs);
   auto normalizedAcc =
       normalizeAccessMap(accLoad.getMap(), accLoad.getIndices(),
-                         iterationIVs);
+                         iterationIVs, symbolicAcc, symbolsAcc);
 
   if (failed(normalizedLhs) ||
       failed(normalizedRhs) ||
@@ -1301,12 +1361,16 @@ mlir::systolic::recognizeLogicalMatmul(
                i != j && i != k && j != k;
       };
 
+  AffineMap symbolicA = symbolicLhs, symbolicB = symbolicRhs;
+  SmallVector<Value> symbolsA = symbolsLhs, symbolsB = symbolsRhs;
   if (!matchesGemmAccesses(accessA, accessB)) {
     if (!matchesGemmAccesses(accessB, accessA))
       return failure();
 
     std::swap(aLoad, bLoad);
     std::swap(accessA, accessB);
+    std::swap(symbolicA, symbolicB);
+    std::swap(symbolsA, symbolsB);
   }
 
   AffineExpr logicalI = accessA.getResult(numPartitionDims);
@@ -1407,6 +1471,12 @@ mlir::systolic::recognizeLogicalMatmul(
   result.accessA = accessA;
   result.accessB = accessB;
   result.accessC = *normalizedAcc;
+  result.symbolicA = symbolicA;
+  result.symbolicB = symbolicB;
+  result.symbolicC = symbolicAcc;
+  result.symbolsA = symbolsA;
+  result.symbolsB = symbolsB;
+  result.symbolsC = symbolsAcc;
 
   // Materialize operand factor maps:
   //

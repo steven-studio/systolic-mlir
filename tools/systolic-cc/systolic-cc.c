@@ -581,6 +581,29 @@ static void array_desc(const json_value *p, long long *count, const char **ct) {
   *ct = c_type(json_string(json_get(p, "elem"), "f32"));
 }
 
+/* The leading extent of an array parameter as a C expression, evaluable in
+   the shim where the parameters are in scope: the constant the front end
+   computed, or -- when a subscript uses a parameter (a dynamic offset) --
+   the expression of the parameters it wrote (leading_extent_expr). */
+static char *leading_extent_expr(const json_value *p) {
+  const char *e = json_string(json_get(p, "leading_extent_expr"), NULL);
+  if (e)
+    return format("((long long)%s)", e);
+  return format("%lldLL", json_int(json_get(p, "leading_extent"), 0));
+}
+
+/* Element count of a written array parameter, as a C expression. */
+static char *count_expr(const json_value *p) {
+  char *lead = leading_extent_expr(p);
+  const json_value *dims = json_get(p, "inner_dims");
+  long long inner = 1;
+  for (size_t d = 0; d < json_size(dims); ++d)
+    inner *= json_int(json_at(dims, d), 1);
+  char *r = format("(%s * %lldLL)", lead, inner);
+  free(lead);
+  return r;
+}
+
 /* The C entry point of each offloaded function NAME.
  *
  *   1. Snapshot every array NAME writes (the exact rows its accesses reach).
@@ -651,7 +674,13 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         }
         bprintf(&kargs, ", 0");
         bprintf(&kdecl, ", int64_t");
-        for (size_t d = 0; d < rank; ++d) {
+        {
+          char *lead = leading_extent_expr(p);
+          bprintf(&kargs, ", %s", lead);
+          bprintf(&kdecl, ", int64_t");
+          free(lead);
+        }
+        for (size_t d = 1; d < rank; ++d) {
           bprintf(&kargs, ", %lld", sizes[d]);
           bprintf(&kdecl, ", int64_t");
         }
@@ -664,8 +693,11 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         bprintf(&kdecl, "%s%s", kdecl.n ? ", " : "",
                 c_type(json_string(json_get(p, "elem"), "f32")));
       } else {
+        /* An integer parameter: i32 / i64 as the front end typed it. */
+        const char *ctype = json_string(json_get(p, "ctype"), "int");
         bprintf(&kargs, "%s%s", kargs.n ? ", " : "", pname);
-        bprintf(&kdecl, "%sint", kdecl.n ? ", " : "");
+        bprintf(&kdecl, "%s%s", kdecl.n ? ", " : "",
+                strstr(ctype, "long") ? "long long" : "int");
       }
     }
     const char *name = offload[f].name, *symbol = offload[f].symbol;
@@ -708,10 +740,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      bprintf(&b, "  %s *save_%s = malloc(%lld * sizeof(%s) + 1);\n", ct, pname,
-              count, ct);
-      bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %lld * sizeof(%s)); "
-                  "else snapshots = 0;\n", pname, pname, pname, count, ct);
+      char *n = count_expr(p);
+      bprintf(&b, "  %s *save_%s = malloc(%s * sizeof(%s) + 1);\n", ct, pname,
+              n, ct);
+      bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %s * sizeof(%s)); "
+                  "else snapshots = 0;\n", pname, pname, pname, n, ct);
+      free(n);
     }
     bprintf(&b, "  int completed = 0, hw = 0;\n");
     bprintf(&b, "  if (snapshots) {\n"
@@ -736,8 +770,10 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      bprintf(&b, "    if (snapshots) memcpy(%s, save_%s, %lld * sizeof(%s));\n",
-              pname, pname, count, ct);
+      char *n = count_expr(p);
+      bprintf(&b, "    if (snapshots) memcpy(%s, save_%s, %s * sizeof(%s));\n",
+              pname, pname, n, ct);
+      free(n);
     }
     bprintf(&b, "    %s%s(", name, REFERENCE_SUFFIX);
     for (size_t i = 0; i < np; ++i)
@@ -755,10 +791,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const char *ct, *pname = json_string(json_get(p, "name"), "");
         long long count;
         array_desc(p, &count, &ct);
-        bprintf(&b, "    %s *ref_%s = malloc(%lld * sizeof(%s) + 1);\n", ct,
-                pname, count, ct);
-        bprintf(&b, "    memcpy(ref_%s, save_%s, %lld * sizeof(%s));\n", pname,
-                pname, count, ct);
+        char *n = count_expr(p);
+        bprintf(&b, "    %s *ref_%s = malloc(%s * sizeof(%s) + 1);\n", ct,
+                pname, n, ct);
+        bprintf(&b, "    memcpy(ref_%s, save_%s, %s * sizeof(%s));\n", pname,
+                pname, n, ct);
+        free(n);
       }
       bprintf(&b, "    __systolic_cc_quiet = 1;\n    %s%s(", name,
               REFERENCE_SUFFIX);
@@ -779,7 +817,9 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const char *ct, *pname = json_string(json_get(p, "name"), "");
         long long count;
         array_desc(p, &count, &ct);
-        bprintf(&b, "    for (long e = 0; e < %lld; ++e) {\n", count);
+        char *n = count_expr(p);
+        bprintf(&b, "    for (long long e = 0; e < %s; ++e) {\n", n);
+        free(n);
         bprintf(&b, "      %s got = ((%s *)%s)[e], want = ref_%s[e];\n", ct, ct,
                 pname, pname);
         if (rtol > 0) {
@@ -837,7 +877,8 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
                    completion record matched to its tile. The default for
                    --runtime board on such a bitstream (--submission auto).
      synchronous   one fpga_matmul_tiled_auto_scheduled per tile, each
-                   waited for before the next: the software model, a
+                   waited for before the next: the software model (unless
+                   --submission async, which it implements too), a
                    bitstream without the record, or --submission sync. */
 static int fleet_config(driver *d, long *k8, long *k4, int *header) {
   const options *a = d->a;
@@ -887,12 +928,12 @@ static int choose_async(driver *d, int header) {
   if (strcmp(a->submission, "sync") == 0)
     return 0;
   if (strcmp(a->submission, "async") == 0) {
-    if (!board) {
-      snprintf(d->error, sizeof d->error,
-               "--submission async needs --runtime board: the software "
-               "model has only the synchronous entry point");
-      return -1;
-    }
+    /* The software model implements the asynchronous API too (a queue run
+       at polls and waits), so a program's asynchronous lowering can be
+       checked without the board; it is not its default, which keeps the
+       model's one-call-one-invocation fault semantics for --runtime soft. */
+    if (!board)
+      return 1;
     if (!header) {
       snprintf(d->error, sizeof d->error,
                "--submission async needs a bitstream with the completion "

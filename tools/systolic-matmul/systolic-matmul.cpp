@@ -945,6 +945,17 @@ int main(int argc, char **argv) {
                   s.max_inflight_per_device[0], s.max_inflight_per_device[1],
                   s.max_inflight_per_device[2], s.max_inflight_per_device[3],
                   s.submits_blocked, s.ns_submit_blocked / 1e6);
+      // Where the wall-clock went (fpga_async_runtime.h): the caller's
+      // submits (packing and queueing), the transfer thread's link writes
+      // and reads, the results' accumulation, and the caller's wait.
+      std::printf("                 time: submit %.3f ms (+ %.3f ms waiting for "
+                  "host-queue room), link writes %.3f ms, link reads %.3f ms, "
+                  "collect %.3f ms, wait %.3f ms; first completion %.3f ms "
+                  "after the first submit, last descriptor %.3f ms\n",
+                  s.ns_submit / 1e6, s.ns_submit_blocked / 1e6,
+                  s.ns_link_write / 1e6, s.ns_link_read / 1e6, s.ns_collect / 1e6,
+                  s.ns_wait / 1e6, s.ns_first_completion / 1e6,
+                  s.ns_last_descriptor / 1e6);
     }
     std::printf("\n");
   }

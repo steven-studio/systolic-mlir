@@ -33,6 +33,7 @@ module {
   // Block C[0:4, 0:4]: a pointer to element 0 of C's buffer, the GEMM
   // opened, two submits with ldc = 4 on device 1.
   // CHECK: %[[CM:.*]] = bufferization.to_buffer %[[C]] :
+  // CHECK: %[[LD0:.*]] = arith.constant 4 : i32
   // CHECK: %[[P0:.*]] = memref.extract_aligned_pointer_as_index %[[CM]]
   // CHECK: %[[I0:.*]] = arith.index_cast %[[P0]] : index to i64
   // CHECK: %[[CP0:.*]] = llvm.inttoptr %[[I0]]
@@ -49,7 +50,6 @@ module {
   // CHECK-NEXT: %[[M0:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[K0:.*]] = arith.constant 16 : i32
   // CHECK-NEXT: %[[N0:.*]] = arith.constant 4 : i32
-  // CHECK-NEXT: %[[LD0:.*]] = arith.constant 4 : i32
   // CHECK-NEXT: %[[D0:.*]] = arith.constant 1 : i32
   // CHECK-NEXT: %[[S0:.*]] = arith.constant {{[0-9]+}} : i32
   // CHECK-NEXT: %[[E0:.*]] = arith.constant {{[0-9]+}} : i32
@@ -65,6 +65,7 @@ module {
   // Block C[4:8, 0:4]: element 16 of the same buffer (64 bytes in; the
   // previous block's to_tensor stands for it, so no to_buffer of that),
   // device 2; no copy of C anywhere.
+  // CHECK: %[[LD2:.*]] = arith.constant 4 : i32
   // CHECK: %[[P2:.*]] = memref.extract_aligned_pointer_as_index %[[CM]]
   // CHECK-NEXT: %[[OFF2:.*]] = arith.constant 64 : index
   // CHECK-NEXT: %[[PA2:.*]] = arith.addi %[[P2]], %[[OFF2]]

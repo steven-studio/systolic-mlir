@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -473,12 +474,14 @@ struct OutputBlock {
 };
 
 /// The restrict, writable to_tensor of a row-major memref of the tensor's
-/// own shape (the identity layout, or a static strided view with unit
-/// column stride such as the one the affine front end takes of a memref
-/// argument): the one tensor view of that buffer, which the lowering may
-/// therefore write through directly (the front end's bracket of a GEMM's
-/// output, bufferization.to_tensor %C restrict writable ...
-/// materialize_in_destination %result in %C).
+/// own shape (the identity layout, or a strided view with unit column
+/// stride -- static or not: the one the affine front end takes of a memref
+/// argument, or of the block a run-time offset names): the one tensor view
+/// of that buffer, which the lowering may therefore write through directly
+/// (the front end's bracket of a GEMM's output, bufferization.to_tensor %C
+/// restrict writable ... materialize_in_destination %result in %C). A
+/// dynamic offset or row stride is read from the memref at run time
+/// (memref.extract_strided_metadata), see lowerOutputBlock.
 static bool isExclusiveBufferView(Value r) {
   auto toTensor = r.getDefiningOp<bufferization::ToTensorOp>();
   if (!toTensor || !toTensor.getRestrict() || !toTensor.getWritable())
@@ -493,8 +496,7 @@ static bool isExclusiveBufferView(Value r) {
   int64_t offset = 0;
   if (failed(memrefTy.getStridesAndOffset(strides, offset)))
     return false;
-  return !ShapedType::isDynamic(offset) && strides.size() == 2 &&
-         !ShapedType::isDynamic(strides[0]) && strides[1] == 1;
+  return strides.size() == 2 && strides[1] == 1;
 }
 
 static std::optional<OutputBlock>
@@ -609,6 +611,7 @@ public:
 
     if (asyncRuntime) {
       rewriter.setListener(&listener);
+      allTiles.assign(tiles.begin(), tiles.end());
       for (auto [op, inv] : llvm::zip_equal(tiles, invocations)) {
         GemmState &g = gemms[inv.gemm];
         if (!g.firstTile) {
@@ -619,6 +622,7 @@ public:
         ++g.tileCount;
         if (inv.tile == g.firstTileId)
           g.k += inv.k;
+        tileGemm[MatmulTileOp(op).getOperation()] = &g;
       }
     }
   }
@@ -669,9 +673,22 @@ public:
           ValueRange{i32(loc, m), i32(loc, n), i32(loc, g.k),
                      i32(loc, g.tileCount)});
       g.handle = begin->getResult(0);
+      g.beginOp = begin.getOperation();
       g.m = m;
       g.n = n;
       currentGemm = nullptr;
+    }
+    // What each GEMM reads and writes through the front end's views, for
+    // the ordering below (waitGemms): a GEMM that touches a buffer an
+    // earlier one writes waits for it first.
+    for (MatmulTileOp op : allTiles) {
+      auto it = tileGemm.find(op.getOperation());
+      if (it == tileGemm.end())
+        continue;
+      GemmState &g = *it->second;
+      collectViews(op.getA(), g.readViews);
+      collectViews(op.getB(), g.readViews);
+      collectViews(op.getCIn(), g.writeViews);
     }
   }
 
@@ -694,11 +711,15 @@ public:
     Value rMemref = rootBuffer(loc, r, rTy);
     Value cPtr;
     Value cTile, cBlock;
-    int64_t ldc = 0;
+    Value ldc;
     if (asyncRuntime) {
       // The block's top-left element in the buffer of %R, through its
       // layout: the identity, or the row-major strided view the affine
-      // front end takes of a memref argument (isExclusiveBufferView).
+      // front end takes of a memref argument (isExclusiveBufferView). A
+      // static offset and row stride fold into the pointer here; a dynamic
+      // one -- the view of a block a run-time offset names -- is read from
+      // the memref's descriptor at run time and the pointer computed from
+      // it, so the offset's actual value reaches the runtime.
       ArrayRef<int64_t> offsets = extract.getStaticOffsets();
       auto memrefTy = cast<MemRefType>(rMemref.getType());
       SmallVector<int64_t> strides;
@@ -707,9 +728,38 @@ public:
         strides = {rTy.getDimSize(1), 1};
         offset = 0;
       }
-      ldc = strides[0];
-      cPtr = elementPtr(loc, rMemref,
-                        offset + offsets[0] * strides[0] + offsets[1] * strides[1]);
+      if (!ShapedType::isDynamic(offset) && !ShapedType::isDynamic(strides[0])) {
+        ldc = i32(loc, strides[0]);
+        cPtr = elementPtr(loc, rMemref,
+                          offset + offsets[0] * strides[0] + offsets[1] * strides[1]);
+      } else {
+        auto meta = memref::ExtractStridedMetadataOp::create(rewriter, loc, rMemref);
+        Value rowStride = meta.getStrides()[0];
+        Value base = memref::ExtractAlignedPointerAsIndexOp::create(
+            rewriter, loc, meta.getBaseBuffer());
+        // element = offset + o0 * stride0 + o1 * stride1 (stride1 is 1)
+        Value linear = meta.getOffset();
+        if (offsets[0] != 0)
+          linear = arith::AddIOp::create(
+              rewriter, loc, linear,
+              arith::MulIOp::create(
+                  rewriter, loc, rowStride,
+                  arith::ConstantIndexOp::create(rewriter, loc, offsets[0])));
+        if (offsets[1] != 0)
+          linear = arith::AddIOp::create(
+              rewriter, loc, linear,
+              arith::ConstantIndexOp::create(rewriter, loc, offsets[1]));
+        Value bytes = arith::MulIOp::create(
+            rewriter, loc, linear, arith::ConstantIndexOp::create(rewriter, loc, 4));
+        Value addr = arith::AddIOp::create(rewriter, loc, base, bytes);
+        Value asI64 = arith::IndexCastOp::create(rewriter, loc,
+                                                 rewriter.getI64Type(), addr);
+        cPtr = LLVM::IntToPtrOp::create(
+            rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+            asI64);
+        ldc = arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                         rowStride);
+      }
     } else {
       cBlock = memref::SubViewOp::create(
           rewriter, loc, rMemref, extract.getStaticOffsets(),
@@ -735,8 +785,10 @@ public:
     Value result = bufferization::ToTensorOp::create(
         rewriter, loc, rTy, rMemref, /*restrict=*/true, /*writable=*/true);
     rewriter.replaceOp(insert, result);
-    if (g)
+    if (g) {
       g->results.push_back(result);
+      resultOwner[result] = g;
+    }
 
     for (unsigned idx : llvm::reverse(block.tiles)) {
       MatmulTileOp op = tiles[idx];
@@ -757,7 +809,8 @@ public:
     Value cMemref = tensorToMemref(rewriter, loc, op.getCIn(), inv.cTy,
                                    /*readOnly=*/false);
     if (asyncRuntime)
-      emitAsyncCall(op, inv, g->handle, elementPtr(loc, cMemref, 0), inv.n);
+      emitAsyncCall(op, inv, g->handle, elementPtr(loc, cMemref, 0),
+                    i32(loc, inv.n));
     else
       emitCall(op, inv, memrefToLLVMPtr(rewriter, loc, cMemref));
 
@@ -766,8 +819,10 @@ public:
     auto toTensor = bufferization::ToTensorOp::create(
         rewriter, loc, inv.cTy, cMemref, /*restrict=*/true, /*writable=*/true);
     rewriter.replaceOp(op, toTensor.getResult());
-    if (g)
+    if (g) {
       g->results.push_back(toTensor.getResult());
+      resultOwner[toTensor.getResult()] = g;
+    }
     currentGemm = nullptr;
   }
 
@@ -798,6 +853,25 @@ public:
           if (inBlock && !g.internal.contains(inBlock))
             readers.push_back(inBlock);
         }
+      // A later GEMM of the block that reads or writes, through the front
+      // end's views, a buffer this one writes: its begin is a reader too
+      // (the memory dependence is not in SSA). Views of one buffer whose
+      // static boxes do not intersect are independent; a view at a
+      // run-time offset is not provably so and orders the GEMMs.
+      for (auto &[otherId, other] : gemms) {
+        if (&other == &g || !other.beginOp || other.beginOp->getBlock() != block ||
+            !g.beginOp || !g.beginOp->isBeforeInBlock(other.beginOp))
+          continue;
+        bool depends = false;
+        for (Value w : g.writeViews) {
+          for (Value r : other.readViews)
+            depends = depends || viewsMayAlias(w, r);
+          for (Value w2 : other.writeViews)
+            depends = depends || viewsMayAlias(w, w2);
+        }
+        if (depends)
+          readers.push_back(other.beginOp);
+      }
       llvm::sort(readers, [](Operation *a, Operation *b) {
         return a->isBeforeInBlock(b);
       });
@@ -883,10 +957,99 @@ private:
     int64_t m = 0, n = 0;             // the output, as fpga_gemm_begin was told
     int64_t k = 0;                    // the reduction, from the first output tile's folds
     Value handle;                     // the fpga_gemm_begin result
+    Operation *beginOp = nullptr;     // the fpga_gemm_begin call
     SmallVector<Value> results;       // the to_tensor values standing for its output
     SmallVector<Submit> submits;      // its fpga_tile_submit calls, in order
     DenseSet<Operation *> internal;   // ops this lowering created for it
+    // The memrefs its tiles read (A, B) and write (C) through to_tensor
+    // views that are not this lowering's results -- the affine front end's
+    // brackets -- for the ordering of GEMMs that touch one buffer.
+    SmallVector<Value> readViews, writeViews;
   };
+
+  /// A memref view's place in its root buffer: the root, and the box
+  /// [row0, row1) x [col0, col1) when the view's offsets and sizes are
+  /// static (a subview with static operands, or the whole static memref).
+  struct ViewBox {
+    Value root;
+    bool known = false;
+    int64_t row0 = 0, row1 = 0, col0 = 0, col1 = 0;
+  };
+
+  static Value viewRoot(Value memref) {
+    while (auto view = memref.getDefiningOp<ViewLikeOpInterface>())
+      memref = view.getViewSource();
+    return memref;
+  }
+
+  static ViewBox viewBox(Value memref) {
+    ViewBox b;
+    b.root = viewRoot(memref);
+    auto ty = dyn_cast<MemRefType>(memref.getType());
+    if (!ty || ty.getRank() != 2)
+      return b;
+    if (auto sub = memref.getDefiningOp<memref::SubViewOp>()) {
+      if (sub.getSource() != b.root || !sub.getOffsets().empty() ||
+          !sub.getSizes().empty() || !sub.getStrides().empty())
+        return b;   // a view of a view, or dynamic operands: unknown
+      ArrayRef<int64_t> off = sub.getStaticOffsets(), sz = sub.getStaticSizes(),
+                        st = sub.getStaticStrides();
+      b.row0 = off[0]; b.row1 = off[0] + (sz[0] - 1) * st[0] + 1;
+      b.col0 = off[1]; b.col1 = off[1] + (sz[1] - 1) * st[1] + 1;
+      b.known = true;
+      return b;
+    }
+    if (memref == b.root && ty.hasStaticShape()) {
+      b.row0 = 0; b.row1 = ty.getDimSize(0);
+      b.col0 = 0; b.col1 = ty.getDimSize(1);
+      b.known = true;
+    }
+    return b;
+  }
+
+  /// Whether two views may touch the same element: the same root buffer,
+  /// unless both are static boxes that do not intersect. Different roots
+  /// are taken as disjoint (the front end's restrict arguments; the
+  /// linalg path has no memref views at all).
+  static bool viewsMayAlias(Value a, Value b) {
+    ViewBox x = viewBox(a), y = viewBox(b);
+    if (x.root != y.root)
+      return false;
+    if (!x.known || !y.known)
+      return true;
+    const bool rowsApart = x.row1 <= y.row0 || y.row1 <= x.row0;
+    const bool colsApart = x.col1 <= y.col0 || y.col1 <= x.col0;
+    return !(rowsApart || colsApart);
+  }
+
+  /// The front-end views a tile operand reads: the to_tensor memrefs behind
+  /// its tensor, through extract_slice / insert_slice chains, ignoring
+  /// this lowering's own result tensors (those dependences are SSA).
+  void collectViews(Value tensor, SmallVectorImpl<Value> &out) {
+    for (unsigned hops = 0; tensor && hops < 64; ++hops) {
+      if (resultOwner.contains(tensor))
+        return;
+      if (auto toTensor = tensor.getDefiningOp<bufferization::ToTensorOp>()) {
+        if (isa<MemRefType>(toTensor.getBuffer().getType()) &&
+            !llvm::is_contained(out, toTensor.getBuffer()))
+          out.push_back(toTensor.getBuffer());
+        return;
+      }
+      if (auto slice = tensor.getDefiningOp<tensor::ExtractSliceOp>()) {
+        tensor = slice.getSource();
+        continue;
+      }
+      if (auto insert = tensor.getDefiningOp<tensor::InsertSliceOp>()) {
+        tensor = insert.getDest();
+        continue;
+      }
+      if (auto tile = tensor.getDefiningOp<MatmulTileOp>()) {
+        tensor = tile.getCIn();
+        continue;
+      }
+      return;
+    }
+  }
 
   /// Every op created while a GEMM is being lowered is that GEMM's own: a
   /// use of one of its result tensors by such an op (the next block's
@@ -951,7 +1114,13 @@ private:
   /// The buffer of an output block's %R: the memref behind a to_tensor (the
   /// affine front end's bracket of C, or the previous block's result), else
   /// a to_buffer of the tensor.
+  /// Another GEMM's result is read through a to_buffer of the tensor, so
+  /// that the read is a use of that result and waitGemms waits for it
+  /// first.
   Value rootBuffer(Location loc, Value r, RankedTensorType rTy) {
+    auto owner = resultOwner.find(r);
+    if (owner != resultOwner.end() && owner->second != currentGemm)
+      return tensorToMemref(rewriter, loc, r, rTy, /*readOnly=*/false);
     if (auto toTensor = r.getDefiningOp<bufferization::ToTensorOp>())
       if (isa<MemRefType>(toTensor.getBuffer().getType()))
         return toTensor.getBuffer();
@@ -959,9 +1128,15 @@ private:
   }
 
   /// The buffer a staged slice is read from: the function-wide one of a
-  /// shared source, else a to_buffer right here.
+  /// shared source, the memref behind a to_tensor (the affine front end's
+  /// view of an argument -- any layout, since the slice is copied out of it
+  /// with memref.copy), else a to_buffer right here.
   Value sourceBuffer(Location loc, Value source) {
     auto sourceTy = cast<RankedTensorType>(source.getType());
+    if (!resultOwner.contains(source))
+      if (auto toTensor = source.getDefiningOp<bufferization::ToTensorOp>())
+        if (isa<MemRefType>(toTensor.getBuffer().getType()))
+          return toTensor.getBuffer();
     if (!sharedSources.contains(source))
       return tensorToMemref(rewriter, loc, source, sourceTy,
                             /*readOnly=*/true);
@@ -1010,10 +1185,11 @@ private:
   }
 
   /// The asynchronous submit of one invocation: C at cPtr with row stride
-  /// ldc, in the GEMM `handle`. The operands are packed by the runtime
-  /// before the call returns, so the scratch tiles are reused as before.
+  /// ldc (an i32 value), in the GEMM `handle`. The operands are packed by
+  /// the runtime before the call returns, so the scratch tiles are reused
+  /// as before.
   void emitAsyncCall(MatmulTileOp op, const FpgaInvocation &inv, Value handle,
-                     Value cPtr, int64_t ldc) {
+                     Value cPtr, Value ldc) {
     Location loc = op.getLoc();
     Scratch &scratch = scratchFor(op);
     Value aPtr = stageOperand(loc, op.getA(), inv.aTy, scratch.a);
@@ -1023,7 +1199,7 @@ private:
         rewriter, loc, asyncRuntime->submit,
         ValueRange{handle, i32(loc, inv.tile), i32(loc, inv.kIndex),
                    i32(loc, inv.kCount), i32(loc, inv.m), i32(loc, inv.k),
-                   i32(loc, inv.n), aPtr, bPtr, cPtr, i32(loc, ldc),
+                   i32(loc, inv.n), aPtr, bPtr, cPtr, ldc,
                    i32(loc, inv.deviceId), i32(loc, inv.startCycle),
                    i32(loc, inv.estCycles)});
     if (currentGemm)
@@ -1044,6 +1220,9 @@ private:
   // Asynchronous mode.
   std::map<int64_t, GemmState> gemms;   // ordered: begins in GEMM order
   GemmState *currentGemm = nullptr;
+  SmallVector<MatmulTileOp> allTiles;
+  DenseMap<Operation *, GemmState *> tileGemm;
+  DenseMap<Value, GemmState *> resultOwner;  // this lowering's result tensors
   InternalOpListener listener{*this};
 };
 
