@@ -273,6 +273,11 @@ def main():
     rng = random.Random(a.seed)
     nests = [oracle.generate(rng) for _ in range(a.count)]
     for i, nest in enumerate(nests):
+        # The screening is defined on a box (docs section 19.2, 19.12): the
+        # compiler normalizes a constant-extent parallelotope onto its box
+        # first, which this check then recomputes on the oracle's box nest. A
+        # 'triangle' (bounds that do not shift together) is outside that
+        # family: it must come back 'not screened' (checked below).
         oracle.decorate_bounds(random.Random("bounds:%d:%d" % (a.seed, i)), nest)
     text = "\n// -----\n".join(oracle.emit(nest, "case_%d" % i) for i, nest in enumerate(nests))
     run = subprocess.run([a.opt, "--test-affine-matmul-discovery=geometry=true", "-split-input-file",
@@ -312,13 +317,23 @@ def main():
         return candidates[-1] if candidates else []
     blocks = [own_block(nest, c) for nest, c in zip(nests, splits)]
     screened = 0
+    triangles = 0
     for i, (nest, lines) in enumerate(zip(nests, blocks)):
+        if nest.domain_mode == "triangle":
+            # not in the normalized family: the discovery pass must leave the
+            # nest as written and screen nothing
+            triangles += 1
+            if not (lines and lines[0].startswith("  not screened")):
+                failures.append("FAIL case_%d [%s, triangle]: a domain outside the normalized family "
+                                "was screened" % (i, nest.mode))
+            continue
         screened += not (lines and lines[0].startswith("  not screened"))
         for f in check(nest, lines):
             failures.append("FAIL case_%d [%s]: %s" % (i, nest.mode, f))
     for f in failures:
         print(f)
-    print("geometry check: %d nests, %d screened, failures %d" % (len(nests), screened, len(failures)))
+    print("geometry check: %d nests, %d screened, %d triangles not screened, failures %d"
+          % (len(nests), screened, triangles, len(failures)))
 
 
 if __name__ == "__main__":

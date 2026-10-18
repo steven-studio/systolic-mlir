@@ -1412,7 +1412,9 @@ FPGA board: NOT RUN; every execution below ran on the software runtime model.
 
 **19.12.1 The family F and its lattice.** A perfect band of n loops x_0, …, x_{n−1} around one
 multiply-accumulate (three loads, one product of two of them, one sum of the third with the
-product, one store of the sum to the third load's element) is in F when every loop s has lower
+product, one store of the sum to the third load's memref with as many indices -- whether the
+two address the same element is the recognizer's question, so a load differing by a term of a
+loop that runs once is admitted) is in F when every loop s has lower
 bound ℓ_s·x_{<s} + a_s and upper bound ℓ_s·x_{<s} + b_s with one and the same integer row ℓ_s
 over the outer counters (several results of a `max` / `min` bound must share that row; their
 constants fold to the max / min) and step σ_s ≥ 1. Its iteration set is
@@ -1524,3 +1526,84 @@ VALID_BUT_LOWERING_UNSUPPORTED (or UNKNOWN), the refusal naming the candidate de
 constructed"). The architecture keeps its place: the recognizer's reason carries the candidate,
 the executable specification's `_check_decomposition` enumerates decompositions, and §19.2–19.3
 define the per-batch GEMM a demotion must produce. Nothing in 19.12 decides a demotion.
+
+**19.12.7 Generator and oracle coverage of these families (2026-10-18, afternoon).** Until this
+point no generated case had a non-constant loop bound or one array as both factors (a
+regeneration of the six standard batches in memory: 0 of 800 for either; K = 1 appeared in 303,
+262 of them the all-once 1 x 1 x 1 nests of the enumeration modes), and the oracle's 17,200 nests
+covered none of 19.12 either. Both generators now produce them and derive the expected verdicts
+independently of the compiler:
+
+- *The MLIR oracle* (`test/Systolic/Inputs/affine_gemm_mapping_oracle.py`): a nest is still decided
+  as a BOX nest by enumeration; 30% of the nests are then *emitted* on a sheared domain -- one or two
+  loops with bounds shifted by an integer form of outer counters (coefficients in {−2, −1, 1, 2},
+  one or two outer loops, chained shifts preferred, steps and max/min decorations kept), the
+  subscripts composed with L (x' = L x, lower unitriangular) so that the emitted nest touches the
+  same elements at corresponding points, which `check_shear` asserts on every sheared nest -- and
+  18% of those are *triangles* (the upper bound shifted by another form or not at all: outside the
+  family, expected not lowered). 12% of the nests make B read A's memref through its own view, 4%
+  are built as one view (`generate_same_view`), 4% make C a view of A's memref (expected not
+  lowered, "A may overlap C"). The tile's operands are named by their memref argument and, on a
+  shared one, by position (retried swapped). New counters prove the coverage per run
+  (`a sheared domain N (chained, with a step > 1, with a max/min bound)`, `one array as both factors
+  N (two different views, one view, served by one tensor)`, `K = 1 N (without a reduction loop)`,
+  and the refusals `domain outside the normalized family`, `C the base of a factor`, `out of bounds
+  after a shear`, `C not injective after a shear`); the headline line counts every nest (accepted,
+  rejected, skipped, refused by rule), and the lit test requires every new counter nonzero except
+  "C not injective after a shear" (rare: it may be 0 in a seed). Sweep on the debug build, 40
+  runs x 400 nests with the reassociation permission: 16,000 nests, 12,097 accepted, 2,694 rejected,
+  30 skipped, 839 triangles and 340 aliasing outputs refused as predicted; of the lowered and
+  verified nests 3,144 sheared (833 chained, 1,514 with a step > 1, 1,859 with a max/min bound),
+  1,297 with one array as both factors (724 through two different views, 573 through one view, 558 of
+  those served by one tensor), 1,930 with K = 1 (1,602 with no loop at all read as the reduction),
+  364 out of bounds after a shear and 21 with C not injective after a shear refused; plus 3 strict
+  runs (1,200 nests, nothing lowered, 64 triangles and 34 aliasing outputs); **0 mismatches** in
+  all 43. The first run of the extended oracle found a compiler gap: the body test of
+  `normalizeParallelotopeDomains` demanded the accumulator's load and store maps to be equal, so a
+  sheared nest whose load differs by a term of a loop that runs once (constant on the domain) was
+  left sheared and refused in silence -- 123 oracle mismatches over 8 seeds, all of that kind; the
+  test now asks for the memref and the index count only (`@shift_acc_once_term`).
+  `affine_geometry_check.py` reuses the oracle's generator: a parallelotope is screened after the
+  compiler's normalization (the Python model is the box nest), and a triangle must come back "not
+  screened" (checked).
+- *The C generator* (`test/gemm_recognition/generator/gen_cases.py`, family `domains`): twelve
+  variants of a positive case -- `shift` (one loop shifted by an enclosing counter, coefficient ±1),
+  `shear` (a multiple, or two enclosing counters), `chain` (a loop shifted by a shifted loop),
+  `step_shift` (a shifted loop of step > 1; rejected when the case has none), `shift_same_base`,
+  `shift_batched` (the `batched` mutation, then a shift by the batch loop or another),
+  `same_base` (B reads A's array through its own view), `same_view` (B's subscripts A's with the
+  roles' counters moved and the I, J, K loops made one range: one element map, as the compiler's
+  `sameView` requires), `k1_const` (the reduction index a constant, no K loop), `triangle` (the lower
+  bound rises by the loop's step per unit of an enclosing counter, the upper does not, and the trip
+  count genuinely varies: outside the front end's subset), `alias_c` and `alias_c_b` (the output is
+  the first / second factor's array; no repetition loop, since the feedback grows). In the
+  `enumerate` and `boundary` modes the shapes are walked with the index itself (the generic walk
+  stays at 1 x 1 x 1 for its first 921,600 indices, where nothing can be shifted). The subscripts
+  of a sheared variant are composed with L so that the
+  nest is the same GEMM as the positive case; `casespec.Loop` carries the bounds' counter terms
+  (`lb_terms`, `ub_terms`), the C text prints them (`for (int k = 2 * i + 1; k < 2 * i + 5; ++k)`), and
+  the specification decides a family-F case on its *box form* (`casespec.box_form`: x = U x', the
+  compiler's normalization replayed independently) -- the analysis, the prediction and the
+  specification of the box, whose equivalence the generator asserts by evaluating both nests (`C`
+  identical). A triangle's points are enumerated as written (bounds evaluated at the enclosing
+  counters' values, `domain_points`): a GEMM only if the readers' roles map them bijectively onto a
+  box with every point repeated the same number of times -- REJECT `non_box_domain` otherwise; the
+  specification does accept a non-box domain whose written points form such a box (`non_box_gemm`:
+  a GEMM the front end refuses for its syntax), so the generated triangles are built to vary their
+  trip count genuinely, and above 200,000 points the verdict is UNDETERMINED
+  (`non_box_unenumerated`). The predicted front-end refusal is the front end's own message. An
+  output that is also a factor is decided by the addresses (`_alias_verdict`): REJECT
+  `aliasing_not_gemm` when some product reads an element written at an earlier point of the nest
+  (not the GEMM of the operands, whatever the data), OUT_OF_SCOPE `aliasing` otherwise, the
+  evaluation against the factors' initial values cross-checking it. A reduction with no loop and
+  constant subscripts in A and B is the K = 1 GEMM in the dense analysis (SQ-4; different constants
+  in A and B, `A[i][6] * B[1][j]`, are one coordinate, not SQ-1), so `C[i][j] += A[i][0] * B[0][j]`
+  carries the logical reference like any GEMM. Features record each family (`domain:parallelotope`, `bounds:shifted`,
+  `bounds:sheared`, `bounds:chained`, `bounds:shifted_step_gt1`, `bounds:not_together`,
+  `factors:same_base`, `factors:two_views` / `factors:same_view`, `output:aliases_factor`,
+  `K1:no_loop`, `K1:loop`, the two K = 1 tags only on nests the analysis finds to be GEMMs) so a
+  batch's coverage is read off `coverage.json`; the showcase set is byte-identical to a fresh
+  generation (no existing expectation changed). Two batches were added to the validation gate
+  script (`random 2027 domains 4 x 50`, `enumerate enum domains 2 x 50`); that script is kept with
+  the validation logs under `~/work/integration-backups-20261016/generator-ext-validation/`
+  (`run_gate_and_loops_ext.sh`), not in the repository, like the six-batch script before it.

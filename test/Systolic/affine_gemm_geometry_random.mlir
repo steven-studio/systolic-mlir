@@ -10,4 +10,4 @@
 // RUN: %python %S/Inputs/affine_geometry_check.py --opt systolic-opt --seed 2 --count 300 | FileCheck %s
 //
 // CHECK-NOT: FAIL
-// CHECK:     geometry check: 300 nests, {{[0-9]+}} screened, failures 0
+// CHECK:     geometry check: 300 nests, {{[0-9]+}} screened, {{[1-9][0-9]*}} triangles not screened, failures 0

@@ -37,11 +37,15 @@ Stage by stage. "Documented" means the sources or the existing tests say so expl
 
 **Front end** (`tools/systolic-cfront`, clang 24 AST): `void` functions; parameters
 `float|double A[M][K]` (`restrict` → `llvm.noalias`), scalar float/double; `for (int|long i = LB;
-i < UB | i <= UB; ++i | i++ | i += S | i = i + S)` with integer-constant bounds; subscripts that
+i < UB | i <= UB; ++i | i++ | i += S | i = i + S)` with integer-constant bounds, or (since
+2026-10-18, docs section 19.12) bounds affine in the enclosing counters that shift together --
+`for (int k = 2 * i + 1; k < 2 * i + 5; ++k)`, the same counter terms in both, counting up: a
+constant-extent parallelotope the compiler maps onto its box; subscripts that
 are affine expressions of the enclosing counters (`+`, `-`, constant `*`); assignments to array
 elements (`=`, `+=`, `-=`, `*=`, `/=`); `+ - * /` and unary `-` on float/double. Outside the
 subset (an error, never an approximation): local variables, `if`, `while`, calls, pointer
-arithmetic, globals, integer arrays, non-affine or symbolic subscripts, symbolic bounds,
+arithmetic, globals, integer arrays, non-affine or symbolic subscripts, symbolic bounds, a loop
+whose trip count varies with an enclosing counter (`k in [i, 8)`: the bounds do not shift together),
 `!=` conditions, `return` with a value. Loops that count down (`i > B | i >= B; --i | i-- |
 i -= S | i = i - S`, since 2026-10-15, ISSUE-004) are translated to the ordinal loop
 `affine.for %i = 0 to N` (N the trip count) with the counter `LB - S * %i` (affine.for only
@@ -397,12 +401,19 @@ tag with CRC-32, so it no longer depends on Python's per-process hash randomisat
 The index family: every loop order; origins; steps; offsets; strides; coordinates split over
 2–3 loops; repetition loops outside / between / before the reduction; four statement
 spellings; `<=`/`i++` syntax; leading-dimension slack; shapes from (1,1,1) upward without bound
-(Cantor enumeration) or boundary values (1, k_max ± 1, k_max, 2 k_max, 3 k_max + 1, ...); three
+(Cantor enumeration) or boundary values (1, k_max ± 1, k_max, 2 k_max, 3 k_max + 1, ...); four
 families — `positive` (shared views), `views` (per-operand views: ISSUE-001's family, generated
 on purpose to track it), `mutation` (one deliberate deviation: transposed operand, coupled,
 singular, element-wise, output in the reduction, no accumulation, subtract, alpha, init inside,
 scalar accumulator, double, no restrict, reversed rows, repetition inside the reduction, triple,
-sum, batched). Every case is validated (in bounds via the Python oracle; the author's roles
+sum, batched), and `domains` (since 2026-10-18, docs section 19.12.7: variants of a positive case
+-- a loop's bounds shifted by an enclosing counter, sheared by a multiple or by two counters,
+chained shifts, a shifted loop of step > 1, a shifted batched nest, one array as both factors
+through two views or through one view, the reduction index a constant (K = 1 without a loop), and
+the negatives: a triangle, whose trip count varies -- outside the front end's subset --, and the
+output aliasing a factor; the specification decides a sheared case on its box form,
+`casespec.box_form`, and an aliasing output by the addresses -- a product reading an element
+written earlier --, `casespec._alias_verdict`). Every case is validated (in bounds via the Python oracle; the author's roles
 checked against the subscripts), classified, de-duplicated against `generated/registry.json`
 (canonical signature), written in the showcase format with its references, and counted in
 `generated/coverage.json`. Invalid candidates are *generator rejections* (`rejected.json`),

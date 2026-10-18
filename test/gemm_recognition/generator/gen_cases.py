@@ -447,6 +447,251 @@ def mutate(case: Case, mutation: str, rng) -> Case:
 
 
 # --------------------------------------------------------------------------
+# the 'domains' family: iteration domains that are not boxes, one array as
+# both factors, K = 1 without a reduction loop (docs/AFFINE_GEMM_MAPPING.md
+# section 19.12, 2026-10-18) -- variants of a positive case
+# --------------------------------------------------------------------------
+
+DOMAIN_VARIANTS = ["shift", "shear", "chain", "step_shift", "shift_same_base", "same_base",
+                   "same_view", "k1_const", "triangle", "alias_c", "alias_c_b", "shift_batched"]
+DOMAIN_WEIGHTS = [16, 14, 12, 8, 8, 11, 5, 9, 7, 5, 3, 6]
+DOMAIN_NOTES = {
+    "shift": "a loop's two bounds shifted by an enclosing counter (k in [i + c, i + c + K)): a "
+             "constant-extent parallelotope, the same GEMM on the box x = U x' (docs section 19.12)",
+    "shear": "a loop's two bounds shifted by a multiple of an enclosing counter, or by two of them: "
+             "a sheared parallelotope, the same GEMM on its box (docs section 19.12)",
+    "chain": "two shifted loops, the inner one shifted by the outer shifted one (chained shifts: U "
+             "composes them), the same GEMM on the box (docs section 19.12)",
+    "step_shift": "a loop of step > 1 shifted by an enclosing counter (docs section 19.12)",
+    "shift_same_base": "a shifted loop and one array as both factors through two views (docs "
+                       "sections 7, 19.12)",
+    "same_base": "one array as both factors, each through its own affine view (A[i][k] * A[k][j] "
+                 "with different offsets or strides, A . A^T): two read-only views of the shared "
+                 "base, lowered since 2026-10-18 (docs sections 7, 19.12)",
+    "same_view": "one array as both factors through the SAME element map (A[f(i)][g(k)] * "
+                 "A[f(k)][g(j)]): one tensor serves both (docs section 7)",
+    "k1_const": "K = 1 with no reduction loop: the reduction index a constant (C[i][j] += A[i][c] * "
+                "B[c][j]), a GEMM of reduction extent one (SQ-4, decided 2026-10-15; the K = 1 "
+                "requirement of 2026-10-18)",
+    "triangle": "the lower bound rises with an enclosing counter, the upper bound does not: the trip "
+                "count varies, the iteration set is a triangle inside the box -- not the affine image "
+                "of a box (docs section 19.7), outside the C front end's subset (the compiler never "
+                "sees it)",
+    "alias_c": "the output is the same array as the first factor (A[i][j] += A[i][k] * B[k][j]): the "
+               "factor may alias C, refused ('A may overlap C'); the specification decides by the "
+               "addresses whether a product reads an element written earlier (not a GEMM of the "
+               "operands: REJECT) or not (a GEMM refused conservatively: OUT_OF_SCOPE)",
+    "alias_c_b": "the output is the same array as the second factor (B[i][j] += A[i][k] * B[k][j]): "
+                 "as alias_c, with B",
+    "shift_batched": "a batched GEMM (a batch loop around the nest, every operand carrying its "
+                     "coordinate) with a loop shifted by an enclosing counter -- the batch loop or "
+                     "another: a sheared batched nest through the front end (docs section 19.12)",
+}
+
+
+def _rename(sub: str, old: str, new: str) -> str:
+    f = casespec.parse_affine(sub)
+    coef = dict(f.coef)
+    if old in coef:
+        coef[new] = coef.get(new, 0) + coef.pop(old)
+    return casespec.LinearForm(coef, f.const).c_text()
+
+
+def _substitute(sub: str, var: str, value: int) -> str:
+    f = casespec.parse_affine(sub)
+    coef = dict(f.coef)
+    const = f.const + coef.pop(var, 0) * value
+    return casespec.LinearForm(coef, const).c_text()
+
+
+def _apply_shear(case: Case, shears):
+    """shears: {target var: {enclosing var: coefficient}} -- the targets' two
+    bounds shifted alike (family F), every subscript composed so that the
+    nest touches the same elements at corresponding points: f(x) with
+    x'_s = x_s - l_s . x_<s, the inverse of casespec.box_form, which gives
+    the case back."""
+    order = [lp.var for lp in case.loops]
+    for target, terms in shears.items():
+        lp = next(l for l in case.loops if l.var == target)
+        assert all(order.index(src) < order.index(target) for src in terms), (target, terms)
+        lp.lb_terms = dict(terms)
+        lp.ub_terms = dict(terms)
+    for arr in case.arrays.values():
+        new = []
+        for sub in arr.subs:
+            f = casespec.parse_affine(sub)
+            coef = dict(f.coef)
+            # the simultaneous substitution: every target's ORIGINAL
+            # coefficient (f.coef), whatever the order of `shears`
+            for target, terms in shears.items():
+                c = f.coef.get(target, 0)
+                if c:
+                    for src, l in terms.items():
+                        coef[src] = coef.get(src, 0) - c * l
+            new.append(casespec.LinearForm(coef, f.const).c_text())
+        arr.subs = tuple(new)
+
+
+def _shear_targets(case: Case, need_step=False):
+    """The loops (not the outermost) that count up and have an enclosing loop
+    of two or more iterations to read, with those loops."""
+    out = []
+    for s, lp in enumerate(case.loops):
+        if s == 0 or lp.step < 0 or lp.cond or not lp.is_box():
+            continue
+        if need_step and lp.step == 1:
+            continue
+        sources = [l for l in case.loops[:s] if l.trip() >= 2]
+        if sources:
+            out.append((lp, sources))
+    return out
+
+
+def _share_base(c: Case):
+    """B reads A's array: one parameter, two views."""
+    A, B = c.arrays["a"], c.arrays["b"]
+    if len(A.dims) != len(B.dims):
+        raise Rejected("same base needs factors of one rank")
+    dims = tuple(max(x, y) for x, y in zip(A.dims, B.dims))
+    A.dims = dims
+    c.arrays["b"] = Array(A.name, dims, B.subs, restrict=A.restrict, elem=B.elem)
+
+
+def _same_view(c: Case):
+    """B'(K, J) = A[f_I(K)][f_K(J)]: the same element map as A'(I, K) =
+    A[f_I(I)][f_K(K)] -- which needs the I, J and K loops to run over the same
+    values (M = N = K, one origin, one step: the compiler's sameView compares
+    the roles' extents too), so J's and K's loops are made I's."""
+    A, B, C = c.arrays["a"], c.arrays["b"], c.arrays["c"]
+    fa = [casespec.parse_affine(sub) for sub in A.subs]
+    if len(fa) != 2 or any(len(f.coef) != 1 for f in fa):
+        raise Rejected("same_view needs A's two subscripts over one counter each")
+    i_var, k_var = (list(f.coef)[0] for f in fa)
+    i_loops = [lp for lp in c.loops if lp.role == "I"]
+    j_loops = [lp for lp in c.loops if lp.role == "J"]
+    k_loops = [lp for lp in c.loops if lp.role == "K"]
+    if len(i_loops) != 1 or len(j_loops) != 1 or len(k_loops) != 1 or k_loops[0].var != k_var \
+            or i_loops[0].var != i_var:
+        raise Rejected("same_view needs one loop per role")
+    il = i_loops[0]
+    for lp in (j_loops[0], k_loops[0]):
+        lp.lb, lp.ub, lp.step, lp.cmp, lp.inc = il.lb, il.ub, il.step, il.cmp, il.inc
+    subs = (_rename(A.subs[0], i_var, k_var), _rename(A.subs[1], k_var, j_loops[0].var))
+    c.arrays["b"] = Array(A.name, A.dims, subs, restrict=A.restrict, elem=B.elem)
+    # the arrays sized to the new ranges (the loops of J and K changed)
+    for arr in (A, c.arrays["b"], C):
+        needed = []
+        for sub in arr.subs:
+            lo, hi = casespec._form_range(casespec.parse_affine(sub), c.loops)
+            if lo < 0:
+                raise Rejected("same_view: a negative subscript")
+            needed.append(hi + 1)
+        arr.dims = tuple(max(x, y) for x, y in zip(arr.dims, needed))
+    A.dims = c.arrays["b"].dims = tuple(max(x, y) for x, y in zip(A.dims, c.arrays["b"].dims))
+
+
+def domain_variant(case: Case, variant: str, rng) -> Case:
+    import copy
+    c = copy.deepcopy(case)
+    c.name = c.name + "_" + variant
+    c.category = "domain_" + variant
+    c.math_note = DOMAIN_NOTES[variant]
+    A, C = c.arrays["a"], c.arrays["c"]
+    if variant in ("shift", "shear", "chain", "step_shift", "shift_same_base", "shift_batched"):
+        if variant == "shift_batched":
+            c = mutate(c, "batched", rng)
+            c.name = c.name.replace("_batched", "_shift_batched")
+            c.category = "domain_shift_batched"
+            c.math_note = DOMAIN_NOTES[variant]
+        targets = _shear_targets(c, need_step=(variant == "step_shift"))
+        if not targets:
+            raise Rejected("%s: no loop%s to shift" % (variant, " of step > 1" if variant == "step_shift" else ""))
+        lp, sources = rng.choice(targets)
+        if variant in ("shift", "step_shift", "shift_same_base", "shift_batched"):
+            shears = {lp.var: {rng.choice(sources).var: rng.choice([1, -1])}}
+        elif variant == "shear":
+            srcs = rng.sample(sources, min(len(sources), rng.choice([1, 2])))
+            shears = {lp.var: {src.var: rng.choice([2, -2, 1, -1]) for src in srcs}}
+            if len(srcs) == 1 and abs(shears[lp.var][srcs[0].var]) == 1:
+                shears[lp.var][srcs[0].var] = rng.choice([2, -2])
+        else:   # chain: a loop inside the shifted one, shifted by it (and maybe by another)
+            inner = [l for l in c.loops[c.loops.index(lp) + 1:] if l.step > 0 and not l.cond and l.is_box()]
+            if not inner:
+                raise Rejected("chain: no loop inside the shifted one")
+            second = rng.choice(inner)
+            shears = {lp.var: {rng.choice(sources).var: rng.choice([1, -1, 2])},
+                      second.var: {lp.var: rng.choice([1, -1])}}
+            if rng.random() < 0.5:
+                shears[second.var][rng.choice(sources).var] = rng.choice([1, -1, 2])
+        _apply_shear(c, shears)
+        if variant == "shift_same_base":
+            _share_base(c)
+    elif variant == "same_base":
+        _share_base(c)
+    elif variant == "same_view":
+        _same_view(c)
+    elif variant == "k1_const":
+        ks = [lp for lp in c.loops if lp.role == "K"]
+        if len(ks) != 1 or ks[0].trip() != 1:
+            raise Rejected("k1_const needs one reduction loop of one iteration")
+        k = ks[0]
+        c.loops = [lp for lp in c.loops if lp is not k]
+        for arr in c.arrays.values():
+            arr.subs = tuple(_substitute(sub, k.var, k.lb) for sub in arr.subs)
+    elif variant == "triangle":
+        # a role loop (a repetition loop's varying count would repeat every
+        # point alike when it sums to one number, and the empty iterations of
+        # a collapsed triangle leave a box: those are GEMMs the front end
+        # refuses for their syntax, not the negative this variant is for)
+        targets = [(lp, src) for lp, src in _shear_targets(c) if lp.role in "IJK"]
+        if not targets:
+            raise Rejected("triangle: no role loop to shift")
+        lp, sources = rng.choice(targets)
+        src = rng.choice(sources)
+        # the lower bound rises by the loop's step per unit of the enclosing
+        # counter (staying on the loop's lattice); the upper bound stays: the
+        # trip count varies
+        lp.lb_terms = {src.var: lp.step}
+        trips = {len(lp.values({src.var: v})) for v in src.values()}
+        if len(trips - {0}) < 2:
+            raise Rejected("triangle: the shifted loop's trip count does not vary over the "
+                           "enclosing counter's values (a box in disguise)")
+        c.math_class = "non_box_domain"
+    elif variant in ("alias_c", "alias_c_b"):
+        F = A if variant == "alias_c" else c.arrays["b"]
+        if len(F.dims) != len(C.dims):
+            raise Rejected("%s needs the factor and C of one rank" % variant)
+        # no repetition loop: the feedback through the aliased array grows
+        # with every repetition and leaves float's exact integers
+        c.loops = [lp for lp in c.loops if lp.role != "R"]
+        dims = tuple(max(x, y) for x, y in zip(F.dims, C.dims))
+        F.dims = dims
+        c.arrays["c"] = Array(F.name, dims, C.subs, restrict=F.restrict, elem=C.elem)
+    else:
+        raise ValueError(variant)
+    return c
+
+
+def _same_element_map(case: Case) -> bool:
+    """One array as both factors through one view: A's (I, K) and B's (K, J)
+    subscripts the same functions of their single counters AND those counters
+    running over the same values (the compiler's sameView compares the
+    element maps with the roles' extents), judged on the box form."""
+    if case.a.name != case.b.name or len(case.a.subs) != 2 or len(case.b.subs) != 2:
+        return False
+    box = casespec.box_form(case) if casespec.shifts_together(case) else case
+    loops = {lp.var: (lp.lb, lp.exclusive_ub(), lp.step) for lp in box.loops}
+
+    def shape(sub):
+        f = casespec.parse_affine(sub)
+        if len(f.coef) != 1:
+            return None
+        (var, coef), = f.coef.items()
+        return (coef, f.const, loops.get(var))
+    return all(shape(x) is not None and shape(x) == shape(y) for x, y in zip(box.a.subs, box.b.subs))
+
+
+# --------------------------------------------------------------------------
 # signatures, registry, coverage
 # --------------------------------------------------------------------------
 
@@ -454,7 +699,9 @@ def mutate(case: Case, mutation: str, rng) -> Case:
 def signature(case: Case) -> str:
     parts = []
     for lp in case.loops:
-        parts.append("%s:%s:%d:%d:%d" % (lp.var, lp.role, lp.lb, lp.exclusive_ub(), lp.step))
+        parts.append("%s:%s:%d:%d:%d" % (lp.var, lp.role, lp.lb, lp.exclusive_ub(), lp.step)
+                     + ("" if lp.is_box() else ":%s:%s" % (sorted(lp.lb_terms.items()),
+                                                           sorted(lp.ub_terms.items()))))
     for role in sorted(case.arrays):
         arr = case.arrays[role]
         parts.append("%s=%s%s:%s:%s:%s" % (role, arr.name, list(arr.dims),
@@ -515,6 +762,33 @@ def features(case: Case, cls):
         f.add("MN:%s" % ("tiny" if max(e["I"], e["J"]) <= 4 else "small" if max(e["I"], e["J"]) <= 16 else "large"))
     for t in an.get("gemm_tags", []):
         f.add("tag:" + t)
+    # the families of 2026-10-18 (docs/AFFINE_GEMM_MAPPING.md section 19.12)
+    if an.get("domain"):
+        f.add("domain:" + an["domain"])
+    shifted = {lp.var for lp in case.loops if not lp.is_box()}
+    for lp in case.loops:
+        if lp.is_box():
+            continue
+        terms = lp.lb_terms or lp.ub_terms
+        f.add("bounds:shifted")
+        if any(abs(v) > 1 for v in terms.values()) or len(terms) > 1:
+            f.add("bounds:sheared")
+        if any(src in shifted for src in terms):
+            f.add("bounds:chained")
+        if lp.step > 1:
+            f.add("bounds:shifted_step_gt1")
+        if not lp.shifts_together():
+            f.add("bounds:not_together")
+    if case.a.name == case.b.name:
+        f.add("factors:same_base")
+        f.add("factors:" + ("same_view" if _same_element_map(case) else "two_views"))
+    if case.c.name in (case.a.name, case.b.name):
+        f.add("output:aliases_factor")
+    if an.get("is_gemm"):
+        if not any(lp.role == "K" for lp in case.loops):
+            f.add("K1:no_loop")
+        elif (an.get("extents") or {}).get("K") == 1:
+            f.add("K1:loop")
     return sorted(f)
 
 
@@ -527,6 +801,7 @@ def build_one(mode, family, seed, index, max_extent, max_loops):
     """The case of (mode, seed, index) -- deterministic."""
     tag = "%s:%s:%d" % (mode, seed, index)
     rng = random.Random("%s/%d" % (seed, index)) if mode == "random" else None
+    variant = None
     if mode == "random":
         p = Params.from_random(rng)
         M = rng.choice([1, 2, 3, 4, 5, 7, 8, 9, 12, 16, 17, 20, 24, 32])
@@ -536,6 +811,8 @@ def build_one(mode, family, seed, index, max_extent, max_loops):
         if family == "mixed":
             fam = rng.choices(["positive", "views", "mutation"], [60, 15, 25])[0]
         mut = rng.choice(MUTATIONS)
+        if family == "domains":
+            variant = rng.choices(DOMAIN_VARIANTS, DOMAIN_WEIGHTS)[0]
     else:
         F = Params.space_size()
         p = Params.from_index(index % F)
@@ -545,6 +822,23 @@ def build_one(mode, family, seed, index, max_extent, max_loops):
             fam = ["positive", "positive", "positive", "views", "mutation", "mutation"][index % 6]
         mut = MUTATIONS[(index // 7) % len(MUTATIONS)]
         rng = random.Random(tag)
+        if family == "domains":
+            variant = DOMAIN_VARIANTS[(index // 5) % len(DOMAIN_VARIANTS)]
+            # the shapes walked with the index itself (the generic walk stays
+            # at 1 x 1 x 1 for the first 921,600 indices, where no loop can be
+            # shifted): the all-ones shape skipped, a new shape every 7 indices
+            M, N, K = shape_from_index(index // 7 + 1, mode)
+    if fam == "domains":
+        # the variants of docs section 19.12 over a positive case (a quarter
+        # of them with per-operand views); K = 1 for the constant reduction
+        # index, M, N, K otherwise as drawn
+        if variant == "k1_const":
+            K = 1
+        base = positive_case("gen_tmp", M, N, K, p, "views" if rng.random() < 0.25 else "positive",
+                             rng, max_extent, max_loops, tag)
+        case = domain_variant(base, variant, rng)
+        case.set = "generated"
+        return case, fam, variant, tag
     base = positive_case("gen_tmp", M, N, K, p, "positive" if fam != "views" else "views", rng,
                          max_extent, max_loops, tag)
     if fam == "mutation":
@@ -565,9 +859,22 @@ def finalize(case: Case):
     casespec.spec_expect(case)
     cls = casespec.classify_case(case)
     try:
-        casespec.evaluate(case)
+        result = casespec.evaluate(case)
     except IndexError as e:
         raise Rejected("out of bounds: %s" % e)
+    # The program checks itself in float: every value must be an integer float
+    # represents exactly (|v| < 2^24). Products of the data in [-3, 3] over a
+    # GEMM stay far below that; an output that is also a factor (the domains
+    # family's alias_c) can feed back and grow without bound.
+    peak = max(result.get("peak", 0), max((abs(v) for v in result["c"]), default=0))
+    if peak >= 2 ** 24:
+        raise Rejected("a product, partial sum or result of magnitude %d exceeds float's exact "
+                       "integers" % peak)
+    if not casespec.is_box_case(case) and casespec.shifts_together(case):
+        # the box form (what the compiler analyses) computes the same C
+        if casespec.evaluate(casespec.box_form(case))["c"] != result["c"]:
+            raise RuntimeError("%s: the box form computes a different C than the nest as written"
+                               % case.id)
     if cls in ("FALSE_POSITIVE", "UNEXPECTED_ACCEPT"):
         # the prediction itself says the implementation would offload a nest
         # the specification refuses: keep it (the run decides), but flag it
@@ -589,7 +896,8 @@ def main():
     ap.add_argument("--seed", default="1")
     ap.add_argument("--count", type=int, default=20)
     ap.add_argument("--start", type=int, default=0, help="first index of the walk")
-    ap.add_argument("--family", default="mixed", choices=["positive", "views", "mutation", "mixed"])
+    ap.add_argument("--family", default="mixed",
+                    choices=["positive", "views", "mutation", "mixed", "domains"])
     ap.add_argument("--out", default=None, help="output directory (default generated/batch_<mode>_<seed>_<start>)")
     ap.add_argument("--registry", default=os.path.join(HERE, "..", "generated", "registry.json"))
     ap.add_argument("--coverage", default=os.path.join(HERE, "..", "generated", "coverage.json"))

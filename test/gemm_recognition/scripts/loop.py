@@ -78,6 +78,8 @@ def shrink_candidates(case):
     bounds), so the feature under test is unchanged."""
     out = []
     for i, lp in enumerate(case.loops):
+        if not lp.is_box() or any(lp.var in l.bound_vars() for l in case.loops):
+            continue    # a loop with bounds over the enclosing counters, or one they read: kept as is
         if lp.role == "R":
             c = copy.deepcopy(case)
             del c.loops[i]
@@ -238,7 +240,8 @@ def main():
     ap.add_argument("--mode", default="random", choices=["random", "enumerate", "boundary"])
     ap.add_argument("--seed", default=datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
     ap.add_argument("--start", type=int, default=None, help="first generator index (default: continue the registry)")
-    ap.add_argument("--family", default="mixed", choices=["mixed", "positive", "views", "mutation"])
+    ap.add_argument("--family", default="mixed",
+                    choices=["mixed", "positive", "views", "mutation", "domains"])
     ap.add_argument("--runtime", default="soft", choices=["soft", "board"])
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--build-dir")

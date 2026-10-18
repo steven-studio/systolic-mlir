@@ -397,3 +397,34 @@ func.func @shift_repetition_stuck(%A: memref<4x4xf32> {llvm.noalias}, %B: memref
   }
   return
 }
+
+
+// -----
+// The accumulator loaded with a term of a loop that runs once (r in [0, 1):
+// C[i + r][j - i] against the store C[i][j - i], the same element at every
+// point, Lemma 0) under a shifted j: normalized all the same -- the body test
+// asks for the accumulator's memref and index count, not equal maps (the
+// recognizer decides the element) -- and lowered. Found by the oracle's
+// sheared nests on 2026-10-18 (refused in silence before).
+// CHECK-LABEL: func.func @shift_acc_once_term
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      loop 2: x2 = x2' + 1*x0, box [0, 4) step 1
+// REMARK:      affine GEMM 4x4x4 lowered as 1 exact region(s)
+// DISC:        domain normalization: 1 nest(s)
+func.func @shift_acc_once_term(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %r = 0 to 1 {
+      affine.for %j = affine_map<(d0) -> (d0)>(%i) to affine_map<(d0) -> (d0 + 4)>(%i) {
+        affine.for %k = 0 to 4 {
+          %a = affine.load %A[%i, %k] : memref<4x4xf32>
+          %b = affine.load %B[%k, %j - %i] : memref<4x4xf32>
+          %c = affine.load %C[%i + %r, %j - %i] : memref<4x4xf32>
+          %p = arith.mulf %a, %b : f32
+          %s = arith.addf %c, %p : f32
+          affine.store %s, %C[%i, %j - %i] : memref<4x4xf32>
+        }
+      }
+    }
+  }
+  return
+}

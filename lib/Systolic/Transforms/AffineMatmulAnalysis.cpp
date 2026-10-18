@@ -3911,12 +3911,18 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
             mul = m;
         }
       }
+      // The accumulator is loaded from the memref the sum is stored to, with
+      // as many indices; whether the two address the same element at every
+      // point is the recognizer's question (the maps may differ by terms of
+      // loops that run once, constants on the domain -- the oracle of
+      // 2026-10-18 found such nests left sheared and refused in silence when
+      // this test demanded equal maps).
       macBody = add && acc && mul &&
                 mul.getLhs().getDefiningOp<affine::AffineLoadOp>() &&
                 mul.getRhs().getDefiningOp<affine::AffineLoadOp>() &&
                 acc.getMemRef() == store.getMemRef() &&
-                acc.getAffineMap() == store.getAffineMap() &&
-                llvm::equal(acc.getMapOperands(), store.getMapOperands());
+                acc.getAffineMap().getNumResults() ==
+                    store.getAffineMap().getNumResults();
     }
     if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
           return loop.getNumResults() == 0 && loop.getStepAsInt() >= 1;

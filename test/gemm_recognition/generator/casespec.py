@@ -175,6 +175,15 @@ class Loop:
                        # affine expression of the counter compared with a constant, e.g.
                        # '2 * i - 3 > 0'; cmp / ub are then its declared equivalent (i > 1),
                        # and values() checks the two against each other
+    # Bounds affine in the enclosing counters (docs/AFFINE_GEMM_MAPPING.md
+    # section 19.12): a coefficient per enclosing loop variable, added to lb
+    # and to ub respectively. Equal terms -- the two bounds shift together,
+    # for (int k = i; k < i + 4; ++k) -- make the iteration set a
+    # constant-extent parallelotope (family F: translated by the C front end,
+    # mapped onto its box by the compiler); different terms (a triangle,
+    # k in [i, 8)) are outside the front end's subset.
+    lb_terms: Dict[str, int] = field(default_factory=dict)
+    ub_terms: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.cmp not in ("<", "<=", ">", ">="):
@@ -188,21 +197,80 @@ class Loop:
             raise ValueError("%s: increment %r" % (self.var, self.inc))
         if self.cond and not re.search(r"\b%s\b" % re.escape(self.var), self.cond):
             raise ValueError("%s: condition %r does not use the counter" % (self.var, self.cond))
+        self.lb_terms = {k: v for k, v in self.lb_terms.items() if v}
+        self.ub_terms = {k: v for k, v in self.ub_terms.items() if v}
+        if (self.lb_terms or self.ub_terms) and self.cond:
+            raise ValueError("%s: a bound over the enclosing counters cannot be combined with a "
+                             "written condition" % self.var)
+        if self.var in self.lb_terms or self.var in self.ub_terms:
+            raise ValueError("%s: a bound reads the loop's own counter" % self.var)
 
     def decreasing(self):
         return self.step < 0
 
+    def is_box(self):
+        """Constant bounds."""
+        return not self.lb_terms and not self.ub_terms
+
+    def shifts_together(self):
+        """Family F (docs/AFFINE_GEMM_MAPPING.md section 19.12): the two
+        bounds shifted by the same form of the enclosing counters, so the
+        trip count is a constant; true of a plain loop."""
+        return self.lb_terms == self.ub_terms
+
+    def bound_vars(self):
+        return set(self.lb_terms) | set(self.ub_terms)
+
+    def _shift(self, terms, env):
+        if not terms:
+            return 0
+        if env is None:
+            raise ValueError("%s: its bounds read %s; the enclosing counters' values are needed"
+                             % (self.var, ", ".join(sorted(terms))))
+        return sum(c * env[v] for v, c in terms.items())
+
+    def lb_at(self, env=None):
+        """The lower bound at the enclosing counters' values."""
+        return self.lb + self._shift(self.lb_terms, env)
+
+    def ub_at(self, env=None):
+        """The upper bound as written, at the enclosing counters' values."""
+        return self.ub + self._shift(self.ub_terms, env)
+
+    def _exclusive(self, hi):
+        if self.cmp == "<=":
+            return hi + 1
+        if self.cmp == ">=":
+            return hi - 1
+        return hi
+
     def exclusive_ub(self):
         """The bound in range() terms: the first value NOT visited, in the
-        direction of the step."""
-        if self.cmp == "<=":
-            return self.ub + 1
-        if self.cmp == ">=":
-            return self.ub - 1
-        return self.ub
+        direction of the step (its constant part for a shifted loop)."""
+        return self._exclusive(self.ub)
 
-    def values(self):
-        declared = list(range(self.lb, self.exclusive_ub(), self.step))
+    @staticmethod
+    def _bound_text(terms, const):
+        """A bound as C text: 2 * i + k - 3 (the enclosing counters by name)."""
+        parts = []
+        for v, c in sorted(terms.items()):
+            parts.append(v if c == 1 else "-%s" % v if c == -1 else "%d * %s" % (c, v))
+        text = " + ".join(parts)
+        if const or not parts:
+            text = (text + " + " if text else "") + str(const)
+        return text.replace("+ -", "- ")
+
+    def values(self, env=None):
+        """The counter's values: of a plain loop as declared; of a loop whose
+        bounds shift together, WITHOUT the shift when `env` is None (the
+        values of the box form's counter, docs section 19.12) and with it at
+        the enclosing counters' values `env`; of a loop whose bounds do not
+        shift together only at `env`."""
+        if self.is_box() or (env is None and self.shifts_together()):
+            lo, hi = self.lb, self.exclusive_ub()
+        else:
+            lo, hi = self.lb_at(env), self._exclusive(self.ub_at(env))
+        declared = list(range(lo, hi, self.step))
         if self.cond:
             # run the condition as written (integer + - * and comparisons
             # mean the same in Python as in C over these values): the
@@ -236,8 +304,9 @@ class Loop:
             inc = "%s = %s %s %d" % (v, v, "+" if self.step > 0 else "-", s)
         else:
             raise ValueError(self.inc)
-        cond = self.cond or "%s %s %d" % (self.var, self.cmp, self.ub)
-        return "for (%s %s = %d; %s; %s)" % (self.ctype, self.var, self.lb, cond, inc)
+        cond = self.cond or "%s %s %s" % (self.var, self.cmp, self._bound_text(self.ub_terms, self.ub))
+        return "for (%s %s = %s; %s; %s)" % (self.ctype, self.var,
+                                            self._bound_text(self.lb_terms, self.lb), cond, inc)
 
     def _compound(self, s):
         return "%s %s %d" % (self.var, "+=" if self.step > 0 else "-=", s)
@@ -245,9 +314,10 @@ class Loop:
     def reference_header(self, ctype="long"):
         """The same iteration set as a reference loop: for (v = lb; v < / >
         exclusive bound; v += step)."""
-        return "for (%s %s = %d; %s %s %d; %s += %d)" % (
-            ctype, self.var, self.lb, self.var, "<" if self.step > 0 else ">",
-            self.exclusive_ub(), self.var, self.step)
+        return "for (%s %s = %s; %s %s %s; %s += %d)" % (
+            ctype, self.var, self._bound_text(self.lb_terms, self.lb), self.var,
+            "<" if self.step > 0 else ">", self._bound_text(self.ub_terms, self.exclusive_ub()),
+            self.var, self.step)
 
 
 @dataclass
@@ -354,15 +424,141 @@ def volume(dims):
 
 
 # --------------------------------------------------------------------------
+# iteration domains that are not boxes (docs/AFFINE_GEMM_MAPPING.md 19.12)
+# --------------------------------------------------------------------------
+
+
+def is_box_case(case: "Case") -> bool:
+    return all(lp.is_box() for lp in case.loops)
+
+
+def shifts_together(case: "Case") -> bool:
+    """Family F: every loop's two bounds shifted by the same form of the
+    enclosing counters (a constant-extent parallelotope)."""
+    return all(lp.shifts_together() for lp in case.loops)
+
+
+def domain_points(loops):
+    """The iteration points as environments, in program order, each loop's
+    bounds evaluated at the enclosing counters' values (any shape of
+    domain)."""
+    out = []
+    env = {}
+
+    def rec(depth):
+        if depth == len(loops):
+            out.append(dict(env))
+            return
+        lp = loops[depth]
+        for v in lp.values(env):
+            env[lp.var] = v
+            rec(depth + 1)
+        env.pop(lp.var, None)
+
+    rec(0)
+    return out
+
+
+def box_form(case: "Case") -> "Case":
+    """The equivalent box nest of a family-F case: x = U x' with
+    x_s = x'_s + l_s . x_<s (U lower unitriangular -- a bijection of the two
+    iteration sets that preserves their order), the bounds constant and every
+    subscript composed with U: the nest the compiler analyses after its domain
+    normalization (docs/AFFINE_GEMM_MAPPING.md section 19.12), the same
+    computation on the same elements in the same order. The case itself when
+    it is a box; ValueError when the bounds do not shift together."""
+    if is_box_case(case):
+        return case
+    if not shifts_together(case):
+        raise ValueError("%s: a loop's bounds do not shift together (not a parallelotope)" % case.id)
+    import copy
+    box = copy.deepcopy(case)
+    shift = {lp.var: dict(lp.lb_terms) for lp in case.loops if lp.lb_terms}
+    order = [lp.var for lp in case.loops]
+
+    def compose(f: LinearForm) -> LinearForm:
+        coef = dict(f.coef)
+        # innermost first: a shift's own counters are substituted after it
+        for v in reversed(order):
+            c = coef.get(v, 0)
+            if c == 0 or v not in shift:
+                continue
+            for t, l in shift[v].items():
+                coef[t] = coef.get(t, 0) + c * l
+        return LinearForm(coef, f.const)
+
+    for arr in box.arrays.values():
+        arr.subs = tuple(compose(parse_affine(sub)).c_text() for sub in arr.subs)
+    for lp in box.loops:
+        lp.lb_terms, lp.ub_terms = {}, {}
+    box.analysis, box.expect, box.spec, box.classification = {}, {}, {}, ""
+    return box
+
+
+def _aliases_output(case: "Case") -> bool:
+    """A factor that may alias C: the same array (A[i][j] += A[i][k] *
+    B[k][j]: the writes to C are reads of A in program order), or neither
+    side restrict-qualified."""
+    return (case.c.name in (case.a.name, case.b.name)
+            or not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict))
+
+
+def _alias_changes_result(case: "Case") -> bool:
+    """With the output array also a factor: whether the nest's result on its
+    data differs from the GEMM of the factors' initial values. A cross-check
+    of _alias_reads_written (a difference needs a read of a written element;
+    the converse depends on the data: a product that is zero leaves the
+    element as it was)."""
+    return evaluate(case)["c"] != evaluate(case, snapshot=True)["c"]
+
+
+def _alias_reads_written(case: "Case") -> bool:
+    """With the output array also a factor: whether some product reads an
+    element of that array written at an earlier point of the nest, in program
+    order -- then the nest is not the GEMM of its operands' initial values,
+    whatever the data. Decided by the addresses alone."""
+    shared = [r for r in ("a", "b") if case.arrays[r].name == case.c.name]
+    if not shared:
+        return False
+    forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
+    dims = case.c.dims
+    written = set()
+    for env in domain_points(case.loops):
+        for r in shared:
+            if flat_index(dims, [f.eval(env) for f in forms[r]]) in written:
+                return True
+        written.add(flat_index(dims, [f.eval(env) for f in forms["c"]]))
+    return False
+
+
+def _alias_verdict(case: "Case"):
+    """The specification on a factor that may alias C: REJECT when the output
+    is a factor and a product reads an element written earlier (not the GEMM
+    of the operands, by the addresses), OUT_OF_SCOPE (a valid GEMM the
+    compiler refuses conservatively) otherwise."""
+    if case.c.name in (case.a.name, case.b.name):
+        structural = _alias_reads_written(case)
+        if _alias_changes_result(case) and not structural:
+            raise ValueError("%s: the result differs from the GEMM of the initial values, yet no "
+                             "product reads an element written earlier" % case.id)
+        if structural:
+            return ("REJECT", "aliasing_not_gemm")
+    return ("OUT_OF_SCOPE", "aliasing")
+
+
+# --------------------------------------------------------------------------
 # the Python oracle: evaluate the kernel's statement exactly, in integers
 # --------------------------------------------------------------------------
 
 
-def evaluate(case: Case):
+def evaluate(case: Case, snapshot: bool = False):
     """Return {'c0': C before, 'c': C after, <name>: flat int arrays},
     evaluating the statement over the loop domain exactly as the C kernel
     does (in exact integer arithmetic, which is what makes the float results
-    exact).  Raises IndexError on an out-of-bounds subscript."""
+    exact).  Raises IndexError on an out-of-bounds subscript. With
+    `snapshot`, the factors are read from copies of their initial values (the
+    GEMM of the operands as they were), which differs from the run as written
+    only when the output array is also a factor."""
     data = {}
     for name in case.array_names():
         arr = case.arrays[case.role_of_name(name)]
@@ -380,12 +576,15 @@ def evaluate(case: Case):
         return flat_index(arr.dims, idx)
 
     A, B, C = data[case.a.name], data[case.b.name], data[case.c.name]
+    if snapshot:
+        A, B = list(A), list(B)
     D = data[case.arrays["d"].name] if "d" in case.arrays else None
     stmt = case.stmt
     alpha = int(case.alpha) if case.alpha is not None else None
     env = {}
     loops = case.loops
     zero_before_inner = case.kernel_style in ("init_inside", "scalar_acc")
+    peak = [0]      # the largest |product| and |partial sum| met (float exactness, 2^24)
 
     def rec(depth):
         if depth == len(loops):
@@ -406,9 +605,10 @@ def evaluate(case: Case):
                 C[ic] = C[ic] - p
             else:
                 C[ic] = C[ic] + p
+            peak[0] = max(peak[0], abs(p), abs(C[ic]))
             return
         lp = loops[depth]
-        for v in lp.values():
+        for v in lp.values(env):
             env[lp.var] = v
             if zero_before_inner and depth == len(loops) - 2:
                 env[loops[-1].var] = loops[-1].lb   # C's subscripts do not use it
@@ -420,6 +620,7 @@ def evaluate(case: Case):
     out = dict(data)
     out["c0"] = c0
     out["c"] = C
+    out["peak"] = peak[0]
     return out
 
 
@@ -431,6 +632,8 @@ def evaluate(case: Case):
 def analyse(case: Case) -> dict:
     """Classify the nest from its subscripts and loop domain.  Returns a dict
     with 'math_class' and the supporting facts, and sets case.analysis."""
+    if not is_box_case(case):
+        return _analyse_domain(case)
     loops = case.loops
     roles = {lp.var: lp.role for lp in loops}
     used = set()
@@ -498,19 +701,32 @@ def analyse(case: Case) -> dict:
     if case.stmt == "=AB":
         dense = False
         reasons.append("the statement overwrites C instead of accumulating into it")
+    # A reduction no loop enumerates has extent one (SQ-4, decided
+    # 2026-10-15: a role of extent one needs no loop; the K = 1 requirement of
+    # 2026-10-18 -- C[i][j] += A[i][0] * B[0][j] is the K = 1 GEMM): A and B
+    # read it through a constant subscript, which stands for it below. A row
+    # or column coordinate without a loop is left to the enumeration on the
+    # domain (spec_expect: dense_on_domain, generalized_views), as before.
+    absent = ["K"] if "K" not in groups and "I" in groups and "J" in groups else []
+    role_order = {"a": ("I", "K"), "b": ("K", "J"), "c": ("I", "J")}
     for role in ("a", "b", "c"):
         gl = [subscript_group(f) for f in forms[role]]
-        operand_groups[role] = gl
         want = set(expected_groups[role])
-        have = [g for g in gl if g != "P"]
+        missing = [g for g in role_order[role] if g in absent]
+        have = [g for g in gl if g not in ("P", "const")]
+        consts = [pos for pos, g in enumerate(gl) if g == "const"]
         if any(g.startswith("mixed") for g in gl):
             dense = False
             reasons.append("%s has a subscript that couples loops of different "
                            "coordinates (%s)" % (case.arrays[role].name, ", ".join(gl)))
-        elif sorted(have) != sorted(want):
+        elif sorted(have) != sorted(want - set(missing)) or len(consts) != len(missing):
             dense = False
             reasons.append("%s is indexed by %s; the operand in that position of a GEMM "
                            "is indexed by exactly %s" % (case.arrays[role].name, gl, sorted(want)))
+        else:
+            for pos, g in zip(consts, missing):
+                gl[pos] = g
+        operand_groups[role] = gl
     p_loops = groups.get("P", [])
     if p_loops and dense:
         # C must carry every batch coordinate; A or B may be shared by all
@@ -521,15 +737,24 @@ def analyse(case: Case) -> dict:
                 dense = False
                 reasons.append("the batch coordinate(s) are not subscripts of %s"
                                % case.arrays[role].name)
-    for g in ("I", "J", "K"):
+    for g in ("I", "J"):
         if g not in groups and dense:
             dense = False
             reasons.append("no loop enumerates coordinate %s" % g)
+    # (a reduction without a loop is one of extent one when A and B read it
+    # through a constant: handled above)
+    if dense and case.c.name in (case.a.name, case.b.name):
+        # the products may read elements the nest wrote: not the GEMM of the
+        # operands as they were (spec_expect decides by evaluation whether
+        # the result differs: _alias_verdict)
+        dense = False
+        reasons.append("the output array %s is also a factor: the products can read elements "
+                       "written earlier in the nest" % case.c.name)
 
     views = {}
     if dense:
         def ordinals(g):
-            ls = groups[g]
+            ls = groups.get(g, [])
             return ls, list(itertools.product(*[lp.values() for lp in ls]))
 
         for role in ("a", "b", "c"):
@@ -553,12 +778,14 @@ def analyse(case: Case) -> dict:
                     "position": pos, "subscript": arr.subs[pos],
                     "first": min(seen) if seen else None, "last": max(seen) if seen else None}
     if dense:
-        extents = {g: volume([lp.trip() for lp in groups[g]]) for g in ("I", "J", "K")}
+        extents = {g: volume([lp.trip() for lp in groups.get(g, [])]) for g in ("I", "J", "K")}
         result["extents"] = extents
         result["views"] = views
         tags = []
         if p_loops:
             tags.append("batched")
+        if absent:
+            tags.append("extent_one_without_loop:" + "".join(absent))
         if operand_groups["a"][-2:] != ["I", "K"]:
             tags.append("A_transposed")
         if operand_groups["b"][-2:] != ["K", "J"]:
@@ -1065,6 +1292,8 @@ def predict(case: Case) -> dict:
       reject_stage:      None or the first stage that stops the offload
       reject_reason:     text (the compiler's own wording where it has one)
     """
+    if not is_box_case(case):
+        return _predict_domain(case)
     an = case.analysis or analyse(case)
     ex = {s: "not_reached" for s in STAGES}
     ex["hoisting_required"] = False
@@ -1563,6 +1792,28 @@ SPEC_BASIS = {
                      "getLogicalOperand: 'accessed out of bounds along dimension'; "
                      "AffineMatmulPartitioning.cpp getDenseLogicalGemm when the coordinate's values "
                      "overflow 64-bit arithmetic -- ISSUE-002)",
+    "aliasing_not_gemm": "the output array is also a factor and a product reads an element of it "
+                         "written at an earlier point of the nest (A[i][j] += A[i][k] * B[k][j]: "
+                         "A[i][j], once written, is read as A[i][k'] with k' = j later on), so the "
+                         "nest is not the GEMM of the factors' initial values -- decided by the "
+                         "addresses in program order (casespec._alias_reads_written), cross-checked "
+                         "by evaluating the nest against a run that reads the factors' initial values; "
+                         "the compiler refuses the aliasing before that ('A may overlap C', docs "
+                         "section 7)",
+    "non_box_unenumerated": "a loop nest whose bounds do not shift together and whose iteration set "
+                            "exceeds the enumeration limit of the executable specification (200,000 "
+                            "points): not decided here (the compiler decides no such domain either)",
+    "non_box_domain": "(docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12) a loop nest whose bounds do "
+                      "not shift together (a triangle, k in [i, 8)): its iteration set is not mapped "
+                      "onto a box by the readers' roles -- decided by enumerating its points as written "
+                      "(casespec._spec_domain) --, so it is not a GEMM of affine views; the C front end "
+                      "does not translate it ('the loop's trip count depends on an enclosing loop "
+                      "counter') and the compiler decides no such domain (UNKNOWN)",
+    "non_box_gemm": "a loop nest whose bounds do not shift together but whose points, enumerated as "
+                    "written, the readers' roles map bijectively onto a box: a GEMM of affine views on "
+                    "a domain the compiler does not normalize (docs/AFFINE_GEMM_MAPPING.md section "
+                    "19.12 normalizes constant-extent parallelotopes only) and the C front end does "
+                    "not translate",
     "SQ-1": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-1"],
     "SQ-2": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-2"],
     "SQ-3": "UNDETERMINED -- " + SPEC_QUESTIONS["SQ-3"],
@@ -1898,6 +2149,8 @@ def repeat_in_reduction(case: Case) -> bool:
 
 
 def spec_expect(case: Case) -> dict:
+    if not is_box_case(case):
+        return _spec_domain(case)
     an = case.analysis or analyse(case)
     tags = set(an.get("gemm_tags", []))
     out = {"recognition": None, "basis_key": None, "basis": None, "legal_gemm": bool(an.get("is_gemm"))}
@@ -1954,8 +2207,8 @@ def spec_expect(case: Case) -> dict:
                 return done("OUT_OF_SCOPE", "double")
             if len({a.elem for a in case.arrays.values()}) > 1:
                 return done("OUT_OF_SCOPE", "mixed_types")
-            if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
-                return done("OUT_OF_SCOPE", "aliasing")
+            if _aliases_output(case):
+                return done(*_alias_verdict(case))
             if repeat_in_reduction(case):
                 return done("OUT_OF_SCOPE", "repeat_in_reduction")
             # two of M, N, K equal to 1 per batch: SQ-5, decided 2026-10-16
@@ -1974,8 +2227,8 @@ def spec_expect(case: Case) -> dict:
                 return done("OUT_OF_SCOPE", "double")
             if len({a.elem for a in case.arrays.values()}) > 1:
                 return done("OUT_OF_SCOPE", "mixed_types")
-            if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
-                return done("OUT_OF_SCOPE", "aliasing")
+            if _aliases_output(case):
+                return done(*_alias_verdict(case))
             return done("ACCEPT", "dense_on_domain")
         # The generalized definition (docs/AFFINE_GEMM_MAPPING.md section
         # 19): skewed and merged views, C reading batch loops in its role
@@ -2001,8 +2254,8 @@ def spec_expect(case: Case) -> dict:
                 return done("OUT_OF_SCOPE", "double")
             if len({a.elem for a in case.arrays.values()}) > 1:
                 return done("OUT_OF_SCOPE", "mixed_types")
-            if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
-                return done("OUT_OF_SCOPE", "aliasing")
+            if _aliases_output(case):
+                return done(*_alias_verdict(case))
             if repeat_in_reduction(case):
                 return done("OUT_OF_SCOPE", "repeat_in_reduction")
             return done("ACCEPT", "sq5_decided" if g["two_unit"] else "generalized_views")
@@ -2037,8 +2290,8 @@ def spec_expect(case: Case) -> dict:
         return done("OUT_OF_SCOPE", "double")
     if len({a.elem for a in case.arrays.values()}) > 1:
         return done("OUT_OF_SCOPE", "mixed_types")
-    if not (case.a.restrict or case.c.restrict) or not (case.b.restrict or case.c.restrict):
-        return done("OUT_OF_SCOPE", "aliasing")
+    if _aliases_output(case):
+        return done(*_alias_verdict(case))
     # a repetition loop (of more than one iteration) whose hoist would reorder
     # the accumulations into one element of C (inside a reduction loop, or
     # inside a batch loop whose C windows overlap)
@@ -2057,6 +2310,11 @@ def spec_expect(case: Case) -> dict:
     # combinations (not two views of one strided coordinate): open question
     for ra, rb, g in (("a", "c", "I"), ("b", "c", "J"), ("a", "b", "K")):
         fa_, fb_ = forms[ra][v[ra][g]["position"]], forms[rb][v[rb][g]["position"]]
+        if fa_.is_const() and fb_.is_const():
+            # a coordinate of extent one read through constants (A[i][6] *
+            # B[1][j]: K = 1, each factor's own slice): one coordinate, not
+            # the split-radix question of SQ-1
+            continue
         if shared_coordinate(fa_, fb_) is None:
             return done("UNDETERMINED", "SQ-1")
     return done("ACCEPT", "batched" if "batched" in tags else "dense_gemm")
@@ -2078,6 +2336,175 @@ def classify_case(case: Case) -> str:
         c = "UNEXPECTED_ACCEPT" if offloaded else "DOCUMENTED_LIMITATION"
     case.classification = c
     return c
+
+
+# --------------------------------------------------------------------------
+# domains whose bounds read the enclosing counters: analysis, prediction,
+# specification (docs/AFFINE_GEMM_MAPPING.md section 19.12)
+# --------------------------------------------------------------------------
+
+MAC_STMTS = ("+=", "=C+AB", "=AB+C", "+=BA")
+
+
+def _analyse_domain(case: Case) -> dict:
+    """A nest whose bounds read the enclosing counters: analysed on its box
+    form when the bounds shift together (the computation is the same, and it
+    is what the compiler analyses after normalization), else recorded as a
+    non-box domain -- a triangle: not the affine image of a box, not a GEMM
+    (docs section 19.7)."""
+    if shifts_together(case):
+        result = dict(analyse(box_form(case)))
+        result["domain"] = "parallelotope"
+        result["shifted_loops"] = [lp.var for lp in case.loops if lp.lb_terms]
+        result["gemm_tags"] = list(result.get("gemm_tags", [])) + ["parallelotope_domain"]
+        case.analysis = result
+        return result
+    roles = {lp.var: lp.role for lp in case.loops}
+    used = set()
+    affine_ok = True
+    for arr in case.arrays.values():
+        try:
+            for f in arr.forms():
+                used |= f.vars()
+        except NotAffine:
+            affine_ok = False
+    for v in used:
+        if v not in roles:
+            raise ValueError("%s: subscript uses %r which is not a loop counter" % (case.id, v))
+    result = {"loop_roles": roles, "repetition_loops": [lp.var for lp in case.loops if lp.var not in used],
+              "affine": affine_ok, "perfect_nest": case.kernel_style not in ("init_inside", "scalar_acc"),
+              "domain": "non_box", "is_gemm": False, "gemm_tags": [],
+              "math_class": case.math_class or "non_box_domain",
+              "not_dense_reasons": ["loop %s's bounds do not shift together: the iteration set is not "
+                                    "the affine image of a box (a triangle; docs/AFFINE_GEMM_MAPPING.md "
+                                    "section 19.7)" % lp.var
+                                    for lp in case.loops if not lp.shifts_together()]}
+    case.analysis = result
+    return result
+
+
+def _predict_domain(case: Case) -> dict:
+    """The C front end translates a loop whose bounds are affine in the
+    enclosing counters when both bounds have the same counter terms and the
+    loop counts up (systolic-cfront.c for_stmt, 2026-10-18); the compiler
+    then maps the domain onto its box (docs section 19.12) and the box nest's
+    prediction is the case's."""
+    bad = [lp for lp in case.loops if not lp.shifts_together()]
+    down = [lp for lp in case.loops if not lp.is_box() and lp.step < 0]
+    if bad or down:
+        ex = {s: "not_reached" for s in STAGES}
+        ex["frontend"] = "rejected"
+        ex["hoisting_required"] = False
+        ex["reject_stage"] = "frontend"
+        ex["reject_reason"] = (
+            "the loop's trip count depends on an enclosing loop counter (its bounds do not shift "
+            "together): only bounds with the same counter terms are supported" if bad else
+            "a loop whose bounds depend on an enclosing loop counter must count up")
+        ex["driver"] = "not_translated"
+        case.expect = ex
+        return ex
+    ex = dict(predict(box_form(case)))
+    ex["domain_normalized"] = True
+    case.expect = ex
+    return ex
+
+
+def _spec_domain(case: Case) -> dict:
+    """The specification on a domain whose bounds read the enclosing
+    counters. Bounds that shift together (family F): the iteration set is the
+    image of a box under x = U x' (U lower unitriangular, order-preserving;
+    docs/AFFINE_GEMM_MAPPING.md section 19.12), so the definition of 19.1 --
+    a bijection from a box, the roles taken on the box (19.2, 'Non-box
+    domains') -- is decided on the box form, the same computation. Otherwise
+    (a triangle) the points are enumerated as written: a GEMM only if the
+    readers' roles map them bijectively onto a box, every batch iteration the
+    same shape (they never do for a triangle: 19.7's symmetry argument); no
+    other parametrization is searched."""
+    if shifts_together(case):
+        out = dict(spec_expect(box_form(case)))
+        out["domain"] = "parallelotope"
+        out["basis"] = (out["basis"] + " -- on a constant-extent parallelotope domain (the bounds "
+                        "shifted together by the enclosing counters), decided on its box x = U x' "
+                        "(docs/AFFINE_GEMM_MAPPING.md section 19.12)")
+        case.spec = out
+        return out
+    an = case.analysis or analyse(case)
+    out = {"recognition": None, "basis_key": None, "basis": None, "legal_gemm": False,
+           "domain": "non_box"}
+
+    def done(rec, key):
+        out["recognition"] = rec
+        out["basis_key"] = key
+        out["basis"] = SPEC_BASIS[key]
+        out["offload"] = "offloaded" if rec == "ACCEPT" else "stays_on_host"
+        case.spec = out
+        return out
+
+    if not an.get("affine") or case.stmt in ("+=sum", "+=triple", "=AB"):
+        return done("REJECT", "not_gemm")
+    if case.kernel_style == "scalar_acc":
+        return done("OUT_OF_SCOPE", "scalar_acc")
+    used = set()
+    for arr in case.arrays.values():
+        for f in arr.forms():
+            used |= f.vars()
+    # The points over the loops the accesses use, with their multiplicity: a
+    # loop no access uses repeats the accumulation, which is a GEMM only when
+    # it repeats every point the same number of times (a triangle in such a
+    # loop accumulates each row a different number of times: not a GEMM).
+    counts = {}
+    pts = []
+    for env in domain_points(case.loops):
+        key = tuple(sorted((k, v) for k, v in env.items() if k in used))
+        if key not in counts:
+            pts.append(dict(key))
+        counts[key] = counts.get(key, 0) + 1
+    if len(pts) > 200000:
+        out["spec_question"] = "non_box_unenumerated"
+        out["recognition"] = "UNDETERMINED"
+        out["basis_key"] = "non_box_unenumerated"
+        out["basis"] = SPEC_BASIS["non_box_unenumerated"]
+        out["offload"] = "undetermined"
+        case.spec = out
+        return out
+    if not pts or len(set(counts.values())) != 1:
+        return done("REJECT", "non_box_domain")
+    found = _gemm_on_points(case, pts)
+    if found is None:
+        # batched: the loops every operand reads, with two or more values,
+        # fix the batch; per batch value one GEMM, all of one shape
+        readers = {}
+        for r in ("a", "b", "c"):
+            for f in case.arrays[r].forms():
+                for v in f.vars():
+                    readers.setdefault(v, set()).add(r)
+        batch = [v for v in used if readers.get(v) == {"a", "b", "c"} and len({p[v] for p in pts}) >= 2]
+        if batch:
+            groups = {}
+            for p in pts:
+                groups.setdefault(tuple(p[v] for v in batch), []).append(p)
+            shape = None
+            for sub in groups.values():
+                res = _gemm_on_points(case, sub)
+                if res is None or not res[1] or (shape is not None and res[:2] != shape):
+                    shape = False
+                    break
+                shape = res[:2]
+            found = shape or None
+    if not found:
+        return done("REJECT", "non_box_domain")
+    out["legal_gemm"] = True
+    if case.stmt in ("+=alpha", "-="):
+        return done("OUT_OF_SCOPE", "alpha")
+    if case.kernel_style == "init_inside":
+        return done("OUT_OF_SCOPE", "init_inside")
+    if case.elem != "float":
+        return done("OUT_OF_SCOPE", "double")
+    if len({a.elem for a in case.arrays.values()}) > 1:
+        return done("OUT_OF_SCOPE", "mixed_types")
+    if _aliases_output(case):
+        return done(*_alias_verdict(case))
+    return done("ACCEPT", "non_box_gemm")
 
 
 # --------------------------------------------------------------------------
@@ -2224,6 +2651,13 @@ def reference_logical_text(case: Case) -> Optional[str]:
     an = case.analysis
     if not an.get("is_gemm"):
         return None
+    if not is_box_case(case):
+        # a parallelotope domain: the logical operands are those of its box
+        # form (the same elements, gathered over the box's loops through the
+        # composed subscripts; docs/AFFINE_GEMM_MAPPING.md section 19.12)
+        box = box_form(case)
+        box.analysis = an
+        case = box
     groups = {}
     for lp in case.loops:
         groups.setdefault(lp.role, []).append(lp)
@@ -2239,14 +2673,14 @@ def reference_logical_text(case: Case) -> Optional[str]:
     zero = case.kernel_style in ("init_inside", "scalar_acc")
 
     def ordinal_expr(g):
-        ls = groups[g]
+        ls = groups.get(g, [])     # no loop: a coordinate of extent one, ordinal 0
         terms = []
         mult = 1
         for lp in reversed(ls):
             terms.append("((%s - %d) / %d) * %d" % (lp.var, lp.lb, lp.step, mult)
                          if (lp.lb or lp.step != 1 or mult != 1) else lp.var)
             mult *= lp.trip()
-        return " + ".join(reversed(terms))
+        return " + ".join(reversed(terms)) or "0"
 
     def loops_text(gs, depth):
         out = []
@@ -2330,6 +2764,10 @@ def math_description(case: Case) -> List[str]:
     d = case.arrays["d"].name + _sub_text(case.arrays["d"]) if "d" in case.arrays else None
     out = []
     def dom_text(lp):
+        if not lp.is_box():
+            return "%s in [%s, %s)%s" % (lp.var, lp._bound_text(lp.lb_terms, lp.lb),
+                                         lp._bound_text(lp.ub_terms, lp.exclusive_ub()),
+                                         "" if lp.step == 1 else " step %d" % lp.step)
         if lp.trip() == 0:
             return "%s in {} (the loop runs zero times)" % lp.var
         if lp.step == 1:
@@ -2357,7 +2795,8 @@ def math_description(case: Case) -> List[str]:
             groups.setdefault(lp.role, []).append(lp)
         for g in ("I", "J", "K"):
             out.append("  %s is enumerated by loop(s) %s: extent %d" % (
-                g, ", ".join("%s (%d values)" % (lp.var, lp.trip()) for lp in groups[g]), ext[g]))
+                g, ", ".join("%s (%d values)" % (lp.var, lp.trip()) for lp in groups[g])
+                if g in groups else "none (a constant subscript: extent one)", ext[g]))
         for role, nm, g0, g1 in (("a", "A'(I,K)", "I", "K"), ("b", "B'(K,J)", "K", "J"), ("c", "C'(I,J)", "I", "J")):
             arr = case.arrays[role]
             vv = v[role]
@@ -2925,10 +3364,17 @@ def index_forms(case: Case) -> dict:
 
 
 def loop_summary(case: Case) -> List[str]:
-    return ["%s [%s]: %d %s %s %s %d, step %d, %d iteration(s)%s" % (
-        lp.var, lp.role, lp.lb, "<=" if lp.step > 0 else ">=", lp.var, lp.cmp, lp.ub, lp.step, lp.trip(),
-        " (written as the condition %s)" % lp.cond if lp.cond else "")
-        for lp in case.loops]
+    out = []
+    for lp in case.loops:
+        trip = ("%d iteration(s)" % lp.trip() if lp.shifts_together()
+                else "a trip count that varies with the enclosing counters")
+        out.append("%s [%s]: %s %s %s %s %s, step %d, %s%s%s" % (
+            lp.var, lp.role, lp._bound_text(lp.lb_terms, lp.lb), "<=" if lp.step > 0 else ">=", lp.var,
+            lp.cmp, lp._bound_text(lp.ub_terms, lp.ub), lp.step, trip,
+            " (written as the condition %s)" % lp.cond if lp.cond else "",
+            "" if lp.is_box() else " (bounds affine in the enclosing counters%s)"
+            % ("" if lp.shifts_together() else ", not shifting together")))
+    return out
 
 
 def manifest_entry(case: Case, subdir: str) -> dict:
@@ -2957,8 +3403,11 @@ def manifest_entry(case: Case, subdir: str) -> dict:
         "statement": case.stmt,
         "kernel_style": case.kernel_style,
         "loops": [dict({"var": lp.var, "role": lp.role, "lb": lp.lb, "ub_exclusive": lp.exclusive_ub(),
-                        "step": lp.step, "cmp": lp.cmp, "trip": lp.trip()},
-                       **({"cond": lp.cond} if lp.cond else {})) for lp in case.loops],
+                        "step": lp.step, "cmp": lp.cmp,
+                        "trip": lp.trip() if lp.shifts_together() else None},
+                       **({"cond": lp.cond} if lp.cond else {}),
+                       **({"lb_terms": lp.lb_terms, "ub_terms": lp.ub_terms} if not lp.is_box() else {}))
+                  for lp in case.loops],
         "arrays": {role: {"name": arr.name, "dims": list(arr.dims), "subscripts": list(arr.subs),
                           "restrict": arr.restrict, "elem": arr.elem}
                    for role, arr in case.arrays.items()},

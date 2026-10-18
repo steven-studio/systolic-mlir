@@ -61,6 +61,32 @@ must fold them -- a bound map's first result alone runs other iterations. The
 decoration has its own random stream per nest, so a seed's nests are the
 same with or without it.
 
+Sheared iteration domains (docs/AFFINE_GEMM_MAPPING.md section 19.12, since
+2026-10-18): some nests are emitted on a constant-extent parallelotope instead
+of their box -- loop s runs from a_s + l_s . x_<s to b_s + l_s . x_<s (the
+same integer form l_s shifts both bounds; max/min decorations keep that linear
+part), the subscripts rewritten so that the emitted nest reads and writes
+exactly the elements of the box nest at corresponding points, in the same
+order (x' = L x with L lower unitriangular; an access c . x' is c . L . x).
+The DECISION stays the box nest's (the roles are taken after the bijection,
+section 19.2 / 19.12), and the compiler's views are checked on the box
+points: a lowering of the sheared nest is right iff it is the box nest's. A
+'triangle' (the two bounds shifted by different forms) is outside the family
+the compiler normalizes: it must not be lowered. Sheared nests are emitted
+in every mode, so an out-of-bounds access or a non-injective C under a shear
+is a rejection / refusal like any other.
+
+One memref as both factors (section 7, 19.12.3): some nests read A's memref
+for B too -- through two different views (A[i][k] * A[k][j], transposed,
+skewed, strided or reversed variants: two read-only tensors of one buffer),
+or through ONE view (A'(I, K) and B'(K, J) the same element map, which needs
+M = N = K: one tensor serves both). Some nests make C a view of A's memref:
+the compiler must refuse them ("A may overlap C").
+
+K = 1 (a reduction of extent one: a loop that runs once read by both
+factors, or no reduction loop at all) is counted explicitly: such a GEMM
+must stay eligible and lowered.
+
 With --fp-default the nests go through the pass WITHOUT the reassociation
 permission, and nothing may be lowered (section 6).
 
@@ -95,6 +121,13 @@ def value(f, x):
 
 
 class Nest:
+    """The BOX nest: constant loops, the subscripts over its counters x'. It
+    is what the oracle decides and checks. How it is EMITTED may differ:
+    sheared loops (the counters x of the emitted nest, x_s = x'_s + l_s . x_<s,
+    `shear[s]` = l_s over the outer loops), a 'triangle' (`shear_ub` differs
+    from `shear`: not the same computation, not in the compiler's family),
+    operands sharing one memref (`arg_of`: the emitted argument of each)."""
+
     def __init__(self, loops, ops, cload, order, mode):
         self.loops = loops          # [(lb, ub, step)]
         self.ops = ops              # {"A"|"B"|"C": (shape, [f, ...])}
@@ -102,10 +135,83 @@ class Nest:
         self.order = order          # ("A", "B") or ("B", "A"): the product's factor order
         self.mode = mode
         self.bounds = None          # per loop ([lowers], [uppers]) as emitted, or None: lb, ub
+        self.shear = None           # per loop s: [l_s0, .., l_s(s-1)] over the outer loops, or None
+        self.shear_ub = None        # the upper bounds' rows when they differ (a triangle), else None
+        self.domain_mode = "box"    # "box" | "shear" | "triangle"
+        self.arg_of = {"A": 0, "B": 1, "C": 2}   # the emitted memref argument of each operand
+        self.shared = None          # None | "two_views" | "same_view" | "alias_c"
 
     def points(self):
         return list(itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
                                         for lb, ub, st in self.loops]))
+
+    def sheared_loops(self):
+        return [s for s, row in enumerate(self.shear or []) if any(row)]
+
+    def chained(self):
+        """A sheared loop whose shift reads another sheared loop."""
+        sheared = set(self.sheared_loops())
+        return any(t in sheared for s in sheared for t, c in enumerate(self.shear[s]) if c)
+
+
+def shear_matrix(nest):
+    """L with x' = L x: the box counters from the emitted ones (docs section
+    19.12.1: x_s = x'_s + l_s . x_<s, so x'_s = x_s - l_s . x_<s). Lower
+    unitriangular, unimodular."""
+    n = len(nest.loops)
+    L = [[1 if s == t else 0 for t in range(n)] for s in range(n)]
+    for s, row in enumerate(nest.shear or []):
+        for t, c in enumerate(row):
+            L[s][t] -= c
+    return L
+
+
+def emitted_row(f, L):
+    """A subscript c . x' + k over the emitted counters: (c . L) . x + k."""
+    coefs, const = f
+    n = len(coefs)
+    return ([sum(coefs[s] * L[s][t] for s in range(n)) for t in range(n)], const)
+
+
+def emitted_points(nest):
+    """The emitted nest's iteration points (bounds depending on the outer
+    counters), in iteration order."""
+    n = len(nest.loops)
+    out = []
+
+    def rec(s, x):
+        if s == n:
+            out.append(tuple(x))
+            return
+        lb, ub, st = nest.loops[s]
+        lo_row = nest.shear[s] if nest.shear else []
+        up_row = nest.shear_ub[s] if nest.shear_ub else lo_row
+        lo = lb + sum(c * x[t] for t, c in enumerate(lo_row))
+        up = ub + sum(c * x[t] for t, c in enumerate(up_row))
+        for z in range(trips(lo, up, st)):
+            rec(s + 1, x + [lo + st * z])
+    rec(0, [])
+    return out
+
+
+def check_shear(nest):
+    """The emitted sheared nest performs the box nest's computation: the same
+    number of points, in the same order, x' = L x at each, and every access
+    (A, B, the C load, the C store) at the same element. Raises on failure
+    (an oracle bug, never a compiler one)."""
+    L = shear_matrix(nest)
+    box, emitted = nest.points(), emitted_points(nest)
+    assert len(box) == len(emitted), (nest.mode, len(box), len(emitted))
+    n = len(nest.loops)
+    rows = {name: [emitted_row(f, L) for f in fs] for name, (_, fs) in nest.ops.items()}
+    rows["cload"] = [emitted_row(f, L) for f in nest.cload]
+    for xb, xe in zip(box, emitted):
+        assert tuple(sum(L[s][t] * xe[t] for t in range(n)) for s in range(n)) == xb
+        for name, fs in nest.ops.items():
+            for f, g in zip(fs[1], rows[name]):
+                assert value(f, xb) == value(g, xe), (name, f, g, xb, xe)
+        for f, g in zip(nest.cload, rows["cload"]):
+            assert value(f, xb) == value(g, xe)
 
 
 # ---------------------------------------------------------------------------
@@ -402,15 +508,164 @@ def has_folded_bound(nest, loops=None):
                for s, (lo, up) in enumerate(nest.bounds) if loops is None or s in loops)
 
 
+def generate_same_view(rng):
+    """One memref as both factors through ONE view (docs section 7): A'(I, K)
+    and B'(K, J) the same element map -- the same offsets and strides on a
+    square M = N = K --, which the compiler serves with one tensor. The three
+    role loops are one and the same (lb, ub, step); B's subscripts are A's
+    with the role columns moved (I's loop -> K's loop, K's loop -> J's loop),
+    the terms of a loop that runs once the same in both; the constants are
+    made equal after finalize (unify_same_view)."""
+    trip = rng.randint(2, 4)
+    role_loop = make_loop(rng, trip)
+    coord = ["I", "J", "K"]
+    rng.shuffle(coord)
+    if rng.random() < 0.3:
+        coord.insert(rng.randint(0, 3), None)      # a loop that runs once
+    n = len(coord)
+    loops = [role_loop if c is not None else make_loop(rng, 1) for c in coord]
+    pos = {r: coord.index(r) for r in "IJK"}
+
+    def row(role, p):
+        coefs = [0] * n
+        coefs[pos[role]] = p
+        return coefs
+    p_first = rng.choice([1, 1, 1, 2, 3]) * rng.choice([1, 1, -1])
+    p_second = rng.choice([1, 1, 1, 2, 3]) * rng.choice([1, 1, -1])
+    a_dims = [[row("I", p_first), 0], [row("K", p_second), 0]]
+    b_dims = [[row("K", p_first), 0], [row("J", p_second), 0]]
+    if rng.random() < 0.35:                        # both stored transposed
+        a_dims.reverse()
+        b_dims.reverse()
+    if rng.random() < 0.3:                         # a constant dimension, same place in both
+        d = rng.randint(0, 2)
+        a_dims.insert(d, [[0] * n, None])
+        b_dims.insert(d, [[0] * n, None])
+    c_dims = [[row("I", rng.choice([1, 1, 2, -1])), 0], [row("J", rng.choice([1, 1, 2, -1])), 0]]
+    if rng.random() < 0.3:
+        c_dims.reverse()
+    once = [s for s in range(n) if coord[s] is None]
+    for d in range(len(a_dims)):
+        for s in once:
+            if rng.random() < 0.4:
+                delta = rng.randint(-3, 3)
+                a_dims[d][0][s] += delta
+                b_dims[d][0][s] += delta
+    for f in c_dims:
+        for s in once:
+            if rng.random() < 0.4:
+                f[0][s] += rng.randint(-3, 3)
+    ops = {"A": a_dims, "B": b_dims, "C": c_dims}
+    for s in once:
+        if all(f[0][s] == 0 for fs in ops.values() for f in fs):
+            c_dims[0][0][s] = rng.choice([-2, -1, 1, 2])
+    return loops, [1 if c is None else trip for c in coord], ops
+
+
+def unify_same_view(nest):
+    """After finalize: B's constants are A's (the same element map), and the
+    two factors share A's memref."""
+    a_dims, b_dims = nest.ops["A"][1], nest.ops["B"][1]
+    for fa, fb in zip(a_dims, b_dims):
+        fb[1] = fa[1]
+    pts = nest.points()
+    shape = tuple(max(nest.ops["A"][0][d], nest.ops["B"][0][d],
+                      max(value(f, x) for f in (fa, fb) for x in pts) + 1)
+                  for d, (fa, fb) in enumerate(zip(a_dims, b_dims)))
+    nest.ops["A"] = (shape, a_dims)
+    nest.ops["B"] = (shape, b_dims)
+    nest.arg_of = {"A": 0, "B": 0, "C": 1}
+    nest.shared = "same_view"
+
+
+def share_base(nest):
+    """B reads A's memref through its own view (docs section 7, 19.12.3): one
+    buffer of the two shapes' elementwise maximum, two read-only views. False
+    when the ranks differ (one memref has one rank)."""
+    if len(nest.ops["A"][0]) != len(nest.ops["B"][0]):
+        return False
+    shape = tuple(max(a, b) for a, b in zip(nest.ops["A"][0], nest.ops["B"][0]))
+    nest.ops["A"] = (shape, nest.ops["A"][1])
+    nest.ops["B"] = (shape, nest.ops["B"][1])
+    nest.arg_of = {"A": 0, "B": 0, "C": 1}
+    nest.shared = "two_views"
+    return True
+
+
+def alias_output(nest):
+    """C is a view of A's memref: the output may overlap a factor, which the
+    compiler refuses (section 7: 'A may overlap C'); not lowered whatever the
+    mathematics says."""
+    if len(nest.ops["A"][0]) != len(nest.ops["C"][0]):
+        return False
+    shape = tuple(max(a, c) for a, c in zip(nest.ops["A"][0], nest.ops["C"][0]))
+    nest.ops["A"] = (shape, nest.ops["A"][1])
+    nest.ops["C"] = (shape, nest.ops["C"][1])
+    nest.arg_of = {"A": 0, "B": 1, "C": 0}
+    nest.shared = "alias_c"
+    return True
+
+
+def shear_domain(rng, nest):
+    """Emit the nest on a constant-extent parallelotope (docs section 19.12.1,
+    the family the compiler normalizes): one or two loops s >= 1 get their
+    bounds shifted by an integer form of outer counters -- coefficients in
+    {-2, -1, 1, 2}, one or two outer loops, preferring an outer loop that is
+    itself sheared (a chained shift). With a small probability the nest is a
+    'triangle' instead: the upper bound shifted by a different form (or not
+    at all), outside the family -- the compiler must not lower it."""
+    n = len(nest.loops)
+    if n < 2:
+        return
+    nest.shear = [[0] * s for s in range(n)]
+    chosen = sorted(rng.sample(range(1, n), min(n - 1, rng.choice([1, 1, 2]))))
+    for s in chosen:
+        picks = set()
+        sheared_outer = [t for t in range(s) if any(nest.shear[t])]
+        if sheared_outer and rng.random() < 0.7:
+            picks.add(rng.choice(sheared_outer))
+        want = min(s, rng.choice([1, 1, 2]))
+        while len(picks) < want:
+            picks.add(rng.randrange(s))
+        for t in picks:
+            nest.shear[s][t] = rng.choice([-2, -1, 1, 1, 2])
+    nest.domain_mode = "shear"
+    if rng.random() < 0.18:
+        s = rng.choice(chosen)
+        nest.shear_ub = [list(row) for row in nest.shear]
+        if rng.random() < 0.6:
+            nest.shear_ub[s] = [0] * s                 # a constant upper bound
+        else:
+            t = next(t for t in range(s) if nest.shear[s][t])
+            nest.shear_ub[s][t] += rng.choice([-1, 1, 2])   # another slope
+        nest.domain_mode = "triangle"
+
+
 def generate(rng):
-    loops, trip, ops = generate_valid(rng)
-    r = rng.random()
-    if r < 0.45:
-        return finalize(rng, loops, ops, "valid")
-    if r < 0.55:
-        return finalize(rng, loops, ops, "oob", oob=True)
-    kind, cload = mutate(rng, loops, trip, ops)
-    return finalize(rng, loops, ops, "mutated:" + kind, cload=cload)
+    if rng.random() < 0.04:
+        loops, trip, ops = generate_same_view(rng)
+        nest = finalize(rng, loops, ops, "valid:same_view")
+        unify_same_view(nest)
+    else:
+        loops, trip, ops = generate_valid(rng)
+        r = rng.random()
+        if r < 0.45:
+            nest = finalize(rng, loops, ops, "valid")
+        elif r < 0.55:
+            nest = finalize(rng, loops, ops, "oob", oob=True)
+        else:
+            kind, cload = mutate(rng, loops, trip, ops)
+            nest = finalize(rng, loops, ops, "mutated:" + kind, cload=cload)
+        r = rng.random()
+        if r < 0.12:
+            share_base(nest)
+        elif r < 0.16:
+            alias_output(nest)
+    if rng.random() < 0.3:
+        shear_domain(rng, nest)
+        if nest.domain_mode == "shear":
+            check_shear(nest)
+    return nest
 
 
 # ---------------------------------------------------------------------------
@@ -548,29 +803,57 @@ def mtype(shape):
 
 
 def emit(nest, name):
-    ivs = ["%%x%d" % s for s in range(len(nest.loops))]
+    n = len(nest.loops)
+    ivs = ["%%x%d" % s for s in range(n)]
+    # One memref argument per distinct buffer, named after the first operand
+    # that uses it (A and B, or A and C, may share one: nest.arg_of).
+    arg_name = {}
+    for k in "ABC":
+        arg_name.setdefault(nest.arg_of[k], "%" + k)
+    args = []
+    for a in sorted(arg_name):
+        shapes = {nest.ops[k][0] for k in "ABC" if nest.arg_of[k] == a}
+        assert len(shapes) == 1, "operands sharing a memref must share its shape"
+        args.append("%s: %s {llvm.noalias}" % (arg_name[a], mtype(shapes.pop())))
     ty = {k: mtype(nest.ops[k][0]) for k in "ABC"}
-    out = ["func.func @%s(%%A: %s {llvm.noalias}, %%B: %s {llvm.noalias}, %%C: %s {llvm.noalias}) {"
-           % (name, ty["A"], ty["B"], ty["C"])]
+    ref = {k: arg_name[nest.arg_of[k]] for k in "ABC"}
+    out = ["func.func @%s(%s) {" % (name, ", ".join(args))]
     ind = "  "
-    def bound(kind, values):
-        if len(values) == 1:
-            return str(values[0])
-        return "%s affine_map<() -> (%s)>()" % (kind, ", ".join(str(v) for v in values))
+    L = shear_matrix(nest)
+
+    def bound(kind, values, row):
+        """Constants `values` (one, or several folded by max/min), each shifted
+        by row . x_<s: affine_map<(d..) -> (..)>(outer counters)."""
+        dims = [t for t, c in enumerate(row) if c]
+        if not dims:
+            if len(values) == 1:
+                return str(values[0])
+            return "%s affine_map<() -> (%s)>()" % (kind, ", ".join(str(v) for v in values))
+        names = ["d%d" % i for i in range(len(dims))]
+        results = []
+        for v in values:
+            terms = [nm if row[t] == 1 else "%s * %d" % (nm, row[t]) for nm, t in zip(names, dims)]
+            text = " + ".join(terms) + (" + %d" % v if v else "")
+            results.append(text.replace("+ -", "- "))
+        return "%saffine_map<(%s) -> (%s)>(%s)" % (kind + " " if len(values) > 1 else "",
+                                                   ", ".join(names), ", ".join(results),
+                                                   ", ".join(ivs[t] for t in dims))
     for s, ((lb, ub, st), iv) in enumerate(zip(nest.loops, ivs)):
         lowers, uppers = nest.bounds[s] if nest.bounds else ([lb], [ub])
         assert max(lowers) == lb and min(uppers) == ub
-        out.append("%saffine.for %s = %s to %s%s {" % (ind, iv, bound("max", lowers),
-                                                       bound("min", uppers),
+        lo_row = nest.shear[s] if nest.shear else []
+        up_row = nest.shear_ub[s] if nest.shear_ub else lo_row
+        out.append("%saffine.for %s = %s to %s%s {" % (ind, iv, bound("max", lowers, lo_row),
+                                                       bound("min", uppers, up_row),
                                                        "" if st == 1 else " step %d" % st))
         ind += "  "
-    idx = lambda fs: ", ".join(expr(f, ivs) for f in fs)
+    idx = lambda fs: ", ".join(expr(emitted_row(f, L), ivs) for f in fs)
     for k in "AB":
-        out.append("%s%%%s = affine.load %%%s[%s] : %s" % (ind, k.lower(), k, idx(nest.ops[k][1]), ty[k]))
-    out.append("%s%%c = affine.load %%C[%s] : %s" % (ind, idx(nest.cload), ty["C"]))
+        out.append("%s%%%s = affine.load %s[%s] : %s" % (ind, k.lower(), ref[k], idx(nest.ops[k][1]), ty[k]))
+    out.append("%s%%c = affine.load %s[%s] : %s" % (ind, ref["C"], idx(nest.cload), ty["C"]))
     out.append("%s%%p = arith.mulf %%%s, %%%s : f32" % (ind, nest.order[0].lower(), nest.order[1].lower()))
     out.append("%s%%s = arith.addf %%c, %%p : f32" % ind)
-    out.append("%saffine.store %%s, %%C[%s] : %s" % (ind, idx(nest.ops["C"][1]), ty["C"]))
+    out.append("%saffine.store %%s, %s[%s] : %s" % (ind, ref["C"], idx(nest.ops["C"][1]), ty["C"]))
     for _ in nest.loops:
         ind = ind[:-2]
         out.append(ind + "}")
@@ -662,10 +945,28 @@ def compiler_results(opt, text, permit):
         views = []
         for t in tile.groups()[:3]:
             root, view, subview = tensors[t]
-            views.append(("ABC"[int(root[len("%arg"):])], view, subview))
+            # the memref ARGUMENT the view roots at; the nest names it (arg_of)
+            views.append((int(root[len("%arg"):]) if root.startswith("%arg") else None,
+                          view, subview))
         results.append((tuple(int(v) for v in tile.groups()[3:]), views,
-                        len(batch_loops), {"loops": batch_loops, "applies": applies}))
+                        len(batch_loops), {"loops": batch_loops, "applies": applies,
+                                           "operands": list(tile.groups()[:3])}))
     return results
+
+
+def name_views(nest, raw, swap=False):
+    """The tile's operands as A, B, C: each view roots at a memref argument,
+    which nest.arg_of maps back to the operand(s) using it. Two operands on
+    one shared argument are told apart by position -- the tile's first factor
+    is A, the second B --, or the other way round with `swap` (the compiler
+    may have solved the transposed problem B^T A^T, which is accepted)."""
+    named = []
+    for p, (arg, view, subview) in enumerate(raw):
+        candidates = [k for k in "ABC" if nest.arg_of[k] == arg]
+        positional = "ABC"[1 - p if swap and p < 2 else p]
+        name = positional if positional in candidates else (candidates[0] if candidates else "?")
+        named.append((name, view, subview))
+    return named
 
 
 def evaluate(token, env, applies):
@@ -824,6 +1125,15 @@ def check_batched(nest, got):
     return None
 
 
+def reduction_once_loop(nest):
+    """Whether a loop that runs once is read by both factors (a reduction of
+    extent one driven by a loop, as against no reduction loop at all)."""
+    n = len(nest.loops)
+    return any(trips(*nest.loops[s]) == 1 and
+               all(any(f[0][s] for f in nest.ops[name][1]) for name in "AB")
+               for s in range(n))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--opt", default="systolic-opt")
@@ -851,7 +1161,12 @@ def main():
     feature = {"transposed": 0, "reversed": 0, "extent_one": 0, "rank_not_2": 0, "once": 0,
                "batched": 0, "batch_offset": 0, "both_transposed": 0, "folded": 0,
                "batch_folded": 0, "role_in_k": 0, "batch_once": 0, "c_batch_terms": 0,
-               "two_unit": 0, "general": 0, "c_not_injective": 0}
+               "two_unit": 0, "general": 0, "c_not_injective": 0,
+               # since 2026-10-18 (section 19.12)
+               "sheared": 0, "chained": 0, "shear_step": 0, "shear_folded": 0,
+               "shared": 0, "two_views": 0, "same_view": 0, "same_view_one_tensor": 0,
+               "k1": 0, "k1_noloop": 0,
+               "triangle": 0, "alias_c": 0, "shear_oob": 0, "shear_c_not_injective": 0}
 
     def is_transposed(view):
         shape, strides = view[0], view[1]
@@ -862,9 +1177,40 @@ def main():
         named = dict((nm, v) for nm, v, _ in views)
         return all(nm in named and named[nm] is not None and is_transposed(named[nm])
                    for nm in "AB")
+
+    def count_new_families(nest, mnk, got):
+        """The features of section 19.12 on a lowered, verified nest."""
+        if nest.domain_mode == "shear":
+            feature["sheared"] += 1
+            feature["chained"] += nest.chained()
+            feature["shear_step"] += any(nest.loops[s][2] > 1 for s in nest.sheared_loops())
+            feature["shear_folded"] += has_folded_bound(nest, set(nest.sheared_loops()))
+        if nest.shared in ("two_views", "same_view"):
+            feature["shared"] += 1
+            feature[nest.shared] += 1
+            if nest.shared == "same_view":
+                feature["same_view_one_tensor"] += got[3]["operands"][0] == got[3]["operands"][1]
+        if mnk[2] == 1:
+            feature["k1"] += 1
+            feature["k1_noloop"] += not reduction_once_loop(nest)
+
     mismatches = []
     for i, (nest, got) in enumerate(zip(nests, results)):
         verdict = decide(nest)
+        # Outside the compiler's domain family, or an output aliasing a factor:
+        # never lowered, whatever the box nest is (a conservative refusal, not
+        # a mathematical verdict: counted apart, never a pass).
+        if nest.domain_mode == "triangle":
+            feature["triangle"] += 1
+            if got is not None:
+                mismatches.append((i, nest, "a triangle (bounds not shifting together) was lowered %s"
+                                            % (got[0],)))
+            continue
+        if nest.shared == "alias_c":
+            feature["alias_c"] += 1
+            if got is not None:
+                mismatches.append((i, nest, "C is a view of a factor's memref; lowered %s" % (got[0],)))
+            continue
         counts[verdict[0] if verdict[0] != "UNSUPPORTED" else "REJECT"] += 1
         if verdict[0] == "SKIP":
             continue
@@ -877,6 +1223,7 @@ def main():
                 mismatches.append((i, nest, "%s: not lowered by the compiler's rules, compiler lowered %s"
                                             % (verdict[1], got[0])))
             feature["c_not_injective"] += 1
+            feature["shear_c_not_injective"] += nest.domain_mode == "shear"
             continue
         if verdict[0] == "ACCEPT":
             mnk = verdict[1]
@@ -897,36 +1244,46 @@ def main():
             if got[0] not in (mnk, (mnk[1], mnk[0], mnk[2])):
                 mismatches.append((i, nest, "oracle %s, compiler %s" % (mnk, got[0])))
                 continue
+            # Two factors on one memref are named by position, and once more
+            # the other way round when that fails (name_views).
+            bad, named = None, None
+            for swap in ([False, True] if nest.shared in ("two_views", "same_view") else [False]):
+                named = name_views(nest, got[1], swap)
+                if verdict[2]:
+                    # batched: the batch loops re-emitted around the tiles, each
+                    # operand's view at offsets evaluated per batch value
+                    if got[2] != verdict[2]:
+                        bad = "batched over %d loop(s), compiler emitted %d affine.for" % (verdict[2], got[2])
+                        break
+                    bad = check_batched(nest, (got[0], named, got[2], got[3]))
+                    if bad:
+                        bad = "batched views: " + bad
+                else:
+                    if any(v[1] is None or v[1][2] is None for v in named):
+                        bad = "a view of a plain GEMM has a dynamic offset"
+                        break
+                    bad = check_views(nest, got[0], [(nm, v) for nm, v, _ in named])
+                    if bad:
+                        bad = "views: " + bad
+                if bad is None:
+                    break
+            if bad:
+                mismatches.append((i, nest, bad))
+                continue
+            count_new_families(nest, mnk, got)
             if verdict[2]:
-                # batched: the batch loops re-emitted around the tiles, each
-                # operand's view at offsets evaluated per batch value
-                if got[2] != verdict[2]:
-                    mismatches.append((i, nest, "batched over %d loop(s), compiler emitted %d affine.for"
-                                                % (verdict[2], got[2])))
-                    continue
-                bad = check_batched(nest, got)
-                if bad:
-                    mismatches.append((i, nest, "batched views: " + bad))
-                    continue
                 feature["batched"] += 1
                 feature["c_batch_terms"] += c_has_batch_terms(nest)
                 feature["two_unit"] += sum(e == 1 for e in mnk) >= 2
                 feature["batch_offset"] += batch_offset_in_role(nest)
-                feature["both_transposed"] += both_factors_transposed(got[1])
+                feature["both_transposed"] += both_factors_transposed(named)
                 feature["folded"] += has_folded_bound(nest)
                 feature["batch_folded"] += has_folded_bound(nest, set(batch_loops_of(nest)))
                 feature["role_in_k"] += nest.mode == "mutated:role_in_k"
                 continue
-            if any(v[1] is None or v[1][2] is None for v in got[1]):
-                mismatches.append((i, nest, "a view of a plain GEMM has a dynamic offset"))
-                continue
-            bad = check_views(nest, got[0], [(nm, v) for nm, v, _ in got[1]])
-            if bad:
-                mismatches.append((i, nest, "views: " + bad))
-                continue
-            views = dict((nm, v) for nm, v, _ in got[1])
+            views = dict((nm, v) for nm, v, _ in named)
             feature["transposed"] += any(abs(v[1][0]) < abs(v[1][1]) and v[0][0] > 1 and v[0][1] > 1 for v in views.values())
-            feature["both_transposed"] += both_factors_transposed(got[1])
+            feature["both_transposed"] += both_factors_transposed(named)
             feature["reversed"] += any(s < 0 for v in views.values() for s, n in zip(v[1], v[0]) if n > 1)
             feature["extent_one"] += 1 in mnk
             feature["rank_not_2"] += any(len(nest.ops[k][0]) != 2 for k in "ABC")
@@ -934,14 +1291,21 @@ def main():
             feature["folded"] += has_folded_bound(nest)
             feature["role_in_k"] += nest.mode == "mutated:role_in_k"
             feature["batch_once"] += nest.mode == "mutated:batch_once"
-        elif got is not None:
-            mismatches.append((i, nest, "oracle REJECT (%s), compiler lowered %s" % (verdict[1], got[0])))
+        else:
+            if nest.domain_mode == "shear" and "out of bounds" in verdict[1]:
+                feature["shear_oob"] += 1
+            if got is not None:
+                mismatches.append((i, nest, "oracle REJECT (%s), compiler lowered %s" % (verdict[1], got[0])))
 
     for i, nest, what in mismatches:
-        print("MISMATCH case_%d [%s]: %s" % (i, nest.mode, what))
+        print("MISMATCH case_%d [%s%s%s]: %s" % (i, nest.mode,
+                                                  ", " + nest.domain_mode if nest.domain_mode != "box" else "",
+                                                  ", " + nest.shared if nest.shared else "", what))
         print(emit(nest, "case_%d" % i))
-    print("oracle: %d nests, accept %d, reject %d, skipped %d%s"
+    print("oracle: %d nests, accept %d, reject %d, skipped %d, refused by rule %d (triangles %d, "
+          "C aliasing a factor %d)%s"
           % (len(nests), counts["ACCEPT"], counts["REJECT"], counts["SKIP"],
+             feature["triangle"] + feature["alias_c"], feature["triangle"], feature["alias_c"],
              " (pass run without the reassociation permission)" if a.fp_default else ""))
     if not a.fp_default:
         print("accepted with: transposed view %(transposed)d, negative stride %(reversed)d, "
@@ -950,12 +1314,23 @@ def main():
               "(a factor's view moving with the batch %(batch_offset)d), "
               "A and B both transposed %(both_transposed)d, "
               "a max/min loop bound %(folded)d (of a batch loop %(batch_folded)d), "
-              "mutations role_in_k %(role_in_k)d and batch_once %(batch_once)d" % feature)
+              "mutations role_in_k %(role_in_k)d and batch_once %(batch_once)d, "
+              "a sheared domain %(sheared)d (chained %(chained)d, with a step > 1 %(shear_step)d, "
+              "with a max/min bound %(shear_folded)d), one array as both factors %(shared)d "
+              "(through two different views %(two_views)d, through one view %(same_view)d, "
+              "served by one tensor %(same_view_one_tensor)d), "
+              "K = 1 %(k1)d (without a reduction loop %(k1_noloop)d)" % feature)
         print("generalized mapping: batched with C reading a batch loop in a role dimension "
               "%(c_batch_terms)d, batched with two unit extents %(two_unit)d, skewed or merged "
               "views (%(general_state)s) %(general)d, C not injective (refused) "
-              "%(c_not_injective)d" % dict(feature, general_state="lowered" if GENERAL_VIEWS_LOWERED
+              "%(c_not_injective)d, domain outside the normalized family (refused) %(triangle)d, "
+              "C the base of a factor (refused) %(alias_c)d, out of bounds after a shear "
+              "(rejected) %(shear_oob)d, C not injective after a shear (refused) "
+              "%(shear_c_not_injective)d" % dict(feature, general_state="lowered" if GENERAL_VIEWS_LOWERED
                                                    else "recognized, not lowered"))
+    else:
+        print("not lowered (strict mode): %d outside the normalized family, %d with C the base of a factor"
+              % (feature["triangle"], feature["alias_c"]))
     print("mismatches: %d" % len(mismatches))
 
 
