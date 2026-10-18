@@ -277,10 +277,12 @@ wire        dpti_oe_n;
 
       if (USE_EXTERNAL_SCHEDULER) begin
         // External scheduler mode: operands are already resident in DDR.
-        // Keep the operand and result regions separate.
+        // Keep the operand and result regions separate; job `id` writes its
+        // result tile `id` tiles into the result region, as the legacy run's
+        // invocation `id` does.
         job_a_base      <= EXT_JOB_A_BASE;
         job_b_base      <= EXT_JOB_A_BASE;
-        job_c_base      <= EXT_JOB_C_BASE;
+        job_c_base      <= EXT_JOB_C_BASE + 64'(id) * 64'(N*N*4);
       end else begin
         // Legacy mode: preserve the original deterministic address map.
         job_a_base      <= 64'd0;
@@ -869,14 +871,22 @@ wire        dpti_oe_n;
 
     // Scheduler E2E smoke test:
     //
-    //   job 0 -> device 0 -> 8x8
-    //   job 1 -> device 0 -> 8x8
+    //   job f -> device 0 -> 8x8,  f = 0 .. n_inv - 1, back to back
     //
-    // This deliberately reproduces the already-PASS n_inv=2 workload while
-    // replacing the implicit FSM ownership with explicit job descriptors.
+    // This deliberately reproduces the legacy n_inv workload (n_inv
+    // invocations of the same operand slab, result tile f at wb_base + f *
+    // 256) while replacing the implicit FSM ownership with explicit job
+    // descriptors: one descriptor per invocation, as the runtime issues them.
+    // The next descriptor is offered one cycle after the previous one is
+    // accepted, so from the second job on the context queues it behind the
+    // one in flight (systolic_accel_context.sv, PIPELINED JOBS) -- the n_inv
+    // jobs are one run of the context, and the run's counters below cover
+    // all of them.  (Until Oct 2026 the context took one job at a time and
+    // ran n_inv tiles per job, passing through its run boundary between
+    // jobs; the submit loop then submitted two jobs regardless of n_inv.)
     if (USE_EXTERNAL_SCHEDULER) begin
-      submit_job(32'd0, 32'd0, job_k);
-      submit_job(32'd1, 32'd0, job_k);
+      for (f = 0; f < n_inv; f = f + 1)
+        submit_job(32'(f), 32'd0, job_k);
     end
 
     // wb_done_sticky is set by the FIRST write-back, so it is not the end of a
@@ -897,9 +907,13 @@ wire        dpti_oe_n;
     repeat (20) @(posedge clk);
 
     // ---- 1. the operand path is untouched ---------------------------------
-    if (dut.words_written !== 32'(n_inv * JOB_RX_WORDS)) begin
+    // Legacy: the run's n_inv slabs, counted over the run.  External: the
+    // writer's count is cleared per descriptor (every job has its own k),
+    // so after the run it is the last job's payload.
+    if (dut.words_written !== 32'((USE_EXTERNAL_SCHEDULER ? 1 : n_inv) * JOB_RX_WORDS)) begin
       $display("  FAIL: words_written = %0d, want %0d (%0d job payloads)",
-               dut.words_written, n_inv * JOB_RX_WORDS, n_inv);
+               dut.words_written, (USE_EXTERNAL_SCHEDULER ? 1 : n_inv) * JOB_RX_WORDS,
+               (USE_EXTERNAL_SCHEDULER ? 1 : n_inv));
       errors = errors + 1;
     end
     if (dut.folds_done !== 8'(n_inv)) begin
@@ -909,15 +923,18 @@ wire        dpti_oe_n;
     // The design latches n_inv on the way out of P_CALIB, so this is checked
     // after the run, not at time 0 when the register is still at its reset
     // value: the address map the design used has to be the one this bench
-    // checked the image against.
-    if (dut.n_inv !== 4'(n_inv)) begin
+    // checked the image against.  (External jobs are one tile each; the
+    // design's n_inv is not what repeats them.)
+    if (!USE_EXTERNAL_SCHEDULER && dut.n_inv !== 4'(n_inv)) begin
       $display("  FAIL: the design latched n_inv = %0d, the bench asked for %0d",
                dut.n_inv, n_inv);
       errors = errors + 1;
     end
-    if (dut.wb_region_base !== wb_base) begin
+    // Legacy: the run's result region.  External: the last job's c_base,
+    // tile n_inv - 1 of the same region.
+    if (dut.wb_region_base !== (USE_EXTERNAL_SCHEDULER ? wb_base + (n_inv - 1) * N*N*4 : wb_base)) begin
       $display("  FAIL: the design put the result region at %0d, this bench at %0d",
-               dut.wb_region_base, wb_base);
+               dut.wb_region_base, (USE_EXTERNAL_SCHEDULER ? wb_base + (n_inv - 1) * N*N*4 : wb_base));
       errors = errors + 1;
     end
     if (expected_wr_chk(job_k) == 32'h0)

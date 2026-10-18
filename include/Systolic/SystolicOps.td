@@ -137,6 +137,36 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
     OptionalAttr<I64Attr>:$write_overhead,
     OptionalAttr<I64Attr>:$operand_lanes,
     OptionalAttr<I64Attr>:$k_window,
+
+    // How one accelerator runs CONSECUTIVE invocations (CostModel.h, the
+    // pipelined per-accelerator timeline). Without these three attributes an
+    // accelerator is costed as the archived bitstream behaves: the next
+    // invocation's operand fill, feed and reduction start only after the
+    // previous invocation's result tile has been written back -- T_tile is
+    // the plain sum of the invocations' read + compute + write. With them the
+    // context pipelines invocations (rtl/.../dma/systolic_accel_context.sv
+    // with USE_EXTERNAL_SCHEDULER): the PE's ping-pong accumulator sets let
+    // invocation j+1 be fed and accumulated while invocation j's bank
+    // reduction (the tree inside tile_overhead) still runs, and the fill and
+    // write-back stages run beside both.
+    //
+    //   pipeline_depth   invocations one context holds at a time, accepted
+    //                    and not yet written back (the RTL's job queue); 1 is
+    //                    the serialized hardware and the same as leaving the
+    //                    attributes off
+    //   reduce_cycles    the serial part of tile_overhead: the bank-reduction
+    //                    tree of one invocation, which the next invocation's
+    //                    reduction cannot overlap (67 on this RTL: four
+    //                    levels of 21 + 17 + 15 + 14 cycles); must be
+    //                    <= tile_overhead
+    //   feed_gap         cycles the array input stays idle between the last
+    //                    reduction step of one invocation and the first of
+    //                    the next, so every PE sees a transaction boundary
+    //                    (the PE has no tag; it detects the boundary as a
+    //                    quiet gap of at least 22 cycles -- tb_pe_overlap.sv)
+    OptionalAttr<I64Attr>:$pipeline_depth,
+    OptionalAttr<I64Attr>:$reduce_cycles,
+    OptionalAttr<I64Attr>:$feed_gap,
     OptionalAttr<StrAttr>:$sym_visibility
   );
 
@@ -153,11 +183,16 @@ def Systolic_DeviceOp : Systolic_Op<"device", [Symbol]> {
       "(`write_overhead` `=` $write_overhead^)? "
       "(`operand_lanes` `=` $operand_lanes^)? "
       "(`k_window` `=` $k_window^)? "
+      "(`pipeline_depth` `=` $pipeline_depth^)? "
+      "(`reduce_cycles` `=` $reduce_cycles^)? "
+      "(`feed_gap` `=` $feed_gap^)? "
       "(`sym_visibility` `=` $sym_visibility^)? "
       "attr-dict";
 
-  // k_max, operand_lanes and k_window, when present, must be positive;
-  // bandwidths positive and finite; overheads non-negative.
+  // k_max, operand_lanes, k_window and pipeline_depth, when present, must be
+  // positive; bandwidths positive and finite; overheads, reduce_cycles and
+  // feed_gap non-negative; reduce_cycles <= tile_overhead; the three
+  // pipelining attributes come together.
   let hasVerifier = 1;
 }
 

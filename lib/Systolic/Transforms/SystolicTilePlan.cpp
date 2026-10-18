@@ -16,6 +16,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 
 using namespace mlir;
@@ -114,15 +115,17 @@ FailureOr<SystolicFleet> mlir::systolic::collectSystolicFleet(ModuleOp module) {
           a.readOverhead != b.readOverhead ||
           a.writeOverhead != b.writeOverhead ||
           a.operandLanes != b.operandLanes || a.kWindow != b.kWindow ||
-          a.elementBytes != b.elementBytes) {
+          a.elementBytes != b.elementBytes ||
+          a.pipelineDepth != b.pipelineDepth ||
+          a.reduceCycles != b.reduceCycles || a.feedGap != b.feedGap) {
         module.emitError()
             << "systolic.device " << fleet.symbols[i] << " and "
             << fleet.symbols[j] << " of the same " << resources[i].arraySize
             << "x" << resources[i].arraySize
             << " geometry declare different cost parameters "
-               "(tile_overhead, read/write terms, operand_lanes or "
-               "k_window); the binary-search decomposition bills one "
-               "cost per geometry";
+               "(tile_overhead, read/write terms, operand_lanes, k_window "
+               "or the pipelining attributes); the binary-search "
+               "decomposition bills one cost per geometry";
         return failure();
       }
     }
@@ -153,18 +156,30 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
   // The compute clock of every accelerator.
   //
   // The optimizer's schedule is on the full timeline: a tile holds its
-  // accelerator for every invocation's read, compute and write. est_cycles
-  // has always meant an invocation's compute duration -- in every costing
-  // pass, and in the hardware scheduler (systolic_hw_scheduler.sv), which
-  // takes it as req_compute_cycles. The IR keeps that meaning and carries
-  // the optimizer's schedule projected onto compute time: on each
-  // accelerator, in the order the optimizer runs its tiles, an invocation's
-  // start_cycle is where the previous one's compute term ends. The full
-  // timeline is in the pass remark (`report`) and in systolic-cost.
+  // accelerator from its first invocation's operand fill to its last
+  // invocation's write-back. est_cycles has always meant an invocation's
+  // compute duration -- in every costing pass, and in the hardware
+  // scheduler (systolic_hw_scheduler.sv), which takes it as
+  // req_compute_cycles. The IR keeps that meaning and carries the
+  // optimizer's schedule projected onto compute time: on each accelerator,
+  // in the order the optimizer runs its tiles, an invocation's start_cycle
+  // is its fold's start on the same per-accelerator timeline with the
+  // transfers free (::systolic::AcceleratorTimeline). Serialized, that is
+  // where the previous invocation's compute term ends, as it always was;
+  // pipelined, the next fold starts feed_gap cycles after the previous
+  // invocation's k steps, while that invocation is still being reduced.
+  // The full timeline is in the pass remark (`report`) and in systolic-cost.
+  //
+  // Both timelines are rebuilt here from the same tile order the optimizer
+  // used, so the interval the optimizer scheduled every tile over can be
+  // checked against the model, invocation by invocation, below.
   // --------------------------------------------------------------------
 
-  SmallVector<int64_t> tileComputeStart(optimization->decomposition.size(),
-                                        0);
+  struct TileTimeline {
+    int64_t fullStart = 0, fullEnd = 0;   // the optimizer's interval
+    SmallVector<int64_t> invocationStart;  // compute-only fold starts
+  };
+  SmallVector<TileTimeline> timelines(optimization->decomposition.size());
   {
     SmallVector<size_t> order(optimization->decomposition.size());
     for (size_t i = 0; i < order.size(); ++i)
@@ -177,23 +192,38 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
       return x.startCycle < y.startCycle;
     });
     int64_t accelerator = -1;
-    int64_t clock = 0;
+    std::optional<::systolic::AcceleratorTimeline> full;
+    std::optional<::systolic::AcceleratorTimeline> computeOnly;
     for (size_t idx : order) {
       const SystolicExecutionTask &task = optimization->decomposition[idx];
-      if (task.acceleratorId != accelerator) {
-        accelerator = task.acceleratorId;
-        clock = 0;
-      }
-      tileComputeStart[idx] = clock;
       if (task.acceleratorId < 0 ||
           task.acceleratorId >= static_cast<int64_t>(resources.size()))
         return diagOp->emitError()
                << "optimizer returned invalid accelerator id "
                << task.acceleratorId;
-      const ::systolic::TileCost tileCost =
-          ::systolic::estimateTileCost(K, resources[task.acceleratorId].config);
-      if (!tileCost.ok ||
-          __builtin_add_overflow(clock, tileCost.compute, &clock))
+      const ::systolic::ArrayConfig &config =
+          resources[task.acceleratorId].config;
+      if (task.acceleratorId != accelerator) {
+        accelerator = task.acceleratorId;
+        full.emplace(config);
+        computeOnly.emplace(config, /*transfersFree=*/true);
+      }
+      TileTimeline &t = timelines[idx];
+      const int64_t invocations = ::systolic::countInvocations(K, config);
+      for (int64_t j = 0; j < invocations; ++j) {
+        const int64_t depth = ::systolic::invocationDepth(K, j, config);
+        ::systolic::InvocationEvents fullEvents, computeEvents;
+        if (!full->push(depth, fullEvents) ||
+            !computeOnly->push(depth, computeEvents))
+          return diagOp->emitError()
+                 << "cost model cannot price a " << task.size << "x"
+                 << task.size << " tile of reduction " << K;
+        if (j == 0)
+          t.fullStart = fullEvents.fillStart;
+        t.fullEnd = fullEvents.writeEnd;
+        t.invocationStart.push_back(computeEvents.feedStart);
+      }
+      if (invocations < 1)
         return diagOp->emitError()
                << "cost model cannot price a " << task.size << "x"
                << task.size << " tile of reduction " << K;
@@ -285,10 +315,11 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
     //
     // Invocation j runs exactly k_j steps (k_max is a capacity) and costs
     // what the cost model says it costs: the last one is the short one.
-    // est_cycles is invocation j's compute term, start_cycle the tile's
-    // compute start plus the compute terms of invocations 0 .. j-1. Their
-    // read + compute + write must add up to exactly the interval the
-    // optimizer scheduled the tile over; anything else would mean the
+    // est_cycles is invocation j's compute term, start_cycle its fold's
+    // start on the accelerator's compute-only timeline. The interval the
+    // optimizer scheduled the tile over must be exactly the tile's interval
+    // on the accelerator's full timeline (serialized: the sum of its
+    // invocations' read + compute + write); anything else would mean the
     // optimizer and the IR were priced by two different models.
     // ------------------------------------------------------------------
 
@@ -300,29 +331,29 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
         ::systolic::countInvocations(K, deviceConfig);
 
     SmallVector<::systolic::InvocationCost> invocationCosts;
-    int64_t sequentialCycles = 0;
     for (int64_t j = 0; j < numInvocations; ++j) {
       ::systolic::InvocationCost cost =
           ::systolic::estimateInvocationCost(K, j, deviceConfig);
-      if (!cost.ok || __builtin_add_overflow(sequentialCycles,
-                                             cost.sequential(),
-                                             &sequentialCycles))
+      if (!cost.ok)
         return diagOp->emitError()
                << "cost model cannot price invocation " << j << " of tile ("
                << task.row << ", " << task.column << ")";
       invocationCosts.push_back(cost);
     }
 
+    const TileTimeline &timeline = timelines[taskIndex];
     if (numInvocations < 1 ||
         numInvocations != (K + kStep - 1) / kStep ||
-        sequentialCycles !=
-            scheduledTile.endCycle - scheduledTile.startCycle)
+        static_cast<int64_t>(timeline.invocationStart.size()) !=
+            numInvocations ||
+        timeline.fullStart != scheduledTile.startCycle ||
+        timeline.fullEnd != scheduledTile.endCycle)
       return diagOp->emitError()
              << "optimizer scheduled tile (" << task.row << ", "
-             << task.column << ") over "
-             << scheduledTile.endCycle - scheduledTile.startCycle
-             << " cycles, but its " << numInvocations
-             << " invocations cost " << sequentialCycles;
+             << task.column << ") over [" << scheduledTile.startCycle << ", "
+             << scheduledTile.endCycle << "), but its " << numInvocations
+             << " invocations run over [" << timeline.fullStart << ", "
+             << timeline.fullEnd << ") on the accelerator's timeline";
 
     SystolicTileBlock block;
     block.row = task.row;
@@ -331,7 +362,6 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
     block.n = n;
     block.acceleratorId = task.acceleratorId;
 
-    int64_t computeClock = tileComputeStart[taskIndex];
     for (int64_t j = 0; j < numInvocations; ++j) {
       const int64_t k0 = j * kStep;
       const int64_t kc = std::min<int64_t>(kStep, K - k0);
@@ -345,8 +375,7 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
       invocation.k0 = k0;
       invocation.k = kc;
       invocation.estCycles = invocationCosts[j].compute;
-      invocation.startCycle = computeClock;
-      computeClock += invocation.estCycles;
+      invocation.startCycle = timeline.invocationStart[j];
       block.invocations.push_back(invocation);
     }
 

@@ -366,8 +366,13 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 
 ## 6. 已知限制
 
-- 一次一個 invocation：四顆陣列在時間上沒有並行（硬體 scheduler 一次接一個 job，
-  runtime 也同步送）。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的發射時間。
+- runtime 一次一個 invocation：`fpga_matmul_tiled_auto_scheduled` 是同步的，所以板子上
+  四顆陣列在時間上沒有並行，同一顆陣列上連續的 invocation 也沒有。RTL 這一側（2026-10-18）
+  已經不再是限制：每個 context 有 4 深的 job queue，下一個 invocation 的 fill 在前一個 fold
+  開始時發出、下一個 fold 在前一個 tile 還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，
+  `eval/pipeline_overlap/run.sh`）；co-sim 與板子要兌現它需要 runtime 多個 invocation 在途，
+  以及每個在途 invocation 自己的 slab／result 區域。`start_cycle` 有寫進 descriptor，但不能讀成
+  硬體強制的發射時間。
 - 每次 invocation 的 MEM_WRITE 都是整塊 slab（`HOST_SLAB_BYTES`，最深幾何的
   `ceil(K_MAX/8)·512` byte）：小 tile 也付整塊的 USB 傳輸，K_MAX 越深越多。FPGA 端只讀
   `ceil(k/8)` 個 window。

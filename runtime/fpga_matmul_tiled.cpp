@@ -216,6 +216,7 @@ int load_config(fpga_runtime_config_t &cfg) {
     cfg = fpga_runtime_config_t{};
     cfg.k_max_8x8 = 16;
     cfg.k_max_4x4 = 16;
+    cfg.pipeline_depth = 1;
 
     const char *path = std::getenv("SYSTOLIC_FPGA_CONFIG");
     if (!path || !*path) {
@@ -231,6 +232,7 @@ int load_config(fpga_runtime_config_t &cfg) {
         set_text(cfg.error, sizeof cfg.error,
                  std::string("SYSTOLIC_FPGA_CONFIG=") + path + ": " + why);
         cfg.k_max_8x8 = cfg.k_max_4x4 = cfg.slab_bytes = 0;
+        cfg.pipeline_depth = 0;
         return -16;
     };
 
@@ -263,6 +265,15 @@ int load_config(fpga_runtime_config_t &cfg) {
                             " (no sign, no leading zeros)");
             if (key == "K_MAX_8X8") { cfg.k_max_8x8 = v; have8 = true; }
             else                    { cfg.k_max_4x4 = v; have4 = true; }
+        } else if (key == "PIPELINE_DEPTH") {
+            // The context's job queue: how many invocations the bitstream
+            // holds per accelerator. The compiler declares the fleet's
+            // pipelining from it; this runtime's own protocol does not
+            // change with it.
+            if (!parse_count(val, 64u, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1..64 "
+                            "(no sign, no leading zeros)");
+            cfg.pipeline_depth = v;
         } else if (key == "N" || key == "NUM_8X8" || key == "NUM_4X4") {
             // This runtime drives the 1x8x8 + 3x4x4 device map; a bitstream
             // built with another fleet is not something it can address.

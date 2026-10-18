@@ -197,6 +197,13 @@ module systolic_dma_top #(
   parameter integer NUM_8X8 = 1,
   parameter integer NUM_4X4 = 3,
 
+  // The PE boundary gap the contexts keep between two invocations' operands
+  // (systolic_accel_context.sv PE_QUIET_GAP / FEED_GAP_MARGIN; the defaults
+  // are the contexts' own).  Exposed so a bench can shrink the gap below the
+  // PE's minimum and show that the boundary check catches merged tiles.
+  parameter integer PE_QUIET_GAP    = 23,
+  parameter integer FEED_GAP_MARGIN = 3,
+
   // Legacy compiler/testbench descriptor producer.
   //
   // 1: allow the top-level job_* ports to provide descriptors.
@@ -596,6 +603,7 @@ module systolic_dma_top #(
   wire [3:0]  ctx_phase            [0:NUM_ACCEL-1];
   wire        ctx_job_busy         [0:NUM_ACCEL-1];
   wire        ctx_job_active       [0:NUM_ACCEL-1];
+  wire        ctx_job_accept_ready [0:NUM_ACCEL-1];
   wire        ctx_job_done         [0:NUM_ACCEL-1];
   wire        ctx_job_fire         [0:NUM_ACCEL-1];
   wire [31:0] ctx_job_id           [0:NUM_ACCEL-1];
@@ -682,10 +690,17 @@ module systolic_dma_top #(
   // ==========================================================
   // Job acceptance.
   //
-  // A descriptor is accepted when the context of the device it names is
-  // free: that context has no job in flight, its result readback (if any)
-  // has drained, and its FSM is at a run boundary.  Another context's job
-  // being in flight does not matter -- that is the point.
+  // A descriptor is accepted when the context of the device it names can
+  // queue it (job_accept_ready: its job queue has room -- JOB_QUEUE_DEPTH
+  // jobs accepted and not yet written back) and that context's readback
+  // queue has room for the result.  Another context's job being in flight
+  // does not matter -- that is the point.  Nor does this context's: a job
+  // is taken while the previous one is still being filled, fed, reduced or
+  // written back, which is what lets the context pipeline them
+  // (systolic_accel_context.sv, PIPELINED JOBS).  Until Oct 2026 acceptance
+  // waited for the previous job's write-back and readback and for the
+  // scheduler slot to be idle -- one job per context, every invocation of an
+  // accelerator strictly after the previous one.
   // ==========================================================
   wire [31:0] effective_job_device_id;             // defined with the ingress
   wire        target_valid = (effective_job_device_id < NUM_ACCEL);
@@ -704,8 +719,9 @@ module systolic_dma_top #(
       (effective_job_k <= (target_is_8x8 ? 32'(K_MAX_8X8) : 32'(K_MAX_4X4)));
   logic       err_job_k;
 
-  // A completed job may still own the shared DMA read engine while its
-  // result tile is read back; its context takes no new job until then.
+  // Completed jobs wait in a per-context queue for the shared DMA read engine
+  // to read their result tiles back; a context whose readback queue is full
+  // takes no new job until one has been read back.
   wire result_readback_busy [0:NUM_ACCEL-1];
 
   wire core_job_ready =
@@ -714,14 +730,14 @@ module systolic_dma_top #(
       !hs_busy &&
       target_valid &&
       job_k_ok &&
-      !ctx_job_busy[target_idx] &&
-      !result_readback_busy[target_idx] &&
-      (ctx_phase[target_idx] == 4'd0 ||    // P_CALIB
-       ctx_phase[target_idx] == 4'd2 ||    // P_READ
-       ctx_phase[target_idx] == 4'd7);     // P_DONE
+      ctx_job_accept_ready[target_idx] &&
+      !result_readback_busy[target_idx];
 
-  // The scheduler's context for the target must be idle as well.
-  wire scheduler_desc_ready = target_valid && scheduler_req_ready[target_idx];
+  // The scheduler slot is no longer part of acceptance: the context raises
+  // one request per queued job itself (tile_req) and the slot is released at
+  // each start, so a job can be accepted and filled while the slot is still
+  // holding the previous job's release.
+  wire scheduler_desc_ready = 1'b1;
 
   // ----------------------------------------------------------
   // DPTI descriptor bridge.
@@ -1684,6 +1700,7 @@ module systolic_dma_top #(
       systolic_accel_context #(
         .N_ARRAY (N), .N_WIRE (N), .K_MAX (K_MAX_8X8), .K_DIM (K_DIM),
         .DEVICE_ID (i),
+        .PE_QUIET_GAP (PE_QUIET_GAP), .FEED_GAP_MARGIN (FEED_GAP_MARGIN),
         .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
         .LEGACY_RUN (i == 0),
         .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
@@ -1699,6 +1716,7 @@ module systolic_dma_top #(
         .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
         .in_c_base (effective_job_c_base),
         .job_busy (ctx_job_busy[i]), .job_active (ctx_job_active[i]),
+        .job_accept_ready (ctx_job_accept_ready[i]),
         .job_done (ctx_job_done[i]),
         .job_id_reg (ctx_job_id[i]), .job_device_id_reg (ctx_job_device_id[i]),
         .job_k_reg (ctx_job_k[i]),
@@ -1762,6 +1780,7 @@ module systolic_dma_top #(
         .N_ARRAY (4), .N_WIRE (N), .K_MAX (K_MAX_4X4),
         .K_DIM ((K_DIM < K_MAX_4X4) ? K_DIM : K_MAX_4X4),
         .DEVICE_ID (CTX),
+        .PE_QUIET_GAP (PE_QUIET_GAP), .FEED_GAP_MARGIN (FEED_GAP_MARGIN),
         .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
         .LEGACY_RUN (1'b0),
         .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
@@ -1777,6 +1796,7 @@ module systolic_dma_top #(
         .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
         .in_c_base (effective_job_c_base),
         .job_busy (ctx_job_busy[CTX]), .job_active (ctx_job_active[CTX]),
+        .job_accept_ready (ctx_job_accept_ready[CTX]),
         .job_done (ctx_job_done[CTX]),
         .job_id_reg (ctx_job_id[CTX]), .job_device_id_reg (ctx_job_device_id[CTX]),
         .job_k_reg (ctx_job_k[CTX]),
@@ -1990,20 +2010,41 @@ module systolic_dma_top #(
   wire                  eng_done_valid;
   wire [7:0]            eng_done_tag;
 
-  // ---- result readback, one request per context, one slot ---------------------
-  // Armed when a context's job completes (its last tile's write response);
-  // the result is in DDR before the read descriptor can be accepted.  The
-  // lowest-numbered pending context is granted the readback slot when it is
-  // free.
+  // ---- result readback, a queue per context, one slot -------------------------
+  // A context's job completes (its write response returns) possibly before
+  // the previous job's result has been read back -- the 8x8's readback takes
+  // ~213 cycles through the DPTI output path while a pipelined invocation
+  // can complete every ~270 -- so each context keeps a FIFO of the result
+  // tiles waiting to be read back (their c_base, in completion = job order),
+  // RB_DEPTH deep: at least as deep as the context's job queue, so every
+  // accepted job has a place -- twice as deep, so that a host draining the
+  // DPTI output path at its byte rate (an 8x8 tile takes ~850 array cycles
+  // of it in simulation) does not throttle the context's intake before the
+  // queue does.  A context with RB_DEPTH jobs accepted and not yet read back
+  // takes no new job (result_readback_busy).  The lowest-numbered context
+  // with a pending readback is granted the slot when it is free, one tile at
+  // a time; the result is in DDR before the read descriptor can be accepted.
+  localparam integer RB_DEPTH  = 8;
+  localparam integer RB_IDX_W  = 3;
+  logic [AXI_ADDR_W-1:0] rb_q      [0:NUM_ACCEL-1][0:RB_DEPTH-1];
+  logic [RB_IDX_W-1:0]   rb_q_wr   [0:NUM_ACCEL-1];
+  logic [RB_IDX_W-1:0]   rb_q_rd   [0:NUM_ACCEL-1];
+  logic [RB_IDX_W:0]     rb_q_cnt  [0:NUM_ACCEL-1];
   logic [NUM_ACCEL-1:0]  rb_pending;
   logic                  rb_active;
   logic [ACC_ID_W-1:0]   rb_owner;
-  logic [AXI_ADDR_W-1:0] rb_addr [0:NUM_ACCEL-1];
+  logic [AXI_ADDR_W-1:0] rb_addr [0:NUM_ACCEL-1];   // head of each queue
 
+  // Jobs of a context accepted and not yet read back: every one of them will
+  // need a FIFO entry, so acceptance stops at RB_DEPTH of them -- then no
+  // completion can ever find the FIFO full, however slowly the host drains
+  // the DPTI output path.
+  logic [RB_IDX_W:0] rb_inflight [0:NUM_ACCEL-1];
   generate
     for (genvar i = 0; i < NUM_ACCEL; i++) begin : RB_BUSY
-      assign result_readback_busy[i] =
-          rb_pending[i] || (rb_active && (rb_owner == ACC_ID_W'(i)));
+      assign rb_pending[i]           = (rb_q_cnt[i] != 0);
+      assign rb_addr[i]              = rb_q[i][rb_q_rd[i]];
+      assign result_readback_busy[i] = (rb_inflight[i] == (RB_IDX_W+1)'(RB_DEPTH));
     end
   endgenerate
 
@@ -2013,11 +2054,18 @@ module systolic_dma_top #(
 
   logic                rb_any;
   logic [ACC_ID_W-1:0] rb_grant;
+  // Round robin from the context after the last one served: with jobs
+  // pipelined, a context that completes a tile every readback period
+  // (the 8x8 fed a long chain) would otherwise hold a fixed-priority slot
+  // for good and the other contexts' finished tiles would never reach the
+  // host.
+  logic [ACC_ID_W-1:0] rb_last;
 
   always_comb begin
     rb_any   = 1'b0;
     rb_grant = '0;
-    for (int k = NUM_ACCEL-1; k >= 0; k--) begin
+    for (int n = NUM_ACCEL; n >= 1; n--) begin
+      automatic int k = (int'(rb_last) + n) % NUM_ACCEL;
       if (rb_pending[k]) begin
         rb_any   = 1'b1;
         rb_grant = ACC_ID_W'(k);
@@ -2061,30 +2109,59 @@ module systolic_dma_top #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
-      rb_pending <= '0;
       rb_active  <= 1'b0;
       rb_owner   <= '0;
-      for (int k = 0; k < NUM_ACCEL; k++) rb_addr[k] <= '0;
+      rb_last    <= ACC_ID_W'(NUM_ACCEL - 1);   // so context 0 is first after reset
+      for (int k = 0; k < NUM_ACCEL; k++) begin
+        rb_q_wr[k]     <= '0;
+        rb_q_rd[k]     <= '0;
+        rb_q_cnt[k]    <= '0;
+        rb_inflight[k] <= '0;
+        for (int d = 0; d < RB_DEPTH; d++) rb_q[k][d] <= '0;
+      end
     end
     else begin
       for (int k = 0; k < NUM_ACCEL; k++) begin
-        if (USE_EXTERNAL_SCHEDULER && ctx_job_done[k] && !rb_pending[k]) begin
-          rb_pending[k] <= 1'b1;
-          rb_addr[k]    <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
+        // A job completes (push) and a readback of the same context is
+        // granted (pop) possibly in one cycle; a job is accepted (in) and a
+        // readback of the same context completes (out) possibly in one cycle.
+        logic push, pop, in_, out_;
+        push = USE_EXTERNAL_SCHEDULER && ctx_job_done[k];
+        pop  = rb_accept && (rb_grant == ACC_ID_W'(k));
+        in_  = USE_EXTERNAL_SCHEDULER && ctx_job_fire[k];
+        out_ = rb_done && rb_active && (rb_owner == ACC_ID_W'(k));
+        if (push) begin
+          rb_q[k][rb_q_wr[k]] <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
+          rb_q_wr[k]          <= rb_q_wr[k] + 1'b1;
         end
+        if (pop)
+          rb_q_rd[k] <= rb_q_rd[k] + 1'b1;
+        if (push && !pop)      rb_q_cnt[k] <= rb_q_cnt[k] + 1'b1;
+        else if (!push && pop) rb_q_cnt[k] <= rb_q_cnt[k] - 1'b1;
+        if (in_ && !out_)      rb_inflight[k] <= rb_inflight[k] + 1'b1;
+        else if (!in_ && out_) rb_inflight[k] <= rb_inflight[k] - 1'b1;
       end
       // A readback may be accepted in the very cycle the previous one's
       // completion pulse is visible; the new owner wins.
       if (rb_accept) begin
-        rb_pending[rb_grant] <= 1'b0;
-        rb_active            <= 1'b1;
-        rb_owner             <= rb_grant;
+        rb_active <= 1'b1;
+        rb_owner  <= rb_grant;
+        rb_last   <= rb_grant;
       end
       else if (rb_done) begin
         rb_active <= 1'b0;
       end
     end
   end
+
+`ifndef SYNTHESIS
+  always_ff @(posedge ui_clk) begin
+    for (int k = 0; k < NUM_ACCEL; k++)
+      if (ui_rst_n && USE_EXTERNAL_SCHEDULER && ctx_job_done[k] &&
+          rb_q_cnt[k] == (RB_IDX_W+1)'(RB_DEPTH) && !(rb_accept && rb_grant == ACC_ID_W'(k)))
+        $fatal(1, "context %0d completed a job with its readback queue full", k);
+  end
+`endif
 
   dma_engine_multi #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),

@@ -14,6 +14,15 @@
 //
 // This adapter contains NO scheduling policy and NO cost model.
 // It is only a protocol bridge.
+//
+// It used to be a three-state machine (idle / running / done) that dropped a
+// start arriving while c_done was still pending.  With the context pipelining
+// its transactions (the next tile fed while the previous one reduces), a start
+// may legitimately arrive before the previous c_done, so the bridge now
+// forwards every start and counts the transactions in flight; c_done pulses
+// arrive in start order (the array publishes in order) and each one answers
+// the oldest start.  Nothing is dropped and nothing is invented: a c_done with
+// no start outstanding is ignored, as the old ST_IDLE ignored it.
 // ============================================================================
 
 module systolic_hw_scheduler_adapter #(
@@ -37,61 +46,24 @@ module systolic_hw_scheduler_adapter #(
     input  wire                     c_done
 );
 
-    typedef enum logic [1:0] {
-        ST_IDLE = 2'd0,
-        ST_RUN  = 2'd1,
-        ST_DONE = 2'd2
-    } state_t;
+    // Transactions started and not yet completed.
+    logic [7:0] outstanding;
 
-    state_t state;
+    wire done_now = c_done && (outstanding != 8'd0);
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            state             <= ST_IDLE;
+            outstanding       <= 8'd0;
             fold_start        <= 1'b0;
             accelerator_done  <= 1'b0;
         end
         else begin
-            // Both are pulses.
-            fold_start       <= 1'b0;
-            accelerator_done <= 1'b0;
+            // Both are pulses, one per start / per completion.
+            fold_start       <= accelerator_start;
+            accelerator_done <= done_now;
 
-            case (state)
-
-                // ------------------------------------------------------------
-                // Wait for the scheduler to release this accelerator.
-                // ------------------------------------------------------------
-                ST_IDLE: begin
-                    if (accelerator_start) begin
-                        fold_start <= 1'b1;
-                        state      <= ST_RUN;
-                    end
-                end
-
-                // ------------------------------------------------------------
-                // Existing accelerator is executing.
-                // ------------------------------------------------------------
-                ST_RUN: begin
-                    if (c_done) begin
-                        accelerator_done <= 1'b1;
-                        state             <= ST_DONE;
-                    end
-                end
-
-                // ------------------------------------------------------------
-                // One-cycle separation before accepting another transaction.
-                // ------------------------------------------------------------
-                ST_DONE: begin
-                    state <= ST_IDLE;
-                end
-
-                default: begin
-                    state            <= ST_IDLE;
-                    fold_start       <= 1'b0;
-                    accelerator_done <= 1'b0;
-                end
-
-            endcase
+            if (accelerator_start && !done_now)      outstanding <= outstanding + 8'd1;
+            else if (!accelerator_start && done_now) outstanding <= outstanding - 8'd1;
         end
     end
 

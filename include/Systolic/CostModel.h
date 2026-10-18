@@ -75,12 +75,32 @@ struct ArrayConfig {
   // padding steps of the last window are moved but never fed).
   int64_t kWindow = 1;
   int64_t elementBytes = 4;        // binary32, the only type lowered
+
+  // ---- consecutive invocations on one accelerator -------------------------
+  // How the context runs invocation j+1 relative to invocation j (the
+  // pipelined per-accelerator timeline below). The defaults are the
+  // serialized hardware: one invocation in flight, the next one's fill
+  // starts when the previous result tile is written back, T_tile = sum of
+  // T_seq. The three come together (DeviceOp's verifier).
+  int64_t pipelineDepth = 1;       // invocations a context holds at a time
+                                   // (accepted, not yet written back)
+  int64_t reduceCycles = 0;        // the serial part of tileOverhead: one
+                                   // invocation's bank-reduction tree, which
+                                   // the next invocation's cannot overlap
+  int64_t feedGap = 0;             // idle cycles of the array input between
+                                   // invocation j's last reduction step and
+                                   // j+1's first (the PE's boundary gap)
 };
+
+/// True if consecutive invocations on this accelerator overlap
+/// (pipelineDepth > 1); false for the serialized model.
+bool isPipelined(const ArrayConfig &array);
 
 enum class Dataflow { WeightStationary, OutputStationary, RowStationary };
 
-/// True if every field is in range: rows, cols, kWindow, elementBytes >= 1;
-/// kMax, l1Bytes, tileOverhead, the overheads and operandLanes >= 0;
+/// True if every field is in range: rows, cols, kWindow, elementBytes,
+/// pipelineDepth >= 1; kMax, l1Bytes, tileOverhead, the overheads,
+/// operandLanes, reduceCycles and feedGap >= 0; reduceCycles <= tileOverhead;
 /// bandwidths finite and >= 0; operandLanes, when set, >= max(rows, cols).
 bool isValidArrayConfig(const ArrayConfig &array);
 
@@ -127,9 +147,14 @@ InvocationCost estimateInvocationCost(int64_t reduction, int64_t j,
                                       const ArrayConfig &array);
 
 /// One rows x cols output tile over a k-step reduction: the sum of its
-/// countInvocations(k) invocations. They run back to back with nothing
-/// overlapped -- the RTL takes a context's next job only once the previous
-/// result is written back -- so T_tile = sum over j of T_seq(j).
+/// countInvocations(k) invocations' terms. On the serialized hardware they
+/// run back to back with nothing overlapped -- the RTL takes a context's
+/// next job only once the previous result is written back -- so the tile
+/// holds its accelerator for sequential() = sum over j of T_seq(j). On a
+/// pipelined accelerator (isPipelined) the invocations overlap and the tile
+/// holds it for span(): first fill start to last write end of the tile's
+/// invocations run alone on an idle context (AcceleratorTimeline below), so
+/// span() <= sequential(), with equality at pipelineDepth = 1.
 struct TileCost {
   bool ok = false;
   int64_t invocations = 0;
@@ -139,9 +164,127 @@ struct TileCost {
   int64_t readBytes = 0;
   int64_t writeBytes = 0;
   int64_t sequential() const { return read + compute + write; }
+  int64_t span() const { return isolatedSpan; }
+  int64_t isolatedSpan = 0;
 };
 
 TileCost estimateTileCost(int64_t k, const ArrayConfig &array);
+
+//===----------------------------------------------------------------------===//
+// The per-accelerator timeline of consecutive invocations.
+//
+// One context runs a stream of invocations j = 0, 1, ... (the K-folded
+// invocations of its tiles, in order). The events of invocation j, in
+// cycles of the array clock, follow from the resources the context has
+// (rtl/multi_200t/tile_pipelined/dma/systolic_accel_context.sv, external
+// scheduler): a job queue of pipelineDepth entries, two operand buffers
+// (ping-pong) of which at most one completely filled tile waits for the
+// array, one operand descriptor in flight, one array, two result snapshot
+// banks, one write-back stage, and inside every PE two accumulator sets and
+// a reduction tree the next invocation's tree cannot overlap:
+//
+//   accept_j  = max(accept_{j-1}, writeEnd_{j-D} + 2)      queue of depth D; the
+//                                      slot frees two cycles after the write
+//                                      end (counter, registered acceptance);
+//                                      serialized (D = 1) the host's resubmission
+//                                      is the gap and the model keeps writeEnd
+//   fillStart = max(accept_j, fillEnd_{j-1}, feedStart_{j-1})
+//                                      one descriptor at a time; the next fill
+//                                      only once the filled tile is being fed
+//   fillEnd   = fillStart + T_read(k_j) the operands landed and the fold
+//                                      released (c_read holds the release)
+//   feedStart = max(fillEnd,
+//                   feedStart_{j-1} + k_{j-1} + feedGap,   the PE boundary gap
+//                   computeEnd_{j-2} + 3,  tile j-2 published: its accumulator
+//                                          set in every PE is free (two sets)
+//                   writeEnd_{j-2} + 3)    result bank j%2 written back
+//                                      3: the release handshake, ready ->
+//                                      scheduler start -> adapter -> fold
+//   computeEnd= max(feedStart + T_compute(k_j), computeEnd_{j-1} + reduceCycles)
+//                                      the invocation's own latency, or the
+//                                      previous reduction holding this one
+//   writeStart= max(computeEnd, writeEnd_{j-1});  writeEnd = writeStart + T_write
+//
+// With D = 1 these are exactly the serialized model: every invocation's
+// fill starts at the previous write end, nothing overlaps. With transfers
+// free (T_read = T_write = 0) the same recurrences give the compute-only
+// timeline, which is what start_cycle in the IR is measured on (as it was
+// for the serialized model: the compute terms before it).
+//
+// Every event is a cycle the RTL bench stamps (tb_pipeline_overlap.sv:
+// fire = accept, fold = feedStart, cv = computeEnd, done = writeEnd), and
+// eval/pipeline_overlap/compare_timeline.py requires them to agree to the
+// cycle; the result readback over the DPTI link, which the host's pace
+// decides, is outside this timeline (it may delay accept_j, which the bench
+// supplies as observed).
+//===----------------------------------------------------------------------===//
+
+struct InvocationEvents {
+  int64_t k = 0;
+  int64_t accept = 0;
+  int64_t fillStart = 0;
+  int64_t fillEnd = 0;
+  int64_t feedStart = 0;     // the fold's start: what start_cycle describes
+  int64_t computeEnd = 0;    // c_valid: the result tile published
+  int64_t writeStart = 0;
+  int64_t writeEnd = 0;      // the result tile in memory
+};
+
+class AcceleratorTimeline {
+public:
+  /// A context of `array` idle at cycle 0. transfersFree: cost the fills
+  /// and write-backs at zero cycles (the compute-only timeline).
+  explicit AcceleratorTimeline(const ArrayConfig &array,
+                               bool transfersFree = false);
+
+  /// Append one invocation of depth k (1 <= k <= kMax, any k >= 1 without
+  /// kMax). ok = false (and nothing appended) for an invalid depth or on
+  /// overflow. acceptNotBefore: the descriptor arrives no earlier than this
+  /// cycle (an observed acceptance; 0 = as soon as the queue has room).
+  /// feedNotBefore: the fold starts no earlier than this cycle (an observed
+  /// fold, when the operands landed later than T_read says because the
+  /// shared read engine was held by a readback or another context's fill --
+  /// which this timeline does not model). writeEndNotBefore: the write-back
+  /// completes no earlier than this cycle (an observed completion, when the
+  /// shared write engine was serving another context).
+  bool push(int64_t k, InvocationEvents &events, int64_t acceptNotBefore = 0,
+            int64_t feedNotBefore = 0, int64_t writeEndNotBefore = 0);
+
+  /// The release handshake: accelerator_ready -> the scheduler's start pulse
+  /// -> the adapter's fold_start, in cycles (systolic_hw_scheduler.sv,
+  /// systolic_hw_scheduler_adapter.sv).
+  static constexpr int64_t kReleaseLatency = 3;
+  /// A queue slot freed by a write-back end is seen by the acceptance two
+  /// cycles later (the counter update and the registered accept decision,
+  /// systolic_dma_top.sv).
+  static constexpr int64_t kAcceptLatency = 2;
+
+  /// Append every invocation of a K-step reduction (a tile), in order.
+  /// Returns the tile's events: fillStart of its first invocation and
+  /// writeEnd of its last. ok = false on an invalid K or overflow.
+  bool pushTile(int64_t reduction, int64_t &tileStart, int64_t &tileEnd);
+
+  int64_t invocations() const { return count; }
+  /// writeEnd of the last invocation; 0 before any.
+  int64_t end() const { return lastWriteEnd; }
+
+private:
+  ArrayConfig config;
+  bool transfersFree = false;
+  int64_t count = 0;
+  int64_t lastAccept = 0;
+  int64_t lastFillEnd = 0;
+  int64_t lastFeedStart = 0;
+  int64_t lastK = 0;
+  int64_t lastComputeEnd = 0;
+  int64_t lastWriteEnd = 0;
+  // writeEnd / computeEnd of the last max(pipelineDepth, 2) invocations,
+  // oldest first.
+  int64_t writeEnds[64];
+  int64_t computeEnds[64];
+  int64_t writeEndCount = 0;
+  int64_t window = 2;
+};
 
 /// Compute-only cycles of an m x n x k matmul on one array: the number of
 /// rows x cols output tiles times one tile's compute term,

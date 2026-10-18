@@ -33,5 +33,14 @@ using namespace mlir::systolic;
     cfg.operandLanes = lanes.getInt();
   if (IntegerAttr window = device.getKWindowAttr())
     cfg.kWindow = window.getInt();
+
+  // The pipelined per-accelerator timeline; absent (the verifier requires
+  // all three or none) keeps the serialized model: pipelineDepth = 1.
+  if (IntegerAttr depth = device.getPipelineDepthAttr())
+    cfg.pipelineDepth = depth.getInt();
+  if (IntegerAttr reduce = device.getReduceCyclesAttr())
+    cfg.reduceCycles = reduce.getInt();
+  if (IntegerAttr gap = device.getFeedGapAttr())
+    cfg.feedGap = gap.getInt();
   return cfg;
 }
