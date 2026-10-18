@@ -3,11 +3,26 @@
 #include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
+#include "llvm/Support/Debug.h"
+
 #include <numeric>
 #include <utility>
 
+#define DEBUG_TYPE "affine-matmul-analysis"
+
 using namespace mlir;
 using namespace mlir::systolic;
+
+/// The recognizer's trace (-debug-only=affine-matmul-analysis). It used to go
+/// to llvm::errs() unconditionally, so every pass built on the recognizer
+/// printed it.
+static llvm::raw_ostream &dbgOut() {
+#ifndef NDEBUG
+  if (llvm::DebugFlag && llvm::isCurrentDebugType(DEBUG_TYPE))
+    return llvm::dbgs();
+#endif
+  return llvm::nulls();
+}
 
 static StringRef classifyLoopIV(Value value,
                                 affine::AffineForOp outerLoop,
@@ -734,10 +749,10 @@ void mlir::systolic::collectAffineMatmulCandidates(
     AffineMatmulCandidate candidate;
     candidate.anchor = outerLoop.getOperation();
 
-    llvm::errs() << "Found affine matmul candidate:\n";
-    llvm::errs() << "  outer IV: " << outerLoop.getInductionVar() << "\n";
-    llvm::errs() << "  middle IV: " << middleLoop.getInductionVar() << "\n";
-    llvm::errs() << "  inner IV: " << innerLoop.getInductionVar() << "\n";
+    dbgOut() << "Found affine matmul candidate:\n";
+    dbgOut() << "  outer IV: " << outerLoop.getInductionVar() << "\n";
+    dbgOut() << "  middle IV: " << middleLoop.getInductionVar() << "\n";
+    dbgOut() << "  inner IV: " << innerLoop.getInductionVar() << "\n";
 
     candidates.push_back(candidate);
   });
@@ -886,6 +901,12 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
     if (!loop)
       return failure();
 
+    // A symbolic bound has no static normalized extent. (Calling
+    // getConstantUpperBound() on one is undefined, and went unnoticed in
+    // builds without assertions.)
+    if (!loop.hasConstantLowerBound() || !loop.hasConstantUpperBound())
+      return failure();
+
     const int64_t lower =
         loop.getConstantLowerBound();
     const int64_t upper =
@@ -920,8 +941,8 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
 
   normalization.domain = std::move(normalizedDomain);
 
-  llvm::errs() << "  normalized execution domain:\n";
-  normalization.domain->dump();
+  dbgOut() << "  normalized execution domain:\n";
+  normalization.domain->print(dbgOut());
 
   normalization.isIdentity = true;
 
@@ -943,12 +964,12 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
       normalization.isIdentity = false;
   }
 
-  llvm::errs() << "  normalized logical coordinates:\n";
+  dbgOut() << "  normalized logical coordinates:\n";
 
   for (unsigned logicalDim = 0;
        logicalDim < numLogicalDims;
        ++logicalDim) {
-    llvm::errs() << "    y" << logicalDim << " = ";
+    dbgOut() << "    y" << logicalDim << " = ";
 
     bool printed = false;
 
@@ -963,9 +984,9 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
         continue;
 
       if (printed)
-        llvm::errs() << " + ";
+        dbgOut() << " + ";
 
-      llvm::errs() << coefficient
+      dbgOut() << coefficient
                    << "*z" << sourceDim;
 
       printed = true;
@@ -974,13 +995,13 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
     if (normalization.logicalOffset[logicalDim] != 0 ||
         !printed) {
       if (printed)
-        llvm::errs() << " + ";
+        dbgOut() << " + ";
 
-      llvm::errs()
+      dbgOut()
           << normalization.logicalOffset[logicalDim];
     }
 
-    llvm::errs() << "\n";
+    dbgOut() << "\n";
   }
 
   return normalization;
@@ -1024,39 +1045,72 @@ mlir::systolic::recognizeLogicalMatmul(
   SmallVector<affine::AffineLoadOp> loads;
   SmallVector<affine::AffineStoreOp> stores;
 
-  candidate.anchor->walk([&](Operation *op) {
+  // The anchored nest must be a perfect chain of affine.for ops around the
+  // MAC and nothing else: a pass that replaces the nest with a GEMM drops
+  // whatever else is in it -- an initialization of C between the j and k
+  // loops, a call, a store through another dialect -- or reorders it. The
+  // chain runs from the anchor down to the innermost loop; every loop in it
+  // has the next one as its only operation, and the innermost holds only the
+  // MAC. Whether every loop's IV is used is checked once the accesses are
+  // known (below).
+  SmallVector<affine::AffineForOp> chain{outerLoop};
+  for (;;) {
+    affine::AffineForOp child;
+    for (Operation &op : *chain.back().getBody()) {
+      if (isa<affine::AffineYieldOp>(op))
+        continue;
+      auto loop = dyn_cast<affine::AffineForOp>(op);
+      if (!loop || child) {
+        child = nullptr;
+        break;
+      }
+      child = loop;
+    }
+    if (!child)
+      break;
+    chain.push_back(child);
+  }
+  if (chain.size() < 3)
+    return failure();
+  for (affine::AffineForOp loop : chain)
+    if (loop.getNumResults() != 0)
+      return failure();
+
+  for (Operation &op : *chain.back().getBody()) {
     if (auto load = dyn_cast<affine::AffineLoadOp>(op))
       loads.push_back(load);
     else if (auto store = dyn_cast<affine::AffineStoreOp>(op))
       stores.push_back(store);
-  });
+    else if (!isa<arith::MulFOp, arith::AddFOp, affine::AffineYieldOp>(op))
+      return failure();
+  }
 
-  llvm::errs() << "Affine matmul recognition:\n";
-  llvm::errs() << "  loads: " << loads.size() << "\n";
-  llvm::errs() << "  stores: " << stores.size() << "\n";
+  dbgOut() << "Affine matmul recognition:\n";
+  dbgOut() << "  loads: " << loads.size() << "\n";
+  dbgOut() << "  stores: " << stores.size() << "\n";
 
   for (auto [index, load] : llvm::enumerate(loads)) {
-    llvm::errs() << "  load[" << index << "] map: ";
-    load.getMap().print(llvm::errs());
-    llvm::errs() << "\n";
+    dbgOut() << "  load[" << index << "] map: ";
+    load.getMap().print(dbgOut());
+    dbgOut() << "\n";
 
-    llvm::errs() << "    operands:";
+    dbgOut() << "    operands:";
     for (Value operand : load.getIndices())
-      llvm::errs() << " "
+      dbgOut() << " "
                    << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
-    llvm::errs() << "\n";
+    dbgOut() << "\n";
   }
 
   for (auto [index, store] : llvm::enumerate(stores)) {
-    llvm::errs() << "  store[" << index << "] map: ";
-    store.getMap().print(llvm::errs());
-    llvm::errs() << "\n";
+    dbgOut() << "  store[" << index << "] map: ";
+    store.getMap().print(dbgOut());
+    dbgOut() << "\n";
 
-    llvm::errs() << "    operands:";
+    dbgOut() << "    operands:";
     for (Value operand : store.getIndices())
-      llvm::errs() << " "
+      dbgOut() << " "
                    << classifyLoopIV(operand, outerLoop, middleLoop, innerLoop);
-    llvm::errs() << "\n";
+    dbgOut() << "\n";
   }
 
   // Canonical GEMM currently expected to contain:
@@ -1121,27 +1175,37 @@ mlir::systolic::recognizeLogicalMatmul(
   auto iterationIVs =
       collectAccessIterationIVs(lhsLoad, rhsLoad, accLoad, store);
 
-  llvm::errs() << "  access iteration IV count: "
+  dbgOut() << "  access iteration IV count: "
                << iterationIVs.size() << "\n";
+
+  // The iteration space is exactly the anchored chain. A chain loop whose IV
+  // no access uses repeats the accumulation (C += A*B once per iteration),
+  // which a single GEMM over the used IVs would not; an IV from outside the
+  // chain is a parameter of the nest, not one of its iteration dimensions.
+  if (iterationIVs.size() != chain.size())
+    return failure();
+  for (affine::AffineForOp loop : chain)
+    if (!llvm::is_contained(iterationIVs, loop.getInductionVar()))
+      return failure();
 
   auto sourceDomain = recoverSourceDomain(iterationIVs);
   if (failed(sourceDomain))
     return failure();
 
-  llvm::errs() << "  source iteration domain:\n";
-  sourceDomain->dump();
+  dbgOut() << "  source iteration domain:\n";
+  sourceDomain->print(dbgOut());
 
-  llvm::errs() << "  source inequalities:\n";
+  dbgOut() << "  source inequalities:\n";
   for (unsigned i = 0; i < sourceDomain->getNumInequalities(); ++i) {
     auto inequality = sourceDomain->getInequality64(i);
 
-    llvm::errs() << "    [";
+    dbgOut() << "    [";
     for (unsigned j = 0; j < inequality.size(); ++j) {
       if (j != 0)
-        llvm::errs() << " ";
-      llvm::errs() << inequality[j];
+        dbgOut() << " ";
+      dbgOut() << inequality[j];
     }
-    llvm::errs() << "] >= 0\n";
+    dbgOut() << "] >= 0\n";
   }
 
   // The accumulator must be read from and written back to the same
@@ -1185,17 +1249,17 @@ mlir::systolic::recognizeLogicalMatmul(
       failed(normalizedAcc))
     return failure();
 
-  llvm::errs() << "  normalized A: ";
-  normalizedLhs->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "  normalized A: ";
+  normalizedLhs->print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "  normalized B: ";
-  normalizedRhs->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "  normalized B: ";
+  normalizedRhs->print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "  normalized C: ";
-  normalizedAcc->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "  normalized C: ";
+  normalizedAcc->print(dbgOut());
+  dbgOut() << "\n";
 
   // A logical GEMM may have a shared partition prefix P*:
   //
@@ -1260,54 +1324,54 @@ mlir::systolic::recognizeLogicalMatmul(
       failed(linearK))
     return failure();
 
-  llvm::errs() << "  affine logical mapping\n";
+  dbgOut() << "  affine logical mapping\n";
   if (succeeded(linearI) &&
       succeeded(linearJ) &&
       succeeded(linearK)) {
     auto printLinearForm = [](StringRef name,
                               const LinearForm &form) {
-      llvm::errs() << "    " << name << " = [";
+      dbgOut() << "    " << name << " = [";
       for (unsigned i = 0; i < form.coefficients.size(); ++i) {
         if (i != 0)
-          llvm::errs() << " ";
-        llvm::errs() << form.coefficients[i];
+          dbgOut() << " ";
+        dbgOut() << form.coefficients[i];
       }
-      llvm::errs() << " | " << form.constant << "]\n";
+      dbgOut() << " | " << form.constant << "]\n";
     };
 
     printLinearForm("I", *linearI);
     printLinearForm("J", *linearJ);
     printLinearForm("K", *linearK);
   } else {
-    llvm::errs() << "    unsupported non-linear affine form\n";
+    dbgOut() << "    unsupported non-linear affine form\n";
   }
 
-  llvm::errs() << "  logical GEMM coordinates recovered\n";
-  llvm::errs() << "    I: ";
-  logicalI.print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "  logical GEMM coordinates recovered\n";
+  dbgOut() << "    I: ";
+  logicalI.print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "    J: ";
-  logicalJ.print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "    J: ";
+  logicalJ.print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "    K: ";
-  logicalK.print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "    K: ";
+  logicalK.print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "  accumulator read-modify-write verified\n";
-  llvm::errs() << "  MAC dataflow recognized\n";
-  llvm::errs() << "    accumulator load: ";
-  accLoad.getOperation()->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "  accumulator read-modify-write verified\n";
+  dbgOut() << "  MAC dataflow recognized\n";
+  dbgOut() << "    accumulator load: ";
+  accLoad.getOperation()->print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "    lhs load: ";
-  lhsLoad.getOperation()->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "    lhs load: ";
+  lhsLoad.getOperation()->print(dbgOut());
+  dbgOut() << "\n";
 
-  llvm::errs() << "    rhs load: ";
-  rhsLoad.getOperation()->print(llvm::errs());
-  llvm::errs() << "\n";
+  dbgOut() << "    rhs load: ";
+  rhsLoad.getOperation()->print(dbgOut());
+  dbgOut() << "\n";
 
   LogicalMatmul result;
   result.anchor = candidate.anchor;
@@ -1439,23 +1503,23 @@ mlir::systolic::recognizeLogicalMatmul(
     if (failed(inverse))
       return failure();
 
-    llvm::errs() << "  inverse logical mapping\n";
+    dbgOut() << "  inverse logical mapping\n";
     for (unsigned row = 0; row < inverse->size(); ++row) {
-      llvm::errs() << "    T^-1[" << row << "] = [";
+      dbgOut() << "    T^-1[" << row << "] = [";
 
       for (unsigned column = 0;
            column < (*inverse)[row].size();
            ++column) {
         if (column != 0)
-          llvm::errs() << " ";
+          dbgOut() << " ";
 
         const Rational &value = (*inverse)[row][column];
-        llvm::errs() << value.numerator;
+        dbgOut() << value.numerator;
         if (value.denominator != 1)
-          llvm::errs() << "/" << value.denominator;
+          dbgOut() << "/" << value.denominator;
       }
 
-      llvm::errs() << "]\n";
+      dbgOut() << "]\n";
     }
 
     auto logicalInequalities =
@@ -1465,23 +1529,23 @@ mlir::systolic::recognizeLogicalMatmul(
             result.logicalMapping.offset);
 
     if (succeeded(logicalInequalities)) {
-      llvm::errs() << "  logical iteration domain:\n";
+      dbgOut() << "  logical iteration domain:\n";
       for (const auto &inequality : *logicalInequalities) {
-        llvm::errs() << "    [";
+        dbgOut() << "    [";
 
         for (unsigned column = 0;
              column < inequality.size();
              ++column) {
           if (column != 0)
-            llvm::errs() << " ";
+            dbgOut() << " ";
 
           const Rational &value = inequality[column];
-          llvm::errs() << value.numerator;
+          dbgOut() << value.numerator;
           if (value.denominator != 1)
-            llvm::errs() << "/" << value.denominator;
+            dbgOut() << "/" << value.denominator;
         }
 
-        llvm::errs() << "] >= 0\n";
+        dbgOut() << "] >= 0\n";
       }
     }
 
@@ -1496,8 +1560,8 @@ mlir::systolic::recognizeLogicalMatmul(
   if (succeeded(exactLogicalDomain)) {
     result.logicalDomain = std::move(*exactLogicalDomain);
 
-    llvm::errs() << "  exact logical iteration domain:\n";
-    result.logicalDomain->dump();
+    dbgOut() << "  exact logical iteration domain:\n";
+    result.logicalDomain->print(dbgOut());
   }
 
   result.partitionMap =
@@ -1521,12 +1585,13 @@ mlir::systolic::recognizeLogicalMatmul(
                      logicalK,
                      candidate.anchor->getContext());
 
+  // Normalization needs static loop bounds. A nest with a symbolic bound is
+  // still a recognized GEMM, with no normalized domain (consumers that need
+  // one check normalization.domain).
   auto normalization =
       normalizeLogicalCoordinates(result, iterationIVs);
-  if (failed(normalization))
-    return failure();
-
-  result.normalization = std::move(*normalization);
+  if (succeeded(normalization))
+    result.normalization = std::move(*normalization);
 
   result.rowExtent =
       recoverLogicalExtent(logicalI, iterationIVs);

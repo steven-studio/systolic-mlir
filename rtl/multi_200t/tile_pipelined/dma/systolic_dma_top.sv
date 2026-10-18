@@ -197,13 +197,33 @@ module systolic_dma_top #(
   parameter integer NUM_8X8 = 1,
   parameter integer NUM_4X4 = 3,
 
+  // The PE boundary gap the contexts keep between two invocations' operands
+  // (systolic_accel_context.sv PE_QUIET_GAP / FEED_GAP_MARGIN; the defaults
+  // are the contexts' own).  Exposed so a bench can shrink the gap below the
+  // PE's minimum and show that the boundary check catches merged tiles.
+  parameter integer PE_QUIET_GAP    = 23,
+  parameter integer FEED_GAP_MARGIN = 3,
+
   // Legacy compiler/testbench descriptor producer.
   //
   // 1: allow the top-level job_* ports to provide descriptors.
   // 0: production board build uses only the internal descriptor bridge.
   //
   // Keep the default enabled so existing simulation testbenches are unchanged.
-  parameter bit USE_LEGACY_JOB_PORTS = 1'b1
+  parameter bit USE_LEGACY_JOB_PORTS = 1'b1,
+
+  // FT2232H physical layer.
+  //
+  // 1: dpti_sync245_phy -- registered pads (IOB candidates), registered OE#,
+  //    RD#/RXF# qualification at the capture edge, RX/TX FIFOs, bus
+  //    arbitration with turnaround, TX acceptance confirmed by TXE#/WR#.
+  // 0: the original dpti_byte_rx + dpti_byte_tx and their glue, unchanged.
+  // Both drive the same dpti_byte_* (RX) and rb_tx_byte_* (TX) streams.
+  parameter bit DPTI_PHY_SYNC245 = 1'b1,
+
+  // dpti_clk_gen's CLKOUT0 phase (degrees, 360 = 16.667 ns).  0 unless the
+  // routed I/O slacks call for a shift; see dpti_clk_gen.sv, PHASE.
+  parameter real DPTI_CLKOUT0_PHASE = 0.0
 ) (
   input  wire        sys_clk_pin,     // R4, 100 MHz
   input  wire        cpu_resetn,      // G4, active low
@@ -294,7 +314,8 @@ module systolic_dma_top #(
   // The FT2232H drives/receives the data bus depending on direction.
   //
   // DPTI clock:
-  //   dpti_clkout = FT2232H CLKO
+  //   dpti_clkout = FT2232H CLKO; it drives only dpti_clk_gen's MMCM, whose
+  //   output clk_dpti clocks the DPTI domain
   //
   // All *_n signals are active-low.
   // ----------------------------------------------------------
@@ -620,6 +641,7 @@ module systolic_dma_top #(
   wire [3:0]  ctx_phase            [0:NUM_ACCEL-1];
   wire        ctx_job_busy         [0:NUM_ACCEL-1];
   wire        ctx_job_active       [0:NUM_ACCEL-1];
+  wire        ctx_job_accept_ready [0:NUM_ACCEL-1];
   wire        ctx_job_done         [0:NUM_ACCEL-1];
   wire        ctx_job_fire         [0:NUM_ACCEL-1];
   wire [31:0] ctx_job_id           [0:NUM_ACCEL-1];
@@ -705,10 +727,17 @@ module systolic_dma_top #(
   // ==========================================================
   // Job acceptance.
   //
-  // A descriptor is accepted when the context of the device it names is
-  // free: that context has no job in flight, its result readback (if any)
-  // has drained, and its FSM is at a run boundary.  Another context's job
-  // being in flight does not matter -- that is the point.
+  // A descriptor is accepted when the context of the device it names can
+  // queue it (job_accept_ready: its job queue has room -- JOB_QUEUE_DEPTH
+  // jobs accepted and not yet written back) and that context's readback
+  // queue has room for the result.  Another context's job being in flight
+  // does not matter -- that is the point.  Nor does this context's: a job
+  // is taken while the previous one is still being filled, fed, reduced or
+  // written back, which is what lets the context pipeline them
+  // (systolic_accel_context.sv, PIPELINED JOBS).  Until Oct 2026 acceptance
+  // waited for the previous job's write-back and readback and for the
+  // scheduler slot to be idle -- one job per context, every invocation of an
+  // accelerator strictly after the previous one.
   // ==========================================================
   wire [31:0] effective_job_device_id;             // defined with the ingress
   wire        target_valid = (effective_job_device_id < NUM_ACCEL);
@@ -727,8 +756,9 @@ module systolic_dma_top #(
       (effective_job_k <= (target_is_8x8 ? 32'(K_MAX_8X8) : 32'(K_MAX_4X4)));
   logic       err_job_k;
 
-  // A completed job may still own the shared DMA read engine while its
-  // result tile is read back; its context takes no new job until then.
+  // Completed jobs wait in a per-context queue for the shared DMA read engine
+  // to read their result tiles back; a context whose readback queue is full
+  // takes no new job until one has been read back.
   wire result_readback_busy [0:NUM_ACCEL-1];
 
   wire core_job_ready =
@@ -737,14 +767,14 @@ module systolic_dma_top #(
       !hs_busy &&
       target_valid &&
       job_k_ok &&
-      !ctx_job_busy[target_idx] &&
-      !result_readback_busy[target_idx] &&
-      (ctx_phase[target_idx] == 4'd0 ||    // P_CALIB
-       ctx_phase[target_idx] == 4'd2 ||    // P_READ
-       ctx_phase[target_idx] == 4'd7);     // P_DONE
+      ctx_job_accept_ready[target_idx] &&
+      !result_readback_busy[target_idx];
 
-  // The scheduler's context for the target must be idle as well.
-  wire scheduler_desc_ready = target_valid && scheduler_req_ready[target_idx];
+  // The scheduler slot is no longer part of acceptance: the context raises
+  // one request per queued job itself (tile_req) and the slot is released at
+  // each start, so a job can be accepted and filled while the slot is still
+  // holding the previous job's release.
+  wire scheduler_desc_ready = 1'b1;
 
   // ----------------------------------------------------------
   // DPTI descriptor bridge.
@@ -841,45 +871,92 @@ module systolic_dma_top #(
 
   // Physical data bus ownership is selected by the output path.
   // Otherwise the FPGA releases the bidirectional bus for input traffic.
+  // (DPTI_PHY_SYNC245 = 0; the pads are driven in g_legacy_phy below.)
   wire [7:0] dpti_tx_data;
   wire       dpti_tx_oe;
   wire       dpti_tx_wr_n;
 
-  assign dpti_d =
-      dpti_tx_oe
-          ? dpti_tx_data
-          : 8'bz;
-
-  assign dpti_wr_n = dpti_tx_wr_n;
+  // What dpti_phy_debug records as "RXF# seen low" / "RD# asserted": the pads
+  // themselves for the legacy layer, registered copies for the sync245 PHY so
+  // that each pad keeps a single (IOB) register load.
+  wire       dpti_dbg_rxf_avail;
+  wire       dpti_dbg_rd_active;
 
   // ------------------------------------------------------------------------
-  // DPTI clock-domain reset.
+  // DPTI clock and link reset.
   //
-  // dpti_host_rx is clocked by dpti_clkout, so synchronize the
-  // system reset into the DPTI clock domain before using it there.
+  // Every register of the DPTI domain runs on clk_dpti: CLKOUT regenerated by
+  // dpti_clk_gen's MMCM so that it is aligned at the IOB registers with
+  // CLKOUT at the pin (see that file for the topology and why).  The port
+  // dpti_clkout feeds nothing but the MMCM.
+  //
+  // dpti_rst (clk_dpti) and dpti_ui_link_rst (ui_clk, the ui_clk halves of
+  // the three DPTI crossings) come from dpti_link_ctrl, which takes both down
+  // together when MMCM LOCKED drops or on ui_rst_n, lets the ui_clk side drain
+  // what already crossed, and brings both up together once LOCKED is back.
+  // A MEM_WRITE cut off by a lost link latches dpti_link_fatal (any_err).
   // ------------------------------------------------------------------------
 
-  reg dpti_rst_meta;
-  reg dpti_rst;
+  wire       clk_dpti;
+  wire       dpti_mmcm_locked;
+  wire       dpti_hold_mmcm;
+  wire [7:0] dpti_mmcm_reset_count;     // clk_sys_100
 
-  always @(posedge dpti_clkout) begin
-    if (!ui_rst_n) begin
-      dpti_rst_meta <= 1'b1;
-      dpti_rst      <= 1'b1;
-    end
-    else begin
-      dpti_rst_meta <= 1'b0;
-      dpti_rst      <= dpti_rst_meta;
-    end
+  dpti_clk_gen #(
+    .CLKOUT0_PHASE (DPTI_CLKOUT0_PHASE)
+  ) u_dpti_clk_gen (
+    .clk_sys          (clk_sys_100),
+    .clkout_pad       (dpti_clkout),
+    .hold_rst         (dpti_hold_mmcm),
+    .clk_dpti         (clk_dpti),
+    .locked           (dpti_mmcm_locked),
+    .mmcm_reset_count (dpti_mmcm_reset_count)
+  );
+
+  wire       dpti_rst;
+  wire       dpti_ui_link_rst;
+  wire       dpti_link_up;
+  wire       dpti_link_fatal;
+  wire [7:0] dpti_link_drop_count;
+  wire       dpti_locked_ui;
+  wire [2:0] dpti_link_state;
+
+  dpti_link_ctrl u_dpti_link_ctrl (
+    .ui_clk            (ui_clk),
+    .ui_rst_n          (ui_rst_n),
+    .mmcm_locked       (dpti_mmcm_locked),
+    .mem_writer_busy   (hs_busy),
+    .cmd_fifo_rd_valid (dpti_fifo_rd_valid),
+    .cmd_master_idle   (dpti_axi_cmd_ready),
+    .clk_dpti          (clk_dpti),
+    .dpti_rst          (dpti_rst),
+    .ui_link_rst       (dpti_ui_link_rst),
+    .hold_mmcm         (dpti_hold_mmcm),
+    .link_up           (dpti_link_up),
+    .err_link_fatal    (dpti_link_fatal),
+    .link_drop_count   (dpti_link_drop_count),
+    .locked_ui         (dpti_locked_ui),
+    .state_o           (dpti_link_state)
+  );
+
+  // Observation only: the MMCM reset count, a clk_sys_100 counter, sampled in
+  // ui_clk.  A sample taken while it changes may be wrong by one read; it is
+  // read for whether it moves, as dpti_clk_activity is.
+  (* ASYNC_REG = "TRUE" *) reg [7:0] dpti_mmcm_resets_meta;
+  (* ASYNC_REG = "TRUE" *) reg [7:0] dpti_mmcm_resets_ui;
+
+  always @(posedge ui_clk) begin
+    dpti_mmcm_resets_meta <= dpti_mmcm_reset_count;
+    dpti_mmcm_resets_ui   <= dpti_mmcm_resets_meta;
   end
 
   // ------------------------------------------------------------------------
   // Physical-input diagnostic state.
   //
-  // This state is generated entirely in dpti_clkout.  Do not sample the
+  // This state is generated entirely in clk_dpti.  Do not sample the
   // short physical-interface events directly from ui_clk.
   //
-  // bit0: dpti_clkout has run after reset release
+  // bit0: clk_dpti has run after reset release
   // bit1: input data was reported available
   // bit2: the receiver asserted its physical read control
   // bit3: the receiver produced a valid byte
@@ -891,25 +968,26 @@ module systolic_dma_top #(
   // Free-running physical-clock activity counter.
   //
   // Deliberately NOT reset by dpti_rst or ui_rst_n.  This is observation-only:
-  // if dpti_clkout is reaching the FPGA, this counter must change regardless of
-  // the state of the physical-interface reset synchronizer.
+  // if CLKOUT is reaching the FPGA and the MMCM is locked to it (clk_dpti
+  // runs), this counter must change regardless of the state of the
+  // physical-interface reset synchronizer.
   reg [31:0] dpti_clk_activity = 32'd0;
 
-  always @(posedge dpti_clkout) begin
+  always @(posedge clk_dpti) begin
     dpti_clk_activity <= dpti_clk_activity + 32'd1;
   end
 
-  always @(posedge dpti_clkout) begin
+  always @(posedge clk_dpti) begin
     if (dpti_rst) begin
       dpti_phy_debug <= 32'd0;
     end
     else begin
       dpti_phy_debug[0] <= 1'b1;
 
-      if (!dpti_rxf_n)
+      if (dpti_dbg_rxf_avail)
         dpti_phy_debug[1] <= 1'b1;
 
-      if (!dpti_rd_n)
+      if (dpti_dbg_rd_active)
         dpti_phy_debug[2] <= 1'b1;
 
       if (dpti_byte_valid)
@@ -974,13 +1052,13 @@ module systolic_dma_top #(
     .DEPTH  (8)
   ) u_dpti_output_cdc (
     .src_clk   (ui_clk),
-    .src_rst   (!ui_rst_n),
+    .src_rst   (!ui_rst_n || dpti_ui_link_rst),
 
     .src_data  (rb_hdr_valid ? rb_hdr_data : dst_wr_data),
     .src_valid (rb_hdr_valid | rb_dst_wr_en),
     .src_ready (rb_cdc_src_ready),
 
-    .dst_clk   (dpti_clkout),
+    .dst_clk   (clk_dpti),
     .dst_rst   (dpti_rst),
 
     .dst_data  (rb_cdc_dst_data),
@@ -991,7 +1069,7 @@ module systolic_dma_top #(
   dpti_beat_to_byte #(
     .DATA_W (AXI_DATA_W)
   ) u_dpti_beat_to_byte (
-    .clk        (dpti_clkout),
+    .clk        (clk_dpti),
     .rst        (dpti_rst),
 
     .beat_data  (rb_cdc_dst_data),
@@ -1003,46 +1081,166 @@ module systolic_dma_top #(
     .byte_ready (rb_tx_byte_ready)
   );
 
-  // ------------------------------------------------------------------------
-  // The DPTI bus, both directions, one owner at a time (dpti_bus_arbiter).
-  //
-  // dpti_byte_rx and dpti_byte_tx used to sit here side by side, each driving
-  // its own strobes: a bus fight as soon as a result left while a slab was
-  // still coming in. The arbiter keeps the FT2232H's rules (read or write,
-  // never both; OE# a cycle ahead of RD#; an idle cycle at every turnaround)
-  // and alternates the directions in chunks, results first. The byte
-  // handshakes toward dpti_command_frontend and from dpti_beat_to_byte are
-  // the two old modules', unchanged.
-  // ------------------------------------------------------------------------
+  // The legacy pads path arbitrates the bus below; the registered PHY
+  // reports its own mode on the same wires.
   wire [2:0]  dpti_bus_state;
   wire [31:0] dpti_bus_turnarounds;
 
-  dpti_bus_arbiter #(
-    .CHUNK_BYTES (64)
-  ) u_dpti_bus (
-    .clk           (dpti_clkout),
-    .rst           (dpti_rst),
+  generate
+  if (DPTI_PHY_SYNC245) begin : g_sync245_phy
 
-    .dpti_d_in     (dpti_d),
-    .dpti_rxf_n    (dpti_rxf_n),
-    .dpti_txe_n    (dpti_txe_n),
-    .dpti_rd_n     (dpti_rd_n),
-    .dpti_oe_n     (dpti_oe_n),
-    .dpti_wr_n     (dpti_tx_wr_n),
-    .dpti_d_out    (dpti_tx_data),
-    .dpti_d_oe     (dpti_tx_oe),
+    // ----------------------------------------------------------------------
+    // dpti_sync245_phy.  Clocked by clk_dpti like the rest of the DPTI
+    // domain: CLKOUT through dpti_clk_gen's delay-compensating MMCM, which is
+    // the alignment this PHY's IOB registers are designed for.
+    //
+    // Reset: asserted at once -- with or without a clock -- by the link reset,
+    // by ui_rst_n, and by MMCM LOCKED falling, so the pads are safe (RD#, OE#,
+    // WR# high, D released) the moment the clock can no longer be trusted,
+    // even while dpti_link_ctrl is still draining the ui_clk side.  Released
+    // after dpti_rst plus the PHY's own two-flop synchronizer, so the command
+    // frontend is out of reset before the PHY can present a byte.
+    // ----------------------------------------------------------------------
+    wire [7:0] pad_d_o;
+    wire [7:0] pad_d_t;      // 1 = high-Z
 
-    .rx_byte_data  (dpti_byte_data),
-    .rx_byte_valid (dpti_byte_valid),
-    .rx_byte_ready (dpti_byte_ready),
+    for (genvar gi = 0; gi < 8; gi = gi + 1) begin : g_pad_d
+      assign dpti_d[gi] = pad_d_t[gi] ? 1'bz : pad_d_o[gi];
+    end
 
-    .tx_byte_data  (rb_tx_byte_data),
-    .tx_byte_valid (rb_tx_byte_valid),
-    .tx_byte_ready (rb_tx_byte_ready),
+    // ----------------------------------------------------------------------
+    // RX pacing at the boundary to the command frontend.
+    //
+    // dpti_command_frontend hands a byte to the MEM_WRITE decoder for one
+    // more cycle after that decoder has finished (it releases OWNER_MEM on
+    // the cycle after mem_done, while the decoder is already back in
+    // S_OPCODE with byte_ready = 1).  A byte presented on that cycle is
+    // swallowed.  dpti_byte_rx could never present one there: after each
+    // consumed byte its next byte becomes valid two edges later at the
+    // earliest.  The sync245 PHY's FIFO has the next byte ready at once, and
+    // without this pacing the replay bench (tb_dpti_top_replay) loses the two
+    // bytes after every MEM_WRITE.  The pacer restores exactly the legacy
+    // minimum spacing -- after a byte is taken, the next one is held back
+    // for two cycles -- so the frontend sees no input pattern the legacy
+    // layer could not produce.  It does not fix the frontend; see the Stage 3
+    // report.
+    // ----------------------------------------------------------------------
+    wire [7:0] phy_rx_data;
+    wire       phy_rx_valid;
+    wire       phy_rx_ready;
+    reg  [1:0] rx_hold;
 
-    .state_o       (dpti_bus_state),
-    .turnarounds   (dpti_bus_turnarounds)
-  );
+    always @(posedge clk_dpti) begin
+      if (dpti_rst)
+        rx_hold <= 2'd0;
+      else if (dpti_byte_valid && dpti_byte_ready)
+        rx_hold <= 2'd2;
+      else if (rx_hold != 2'd0)
+        rx_hold <= rx_hold - 2'd1;
+    end
+
+    assign dpti_byte_data  = phy_rx_data;
+    assign dpti_byte_valid = phy_rx_valid && (rx_hold == 2'd0);
+    assign phy_rx_ready    = dpti_byte_ready && (rx_hold == 2'd0);
+
+    // unused in the top: the PHY's own counters and mode
+    wire [1:0]  phy_bus_mode;
+    wire        phy_err_rx_overflow;
+    wire [31:0] phy_rx_xfer_count;
+    wire [31:0] phy_tx_accept_count;
+    wire [31:0] phy_tx_reject_count;
+
+    dpti_sync245_phy u_dpti_sync245_phy (
+      .clk             (clk_dpti),
+      .arst            (dpti_rst | !ui_rst_n | !dpti_mmcm_locked),
+
+      .pad_d_i         (dpti_d),
+      .pad_d_o         (pad_d_o),
+      .pad_d_t         (pad_d_t),
+      .pad_rxf_n       (dpti_rxf_n),
+      .pad_txe_n       (dpti_txe_n),
+      .pad_rd_n        (dpti_rd_n),
+      .pad_oe_n        (dpti_oe_n),
+      .pad_wr_n        (dpti_wr_n),
+
+      .rx_data         (phy_rx_data),
+      .rx_valid        (phy_rx_valid),
+      .rx_ready        (phy_rx_ready),
+
+      .tx_data         (rb_tx_byte_data),
+      .tx_valid        (rb_tx_byte_valid),
+      .tx_ready        (rb_tx_byte_ready),
+
+      .dbg_rxf_avail   (dpti_dbg_rxf_avail),
+      .dbg_rd_active   (dpti_dbg_rd_active),
+      .bus_mode        (phy_bus_mode),
+      .err_rx_overflow (phy_err_rx_overflow),
+      .rx_xfer_count   (phy_rx_xfer_count),
+      .tx_accept_count (phy_tx_accept_count),
+      .tx_reject_count (phy_tx_reject_count)
+    );
+
+    assign dpti_tx_data = pad_d_o;
+    assign dpti_tx_oe   = 1'b0;
+    assign dpti_tx_wr_n = 1'b1;
+    assign dpti_bus_state       = {1'b0, phy_bus_mode};   // the PHY arbitrates the bus itself
+    assign dpti_bus_turnarounds = 32'd0;
+
+  end
+  else begin : g_legacy_phy
+
+    assign dpti_d =
+        dpti_tx_oe
+            ? dpti_tx_data
+            : 8'bz;
+
+    assign dpti_wr_n = dpti_tx_wr_n;
+
+    assign dpti_dbg_rxf_avail = !dpti_rxf_n;
+    assign dpti_dbg_rd_active = !dpti_rd_n;
+
+
+    // ----------------------------------------------------------------------
+    // The DPTI bus, both directions, one owner at a time (dpti_bus_arbiter).
+    //
+    // dpti_byte_rx and dpti_byte_tx used to sit here side by side, each
+    // driving its own strobes: a bus fight as soon as a result left while a
+    // slab was still coming in. The arbiter keeps the FT2232H's rules (read
+    // or write, never both; OE# a cycle ahead of RD#; an idle cycle at every
+    // turnaround) and alternates the directions in chunks, results first.
+    // The byte handshakes toward dpti_command_frontend and from
+    // dpti_beat_to_byte are the two old modules', unchanged.  (The
+    // registered PHY above owns both directions by itself.)
+    // ----------------------------------------------------------------------
+    dpti_bus_arbiter #(
+      .CHUNK_BYTES (64)
+    ) u_dpti_bus (
+      .clk           (clk_dpti),
+      .rst           (dpti_rst),
+
+      .dpti_d_in     (dpti_d),
+      .dpti_rxf_n    (dpti_rxf_n),
+      .dpti_txe_n    (dpti_txe_n),
+      .dpti_rd_n     (dpti_rd_n),
+      .dpti_oe_n     (dpti_oe_n),
+      .dpti_wr_n     (dpti_tx_wr_n),
+      .dpti_d_out    (dpti_tx_data),
+      .dpti_d_oe     (dpti_tx_oe),
+
+      .rx_byte_data  (dpti_byte_data),
+      .rx_byte_valid (dpti_byte_valid),
+      .rx_byte_ready (dpti_byte_ready),
+
+      .tx_byte_data  (rb_tx_byte_data),
+      .tx_byte_valid (rb_tx_byte_valid),
+      .tx_byte_ready (rb_tx_byte_ready),
+
+      .state_o       (dpti_bus_state),
+      .turnarounds   (dpti_bus_turnarounds)
+    );
+
+  end
+  endgenerate
 
   dpti_command_frontend #(
     .ADDR_W        (8),
@@ -1050,7 +1248,7 @@ module systolic_dma_top #(
     .MEM_DATA_W    (AXI_DATA_W),
     .PAYLOAD_BYTES (HOST_SLAB_BYTES)
   ) u_dpti_command_frontend (
-    .clk                (dpti_clkout),
+    .clk                (clk_dpti),
     .rst                (dpti_rst),
 
     .byte_data          (dpti_byte_data),
@@ -1084,7 +1282,7 @@ module systolic_dma_top #(
     .BURST_LEN   (16),
     .TOTAL_BEATS (HOST_SLAB_BEATS)
   ) u_dpti_mem_write_cdc_engine (
-    .src_clk       (dpti_clkout),
+    .src_clk       (clk_dpti),
     .src_rst       (dpti_rst),
 
     .src_start     (dpti_mem_start),
@@ -1095,6 +1293,7 @@ module systolic_dma_top #(
 
     .ui_clk        (ui_clk),
     .ui_rst_n      (ui_rst_n),
+    .ui_cdc_rst    (dpti_ui_link_rst),
 
     .busy          (hs_busy),
     .done          (hs_done),
@@ -1134,7 +1333,7 @@ module systolic_dma_top #(
     .ADDR_W(8),
     .DEPTH (4)
   ) u_dpti_cmd_async_fifo (
-    .wr_clk   (dpti_clkout),
+    .wr_clk   (clk_dpti),
     .wr_rst   (dpti_rst),
 
     .wr_valid (dpti_host_cmd_valid),
@@ -1144,7 +1343,7 @@ module systolic_dma_top #(
     .wr_data  (dpti_host_cmd_data),
 
     .rd_clk   (ui_clk),
-    .rd_rst   (!ui_rst_n),
+    .rd_rst   (!ui_rst_n || dpti_ui_link_rst),
 
     .rd_valid (dpti_fifo_rd_valid),
     .rd_ready (dpti_fifo_rd_ready),
@@ -1617,6 +1816,7 @@ module systolic_dma_top #(
       systolic_accel_context #(
         .N_ARRAY (N), .N_WIRE (N), .K_MAX (K_MAX_8X8), .K_DIM (K_DIM),
         .DEVICE_ID (i),
+        .PE_QUIET_GAP (PE_QUIET_GAP), .FEED_GAP_MARGIN (FEED_GAP_MARGIN),
         .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
         .LEGACY_RUN (i == 0),
         .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
@@ -1632,6 +1832,7 @@ module systolic_dma_top #(
         .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
         .in_c_base (effective_job_c_base),
         .job_busy (ctx_job_busy[i]), .job_active (ctx_job_active[i]),
+        .job_accept_ready (ctx_job_accept_ready[i]),
         .job_done (ctx_job_done[i]),
         .job_id_reg (ctx_job_id[i]), .job_device_id_reg (ctx_job_device_id[i]),
         .job_k_reg (ctx_job_k[i]),
@@ -1695,6 +1896,7 @@ module systolic_dma_top #(
         .N_ARRAY (4), .N_WIRE (N), .K_MAX (K_MAX_4X4),
         .K_DIM ((K_DIM < K_MAX_4X4) ? K_DIM : K_MAX_4X4),
         .DEVICE_ID (CTX),
+        .PE_QUIET_GAP (PE_QUIET_GAP), .FEED_GAP_MARGIN (FEED_GAP_MARGIN),
         .USE_V2 (USE_V2), .USE_EXTERNAL_SCHEDULER (USE_EXTERNAL_SCHEDULER),
         .LEGACY_RUN (1'b0),
         .BASE_ADDR (BASE_ADDR), .WB_GAP_BYTES (WB_GAP_BYTES),
@@ -1710,6 +1912,7 @@ module systolic_dma_top #(
         .in_a_base (effective_job_a_base), .in_b_base (effective_job_b_base),
         .in_c_base (effective_job_c_base),
         .job_busy (ctx_job_busy[CTX]), .job_active (ctx_job_active[CTX]),
+        .job_accept_ready (ctx_job_accept_ready[CTX]),
         .job_done (ctx_job_done[CTX]),
         .job_id_reg (ctx_job_id[CTX]), .job_device_id_reg (ctx_job_device_id[CTX]),
         .job_k_reg (ctx_job_k[CTX]),
@@ -1901,44 +2104,27 @@ module systolic_dma_top #(
   wire                  eng_done_valid;
   wire [7:0]            eng_done_tag;
 
-  // ---- result readback, one request per context, one slot ---------------------
-  // Armed when a context's job completes (its last tile's write response);
-  // the result is in DDR before the read descriptor can be accepted.  The
-  // lowest-numbered pending context is granted the readback slot when it is
-  // free.
-  logic [NUM_ACCEL-1:0]  rb_pending;
-  logic                  rb_active;
-  logic [ACC_ID_W-1:0]   rb_owner;
-  logic [AXI_ADDR_W-1:0] rb_addr [0:NUM_ACCEL-1];
-
-  generate
-    for (genvar i = 0; i < NUM_ACCEL; i++) begin : RB_BUSY
-      assign result_readback_busy[i] =
-          rb_pending[i] || (rb_active && (rb_owner == ACC_ID_W'(i)));
-    end
-  endgenerate
-
-  function automatic logic [15:0] rb_beats_of(input logic [ACC_ID_W-1:0] ctx);
-    rb_beats_of = (integer'(ctx) < NUM_8X8) ? 16'd16 : 16'd4;   // 8x8: 64 words; 4x4: 16 words
-  endfunction
-
-  logic                rb_any;
-  logic [ACC_ID_W-1:0] rb_grant;
-
-  always_comb begin
-    rb_any   = 1'b0;
-    rb_grant = '0;
-    for (int k = NUM_ACCEL-1; k >= 0; k--) begin
-      if (rb_pending[k]) begin
-        rb_any   = 1'b1;
-        rb_grant = ACC_ID_W'(k);
-      end
-    end
-  end
-
-  // ---- the completion record ---------------------------------------------
-  // Every result the host reads back starts with one 16-byte record, one
-  // AXI beat pushed into the output FIFO ahead of the tile's DMA beats:
+  // ---- result readback: a queue per context, one slot, a completion record ----
+  // ---- ahead of every result -------------------------------------------------
+  // A context's job completes (its write response returns) possibly before
+  // the previous job's result has been read back -- the 8x8's readback takes
+  // ~213 cycles through the DPTI output path while a pipelined invocation
+  // can complete every ~270 -- so each context keeps a FIFO of the result
+  // tiles waiting to be read back ({job_id, c_base}, in completion = job
+  // order), RB_DEPTH deep: at least as deep as the context's job queue, so
+  // every accepted job has a place -- twice as deep, so that a host draining
+  // the DPTI output path at its byte rate (an 8x8 tile takes ~850 array
+  // cycles of it in simulation) does not throttle the context's intake
+  // before the queue does.  A context with RB_DEPTH jobs accepted and not yet
+  // read back takes no new job (result_readback_busy).  Round robin from the
+  // context after the last one served grants the slot when it is free, one
+  // tile at a time (fixed priority would let a context fed a long 8x8 chain
+  // hold the slot for good); the result is in DDR before the read descriptor
+  // can be accepted.
+  //
+  // Every result the host reads back starts with one 16-byte completion
+  // record, one AXI beat pushed into the output FIFO ahead of the tile's DMA
+  // beats:
   //
   //   bytes  0..3   magic 0x5953_4A43 ("CJSY" on the wire)   bits  31:0
   //   bytes  4..7   job_id of the completed descriptor         bits  63:32
@@ -1949,23 +2135,88 @@ module systolic_dma_top #(
   //
   // Without it the host saw bare tiles and could attribute them only by
   // order, which with four contexts completing on their own clocks is no
-  // order at all. The readback descriptor goes to the read engine only once
+  // order at all.  The readback descriptor goes to the read engine only once
   // the record is in the FIFO, so the bytes cannot overtake each other.
-  // job_id is read from the context while it still holds the job: a context
-  // takes no new descriptor until its readback is over.
+  // The job_id is the FIFO entry's: captured at the job's own job_done
+  // pulse, the one cycle in which the context's job_id_reg names the job
+  // being completed (the context takes its next queued job at once, so
+  // job_id_reg read any later may name another job).  A refused descriptor
+  // (acceptance section: k outside 1..K_MAX, or no such device) is reported
+  // the same way, as a record with status 1 or 2 and no payload, ahead of
+  // any tile.
+  localparam integer RB_DEPTH  = 8;
+  localparam integer RB_IDX_W  = 3;
+  logic [AXI_ADDR_W-1:0] rb_q      [0:NUM_ACCEL-1][0:RB_DEPTH-1];   // c_base of the result
+  logic [31:0]           rb_q_id   [0:NUM_ACCEL-1][0:RB_DEPTH-1];   // job_id of the result
+  logic [RB_IDX_W-1:0]   rb_q_wr   [0:NUM_ACCEL-1];
+  logic [RB_IDX_W-1:0]   rb_q_rd   [0:NUM_ACCEL-1];
+  logic [RB_IDX_W:0]     rb_q_cnt  [0:NUM_ACCEL-1];
+  logic [NUM_ACCEL-1:0]  rb_pending;
+  logic                  rb_active;
+  logic [ACC_ID_W-1:0]   rb_owner;
+  logic [AXI_ADDR_W-1:0] rb_addr [0:NUM_ACCEL-1];   // head of each queue
+  logic [31:0]           rb_id   [0:NUM_ACCEL-1];   // head of each queue
+
+  // Jobs of a context accepted and not yet read back: every one of them will
+  // need a FIFO entry, so acceptance stops at RB_DEPTH of them -- then no
+  // completion can ever find the FIFO full, however slowly the host drains
+  // the DPTI output path.
+  logic [RB_IDX_W:0] rb_inflight [0:NUM_ACCEL-1];
+  generate
+    for (genvar i = 0; i < NUM_ACCEL; i++) begin : RB_BUSY
+      assign rb_pending[i]           = (rb_q_cnt[i] != 0);
+      assign rb_addr[i]              = rb_q[i][rb_q_rd[i]];
+      assign rb_id[i]                = rb_q_id[i][rb_q_rd[i]];
+      assign result_readback_busy[i] = (rb_inflight[i] == (RB_IDX_W+1)'(RB_DEPTH));
+    end
+  endgenerate
+
+  function automatic logic [15:0] rb_beats_of(input logic [ACC_ID_W-1:0] ctx);
+    rb_beats_of = (integer'(ctx) < NUM_8X8) ? 16'd16 : 16'd4;   // 8x8: 64 words; 4x4: 16 words
+  endfunction
+
+  logic                rb_any;
+  logic [ACC_ID_W-1:0] rb_grant;
+  // Round robin from the context after the last one served: with jobs
+  // pipelined, a context that completes a tile every readback period
+  // (the 8x8 fed a long chain) would otherwise hold a fixed-priority slot
+  // for good and the other contexts' finished tiles would never reach the
+  // host.
+  logic [ACC_ID_W-1:0] rb_last;
+
+  always_comb begin
+    rb_any   = 1'b0;
+    rb_grant = '0;
+    for (int n = NUM_ACCEL; n >= 1; n--) begin
+      automatic int k = (int'(rb_last) + n) % NUM_ACCEL;
+      if (rb_pending[k]) begin
+        rb_any   = 1'b1;
+        rb_grant = ACC_ID_W'(k);
+      end
+    end
+  end
+
+  // ---- the completion record -----------------------------------------------
   localparam logic [31:0] COMPLETION_MAGIC = 32'h5953_4A43;
   typedef enum logic [1:0] { RB_IDLE, RB_HDR, RB_DATA } rb_state_t;
-  rb_state_t    rb_state;
-  logic         rb_kind_data;                // RB_HDR: a tile follows (else a refusal)
-  logic [127:0] rb_hdr_beat;
-  logic [31:0]  rb_seq;
-  logic         rb_desc_sent;
+  rb_state_t             rb_state;
+  logic                  rb_kind_data;                // RB_HDR: a tile follows (else a refusal)
+  logic [127:0]          rb_hdr_beat;
+  logic [31:0]           rb_seq;
+  logic                  rb_desc_sent;
+  logic [AXI_ADDR_W-1:0] rb_owner_addr;               // the granted entry's c_base
 
   wire rb_hdr_fire = (rb_state == RB_HDR) && rb_cdc_src_ready;
   assign ref_sent  = rb_hdr_fire && !rb_kind_data;
 
+  // The grant, in RB_IDLE: a refusal record first (it holds the descriptor
+  // path), else the round-robin context with a result in DDR.  The FIFO entry
+  // is popped at the grant, its job_id into the record and its c_base into
+  // the read descriptor that follows the record.
+  wire rb_take = (rb_state == RB_IDLE) && !ref_pending && rb_any;
+
   assign rd_desc_valid[RD_SLOT_RB]      = (rb_state == RB_DATA) && !rb_desc_sent;
-  assign rd_desc_addr[RD_SLOT_RB]       = rb_addr[rb_owner];
+  assign rd_desc_addr[RD_SLOT_RB]       = rb_owner_addr;
   assign rd_desc_beats[RD_SLOT_RB]      = rb_beats_of(rb_owner);
   assign rd_desc_tag[RD_SLOT_RB]        = DMA_TAG_READBACK;
   assign rd_dst_almost_full[RD_SLOT_RB] = !rb_cdc_src_ready;
@@ -2000,27 +2251,50 @@ module systolic_dma_top #(
 
   always_ff @(posedge ui_clk or negedge ui_rst_n) begin
     if (!ui_rst_n) begin
-      rb_pending   <= '0;
-      rb_active    <= 1'b0;
-      rb_owner     <= '0;
-      rb_state     <= RB_IDLE;
-      rb_kind_data <= 1'b0;
-      rb_hdr_beat  <= '0;
-      rb_seq       <= 32'd0;
-      rb_desc_sent <= 1'b0;
-      for (int k = 0; k < NUM_ACCEL; k++) rb_addr[k] <= '0;
+      rb_active     <= 1'b0;
+      rb_owner      <= '0;
+      rb_last       <= ACC_ID_W'(NUM_ACCEL - 1);   // so context 0 is first after reset
+      rb_state      <= RB_IDLE;
+      rb_kind_data  <= 1'b0;
+      rb_hdr_beat   <= '0;
+      rb_seq        <= 32'd0;
+      rb_desc_sent  <= 1'b0;
+      rb_owner_addr <= '0;
+      for (int k = 0; k < NUM_ACCEL; k++) begin
+        rb_q_wr[k]     <= '0;
+        rb_q_rd[k]     <= '0;
+        rb_q_cnt[k]    <= '0;
+        rb_inflight[k] <= '0;
+        for (int d = 0; d < RB_DEPTH; d++) begin
+          rb_q[k][d]    <= '0;
+          rb_q_id[k][d] <= 32'd0;
+        end
+      end
     end
     else begin
       for (int k = 0; k < NUM_ACCEL; k++) begin
-        if (USE_EXTERNAL_SCHEDULER && ctx_job_done[k] && !rb_pending[k]) begin
-          rb_pending[k] <= 1'b1;
-          rb_addr[k]    <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
+        // A job completes (push) and a readback of the same context is
+        // granted (pop) possibly in one cycle; a job is accepted (in) and a
+        // readback of the same context completes (out) possibly in one cycle.
+        logic push, pop, in_, out_;
+        push = USE_EXTERNAL_SCHEDULER && ctx_job_done[k];
+        pop  = rb_take && (rb_grant == ACC_ID_W'(k));
+        in_  = USE_EXTERNAL_SCHEDULER && ctx_job_fire[k];
+        out_ = rb_done && rb_active && (rb_owner == ACC_ID_W'(k));
+        if (push) begin
+          rb_q[k][rb_q_wr[k]]    <= ctx_job_c_base[k][AXI_ADDR_W-1:0];
+          rb_q_id[k][rb_q_wr[k]] <= ctx_job_id[k];
+          rb_q_wr[k]             <= rb_q_wr[k] + 1'b1;
         end
+        if (pop)
+          rb_q_rd[k] <= rb_q_rd[k] + 1'b1;
+        if (push && !pop)      rb_q_cnt[k] <= rb_q_cnt[k] + 1'b1;
+        else if (!push && pop) rb_q_cnt[k] <= rb_q_cnt[k] - 1'b1;
+        if (in_ && !out_)      rb_inflight[k] <= rb_inflight[k] + 1'b1;
+        else if (!in_ && out_) rb_inflight[k] <= rb_inflight[k] - 1'b1;
       end
 
       case (rb_state)
-        // A refusal record first (it holds the descriptor path), then the
-        // lowest-numbered context with a result in DDR.
         RB_IDLE: begin
           if (ref_pending) begin
             rb_kind_data <= 1'b0;
@@ -2029,17 +2303,18 @@ module systolic_dma_top #(
             rb_state     <= RB_HDR;
           end
           else if (rb_any) begin
-            rb_kind_data <= 1'b1;
-            rb_hdr_beat  <= {rb_seq,
-                             16'(rb_beats_of(rb_grant)) * 16'd16,
-                             8'd0, 8'(rb_grant),
-                             ctx_job_id[rb_grant], COMPLETION_MAGIC};
-            rb_seq       <= rb_seq + 32'd1;
-            rb_pending[rb_grant] <= 1'b0;
-            rb_active    <= 1'b1;
-            rb_owner     <= rb_grant;
-            rb_desc_sent <= 1'b0;
-            rb_state     <= RB_HDR;
+            rb_kind_data  <= 1'b1;
+            rb_hdr_beat   <= {rb_seq,
+                              16'(rb_beats_of(rb_grant)) * 16'd16,
+                              8'd0, 8'(rb_grant),
+                              rb_id[rb_grant], COMPLETION_MAGIC};
+            rb_seq        <= rb_seq + 32'd1;
+            rb_active     <= 1'b1;
+            rb_owner      <= rb_grant;
+            rb_last       <= rb_grant;
+            rb_owner_addr <= rb_addr[rb_grant];
+            rb_desc_sent  <= 1'b0;
+            rb_state      <= RB_HDR;
           end
         end
         // The record enters the output FIFO; only then may the tile's
@@ -2063,6 +2338,14 @@ module systolic_dma_top #(
   assign rb_hdr_valid = (rb_state == RB_HDR);
   assign rb_hdr_data  = rb_hdr_beat;
 
+`ifndef SYNTHESIS
+  always_ff @(posedge ui_clk) begin
+    for (int k = 0; k < NUM_ACCEL; k++)
+      if (ui_rst_n && USE_EXTERNAL_SCHEDULER && ctx_job_done[k] &&
+          rb_q_cnt[k] == (RB_IDX_W+1)'(RB_DEPTH) && !(rb_take && rb_grant == ACC_ID_W'(k)))
+        $fatal(1, "context %0d completed a job with its readback queue full", k);
+  end
+`endif
   dma_engine_multi #(
     .AXI_DATA_W (AXI_DATA_W), .AXI_ADDR_W (AXI_ADDR_W), .AXI_ID_W (2),
     .BEAT_W (16), .BURST_LEN (16),
@@ -2095,7 +2378,7 @@ module systolic_dma_top #(
       if (ui_rst_n && rd_desc_valid[k] && rd_desc_ready[k])
         $display("DMATRACE t=%0t grant=%s ctx=%0d addr=0x%08h beats=%0d tag=%02h",
                  $time, (k == RD_SLOT_RB) ? "readback" : "operand",
-                 (k == RD_SLOT_RB) ? integer'(rb_grant) : k,
+                 (k == RD_SLOT_RB) ? integer'(rb_owner) : k,
                  rd_desc_addr[k], rd_desc_beats[k], rd_desc_tag[k]);
     end
     if (ui_rst_n && rb_dst_wr_en)
@@ -2295,10 +2578,11 @@ module systolic_dma_top #(
   // ---- concurrency evidence (Oct 2026) ---------------------------------------
   // What the host cannot see from its clock: how often two or four arrays
   // were in their fold at the same time, and how long each context sat idle
-  // between finishing a job and being handed the next one (the gap the
-  // host's submission latency leaves; the number that decides whether a
-  // second outstanding job per accelerator is worth building). Counted from
-  // reset, read over JTAG.
+  // with no job queued after its first one (the gap the host's submission
+  // latency leaves once the context's job queue has run dry; with jobs
+  // pipelined the next job is accepted while the previous one still runs,
+  // so a done -> fire window would not measure it). Counted from reset, read
+  // over JTAG.
   logic [31:0] overlap2_cycles, overlap4_cycles;
   logic [31:0] idle_gap_cycles [0:NUM_ACCEL-1];
   logic        gap_open        [0:NUM_ACCEL-1];
@@ -2320,9 +2604,9 @@ module systolic_dma_top #(
       if (folds_now >= 4'd2) overlap2_cycles <= overlap2_cycles + 32'd1;
       if (folds_now >= 4'd4) overlap4_cycles <= overlap4_cycles + 32'd1;
       for (int k = 0; k < NUM_ACCEL; k++) begin
-        if (ctx_job_done[k])      gap_open[k] <= 1'b1;
-        else if (ctx_job_fire[k]) gap_open[k] <= 1'b0;
-        if (gap_open[k] && !ctx_job_fire[k]) idle_gap_cycles[k] <= idle_gap_cycles[k] + 32'd1;
+        if (ctx_job_fire[k]) gap_open[k] <= 1'b1;      // the context has had a job
+        if (gap_open[k] && !ctx_job_busy[k] && !ctx_job_fire[k])
+          idle_gap_cycles[k] <= idle_gap_cycles[k] + 32'd1;
       end
     end
   end
@@ -2330,7 +2614,8 @@ module systolic_dma_top #(
   wire any_err  = seed_err_align | seed_err_resp
                 | eng_err_align  | eng_err_resp | wr_err_range
                 | wb_err_align   | wb_err_resp  | err_w_owner
-                | err_job_k;
+                | err_job_k
+                | dpti_link_fatal;   // a MEM_WRITE cut off by a lost DPTI link
 
   // ---- MIG ----------------------------------------------------------------
   mig_7series_0 u_mig_7series_0 (
@@ -2366,6 +2651,20 @@ module systolic_dma_top #(
 
     .sys_clk_i (clk_sys_100), .clk_ref_i (clk_ref_200), .sys_rst (sys_rst_n)
   );
+
+  // DPTI status for probe_in18, one register so the probe keeps one net name
+  // (dma_top_build.tcl 'read' looks it up by that name):
+  //   [4:0]   dpti_phy_debug (clk_dpti, sticky)   [7:5]  0
+  //   [8]     MMCM LOCKED (ui_clk)                [9]    link up
+  //   [10]    link fatal (sticky)                 [13:11] dpti_link_ctrl state
+  //   [15:14] 0                                   [23:16] MMCM resets issued
+  //   [31:24] link drops
+  reg [31:0] dpti_status_word;
+
+  always @(posedge ui_clk)
+    dpti_status_word <= { dpti_link_drop_count, dpti_mmcm_resets_ui, 2'd0,
+                          dpti_link_state, dpti_link_fatal, dpti_link_up,
+                          dpti_locked_ui, 3'd0, dpti_phy_debug_sync[4:0] };
 
   // ---- JTAG readout -------------------------------------------------------
   // (Oct 2026: 25 probes in -- the five below are the asynchronous host's
@@ -2407,7 +2706,7 @@ module systolic_dma_top #(
     .probe_in15 (cyc_total),
     .probe_in16 ({16'd0, folds_done, 4'd0, n_inv}),
     .probe_in17 (external_debug_sticky),
-    .probe_in18 (dpti_phy_debug_sync),
+    .probe_in18 (dpti_status_word),
     .probe_in19 (dpti_clk_activity_sync),
     // the asynchronous host's evidence (Oct 2026): overlap, idle gaps,
     // completions issued

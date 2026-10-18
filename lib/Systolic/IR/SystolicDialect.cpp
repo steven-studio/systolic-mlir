@@ -138,6 +138,37 @@ LogicalResult StreamOp::verify() {
       return emitOpError("operand_lanes must cover the array's ")
              << widest << " lanes, got " << lanes.getInt();
   }
+
+  // The pipelined per-accelerator timeline (CostModel.h). The three
+  // attributes describe one piece of hardware -- how deep the context's job
+  // queue is, which part of tile_overhead is the serial reduction, and the
+  // idle gap the PE needs between two invocations' operands -- so a device
+  // declares all of them or none: a depth without a reduce term would overlap
+  // the whole of H, which the PE cannot do, and a reduce term without a depth
+  // would describe a pipeline the context does not have.
+  ::mlir::IntegerAttr depth = getPipelineDepthAttr();
+  ::mlir::IntegerAttr reduce = getReduceCyclesAttr();
+  ::mlir::IntegerAttr gap = getFeedGapAttr();
+  if (depth || reduce || gap) {
+    if (!depth || !reduce || !gap)
+      return emitOpError("pipeline_depth, reduce_cycles and feed_gap "
+                         "describe one pipelined accelerator and must be "
+                         "declared together");
+    if (depth.getInt() < 1)
+      return emitOpError("pipeline_depth must be a positive integer, got ")
+             << depth.getInt();
+    if (reduce.getInt() < 0)
+      return emitOpError("reduce_cycles must be non-negative, got ")
+             << reduce.getInt();
+    if (gap.getInt() < 0)
+      return emitOpError("feed_gap must be non-negative, got ") << gap.getInt();
+    const int64_t overhead =
+        getTileOverheadAttr() ? getTileOverheadAttr().getInt() : 0;
+    if (reduce.getInt() > overhead)
+      return emitOpError("reduce_cycles is the serial part of tile_overhead "
+                         "and cannot exceed it: ")
+             << reduce.getInt() << " > " << overhead;
+  }
   return ::mlir::success();
 }
 

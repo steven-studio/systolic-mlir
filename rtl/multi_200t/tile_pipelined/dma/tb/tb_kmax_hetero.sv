@@ -365,10 +365,13 @@ module tb_kmax_hetero #(
     end
   endtask
 
-  // A descriptor that must never be taken.
+  // A descriptor that must never run: the refusal path takes it off the job
+  // interface (job_ready, so the producer does not hang -- it is reported
+  // to the host as a completion record with status 1, docs/ASYNC.md 2.4)
+  // but no context ever fires it, and err_job_k is latched.
   task automatic expect_refused(input integer dev, input integer k);
     integer waited;
-    bit     taken, seen;
+    bit     fired, consumed, seen;
     begin
       @(posedge clk);
       job_id <= 32'hBAD0 + dev; job_device_id <= 32'(dev); job_k <= 32'(k);
@@ -376,11 +379,20 @@ module tb_kmax_hetero #(
       job_a_base <= 64'(SLAB_BASE); job_b_base <= 64'(SLAB_BASE);
       job_c_base <= 64'(C_BASE + 15 * 256);
       job_valid <= 1'b1;
-      taken = 1'b0;
-      seen  = 1'b0;
+      fired    = 1'b0;
+      consumed = 1'b0;
+      seen     = 1'b0;
       for (waited = 0; waited < 3000; waited++) begin
         @(posedge clk);
-        if (job_ready || dut.job_fire) taken = 1'b1;
+        if (dut.job_fire) fired = 1'b1;
+        // The handshake, as submit() does it: the descriptor is taken (by
+        // the refusal path) at the edge after job_ready is seen, and the
+        // producer withdraws it then.
+        if (job_valid && job_ready) begin
+          consumed = 1'b1;
+          @(posedge clk);
+          job_valid <= 1'b0;
+        end
         // This descriptor, judged by the acceptance logic: k outside 1..K_MAX.
         if (dut.effective_job_valid && dut.target_valid && !dut.job_k_ok &&
             dut.effective_job_device_id == 32'(dev) && dut.effective_job_k == 32'(k))
@@ -388,12 +400,12 @@ module tb_kmax_hetero #(
       end
       job_valid <= 1'b0;
       @(posedge clk);
-      if (taken || !seen || dut.err_job_k !== 1'b1 || dut.any_err !== 1'b1) begin
-        $display("  FAIL: device %0d k = %0d: taken %0b, judged out of range %0b, err_job_k %0b, any_err %0b (want 0, 1, 1, 1)",
-                 dev, k, taken, seen, dut.err_job_k, dut.any_err);
+      if (fired || !consumed || !seen || dut.err_job_k !== 1'b1 || dut.any_err !== 1'b1) begin
+        $display("  FAIL: device %0d k = %0d: fired %0b, taken by the refusal path %0b, judged out of range %0b, err_job_k %0b, any_err %0b (want 0, 1, 1, 1, 1)",
+                 dev, k, fired, consumed, seen, dut.err_job_k, dut.any_err);
         errors++;
       end else
-        $display("  device %0d k = %0d: refused (job_k_ok = 0, never accepted), err_job_k latched", dev, k);
+        $display("  device %0d k = %0d: refused (job_k_ok = 0, taken by the refusal path, never fired), err_job_k latched", dev, k);
     end
   endtask
 

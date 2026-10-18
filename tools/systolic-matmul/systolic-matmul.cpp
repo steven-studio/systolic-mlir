@@ -98,10 +98,20 @@ namespace {
 // (docs/COSTMODEL.md). The same two K_MAX go to the FPGA lowering as the
 // physical capacities, so the IR-declared k_max and the hardware's agree by
 // construction.
+// PIPELINE_DEPTH of the same record says whether the loaded bitstream's
+// contexts pipeline consecutive invocations (the job queue of the 2026-10-18
+// RTL) or serialize them (the archived bitstream; the record has no such
+// line): the fleet is declared accordingly, so the schedule's makespan
+// describes the hardware that is loaded. The runtime itself still submits
+// one invocation at a time, so on the board the predicted overlap between
+// invocations is not realized until it does (docs/COSTMODEL.md).
 std::string buildFleet(const fpga_runtime_config_t &hw) {
   std::ostringstream os;
+  const bool pipelined = hw.pipeline_depth > 1;
   auto device = [&](const char *sym, int edge, unsigned kMax) {
-    os << "  " << ::systolic::fpga::deviceDeclaration(sym, edge, kMax) << "\n";
+    os << "  "
+       << ::systolic::fpga::deviceDeclaration(sym, edge, kMax, pipelined)
+       << "\n";
   };
   device("acc_8x8_0", 8, hw.k_max_8x8);
   device("acc_4x4_0", 4, hw.k_max_4x4);

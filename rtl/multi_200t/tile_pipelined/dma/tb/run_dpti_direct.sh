@@ -80,15 +80,28 @@ SRCS=(
     "$ROOT/scheduler/systolic_hw_scheduler.sv"
     "$ROOT/scheduler/systolic_hw_scheduler_adapter.sv"
 )
-# Modules that exist only from phase 2 of docs/ASYNC.md on.
-for f in "$DMA/dpti_bus_arbiter.sv"; do
+# Modules that exist only from phase 2 of docs/ASYNC.md on (the bus arbiter
+# of the legacy pads path), and the registered FT2232H PHY with its clock
+# and link controller (systolic_dma_top DPTI_PHY_SYNC245, the default from
+# 29f3209 on): the generate branch references them whichever PHY is chosen.
+for f in "$DMA/dpti_bus_arbiter.sv" "$DMA/dpti_sync245_phy.sv" "$DMA/dpti_sync245_fifo.sv" \
+         "$DMA/dpti_clk_gen.sv" "$DMA/dpti_link_ctrl.sv"; do
     [ -f "$f" ] && SRCS+=("$f")
 done
+# PHY=sync245 (default: the registered PHY, as the board builds) or
+# PHY=legacy (the pads path with dpti_bus_arbiter.sv).
+PHY="${PHY:-sync245}"
+case "$PHY" in
+    sync245) PHY_G=1 ;;
+    legacy)  PHY_G=0 ;;
+    *) echo "PHY must be sync245 or legacy, got '$PHY'" >&2; exit 2 ;;
+esac
+OUT="${OUT}_${PHY}"
 
 build() {
     mkdir -p "$OUT"
     verilator --binary -Wno-fatal --timing -j "$JOBS" -O2 --public-flat-rw \
-        -GUSE_V2=0 -GK_MAX_8X8="$K_MAX_8X8" -GK_MAX_4X4="$K_MAX_4X4" \
+        -GUSE_V2=0 -GK_MAX_8X8="$K_MAX_8X8" -GK_MAX_4X4="$K_MAX_4X4" -GDPTI_PHY_SYNC245="$PHY_G" \
         -I"$COSIM" -I"$HERE" \
         --top-module tb_dpti_direct -o tbdirect --Mdir "$OUT/obj" \
         "$HERE/tb_dpti_direct.sv" "$HERE/xil_stubs.sv" "$HERE/mig_axi_model.sv" \

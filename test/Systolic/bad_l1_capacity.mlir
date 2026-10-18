@@ -7,7 +7,7 @@
 // declares 1024.
 module {
   systolic.device @tiny rows = 8 cols = 8 dataflow = output_stationary
-      {k_max = 256 : i64, tile_overhead = 95 : i64, l1_bytes = 1024 : i64}
+      k_max = 256 l1_bytes = 1024 tile_overhead = 95
 
   func.func @too_big(%a: tensor<64x64xf32>, %b: tensor<64x64xf32>,
                      %c: tensor<64x64xf32>) -> tensor<64x64xf32> {

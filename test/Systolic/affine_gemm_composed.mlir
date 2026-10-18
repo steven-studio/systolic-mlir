@@ -1,3 +1,18 @@
+// RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s
+//
+// CHECK: unique logical matmul count: 1
+// CHECK: recognition result: success
+// CHECK: T[0] = [1 1 0]
+// CHECK: T[1] = [0 1 0]
+// CHECK: T[2] = [0 0 1]
+// CHECK: c = [0 0 0]
+// CHECK: row extent: unknown
+// CHECK: column extent: static 4
+// CHECK: reduction extent: static 4
+// CHECK: dense logical GEMM: no (two logical coordinates are driven by the same loop (loop 1 drives I and J))
+// CHECK: partition count: 1
+
 func.func @affine_gemm_composed(
     %A: memref<8x4xf32>,
     %B: memref<4x4xf32>,

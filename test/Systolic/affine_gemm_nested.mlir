@@ -1,3 +1,23 @@
+// RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
+// RUN:   | FileCheck %s
+//
+// Two candidates share the MAC: the nest anchored at %l is rejected (no
+// access uses %l, so it repeats the GEMM rather than being one of its
+// dimensions), the one anchored at %k is the GEMM.
+//
+// CHECK: recognition result: failure
+// CHECK: unique logical matmul count: 1
+// CHECK: recognition result: success
+// CHECK: T[0] = [0 1 0]
+// CHECK: T[1] = [0 0 1]
+// CHECK: T[2] = [1 0 0]
+// CHECK: c = [0 0 0]
+// CHECK: row extent: static 16
+// CHECK: column extent: static 16
+// CHECK: reduction extent: static 16
+// CHECK: dense logical GEMM: yes, I/J/K on loops 1/2/0
+// CHECK: partition count: 1
+
 func.func @affine_gemm_nested(
     %A: memref<16x16xf32>,
     %B: memref<16x16xf32>,

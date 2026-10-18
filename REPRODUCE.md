@@ -199,6 +199,32 @@ Machine-checkable regression:
       /usr/lib/llvm-18/bin/FileCheck test/Systolic/schedule_overlap.mlir
 
 
+## 6b. Reproduce the pipelined per-accelerator timeline (RTL vs cost model)
+
+The 2026-10-18 RTL pipelines consecutive invocations of one accelerator
+(docs/COSTMODEL.md section 8). The evidence, bench and model side by side:
+
+    eval/pipeline_overlap/run.sh            # -> build/pipeline_overlap/summary.txt
+
+runs rtl/multi_200t/tile_pipelined/dma/tb/tb_pipeline_overlap.sv on the
+K-folded chains in eval/pipeline_overlap/jobs/ (one device at a time and
+mixed; v1 and v2 operand path; offered back to back and one at a time), checks
+every result tile exactly, and holds every job's fold / publish / write-back
+cycle against `systolic-cost timeline` (eval/pipeline_overlap/compare_timeline.py).
+One list by hand:
+
+    rtl/multi_200t/tile_pipelined/dma/tb/run_pipeline_sim.sh 16 16 \
+        eval/pipeline_overlap/jobs/dev0.svh /tmp/po v2
+    python3 eval/pipeline_overlap/compare_timeline.py \
+        --cost build/bin/systolic-cost --run /tmp/po/run.log --v2
+
+Machine-checkable regression of the model alone:
+
+    ./build/bin/systolic-cost timeline --geometry 8 --k-max 16 --k 16,16,16,16 \
+        --pipelined --read-bytes-per-cycle 16
+
+(test/Systolic/cost_model_pipelined.mlir, binary_search_pipelined.mlir).
+
 ## 7. Reproduce Linalg -> Systolic -> FPGA runtime calls
 
 The pipeline that runs on the FPGA starts from `linalg.matmul` and a

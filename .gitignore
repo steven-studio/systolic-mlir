@@ -167,3 +167,8 @@ hls/gemm_4x4/tba
 /sweep_out/
 sweep*.out
 hls/multi_200t/sweep_results.csvooc_reports/
+
+/scratchpad/datasheets/
+
+# Verilator generated simulation build directories
+/rtl/multi_200t/tile_pipelined/dma/tb/sim_out_top_*/

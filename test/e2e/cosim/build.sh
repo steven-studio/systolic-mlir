@@ -4,9 +4,8 @@
 #
 #   test/e2e/cosim/build.sh            -> build/cosim/{Vcosim,libftdi_cosim.so}
 #
-# The RTL is the working tree's by default on this branch
-# (experiment/batch-gemm-parallelism changes the DPTI path, so the
-# co-simulation has to follow the tree); a git revision can be named instead,
+# The RTL is the working tree's by default (the pipelined contexts and the
+# completion record exist only there); a git revision can be named instead,
 # so the simulated FPGA is a programmed bitstream's RTL even while rtl/ moves
 # on:
 #
@@ -25,8 +24,8 @@
 #            runtime stages every slab at 0x10000, so a slab of ceil(K / 8)
 #            * 512 bytes must fit in 64 KiB (the board's DDR has no such
 #            limit). Only an RTL with the split parameters (systolic_dma_top
-#            K_MAX_8X8 / K_MAX_4X4, e.g. RTL_DIR=.) takes other values; the
-#            default RTL_REV has one K_MAX and is built at 16.
+#            K_MAX_8X8 / K_MAX_4X4, e.g. the working tree) takes other values;
+#            the archived tag has one K_MAX, built at 16.
 #
 # Besides Vcosim and the libftdi shim, OUT gets fpga_config.txt: the
 # parameters this simulated bitstream was built with, in the form the
@@ -156,6 +155,13 @@ RTL_SRCS+=(
     "$T/scheduler/systolic_hw_scheduler.sv"
     "$T/scheduler/systolic_hw_scheduler_adapter.sv"
 )
+# The registered FT2232H PHY (systolic_dma_top DPTI_PHY_SYNC245) exists only
+# in RTL after 29f3209, and the MMCM clock / link reset (dpti_clk_gen,
+# dpti_link_ctrl) only after it; older revisions build without them.
+for f in "$D/dpti_sync245_phy.sv" "$D/dpti_sync245_fifo.sv" \
+         "$D/dpti_clk_gen.sv" "$D/dpti_link_ctrl.sv"; do
+    [ -f "$f" ] && RTL_SRCS+=("$f")
+done
 STANDINS=(
     "$D/tb/xil_stubs.sv"
     "$D/tb/mig_axi_model.sv"
@@ -195,10 +201,17 @@ HOST_SLAB=$(( (S8 > S4 ? S8 : S4) * 64 ))
     echo "VARIANT=$([ "$USE_V2" = 1 ] && echo v2 || echo v1)"
     echo "USE_V2=$USE_V2"
     echo "HOST_SLAB_BYTES=$HOST_SLAB"
-    # RTL with the DPTI bus arbiter also sends the 16-byte completion record
-    # ahead of every result (systolic_dma_top.sv, Oct 2026); the runtime reads
-    # it only when told so here.
-    echo "COMPLETION_HEADER=$([ -f "$D/dpti_bus_arbiter.sv" ] && echo 1 || echo 0)"
+    # RTL with the completion record sends 16 bytes ahead of every result
+    # (systolic_dma_top.sv COMPLETION_MAGIC, Oct 2026); the runtime reads
+    # them only when told so here.
+    echo "COMPLETION_HEADER=$(grep -q COMPLETION_MAGIC "$D/systolic_dma_top.sv" && echo 1 || echo 0)"
+    # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH):
+    # how many invocations one accelerator holds at a time.  An RTL without
+    # it takes one job per context and the line is left out (the compiler
+    # then models the serialized hardware, as for the archived bitstream).
+    if grep -q "parameter integer JOB_QUEUE_DEPTH" "$D/systolic_accel_context.sv" 2>/dev/null; then
+        echo "PIPELINE_DEPTH=$(sed -nE 's/^ *parameter integer JOB_QUEUE_DEPTH *= *([0-9]+).*/\1/p' "$D/systolic_accel_context.sv" | head -1)"
+    fi
     echo "RTL_SOURCE=$RTL_DESC"
     echo "BUILT=$(date -Iseconds)"
 } > "$OUT/fpga_config.txt"

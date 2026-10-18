@@ -64,7 +64,10 @@
 module tb_dpti_direct #(
   parameter bit     USE_V2    = 1'b0,
   parameter integer K_MAX_8X8 = 16,
-  parameter integer K_MAX_4X4 = 16
+  parameter integer K_MAX_4X4 = 16,
+  // The top's DPTI PHY: 1 the registered FT2232H PHY (the board's default),
+  // 0 the legacy pads path with dpti_bus_arbiter (run_dpti_direct.sh PHY=).
+  parameter bit     DPTI_PHY_SYNC245 = 1'b1
 );
 
   // ---- clocks, reset ---------------------------------------------------
@@ -100,6 +103,7 @@ module tb_dpti_direct #(
     .USE_EXTERNAL_SCHEDULER (1'b1),
     .USE_LEGACY_JOB_PORTS (1'b0),
     .USE_V2 (USE_V2),
+    .DPTI_PHY_SYNC245 (DPTI_PHY_SYNC245),
     .EXPECT_WR_CHK (32'h3F88_0780),
     .EXPECT_C_CHK (32'hC74B_2660)
   ) dut (

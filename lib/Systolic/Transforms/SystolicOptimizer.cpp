@@ -45,6 +45,25 @@ struct GeometryInfo {
   int64_t compute = 0;      // the compute term alone
   int64_t readBytes = 0;    // operand bytes one spatial tile reads
   llvm::SmallVector<int64_t> acceleratorIds;   // in fleet order
+
+  // The stream of tiles one accelerator of this geometry runs, in order, on
+  // the cost model's per-accelerator timeline (AcceleratorTimeline): tile n
+  // of the stream holds the accelerator over [tileStart[n], tileEnd[n]).
+  // Serialized (pipelineDepth = 1) that is [n * cost, (n + 1) * cost); on a
+  // pipelined accelerator consecutive tiles overlap and the stream is
+  // shorter. computeOnlyEnd[n]: the same stream with transfers free, where
+  // start_cycle is measured. Long enough for every tile the search could
+  // place on one accelerator.
+  std::vector<int64_t> tileStart;
+  std::vector<int64_t> tileEnd;
+  std::vector<int64_t> computeOnlyEnd;
+
+  /// Tiles one accelerator completes by `deadline`.
+  int64_t tilesBy(int64_t deadline) const {
+    return static_cast<int64_t>(
+        std::upper_bound(tileEnd.begin(), tileEnd.end(), deadline) -
+        tileEnd.begin());
+  }
 };
 
 /// Everything a feasibility test needs, computed once per search.
@@ -79,7 +98,9 @@ static bool sameCostParameters(const ::systolic::ArrayConfig &a,
          a.readOverhead == b.readOverhead &&
          a.writeOverhead == b.writeOverhead &&
          a.operandLanes == b.operandLanes && a.kWindow == b.kWindow &&
-         a.elementBytes == b.elementBytes;
+         a.elementBytes == b.elementBytes &&
+         a.pipelineDepth == b.pipelineDepth &&
+         a.reduceCycles == b.reduceCycles && a.feedGap == b.feedGap;
 }
 
 static LogicalResult
@@ -182,6 +203,43 @@ buildSearchProblem(int64_t rows, int64_t columns, int64_t reduction,
       !checkedCeilDiv(columns, blockSize, problem.originalColumnBlocks))
     return failure();
 
+  // ----------------------------------------------------------
+  // Every geometry's tile stream, as long as any accelerator could ever
+  // need: at most ceil(rowBlocks / side) * ceil(columnBlocks / side) tiles
+  // of a geometry fit the padded domain, so no accelerator runs more.
+  // ----------------------------------------------------------
+
+  for (GeometryInfo &g : problem.geometries) {
+    int64_t tilesPerRow = 0, tilesPerColumn = 0, maxTiles = 0;
+    if (!checkedCeilDiv(problem.rowBlocks, g.blocks, tilesPerRow) ||
+        !checkedCeilDiv(problem.columnBlocks, g.blocks, tilesPerColumn) ||
+        !checkedMultiply(tilesPerRow, tilesPerColumn, maxTiles))
+      return failure();
+    const SystolicArrayResource *resource = nullptr;
+    for (const SystolicArrayResource &r : fleet)
+      if (r.arraySize == g.geometry) {
+        resource = &r;
+        break;
+      }
+    if (!resource)
+      return failure();
+    ::systolic::AcceleratorTimeline full(resource->config);
+    ::systolic::AcceleratorTimeline computeOnly(resource->config,
+                                                /*transfersFree=*/true);
+    g.tileStart.reserve(static_cast<size_t>(maxTiles));
+    g.tileEnd.reserve(static_cast<size_t>(maxTiles));
+    g.computeOnlyEnd.reserve(static_cast<size_t>(maxTiles));
+    for (int64_t n = 0; n < maxTiles; ++n) {
+      int64_t start = 0, end = 0, cStart = 0, cEnd = 0;
+      if (!full.pushTile(reduction, start, end) ||
+          !computeOnly.pushTile(reduction, cStart, cEnd))
+        return failure();
+      g.tileStart.push_back(start);
+      g.tileEnd.push_back(end);
+      g.computeOnlyEnd.push_back(cEnd);
+    }
+  }
+
   return success();
 }
 
@@ -210,8 +268,9 @@ static bool binarySearchFeasible(
   // ----------------------------------------------------------
   // Per-geometry deadline capacity.
   //
-  //   tiles / accelerator = floor(T / cost(g))
-  //   total capacity      = #accelerators(g) * floor(T / cost(g))
+  //   tiles / accelerator = tiles of the geometry's stream that end by T
+  //                         (floor(T / cost(g)) when nothing overlaps)
+  //   total capacity      = #accelerators(g) * tiles / accelerator
   //
   // A capacity too large for int64 is unlimited for any real problem.
   // ----------------------------------------------------------
@@ -219,7 +278,7 @@ static bool binarySearchFeasible(
   llvm::SmallVector<int64_t> capacity(numGeometries, 0);
   for (size_t g = 0; g < numGeometries; ++g) {
     const GeometryInfo &info = problem.geometries[g];
-    const int64_t perAccelerator = deadline / info.cost;
+    const int64_t perAccelerator = info.tilesBy(deadline);
     const int64_t count =
         static_cast<int64_t>(info.acceleratorIds.size());
     if (!checkedMultiply(count, perAccelerator, capacity[g]))
@@ -313,11 +372,15 @@ static bool binarySearchFeasible(
       const int64_t acceleratorIndex = slot % count;
       const int64_t executionRound = slot / count;
 
-      int64_t startCycle = 0;
-      if (!checkedMultiply(executionRound, info.cost, startCycle) ||
-          startCycle > deadline - info.cost)
+      // used[g] < capacity[g] puts this round inside the stream and by the
+      // deadline; the interval is the stream's.
+      if (executionRound >= static_cast<int64_t>(info.tileEnd.size()) ||
+          info.tileEnd[static_cast<size_t>(executionRound)] > deadline)
         continue;
-      const int64_t endCycle = startCycle + info.cost;
+      const int64_t startCycle =
+          info.tileStart[static_cast<size_t>(executionRound)];
+      const int64_t endCycle =
+          info.tileEnd[static_cast<size_t>(executionRound)];
 
       for (int64_t r = startRow; r < startRow + side; ++r)
         for (int64_t c = startColumn; c < startColumn + side; ++c)
@@ -456,8 +519,10 @@ optimizeSystolicBinarySearch(
     result.sharedReadCycles = ::systolic::transferCycles(
         readBytes, problem.sharedReadBytesPerCycle);
 
-  // Compute-only view of the same schedule, per accelerator.
-  llvm::SmallVector<std::pair<int64_t, int64_t>> computeLoad;   // id, cycles
+  // Compute-only view of the same schedule, per accelerator: tiles placed on
+  // the accelerator so far, and the geometry's compute-only stream end for
+  // that many tiles.
+  llvm::SmallVector<std::pair<int64_t, int64_t>> computeLoad;   // id, tiles
 
   for (const BinarySearchPlacement &placement : finalPlacements) {
     SystolicExecutionTask task;
@@ -489,10 +554,12 @@ optimizeSystolicBinarySearch(
       computeLoad.push_back({placement.acceleratorId, 0});
       load = std::prev(computeLoad.end());
     }
-    if (__builtin_add_overflow(load->second, info->compute, &load->second))
+    const size_t tiles = static_cast<size_t>(load->second);
+    if (tiles >= info->computeOnlyEnd.size())
       return failure();
+    ++load->second;
     result.computeOnlyMakespan =
-        std::max(result.computeOnlyMakespan, load->second);
+        std::max(result.computeOnlyMakespan, info->computeOnlyEnd[tiles]);
   }
 
   result.feasibilityChecks = checks;

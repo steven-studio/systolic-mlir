@@ -58,7 +58,13 @@ static int write_all(
         if (rc < 0) {
             std::fprintf(
                 stderr,
-                "[DPTI FTDI] write failed: %s\n",
+                "[DPTI FTDI] write failed: "
+                "requested=%d transferred=%d remaining=%d rc=%d "
+                "error=%s\n",
+                len,
+                off,
+                len - off,
+                rc,
                 ftdi_get_error_string(ftdi));
             return -1;
         }
@@ -66,7 +72,11 @@ static int write_all(
         if (rc == 0) {
             std::fprintf(
                 stderr,
-                "[DPTI FTDI] write returned 0\n");
+                "[DPTI FTDI] write returned 0: "
+                "requested=%d transferred=%d remaining=%d\n",
+                len,
+                off,
+                len - off);
             return -1;
         }
 

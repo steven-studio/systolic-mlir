@@ -59,6 +59,37 @@ constexpr int64_t kOperandLanes = 8;
 constexpr int64_t kKWindow = 8;
 constexpr int64_t kElementBytes = 4;
 
+// How one context runs consecutive invocations (CostModel.h,
+// AcceleratorTimeline). The archived bitstream (artifacts/fpga/
+// tile_pipelined/1x8x8-3x4x4) serializes them: the next invocation's fill
+// starts once the previous result tile is written back -- pipeline depth 1,
+// which is what deviceConfig(edge, kMax) declares. The pipelined RTL
+// (systolic_accel_context.sv with its job queue, 2026-10-18) overlaps them:
+//
+//   kPipelineDepth  4   JOB_QUEUE_DEPTH: invocations a context holds at a
+//                       time, accepted and not yet written back
+//   kReduceCycles  69   the least spacing of two result publishes of one
+//                       array: the four-level bank-reduction tree of one
+//                       invocation (21 + 17 + 15 + 14 = 67 cycles,
+//                       tb_array_h_decomp.sv) plus the two cycles from
+//                       RED_DONE back to RED_IDLE before the next tile's
+//                       set can be handed to it; the part of H = 95 the
+//                       next invocation cannot overlap (measured 69 in
+//                       tb_pipeline_overlap, 4x4 k = 1 chain)
+//   kFeedGap       26   array-input idle cycles the context keeps between
+//                       invocation j's last reduction step and j+1's first:
+//                       the PE detects a transaction boundary as a quiet
+//                       gap of MUL + ADD + 2 cycles (23 at the integer
+//                       model's 9 / 12, 21 at the IP's 8 / 11,
+//                       tb_pe_overlap.sv) and the context adds three cycles
+//                       of margin (PE_QUIET_GAP + FEED_GAP_MARGIN)
+//
+// A bitstream's record (fpga_config.txt) says which it is: PIPELINE_DEPTH,
+// absent for the archived bitstream.
+constexpr int64_t kPipelineDepth = 4;
+constexpr int64_t kReduceCycles = 69;
+constexpr int64_t kFeedGap = 26;
+
 /// Operand words per array cycle all four fills share (see above), and the
 /// same in bytes, as the binary search takes it.
 constexpr double kSharedReadWordsPerCycle = 3.51;
@@ -67,8 +98,10 @@ inline double sharedReadBytesPerCycle(double wordsPerCycle) {
 }
 
 /// One accelerator of the fleet with operand depth kMax, as the cost model
-/// prices it.
-inline ArrayConfig deviceConfig(int64_t edge, int64_t kMax) {
+/// prices it: serialized consecutive invocations (the archived bitstream),
+/// or, with pipelined = true, the pipelined RTL's.
+inline ArrayConfig deviceConfig(int64_t edge, int64_t kMax,
+                                bool pipelined = false) {
   ArrayConfig c;
   c.rows = edge;
   c.cols = edge;
@@ -81,6 +114,11 @@ inline ArrayConfig deviceConfig(int64_t edge, int64_t kMax) {
   c.operandLanes = kOperandLanes;
   c.kWindow = kKWindow;
   c.elementBytes = kElementBytes;
+  if (pipelined) {
+    c.pipelineDepth = kPipelineDepth;
+    c.reduceCycles = kReduceCycles;
+    c.feedGap = kFeedGap;
+  }
   return c;
 }
 
@@ -103,7 +141,7 @@ inline std::string floatLiteral(double v) {
 
 /// The same accelerator as a systolic.device declaration.
 inline std::string deviceDeclaration(const std::string &symbol, int64_t edge,
-                                     int64_t kMax) {
+                                     int64_t kMax, bool pipelined = false) {
   std::ostringstream os;
   os << "systolic.device @" << symbol << " rows = " << edge
      << " cols = " << edge << " dataflow = output_stationary k_max = "
@@ -113,6 +151,9 @@ inline std::string deviceDeclaration(const std::string &symbol, int64_t edge,
      << " read_overhead = " << kReadOverhead
      << " write_overhead = " << kWriteOverhead
      << " operand_lanes = " << kOperandLanes << " k_window = " << kKWindow;
+  if (pipelined)
+    os << " pipeline_depth = " << kPipelineDepth
+       << " reduce_cycles = " << kReduceCycles << " feed_gap = " << kFeedGap;
   return os.str();
 }
 

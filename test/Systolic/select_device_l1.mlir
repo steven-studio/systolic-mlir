@@ -22,9 +22,9 @@
 
 module {
   systolic.device @acc_8x8 rows = 8 cols = 8 dataflow = output_stationary
-      {k_max = 256 : i64, tile_overhead = 95 : i64, l1_bytes = 16384 : i64}
+      k_max = 256 l1_bytes = 16384 tile_overhead = 95
   systolic.device @acc_4x4 rows = 4 cols = 4 dataflow = output_stationary
-      {k_max = 256 : i64, tile_overhead = 95 : i64}
+      k_max = 256 tile_overhead = 95
 
   // With the check on, the fast device cannot hold this tile's operands and
   // the tile goes to the slow one at 3.8x the cost. With the check off it

@@ -55,10 +55,17 @@ bool scaleAdd(int64_t count, int64_t part, int64_t last, int64_t &sum) {
 
 } // namespace
 
+bool isPipelined(const ArrayConfig &a) { return a.pipelineDepth > 1; }
+
 bool isValidArrayConfig(const ArrayConfig &a) {
   if (a.rows < 1 || a.cols < 1 || a.kMax < 0 || a.l1Bytes < 0 ||
       a.tileOverhead < 0 || a.readOverhead < 0 || a.writeOverhead < 0 ||
       a.operandLanes < 0 || a.kWindow < 1 || a.elementBytes < 1)
+    return false;
+  // Consecutive invocations: a queue of at least one, a serial reduction
+  // that is part of H, a non-negative gap.
+  if (a.pipelineDepth < 1 || a.reduceCycles < 0 || a.feedGap < 0 ||
+      a.reduceCycles > a.tileOverhead)
     return false;
   if (a.operandLanes > 0 && a.operandLanes < std::max(a.rows, a.cols))
     return false;
@@ -217,9 +224,154 @@ TileCost estimateTileCost(int64_t k, const ArrayConfig &a) {
   if (!add(t.read, t.compute, total) || !add(total, t.write, total))
     return t;
 
+  // The tile alone on an idle context. Serialized (pipelineDepth = 1) that
+  // is the sum above, to the cycle; pipelined, its invocations overlap.
+  if (isPipelined(a)) {
+    AcceleratorTimeline timeline(a);
+    int64_t start = 0, end = 0;
+    if (!timeline.pushTile(k, start, end))
+      return t;
+    t.isolatedSpan = end - start;
+  } else {
+    t.isolatedSpan = total;
+  }
+
   t.invocations = invocations;
   t.ok = true;
   return t;
+}
+
+//===----------------------------------------------------------------------===//
+// AcceleratorTimeline
+//===----------------------------------------------------------------------===//
+
+AcceleratorTimeline::AcceleratorTimeline(const ArrayConfig &array,
+                                         bool transfersFree)
+    : config(array), transfersFree(transfersFree) {
+  // writeEnd_{j-D} for the queue and writeEnd_{j-2} for the result banks.
+  window = std::max<int64_t>(2, std::min<int64_t>(array.pipelineDepth, 64));
+  for (int64_t &w : writeEnds)
+    w = 0;
+  for (int64_t &c : computeEnds)
+    c = 0;
+}
+
+bool AcceleratorTimeline::push(int64_t k, InvocationEvents &e,
+                               int64_t acceptNotBefore,
+                               int64_t feedNotBefore,
+                               int64_t writeEndNotBefore) {
+  if (!isValidArrayConfig(config))
+    return false;
+  const InvocationCost cost = estimateInvocationCost(k, config);
+  if (!cost.ok)
+    return false;
+  const int64_t tRead = transfersFree ? 0 : cost.read;
+  const int64_t tWrite = transfersFree ? 0 : cost.write;
+
+  // writeEnd / computeEnd of invocation j - n, n >= 1; 0 (the idle context)
+  // before the stream began.
+  auto writeEndBack = [&](int64_t n) -> int64_t {
+    if (n > writeEndCount)
+      return 0;
+    return writeEnds[writeEndCount - n];
+  };
+  auto computeEndBack = [&](int64_t n) -> int64_t {
+    if (n > writeEndCount)
+      return 0;
+    return computeEnds[writeEndCount - n];
+  };
+
+  InvocationEvents v;
+  v.k = k;
+
+  // The queue: invocation j is accepted once invocation j - D has left it.
+  // A pipelineDepth deeper than the window remembered here can only make
+  // accept earlier, never later, and the fill rule below (one filled tile
+  // waiting) already bounds how early a fill can be; so the window is the
+  // effective depth.
+  const int64_t depth = std::min<int64_t>(config.pipelineDepth, window);
+  int64_t slotFree = writeEndBack(depth);
+  if (isPipelined(config) && slotFree > 0 &&
+      !add(slotFree, kAcceptLatency, slotFree))
+    return false;
+  v.accept = std::max({lastAccept, slotFree, acceptNotBefore});
+
+  // One operand descriptor at a time; the next fill only once the filled
+  // tile is being fed (its fold started), which also frees its ping-pong
+  // buffer: tile j writes buffer j % 2, last read by tile j - 2, whose feed
+  // ended before tile j - 1's fold started.
+  v.fillStart = std::max({v.accept, lastFillEnd, lastFeedStart});
+  if (!add(v.fillStart, tRead, v.fillEnd))
+    return false;
+
+  // The fold: operands landed (T_read holds the release); the array input
+  // idle for feedGap cycles after the previous invocation's k steps; tile
+  // j - 2 published, so its accumulator set in every PE is free again (the
+  // PE holds two and cannot refuse operands); result bank j % 2 written
+  // back. The last two are seen by the scheduler one cycle after the event
+  // and reach the fold through the release handshake.
+  int64_t gapStart = 0;
+  if (count > 0 && (!add(lastFeedStart, lastK, gapStart) ||
+                    !add(gapStart, config.feedGap, gapStart)))
+    return false;
+  int64_t setFree = 0, bankFree = 0;
+  if (count >= 2) {
+    if (!add(computeEndBack(2), kReleaseLatency, setFree) ||
+        !add(writeEndBack(2), kReleaseLatency, bankFree))
+      return false;
+  }
+  v.feedStart = std::max({v.fillEnd, count > 0 ? gapStart : int64_t{0},
+                          setFree, bankFree, feedNotBefore});
+
+  // The result: the invocation's own latency, unless the previous
+  // invocation's bank reduction is still holding the PEs' reduction path.
+  int64_t ownEnd = 0, serialEnd = 0;
+  if (!add(v.feedStart, cost.compute, ownEnd))
+    return false;
+  if (count > 0 && !add(lastComputeEnd, config.reduceCycles, serialEnd))
+    return false;
+  v.computeEnd = std::max(ownEnd, count > 0 ? serialEnd : int64_t{0});
+
+  // The write-back stage, one tile at a time, in order.
+  v.writeStart = std::max(v.computeEnd, lastWriteEnd);
+  if (!add(v.writeStart, tWrite, v.writeEnd))
+    return false;
+  v.writeEnd = std::max(v.writeEnd, writeEndNotBefore);
+
+  lastAccept = v.accept;
+  lastFillEnd = v.fillEnd;
+  lastFeedStart = v.feedStart;
+  lastK = k;
+  lastComputeEnd = v.computeEnd;
+  lastWriteEnd = v.writeEnd;
+  if (writeEndCount == window) {
+    for (int64_t i = 1; i < window; ++i) {
+      writeEnds[i - 1] = writeEnds[i];
+      computeEnds[i - 1] = computeEnds[i];
+    }
+    writeEndCount = window - 1;
+  }
+  computeEnds[writeEndCount] = v.computeEnd;
+  writeEnds[writeEndCount++] = v.writeEnd;
+  ++count;
+  e = v;
+  return true;
+}
+
+bool AcceleratorTimeline::pushTile(int64_t reduction, int64_t &tileStart,
+                                   int64_t &tileEnd) {
+  const int64_t invocations = countInvocations(reduction, config);
+  if (invocations < 1)
+    return false;
+  for (int64_t j = 0; j < invocations; ++j) {
+    InvocationEvents e;
+    if (!push(invocationDepth(reduction, j, config), e))
+      return false;
+    if (j == 0)
+      tileStart = e.fillStart;
+    tileEnd = e.writeEnd;
+  }
+  return true;
 }
 
 int64_t estimateMatmulCycles(int64_t m, int64_t n, int64_t k,

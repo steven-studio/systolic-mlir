@@ -97,8 +97,9 @@ while read -r k8 k4 slab; do
     want="K_MAX_8X8=$k8
 K_MAX_4X4=$k4
 SLAB_BYTES=$slab
+PIPELINE_DEPTH=1
 SOURCE=$f"
-    [ $rc -eq 0 ] && [ "$out" = "$want" ] && ok "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4 -> slab $slab" \
+    [ $rc -eq 0 ] && [ "$out" = "$want" ] && ok "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4 -> slab $slab, pipeline depth 1 (not recorded)" \
         || bad "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4" "$out"
 done <<'EOF'
 24 12 1536
@@ -112,6 +113,19 @@ done <<'EOF'
 16376 16376 1048064
 512 512 32768
 EOF
+
+# PIPELINE_DEPTH: the context's job queue, read when recorded (the pipelined
+# RTL's co-simulation and bitstream builds write it), 1 when not; malformed
+# values are refused like the K_MAX ones.
+f=$(cfg "pipe4.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nPIPELINE_DEPTH=4\n")
+out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
+[ $rc -eq 0 ] && has "$out" "PIPELINE_DEPTH=4" && ok "PIPELINE_DEPTH = 4 read" || bad "PIPELINE_DEPTH = 4" "$out"
+for bad_depth in 0 65 04 x4; do
+    f=$(cfg "pipe_bad_$bad_depth.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nPIPELINE_DEPTH=$bad_depth\n")
+    out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
+    [ $rc -ne 0 ] && has "$out" "PIPELINE_DEPTH = '$bad_depth' is not a decimal integer in 1..64" \
+        && ok "PIPELINE_DEPTH = '$bad_depth' refused" || bad "PIPELINE_DEPTH = '$bad_depth'" "$out"
+done
 
 echo "== runtime-dispatch-test: the cases follow each capacity"
 out=$(SYSTOLIC_FPGA_CONFIG="$WORK/k24_12.txt" "$RTTEST" --list 2>&1); rc=$?
