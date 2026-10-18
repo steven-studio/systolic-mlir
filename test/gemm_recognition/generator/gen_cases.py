@@ -346,9 +346,9 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         c.math_class = "gemm_values_skewed_placement"
         c.math_note = ("The product's value for (i, j) lands at a skewed row C[I + j][J]: with J one loop "
                        "an affine, injective (skewed) view of C, a GEMM by docs/AFFINE_GEMM_MAPPING.md "
-                       "section 19 (recognized; its lowering is not implemented yet, ISSUE-008); with J "
-                       "over several loops C reads J through two combinations (valid only by demotion, "
-                       "not constructed).")
+                       "section 19 (recognized since 2026-10-16, lowered as one memref.reinterpret_cast "
+                       "since 2026-10-18, section 19.11; ISSUE-008); with J over several loops C reads J "
+                       "through two combinations (valid only by demotion, not constructed).")
     elif mutation == "coupled_A_and_C_row":
         j = first("J")
         A.subs = ("%s + %s" % (A.subs[0], j), A.subs[1])
@@ -367,9 +367,10 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         c.math_class = "skewed_a_row"
         c.math_note = ("A's row index adds the reduction loop: with K one loop, A's view (I, K) -> "
                        "(I + K, K) is affine, a GEMM by docs/AFFINE_GEMM_MAPPING.md section 19 "
-                       "(recognized; its lowering is not implemented yet, ISSUE-008) -- the old rank test "
-                       "('a singular mapping') does not decide it; with K over several loops A reads K "
-                       "through two combinations (valid only by demotion, not constructed).")
+                       "(recognized since 2026-10-16, lowered as one memref.reinterpret_cast since "
+                       "2026-10-18, section 19.11; ISSUE-008) -- the old rank test ('a singular mapping') "
+                       "does not decide it; with K over several loops A reads K through two combinations "
+                       "(valid only by demotion, not constructed).")
     elif mutation == "elementwise":
         A.subs = C.subs
         A.dims = C.dims
@@ -576,10 +577,9 @@ def finalize(case: Case):
         reason = case.expect.get("reject_reason", "")
         if "same affine expression" in reason:
             case.issue = "ISSUE-001"
-        elif "has a skewed or merged view" in reason:
-            # a GEMM of general affine views, recognized; their lowering is
-            # not implemented yet (docs/AFFINE_GEMM_MAPPING.md section 19)
-            case.issue = "ISSUE-008"
+        # (the skewed or merged views of ISSUE-008 are lowered since
+        # 2026-10-18, docs/AFFINE_GEMM_MAPPING.md section 19.11: no predicted
+        # false negative carries that tag any more)
     return cls
 
 

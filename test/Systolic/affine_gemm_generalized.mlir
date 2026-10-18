@@ -2,9 +2,8 @@
 // readers analysis, C's injectivity per batch (G2), SQ-5 decided, and the three specified
 // tests. What each case is, mathematically, is in its comment; the layouts and reasons
 // below are the recognizer's (DISC), the remarks the lowering's (REMARK). Skewed and
-// merged views are recognized and verified (G1, G2); their lowering (a
-// memref.reinterpret_cast view) is the next phase, so they are refused here as
-// VALID_BUT_LOWERING_UNSUPPORTED.
+// merged views are recognized and verified (G1, G2) and lowered as explicit
+// memref.reinterpret_cast views (section 19.11): element offset, sizes, element strides.
 //
 // RUN: systolic-opt "--affine-matmul-to-systolic=allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s | FileCheck %s
@@ -19,10 +18,14 @@
 // (skewed: A's dimension 1 combines I and K, B's dimension 0 K and J); Ka != Kb
 // physically, the same K at every iteration; C'(I, J) = C[I][J] is injective; A's
 // columns reach 6 < 7, B's rows 6 < 7. A GEMM -- refused before section 19 ("reads one
-// logical coordinate in two of its dimensions").
+// logical coordinate in two of its dimensions"). The views in elements: A'(I, K) at
+// 7 I + (I + K) = 8 I + K (strides (8, 1)), B'(K, J) at 4 (J + K) + J = 4 K + 5 J
+// (strides (4, 5)); C is the whole memref.
 // CHECK-LABEL: func.func @test1
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet [VALID_BUT_LOWERING_UNSUPPORTED]
+// CHECK:       memref.reinterpret_cast %arg0 to offset: [0], sizes: [4, 4], strides: [8, 1] : memref<4x7xf32> to memref<4x4xf32, strided<[8, 1]>>
+// CHECK:       memref.reinterpret_cast %arg1 to offset: [0], sizes: [4, 4], strides: [4, 5] : memref<7x4xf32> to memref<4x4xf32, strided<[4, 5]>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s)
 // DISC:        recognition result: success
 // DISC:        layout A: general view: dimension 0 = 0 + 1*I; dimension 1 = 0 + 1*I + 1*K
 // DISC-NEXT:   layout B: general view: dimension 0 = 0 + 1*K + 1*J; dimension 1 = 0 + 1*J
@@ -134,10 +137,14 @@ func.func @test3(%A: memref<4x7xf32> {llvm.noalias}, %B: memref<7x4xf32> {llvm.n
 // -----
 // A skewed output view, C[i + j][j] += A[i][k] * B[k][j]: C'(I, J) = C[I + J][J], injective
 // (rank 2). A GEMM (section 19.3); refused before as "C reads one logical coordinate in
-// two of its dimensions". (case_087 is the different nest with A[i + j][k].)
+// two of its dimensions". (case_087 is the different nest with A[i + j][k].) C' in
+// elements: 4 (I + J) + J = 4 I + 5 J, strides (4, 5); the tile's result is written back
+// through the same view.
 // CHECK-LABEL: func.func @skewed_c
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: C has a skewed or merged view
+// CHECK:       memref.reinterpret_cast %arg2 to offset: [0], sizes: [4, 4], strides: [4, 5] : memref<7x4xf32> to memref<4x4xf32, strided<[4, 5]>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// CHECK:       bufferization.materialize_in_destination {{.*}} in restrict writable %reinterpret_cast
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s)
 // DISC:        layout C: general view: dimension 0 = 0 + 1*I + 1*J; dimension 1 = 0 + 1*J
 func.func @skewed_c(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<7x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -157,10 +164,14 @@ func.func @skewed_c(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llv
 // -----
 // Flat 1-D arrays, the C idiom C[i*4 + j] += A[i*4 + k] * B[k*4 + j]: every operand reads
 // both of its roles in its one dimension (merged views); C[4I + J] is injective on the
-// 4 x 4 box. A GEMM; refused before as a coupled mapping.
+// 4 x 4 box. A GEMM; refused before as a coupled mapping. Every view is the 4 x 4 matrix
+// with strides (4, 1) over the flat array.
 // CHECK-LABEL: func.func @flat
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A has a skewed or merged view
+// CHECK:       memref.reinterpret_cast %arg0 to offset: [0], sizes: [4, 4], strides: [4, 1] : memref<16xf32> to memref<4x4xf32, strided<[4, 1]>>
+// CHECK:       memref.reinterpret_cast %arg1 to offset: [0], sizes: [4, 4], strides: [4, 1] : memref<16xf32> to memref<4x4xf32, strided<[4, 1]>>
+// CHECK:       memref.reinterpret_cast %arg2 to offset: [0], sizes: [4, 4], strides: [4, 1] : memref<16xf32> to memref<4x4xf32, strided<[4, 1]>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s)
 // DISC:        layout A: general view: dimension 0 = 0 + 4*I + 1*K
 // DISC-NEXT:   layout B: general view: dimension 0 = 0 + 4*K + 1*J
 // DISC-NEXT:   layout C: general view: dimension 0 = 0 + 4*I + 1*J
@@ -181,10 +192,11 @@ func.func @flat(%A: memref<16xf32> {llvm.noalias}, %B: memref<16xf32> {llvm.noal
 }
 // -----
 // A Hankel view, C[i][j] += A[i + k] * B[k][j] (1-D A): A'(I, K) = A[I + K] repeats
-// elements (not injective -- a read view may overlap itself). A GEMM.
+// elements (not injective -- a read view may overlap itself). A GEMM; A' has strides (1, 1).
 // CHECK-LABEL: func.func @hankel
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A has a skewed or merged view
+// CHECK:       memref.reinterpret_cast %arg0 to offset: [0], sizes: [4, 4], strides: [1, 1] : memref<7xf32> to memref<4x4xf32, strided<[1, 1]>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s)
 // DISC:        layout A: general view: dimension 0 = 0 + 1*I + 1*K
 func.func @hankel(%A: memref<7xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -461,6 +473,83 @@ func.func @matvec_repetition_between(%A: memref<4x4xf32> {llvm.noalias}, %B: mem
         %p = arith.mulf %a, %bb : f32
         %s = arith.addf %c, %p : f32
         affine.store %s, %C[%i] : memref<4xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// G3 for a general view: Test 1 with A of 4 columns (A[i][i + k] reaches column 6). The
+// program is undefined; the explicit view goes through the same per-dimension bounds check
+// as every view and the nest is refused as out of bounds (PROVEN_INVALID), not labelled a
+// valid view the lowering lacks (review finding 3, Phase D).
+// CHECK-LABEL: func.func @test1_oob
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A is accessed out of bounds along dimension 1 [PROVEN_INVALID]
+func.func @test1_oob(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<7x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %i + %k] : memref<4x4xf32>
+        %bb = affine.load %B[%j + %k, %j] : memref<7x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// G4 for a general view: Test 1 with neither A nor C marked llvm.noalias -- A may overlap
+// C, UNKNOWN, as for a role-pure nest (the alias check runs for every view; C restrict alone
+// would prove every operand disjoint from it).
+// CHECK-LABEL: func.func @test1_alias
+// CHECK-NOT:   systolic.matmul_tile
+// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias [UNKNOWN]
+func.func @test1_alias(%A: memref<4x7xf32>, %B: memref<7x4xf32> {llvm.noalias}, %C: memref<4x4xf32>) {
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      affine.for %k = 0 to 4 {
+        %a = affine.load %A[%i, %i + %k] : memref<4x7xf32>
+        %bb = affine.load %B[%j + %k, %j] : memref<7x4xf32>
+        %c = affine.load %C[%i, %j] : memref<4x4xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[%i, %j] : memref<4x4xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// A role-pure nest whose rank-reducing subviews were ambiguous: a kept dimension of size one
+// (a role of extent one: i and k run once, j has two iterations) next to a dropped dimension
+// of size one with the same element stride -- A's dimensions 1 and 2 (strides 1 and 1 on
+// memref<2x1x1>), C's dimensions 0 and 1 (strides 6 and 6 on memref<2x1x6>). memref.subview's
+// rank-reduced result type cannot say which dimension was dropped and the verifier refused the
+// IR (review finding 7). Since Phase D such a view is the explicit memref.reinterpret_cast:
+// A'(I, K) at 0 (offset 0), C'(I, J) at 1 + 2 j = 1 + 4 ord_J (offset 1, strides (1, 4)). B's
+// kept unit dimension (1 - k: dimension 1, stride -4) and its dropped dimension 0 (stride 8)
+// differ, so B keeps its subview (the verifier resolves it; a size-one row's stride is
+// immaterial): B'(K, J) at 4 + (j + 1) = 5 + 2 ord_J. A 1 x 2 x 1 GEMM, lowered.
+// CHECK-LABEL: func.func @unit_kept_dimension
+// CHECK:       memref.reinterpret_cast %arg0 to offset: [0], sizes: [1, 1], strides: [1, 1] : memref<2x1x1xf32> to memref<1x1xf32, strided<[1, 1]>>
+// CHECK:       memref.subview %arg1[0, 1, 1] [1, 1, 2] [1, -1, 2] : memref<2x2x4xf32> to memref<1x2xf32, strided<[8, 2], offset: 5>>
+// CHECK:       memref.reinterpret_cast %arg2 to offset: [1], sizes: [1, 2], strides: [1, 4] : memref<2x1x6xf32> to memref<1x2xf32, strided<[1, 4], offset: 1>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 1 n = 2 k = 1
+// REMARK:      remark: affine GEMM 1x2x1 lowered as 1 exact region(s)
+func.func @unit_kept_dimension(%A: memref<2x1x1xf32> {llvm.noalias}, %B: memref<2x2x4xf32> {llvm.noalias}, %C: memref<2x1x6xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 1 {
+    affine.for %j = 0 to 4 step 2 {
+      affine.for %k = 0 to 1 {
+        %a = affine.load %A[0, %i * 2, %k] : memref<2x1x1xf32>
+        %bb = affine.load %B[0, -%k + 1, %j + 1] : memref<2x2x4xf32>
+        %c = affine.load %C[0, %i, %j * 2 + 1] : memref<2x1x6xf32>
+        %p = arith.mulf %a, %bb : f32
+        %s = arith.addf %c, %p : f32
+        affine.store %s, %C[0, %i, %j * 2 + 1] : memref<2x1x6xf32>
       }
     }
   }

@@ -15724,7 +15724,7 @@
     "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19; lowered since 2026-10-18, section 19.11: one memref.reinterpret_cast per operand) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -15734,12 +15734,12 @@
     "recognition": "accept",
     "hoisting_required": false,
     "dense_partition": "supported",
-    "lowering": "unsupported",
-    "driver": "stays_on_host",
-    "reject_stage": "lowering",
-    "reject_reason": "C has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "FALSE_NEGATIVE",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-008",
    "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM with a skewed view of C",
    "has_independent_reference": true,
@@ -15748,7 +15748,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 119,
-   "math_note": "The user's seed A[2*i+3][k+1], B[k+2][3*j+2], C[2*i+j][j], with 4x4x4 loops.\nP[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views\n(A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views\nof A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]\nis accumulated into C[2i+j][j]: C's view (I, J) -> (2I + J, J) is affine and\ninjective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with\nthat skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).\nRe-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided\nsub-matrix of C).  Recognized since; the lowering of a skewed view (a\nmemref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE, refused\nat the lowering ('C has a skewed or merged view').",
+   "math_note": "The user's seed A[2*i+3][k+1], B[k+2][3*j+2], C[2*i+j][j], with 4x4x4 loops.\nP[i][j] = sum_k A[2i+3][k+1] B[k+2][3j+2] is a GEMM of two strided views\n(A rows 3,5,7,9 x cols 1..4; B rows 2..5 x cols 2,5,8,11) -- note the K views\nof A (k+1) and B (k+2) differ, which is fine mathematically.  Its value P[i][j]\nis accumulated into C[2i+j][j]: C's view (I, J) -> (2I + J, J) is affine and\ninjective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with\nthat skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).\nRe-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided\nsub-matrix of C).  Recognized since; lowered since 2026-10-18 (Phase D,\nsection 19.11): C's skewed view is one memref.reinterpret_cast (offset 0,\nsizes 4 x 4, element strides (9, 5) on the 10 x 4 array) -- a TRUE POSITIVE\n(a FALSE NEGATIVE refused at the lowering between 2026-10-16 and 2026-10-18).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_088.c -o case_088 && ./case_088",
@@ -22282,7 +22282,7 @@
     "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19; lowered since 2026-10-18, section 19.11: one memref.reinterpret_cast per operand) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -22292,12 +22292,12 @@
     "recognition": "accept",
     "hoisting_required": false,
     "dense_partition": "supported",
-    "lowering": "unsupported",
-    "driver": "stays_on_host",
-    "reject_stage": "lowering",
-    "reject_reason": "A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "FALSE_NEGATIVE",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-008",
    "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19): REJECT (A' not a strided view of A) before; ACCEPT since -- a GEMM with a skewed view of A",
    "has_independent_reference": true,
@@ -22306,7 +22306,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": -916,
-   "math_note": "C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(I, K) = A[I][I+K]\n(a Hankel-like gather), and C += A' B.  A' is an affine view of A -- its\ndimension 1 combines both of A's roles; in elements A'(I, K) is at 16 I + K\n(row-major strides (16, 1)) -- and C's view is the identity (injective): a\nGEMM by docs/AFFINE_GEMM_MAPPING.md section 19 (G1, G2; Test 1's shape with\nB plain).  Re-decided 2026-10-16 (ISSUE-008; until then rejected: 'A' is not\nan affine strided view of A').  Recognized since; the lowering of a skewed\nview (a memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE,\nrefused at the lowering ('A has a skewed or merged view').",
+   "math_note": "C[i][j] += A[i][i+k] * B[k][j]: A is read along a skew, A'(I, K) = A[I][I+K]\n(a Hankel-like gather), and C += A' B.  A' is an affine view of A -- its\ndimension 1 combines both of A's roles; in elements A'(I, K) is at 16 I + K\n(row-major strides (16, 1)) -- and C's view is the identity (injective): a\nGEMM by docs/AFFINE_GEMM_MAPPING.md section 19 (G1, G2; Test 1's shape with\nB plain).  Re-decided 2026-10-16 (ISSUE-008; until then rejected: 'A' is not\nan affine strided view of A').  Recognized since; lowered since 2026-10-18\n(Phase D, section 19.11): A' is one memref.reinterpret_cast (offset 0,\nsizes 8 x 8, element strides (16, 1)) -- a TRUE POSITIVE (a FALSE NEGATIVE\nrefused at the lowering between 2026-10-16 and 2026-10-18).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_126.c -o case_126 && ./case_126",
@@ -24404,7 +24404,7 @@
     "mathematical_gemm": true,
     "recognition": "OUT_OF_SCOPE",
     "offload": "stays_on_host",
-    "basis": "AffineMatmulToSystolic.cpp: 'A and B are different views of the same memref'",
+    "basis": "AffineMatmulToSystolic.cpp lowerOne: 'A and B are different views of the same memref' -- one array as both factors is lowered only when one read-only tensor serves both: the first factor's (I, K) view and the second's (K, J) view are the same element map in some orientation of the coordinates (each enumerated upward or downward; LogicalOperand::sameView, the orientation search of 2026-10-18); A . A^T and a skew read by one factor only are two views (docs/AFFINE_GEMM_MAPPING.md section 7, README section 2); decided by enumeration (casespec.one_tensor_serves_both_factors)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -27708,7 +27708,7 @@
     "mathematical_gemm": true,
     "recognition": "ACCEPT",
     "offload": "offloaded",
-    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
+    "basis": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19; lowered since 2026-10-18, section 19.11: one memref.reinterpret_cast per operand) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -27718,12 +27718,12 @@
     "recognition": "accept",
     "hoisting_required": false,
     "dense_partition": "supported",
-    "lowering": "unsupported",
-    "driver": "stays_on_host",
-    "reject_stage": "lowering",
-    "reject_reason": "A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet"
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "FALSE_NEGATIVE",
+   "classification": "TRUE_POSITIVE",
    "issue": "ISSUE-008",
    "redecided": null,
    "has_independent_reference": true,
@@ -27732,7 +27732,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 1049,
-   "math_note": "Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\nK = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n(each combines both of its operand's roles), C's is the identity: a GEMM\n(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; the lowering of\nskewed views is not implemented yet: a FALSE NEGATIVE ('A has a skewed\nor merged view'), ISSUE-008, Phase D.",
+   "math_note": "Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\nK = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n(each combines both of its operand's roles), C's is the identity: a GEMM\n(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; lowered since\n2026-10-18 (Phase D, section 19.11): each skewed view is one\nmemref.reinterpret_cast (A': offset 0, strides (8, 1); B': offset 0,\nstrides (4, 5)) -- a TRUE POSITIVE (a FALSE NEGATIVE refused at the\nlowering between 2026-10-16 and 2026-10-18), ISSUE-008.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/extended/ext_026.c -o ext_026 && ./ext_026",

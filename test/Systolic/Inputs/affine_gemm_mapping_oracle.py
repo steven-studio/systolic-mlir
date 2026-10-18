@@ -78,9 +78,11 @@ from math import gcd
 
 # Whether the compiler lowers skewed and merged views (a dimension combining two of an
 # operand's roles, or a role in several dimensions: docs/AFFINE_GEMM_MAPPING.md section
-# 19). Recognized since the generalized mapping; until their lowering exists every such
-# GEMM must be refused, never lowered.
-GENERAL_VIEWS_LOWERED = False
+# 19). Recognized since the generalized mapping (Phase C, 2026-10-16) and lowered since
+# Phase D (2026-10-18, section 19.11: an explicit memref.reinterpret_cast view, checked
+# here address by address like every other view). False makes every such GEMM a required
+# refusal (the state between the two phases).
+GENERAL_VIEWS_LOWERED = True
 
 
 def trips(lb, ub, step):
@@ -579,7 +581,7 @@ def emit(nest, name):
 # ---------------------------------------------------------------------------
 # The compiler's views.
 
-DEF = re.compile(r"^\s*(%[\w.]+) = (?:memref\.subview|memref\.transpose|memref\.expand_shape) (%[\w.]+)")
+DEF = re.compile(r"^\s*(%[\w.]+) = (?:memref\.subview|memref\.transpose|memref\.expand_shape|memref\.reinterpret_cast) (%[\w.]+)")
 TO_TENSOR = re.compile(r"^\s*(%[\w.]+) = bufferization\.to_tensor (%[\w.]+) .*: (memref<[^>]*(?:<[^>]*>[^>]*)?>) to tensor")
 TILE = re.compile(r"systolic\.matmul_tile (%[\w.]+), (%[\w.]+), (%[\w.]+) m = (\d+) n = (\d+) k = (\d+)")
 MEMREF = re.compile(r"memref<([\dx]+)xf32(?:, strided<\[([-\d, ]+)\](?:, offset: (-?\d+|\?))?>)?>")
@@ -587,6 +589,10 @@ MAPDEF = re.compile(r"^(#[\w$.]+) = affine_map<\(([^)]*)\) -> \((.*)\)>\s*$")
 APPLY = re.compile(r"^\s*(%[\w.]+) = affine\.apply (#[\w$.]+|affine_map<\(([^)]*)\) -> \((.*?)\)>)\(([^)]*)\)")
 FORLOOP = re.compile(r"^\s*affine\.for (%[\w.]+) = (-?\d+) to (-?\d+)(?: step (\d+))? \{")
 SUBVIEW = re.compile(r"^\s*(%[\w.]+) = memref\.subview (%[\w.]+)\[([^\]]*)\] \[([^\]]*)\] \[([^\]]*)\] : memref<([\dx]+)xf32>")
+# An explicit view (docs/AFFINE_GEMM_MAPPING.md section 19.11): one reinterpret_cast of the
+# base memref to rows x columns with an element offset (a constant, or an affine.apply of
+# the batch counters), sizes and element strides.
+REINTERPRET = re.compile(r"^\s*(%[\w.]+) = memref\.reinterpret_cast (%[\w.]+) to offset: \[([^\]]*)\], sizes: \[([^\]]*)\], strides: \[([^\]]*)\] : memref<([\dx]+)xf32>")
 
 
 def parse_view(type_text):
@@ -637,8 +643,11 @@ def compiler_results(opt, text, permit):
                 batch_loops.append((m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4) or 1)))
             m = SUBVIEW.match(line)
             if m:
-                subviews[m.group(1)] = ([v.strip() for v in m.group(3).split(",")],
+                subviews[m.group(1)] = ("subview", [v.strip() for v in m.group(3).split(",")],
                                         [int(v) for v in m.group(6).split("x")])
+            m = REINTERPRET.match(line)
+            if m:
+                subviews[m.group(1)] = ("reinterpret", m.group(3).strip())
             m = DEF.match(line)
             if m:
                 source[m.group(1)] = m.group(2)
@@ -676,16 +685,20 @@ def evaluate(token, env, applies):
 
 def batch_views(views, env, applies):
     """The views of one batch iteration: each dynamic offset computed from
-    its subview's offsets and the base memref's row-major strides."""
+    its subview's offsets and the base memref's row-major strides, or from
+    its reinterpret_cast's element offset."""
     out = []
     for name, view, subview in views:
         shape, strides, offset = view
         if offset is None:
-            offsets, base = subview
-            rm = [1] * len(base)
-            for d in range(len(base) - 2, -1, -1):
-                rm[d] = rm[d + 1] * base[d + 1]
-            offset = sum(evaluate(t, env, applies) * rm[d] for d, t in enumerate(offsets))
+            if subview[0] == "reinterpret":
+                offset = evaluate(subview[1], env, applies)
+            else:
+                _, offsets, base = subview
+                rm = [1] * len(base)
+                for d in range(len(base) - 2, -1, -1):
+                    rm[d] = rm[d + 1] * base[d + 1]
+                offset = sum(evaluate(t, env, applies) * rm[d] for d, t in enumerate(offsets))
         out.append((name, (shape, strides, offset)))
     return out
 
@@ -709,25 +722,31 @@ def check_views(nest, mnk, views, pts=None):
     if ash != [M, K] or bsh != [K, N] or csh != [M, N]:
         return "view shapes %s %s %s for %dx%dx%d" % (ash, bsh, csh, M, N, K)
 
-    def locate(name, shape, strides, offset, rows, cols):
+    def hits_of(name, shape, strides, offset, rows, cols):
+        """Per point, the view elements (r, c) at the access's address."""
         table = {}
         for r in range(rows):
             for c in range(cols):
                 table.setdefault(offset + r * strides[0] + c * strides[1], []).append((r, c))
         base = nest.ops[name][0]
-        out = []
-        for x in pts:
-            hits = table.get(linear(base, [value(f, x) for f in nest.ops[name][1]]), [])
-            if len(hits) != 1:
-                return None
-            out.append(hits[0])
-        return out
+        return [table.get(linear(base, [value(f, x) for f in nest.ops[name][1]]), []) for x in pts]
 
-    la = locate(an, ash, ast, aof, M, K)
-    lb = locate(bn, bsh, bst, bof, K, N)
-    lc = locate("C", csh, cst, cof, M, N)
-    if la is None or lb is None or lc is None:
-        return "an access is not exactly one element of its operand's view"
+    # C's view is injective (G2): every access is exactly one element, which
+    # fixes (I, J) at the point. A factor's view may repeat elements (a Hankel
+    # A[i + k], docs section 19): of its elements at the access's address, the
+    # one in row I (A) or column J (B) is the point's; it must be unique.
+    lc = hits_of("C", csh, cst, cof, M, N)
+    if any(len(h) != 1 for h in lc):
+        return "an access of C is not exactly one element of its view"
+    lc = [h[0] for h in lc]
+    la, lb = [], []
+    for ha, hb, (i, j) in zip(hits_of(an, ash, ast, aof, M, K), hits_of(bn, bsh, bst, bof, K, N), lc):
+        ra = [(r, c) for r, c in ha if r == i]
+        rb = [(r, c) for r, c in hb if c == j]
+        if len(ra) != 1 or len(rb) != 1:
+            return "an access of a factor is not exactly one element of its view in the output's row or column"
+        la.append(ra[0])
+        lb.append(rb[0])
     triples = set()
     for (i, k), (k2, j), (i2, j2) in zip(la, lb, lc):
         if i != i2 or k != k2 or j != j2:
@@ -868,6 +887,7 @@ def main():
                                                 "is not implemented: it must be refused)" % (got[0],)))
                 feature["general"] += 1
                 continue
+            feature["general"] += bool(verdict[3])
             if got is None:
                 mismatches.append((i, nest, "oracle ACCEPT %dx%dx%d, compiler did not lower" % mnk))
                 continue
@@ -933,8 +953,9 @@ def main():
               "mutations role_in_k %(role_in_k)d and batch_once %(batch_once)d" % feature)
         print("generalized mapping: batched with C reading a batch loop in a role dimension "
               "%(c_batch_terms)d, batched with two unit extents %(two_unit)d, skewed or merged "
-              "views (recognized, not lowered) %(general)d, C not injective (refused) "
-              "%(c_not_injective)d" % feature)
+              "views (%(general_state)s) %(general)d, C not injective (refused) "
+              "%(c_not_injective)d" % dict(feature, general_state="lowered" if GENERAL_VIEWS_LOWERED
+                                                   else "recognized, not lowered"))
     print("mismatches: %d" % len(mismatches))
 
 

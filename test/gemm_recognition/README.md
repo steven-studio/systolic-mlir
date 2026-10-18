@@ -91,8 +91,11 @@ ISSUE-002, fixed — at 6e25528 it wrapped around).
 offset `o + s · offset`, stride `s · scale` (since the fix of ISSUE-001; before, one view per
 coordinate); offsets ≥ 0 and the operand's last index in bounds on static dims, in checked
 arithmetic (ISSUE-002); equal element types; A and B provably disjoint from C (`restrict` /
-fresh allocations, or `assume-no-alias`); `A × A` through one view, not two different views of
-one memref; the fleet plan's tiles proven an exact partition.
+fresh allocations, or `assume-no-alias`); `A × A` through one view -- the two factors the same
+element map in some orientation of the coordinates (each enumerated upward or downward; since
+2026-10-18 the lowering tries all eight, `A[3 - i][k] * A[k][j]` is lowered with C written
+through a reversed view) --, not two different views of one memref (`A · Aᵀ`); the fleet plan's
+tiles proven an exact partition.
 
 **Driver** (`systolic-cc`): fp32 only (double arrays stay on the host), not `static`/`inline`,
 not from a macro; `--verify` compares every offloaded call with the function as written.
@@ -157,10 +160,10 @@ in its role dimensions as long as its view is injective per batch (`C[i + k][j]`
 rank-1 update, consecutive batches' output windows overlapping and adding up in program order;
 `C[i + j][j]` with `A[i + j][k]`: per `j` a GEMV); (2) **skewed and merged views** -- a dimension
 combining both of an operand's roles (`A[i][i + k]`, `B[j + k][j]`, `C[2i + j][j]`) or one role
-across several dimensions -- are recognized (the readers analysis, `byReaders`) but **not
-lowered yet**: VALID_BUT_LOWERING_UNSUPPORTED ("X has a skewed or merged view ... which is not
-lowered yet"), a FALSE_NEGATIVE of ISSUE-008 until the lowering builds them
-(`memref.reinterpret_cast`); (3) **SQ-5 is decided**: a batched GEMM with two of M, N, K equal
+across several dimensions -- are recognized (the readers analysis, `byReaders`); until Phase D
+(2026-10-18, below) they were **not lowered**: VALID_BUT_LOWERING_UNSUPPORTED ("X has a skewed or
+merged view ... which is not lowered yet"), a FALSE_NEGATIVE of ISSUE-008 until the lowering
+built them (`memref.reinterpret_cast`, done in Phase D); (3) **SQ-5 is decided**: a batched GEMM with two of M, N, K equal
 to 1 per batch (a batch of dot products, `C[i][j] += A[i][j + k] * B[i + k][j]`; a batch of
 scaled vectors) is offloaded; (4) a nest whose canonical decomposition (roles by readers) fails
 but which is a batched GEMM once more loops are demoted to batch loops (a loop read by one
@@ -170,10 +173,25 @@ decomposition: a documented limitation (basis `demotion`), never "not a GEMM"; (
 reading in which one loop drives two coordinates is no longer restored when the analyses refuse
 the nest (their refusal is the reason). Re-decided showcase cases (each with its record
 `redecided`): case_087, case_127 (offloaded), case_088, case_126 (skewed views: recognized,
-FALSE_NEGATIVE until the lowering), case_090, case_095, case_123, case_124, case_125 (valid
+FALSE_NEGATIVE until the lowering of Phase D, TRUE_POSITIVE since), case_090, case_095, case_123, case_124, case_125 (valid
 under another decomposition -- a loop read by one operand as a stride-0 role or a batch loop:
 DOCUMENTED_LIMITATION, basis `broadcast`); case_089 stays REJECT (refused at recognition now:
 element-wise). The three tests of the request are ext_026..028 (section 8, docs section 19.6).
+
+**Phase D, 2026-10-18 (ISSUE-008, the lowering of general views; `docs/AFFINE_GEMM_MAPPING.md`
+section 19.11).** A skewed or merged view -- a dimension combining both of an operand's roles
+(`A[i][i + k]`, `C[2i + j][j]`), a flat `C[4i + j]`, a Hankel `A[i + k]` -- is lowered as one
+`memref.reinterpret_cast` of the operand to rows x columns: the element address of a general
+layout is affine in (row, column), so the view is its element offset, sizes and element strides
+(plus the batch terms through one `affine.apply`), checked per dimension for bounds and for
+64-bit overflow like every other view; the role-pure views keep their `memref.subview`
+construction (nothing changes for transposed, negative-stride or batched GEMMs), except that a
+rank-reducing subview whose rank-reduced type would be ambiguous (a kept dimension of size one
+next to a dropped one, invalid IR before) is now the same explicit view. case_088, case_126 and
+ext_026 are offloaded; the three tests of the request are offloaded (Test 1, Test 3) or refused
+as not a GEMM (Test 2 on a box); `test/SystolicCC/affine_skewed_views.c` executes eighteen such
+kernels against CPU references, one array as both factors through one (skewed, reversed) view
+and the all-once 1 x 1 x 1 nest among them (FPGA board: NOT RUN).
 
 **Review fixes 2026-10-18 (the four-lens adversarial review of Phase C, 27 findings, 25
 confirmed; `docs/AFFINE_GEMM_MAPPING.md` section 19.9).** Compiler: a batched product with
@@ -220,7 +238,11 @@ merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initia
 nest or a scalar accumulator, double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
-`failures/resolved/NOTE-001`), two different views of one array as A and B, and -- since
+`failures/resolved/NOTE-001`), two different views of one array as A and B (the same element
+view in some orientation of the coordinates is ONE view and is offloaded, 2026-10-18), a nest
+whose every loop is a repetition loop of two or more iterations around one scalar
+multiply-accumulate (no loop of a GEMM to anchor on; basis `no_gemm_loop`, 2026-10-18 -- the
+nest of loops that run once is the 1 x 1 x 1 GEMM and is offloaded), and -- since
 ISSUE-008 -- a nest that is a batched GEMM only under a decomposition other than its readers'
 (a loop read by one operand: a stride-0 role or a batch loop, basis `broadcast`; separate
 coordinates in one role, a role that is not one dense coordinate, C not injective per batch:
@@ -254,9 +276,9 @@ section 16); since ISSUE-008 (2026-10-16) every GEMM and batched GEMM of **affin
 (`docs/AFFINE_GEMM_MAPPING.md` section 19: roles by readers, G1, G2, the integer domain): C
 reading batch loops in its role dimensions, injective per batch (`C[i + k][j]`, `C[i + j][j]`
 with `A[i + j][k]`), skewed and merged views (`A[i][i + k]`, `B[j + k][j]`, `C[2i + j][j]`,
-`C[4i + j]` with `j` in [0, 4) -- recognized, their lowering not implemented yet: FALSE_NEGATIVE,
-ISSUE-008), and batched GEMMs with two of M, N, K equal to 1 per batch (SQ-5, decided
-2026-10-16).
+`C[4i + j]` with `j` in [0, 4) -- recognized since 2026-10-16, lowered since 2026-10-18 as
+explicit `memref.reinterpret_cast` views, docs section 19.11), and batched GEMMs with two of
+M, N, K equal to 1 per batch (SQ-5, decided 2026-10-16).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=
@@ -489,8 +511,8 @@ specification puts it in, never the set the compiler's behaviour would suggest:
 | an affine loop condition counting down: `for (int i = 100; 2 * i - 3 > 0; i--)` (99 iterations, rows 2..100) | case_132 | ACCEPT |
 | loops that count down (`i -= 2`, `--k`, `j > 0; j -= 3`, mixed directions) | case_119–122 | ACCEPT since ISSUE-004 (OUT_OF_SCOPE before; the cases stay in negative/) |
 | one operand reversed against the other (`A[7 - i]` with `C[i]`) | mlir_010 | OUT_OF_SCOPE (opposite directions) |
-| the output on its diagonal, an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), coupled subscripts (`A[i][i+k]`, `C[i+k][j]`), a triangular domain | case_123–127, mlir_009 | REJECT until 2026-10-16; since ISSUE-008 (docs/AFFINE_GEMM_MAPPING.md section 19): case_127 ACCEPT (batched rank-1 updates, offloaded), case_126 ACCEPT (a skewed view of A: recognized, FALSE_NEGATIVE until the lowering), case_123–125 OUT_OF_SCOPE (batched GEMMs by demotion, not constructed); mlir_009 REJECT (not the affine image of a box) |
-| the three tests of the 2026-10-16 request: `C[i][j] += A[i][i+k] * B[j+k][j]`; `C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k]` on a box; `C[i][j] += A[i][j+k] * B[i+k][j]` | ext_026–028 | ACCEPT (skewed views of A and B: FALSE_NEGATIVE until the lowering, ISSUE-008); REJECT (element-wise on a box; a GEMM only on the lattice parallelepiped D*, docs section 19.6); ACCEPT (a batch of dot products, SQ-5 decided: offloaded) |
+| the output on its diagonal, an operand reading the wrong coordinate (`B[k][i]`, `A[i][i]`), coupled subscripts (`A[i][i+k]`, `C[i+k][j]`), a triangular domain | case_123–127, mlir_009 | REJECT until 2026-10-16; since ISSUE-008 (docs/AFFINE_GEMM_MAPPING.md section 19): case_127 ACCEPT (batched rank-1 updates, offloaded), case_126 ACCEPT (a skewed view of A: recognized; FALSE_NEGATIVE until the lowering of Phase D, 2026-10-18, offloaded since), case_123–125 OUT_OF_SCOPE (batched GEMMs by demotion, not constructed); mlir_009 REJECT (not the affine image of a box) |
+| the three tests of the 2026-10-16 request: `C[i][j] += A[i][i+k] * B[j+k][j]`; `C[i+j-2k][i+2j+k] += A[i+j-2k][i+j+k] * B[i+j+k][i+2j+k]` on a box; `C[i][j] += A[i][j+k] * B[i+k][j]` | ext_026–028 | ACCEPT (skewed views of A and B: FALSE_NEGATIVE until the lowering of Phase D, 2026-10-18, offloaded since; ISSUE-008); REJECT (element-wise on a box; a GEMM only on the lattice parallelepiped D*, docs section 19.6); ACCEPT (a batch of dot products, SQ-5 decided: offloaded) |
 | out-of-bounds views on static shapes (offset, per-operand stride, offset + extent by one, 2^62 offset) | mlir_001–003, mlir_006 | REJECT (undefined program) |
 | coefficients whose products overflow int64 (scale 2^62 × extent, a per-operand view's last index, the coordinate's exclusive end) | mlir_004, 005, 007, 008 | REJECT; found and fixed ISSUE-002 |
 | per-operand mixed radix of a split coordinate; empty loops (M, N or K = 0, `<=` form); a symbolic bound | case_128–131, mlir_011–013 | UNDETERMINED (SQ-1, SQ-2, SQ-3) |

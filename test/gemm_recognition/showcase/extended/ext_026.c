@@ -16,9 +16,11 @@
  *   Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,
  *   K = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine
  *   (each combines both of its operand's roles), C's is the identity: a GEMM
- *   (docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; the lowering of
- *   skewed views is not implemented yet: a FALSE NEGATIVE ('A has a skewed
- *   or merged view'), ISSUE-008, Phase D.
+ *   (docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; lowered since
+ *   2026-10-18 (Phase D, section 19.11): each skewed view is one
+ *   memref.reinterpret_cast (A': offset 0, strides (8, 1); B': offset 0,
+ *   strides (4, 5)) -- a TRUE POSITIVE (a FALSE NEGATIVE refused at the
+ *   lowering between 2026-10-16 and 2026-10-18), ISSUE-008.
  *
  * Array dimensions: A: float[4][7]   B: float[7][4]   C: float[4][4]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -28,22 +30,15 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): ACCEPT
- *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ *   basis: (since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19; lowered since 2026-10-18, section 19.11: one memref.reinterpret_cast per operand) a GEMM, or a batched GEMM, of general affine operand views -- a dimension combining both of an operand's roles (skewed: A[i][i + k]), both roles in one dimension (merged: C[4 i + j]), C reading batch loops in its role dimensions -- decided by enumeration (casespec.generalized_gemm_on_domain: roles by readers, every role one dense coordinate of its loops, so (P, I, J, K) a bijection onto the box, C injective per batch)
+ * Current implementation (commit 6e25528 with the fix of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
  *   recognition (recognizeLogicalMatmul):    ACCEPT
  *   dense partition (getDenseLogicalGemm):   supported
- *   lowering (--affine-matmul-to-systolic):  unsupported
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: lowering
- *   reason: A has a skewed or merged view (a dimension combining both of its roles, or a role across several dimensions: docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet
- * Classification: FALSE NEGATIVE -- see failures/issues/ISSUE-008
- *   This nest IS a GEMM and the specification requires it to be recognized;
- *   the current recognizer refuses it.  The expectation is not lowered to match
- *   the implementation: the test fails until the recognizer is fixed.
- *   Lowering support: to be verified once recognized.
- *   FPGA execution support: to be verified once lowered.
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- was a FALSE NEGATIVE of failures/issues/ISSUE-008 (fixed)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

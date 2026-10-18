@@ -797,6 +797,89 @@ def predict_by_groups(case, forms, loops):
     return (coords["I"], coords["J"], coords["K"], role_dims, batch_vars, lowering), None, False
 
 
+def _factor_view(forms, dims, coords, loops):
+    """The element view an operand's domain forms span -- the lowering's
+    LogicalOperand (AffineMatmulToSystolic.cpp getLogicalOperand, docs/
+    AFFINE_GEMM_MAPPING.md section 19.11), whatever its construction (a
+    memref.subview or an explicit memref.reinterpret_cast): with w the
+    memref's row-major element strides and `coords` the operand's two role
+    coordinates (domain forms over the loop counters; None or a constant for
+    a role of extent one), the element at the roles' ordinals (r, c) -- each
+    coordinate enumerated upward -- is at
+        O + S[0] * r + S[1] * c + sum_s B[s] * x_s
+    with x_s the batch loops' counters.  Returns (O, S, extents, B) -- S a
+    list, extents a list, B a dict {batch var: coefficient} without zeros --
+    or None when a form's restriction to a role's loops is not a multiple of
+    the coordinate (not a view of it).  A role of extent one has stride 1,
+    as in the compiler."""
+    by_var = {lp.var: lp for lp in loops}
+    w = [volume(dims[d + 1:]) for d in range(len(dims))]
+    slot_of, origin, sigma, ext = {}, [0, 0], [1, 1], [1, 1]
+    for s, g in enumerate(coords):
+        if g is None or g.is_const():
+            continue
+        for v in g.coef:
+            slot_of[v] = s
+        origin[s] = _form_range(LinearForm(g.coef, 0), loops)[0]
+        sigma[s] = min(abs(c * by_var[v].step) for v, c in g.coef.items())
+        ext[s] = volume([by_var[v].trip() for v in g.coef])
+    O, stride, B = 0, [0, 0], {}
+    for d, f in enumerate(forms):
+        O += w[d] * f.const
+        mult = [0, 0]
+        for v, c in f.coef.items():
+            s = slot_of.get(v)
+            if s is None:
+                B[v] = B.get(v, 0) + w[d] * c
+                continue
+            m, rem = divmod(c, coords[s].coef[v])
+            if rem or (mult[s] and mult[s] != m):
+                return None
+            mult[s] = m
+        for s in (0, 1):
+            if not mult[s]:
+                continue
+            if any(f.coef.get(v, 0) != mult[s] * cg for v, cg in coords[s].coef.items()):
+                return None
+            O += w[d] * mult[s] * origin[s]
+            stride[s] += w[d] * mult[s]
+    S = [1 if ext[s] == 1 else stride[s] * sigma[s] for s in (0, 1)]
+    return O, S, ext, {v: c for v, c in B.items() if c}
+
+
+def _one_tensor_serves_both(view_a, view_b):
+    """LogicalOperand::sameView with the orientation search of lowerOne
+    (AffineMatmulToSystolic.cpp): the first factor's (I, K) view and the
+    second's (K, J) view are the same element map -- offset, signed strides,
+    extents and batch terms -- for some orientation of the three coordinates
+    (each enumerated upward or downward: I reverses the first factor's rows,
+    J the second's columns, K the first's columns and the second's rows; a
+    reversed coordinate of extent n moves the offset by (n - 1) strides and
+    negates the stride).  Then one read-only tensor serves both factors."""
+    import itertools
+    if view_a is None or view_b is None:
+        return False
+    oa, sa, ea, ba = view_a
+    ob, sb, eb, bb = view_b
+    if ea != eb or ba != bb:
+        return False
+
+    def flipped(o, st, e, slots):
+        st = list(st)
+        for slot in slots:
+            if e[slot] > 1:
+                o += st[slot] * (e[slot] - 1)
+                st[slot] = -st[slot]
+        return o, st
+
+    for fi, fj, fk in itertools.product((False, True), repeat=3):
+        a = flipped(oa, sa, ea, [slot for slot, f in ((0, fi), (1, fk)) if f])
+        b = flipped(ob, sb, eb, [slot for slot, f in ((0, fk), (1, fj)) if f])
+        if a == b:
+            return True
+    return False
+
+
 def _primitive(v):
     """v divided by the gcd of its entries, its first nonzero entry positive
     (lattice::primitive)."""
@@ -928,10 +1011,18 @@ def predict_by_readers(case, forms, loops):
                               "lowered (spec question SQ-1)"
                               % (role, name[rp], dp, case.arrays[rp].subs[dp], name[rq], dq,
                                  case.arrays[rq].subs[dq]))
-        g = _primitive(next(x for x in rest if any(x)))
+        pick = next(i for i, x in enumerate(rest) if any(x))
+        g = _primitive(rest[pick])
         lead = next(i for i, x in enumerate(g) if x != 0)
         direction[role] = g
-        coords[role] = LinearForm({lp.var: c for lp, c in zip(lps, g)}, 0)
+        # the coordinate returned to predict() in COUNTER space (the loops'
+        # own counters, as every other path's): the primitive direction of
+        # the same subscript's restriction to the role's loops -- the dense
+        # check multiplies a coefficient by the loop's step itself, so a
+        # coefficient already on the ordinal counter would fold a count-down
+        # loop's step twice (review of 2026-10-18)
+        counter = _primitive([subs[pick][2].coef.get(lp.var, 0) for lp in lps])
+        coords[role] = LinearForm({lp.var: c for lp, c in zip(lps, counter)}, 0)
         mult[role] = [x[lead] // g[lead] for x in rest]
     # every operand's layout: per dimension the multipliers of its two roles
     roles_of = {first: ("I", "K"), second: ("K", "J"), "c": ("I", "J")}
@@ -1124,7 +1215,13 @@ def predict(case: Case) -> dict:
     # 2026-10-15): the positional form first -- the checkpoint's rule --,
     # then the analysis by groups and roles (transposes, extent-one roles,
     # other ranks).
-    if not used_vars:
+    # A loop that runs once is an iteration dimension whether or not an
+    # access names it (a constant on the domain, Lemma 0; the recognizer and
+    # hoistRepetitionLoops read it so since 2026-10-18): an all-constant nest
+    # of such loops is the 1 x 1 x 1 GEMM (SQ-4). A loop of two or more
+    # iterations no access uses repeats the accumulation.
+    once_vars = {lp.var for lp in loops if lp.trip() == 1}
+    if not (used_vars | once_vars):
         ex["recognition"] = "reject"
         return stop("recognition", "no loop counter is used by the accesses")
     nr = [len(forms[r]) for r in ("a", "b", "c")]
@@ -1207,8 +1304,8 @@ def predict(case: Case) -> dict:
     # (C[i + k][j], since C may read batch loops in its role dimensions).
     # Decided by enumeration, _hoist_blocked; a single-iteration repetition
     # or reduction reorders nothing (failures/resolved/NOTE-001).
-    used_idx = [i for i, lp in enumerate(loops) if lp.var in used_vars]
-    rep_idx = [i for i, lp in enumerate(loops) if lp.var not in used_vars]
+    used_idx = [i for i, lp in enumerate(loops) if lp.var in used_vars or lp.trip() == 1]
+    rep_idx = [i for i, lp in enumerate(loops) if i not in used_idx]
     blocked = _hoist_blocked(case, loops, used_vars)
     if blocked is not None:
         ex["recognition"] = "reject"
@@ -1295,13 +1392,12 @@ def predict(case: Case) -> dict:
             arr = case.arrays[r]
             if lowering["general"][r]:
                 # a skewed or merged view (docs/AFFINE_GEMM_MAPPING.md section
-                # 19): recognized, its lowering is not implemented yet
-                ex["lowering"] = "unsupported"
-                return stop("lowering", "%s has a skewed or merged view (a dimension combining "
-                            "both of its roles, or a role across several dimensions: "
-                            "docs/AFFINE_GEMM_MAPPING.md section 19), which is not lowered yet" % nm)
-            rdims = [role_dims[g][r] for g in order[r] if g in role_dims and r in role_dims[g]]
-            dims = [d for d in range(len(forms[r])) if d not in rdims] + rdims
+                # 19.11): an explicit memref.reinterpret_cast view, every
+                # dimension's index range checked in memref order
+                dims = list(range(len(forms[r])))
+            else:
+                rdims = [role_dims[g][r] for g in order[r] if g in role_dims and r in role_dims[g]]
+                dims = [d for d in range(len(forms[r])) if d not in rdims] + rdims
             for d in dims:
                 lo, hi = _form_range(forms[r][d], loops)
                 if lo < 0 or (d >= 1 and hi >= arr.dims[d]):
@@ -1316,9 +1412,17 @@ def predict(case: Case) -> dict:
                 ex["lowering"] = "unsupported"
                 return stop("lowering", "%s may overlap C; declare the arguments llvm.noalias (C restrict) "
                             "or pass assume-no-alias" % nm)
-        if case.a.name == case.b.name and forms["a"] != forms["b"]:
-            ex["lowering"] = "unsupported"
-            return stop("lowering", "A and B are different views of the same memref")
+        if case.a.name == case.b.name:
+            # one array as both factors: lowered iff one tensor serves both
+            # (the same element view in some orientation of the coordinates,
+            # LogicalOperand::sameView after the orientation search of
+            # lowerOne); two different views of one memref are refused
+            (first, _), (second, _) = lowering["order"][:2]
+            view_a = _factor_view(forms[first], case.arrays[first].dims, (I, K), loops)
+            view_b = _factor_view(forms[second], case.arrays[second].dims, (K, J), loops)
+            if not _one_tensor_serves_both(view_a, view_b):
+                ex["lowering"] = "unsupported"
+                return stop("lowering", "A and B are different views of the same memref")
         ex["lowering"] = "supported"
         if case.elem != "float":
             ex["driver"] = "stays_on_host"
@@ -1381,9 +1485,17 @@ def predict(case: Case) -> dict:
             ex["lowering"] = "unsupported"
             return stop("lowering", "%s may overlap C; declare the arguments llvm.noalias (C restrict) "
                         "or pass assume-no-alias" % nm)
-    if case.a.name == case.b.name and vA != vB:
-        ex["lowering"] = "unsupported"
-        return stop("lowering", "A and B are different views of the same memref")
+    if case.a.name == case.b.name:
+        # one array as both factors: lowered iff one tensor serves both (the
+        # same element view in some orientation of the coordinates -- the
+        # direction of enumeration counts: A[i][k] against A[3 - k][j] are
+        # two views; LogicalOperand::sameView after lowerOne's orientation
+        # search); two different views of one memref are refused
+        view_a = _factor_view(forms[ka], case.arrays[ka].dims, (I, K), loops)
+        view_b = _factor_view(forms[kb], case.arrays[kb].dims, (K, J), loops)
+        if not _one_tensor_serves_both(view_a, view_b):
+            ex["lowering"] = "unsupported"
+            return stop("lowering", "A and B are different views of the same memref")
     ex["lowering"] = "supported"
 
     # ---- driver: systolic-cc policy
@@ -1468,7 +1580,8 @@ SPEC_BASIS = {
                    "products (C[i][j] += A[i][j + k] B[i + k][j]) or of scaled vectors (the "
                    "reduction index in the output) -- is a batched GEMM of affine views: lowered, "
                    "one small tile per batch value",
-    "generalized_views": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19) a GEMM, or a "
+    "generalized_views": "(since 2026-10-16, docs/AFFINE_GEMM_MAPPING.md section 19; lowered since "
+                         "2026-10-18, section 19.11: one memref.reinterpret_cast per operand) a GEMM, or a "
                          "batched GEMM, of general affine operand views -- a dimension combining "
                          "both of an operand's roles (skewed: A[i][i + k]), both roles in one "
                          "dimension (merged: C[4 i + j]), C reading batch loops in its role "
@@ -1519,7 +1632,21 @@ SPEC_BASIS = {
                            "windows overlap, C[i + k][j]: affine::isValidLoopInterchangePermutation "
                            "refuses it, the accumulation order would change; test/SystolicCC/depth.c "
                            "d4_illegal; decided by enumeration (casespec.repeat_in_reduction)",
-    "same_memref_views": "AffineMatmulToSystolic.cpp: 'A and B are different views of the same memref'",
+    "no_gemm_loop": "every loop of the nest is a repetition loop of two or more iterations -- no access "
+                    "names a loop counter and no loop runs once --, so the body is one scalar "
+                    "multiply-accumulate repeated and the nest has no loop of a GEMM to anchor on: "
+                    "the recognizer decides nothing (UNKNOWN, 'loop 0 of the nest is used by no "
+                    "access'); the nest of loops that run once is the 1 x 1 x 1 GEMM (SQ-4) and is "
+                    "offloaded, a repetition loop around a GEMM loop re-runs the tile (README section 2; "
+                    "a documented limitation, 2026-10-18)",
+    "same_memref_views": "AffineMatmulToSystolic.cpp lowerOne: 'A and B are different views of the same "
+                         "memref' -- one array as both factors is lowered only when one read-only tensor "
+                         "serves both: the first factor's (I, K) view and the second's (K, J) view are the "
+                         "same element map in some orientation of the coordinates (each enumerated upward "
+                         "or downward; LogicalOperand::sameView, the orientation search of 2026-10-18); "
+                         "A . A^T and a skew read by one factor only are two views (docs/AFFINE_GEMM_MAPPING.md "
+                         "section 7, README section 2); decided by enumeration "
+                         "(casespec.one_tensor_serves_both_factors)",
     "matvec": "(no longer a limitation since 2026-10-15, P0) a matrix-vector product is the GEMM "
               "with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), "
               "docs/AFFINE_GEMM_MAPPING.md section 2",
@@ -1752,6 +1879,8 @@ def _check_decomposition(loops, forms, assignment):
     if len(elements) != out["ext"]["I"] * out["ext"]["J"]:
         out["why"] = "C's view is not injective on the (I, J) box"
         return out
+    out["ordinal"] = ordinal
+    out["roles"] = by_role
     # the views: general (a dimension on both roles, or a role on several
     # dimensions), stride-0 (a role of extent >= 2 the operand does not read)
     for r, rl in (("a", "IK"), ("b", "KJ"), ("c", "IJ")):
@@ -1854,6 +1983,73 @@ def generalized_gemm_on_domain(case: Case, max_points: int = 200000):
     return {"verdict": "NOT_GEMM", "why": first_failure}
 
 
+def one_tensor_serves_both_factors(case: Case, max_points: int = 200000):
+    """One array as both factors (A x A): whether ONE tensor serves both --
+    the first factor's (I, K) element map and the second factor's (K, J)
+    element map coincide for some orientation of the three coordinates (each
+    of I, J, K enumerated upward or downward: a relabelling of the ordinals,
+    the same products and sums) -- by enumeration on the domain, with the
+    canonical decomposition of docs/AFFINE_GEMM_MAPPING.md section 19.2 and
+    its ordinals (the first factor and C read I, the second and C read J,
+    both factors read K, all three a batch loop).  The lowering serves the
+    two factors through one view exactly then (docs section 7); two different
+    views of one array are a documented limitation (README section 2).
+    None when the nest has no canonical decomposition or the domain is too
+    large; the caller then decides nothing from it."""
+    import itertools
+    first, second = ("b", "a") if case.stmt == "+=BA" else ("a", "b")
+    forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
+    used = set()
+    for fl in forms.values():
+        for f in fl:
+            used |= f.vars()
+    loops = [lp for lp in case.loops if lp.var in used]
+    total = 1
+    for lp in loops:
+        total *= len(lp.values())
+    if total == 0 or total > max_points:
+        return None
+    many = [lp for lp in loops if lp.trip() >= 2]
+    once = [lp for lp in loops if lp.trip() == 1]
+    role_of = {frozenset((first, "c")): "I", frozenset((second, "c")): "J",
+               frozenset((first, second)): "K", frozenset("abc"): "P"}
+    assignment = {}
+    for lp in many:
+        readers = frozenset(r for r in forms if any(f.coef.get(lp.var, 0) for f in forms[r]))
+        if readers not in role_of:
+            return None
+        assignment[lp.var] = role_of[readers]
+    res = _check_decomposition(many + once, forms, assignment)
+    if res["why"] is not None:
+        return None
+    ordinal, ext = res["ordinal"], res["ext"]
+    batch = [lp.var for lp in many if assignment[lp.var] == "P"]
+    dims = {r: case.arrays[r].dims for r in (first, second)}
+    w = {r: [volume(dims[r][d + 1:]) for d in range(len(dims[r]))] for r in dims}
+    maps = {first: {}, second: {}}
+    names = [lp.var for lp in loops]
+    for x in itertools.product(*[lp.values() for lp in loops]):
+        env = dict(zip(names, x))
+        o = {role: ordinal[role](env) for role in "IJK"}
+        b = tuple(env[v] for v in batch)
+        for r, key in ((first, (o["I"], o["K"], b)), (second, (o["K"], o["J"], b))):
+            addr = sum(w[r][d] * f.eval(env) for d, f in enumerate(forms[r]))
+            if maps[r].setdefault(key, addr) != addr:
+                return None      # not a view of its roles (G1 failed)
+    ea, eb = (ext["I"], ext["K"]), (ext["K"], ext["J"])
+    if ea != eb:
+        return False
+
+    def oriented(m, e, flips):
+        return {(e[0] - 1 - p if flips[0] else p, e[1] - 1 - q if flips[1] else q, b): a
+                for (p, q, b), a in m.items()}
+
+    for fi, fj, fk in itertools.product((False, True), repeat=3):
+        if oriented(maps[first], ea, (fi, fk)) == oriented(maps[second], eb, (fk, fj)):
+            return True
+    return False
+
+
 def repeat_in_reduction(case: Case) -> bool:
     """A repetition loop (no access uses it) of two or more iterations that
     cannot be moved outward without reordering the accumulations into one
@@ -1876,6 +2072,14 @@ def spec_expect(case: Case) -> dict:
     out = {"recognition": None, "basis_key": None, "basis": None, "legal_gemm": bool(an.get("is_gemm"))}
 
     def done(rec, key):
+        # one array as both factors (A x A): accepted only when one tensor
+        # serves both -- the same element view in some orientation of the
+        # coordinates (one_tensor_serves_both_factors, by enumeration);
+        # otherwise two different views of one array, a documented limitation
+        # (README section 2, docs section 7).  Applied to every acceptance,
+        # whichever decision reached it.
+        if rec == "ACCEPT" and case.a.name == case.b.name and one_tensor_serves_both_factors(case) is False:
+            rec, key = "OUT_OF_SCOPE", "same_memref_views"
         out["recognition"] = rec
         out["basis_key"] = key
         out["basis"] = SPEC_BASIS[key]
@@ -1887,6 +2091,15 @@ def spec_expect(case: Case) -> dict:
 
     if case.kernel_style == "scalar_acc":
         return done("OUT_OF_SCOPE", "scalar_acc")
+    # Every loop a repetition loop of two or more iterations (no access names
+    # a counter, no loop runs once): one scalar multiply-accumulate repeated,
+    # no loop of a GEMM to anchor on -- a documented limitation (the
+    # compiler decides nothing: UNKNOWN).
+    if (case.loops and an.get("affine") and case.kernel_style != "init_inside"
+            and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA")
+            and all(lp.trip() >= 2 for lp in case.loops)
+            and not any(f.vars() for arr in case.arrays.values() for f in arr.forms())):
+        return done("OUT_OF_SCOPE", "no_gemm_loop")
     if not an.get("is_gemm"):
         # legal_gemm: the nest is a GEMM, or a batched GEMM, of affine views
         # under the generalized definition (docs/AFFINE_GEMM_MAPPING.md
@@ -2020,17 +2233,8 @@ def spec_expect(case: Case) -> dict:
         fa_, fb_ = forms[ra][v[ra][g]["position"]], forms[rb][v[rb][g]["position"]]
         if shared_coordinate(fa_, fb_) is None:
             return done("UNDETERMINED", "SQ-1")
-    if case.a.name == case.b.name:
-        # one array as both operands: the lowering serves both through ONE
-        # read-only view, so A's (I, K) view must be B's (K, J) view
-        v = an["views"]
-        ext = an["extents"]
-
-        def key(role, g):
-            return (v[role][g]["first"], v[role][g]["last"], ext[g])
-
-        if key("a", "I") != key("b", "K") or key("a", "K") != key("b", "J"):
-            return done("OUT_OF_SCOPE", "same_memref_views")
+    # (one array as both operands: done() applies the one-tensor rule,
+    # same_memref_views, to every acceptance)
     return done("ACCEPT", "batched" if "batched" in tags else "dense_gemm")
 
 

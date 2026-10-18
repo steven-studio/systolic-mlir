@@ -33,7 +33,7 @@
  *
  * Mathematical GEMM: YES
  * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: AffineMatmulToSystolic.cpp: 'A and B are different views of the same memref'
+ *   basis: AffineMatmulToSystolic.cpp lowerOne: 'A and B are different views of the same memref' -- one array as both factors is lowered only when one read-only tensor serves both: the first factor's (I, K) view and the second's (K, J) view are the same element map in some orientation of the coordinates (each enumerated upward or downward; LogicalOperand::sameView, the orientation search of 2026-10-18); A . A^T and a skew read by one factor only are two views (docs/AFFINE_GEMM_MAPPING.md section 7, README section 2); decided by enumeration (casespec.one_tensor_serves_both_factors)
  * Current implementation (commit 6e25528 with the fix of ISSUE-001, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated

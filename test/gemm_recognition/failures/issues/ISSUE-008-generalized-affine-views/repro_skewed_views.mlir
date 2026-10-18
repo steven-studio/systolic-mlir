@@ -1,13 +1,12 @@
 // ISSUE-008: GEMMs whose operand views are affine but not strided sub-matrices
 // (docs/AFFINE_GEMM_MAPPING.md section 19) -- a dimension combining both of an
 // operand's roles. Recognized and verified since 2026-10-16 (the readers
-// analysis: G1, G2); the lowering does not build such a view yet (it needs a
-// memref.reinterpret_cast, not a memref.subview) and refuses them with "X has a
-// skewed or merged view ... which is not lowered yet"
-// [VALID_BUT_LOWERING_UNSUPPORTED]. The specification requires them lowered:
-// this is the XFAIL reproducer of the open part of the issue; once the lowering
-// builds the views it XPASSes, then the XFAIL line is removed and the file is a
-// permanent regression test.
+// analysis: G1, G2); until 2026-10-18 the lowering refused them ("X has a
+// skewed or merged view ... which is not lowered yet", VALID_BUT_LOWERING_
+// UNSUPPORTED) and this file was the XFAIL reproducer of that open part of the
+// issue. Since Phase D (section 19.11) each such view is one
+// memref.reinterpret_cast and the three nests are lowered: a permanent
+// regression test.
 //
 //   @test1     Test 1 of the request: C[i][j] += A[i][i + k] * B[j + k][j]
 //              (showcase ext_026)
@@ -15,7 +14,6 @@
 //              (showcase case_088)
 //   @skewed_a  C[i][j] += A[i][i + k] * B[k][j] (showcase case_126)
 //
-// XFAIL: *
 // RUN: systolic-opt "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true classify=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s
 //

@@ -418,9 +418,10 @@ Ng(88, "skewed_output_seed", "coupled_mapping",
              "injective (rank [lamI lamJ] = 2), so the nest is the GEMM C' += A' B' with\n"
              "that skewed view C' (docs/AFFINE_GEMM_MAPPING.md section 19: G1, G2).\n"
              "Re-decided 2026-10-16 (ISSUE-008; until then rejected: not a strided\n"
-             "sub-matrix of C).  Recognized since; the lowering of a skewed view (a\n"
-             "memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE, refused\n"
-             "at the lowering ('C has a skewed or merged view').",
+             "sub-matrix of C).  Recognized since; lowered since 2026-10-18 (Phase D,\n"
+             "section 19.11): C's skewed view is one memref.reinterpret_cast (offset 0,\n"
+             "sizes 4 x 4, element strides (9, 5) on the 10 x 4 array) -- a TRUE POSITIVE\n"
+             "(a FALSE NEGATIVE refused at the lowering between 2026-10-16 and 2026-10-18).",
    issue="ISSUE-008",
    redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
              "19): REJECT (not a strided sub-matrix of C) before; ACCEPT since -- a GEMM "
@@ -737,9 +738,11 @@ EXTENDED = [
              math_note="Test 1, C[i][j] += A[i][i+k] * B[j+k][j]: by the readers I = i, J = j,\n"
                        "K = k; the views A'(I, K) = A[I][I+K] and B'(K, J) = B[J+K][J] are affine\n"
                        "(each combines both of its operand's roles), C's is the identity: a GEMM\n"
-                       "(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; the lowering of\n"
-                       "skewed views is not implemented yet: a FALSE NEGATIVE ('A has a skewed\n"
-                       "or merged view'), ISSUE-008, Phase D.",
+                       "(docs/AFFINE_GEMM_MAPPING.md section 19.6).  Recognized; lowered since\n"
+                       "2026-10-18 (Phase D, section 19.11): each skewed view is one\n"
+                       "memref.reinterpret_cast (A': offset 0, strides (8, 1); B': offset 0,\n"
+                       "strides (4, 5)) -- a TRUE POSITIVE (a FALSE NEGATIVE refused at the\n"
+                       "lowering between 2026-10-16 and 2026-10-18), ISSUE-008.",
              issue="ISSUE-008"),
     ext_case(27, "test2_on_a_box", "generalized_views",
              [L("i", 2, 10, "X"), L("j", 0, 6, "X"), L("k", 0, 2, "X")],
@@ -986,9 +989,10 @@ Bn(126, "a_column_couples_i_and_k", "coupled_mapping",
              "(row-major strides (16, 1)) -- and C's view is the identity (injective): a\n"
              "GEMM by docs/AFFINE_GEMM_MAPPING.md section 19 (G1, G2; Test 1's shape with\n"
              "B plain).  Re-decided 2026-10-16 (ISSUE-008; until then rejected: 'A' is not\n"
-             "an affine strided view of A').  Recognized since; the lowering of a skewed\n"
-             "view (a memref.reinterpret_cast) is not implemented yet: a FALSE NEGATIVE,\n"
-             "refused at the lowering ('A has a skewed or merged view').",
+             "an affine strided view of A').  Recognized since; lowered since 2026-10-18\n"
+             "(Phase D, section 19.11): A' is one memref.reinterpret_cast (offset 0,\n"
+             "sizes 8 x 8, element strides (16, 1)) -- a TRUE POSITIVE (a FALSE NEGATIVE\n"
+             "refused at the lowering between 2026-10-16 and 2026-10-18).",
    issue="ISSUE-008",
    redecided="2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section "
              "19): REJECT (A' not a strided view of A) before; ACCEPT since -- a GEMM with a "

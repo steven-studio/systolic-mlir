@@ -309,8 +309,14 @@ Policy, conservative **[proved under its premise]**: A and B must be provably di
 - **Otherwise** the nest is refused with the reason "A may overlap C". This holds for views of one
   root buffer even with disjoint regions; bufferization's `restrict` forbids two tensors of one
   buffer, and region disjointness is not analysed (P1).
-- **A and B the same memref** (read-only) is allowed only through the same view (one tensor).
-  Different views (`A·Aᵀ`) are VALID_BUT_LOWERING_UNSUPPORTED.
+- **A and B the same memref** (read-only) is allowed only through the same view (one tensor):
+  the first factor's (I, K) element map and the second's (K, J) element map coincide. Each GEMM
+  coordinate may be enumerated upward or downward -- a relabelling of the ordinals that changes
+  no product and no sum, every operand's view reversed along it --, so the lowering tries the
+  eight orientations and uses the first in which the two views coincide for all three operands
+  (2026-10-18; `A[3 - i][k] * A[k][j]`: with I downward both factors are the whole memref and C
+  is written through a reversed view). Two different views in every orientation (`A·Aᵀ`, a skew
+  read by one factor only) are VALID_BUT_LOWERING_UNSUPPORTED.
 
 Negative-stride and transposed views change none of this: they are views of the same root
 buffers and are traced through `ViewLikeOpInterface` as before.
@@ -1132,9 +1138,9 @@ way and checks every accepted nest's views address by address.
 | category | how it is recorded | examples |
 |---|---|---|
 | mathematically not a GEMM | specification REJECT; compiler PROVEN_INVALID (or UNKNOWN where it does not decide) | every loop read by all three operands (element-wise: Test 2 on a box, case_089, ext_027, a batched product with M = N = K = 1 -- PROVEN_INVALID); out-of-bounds subscripts (PROVEN_INVALID); a sum, a third factor, no accumulation (PROVEN_INVALID); a non-box domain that is not the affine image of a box (the triangle, mlir_009: REJECT by 19.7's symmetry argument, the compiler says UNKNOWN -- it decides no non-box domain) |
-| explicitly outside the specification | OUT_OF_SCOPE, DOCUMENTED_LIMITATION | double or mixed precision, operands that may alias C, alpha ≠ 1, an initialisation inside the nest, a repetition loop inside a reduction loop, an operand shared by every batch |
+| explicitly outside the specification | OUT_OF_SCOPE, DOCUMENTED_LIMITATION | double or mixed precision, operands that may alias C, alpha ≠ 1, an initialisation inside the nest, a repetition loop inside a reduction loop, an operand shared by every batch, one array as both factors through two different views (`A·Aᵀ`; §7), a nest whose every loop is a repetition loop around one scalar multiply-accumulate (no GEMM loop to anchor on; the all-once nest is the 1 x 1 x 1 GEMM and is offloaded) |
 | recognition not implemented | OUT_OF_SCOPE (`demotion`, `broadcast`); UNDETERMINED (SQ-1); compiler VALID_BUT_LOWERING_UNSUPPORTED or UNKNOWN | a batched GEMM only under another decomposition (19.2): a loop read by one operand (case_090, case_095, case_123–125: a stride-0 view or a batch loop), two coordinates in one role, `A[i][k0 + k1]`, C not injective per batch (`C[i + j]`); SQ-1 (UNKNOWN); a parallelogram domain or Test 2's D* written as its own loop nest (19.7: the parametrization is not constructed; every readers verdict is UNKNOWN on a non-box domain); a repetition loop the lowering cannot move outward (UNKNOWN: the mapping is not analysed) |
-| lowering not implemented | ACCEPT, FALSE_NEGATIVE of ISSUE-008; compiler VALID_BUT_LOWERING_UNSUPPORTED ("skewed or merged view") | Test 1 (ext_026), case_088 (`C[2i + j][j]`), case_126 (`A[i][i + k]`), a flat injective C (`C[4i + j]`), a Hankel view (`A[i + k]`) |
+| lowering not implemented | ACCEPT, FALSE_NEGATIVE; compiler VALID_BUT_LOWERING_UNSUPPORTED | none known since Phase D (19.11): every GEMM of affine views the recognizer constructs with three distinct operands, or with one array as both factors through one tensor (§7), is lowered -- Test 1 (ext_026), case_088 (`C[2i + j][j]`), case_126 (`A[i][i + k]`), a flat injective C (`C[4i + j]`), a Hankel view (`A[i + k]`) were in this row between 2026-10-16 and 2026-10-18. One array as both factors through two different views in every orientation (`A·Aᵀ`, `A[i][i + k] * A[k][j]`) is recognized and refused VALID_BUT_LOWERING_UNSUPPORTED: the specification lists it in the row above (OUT_OF_SCOPE `same_memref_views`, decided by enumeration), so it is a documented limitation, not a false negative |
 | hardware or runtime not supporting it | the driver's refusal | double arrays (the datapath is fp32); a floating-point nest without the reassociation permission (§6); the FPGA board itself was not run (NOT RUN) |
 
 **Verification of Phase C** (final run 2026-10-18 after the review fixes; LLVM 24 toolchain
@@ -1251,3 +1257,141 @@ role dimensions' order instead of the swaps, the broadcast refusal instead of L6
 domain (Theorem 3 on the box, UNKNOWN elsewhere) that the lines lack. Where the two disagree
 on a case, the case is listed above with its proof, as the request asks, rather than one of
 them silently adjusted.
+
+
+### 19.11 Phase D: the lowering of general views (2026-10-18)
+
+**What a general layout is, in addresses.** For an operand X of rank ρ with row-major element
+strides w_d (w_{ρ−1} = 1, w_d = w_{d+1} · size_{d+1}; a dynamic leading dimension has a static
+stride) the readers analysis records every dimension as
+
+  index_d(x) = c_d + λ_{d,0} · y_0 + λ_{d,1} · y_1 + Σ_s β_{d,s} x_s
+
+(c_d = dimConstants, λ = roleCoefficients on X's two roles in GEMM order, β = batchCoefficients on
+the batch loops; G1 checks this on the domain). With the dense partition's y_r = o_r + s_r · ord_r
+(offset, scale, ordinal in [0, E_r)) the element address of the view's element (r, c) is
+
+  addr(r, c) = Σ_d w_d · index_d
+             = [Σ_d w_d (c_d + λ_{d,0} o_0 + λ_{d,1} o_1)] + [Σ_d w_d λ_{d,0} s_0] · r
+               + [Σ_d w_d λ_{d,1} s_1] · c + Σ_s [Σ_d w_d β_{d,s}] · x_s
+             = O + S_0 · r + S_1 · c + Σ_s B_s · x_s,
+
+affine in (r, c) with integer strides S_0, S_1 and an offset O plus batch terms: exactly a
+strided two-dimensional view of the memref's buffer, whatever the memref's own dimensions. The
+lowering builds it as one `memref.reinterpret_cast` of the operand to `rows x cols` with
+`offset: [O]` (or the `affine.apply` of O + Σ B_s x_s over the re-emitted batch counters),
+`sizes: [E_row, E_col]`, `strides: [S_0, S_1]` -- the offset relative to the buffer's base, as
+the operation defines it, which is why it is applied to the function argument (identity layout,
+offset 0) and never to a view. A unit extent gets stride 1 (immaterial). The staging copies and
+the tile slices downstream are layout-agnostic (`bufferization.to_tensor` of a strided memref,
+`tensor.extract_slice`, `memref.copy` → `memrefCopy` on the strides), so Test 1 reaches the
+runtime as the same `systolic.matmul_tile` calls as a plain GEMM.
+
+**Correctness, condition by condition.**
+
+- G1 (every iteration's update is its slot's) is the identity above, checked on the domain by
+  the recognizer in checked arithmetic (`dimensionsAreViews`).
+- G3 (bounds): per dimension d the index range over the domain -- c_d plus each role's extreme
+  contribution (λ s · 0 and λ s (E − 1), either order) plus the batch range -- must lie in
+  [0, size_d) (lo ≥ 0 always; the dynamic leading dimension is the program's guarantee), in
+  checked arithmetic; then the extreme element addresses are checked to fit in 64 bits. Since a
+  valid in-bounds index tuple has a unique row-major address, every view element is an element
+  the nest itself accesses, and the view never leaves the allocation.
+- G2 for C: the recognizer's injectivity on the (I, J) box is on the index tuple; distinct
+  in-bounds tuples have distinct addresses, so the view of C is injective: each tile reads and
+  writes each C element once, and the tiles of one batch value write disjoint elements. Across
+  batch values the windows may overlap (C[i + k][j]); the batch loops run in program order and
+  each tile's read-modify-write of its window completes before the next (§19.3, the runtime is
+  synchronous), so the overlapping updates add up in order.
+- A and B may repeat elements (a Hankel A[i + k]: S_0 = S_1): a read view, harmless; the
+  address-exact oracle locates a factor's element by the row (A) or column (B) the output
+  fixes, so repeated elements are checked too.
+- A flat C[4i + j] with j < 4: S_0 = 4, S_1 = 1, injective on the box because G2 holds
+  (4 ≥ N). The same flat C with j < 5 is refused by the recognizer (G2), never lowered.
+- A skew read backwards (A[i][6 − i − k]: S_1 = −1) is a negative stride, as the role-pure
+  views already have (§5).
+- The same explicit view is also used for a role-pure operand whose rank-reducing subview
+  would be ambiguous -- a kept dimension of size one next to a dropped one (`memref.subview`'s
+  rank-reduced result type does not say which size-one dimension was dropped; the verifier's
+  guess by position or by strides differed from the lowering's for a batched 1 x K view with a
+  stride-2 subscript, invalid IR for a valid nest: review finding 7). The reinterpret_cast
+  carries the offset and strides explicitly and is unambiguous.
+- Nothing changes for the role-pure views otherwise: they keep their `memref.subview` /
+  `memref.transpose` / `memref.expand_shape` construction (every earlier lit expectation holds),
+  so transposed, negative-stride and batched GEMMs are lowered as before.
+
+**What is still not lowered**: a broadcast (stride-0) view (§10, refused by the recognizer: a
+one-reader loop), a demoted decomposition (§19.2), SQ-1, non-box domains (§19.7) -- recognition
+limits, listed in §19.9's table --, and one array as both factors through two different views
+(§7: `A·Aᵀ`, `A[i][i + k] * A[k][j]`; recognized, refused by the lowering as
+VALID_BUT_LOWERING_UNSUPPORTED, OUT_OF_SCOPE in the specification). One array as both factors
+through ONE view is lowered, skewed or not, in whichever orientation of the coordinates the two
+views coincide (`A[i][i + k] * A[k][k + j]`: one `reinterpret_cast` feeds both operands;
+`A[i][i + 3 - k] * A[3 - k][3 - k + j]`: the same once K is enumerated downward).
+
+**Review fixes (2026-10-18, before the Phase D commit).** The adversarial review of Phase D (four
+lenses: the C++ against this section, the lowering's safety on the newly lowered shapes, the
+predictor's fidelity, the specification's soundness; each finding re-examined by a skeptic)
+reported 14 findings, 13 confirmed, 1 refuted ("finding 7 does not reproduce": it does, with a
+stride-2 batched 1 x K view). Fixed: the general view's bounds test formed one per-role sum in
+plain int64 (a wrapped sum let `A[i][i + 2^61 k]` pass and emitted an offset of 2^62, or a
+negative one): every term is checked now, and an offset the view type cannot state is refused;
+one array as both factors -- the predictor compared subscript texts (refusing
+`A[i][i + k] * A[k][k + j]`, which the compiler lowers through one view) and ignored the
+direction of enumeration (accepting `A[i][k] * A[3 - k][j]` read backwards), the specification
+had no rule for general views and a direction-blind one for dense views: all three now decide
+"one tensor serves both" the same way (§7; the lowering tries the eight orientations, the
+predictor the same eight analytically, the specification by enumeration); a nest of loops that
+run once with constant subscripts is the 1 x 1 x 1 GEMM (SQ-4) and is lowered (it was UNKNOWN:
+"loop 0 of the nest is used by no access"; such a loop is an iteration dimension of one value in
+the recognizer and the hoist pass alike), while a nest whose every loop is a repetition loop of
+two or more iterations is a documented limitation (basis `no_gemm_loop`); the readers analysis'
+predictor returned a count-down loop's coordinate on the front end's ordinal and the dense check
+folded the step twice (a dense split role refused); the showcase notes, the generator's mutation
+notes and the README rows that still called the skewed views "not implemented yet" are reworded.
+Tests: `test/Systolic/affine_gemm_shared_factor.mlir` (eight A x A nests: the emitted shared
+view in each orientation, the refusals), `test/Systolic/affine_gemm_review_d.mlir` (the once-loop
+nests, the two overflow nests refused UNKNOWN), four more kernels in
+`test/SystolicCC/affine_skewed_views.c`.
+
+**Tests.** `test/Systolic/affine_gemm_generalized.mlir` (Test 1, the skewed C, the flat and the
+Hankel view: the emitted `reinterpret_cast` offsets, sizes and strides, and the tiles);
+`test/SystolicCC/affine_skewed_views.c` (eighteen kernels executed on the software runtime model
+and compared bitwise with CPU references on integer data, each offloaded call also verified
+against the function as written: Test 1, the flat idiom, case_088's seed, a Hankel view,
+case_126, both factors skewed and roles-swapped, a skew read backwards, Test 1 per batch value,
+Test 1 at 16 x 16 x 16 over several tiles, Test 3, case_087, case_127, Test 2 over D* against
+the original statement enumerated over D*'s points, Test 2 on a box staying on the host, one
+array as both factors through one skewed view, the same with K read downward, `A[3 - i][k] *
+A[k][j]` through one reversed tensor, and the all-once 1 x 1 x 1 nest);
+the oracle (`GENERAL_VIEWS_LOWERED = True`: every lowered skewed or merged view is checked
+address by address, the factors' repeated elements included); the executable specification's
+predictor (a general operand's bounds per dimension); showcase case_088, case_126 and ext_026
+(TRUE_POSITIVE since); `failures/issues/ISSUE-008-*/repro_skewed_views.mlir` (its XFAIL removed:
+a permanent regression test). FPGA board: NOT RUN.
+
+**Verification of Phase D** (2026-10-18; LLVM 24 toolchain only; logs in
+`~/work/integration-backups-20261016/phaseD-validation/`):
+
+- lit, release and debug (assertions) builds: 111 tests, 111 passed (the new end-to-end test,
+  the former XFAIL reproducer and the two review-fix tests among them);
+- the oracle on the debug build, 43 seeds × 400 nests: 17,200 nests, 13,823 accepted, 3,326
+  rejected, 51 skipped, **0 mismatches** -- 785 skewed or merged views lowered and checked
+  address by address, 179 with C reading a batch loop in a role dimension, 386 with two unit
+  extents, 96 refused as not injective;
+- the showcase on the software runtime model: 175 cases, 168 pass, **0 known false negatives**,
+  7 expected refusals (SQ-1, SQ-2, SQ-3); case_088, case_126 and ext_026 offloaded (one
+  invocation each) and equal to their CPU references;
+- the regression gate: no regression against the baseline of 2026-10-15 (not re-saved); every
+  issue reproducer passes (ISSUE-008's included); check-systolic 111/111;
+- the six standard generated batches: **800 of 800 pass** (the 8 known false negatives of Phase C
+  -- skewed or merged views -- pass; no other verdict changed);
+- the review's random fuzz on the fixed tree: 1,999 nests, predictor = compiler at every stage;
+  30 hand-written review nests (A x A in every orientation, once-loops, count-down split roles):
+  predictor = compiler, and the specification's verdict consistent with both;
+- `test/SystolicCC/affine_skewed_views.c`: 18 kernels equal to their CPU references on the
+  software runtime model and under the mock-hardware flag, 17 offloaded calls verified bitwise
+  against the function as written, nothing offloaded without the reassociation permission;
+- the permissions test: 48 checks, 0 failed;
+- the adversarial review of Phase D: 14 findings, 13 confirmed and fixed (above), 1 refuted;
+- the FPGA board: NOT RUN.

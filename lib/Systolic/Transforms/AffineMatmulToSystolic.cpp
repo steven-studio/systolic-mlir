@@ -127,16 +127,31 @@ static bool provablyDisjointFromOutput(Value input, Value output,
   return isNoAliasArgument(outputRoot) || isNoAliasArgument(inputRoot);
 }
 
-/// The logical matrix an operand holds (docs/AFFINE_GEMM_MAPPING.md §5): its
-/// two GEMM roles (rows, columns) in GEMM order, each read in one memref
-/// dimension at index alpha + rho * ordinal, rho of either sign (a negative
-/// rho is a view that runs backwards: its origin is the largest index of that
-/// dimension); every other dimension at a fixed index. Built as a
-/// rank-reducing memref.subview of the memref (signed strides), then
-/// memref.transpose when the operand stores the roles in the other order,
-/// then memref.expand_shape for a role of extent one the operand has no
-/// dimension for. Every element of the view is an element the loop nest
-/// itself accesses.
+/// The logical matrix an operand holds (docs/AFFINE_GEMM_MAPPING.md §5, §19):
+/// its two GEMM roles (rows, columns) in GEMM order. Two forms:
+///
+///  * A role-pure layout (§5): each role read in one memref dimension at
+///    index alpha + rho * ordinal, rho of either sign (a negative rho is a
+///    view that runs backwards: its origin is the largest index of that
+///    dimension); every other dimension at a fixed index. Built as a
+///    rank-reducing memref.subview of the memref (signed strides), then
+///    memref.transpose when the operand stores the roles in the other order,
+///    then memref.expand_shape for a role of extent one the operand has no
+///    dimension for.
+///  * An explicit view (§19.11): the element address of the view's element
+///    (row r, column c) is elementOffset + elementStrides[0] r +
+///    elementStrides[1] c (+ the batch terms per batch iteration), built as
+///    one memref.reinterpret_cast of the memref to rows x columns. Used for
+///    the general layouts of §19 (a dimension combining both of an operand's
+///    roles -- A[i][i + k] --, a role across several dimensions, a flat
+///    C[4i + j], a Hankel A[i + k]), whose address IS affine in (row, column)
+///    although no dimension of the memref holds one role alone, and for a
+///    role-pure view whose rank-reduced subview type would be ambiguous
+///    (a kept dimension of size one next to a dropped one: the verifier
+///    cannot tell which was dropped).
+///
+/// Every element of the view is an element the loop nest itself accesses;
+/// for C the view is injective (G2), for A and B it may repeat elements.
 struct LogicalOperand {
   Value memref;
   // The subview, over every dimension of the memref.
@@ -150,13 +165,25 @@ struct LogicalOperand {
   // terms of the enclosing batch loops' counters -- a dynamic offset,
   // computed per batch iteration (ISSUE-006, ISSUE-007).
   SmallVector<SmallVector<int64_t>> batchCoefficients;
+  // The explicit view: element offset, element strides of (rows, columns),
+  // and per source loop the batch loops' coefficients on the element offset
+  // (the dimensions' batch terms times the memref's row-major strides).
+  bool explicitView = false;
+  int64_t elementOffset = 0;
+  std::array<int64_t, 2> elementStrides{1, 1};
+  SmallVector<int64_t> elementBatchCoefficients;
 
   bool hasBatchTerms() const {
+    if (explicitView)
+      return llvm::any_of(elementBatchCoefficients,
+                          [](int64_t v) { return v != 0; });
     return llvm::any_of(batchCoefficients, [](const SmallVector<int64_t> &c) {
       return llvm::any_of(c, [](int64_t v) { return v != 0; });
     });
   }
   bool isWholeMemref() const {
+    if (explicitView)
+      return false;
     auto ty = cast<MemRefType>(memref.getType());
     return ty.getRank() == 2 && ty.hasStaticShape() && roleDim[0] == 0 &&
            roleDim[1] == 1 && offsets[0] == 0 && offsets[1] == 0 &&
@@ -165,13 +192,20 @@ struct LogicalOperand {
            !hasBatchTerms();
   }
   bool sameView(const LogicalOperand &other) const {
-    return memref == other.memref && offsets == other.offsets &&
-           sizes == other.sizes && strides == other.strides &&
-           roleDim == other.roleDim &&
+    if (memref != other.memref || explicitView != other.explicitView ||
+        shape != other.shape)
+      return false;
+    if (explicitView)
+      return elementOffset == other.elementOffset &&
+             elementStrides == other.elementStrides &&
+             elementBatchCoefficients == other.elementBatchCoefficients;
+    return offsets == other.offsets && sizes == other.sizes &&
+           strides == other.strides && roleDim == other.roleDim &&
            batchCoefficients == other.batchCoefficients;
   }
   bool isTransposed() const {
-    return roleDim[0] >= 0 && roleDim[1] >= 0 && roleDim[0] > roleDim[1];
+    return !explicitView && roleDim[0] >= 0 && roleDim[1] >= 0 &&
+           roleDim[0] > roleDim[1];
   }
 };
 
@@ -182,18 +216,6 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
                   const std::array<OperandCoordinateView, 2> &views,
                   const OperandLayout &layout, StringRef name,
                   std::string &why, GemmMappingClass &mappingClass) {
-  // A skewed or merged view (docs/AFFINE_GEMM_MAPPING.md section 19): no
-  // subview of the memref's dimensions expresses it. Recognized and
-  // verified (G1, G2); its lowering is not implemented yet.
-  if (layout.general) {
-    why = (name + " has a skewed or merged view (a dimension combining both "
-                  "of its roles, or a role across several dimensions: docs/"
-                  "AFFINE_GEMM_MAPPING.md section 19), which is not lowered "
-                  "yet")
-              .str();
-    mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
-    return failure();
-  }
   auto ty = dyn_cast<MemRefType>(memref.getType());
   // The subview needs the memref's strides: an identity layout (its leading
   // dimension may be dynamic -- C's float A[][K]).
@@ -218,6 +240,27 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
   operand.offsets.assign(rank, 0);
   operand.sizes.assign(rank, 1);
   operand.strides.assign(rank, 1);
+
+  // The memref's row-major element strides (its layout is the identity; a
+  // dynamic leading dimension has a static stride). They turn an index
+  // tuple into an element address, for the explicit views and for the
+  // address range check at the end.
+  SmallVector<int64_t> rowMajor(rank, 1);
+  for (int64_t d = int64_t(rank) - 2; d >= 0; --d) {
+    std::optional<int64_t> stride =
+        llvm::checkedMul(rowMajor[d + 1], ty.getDimSize(d + 1));
+    if (!stride) {
+      why = (name + "'s row-major strides overflow 64-bit arithmetic").str();
+      mappingClass = GemmMappingClass::Unknown;
+      return failure();
+    }
+    rowMajor[d] = *stride;
+  }
+  auto overflow = [&](const llvm::Twine &what) {
+    why = (name + "'s " + what + " overflow 64-bit arithmetic").str();
+    mappingClass = GemmMappingClass::Unknown;
+    return failure();
+  };
 
   // A dimension's accessed indices [lo, hi] must lie inside it: lo >= 0
   // always, hi < its size when that is static (a dynamic size is the
@@ -281,6 +324,133 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
 
   // The index range of every dimension, for the address check below.
   SmallVector<std::pair<int64_t, int64_t>> indexRange(rank, {0, 0});
+
+  // ------------------------------------------------------------------
+  // A general layout (docs/AFFINE_GEMM_MAPPING.md section 19.11): every
+  // dimension d reads dimConstants[d] + sum over the operand's two roles of
+  // roleCoefficients[d][slot] * y_slot (+ its batch terms), y_slot =
+  // dense.offset + dense.scale * ordinal. The view's element (r, c) is then
+  // at the fixed address sum_d rowMajor_d * (c_d + lambda_{d,0} s_0 r +
+  // lambda_{d,1} s_1 c): an explicit view with
+  //   elementOffset      = sum_d rowMajor_d * (dimConstants[d] + sum_slot
+  //                        lambda_{d,slot} * dense.offset[slot]),
+  //   elementStrides[s]  = sum_d rowMajor_d * lambda_{d,s} * dense.scale[s],
+  // the batch terms likewise summed with the row-major strides. G3 (bounds):
+  // every dimension's index range -- the constant, each role's extreme
+  // contribution, the batch range -- inside the dimension; distinct in-bounds
+  // index tuples have distinct addresses, so with G2 (checked by the
+  // recognizer) the view of C is injective. Checked arithmetic throughout.
+  // ------------------------------------------------------------------
+  if (layout.general) {
+    if (layout.roleCoefficients.size() != rank ||
+        layout.dimConstants.size() != rank) {
+      why = (name + "'s general layout does not match its memref").str();
+      mappingClass = GemmMappingClass::Unknown;
+      return failure();
+    }
+    const std::array<unsigned, 2> logicalOf{rowDim, colDim};
+    std::optional<int64_t> elementOffset = int64_t(0);
+    std::array<std::optional<int64_t>, 2> elementStrides{int64_t(0),
+                                                         int64_t(0)};
+    for (unsigned d = 0; d < rank; ++d) {
+      // The static index of the dimension at the roles' first values, and
+      // the dimension's range over the roles' ordinals.
+      std::optional<int64_t> index = layout.dimConstants[d];
+      std::optional<int64_t> lo = index, hi = index;
+      for (unsigned slot = 0; slot < 2 && index; ++slot) {
+        const int64_t lambda = layout.roleCoefficients[d][slot];
+        if (lambda == 0)
+          continue;
+        const unsigned logical = logicalOf[slot];
+        std::optional<int64_t> base =
+            llvm::checkedMul(lambda, dense.offset[logical]);
+        std::optional<int64_t> rho = llvm::checkedMul(lambda, dense.scale[logical]);
+        std::optional<int64_t> span =
+            rho ? llvm::checkedMul(*rho, dense.extent[logical] - 1)
+                : std::nullopt;
+        if (!base || !rho || !span) {
+          index = std::nullopt;
+          break;
+        }
+        index = llvm::checkedAdd(*index, *base);
+        // The role's extreme contributions, checked too (a wrapped sum here
+        // once let an out-of-bounds nest pass the bounds test: review of
+        // 2026-10-18).
+        std::optional<int64_t> lowTerm =
+            llvm::checkedAdd(*base, std::min<int64_t>(*span, 0));
+        std::optional<int64_t> highTerm =
+            llvm::checkedAdd(*base, std::max<int64_t>(*span, 0));
+        lo = lo && index && lowTerm ? llvm::checkedAdd(*lo, *lowTerm)
+                                    : std::nullopt;
+        hi = hi && index && highTerm ? llvm::checkedAdd(*hi, *highTerm)
+                                     : std::nullopt;
+        std::optional<int64_t> term = llvm::checkedMul(rowMajor[d], *rho);
+        elementStrides[slot] = elementStrides[slot] && term
+                                   ? llvm::checkedAdd(*elementStrides[slot], *term)
+                                   : std::nullopt;
+      }
+      if (!index || !lo || !hi)
+        return overflow("subscripts along dimension " + llvm::Twine(d));
+      std::optional<int64_t> term = llvm::checkedMul(rowMajor[d], *index);
+      elementOffset = elementOffset && term
+                          ? llvm::checkedAdd(*elementOffset, *term)
+                          : std::nullopt;
+      auto range = widened(d, *lo, *hi);
+      if (!range)
+        return failure();
+      indexRange[d] = *range;
+      if (!inBounds(d, range->first, range->second))
+        return failure();
+    }
+    if (!elementOffset || !elementStrides[0] || !elementStrides[1])
+      return overflow("element addresses");
+    // (The element offset needs no check of its own: without batch terms it
+    // is the address of an in-bounds index tuple, in [0, size); with batch
+    // terms it is the static part of the affine.apply below and may be
+    // negative -- a batch dimension's constant with the batch loop's first
+    // value compensating. Every sum above is checked, so it cannot have
+    // wrapped to the dynamic marker.)
+    operand.explicitView = true;
+    operand.roleDim = {-1, -1};
+    operand.elementOffset = *elementOffset;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+      operand.shape[slot] = dense.extent[logicalOf[slot]];
+      if (operand.shape[slot] == 1) {
+        operand.elementStrides[slot] = 1; // a unit dimension: no stride
+        continue;
+      }
+      if (*elementStrides[slot] == 0) {
+        // The roles' terms cancel in the address: the operand would be
+        // constant along a coordinate of two or more values -- a stride-0
+        // view (not lowered, section 10); unreachable with in-bounds
+        // subscripts and distinct dimensions, refused defensively.
+        why = (name + "'s view has stride 0 along logical coordinate " +
+               kName[logicalOf[slot]] + " (a broadcast, not lowered)")
+                  .str();
+        mappingClass = GemmMappingClass::ValidButLoweringUnsupported;
+        return failure();
+      }
+      operand.elementStrides[slot] = *elementStrides[slot];
+    }
+    // The batch terms on the element offset: per source loop, the sum over
+    // the dimensions of the dimension's coefficient times its stride.
+    const unsigned numLoops =
+        layout.batchCoefficients.empty() ? 0 : layout.batchCoefficients[0].size();
+    operand.elementBatchCoefficients.assign(numLoops, 0);
+    for (unsigned d = 0; d < rank; ++d)
+      for (unsigned s = 0; s < numLoops; ++s) {
+        const int64_t coefficient = layout.batchCoefficients[d][s];
+        if (coefficient == 0)
+          continue;
+        std::optional<int64_t> term = llvm::checkedMul(rowMajor[d], coefficient);
+        std::optional<int64_t> sum =
+            term ? llvm::checkedAdd(operand.elementBatchCoefficients[s], *term)
+                 : std::nullopt;
+        if (!sum)
+          return overflow("batch offsets");
+        operand.elementBatchCoefficients[s] = *sum;
+      }
+  } else {
   for (unsigned d = 0; d < rank; ++d)
     if (layout.constantIndex[d]) {
       // A fixed index (an extent-one dimension), or a batch dimension's
@@ -346,7 +516,75 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
       return failure();
   }
 
-  // The view's linear element offsets (what the subview's strided layout and
+  // A rank-reducing subview whose kept dimensions include one of size one
+  // (a role of extent one, or a batched 1 x K view) with the same element
+  // stride as a dropped dimension: memref.subview's rank-reduced result type
+  // does not say which size-one dimension was dropped, and the verifier's
+  // guess (by stride occurrences, then by position) differs from this one --
+  // invalid IR for a valid nest (review finding of 2026-10-18; distinct
+  // strides are resolved correctly, so those views keep their subview). The
+  // same view as an explicit reinterpret_cast is unambiguous: element offset
+  // and strides from the subview's own.
+  bool ambiguous = false;
+  for (unsigned d = 0; d < rank && !ambiguous; ++d) {
+    if (int(d) == operand.roleDim[0] || int(d) == operand.roleDim[1])
+      continue;
+    for (int kept : operand.roleDim) {
+      if (kept < 0 || operand.sizes[kept] != 1)
+        continue;
+      std::optional<int64_t> keptStride =
+          llvm::checkedMul(rowMajor[kept], operand.strides[kept]);
+      std::optional<int64_t> droppedStride =
+          llvm::checkedMul(rowMajor[d], operand.strides[d]);
+      if (!keptStride || !droppedStride || *keptStride == *droppedStride)
+        ambiguous = true;
+    }
+  }
+  if (ambiguous && !operand.isWholeMemref()) {
+    std::optional<int64_t> elementOffset = int64_t(0);
+    for (unsigned d = 0; d < rank && elementOffset; ++d) {
+      std::optional<int64_t> term =
+          llvm::checkedMul(rowMajor[d], operand.offsets[d]);
+      elementOffset =
+          term ? llvm::checkedAdd(*elementOffset, *term) : std::nullopt;
+    }
+    if (!elementOffset)
+      return overflow("element addresses");
+    std::array<int64_t, 2> elementStrides{1, 1};
+    for (unsigned r = 0; r < 2; ++r) {
+      const int dim = operand.roleDim[r];
+      if (dim < 0 || operand.sizes[dim] == 1)
+        continue;
+      std::optional<int64_t> stride =
+          llvm::checkedMul(rowMajor[dim], operand.strides[dim]);
+      if (!stride)
+        return overflow("element strides");
+      elementStrides[r] = *stride;
+    }
+    const unsigned numLoops =
+        operand.batchCoefficients.empty() ? 0 : operand.batchCoefficients[0].size();
+    SmallVector<int64_t> elementBatch(numLoops, 0);
+    for (unsigned d = 0; d < rank; ++d)
+      for (unsigned s = 0; s < numLoops; ++s) {
+        const int64_t coefficient = operand.batchCoefficients[d][s];
+        if (coefficient == 0)
+          continue;
+        std::optional<int64_t> term = llvm::checkedMul(rowMajor[d], coefficient);
+        std::optional<int64_t> sum =
+            term ? llvm::checkedAdd(elementBatch[s], *term) : std::nullopt;
+        if (!sum)
+          return overflow("batch offsets");
+        elementBatch[s] = *sum;
+      }
+    operand.explicitView = true;
+    operand.roleDim = {-1, -1};
+    operand.elementOffset = *elementOffset;
+    operand.elementStrides = elementStrides;
+    operand.elementBatchCoefficients = std::move(elementBatch);
+  }
+  } // role-pure layout
+
+  // The view's linear element offsets (what the view's strided layout and
   // the memref descriptor hold): sum over the dimensions of index * stride
   // with the row-major strides of the memref. Every index is in range, but
   // with a dynamic leading dimension the products are not bounded by an
@@ -354,17 +592,6 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
   // independent per-dimension terms, so its smallest and largest values are
   // the sums of the per-dimension smallest and largest terms (the roles'
   // extreme indices, a batch dimension's range, a fixed index).
-  SmallVector<int64_t> rowMajor(rank, 1);
-  for (int64_t d = int64_t(rank) - 2; d >= 0; --d) {
-    std::optional<int64_t> stride =
-        llvm::checkedMul(rowMajor[d + 1], ty.getDimSize(d + 1));
-    if (!stride) {
-      why = (name + "'s row-major strides overflow 64-bit arithmetic").str();
-      mappingClass = GemmMappingClass::Unknown;
-      return failure();
-    }
-    rowMajor[d] = *stride;
-  }
   for (bool largest : {false, true}) {
     std::optional<int64_t> address = int64_t(0);
     for (unsigned d = 0; d < rank && address; ++d) {
@@ -386,7 +613,9 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
 /// `batchIVs` are the counters of the enclosing batch loops, which re-emit
 /// the nest's loops `batchLoops` (same order). A dimension with batch terms
 /// is read at its static offset plus those terms of the counters -- one
-/// affine.apply per such dimension, a dynamic offset of the subview.
+/// affine.apply per such dimension, a dynamic offset of the subview. An
+/// explicit view is one memref.reinterpret_cast: element offset (static, or
+/// one affine.apply of the batch counters), sizes, element strides.
 static Value materializeOperandView(OpBuilder &builder, Location loc,
                                     const LogicalOperand &operand,
                                     ArrayRef<Value> batchIVs,
@@ -395,6 +624,47 @@ static Value materializeOperandView(OpBuilder &builder, Location loc,
   if (operand.isWholeMemref())
     return operand.memref;
   auto sourceTy = cast<MemRefType>(operand.memref.getType());
+  if (operand.explicitView) {
+    MLIRContext *ctx = builder.getContext();
+    OpFoldResult offset = builder.getIndexAttr(operand.elementOffset);
+    int64_t layoutOffset = operand.elementOffset;
+    AffineExpr expr = getAffineConstantExpr(operand.elementOffset, ctx);
+    bool batched = false;
+    for (auto [j, s] : llvm::enumerate(batchLoops)) {
+      const int64_t coefficient =
+          s < operand.elementBatchCoefficients.size()
+              ? operand.elementBatchCoefficients[s]
+              : 0;
+      if (coefficient == 0)
+        continue;
+      expr = expr + getAffineDimExpr(j, ctx) * coefficient;
+      batched = true;
+    }
+    if (batched) {
+      AffineMap map = AffineMap::get(batchIVs.size(), /*symbolCount=*/0, expr);
+      Value &index = applies[map];
+      if (!index)
+        index = affine::AffineApplyOp::create(builder, loc, map, batchIVs)
+                    .getResult();
+      offset = index;
+      layoutOffset = ShapedType::kDynamic;
+    }
+    SmallVector<int64_t> viewShape(operand.shape.begin(), operand.shape.end());
+    SmallVector<int64_t> viewStrides(operand.elementStrides.begin(),
+                                     operand.elementStrides.end());
+    auto viewTy = MemRefType::get(
+        viewShape, sourceTy.getElementType(),
+        StridedLayoutAttr::get(ctx, layoutOffset, viewStrides),
+        sourceTy.getMemorySpace());
+    SmallVector<OpFoldResult> sizes, strides;
+    for (unsigned r = 0; r < 2; ++r) {
+      sizes.push_back(builder.getIndexAttr(viewShape[r]));
+      strides.push_back(builder.getIndexAttr(viewStrides[r]));
+    }
+    return memref::ReinterpretCastOp::create(builder, loc, viewTy,
+                                             operand.memref, offset, sizes,
+                                             strides);
+  }
   // The subview keeps the role dimensions (in memref order), drops the rest.
   SmallVector<int64_t> keptShape;
   SmallVector<int> kept;
@@ -591,11 +861,19 @@ static void hoistRepetitionLoops(ModuleOp module) {
         }))
       continue;
 
+    // A loop whose counter an access uses is a GEMM dimension; so is a loop
+    // that runs exactly once whatever its uses (a constant on the domain,
+    // docs/AFFINE_GEMM_MAPPING.md Lemma 0: the recognizer reads it as an
+    // iteration dimension of one value, review of 2026-10-18); every other
+    // loop repeats the accumulation.
     SmallVector<unsigned> repeating, dimensions;
-    for (auto [index, loop] : llvm::enumerate(band))
-      (llvm::is_contained(used, loop.getInductionVar()) ? dimensions
-                                                         : repeating)
-          .push_back(index);
+    for (auto [index, loop] : llvm::enumerate(band)) {
+      std::optional<uint64_t> trip = affine::getConstantTripCount(loop);
+      const bool dimension =
+          llvm::is_contained(used, loop.getInductionVar()) ||
+          (trip && *trip == 1);
+      (dimension ? dimensions : repeating).push_back(index);
+    }
     if (repeating.empty() || dimensions.empty())
       continue;
     // Already outside every dimension: nothing to move.
@@ -747,8 +1025,64 @@ struct AffineMatmulToSystolicPass
     }
 
     // A x A: one read-only view serves both operands. Two different views
-    // of one memref would be two restrict tensors of the same buffer.
-    const bool sharedInput = lhs->sameView(*rhs);
+    // of one memref would be two restrict tensors of the same buffer. The
+    // GEMM's coordinates may each be enumerated upward or downward (a
+    // relabelling of the ordinals: the same products, the same sums, every
+    // operand's view read in the other direction along it), so when the two
+    // factors are one memref but not one view, the seven other orientations
+    // are tried and the first in which they coincide is used for all three
+    // operands (A[3 - i][k] * A[k][j]: with I enumerated downward both
+    // factors are the whole memref and C is written through a reversed
+    // view; docs/AFFINE_GEMM_MAPPING.md section 7).
+    bool sharedInput = lhs->sameView(*rhs);
+    if (!sharedInput && matmul.lhs == matmul.rhs) {
+      // Bit d of a mask reverses coordinate d (I, J, K). K alone first: it
+      // changes no view of C; then one output coordinate; then pairs.
+      static constexpr unsigned kOrientations[] = {4, 1, 2, 5, 6, 3, 7};
+      for (unsigned mask : kOrientations) {
+        if (sharedInput)
+          break;
+        DenseLogicalGemm flipped = *dense;
+        bool representable = true;
+        for (unsigned d = 0; d < 3 && representable; ++d) {
+          if (!(mask & (1u << d)))
+            continue;
+          // The coordinate's last value becomes its first: offset + scale *
+          // (extent - 1), checked (the partition checked it too).
+          std::optional<int64_t> span =
+              llvm::checkedMul(flipped.scale[d], flipped.extent[d] - 1);
+          std::optional<int64_t> last =
+              span ? llvm::checkedAdd(flipped.offset[d], *span) : std::nullopt;
+          if (!last) {
+            representable = false;
+            break;
+          }
+          flipped.offset[d] = *last;
+          flipped.scale[d] = -flipped.scale[d];
+        }
+        if (!representable)
+          continue;
+        std::string reason;
+        GemmMappingClass cls = GemmMappingClass::ProvenValid;
+        auto flippedLhs = getLogicalOperand(matmul.lhs, matmul, flipped, kLogicalI,
+                                            kLogicalK, matmul.viewA, matmul.layoutA,
+                                            "A", reason, cls);
+        auto flippedRhs = getLogicalOperand(matmul.rhs, matmul, flipped, kLogicalK,
+                                            kLogicalJ, matmul.viewB, matmul.layoutB,
+                                            "B", reason, cls);
+        auto flippedOut = getLogicalOperand(matmul.output, matmul, flipped,
+                                            kLogicalI, kLogicalJ, matmul.viewC,
+                                            matmul.layoutC, "C", reason, cls);
+        if (failed(flippedLhs) || failed(flippedRhs) || failed(flippedOut) ||
+            !flippedLhs->sameView(*flippedRhs))
+          continue;
+        dense = flipped;
+        lhs = flippedLhs;
+        rhs = flippedRhs;
+        out = flippedOut;
+        sharedInput = true;
+      }
+    }
     if (!sharedInput && matmul.lhs == matmul.rhs) {
       why = "A and B are different views of the same memref";
       mappingClass = GemmMappingClass::ValidButLoweringUnsupported;

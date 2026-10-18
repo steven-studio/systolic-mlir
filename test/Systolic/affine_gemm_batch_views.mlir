@@ -329,10 +329,12 @@ func.func @c_skewed(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llv
 // -----
 // RE-DECIDED 2026-10-16 (section 19): A[i][i + k] -- A's dimension 1 combines I and K,
 // the skewed view A'(I, K) = A[I][I + K] of a GEMM (showcase case_126). Recognized by the
-// readers analysis and verified; its view is a memref.reinterpret_cast, not a subview.
+// readers analysis and verified; since Phase D (2026-10-18, section 19.11) its view is a
+// memref.reinterpret_cast: A'(I, K) at 8 I + (I + K) = 9 I + K, strides (9, 1). Lowered.
 // CHECK-LABEL: func.func @coupled_a
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A has a skewed or merged view
+// CHECK:       memref.reinterpret_cast %arg0 to offset: [0], sizes: [4, 4], strides: [9, 1] : memref<4x8xf32> to memref<4x4xf32, strided<[9, 1]>>
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s)
 // DISC:        layout A: general view: dimension 0 = 0 + 1*I; dimension 1 = 0 + 1*I + 1*K
 func.func @coupled_a(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {

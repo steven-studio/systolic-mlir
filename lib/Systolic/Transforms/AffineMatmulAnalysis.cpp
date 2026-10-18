@@ -1625,6 +1625,17 @@ mlir::systolic::recognizeLogicalMatmul(
   auto iterationIVs =
       collectAccessIterationIVs(lhsLoad, rhsLoad, accLoad, store);
 
+  // A chain loop that runs exactly once is a constant on the domain (Lemma 0)
+  // whether or not an access names its counter: an iteration dimension with
+  // one value, not a repetition (an all-constant nest of such loops is the
+  // 1 x 1 x 1 GEMM, SQ-4; review of 2026-10-18). Appended after the IVs the
+  // accesses name, in chain order.
+  for (affine::AffineForOp loop : chain) {
+    Value iv = loop.getInductionVar();
+    if (!llvm::is_contained(iterationIVs, iv) && singleIterationValue(iv))
+      iterationIVs.push_back(iv);
+  }
+
   dbgOut() << "  access iteration IV count: "
                << iterationIVs.size() << "\n";
 
