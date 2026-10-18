@@ -168,7 +168,7 @@ b971b79 的 RTL，Verilator 模擬中每個 PE 的 MAC 次數 = k，`docs/COSTMO
 封存的 bitstream 在板上只跑過 k = 16。現在 K 不是 16 的倍數時會送 k < 16 的 descriptor；
 這個組合在封存的 bitstream 上**沒有板測、也沒有用它的 RTL 模擬過**（FPGA Board
 Regression：NOT RUN）。
-同步 runtime 一次一個 invocation，結果回來才送下一個（`--mode async` 走非同步 runtime，第 6 節、`docs/ASYNC.md`）。
+有 completion record 的 bitstream（設定檔 `COMPLETION_HEADER=1`）上 `systolic-matmul` 預設走非同步 runtime：同一個 GEMM 的 tile 全部先 submit、每顆陣列最多 `PIPELINE_DEPTH` 筆 descriptor 在飛、一個 wait 收齊（`docs/ASYNC.md` 第 10 節）；`--mode sync`（`systolic-matmul --sync`）才是同步 runtime，一次一個 invocation、結果回來才送下一個，沒有 record 的舊 bitstream 只有這條路。
 
 失敗時（`runtime/fpga_matmul_tiled.h`）：參數錯誤在送出任何東西之前就回傳
 （-10 K、-11 device／tile、-12 null、-13 打包、-15 `est_cycles = 0`、-16
@@ -363,21 +363,26 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
 | Systolic → FPGA（非同步） | `systolic-opt --systolic-fpga-pipeline="async=true" test/Systolic/fpga_lowering_async.mlir` | `llvm.call @fpga_gemm_begin`、每個 tile 一個 `@fpga_tile_submit`、`@fpga_gemm_wait`（`docs/ASYNC.md`） |
-| lit | `cmake --build build --target check-systolic` | 79/79 |
+| Affine → FPGA（非同步） | `systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --lower-systolic-matmul-tile-to-fpga="async=true" test/Systolic/affine_to_fpga_pipeline_async.mlir` | 一個 begin、10 個 submit、最後一個 submit 之後才有唯一的 wait（C 不經 scratch） |
+| lit | `cmake --build build --target check-systolic` | 81/81 |
 | E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
 | runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
-| 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V 六個 mode） |
+| 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V/S/Q/M 九個 mode；S 印每個 submit 回來的時間對第一筆 completion） |
 | E2E | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> test/e2e/run_e2e.sh --backend board` | `E2E: PASS`（`E2E cases: N/N PASS`；N 依設定而定） |
 | E2E（非同步） | 同上加 `--mode async` | `E2E: PASS on backend board, async runtime`；verdict 另外檢查 IR 呼叫的是 `fpga_tile_submit` |
 
 ## 6. 已知限制
 
-- 同步 runtime（預設）一次一個 invocation：`fpga_matmul_tiled_auto_scheduled` 是同步的，
-  host 每個 job 寫 slab、送 descriptor、等結果，四顆陣列在時間上沒有並行，同一顆陣列上
-  連續的 invocation 也沒有。RTL 這一側（2026-10-18）已經不再是限制：每個 context 有 4 深的
-  job queue，下一個 invocation 的 fill 在前一個 fold 開始時發出、下一個 fold 在前一個 tile
-  還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，`eval/pipeline_overlap/run.sh`）。
-- `run_e2e.sh --mode async`／`systolic-matmul --async` 走非同步 runtime
+- 同步 runtime（`--mode sync`／`systolic-matmul --sync`、`systolic-cc --submission sync`，
+  以及沒有 completion record 的舊 bitstream 上唯一的路）一次一個 invocation：
+  `fpga_matmul_tiled_auto_scheduled` 是同步的，host 每個 job 寫 slab、送 descriptor、等結果，
+  四顆陣列在時間上沒有並行，同一顆陣列上連續的 invocation 也沒有。這是該 entry point 的
+  契約（呼叫回來時結果已在 C），保留給相容；它不再是預設。RTL 這一側（2026-10-18）也不是
+  限制：每個 context 有 4 深的 job queue，下一個 invocation 的 fill 在前一個 fold 開始時發出、
+  下一個 fold 在前一個 tile 還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，
+  `eval/pipeline_overlap/run.sh`）。
+- `run_e2e.sh --mode async`／`systolic-matmul --async`（有 record 的 bitstream 上
+  `systolic-matmul`、`systolic-cc --runtime board` 不加旗標的預設）走非同步 runtime
   （`runtime/fpga_async_runtime.h`，`docs/ASYNC.md`）：同一個 GEMM 的 tile 全部先 submit、
   之後再收結果，每顆陣列最多 `PIPELINE_DEPTH`（設定檔；RTL 的 `JOB_QUEUE_DEPTH`，4）個
   descriptor 在飛、每個在飛的 job 有自己的 slab 與 result 區域、下一個 slab 先 stage、

@@ -110,6 +110,8 @@ struct Device {
     uint32_t operand_free = 0;                  // bit s: operand slot s is free
     uint32_t result_free = 0;                   // bit s: result slot s is free
     unsigned max_inflight = 0;                  // most descriptors in flight at once
+    bool     credit_blocked = false;            // a staged descriptor waits for a credit
+    uint32_t last_freed_job = 0;                // the completion that last freed a credit
 };
 
 enum class ReadPolicy { Blocked, Always, Wait };
@@ -213,6 +215,7 @@ struct Runtime {
     // both relative to the first submit.
     clock_t_::time_point  t_last_descriptor, t_first_completion;
     bool                  seen_completion = false;
+    uint32_t              last_completed_job = 0; // the most recent completion (any device)
 
     // Receive side: bytes off the link not yet consumed, and the record
     // being assembled.
@@ -507,6 +510,21 @@ bool send_descriptor(Runtime &r, Device &dv, unsigned d) {
     }
     t->state = TileState::InFlight;
     r.pjt[t->job_id] = t.get();
+    if (!r.seen_completion)
+        ++r.stats.descriptors_before_first_completion;
+    const size_t older = dv.inflight.size();
+    if (older > 0)
+        ++r.stats.descriptors_behind_inflight;
+    if (dv.credit_blocked) {
+        // This descriptor waited for a credit: the oldest job's completion
+        // freed it while the device's previous descriptor(s) stayed in
+        // flight.
+        ++r.stats.credit_waits;
+        dv.credit_blocked = false;
+        trace("credit device=%u job=0x%08x sent on the credit freed by job=0x%08x "
+              "(%zu older descriptor(s) still in flight)",
+              d, t->job_id, dv.last_freed_job, older);
+    }
     dv.inflight.push_back(std::move(t));
     ++r.inflight_total;
     if (dv.inflight.size() > dv.max_inflight)
@@ -554,10 +572,11 @@ bool can_stage(const Runtime &r, const Device &dv) {
     return r.set.stage || dv.inflight.empty();
 }
 
-/* Burst mode (the default, with staging on): a device's descriptors are
- * held back until every operand slot of the device holds a slab (depth + 1
- * of them), or until a GEMM is waited on (fpga_gemm_wait flushes), so the
- * context receives them back to back and runs the tiles through its
+/* Burst mode (the default, with staging on): a device's first descriptors
+ * are held back until every operand slot of the device holds a slab
+ * (depth + 1 of them), or until a GEMM is waited on (fpga_gemm_wait
+ * flushes); from then on each staged descriptor goes as soon as a credit
+ * is free. So the context receives the first ones back to back and runs the tiles through its
  * pipeline (the fill of T+1 at the fold of T, the fold of T+1 while T is
  * still being written back and read back, and while T reduces where the
  * fill is short enough: docs/COSTMODEL.md section 8), instead of one
@@ -567,7 +586,14 @@ bool can_stage(const Runtime &r, const Device &dv) {
  * the slabs staged ahead of it. SYSTOLIC_ASYNC_BURST=0 sends every
  * descriptor as soon as its slab is in DDR. */
 bool may_release(const Runtime &r, const Device &dv) {
-    return !r.set.burst || !r.set.stage || r.flush || dv.staged.size() >= r.operand_slots;
+    // Hold a device's first descriptors until a full burst is staged; once
+    // something of the device is in flight, every staged descriptor goes as
+    // soon as a credit allows, so the context's queue stays topped up. (The
+    // in-flight jobs hold their operand slots until they complete, so after
+    // the first burst the device can never again have every slot staged:
+    // holding until then would leave one job in flight at a time.)
+    return !r.set.burst || !r.set.stage || r.flush || !dv.inflight.empty() ||
+           dv.staged.size() >= r.operand_slots;
 }
 
 /* Submit every descriptor that may go, stage the oldest queued slab that
@@ -583,6 +609,18 @@ void pump_writes(Runtime &r) {
                 if (!send_descriptor(r, dv, d))
                     return;
                 progress = true;
+            }
+            // A released descriptor that cannot go: the device's hardware
+            // queue is full (every credit in flight) or every result slot
+            // is taken. It waits for capacity -- the next completion of
+            // this device -- not for any particular job.
+            if (!dv.staged.empty() && may_release(r, dv) && !dv.credit_blocked &&
+                (dv.inflight.size() >= r.depth || dv.result_free == 0)) {
+                dv.credit_blocked = true;
+                trace("backpressure device=%u: job=0x%08x staged, %zu/%u descriptor(s) in "
+                      "flight, result slots free=0x%x: waiting for a credit",
+                      d, dv.staged.front()->job_id, dv.inflight.size(), r.depth,
+                      static_cast<unsigned>(dv.result_free));
             }
         }
         int best = -1;
@@ -639,6 +677,8 @@ std::unique_ptr<Tile> take_inflight(Runtime &r, Tile *t) {
     --r.inflight_total;
     dv.operand_free |= 1u << owned->operand_slot;
     dv.result_free  |= 1u << owned->result_slot;
+    dv.last_freed_job = owned->job_id;
+    r.last_completed_job = owned->job_id;
     if (!r.seen_completion) {
         r.seen_completion = true;
         r.t_first_completion = clock_t_::now();
@@ -840,6 +880,8 @@ bool open_session(Runtime &r) {
         r.dev[d].operand_free = (1u << r.operand_slots) - 1u;
         r.dev[d].result_free  = (1u << r.depth) - 1u;
         r.dev[d].max_inflight = 0;
+        r.dev[d].credit_blocked = false;
+        r.dev[d].last_freed_job = 0;
     }
     trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s",
           r.epoch, r.depth, r.depth_source, r.set.stage ? 1 : 0, r.set.burst ? 1 : 0,
@@ -885,7 +927,9 @@ void report_timing(Runtime &r) {
                  "passes=%llu overlap2=%llu overlap4=%llu staged_behind=%llu max_queued=%llu "
                  "stage=%d read_policy=%s queue_limit=%u per_device=%llu/%llu/%llu/%llu "
                  "depth=%u burst=%d depth2_passes=%llu max_inflight=%llu/%llu/%llu/%llu "
-                 "last_descriptor_us=%llu first_completion_us=%llu\n",
+                 "last_descriptor_us=%llu first_completion_us=%llu "
+                 "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
+                 "submits_blocked=%llu blocked_us=%llu\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -896,7 +940,9 @@ void report_timing(Runtime &r) {
                  s.tiles_per_device[3], s.depth, r.set.burst ? 1 : 0, s.passes_depth2,
                  s.max_inflight_per_device[0], s.max_inflight_per_device[1],
                  s.max_inflight_per_device[2], s.max_inflight_per_device[3],
-                 s.ns_last_descriptor / 1000, s.ns_first_completion / 1000);
+                 s.ns_last_descriptor / 1000, s.ns_first_completion / 1000,
+                 s.descriptors_before_first_completion, s.descriptors_behind_inflight,
+                 s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000);
 }
 
 } // namespace
@@ -1016,7 +1062,23 @@ int fpga_tile_submit(fpga_gemm_t *handle,
     pump_writes(r);
     if (!r.link_failed) {
         if (r.queued_total >= r.set.queue_limit) {
+            // The host queue is full: every operand slot of the devices
+            // with queued tiles holds a slab and every credit is in use.
+            // Wait for room -- the next completion of any device frees an
+            // operand slot and the pump stages a queued slab -- never for
+            // this or any particular job to finish.
+            const uint32_t job_id = (static_cast<uint32_t>(r.epoch) << 24) |
+                                    ((r.next_seq - 1u) & 0x00ffffffu);
+            ++r.stats.submits_blocked;
+            trace("backpressure job=0x%08x: host queue full (%u >= limit %u), %u "
+                  "descriptor(s) in flight: waiting for room",
+                  job_id, r.queued_total, r.set.queue_limit, r.inflight_total);
+            const clock_t_::time_point tb = clock_t_::now();
             pump_until(r, [&] { return r.queued_total < r.set.queue_limit; });
+            r.stats.ns_submit_blocked += ns_between(tb, clock_t_::now());
+            trace("resume job=0x%08x: room after the completion of job=0x%08x, %u "
+                  "descriptor(s) in flight",
+                  job_id, r.last_completed_job, r.inflight_total);
         } else if (r.set.policy == ReadPolicy::Always ||
                    (r.set.policy == ReadPolicy::Blocked && r.queued_total > 0 &&
                     r.inflight_total > 0)) {

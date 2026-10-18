@@ -98,6 +98,7 @@ while read -r k8 k4 slab; do
 K_MAX_4X4=$k4
 SLAB_BYTES=$slab
 PIPELINE_DEPTH=1
+COMPLETION_HEADER=0
 SOURCE=$f"
     [ $rc -eq 0 ] && [ "$out" = "$want" ] && ok "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4 -> slab $slab, pipeline depth 1 (not recorded)" \
         || bad "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4" "$out"
@@ -133,7 +134,7 @@ done
 # read together, and COMPLETION_HEADER takes only 0 or 1.
 f=$(cfg "pipe4_hdr.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nPIPELINE_DEPTH=4\nCOMPLETION_HEADER=1\nDDR_BYTES=1048576\n")
 out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
-[ $rc -eq 0 ] && has "$out" "PIPELINE_DEPTH=4" && ok "PIPELINE_DEPTH = 4 with COMPLETION_HEADER = 1 and DDR_BYTES read" \
+[ $rc -eq 0 ] && has "$out" "PIPELINE_DEPTH=4" && has "$out" "COMPLETION_HEADER=1" && ok "PIPELINE_DEPTH = 4 with COMPLETION_HEADER = 1 and DDR_BYTES read" \
     || bad "PIPELINE_DEPTH = 4 with COMPLETION_HEADER = 1" "$out"
 for bad_hdr in 2 x; do
     f=$(cfg "hdr_bad_$bad_hdr.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nCOMPLETION_HEADER=$bad_hdr\n")

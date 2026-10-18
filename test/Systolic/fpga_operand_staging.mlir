@@ -47,11 +47,11 @@ module {
   // CHECK: memref.copy %[[CT]], %[[CV]]
   // CHECK: %[[R1:.*]] = bufferization.to_tensor %[[CM]] restrict writable
 
-  // Block C[4:8, 0:4] on device 2, on top of the first block's result.
-  // CHECK: %[[CM2:.*]] = bufferization.to_buffer %[[R1]] :
-  // CHECK: memref.subview %[[CM2]][4, 0] [4, 4] [1, 1]
+  // Block C[4:8, 0:4] on device 2, on top of the first block's result: the
+  // same buffer, which the first block's to_tensor stands for.
+  // CHECK: memref.subview %[[CM]][4, 0] [4, 4] [1, 1]
   // CHECK-COUNT-2: llvm.call @fpga_matmul_tiled_auto_scheduled
-  // CHECK: %[[R2:.*]] = bufferization.to_tensor %[[CM2]] restrict writable
+  // CHECK: %[[R2:.*]] = bufferization.to_tensor %[[CM]] restrict writable
   // CHECK: return %[[R2]]
   func.func @mm_8x4x20(%A: tensor<8x20xf32>, %B: tensor<20x4xf32>,
                        %C: tensor<8x4xf32>) -> tensor<8x4xf32>

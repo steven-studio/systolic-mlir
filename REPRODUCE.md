@@ -341,15 +341,27 @@ fpga_config.txt); the co-simulation built by `test/e2e/cosim/build.sh` from
 the working tree has both (docs/ASYNC.md section 9 has the evidence runs).
 
     test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1, PIPELINE_DEPTH=4
-    cmake --build build --target check-systolic           # 79 lit tests, three for the async lowering
-    test/e2e/run_e2e.sh --backend cosim                   # the synchronous runtime, as before
+    cmake --build build --target check-systolic           # 81 lit tests, five for the async lowering
+    test/e2e/run_e2e.sh --backend cosim                   # --mode sync: systolic-matmul --sync on every case
     test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
     SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
+
+On a configuration with COMPLETION_HEADER=1 the asynchronous runtime is the
+default of `systolic-matmul` and of `systolic-cc --runtime board` (no flag):
+every tile of a GEMM is submitted without waiting for the one before it and
+one wait per GEMM collects the results; `--sync` / `--submission sync` keep
+the synchronous entry point, one invocation at a time. `docs/ASYNC.md`
+section 10 has the submission evidence (`SYSTOLIC_RUNTIME_TRACE=1` host
+trace + the co-simulation's COSIM_JOB stamps through
+`tools/cosim_overlap_evidence.py`).
 
 `runtime-async-test` runs the experiments of `docs/ASYNC.md` as modes
 (A one array, B every array, C with the slab staged behind the running
 job, D two GEMMs interleaved, X the fold order checked bit for bit against
-the synchronous entry point, V the refusals); `--gemm MxNxK` sizes them. The
+the synchronous entry point, V the refusals, S the submission semantics --
+every submit back before the first completion, descriptors queued behind
+in-flight ones -- Q backpressure with the host queue cut to one, M three
+GEMMs waited for out of order); `--gemm MxNxK` sizes them. The
 RTL changes have their own benches:
 
     rtl/multi_200t/tile_pipelined/dma/tb/run_top_sim.sh v1 16 1 1          # the six regression gates, as before

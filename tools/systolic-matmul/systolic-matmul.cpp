@@ -1,6 +1,6 @@
 //===- systolic-matmul.cpp - C = A x B on the FPGA, from stdin ------------===//
 //
-//   ./systolic-matmul [--dump-ir=DIR] [--quiet] [--async]
+//   ./systolic-matmul [--dump-ir=DIR] [--quiet] [--sync | --async]
 //
 // reads
 //
@@ -21,11 +21,15 @@
 //     -> --systolic-runtime-to-llvm             LLVM dialect
 //     -> JIT, run: fpga_matmul_tiled_auto_scheduled -> DPTI -> FPGA
 //
-// --async lowers to the asynchronous runtime instead (fpga_gemm_begin, one
-// fpga_tile_submit per tile, fpga_gemm_wait; runtime/fpga_async_runtime.h):
-// the tiles are in flight across the four arrays at once, and the result is
-// checked the same way. It needs a bitstream with the completion record
-// (COMPLETION_HEADER=1 in SYSTOLIC_FPGA_CONFIG; docs/ASYNC.md).
+// On a bitstream with the completion record (COMPLETION_HEADER=1 in
+// SYSTOLIC_FPGA_CONFIG; docs/ASYNC.md) the GEMM is lowered to the
+// asynchronous runtime instead (fpga_gemm_begin, one fpga_tile_submit per
+// tile, fpga_gemm_wait; runtime/fpga_async_runtime.h): every tile is
+// submitted without waiting for the one before it, the runtime keeps
+// PIPELINE_DEPTH descriptors in flight per array and matches each completion
+// to its tile, and the result is checked the same way. --sync keeps the
+// synchronous lowering on such a bitstream; --async asks for the
+// asynchronous one and is refused (exit 4) without the record.
 //
 // The result is compared element by element with an exact integer CPU
 // reference. Nothing on this path computes C on the CPU: the CPU only adds
@@ -102,9 +106,12 @@ namespace {
 // contexts pipeline consecutive invocations (the job queue of the 2026-10-18
 // RTL) or serialize them (the archived bitstream; the record has no such
 // line): the fleet is declared accordingly, so the schedule's makespan
-// describes the hardware that is loaded. The runtime itself still submits
-// one invocation at a time, so on the board the predicted overlap between
-// invocations is not realized until it does (docs/COSTMODEL.md).
+// describes the hardware that is loaded. The asynchronous runtime (the
+// default on a bitstream with the completion record) keeps PIPELINE_DEPTH
+// descriptors in flight per array, so the queue the schedule assumes is
+// really fed; with --sync, or on a bitstream without the record, the
+// invocations go one at a time and the predicted overlap between them is
+// not realized (docs/COSTMODEL.md, docs/ASYNC.md section 10).
 std::string buildFleet(const fpga_runtime_config_t &hw) {
   std::ostringstream os;
   const bool pipelined = hw.pipeline_depth > 1;
@@ -138,7 +145,9 @@ constexpr int64_t kMaxValue = int64_t{1} << 24;
 struct Options {
   std::string dumpDir;
   bool quiet = false;
-  bool async = false;
+  // 0: by the configuration (asynchronous when the bitstream has the
+  // completion record), 1: --sync, 2: --async.
+  int submission = 0;
   // Operand words per cycle the four arrays' fills share (the one AXI read
   // port), for the binary search; 0: every array fills independently.
   double sharedReadWordsPerCycle = ::systolic::fpga::kSharedReadWordsPerCycle;
@@ -160,7 +169,7 @@ struct TileInfo {
 
 [[noreturn]] void usage(int status) {
   std::fprintf(status ? stderr : stdout,
-               "usage: systolic-matmul [--dump-ir=DIR] [--quiet] [--async]\n"
+               "usage: systolic-matmul [--dump-ir=DIR] [--quiet] [--sync | --async]\n"
                "                       [--shared-read-words-per-cycle=X]\n"
                "\n"
                "Reads from stdin:\n"
@@ -179,9 +188,17 @@ struct TileInfo {
                "                 30-llvm.mlir 40-llvm.ll\n"
                "  --quiet        print only the verification result\n"
                "  --async        lower to the asynchronous runtime: every\n"
-               "                 tile submitted without waiting, the four\n"
-               "                 arrays busy at once (needs a bitstream with\n"
-               "                 the completion record, COMPLETION_HEADER=1)\n"
+               "                 tile submitted without waiting for the one\n"
+               "                 before it, PIPELINE_DEPTH descriptors in\n"
+               "                 flight per array, the four arrays busy at\n"
+               "                 once. The default on a bitstream with the\n"
+               "                 completion record (COMPLETION_HEADER=1);\n"
+               "                 refused without it\n"
+               "  --sync         lower to the synchronous runtime instead:\n"
+               "                 one fpga_matmul_tiled_auto_scheduled per\n"
+               "                 tile, each waited for before the next (the\n"
+               "                 only runtime of a bitstream without the\n"
+               "                 completion record)\n"
                "  --shared-read-words-per-cycle=X\n"
                "                 operand words per cycle all four arrays'\n"
                "                 fills share, for the binary search (default\n"
@@ -207,7 +224,9 @@ Options parseArgs(int argc, char **argv) {
     else if (arg == "-q" || arg == "--quiet")
       opts.quiet = true;
     else if (arg == "--async")
-      opts.async = true;
+      opts.submission = 2;
+    else if (arg == "--sync")
+      opts.submission = 1;
     else if (arg.rfind("--dump-ir=", 0) == 0)
       opts.dumpDir = arg.substr(std::strlen("--dump-ir="));
     else if (arg.rfind("--shared-read-words-per-cycle=", 0) == 0) {
@@ -598,13 +617,19 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "systolic-matmul: %s\n", hw.error);
     return 4;
   }
-  if (opts.async && !hw.completion_header) {
+  if (opts.submission == 2 && !hw.completion_header) {
     std::fprintf(stderr,
                  "systolic-matmul: --async needs a bitstream with the "
                  "completion record, and %s has no COMPLETION_HEADER=1\n",
                  hw.source);
     return 4;
   }
+  // Batch submission wherever the bitstream can report completions: the
+  // tiles of the GEMM are submitted without waiting for each other, and
+  // collected by one wait. Only --sync (or a bitstream without the record)
+  // keeps the one-invocation-at-a-time runtime.
+  const bool async =
+      opts.submission == 2 || (opts.submission == 0 && hw.completion_header);
 
   const Problem prob = readProblem(hw);
   const int64_t M = prob.M, N = prob.N, K = prob.K;
@@ -634,9 +659,22 @@ int main(int argc, char **argv) {
                 "] on the 1x8x8 + 3x4x4 FPGA\n"
                 "  K_MAX_8X8 = %u, K_MAX_4X4 = %u (%s)\n\n",
                 M, N, M, K, K, N, hw.k_max_8x8, hw.k_max_4x4, hw.source);
-    if (opts.async)
-      std::printf("  asynchronous runtime: tiles in flight across the four "
-                  "arrays\n\n");
+    if (async)
+      std::printf("  asynchronous runtime (%s): every tile submitted without "
+                  "waiting for the one before it, up to PIPELINE_DEPTH = %u "
+                  "descriptor(s) in flight per array\n\n",
+                  opts.submission == 2 ? "--async"
+                                       : "the default: the bitstream has the "
+                                         "completion record",
+                  hw.pipeline_depth);
+    else
+      std::printf("  synchronous runtime (%s): one "
+                  "fpga_matmul_tiled_auto_scheduled per tile, each waited for "
+                  "before the next\n\n",
+                  opts.submission == 1
+                      ? "--sync"
+                      : "the bitstream has no completion record, so its "
+                        "results cannot be matched to tiles in flight");
     printMatrix(("A[" + std::to_string(M) + "][" + std::to_string(K) + "]")
                     .c_str(),
                 M, K, cellsOf(prob.A));
@@ -693,12 +731,12 @@ int main(int argc, char **argv) {
   if (failed(runStage(*module, "Systolic -> FPGA runtime lowering",
                       [&](OpPassManager &pm) {
                         pm.addPass(mlir::systolic::createTileMatmulForFpgaPass(
-                            hw.k_max_8x8, hw.k_max_4x4, opts.async));
+                            hw.k_max_8x8, hw.k_max_4x4, async));
                       })))
     return 3;
   dumpStage(opts, "20-fpga.mlir", module->getOperation());
   {
-    const std::vector<int64_t> ids = collectCallDeviceIds(*module, opts.async);
+    const std::vector<int64_t> ids = collectCallDeviceIds(*module, async);
     report.runtimeCalls = ids.size();
     for (size_t i = 0; i < ids.size() && i < report.tiles.size(); ++i)
       report.tiles[i].deviceId = ids[i];
@@ -735,7 +773,7 @@ int main(int argc, char **argv) {
                   t.k0 + t.k, t.device.c_str(), t.deviceId, t.startCycle,
                   t.estCycles);
     }
-    if (opts.async)
+    if (async)
       std::printf("  [3] FPGA       %zu call(s) of fpga_tile_submit (gemm, tile, "
                   "k_index, k_count, m, k, n, A, B, C, ldc, device, start, est)"
                   " between fpga_gemm_begin and fpga_gemm_wait\n",
@@ -854,7 +892,7 @@ int main(int argc, char **argv) {
   }
   const auto t1 = std::chrono::steady_clock::now();
   report.fpgaSeconds = std::chrono::duration<double>(t1 - t0).count();
-  if (opts.async) {
+  if (async) {
     fpga_async_runtime_get_stats(&report.asyncStats);
     const fpga_async_stats_t &s = report.asyncStats;
     report.invocations = s.tiles_completed;
@@ -890,8 +928,25 @@ int main(int argc, char **argv) {
                 report.invocations, report.perDevice[0], report.perDevice[1],
                 report.perDevice[2], report.perDevice[3]);
     std::printf("                 DPTI: %llu B to the FPGA, %llu B back, "
-                "%.3f s\n\n",
+                "%.3f s\n",
                 report.bytesTo, report.bytesFrom, report.fpgaSeconds);
+    if (async) {
+      // The submission semantics, as the runtime counted them
+      // (fpga_async_runtime.h): how much of the GEMM was on the link before
+      // any result came back, and how its backpressure was handled.
+      const fpga_async_stats_t &s = report.asyncStats;
+      std::printf("                 batch: %llu descriptor(s) on the link before "
+                  "the first completion, %llu sent behind an in-flight one, "
+                  "%llu on a credit a completion freed; depth %u, most in "
+                  "flight %llu/%llu/%llu/%llu; %llu submit(s) waited for "
+                  "host-queue room (%.3f ms)\n",
+                  s.descriptors_before_first_completion,
+                  s.descriptors_behind_inflight, s.credit_waits, s.depth,
+                  s.max_inflight_per_device[0], s.max_inflight_per_device[1],
+                  s.max_inflight_per_device[2], s.max_inflight_per_device[3],
+                  s.submits_blocked, s.ns_submit_blocked / 1e6);
+    }
+    std::printf("\n");
   }
 
   if (report.failed != 0 || report.invocations != report.runtimeCalls) {

@@ -65,8 +65,9 @@
 #                     variables (LATENCY_MS, SETTLE_US, STAGE, ...) pass
 #                     through to the cases as exported.
 #   --mode sync|async sync (default): every case through the synchronous
-#                     runtime, one fpga_matmul_tiled_auto_scheduled per tile.
-#                     async: systolic-matmul --async, the asynchronous runtime
+#                     runtime (systolic-matmul --sync), one
+#                     fpga_matmul_tiled_auto_scheduled per tile, each waited
+#                     for. async: systolic-matmul --async, the asynchronous runtime
 #                     (fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait,
 #                     docs/ASYNC.md); the runtime layer step also runs
 #                     runtime-async-test, and the configuration must say
@@ -147,11 +148,15 @@ MATMUL="$BUILD/bin/systolic-matmul"
 RTTEST="$BUILD/bin/runtime-dispatch-test"
 RTASYNC="$BUILD/bin/runtime-async-test"
 VERDICT="$HERE/e2e_verdict.py"
-MATMUL_FLAGS=()
+# systolic-matmul chooses by itself (batch submission wherever the bitstream
+# has the completion record); each mode asks for its runtime explicitly, so
+# the sync mode keeps exercising the synchronous path on such a bitstream.
+MATMUL_FLAGS=(--sync)
 [ "$RTMODE" = async ] && MATMUL_FLAGS=(--async)
 for b in "$MATMUL" "$RTTEST"; do
     [ -x "$b" ] || { echo "missing $b -- build first (cmake --build $BUILD)" >&2; exit 2; }
 done
+grep -q -- '--sync' "$MATMUL" || { echo "$MATMUL predates --sync -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
 if [ "$RTMODE" = async ]; then
     [ -x "$RTASYNC" ] || { echo "missing $RTASYNC -- build first (cmake --build $BUILD)" >&2; exit 2; }
     grep -q -- '--async' "$MATMUL" || { echo "$MATMUL predates --async -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
@@ -357,7 +362,7 @@ OUT="$(cd "$OUT" && pwd)"
     echo "configuration"
     echo "  host       K_MAX_8X8 = $K8, K_MAX_4X4 = $K4, $SLAB-byte operand slab"
     echo "             (the runtime's parser; SYSTOLIC_FPGA_CONFIG=$GIVEN, from $HOW)"
-    echo "  runtime    $RTMODE$([ "$RTMODE" = async ] && echo ' (systolic-matmul --async: fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait)' || echo ' (one fpga_matmul_tiled_auto_scheduled per tile)')"
+    echo "  runtime    $RTMODE$([ "$RTMODE" = async ] && echo ' (systolic-matmul --async: fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait)' || echo ' (systolic-matmul --sync: one fpga_matmul_tiled_auto_scheduled per tile)')"
     echo "  metadata   (the same file)"
     for m in ${META[@]+"${META[@]}"}; do echo "             $m"; done
     echo "  hardware   $HW"

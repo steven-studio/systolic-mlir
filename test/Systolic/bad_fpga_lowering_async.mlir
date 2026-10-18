@@ -47,3 +47,25 @@ module {
     return %1 : tensor<4x4xf32>
   }
 }
+
+// -----
+
+// A reader of the GEMM's result between two K folds of one output tile: the
+// GEMM would have to be waited for there, but the runtime accumulates a
+// tile's folds within one GEMM, so the second fold could not be submitted
+// under a new one.
+module {
+  systolic.device @acc_4x4_0 rows = 4 cols = 4 dataflow = output_stationary k_max = 16 tile_overhead = 95
+  func.func @read_between_folds(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>, %c: tensor<4x4xf32>) -> (tensor<4x4xf32>, f32) {
+    %i = arith.constant 0 : index
+    %0 = systolic.matmul_tile %a, %b, %c m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 101 start_cycle = 0
+         {systolic.gemm = 0 : i64, systolic.tile = 0 : i64, systolic.k_index = 0 : i64, systolic.k_count = 2 : i64}
+         : (tensor<4x4xf32>, tensor<4x4xf32>, tensor<4x4xf32>) -> tensor<4x4xf32>
+    // expected-error @+1 {{the asynchronous FPGA lowering must wait for GEMM 0 here, before all of its tiles are submitted, but output tile 0 has only 1 of its 2 K folds in by then}}
+    %x = tensor.extract %0[%i, %i] : tensor<4x4xf32>
+    %1 = systolic.matmul_tile %a, %b, %0 m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 101 start_cycle = 101
+         {systolic.gemm = 0 : i64, systolic.tile = 0 : i64, systolic.k_index = 1 : i64, systolic.k_count = 2 : i64}
+         : (tensor<4x4xf32>, tensor<4x4xf32>, tensor<4x4xf32>) -> tensor<4x4xf32>
+    return %1, %x : tensor<4x4xf32>, f32
+  }
+}

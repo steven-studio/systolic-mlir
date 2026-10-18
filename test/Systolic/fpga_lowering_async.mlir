@@ -62,17 +62,17 @@ module {
   // CHECK: llvm.call @fpga_tile_submit(%[[G]], %{{.*}}, %[[KI1]], %{{.*}}, %{{.*}}, %[[K1]], %{{.*}}, %{{.*}}, %{{.*}}, %[[CP0]],
   // CHECK: %[[R1:.*]] = bufferization.to_tensor %[[CM]] restrict writable
 
-  // Block C[4:8, 0:4]: element 16 of the buffer (64 bytes in), device 2;
-  // no copy of C anywhere.
-  // CHECK: %[[CM2:.*]] = bufferization.to_buffer %[[R1]] :
-  // CHECK: %[[P2:.*]] = memref.extract_aligned_pointer_as_index %[[CM2]]
+  // Block C[4:8, 0:4]: element 16 of the same buffer (64 bytes in; the
+  // previous block's to_tensor stands for it, so no to_buffer of that),
+  // device 2; no copy of C anywhere.
+  // CHECK: %[[P2:.*]] = memref.extract_aligned_pointer_as_index %[[CM]]
   // CHECK-NEXT: %[[OFF2:.*]] = arith.constant 64 : index
   // CHECK-NEXT: %[[PA2:.*]] = arith.addi %[[P2]], %[[OFF2]]
   // CHECK-NEXT: %[[I2:.*]] = arith.index_cast %[[PA2]] : index to i64
   // CHECK-NEXT: %[[CP2:.*]] = llvm.inttoptr %[[I2]]
   // CHECK: llvm.call @fpga_tile_submit(%[[G]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[CP2]], %{{.*}}, %{{.*}},
   // CHECK: llvm.call @fpga_tile_submit(%[[G]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[CP2]], %{{.*}}, %{{.*}},
-  // CHECK: %[[R2:.*]] = bufferization.to_tensor %[[CM2]] restrict writable
+  // CHECK: %[[R2:.*]] = bufferization.to_tensor %[[CM]] restrict writable
   // CHECK-NEXT: llvm.call @fpga_gemm_wait(%[[G]])
   // CHECK-NEXT: return %[[R2]]
   func.func @mm_8x4x20(%A: tensor<8x20xf32>, %B: tensor<20x4xf32>,

@@ -163,6 +163,27 @@ typedef struct {
      * fits the credits, and per credit-sized batch otherwise. */
     unsigned long long ns_last_descriptor;
     unsigned long long ns_first_completion;
+    /* The submission semantics, counted (docs/ASYNC.md section 10):
+     *   descriptors_before_first_completion  descriptors on the link before
+     *       the session's first completion record came back: more than one
+     *       means the host queued work in the hardware without waiting for
+     *       a result (at most depth per device, by the credits);
+     *   descriptors_behind_inflight  descriptors sent while an older
+     *       descriptor of the same device was still in flight -- the tile
+     *       went out without waiting for its predecessor's completion;
+     *   credit_waits  descriptors that could only go once a completion had
+     *       freed a credit of their device (the hardware queue was full:
+     *       they waited for capacity, released by the OLDEST job's
+     *       completion, with the previous job still in flight);
+     *   submits_blocked / ns_submit_blocked  fpga_tile_submit calls that
+     *       waited for room in the host queue (SYSTOLIC_ASYNC_QUEUE_LIMIT)
+     *       and the time they spent waiting. Never for a particular job's
+     *       completion: for the next completion of any device. */
+    unsigned long long descriptors_before_first_completion;
+    unsigned long long descriptors_behind_inflight;
+    unsigned long long credit_waits;
+    unsigned long long submits_blocked;
+    unsigned long long ns_submit_blocked;
     int first_error;
 } fpga_async_stats_t;
 

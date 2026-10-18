@@ -14,8 +14,14 @@ Evidence of the two integrated behaviours, from one co-simulation run:
     and the queue occupancy seen from the stamps (jobs fired and not done).
 
   Host side (the runtime's SYSTOLIC_RUNTIME_TRACE=1 lines, "@<us>" stamped):
-    per device the descriptors in flight over time (max), and for every GEMM
-    the time of its last descriptor against its first completion.
+    per device the descriptors in flight over time (max), for every GEMM the
+    time of its last descriptor against its first completion, and the
+    submission semantics per device: descriptors sent while the device's
+    previous descriptor was still in flight (no per-job wait), descriptors
+    that waited for a credit and went out on the completion of the OLDEST
+    in-flight job with the previous one still in flight (backpressure =
+    capacity, not the previous job), and the runtime's own backpressure /
+    credit / resume lines.
 """
 import argparse, collections, json, re, sys
 
@@ -98,17 +104,41 @@ def analyse_cosim(ev, order):
         out["compute_cycles_total"] = sum(d["compute_cycles"] for d in out["devices"].values())
     return out
 
-def parse_trace(path):
+def parse_trace(path, host_session=0):
     desc = []       # (us, dev, job)
     compl = []      # (us, dev, job, status)
     gemm_of = {}    # job -> gemm
     begins, waits = {}, {}
+    notes = {"backpressure": 0, "credit": 0, "resume": 0, "resume_after_older": 0,
+             "credit_older_in_flight": 0, "submits": [], "submit_returns": [], "sessions": 0}
+    cur = 0
     for line in open(path, errors="replace"):
         m = TR_RE.search(line)
         if not m:
             continue
         kind, rest, us = m.group(1), m.group(2), int(m.group(3))
+        if kind == "session" and rest.startswith("opened"):
+            cur += 1
+            notes["sessions"] = cur
+            continue
+        if host_session and cur != host_session:
+            continue
+        if kind in ("backpressure", "credit", "resume"):
+            notes[kind] += 1
+            if kind == "resume":
+                # "resume job=X: room after the completion of job=Y": Y older
+                # than the job before X means the wait was for capacity, not
+                # for X's predecessor.
+                mm = re.search(r"job=0x([0-9a-f]+): room after the completion of job=0x([0-9a-f]+)", rest)
+                if mm and (int(mm.group(1), 16) & 0xffffff) - (int(mm.group(2), 16) & 0xffffff) > 1:
+                    notes["resume_after_older"] += 1
+            elif kind == "credit":
+                mm = re.search(r"\((\d+) older descriptor\(s\) still in flight\)", rest)
+                if mm and int(mm.group(1)) > 0:
+                    notes["credit_older_in_flight"] += 1
+            continue
         if kind == "submit":
+            notes["submits"].append(us)
             j = int(re.search(r"job=0x([0-9a-f]+)", rest).group(1), 16)
             g = int(re.search(r"gemm=(\d+)", rest).group(1))
             gemm_of[j] = g
@@ -125,10 +155,11 @@ def parse_trace(path):
             mm = re.match(r"(\d+) (begin|wait)", rest)
             if mm:
                 (begins if mm.group(2) == "begin" else waits)[int(mm.group(1))] = us
-    return desc, compl, gemm_of, begins, waits
+    return desc, compl, gemm_of, begins, waits, notes
 
-def analyse_trace(desc, compl, gemm_of, begins, waits, depth):
-    out = {"descriptors": len(desc), "completions": len(compl), "max_inflight": {}, "gemms": {}}
+def analyse_trace(desc, compl, gemm_of, begins, waits, notes, depth):
+    out = {"descriptors": len(desc), "completions": len(compl), "max_inflight": {}, "gemms": {},
+           "notes": {k: v for k, v in notes.items() if k not in ("submits", "submit_returns")}}
     inflight = collections.Counter(); mx = collections.Counter()
     events = sorted([(us, 1, d, j) for us, d, j in desc] + [(us, -1, d, j) for us, d, j, _ in compl])
     for us, delta, d, j in events:
@@ -136,6 +167,51 @@ def analyse_trace(desc, compl, gemm_of, begins, waits, depth):
         mx[d] = max(mx[d], inflight[d])
     out["max_inflight"] = dict(sorted(mx.items()))
     out["inflight_within_depth"] = all(v <= depth for v in mx.values()) if depth else None
+    # Submission semantics per device, from the send order of the descriptors
+    # and the completion time of every job.
+    done_at = {j: us for us, d, j, st in compl}
+    per_dev = collections.defaultdict(list)
+    for us, d, j in desc:
+        per_dev[d].append((us, j))
+    sem = {}
+    first_c = min(done_at.values()) if done_at else None
+    out["descriptors_before_first_completion"] = sum(1 for us, d, j in desc if first_c is None or us < first_c)
+    out["submits_before_first_completion"] = sum(1 for us in notes["submits"] if first_c is None or us < first_c)
+    out["submits"] = len(notes["submits"])
+    for d, rows in sorted(per_dev.items()):
+        rows.sort()
+        s = {"descriptors": len(rows), "previous_still_in_flight": 0, "credit_bound": 0,
+             "freed_by_oldest": 0, "next_oldest_still_in_flight": 0, "waited_for_previous": 0}
+        for i, (us, j) in enumerate(rows):
+            if i == 0:
+                continue
+            prev = rows[i - 1][1]
+            if prev in done_at and done_at[prev] > us:
+                s["previous_still_in_flight"] += 1
+            elif prev in done_at:
+                # The previous job had completed before this one went: only a
+                # per-job wait if nothing older was in flight either and the
+                # queue had room -- i.e. the send was not credit-bound.
+                pass
+            if depth and i >= depth:
+                oldest = rows[i - depth][1]
+                nxt = rows[i - depth + 1][1]
+                in_flight_before = sum(1 for k in range(max(0, i - depth), i)
+                                       if rows[k][1] not in done_at or done_at[rows[k][1]] > us)
+                if in_flight_before == depth - 1 and oldest in done_at and done_at[oldest] <= us:
+                    s["credit_bound"] += 1
+                    s["freed_by_oldest"] += 1
+                    if nxt in done_at and done_at[nxt] > us:
+                        s["next_oldest_still_in_flight"] += 1
+            if (prev in done_at and done_at[prev] <= us and i < (depth or 1) and
+                    gemm_of.get(prev) == gemm_of.get(j)):
+                # Sent after its predecessor (of the same GEMM) completed
+                # although a credit was free the whole time: the only way a
+                # per-job wait shows. (Across GEMMs the program itself may
+                # have waited for the earlier one.)
+                s["waited_for_previous"] += 1
+        sem[d] = s
+    out["semantics"] = sem
     by_gemm = collections.defaultdict(lambda: {"descriptors": [], "completions": []})
     for us, d, j in desc:
         by_gemm[gemm_of.get(j, -1)]["descriptors"].append(us)
@@ -155,6 +231,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--cosim"); ap.add_argument("--trace"); ap.add_argument("--depth", type=int, default=0)
     ap.add_argument("--session", type=int, default=0, help="only the COSIM_JOB lines of this cosim session (1-based)")
+    ap.add_argument("--host-session", type=int, default=0,
+                    help="only the host trace lines of this runtime session (1-based, by its 'session opened' lines)")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit 1 if a descriptor waited for its predecessor's completion with a credit free "
+                         "(a per-job wait; expected only with SYSTOLIC_ASYNC_STAGE=0 or SYSTOLIC_ASYNC_BURST=0)")
     ap.add_argument("--json")
     a = ap.parse_args()
     report = {}
@@ -174,10 +255,19 @@ def main():
         if r["pairs_bad"]:
             print("  VIOLATION:", r["pairs_bad"][:5])
     if a.trace:
-        t = analyse_trace(*parse_trace(a.trace), a.depth)
+        t = analyse_trace(*parse_trace(a.trace, a.host_session), a.depth)
         report["host"] = t
         print(f"host trace ({a.trace}): descriptors={t['descriptors']} completions={t['completions']} "
               f"max_inflight_per_device={t['max_inflight']} within_depth={t['inflight_within_depth']}")
+        print(f"  submits={t['submits']} returned_before_first_completion={t['submits_before_first_completion']} "
+              f"descriptors_before_first_completion={t['descriptors_before_first_completion']}")
+        for d, s in t["semantics"].items():
+            print(f"  dev {d}: descriptors={s['descriptors']} sent_with_previous_still_in_flight={s['previous_still_in_flight']} "
+                  f"credit_bound={s['credit_bound']} freed_by_oldest={s['freed_by_oldest']} "
+                  f"next_oldest_still_in_flight={s['next_oldest_still_in_flight']} waited_for_previous={s['waited_for_previous']}")
+        n = t["notes"]
+        print(f"  runtime lines: backpressure={n['backpressure']} credit={n['credit']} (with older in flight: {n['credit_older_in_flight']}) "
+              f"resume={n['resume']} (after a completion older than the predecessor: {n['resume_after_older']})")
         for g, v in t["gemms"].items():
             print(f"  gemm {g}: tiles={v['tiles']} descriptors_before_first_completion={v['descriptors_before_first_completion']} "
                   f"all_submitted_first={v['all_submitted_before_first_collection']} "
@@ -187,6 +277,12 @@ def main():
     bad = bool(report.get("rtl", {}).get("pairs_bad"))
     if a.trace and a.depth and not report["host"]["inflight_within_depth"]:
         bad = True
+    if a.trace and any(s["waited_for_previous"] for s in report["host"]["semantics"].values()):
+        print(("  VIOLATION" if a.strict else "  NOTE") +
+              ": a descriptor went out after its predecessor's completion although a credit was free "
+              "(a per-job wait, or a slab staged after that completion with SYSTOLIC_ASYNC_STAGE=0 / BURST=0)")
+        if a.strict:
+            bad = True
     sys.exit(1 if bad else 0)
 
 if __name__ == "__main__":

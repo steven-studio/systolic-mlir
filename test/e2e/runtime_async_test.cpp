@@ -23,8 +23,22 @@
 //       bitstream's (SYSTOLIC_ASYNC_VIOLATE=1: k = K_MAX + 1 goes out, comes
 //       back as a completion record with status BAD_K, the GEMM's wait
 //       reports -18 and the link stays in step for the GEMM after it)
+//   S   the submission semantics of one GEMM (docs/ASYNC.md section 10):
+//       every submit returns without waiting for the tile before it -- the
+//       wall-clock of each return against the session's first completion;
+//       more than one descriptor on the link before any result; descriptors
+//       sent behind an in-flight one of the same array; no submit blocked
+//   Q   backpressure: the host queue cut to SYSTOLIC_ASYNC_QUEUE_LIMIT=1 on
+//       a GEMM four times the size, so submits must wait for room -- room a
+//       completion of ANY older job makes, never the previous job's; every
+//       result still right, never more than PIPELINE_DEPTH in flight
+//   M   three GEMMs of different shapes submitted round-robin into one
+//       session and waited for out of order (the last begun first): each
+//       result checked right after its own wait, while the others are still
+//       outstanding -- completions are matched to jobs, not to the order
+//       GEMMs were opened or waited for
 //
-//   runtime-async-test [--mode A,B,C,D,X,V | all] [--gemm MxNxK]
+//   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M | all] [--gemm MxNxK]
 //                      [--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]
 //
 // Every mode is reported as PASS, MISMATCH, TRANSPORT (link failure),
@@ -225,7 +239,7 @@ int run_gemm(Gemm &g, const std::vector<TileSpec> &tiles, int *submit_rc,
 }
 
 struct Options {
-  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V'};
+  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M'};
   int M = 16, N = 16, K = 32;
   std::vector<unsigned> devices = {0, 1, 2, 3};
   int stage = -1;     // -1: the mode decides
@@ -242,10 +256,10 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v) return false;
       o.modes.clear();
-      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V'}; continue; }
+      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M'}; continue; }
       for (const char *p = v; *p; ++p)
         if (*p != ',') {
-          if (!std::strchr("ABCDXV", *p)) return false;
+          if (!std::strchr("ABCDXVSQM", *p)) return false;
           o.modes.push_back(*p);
         }
     } else if (a == "--gemm") {
@@ -281,7 +295,9 @@ std::string stats_line(const fpga_async_stats_t &s, double wall_ms) {
                 "reads=%llu empty=%llu overlap2=%llu overlap4=%llu staged_behind=%llu "
                 "bytes_to=%llu bytes_from=%llu per_device=%llu/%llu/%llu/%llu "
                 "depth=%u depth2_passes=%llu max_inflight=%llu/%llu/%llu/%llu "
-                "last_descriptor_us=%llu first_completion_us=%llu",
+                "last_descriptor_us=%llu first_completion_us=%llu "
+                "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
+                "submits_blocked=%llu blocked_us=%llu",
                 s.tiles_submitted, s.tiles_completed, s.tiles_failed, wall_ms,
                 wall_ms > 0 ? s.tiles_completed * 1000.0 / wall_ms : 0.0, s.reads,
                 s.empty_reads, s.passes_2_inflight, s.passes_4_inflight,
@@ -290,8 +306,17 @@ std::string stats_line(const fpga_async_stats_t &s, double wall_ms) {
                 s.tiles_per_device[3], s.depth, s.passes_depth2,
                 s.max_inflight_per_device[0], s.max_inflight_per_device[1],
                 s.max_inflight_per_device[2], s.max_inflight_per_device[3],
-                s.ns_last_descriptor / 1000, s.ns_first_completion / 1000);
+                s.ns_last_descriptor / 1000, s.ns_first_completion / 1000,
+                s.descriptors_before_first_completion, s.descriptors_behind_inflight,
+                s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000);
   return buf;
+}
+
+// Tiles per device of a decomposition.
+std::vector<unsigned> tiles_per_device(const std::vector<TileSpec> &tiles) {
+  std::vector<unsigned> n(4, 0);
+  for (const TileSpec &t : tiles) ++n[t.device];
+  return n;
 }
 
 } // namespace
@@ -301,7 +326,7 @@ int main(int argc, char **argv) {
   Options o;
   if (!parse_options(argc, argv, o)) {
     std::fprintf(stderr,
-                 "usage: runtime-async-test [--mode A,B,C,D,X,V|all] [--gemm MxNxK] "
+                 "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M|all] [--gemm MxNxK] "
                  "[--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]\n");
     return 2;
   }
@@ -349,6 +374,9 @@ int main(int argc, char **argv) {
     case 'D': plans.push_back({m, "two GEMMs interleaved, staging on", 1}); break;
     case 'X': plans.push_back({m, "folds spread across devices, float data, bit-exact vs the synchronous entry point", 1}); break;
     case 'V': plans.push_back({m, "refusals: host-side codes, then the bitstream's BAD_K record", 1}); break;
+    case 'S': plans.push_back({m, "submission semantics: every submit returns before the first completion, descriptors queued behind in-flight ones", 1}); break;
+    case 'Q': plans.push_back({m, "backpressure: SYSTOLIC_ASYNC_QUEUE_LIMIT=1 on a 4x larger GEMM, submits wait for room, never for the previous job", 1}); break;
+    case 'M': plans.push_back({m, "three GEMMs of different shapes interleaved, waited for out of order, each checked while the others are outstanding", 1}); break;
     }
   }
   if (o.list) {
@@ -498,6 +526,197 @@ int main(int argc, char **argv) {
                       static_cast<double>(g_sync.C[first]));
         detail += b;
       }
+      report(p, c, submit_rc ? submit_rc : rc, detail);
+    } else if (p.mode == 'S') {
+      // One GEMM over every device. The wall-clock at which each submit
+      // returned, against the runtime's own stamp of the first completion
+      // (both relative to the first submit), and the runtime's counters of
+      // what went out before any result and behind an in-flight descriptor.
+      Gemm g = make_gemm(o.M, o.N, o.K, true);
+      const std::vector<TileSpec> tiles = decompose(o.M, o.N, o.K, o.devices, cfg, false);
+      const std::vector<unsigned> per_dev = tiles_per_device(tiles);
+      std::vector<unsigned long long> returned_us;
+      int submit_rc = 0, rc = 0;
+      fpga_gemm_t *h = fpga_gemm_begin(g.M, g.N, g.K, static_cast<unsigned>(tiles.size()));
+      if (!h) {
+        rc = fpga_async_runtime_last_error();
+      } else {
+        std::vector<float> a, b;
+        clock_t_::time_point first;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+          const TileSpec &t = tiles[i];
+          tile_operands(g, t, a, b);
+          const clock_t_::time_point ts = clock_t_::now();
+          if (i == 0) first = ts;
+          const int src = fpga_tile_submit(h, t.tile_id, t.k_index, t.k_count, t.m, t.k, t.n,
+                                           a.data(), b.data(),
+                                           &g.C[static_cast<size_t>(t.row) * g.N + t.col], g.N,
+                                           t.device, 0, est_cycles_of(t.device));
+          returned_us.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                                    clock_t_::now() - first).count());
+          if (src != 0 && submit_rc == 0) submit_rc = src;
+        }
+        rc = fpga_gemm_wait(h);
+      }
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      int first = -1;
+      const int bad = rc == 0 ? mismatches_vs_ref(g, &first) : 0;
+      Class c = submit_rc ? class_of_rc(submit_rc) : rc ? class_of_rc(rc) : bad ? MISMATCH : PASS;
+      if (c == NOT_RUN) c = TRANSPORT;
+      if (c == TRANSPORT) link_failed = true;
+      std::string detail = stats_line(s, wall);
+      if (c == PASS) {
+        // What the batch semantics must show on a GEMM of >= 2 tiles with
+        // a credit of >= 2: at least two descriptors on the link before any
+        // result, at least one sent behind an in-flight one, no submit
+        // blocked (the host queue holds 64), and every submit returned
+        // before the wait -- the per-return times say how many returned
+        // before the first result.
+        const unsigned long long first_c_us = s.ns_first_completion / 1000;
+        size_t before = 0;
+        for (unsigned long long us : returned_us) if (us < first_c_us) ++before;
+        unsigned expect_batch = 0, max_dev_tiles = 0;
+        for (unsigned n : per_dev) {
+          expect_batch += std::min(n, s.depth);
+          max_dev_tiles = std::max(max_dev_tiles, n);
+        }
+        char b[512];
+        std::snprintf(b, sizeof b,
+                      "\n    tiles=%zu per_device=%u/%u/%u/%u; submits returned before the first completion: %zu "
+                      "(first completion at %llu us after the first submit, last submit returned at %llu us); "
+                      "descriptors before the first completion: %llu (sum of min(tiles_d, depth) = %u); "
+                      "sent behind an in-flight descriptor: %llu; waited for a credit: %llu; submits blocked: %llu",
+                      tiles.size(), per_dev[0], per_dev[1], per_dev[2], per_dev[3], before, first_c_us,
+                      returned_us.empty() ? 0ull : returned_us.back(),
+                      s.descriptors_before_first_completion, expect_batch,
+                      s.descriptors_behind_inflight, s.credit_waits, s.submits_blocked);
+        detail += b;
+        if (tiles.size() >= 2 && s.depth >= 2 && max_dev_tiles >= 2) {
+          std::string why;
+          if (s.descriptors_before_first_completion < 2)
+            why += "; only " + std::to_string(s.descriptors_before_first_completion) + " descriptor(s) on the link before the first completion";
+          if (s.descriptors_behind_inflight < 1)
+            why += "; no descriptor was sent behind an in-flight one";
+          if (s.submits_blocked != 0 && tiles.size() <= 64)
+            why += "; " + std::to_string(s.submits_blocked) + " submit(s) blocked on a GEMM that fits the host queue";
+          if (before < std::min<size_t>(tiles.size(), 2))
+            why += "; fewer than two submits returned before the first completion";
+          if (!why.empty()) {
+            c = UNKNOWN;
+            detail += "\n    SERIALIZED" + why;
+          }
+        }
+      }
+      report(p, c, submit_rc ? submit_rc : rc, detail);
+    } else if (p.mode == 'Q') {
+      // The host queue cut to one packed tile: once every operand slot of a
+      // device holds a slab and every credit is in flight, the next submit
+      // of that device has to wait -- for room, which the completion of the
+      // OLDEST in-flight job of any device makes. A GEMM four times the
+      // size, so that every device runs out of slots.
+      fpga_async_runtime_close();
+      setenv("SYSTOLIC_ASYNC_QUEUE_LIMIT", "1", 1);
+      set_stage(o, p.stage);
+      fpga_async_runtime_reset_stats();
+      const int M4 = 2 * o.M, N4 = 2 * o.N;
+      Gemm g = make_gemm(M4, N4, o.K, true);
+      const std::vector<TileSpec> tiles = decompose(M4, N4, o.K, o.devices, cfg, false);
+      const std::vector<unsigned> per_dev = tiles_per_device(tiles);
+      int submit_rc = 0;
+      const int rc = run_gemm(g, tiles, &submit_rc);
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      unsetenv("SYSTOLIC_ASYNC_QUEUE_LIMIT");
+      fpga_async_runtime_close();
+      int first = -1;
+      const int bad = rc == 0 ? mismatches_vs_ref(g, &first) : 0;
+      Class c = submit_rc ? class_of_rc(submit_rc) : rc ? class_of_rc(rc) : bad ? MISMATCH : PASS;
+      if (c == NOT_RUN) c = TRANSPORT;
+      if (c == TRANSPORT) link_failed = true;
+      std::string detail = stats_line(s, wall);
+      char b[400];
+      std::snprintf(b, sizeof b,
+                    "\n    GEMM %dx%dx%d, tiles=%zu per_device=%u/%u/%u/%u; submits blocked for room: %llu (%llu us); "
+                    "descriptors sent on a freed credit: %llu; most in flight per device %llu/%llu/%llu/%llu of depth %u",
+                    M4, N4, o.K, tiles.size(), per_dev[0], per_dev[1], per_dev[2], per_dev[3],
+                    s.submits_blocked, s.ns_submit_blocked / 1000, s.credit_waits,
+                    s.max_inflight_per_device[0], s.max_inflight_per_device[1],
+                    s.max_inflight_per_device[2], s.max_inflight_per_device[3], s.depth);
+      detail += b;
+      if (c == PASS) {
+        std::string why;
+        unsigned slots_exceeded = 0;
+        for (unsigned n : per_dev) if (n > s.depth + 1) ++slots_exceeded;
+        if (slots_exceeded > 0 && s.submits_blocked == 0)
+          why += "; no submit blocked although a device had more tiles than operand slots";
+        if (s.tiles_completed != tiles.size())
+          why += "; completed " + std::to_string(s.tiles_completed) + " of " + std::to_string(tiles.size());
+        for (int d = 0; d < 4; ++d)
+          if (s.max_inflight_per_device[d] > s.depth)
+            why += "; device " + std::to_string(d) + " had " + std::to_string(s.max_inflight_per_device[d]) + " in flight, over the credit";
+        if (!why.empty()) {
+          c = UNKNOWN;
+          detail += "\n    BACKPRESSURE" + why;
+        }
+      }
+      report(p, c, submit_rc ? submit_rc : rc, detail);
+    } else if (p.mode == 'M') {
+      // Three GEMMs of different shapes (so tile ids, k_counts and devices
+      // overlap in different ways), submitted round-robin, waited for out
+      // of order; each checked right after its own wait.
+      const int M0 = o.M, N0 = o.N, K0 = o.K;
+      const int M1 = o.M, N1 = o.N, K1 = 2 * o.K;
+      const int M2 = std::min(o.M, 8), N2 = std::min(o.N, 8), K2 = o.K;
+      Gemm gs[3] = {make_gemm(M0, N0, K0, true), make_gemm(M1, N1, K1, true), make_gemm(M2, N2, K2, true)};
+      std::vector<TileSpec> ts[3] = {decompose(M0, N0, K0, o.devices, cfg, false),
+                                     decompose(M1, N1, K1, o.devices, cfg, false),
+                                     decompose(M2, N2, K2, o.devices, cfg, false)};
+      fpga_gemm_t *hs[3] = {nullptr, nullptr, nullptr};
+      int submit_rc = 0, rc = 0;
+      std::string detail;
+      for (int w = 0; w < 3; ++w) {
+        hs[w] = fpga_gemm_begin(gs[w].M, gs[w].N, gs[w].K, static_cast<unsigned>(ts[w].size()));
+        if (!hs[w] && rc == 0) rc = fpga_async_runtime_last_error();
+      }
+      int bad_total = 0;
+      if (rc == 0) {
+        std::vector<float> a, b;
+        const size_t n = std::max({ts[0].size(), ts[1].size(), ts[2].size()});
+        for (size_t i = 0; i < n; ++i)
+          for (int w = 0; w < 3; ++w) {
+            if (i >= ts[w].size()) continue;
+            const TileSpec &t = ts[w][i];
+            Gemm &g = gs[w];
+            tile_operands(g, t, a, b);
+            const int src = fpga_tile_submit(hs[w], t.tile_id, t.k_index, t.k_count, t.m, t.k, t.n,
+                                             a.data(), b.data(),
+                                             &g.C[static_cast<size_t>(t.row) * g.N + t.col], g.N,
+                                             t.device, 0, est_cycles_of(t.device));
+            if (src != 0 && submit_rc == 0) submit_rc = src;
+          }
+        // Waited for in the order 2, 0, 1: the last GEMM begun first.
+        for (int w : {2, 0, 1}) {
+          const int wrc = fpga_gemm_wait(hs[w]);
+          if (wrc != 0 && rc == 0) rc = wrc;
+          fpga_async_stats_t mid; fpga_async_runtime_get_stats(&mid);
+          int first = -1;
+          const int bad = wrc == 0 ? mismatches_vs_ref(gs[w], &first) : -1;
+          if (bad > 0) bad_total += bad;
+          char b2[240];
+          std::snprintf(b2, sizeof b2, "%sgemm %d (%dx%dx%d, %zu tiles): wait rc=%d, %s checked right after its wait with %llu of %zu tiles of the session completed",
+                        detail.empty() ? "" : "\n    ", w, gs[w].M, gs[w].N, gs[w].K, ts[w].size(), wrc,
+                        bad == 0 ? "every element right" : bad < 0 ? "not checked" : (std::to_string(bad) + " mismatch(es)").c_str(),
+                        mid.tiles_completed, ts[0].size() + ts[1].size() + ts[2].size());
+          detail += b2;
+        }
+      }
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      Class c = submit_rc ? class_of_rc(submit_rc) : rc ? class_of_rc(rc) : bad_total ? MISMATCH : PASS;
+      if (c == NOT_RUN) c = TRANSPORT;
+      if (c == TRANSPORT) link_failed = true;
+      detail = stats_line(s, wall) + "\n    " + detail;
       report(p, c, submit_rc ? submit_rc : rc, detail);
     } else if (p.mode == 'V') {
       std::string detail;
