@@ -328,13 +328,15 @@ func.func @shift_oob(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {ll
 // -----
 // NOT NORMALIZED: an access reads a symbol (%n) under shifted bounds. The rewrite
 // of the accesses needs every operand to be a counter of the band, so the nest is
-// left as written and the recognizer says what it said before normalization existed:
-// UNKNOWN (the symbol), not PROVEN_INVALID; the lowering pass is silent on it.
+// left as written. The recognizer separates the symbol off as a run-time offset
+// of A (docs/ASYNC.md section 11.2) and then sees the unnormalized domain: J's loop does
+// not enumerate it densely under the shifted bounds -- UNKNOWN, not
+// PROVEN_INVALID; the lowering pass is silent on it.
 // CHECK-LABEL: func.func @shift_symbol_access
 // CHECK-NOT:   systolic.matmul_tile
 // REMARK-NOT:  lowered as
 // DISC-NOT:    domain normalization
-// DISC:        reason: an access index is not a counter of the nest's loops, or an access map has symbols
+// DISC:        reason: logical coordinate J is driven by 1 loops that do not enumerate it densely
 // DISC-NEXT:   class: UNKNOWN
 func.func @shift_symbol_access(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}, %n: index) {
   affine.for %i = 0 to 4 {

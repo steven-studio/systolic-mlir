@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --systolic-binary-search-tile-matmul \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true --systolic-binary-search-tile-matmul \
 // RUN:   --lower-systolic-matmul-tile-to-fpga="async=true" %s | FileCheck %s
 
 // GEMMs in one function on views of one buffer, asynchronously.

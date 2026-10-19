@@ -12,14 +12,14 @@
 // and (--submission async) the asynchronous one, where the pointer comes
 // from the view's descriptor (memref.extract_strided_metadata).
 //
-// RUN: %systolic-cc --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: %t > %t.out 2> %t.err
 // RUN: FileCheck %s --check-prefix=VERIFY --input-file=%t.err
 // RUN: %host-cc -std=c11 %s -o %t.cpu
 // RUN: %t.cpu > %t.cpu.out
 // RUN: grep -v '^\[systolic-cc\]' %t.out | diff %t.cpu.out -
 //
-// RUN: %systolic-cc --submission async --verify --explain %s -o %t.a 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --submission async --fp-reassociation --verify --explain %s -o %t.a 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: grep -q 'memref.extract_strided_metadata' %t.a.systolic/50-fpga.mlir
 // RUN: %t.a > %t.a.out 2> %t.a.err
 // RUN: FileCheck %s --check-prefix=VERIFY --input-file=%t.a.err

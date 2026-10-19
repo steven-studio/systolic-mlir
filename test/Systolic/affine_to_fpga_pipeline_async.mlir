@@ -1,7 +1,7 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga="async=true" %s \
 // RUN:   | FileCheck %s --implicit-check-not=fpga_matmul_tiled_auto_scheduled --implicit-check-not='memref<8x8xf32, strided' --implicit-check-not='memref<4x4xf32, strided'
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga="async=true" --systolic-runtime-to-llvm %s \
 // RUN:   | FileCheck %s --check-prefix=LLVM
 

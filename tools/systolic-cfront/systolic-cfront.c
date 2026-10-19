@@ -407,6 +407,13 @@ typedef struct {
   int inner_dims[MAX_RANK];
   /* ENV_SCALAR */
   /* (elem above) */
+  /* ENV_INTSCALAR: the index-typed copy usable as an affine symbol, its C
+     name (for the interface's extent expressions), and whether the C type
+     is signed (only signed parameters may offset a subscript) */
+  char *sym_name;
+  const char *cname;
+  int is_signed;
+  int bits;                    /* 32 or 64, as the parameter is passed */
   /* ENV_IV: the counter's first and last values, unless it runs zero times */
   int has_values;
   long long first, last;
@@ -438,6 +445,11 @@ typedef struct {
   int has_ranges;
   int rank;
   long long lo[MAX_RANK], hi[MAX_RANK];
+  /* Subscripts that use a parameter: the range of the leading subscript is
+     a C expression of the parameters (what the caller-side shim needs to
+     size the array it snapshots), lo_expr / hi_expr, or NULL while every
+     range is static. */
+  char *lo_expr, *hi_expr;
 } access_info;
 
 typedef struct {
@@ -455,6 +467,10 @@ typedef struct {
   size_t acc_n, acc_cap;
 
   char *interfaces;            /* the JSON objects, comma separated */
+  /* Set while a subscript is parsed: a signed integer parameter is an
+     affine symbol there (an additive run-time offset); in a loop header it
+     stays outside the subset. */
+  int in_subscript;
 } translator;
 
 static void emit(translator *tr, int indent, const char *fmt, ...) {
@@ -708,8 +724,26 @@ static char *affine_index(translator *tr, const json_value *node,
                                        e->stride);
       return xstrdup(e->name);
     }
+    if (e && e->kind == ENV_INTSCALAR && tr->in_subscript) {
+      /* A signed integer parameter: an affine symbol of the nest, an
+         additive run-time offset of the access (C evaluates r0 + i in int,
+         where overflow is undefined, so the exact index arithmetic agrees
+         with every defined execution). An unsigned one wraps around: not
+         affine. */
+      if (!e->is_signed)
+        unsupported(node, "subscript uses the unsigned parameter '%s'; only "
+                          "signed integer parameters can offset a subscript "
+                          "(unsigned arithmetic wraps, which is not affine)",
+                    referenced_name(node));
+      memset(form, 0, sizeof *form);
+      form->ids[0] = e->decl;
+      form->coef[0] = 1;
+      form->n = 1;
+      return format("symbol(%s)", e->sym_name);
+    }
     unsupported(node, "subscript uses '%s', which is not an enclosing loop "
-                      "counter", referenced_name(node));
+                      "counter%s", referenced_name(node),
+                tr->in_subscript ? " or a signed integer parameter" : "");
   }
   if (strcmp(kind, "UnaryOperator") == 0 && strcmp(op, "-") == 0) {
     char *t = affine_index(tr, child(node, 0), form);
@@ -827,6 +861,9 @@ static int form_value(translator *tr, const linear_form *f, long long *out) {
   __int128 v = f->constant;
   for (size_t i = 0; i < f->n; ++i) {
     env_entry *e = env_find(tr, f->ids[i]);
+    if (e->kind != ENV_IV)
+      continue;   /* a parameter's term: not a counter value (its symbolic
+                     part is kept apart by form_split_symbols) */
     v += (__int128)f->coef[i] * e->cur;
     if (v > kLimit || v < -kLimit)
       return 0;
@@ -983,6 +1020,10 @@ typedef struct {
   __int128 min, max;      /* the range of the node's C type */
   int conversion;         /* an implicit integer conversion to that type */
   int reads;              /* the node reads a loop counter */
+  int symbolic;           /* the node reads an integer parameter (a symbol):
+                             its exact value is not known here; signed
+                             overflow would be undefined behaviour, so it is
+                             not range-checked */
 } header_node;
 
 typedef struct {
@@ -1131,6 +1172,15 @@ static int header_expr(translator *tr, const json_value *n, const char *decl,
     if (decl && id && strcmp(id, decl) == 0) {
       *a = 1;
     } else if (e && e->kind == ENV_IV) {
+      f->ids[0] = e->decl;
+      f->coef[0] = 1;
+      f->n = 1;
+      keep = 0;
+    } else if (e && e->kind == ENV_INTSCALAR && e->is_signed &&
+               tr->in_subscript) {
+      /* a signed integer parameter in a subscript: an affine symbol (its
+         value is not known here; nodes that read it are not range-checked,
+         see header_node.symbolic) */
       f->ids[0] = e->decl;
       f->coef[0] = 1;
       f->n = 1;
@@ -1375,6 +1425,40 @@ static void header_check_closed(translator *tr, const header_nodes *init,
   free(found);
 }
 
+/* Whether a form has a term in an integer parameter (an affine symbol). */
+static int form_has_symbol(translator *tr, const linear_form *f) {
+  for (size_t i = 0; i < f->n; ++i) {
+    env_entry *e = env_find(tr, f->ids[i]);
+    if (e && e->kind == ENV_INTSCALAR)
+      return 1;
+  }
+  return 0;
+}
+
+/* Removes the terms in parameters (symbols) from *f, in place, and returns
+   them as a C expression of the parameters (" + (r0) * 2LL"; NULL when
+   there are none): the range of the form is then lo + sym .. hi + sym at
+   run time, with lo / hi the range of what remains (form_range). */
+static char *form_split_symbols(translator *tr, linear_form *f) {
+  char *symbolic = NULL;
+  size_t n = 0;
+  for (size_t i = 0; i < f->n; ++i) {
+    env_entry *e = env_find(tr, f->ids[i]);
+    if (e && e->kind == ENV_INTSCALAR) {
+      char *more = format("%s + (%s) * %lldLL", symbolic ? symbolic : "",
+                          e->cname, f->coef[i]);
+      free(symbolic);
+      symbolic = more;
+      continue;
+    }
+    f->ids[n] = f->ids[i];
+    f->coef[n] = f->coef[i];
+    ++n;
+  }
+  f->n = n;
+  return symbolic;
+}
+
 static access_info *access_of(translator *tr, const char *decl, int rank) {
   for (size_t i = 0; i < tr->acc_n; ++i)
     if (strcmp(tr->accesses[i].decl, decl) == 0)
@@ -1420,6 +1504,7 @@ static env_entry *array_access(translator *tr, const json_value *node,
 
   char *texts[MAX_RANK];
   linear_form forms[MAX_RANK];
+  tr->in_subscript = 1;   /* a signed integer parameter is a symbol here */
   for (size_t d = 0; d < count; ++d)   /* outermost subscript first */
     texts[d] = affine_index(tr, indices[count - 1 - d], &forms[d]);
 
@@ -1437,6 +1522,17 @@ static env_entry *array_access(translator *tr, const json_value *node,
       unsupported(indices[count - 1 - d], "subscript is not an affine "
                                           "expression of the loop counters");
   }
+  tr->in_subscript = 0;
+  /* A node that reads a parameter has no exact value here (header_node.
+     symbolic): C evaluates it in a signed type, where overflow is undefined,
+     so every defined execution agrees with the exact index arithmetic. */
+  for (size_t i = 0; i < sub.n; ++i)
+    sub.items[i].symbolic = form_has_symbol(tr, &sub.items[i].form);
+  /* The subscripts' terms in parameters, apart: their ranges below are
+     those of the loop part, offset by these at run time. */
+  char *sym[MAX_RANK] = {0};
+  for (size_t d = 0; d < count; ++d)
+    sym[d] = form_split_symbols(tr, &forms[d]);
   const size_t nforms = count + sub.n;
   linear_form *all_forms = xmalloc(nforms * sizeof *all_forms);
   long long *all_lo = xmalloc(nforms * sizeof *all_lo);
@@ -1464,6 +1560,8 @@ static env_entry *array_access(translator *tr, const json_value *node,
   const int reached = nest_has_point(tr);
   for (size_t i = 0; i < sub.n; ++i) {
     const header_node *h = &sub.items[i];
+    if (h->symbolic)
+      continue;
     __int128 low = h->form.constant, high = h->form.constant;
     if (h->reads) {
       if (!found[count + i] || !reached)
@@ -1506,8 +1604,37 @@ static env_entry *array_access(translator *tr, const json_value *node,
       if (!info->has_ranges || hi[d] > info->hi[d])
         info->hi[d] = hi[d];
     }
+    /* The leading subscript's range as a C expression of the parameters:
+       the extreme over the accesses, each "constant + symbolic terms". */
+    if (count && (sym[0] || info->lo_expr)) {
+      char *lo_e = format("(%lldLL%s)", lo[0], sym[0] ? sym[0] : "");
+      char *hi_e = format("(%lldLL%s)", hi[0], sym[0] ? sym[0] : "");
+      if (!info->lo_expr) {
+        if (info->has_ranges) {
+          /* earlier accesses were static: fold their range in */
+          char *l2 = format("((%lldLL) < %s ? (%lldLL) : %s)", info->lo[0], lo_e,
+                            info->lo[0], lo_e);
+          char *h2 = format("((%lldLL) > %s ? (%lldLL) : %s)", info->hi[0], hi_e,
+                            info->hi[0], hi_e);
+          free(lo_e); free(hi_e);
+          lo_e = l2; hi_e = h2;
+        }
+        info->lo_expr = lo_e;
+        info->hi_expr = hi_e;
+      } else {
+        char *l2 = format("(%s < %s ? %s : %s)", info->lo_expr, lo_e,
+                          info->lo_expr, lo_e);
+        char *h2 = format("(%s > %s ? %s : %s)", info->hi_expr, hi_e,
+                          info->hi_expr, hi_e);
+        free(info->lo_expr); free(info->hi_expr); free(lo_e); free(hi_e);
+        info->lo_expr = l2;
+        info->hi_expr = h2;
+      }
+    }
     info->has_ranges = 1;
   }
+  for (size_t d = 0; d < count; ++d)
+    free(sym[d]);
 
   size_t len = 1;
   for (size_t d = 0; d < count; ++d)
@@ -2385,15 +2512,19 @@ static char *parameter(translator *tr, const json_value *p) {
       return format("%s: %s %s", name, ft, loc_text(tr, p));
     }
     if (int_type_max(t, NULL)) {
-      /* Accepted as a parameter, so that a use of it is reported where it is
-         used (a symbolic bound, a subscript) -- every use is outside the
-         subset. */
+      /* An integer parameter: an affine symbol of the function's nests
+         (usable as an additive subscript term when signed), passed as i32 /
+         i64 and cast to index at the function's entry (see function()). A
+         use as a loop bound is still outside the subset. */
       char *name = unique(tr, pname);
       env_entry *e = env_add(tr, json_string(json_get(p, "id"), ""),
                              ENV_INTSCALAR);
       e->name = name;
-      return format("%s: i%d %s", name, strstr(t, "long") ? 64 : 32,
-                    loc_text(tr, p));
+      e->cname = xstrdup(pname);
+      e->is_signed = strstr(t, "unsigned") == NULL && strcmp(t, "_Bool") != 0;
+      e->sym_name = format("%s_idx", name);
+      e->bits = strstr(t, "long") ? 64 : 32;
+      return format("%s: i%d %s", name, e->bits, loc_text(tr, p));
     }
     unsupported(p, "parameter '%s' of type '%s' is not a float/double array "
                    "or scalar", pname, qual_type(p));
@@ -2495,9 +2626,20 @@ static void interface(translator *tr, const json_value *fn,
          accesses reach (0: never accessed). */
       int ranges = info && info->has_ranges;
       fprintf(out, ", \"elem\": \"%s\", \"leading_extent\": %lld, "
-                   "\"leading_min\": %lld, \"inner_dims\": [",
+                   "\"leading_min\": %lld",
               e->elem, ranges ? info->hi[0] + 1 : 0,
               ranges ? info->lo[0] : 0);
+      /* Subscripts in parameters: the leading extent and minimum as C
+         expressions of the parameters, exact at run time. */
+      if (ranges && info->hi_expr) {
+        fprintf(out, ", \"leading_extent_expr\": ");
+        char *ext = format("(%s + 1LL)", info->hi_expr);
+        json_escape(out, ext);
+        free(ext);
+        fprintf(out, ", \"leading_min_expr\": ");
+        json_escape(out, info->lo_expr);
+      }
+      fprintf(out, ", \"inner_dims\": [");
       for (int d = 0; d < e->rank - 1; ++d)
         fprintf(out, "%s%d", d ? ", " : "", e->inner_dims[d]);
       fprintf(out, "], \"read\": %s, \"written\": %s, \"noalias\": %s",
@@ -2564,6 +2706,14 @@ static void function(translator *tr, const json_value *fn) {
   }
   emit(tr, 1, "func.func @%s%s(%s) {", json_string(json_get(fn, "name"), ""),
        tr->symbol_suffix, args);
+  /* Every integer parameter as an index at the top of the function: a
+     top-level value, hence a valid affine symbol for the nests below. */
+  for (size_t i = 0; i < tr->env_n; ++i) {
+    env_entry *e = &tr->env[i];
+    if (e->kind == ENV_INTSCALAR)
+      emit(tr, 2, "%s = arith.index_cast %s : i%d to index %s", e->sym_name,
+           e->name, e->bits, loc_text(tr, fn));
+  }
   statements(tr, json_get(body, "inner"), 2, 1);
   emit(tr, 2, "func.return %s", loc_text(tr, body));
   emit(tr, 1, "} %s", loc_text(tr, fn));

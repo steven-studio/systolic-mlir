@@ -175,7 +175,28 @@ struct LogicalOperand {
   int64_t elementOffset = 0;
   std::array<int64_t, 2> elementStrides{1, 1};
   SmallVector<int64_t> elementBatchCoefficients;
+  // Per memref dimension, the run-time offset the access adds through the
+  // nest's symbols (LogicalMatmul::symbolicA/B/C: C[r0 + i][j] offsets the
+  // rows by the parameter r0), as a map of no dims over `symbols` -- a
+  // "dynamic offset" of another kind than the batch terms: the view is
+  // taken at run time, offset by the symbols' values. Null when the access
+  // has none.
+  AffineMap symbolic;
+  SmallVector<Value> symbols;
 
+  bool hasSymbolicOffset(unsigned d) const {
+    if (!symbolic || d >= symbolic.getNumResults())
+      return false;
+    AffineExpr e = symbolic.getResult(d);
+    return !isa<AffineConstantExpr>(e) ||
+           cast<AffineConstantExpr>(e).getValue() != 0;
+  }
+  bool hasSymbolicOffsets() const {
+    for (unsigned d = 0, n = symbolic ? symbolic.getNumResults() : 0; d < n; ++d)
+      if (hasSymbolicOffset(d))
+        return true;
+    return false;
+  }
   bool hasBatchTerms() const {
     if (explicitView)
       return llvm::any_of(elementBatchCoefficients,
@@ -192,11 +213,12 @@ struct LogicalOperand {
            roleDim[1] == 1 && offsets[0] == 0 && offsets[1] == 0 &&
            strides[0] == 1 && strides[1] == 1 &&
            sizes[0] == ty.getDimSize(0) && sizes[1] == ty.getDimSize(1) &&
-           !hasBatchTerms();
+           !hasBatchTerms() && !hasSymbolicOffsets();
   }
   bool sameView(const LogicalOperand &other) const {
     if (memref != other.memref || explicitView != other.explicitView ||
-        shape != other.shape)
+        shape != other.shape || symbolic != other.symbolic ||
+        symbols != other.symbols)
       return false;
     if (explicitView)
       return elementOffset == other.elementOffset &&
@@ -212,12 +234,42 @@ struct LogicalOperand {
   }
 };
 
+/// `expr` (over `symbols`, no dims) plus `constant`, as index arithmetic at
+/// the builder's point: the run-time offset of a view dimension. A bare
+/// symbol with no constant is the symbol's value itself.
+static Value materializeOffset(OpBuilder &builder, Location loc,
+                               AffineExpr expr, ArrayRef<Value> symbols,
+                               int64_t constant) {
+  std::function<Value(AffineExpr)> build = [&](AffineExpr e) -> Value {
+    if (auto c = dyn_cast<AffineConstantExpr>(e))
+      return arith::ConstantIndexOp::create(builder, loc, c.getValue());
+    if (auto sym = dyn_cast<AffineSymbolExpr>(e))
+      return symbols[sym.getPosition()];
+    auto bin = cast<AffineBinaryOpExpr>(e);
+    Value lhs = build(bin.getLHS()), rhs = build(bin.getRHS());
+    switch (e.getKind()) {
+    case AffineExprKind::Add:
+      return arith::AddIOp::create(builder, loc, lhs, rhs);
+    case AffineExprKind::Mul:
+      return arith::MulIOp::create(builder, loc, lhs, rhs);
+    default:
+      llvm_unreachable("separateSymbols keeps only sums and constant products");
+    }
+  };
+  Value v = build(expr);
+  if (constant != 0)
+    v = arith::AddIOp::create(
+        builder, loc, v, arith::ConstantIndexOp::create(builder, loc, constant));
+  return v;
+}
+
 static FailureOr<LogicalOperand>
 getLogicalOperand(Value memref, const LogicalMatmul &matmul,
                   const DenseLogicalGemm &dense, unsigned rowDim,
                   unsigned colDim,
                   const std::array<OperandCoordinateView, 2> &views,
-                  const OperandLayout &layout, StringRef name,
+                  const OperandLayout &layout, AffineMap symbolic,
+                  ArrayRef<Value> symbols, StringRef name,
                   std::string &why, GemmMappingClass &mappingClass) {
   auto ty = dyn_cast<MemRefType>(memref.getType());
   // The subview needs the memref's strides: an identity layout (its leading
@@ -243,6 +295,15 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
   operand.offsets.assign(rank, 0);
   operand.sizes.assign(rank, 1);
   operand.strides.assign(rank, 1);
+  // The run-time offsets the nest's symbols add, per memref dimension (the
+  // access map's results are the memref's dimensions).
+  if (symbolic && symbolic.getNumResults() != rank) {
+    why = (name + "'s symbolic offsets do not match its memref").str();
+    mappingClass = GemmMappingClass::Unknown;
+    return failure();
+  }
+  operand.symbolic = symbolic;
+  operand.symbols.assign(symbols.begin(), symbols.end());
 
   // The memref's row-major element strides (its layout is the identity; a
   // dynamic leading dimension has a static stride). They turn an index
@@ -270,6 +331,11 @@ getLogicalOperand(Value memref, const LogicalMatmul &matmul,
   // program's own guarantee). Outside, the nest itself accesses out of
   // bounds -- undefined, nothing correct to lower it to.
   auto inBounds = [&](unsigned dim, int64_t lo, int64_t hi) {
+    // A dimension with a run-time offset is the nest's own guarantee, as a
+    // dynamic extent is: where its symbols put the view is not known here,
+    // and the tiles touch no element the nest did not.
+    if (operand.hasSymbolicOffset(dim))
+      return true;
     if (lo >= 0 && (ty.isDynamicDim(dim) || hi < ty.getDimSize(dim)))
       return true;
     why = (name + " is accessed out of bounds along dimension " +
@@ -652,6 +718,30 @@ static Value materializeOperandView(OpBuilder &builder, Location loc,
       offset = index;
       layoutOffset = ShapedType::kDynamic;
     }
+    // The symbols' terms on the element offset: per dimension with a
+    // run-time offset, its term times the memref's row-major stride.
+    if (operand.hasSymbolicOffsets()) {
+      SmallVector<int64_t> rowMajor(sourceTy.getRank(), 1);
+      for (int64_t d = sourceTy.getRank() - 2; d >= 0; --d)
+        rowMajor[d] = rowMajor[d + 1] * sourceTy.getDimSize(d + 1);
+      Value sum = batched ? cast<Value>(offset)
+                          : arith::ConstantIndexOp::create(
+                                builder, loc, operand.elementOffset);
+      for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
+        if (!operand.hasSymbolicOffset(d))
+          continue;
+        Value term = materializeOffset(builder, loc,
+                                       operand.symbolic.getResult(d),
+                                       operand.symbols, /*constant=*/0);
+        if (rowMajor[d] != 1)
+          term = arith::MulIOp::create(
+              builder, loc, term,
+              arith::ConstantIndexOp::create(builder, loc, rowMajor[d]));
+        sum = arith::AddIOp::create(builder, loc, sum, term);
+      }
+      offset = sum;
+      layoutOffset = ShapedType::kDynamic;
+    }
     SmallVector<int64_t> viewShape(operand.shape.begin(), operand.shape.end());
     SmallVector<int64_t> viewStrides(operand.elementStrides.begin(),
                                      operand.elementStrides.end());
@@ -707,6 +797,23 @@ static Value materializeOperandView(OpBuilder &builder, Location loc,
       index =
           affine::AffineApplyOp::create(builder, loc, map, batchIVs).getResult();
     offsets[d] = index;
+  }
+  // A dimension the nest's symbols offset: the static offset (or the batch
+  // terms' affine.apply, which already holds it) plus the symbols' term,
+  // as index arithmetic -- a dynamic offset of the subview (a bare symbol
+  // with no static part is the symbol's value itself).
+  for (int64_t d = 0; d < sourceTy.getRank(); ++d) {
+    if (!operand.hasSymbolicOffset(d))
+      continue;
+    AffineExpr expr = operand.symbolic.getResult(d);
+    if (auto base = dyn_cast<Value>(offsets[d])) {
+      Value term = materializeOffset(builder, loc, expr, operand.symbols,
+                                     /*constant=*/0);
+      offsets[d] = arith::AddIOp::create(builder, loc, base, term).getResult();
+    } else {
+      offsets[d] = materializeOffset(builder, loc, expr, operand.symbols,
+                                     operand.offsets[d]);
+    }
   }
   MemRefType subviewTy = memref::SubViewOp::inferRankReducedResultType(
       keptShape, sourceTy, offsets, sizes, strides);
@@ -1437,18 +1544,18 @@ struct AffineMatmulToSystolicPass
     const int64_t K = dense->extent[kLogicalK];
 
     auto lhs = getLogicalOperand(matmul.lhs, matmul, *dense, kLogicalI, kLogicalK,
-                                 matmul.viewA, matmul.layoutA, "A", why,
-                                 mappingClass);
+                                 matmul.viewA, matmul.layoutA, matmul.symbolicA,
+                                 matmul.symbolsA, "A", why, mappingClass);
     if (failed(lhs))
       return failure();
     auto rhs = getLogicalOperand(matmul.rhs, matmul, *dense, kLogicalK, kLogicalJ,
-                                 matmul.viewB, matmul.layoutB, "B", why,
-                                 mappingClass);
+                                 matmul.viewB, matmul.layoutB, matmul.symbolicB,
+                                 matmul.symbolsB, "B", why, mappingClass);
     if (failed(rhs))
       return failure();
     auto out = getLogicalOperand(matmul.output, matmul, *dense, kLogicalI, kLogicalJ,
-                                 matmul.viewC, matmul.layoutC, "C", why,
-                                 mappingClass);
+                                 matmul.viewC, matmul.layoutC, matmul.symbolicC,
+                                 matmul.symbolsC, "C", why, mappingClass);
     if (failed(out))
       return failure();
 

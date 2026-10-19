@@ -410,6 +410,20 @@ struct TestAffineMatmulDiscoveryPass
       result.phiC.print(llvm::errs());
       llvm::errs() << "\n";
 
+      // The run-time (symbolic) offsets of the accesses, if any.
+      auto printSymbolic = [](const char *name, AffineMap m, ArrayRef<Value> syms) {
+        llvm::errs() << "  symbolic offsets " << name << ": ";
+        if (!m) {
+          llvm::errs() << "none\n";
+          return;
+        }
+        m.print(llvm::errs());
+        llvm::errs() << " over " << syms.size() << " symbol(s)\n";
+      };
+      printSymbolic("A", result.symbolicA, result.symbolsA);
+      printSymbolic("B", result.symbolicB, result.symbolsB);
+      printSymbolic("C", result.symbolicC, result.symbolsC);
+
       // Each operand's own view of its coordinates: subscript = scale *
       // coordinate + offset (1 * I + 0 when the subscript is the coordinate).
       auto printView = [](StringRef operand, StringRef c0, StringRef c1,

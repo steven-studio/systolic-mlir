@@ -68,19 +68,23 @@ func.func @disguise_large(%A: memref<20x24xf32> {llvm.noalias}, %B: memref<24x20
 // CHECK-NOT:     memref.copy
 // CHECK:         return
 // After --lower-systolic-matmul-tile-to-fpga each of the 10 tiles copies its two slabs -- rows
-// of A and columns of A^T, 8 x 16 / 16 x 8 or 4 x 16 / 16 x 4 -- and nothing else: no copy of
-// the 16 x 16 matrix. The transposed tensor is converted to an identity-layout buffer once per
-// tile (TILEBUF); that conversion is where --systolic-runtime-to-llvm materializes it (docs
-// section 19.13.7).
+// of A (strided<[16, 1]>) and columns of A^T, read straight from the transposed view
+// (strided<[1, 16]>), 8 x 16 / 16 x 8 or 4 x 16 / 16 x 4 -- into its staging buffers, and its
+// C block in and out; nothing copies the 16 x 16 matrix. (The lowering of 2026-10-19 stages
+// every operand tile with memref.subview + memref.copy from the source buffer, the C tile
+// included; the earlier one went through tensor slices and converted the whole transposed
+// tensor to an identity-layout buffer once per tile. Same 10 tiles, same FPGA calls.)
 // TILE-LABEL:    func.func @axa_t_large
 // TILE:          bufferization.to_tensor %arg0 restrict :
 // TILE:          bufferization.to_tensor %{{.*}} restrict : memref<16x16xf32, strided<[1, 16]>>
-// TILE-COUNT-20: memref.copy {{.*}} : memref<{{(8x16|16x8|4x16|16x4)}}xf32, strided<[16, 1]{{.*}}>> to memref<{{(8x16|16x8|4x16|16x4)}}xf32>
-// TILE-NOT:      memref.copy
+// TILE-COUNT-20: memref.copy {{.*}} : memref<{{(8x16|16x8|4x16|16x4)}}xf32, strided<[{{16, 1|1, 16}}]{{.*}}>> to memref<{{(8x16|16x8|4x16|16x4)}}xf32>
+// TILE-NOT:      memref.copy {{.*}} : memref<{{(8x16|16x8|4x16|16x4)}}xf32, strided
+// TILE-NOT:      memref.copy {{.*}}16x16
 // TILE:          return
 // TILEBUF-LABEL:    func.func @axa_t_large
 // TILEBUF:          %[[AT:.*]] = bufferization.to_tensor %{{.*}} restrict : memref<16x16xf32, strided<[1, 16]>>
-// TILEBUF-COUNT-10: bufferization.to_buffer %[[AT]] read_only : tensor<16x16xf32> to memref<16x16xf32>
+// TILEBUF-NOT:      bufferization.to_buffer %[[AT]]
+// TILEBUF-COUNT-10: memref.copy {{.*}} : memref<{{(16x8|16x4)}}xf32, strided<[1, 16]{{.*}}>> to memref<{{(16x8|16x4)}}xf32>
 // TILEBUF-NOT:      bufferization.to_buffer %[[AT]]
 // TILEBUF:          return
 // CERT:        dense extents: M 16, N 16, K 16

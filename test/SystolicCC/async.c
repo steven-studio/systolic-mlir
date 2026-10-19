@@ -12,7 +12,7 @@
 // stays failed until the session is closed, so every later GEMM of the
 // program falls back to the CPU as well.
 //
-// RUN: %systolic-cc --submission async --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --submission async --fp-reassociation --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: grep -c 'llvm.call @fpga_tile_submit' %t.systolic/50-fpga.mlir | FileCheck %s --check-prefix=SUBMITS
 // RUN: grep -c 'llvm.call @fpga_gemm_wait' %t.systolic/50-fpga.mlir | FileCheck %s --check-prefix=WAITS
 // RUN: not grep -q 'fpga_matmul_tiled_auto_scheduled' %t.systolic/50-fpga.mlir

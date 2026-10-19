@@ -1,10 +1,10 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic %s \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true %s \
 // RUN:   | FileCheck %s --check-prefix=VIEW
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga %s | FileCheck %s --check-prefix=SYNC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga="async=true" %s | FileCheck %s --check-prefix=ASYNC
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga="async=true" --systolic-runtime-to-llvm %s \
 // RUN:   | FileCheck %s --check-prefix=LLVM
 
