@@ -96,9 +96,29 @@ struct SystolicBinarySearchTileMatmulPass
     SmallVector<linalg::MatmulOp> targets;
     module.walk([&](linalg::MatmulOp op) { targets.push_back(op); });
 
+    // ----------------------------------------------------------
+    // Lower every static tensor linalg.matmul.
+    //
+    // Every matmul_tile this pass emits also carries four discardable
+    // attributes that name its place in the GEMM, for the asynchronous
+    // FPGA lowering (TileMatmulForFpga.cpp, async=true), which hands the
+    // tiles of a GEMM to the runtime without waiting for each one and
+    // needs to know which tiles accumulate into the same output block, and
+    // in what order:
+    //   systolic.gemm     which linalg.matmul of the module (0, 1, ...)
+    //   systolic.tile     which output block of that GEMM (the optimizer's
+    //                     task index)
+    //   systolic.k_index  which K fold of that block (0 .. k_count - 1)
+    //   systolic.k_count  how many K folds the block has
+    // The synchronous lowering ignores them. emitSystolicTilePlan sets
+    // them (SystolicTilePlan.cpp) when it is given the GEMM's index.
+    // ----------------------------------------------------------
+
+    int64_t gemmIndex = nextSystolicGemmIndex(module) - 1;
     for (linalg::MatmulOp matmul : targets) {
       if (matmul->getNumResults() != 1)
         continue;
+      ++gemmIndex;
 
       // The decomposition slices A as M x K and B as K x N, which is what
       // the default indexing maps C(m, n) += A(m, k) * B(k, n) mean.
@@ -201,7 +221,8 @@ struct SystolicBinarySearchTileMatmulPass
       OpBuilder builder(matmul);
       Value result = emitSystolicTilePlan(
           builder, matmul.getLoc(), matmul.getDpsInputs()[0],
-          matmul.getDpsInputs()[1], matmul.getDpsInits()[0], *plan, *fleet);
+          matmul.getDpsInputs()[1], matmul.getDpsInits()[0], *plan, *fleet,
+          gemmIndex);
 
       matmul.getResult(0).replaceAllUsesWith(result);
       matmul.erase();

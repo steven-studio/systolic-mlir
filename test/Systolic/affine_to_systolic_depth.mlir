@@ -15,7 +15,7 @@
 // CHECK:       affine.for %{{.*}} = 0 to 3 {
 // CHECK-NOT:     affine.for
 // CHECK:         systolic.matmul_tile {{.*}} on @acc_8x8_0
-// CHECK:       }
+// CHECK:       {{^ *}$}}
 // CHECK-NEXT:  return
 func.func @repeat_between(%A: memref<8x8xf32> {llvm.noalias},
                           %B: memref<8x8xf32> {llvm.noalias},
@@ -140,7 +140,7 @@ func.func @tiled6(%A: memref<16x24xf32> {llvm.noalias},
 // CHECK-NEXT:    affine.for %{{.*}} = 0 to 3 {
 // CHECK-NOT:       affine.for
 // CHECK:           systolic.matmul_tile
-// CHECK:         }
+// CHECK:         {{^ *}$}}
 // CHECK-NEXT:  }
 // CHECK-NEXT:  return
 func.func @seven(%A: memref<8x16xf32> {llvm.noalias},

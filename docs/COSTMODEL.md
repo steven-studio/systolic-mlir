@@ -255,7 +255,16 @@ D = 1 時逐 cycle 等於第 1 節的序列模型。binary search 的 capacity �
 `SystolicTilePlan` 的 `start_cycle` 是 transfers-free 的 `feedStart_j`（序列化時仍是前面
 compute term 的加總），`systolic-cost --verify` 重算 stream 比對區間。`systolic-cost --pipelined`
 / `timeline` 印出事件；`systolic-matmul` 從 `fpga_config.txt` 的 `PIPELINE_DEPTH` 決定宣告哪一種
-fleet（封存的 bitstream 沒有這一行 → 序列化）。
+fleet（封存的 bitstream 沒有這一行 → 序列化）。C／affine 路徑同一條規則（2026-10-19）：
+`--systolic-declare-fpga-fleet=... pipeline-depth=D`（D > 1 宣告 pipelined，預設 1），`systolic-cc`
+從 `runtime-dispatch-test --print-config` 讀 `PIPELINE_DEPTH` 傳入（`25-plan.json` 記 `pipeline_depth`），
+`test/e2e/affine_c/run.sh` 亦同；在此之前 C 路徑永遠宣告序列化 fleet，16x16x16 報 1245 而非 949、
+第二個 8x8 tile 的 `start_cycle` 是 125 而非 42（`test/Systolic/declare_fpga_fleet_pipelined.mlir`）。
+序列化的 `start_cycle` 在 v1 上無害（fill-bound，fold 間隔 267 > 125），但在 v2 的 4x4 鏈上會被硬體
+scheduler 的 `cycle_counter >= req_start_cycle` 拿來 hold fold（十個 k = 16 job：makespan 1296 對 1105）。
+模型的 makespan 是 **hardware schedule makespan**（descriptor 被接受到結果寫回 DDR，陣列時脈）；
+host 的提交開銷（DPTI 的 slab／descriptor／讀回）與 end-to-end 時間另計（`docs/ASYNC.md` 第 10 節），
+同步提交時模型預測的重疊在 host 端不會兌現。
 
 **驗證（`eval/pipeline_overlap/run.sh`）。** `tb_pipeline_overlap.sv` 把 K-fold 鏈以硬體願意接受的
 速度送進去，逐 job 蓋章（fire / grant / fill / fold / feed / cv / wbacc / done / rb），每塊結果
@@ -285,8 +294,14 @@ fill 這一串序列尾巴；v2（beat-wide）上 fill 75 < compute 125，下一
 （8x8 一塊約 850 拍）對 acceptance 的節流（RB_DEPTH = 8）與共用 read engine 的等待，所以
 比 4 次鏈的比例小；兩邊的 bench、job list 與 RTL 以外的環境完全相同。
 
-**仍未解決（量到的）。** (1) runtime 仍是同步的（一次一個 invocation），板子上要兌現這些重疊
-需要 runtime 多個 invocation 在途與每個 invocation 自己的 slab／result 區域；(2) DPTI 結果讀回在
+**仍未解決（量到的）。** (1) 主機路徑現在預設走非同步 runtime（`docs/ASYNC.md` 第 9、10 節，
+2026-10-18；同步 runtime 只剩 `--sync`／`--submission sync` 與沒有 completion record 的舊 bitstream）：
+每顆陣列最多 `PIPELINE_DEPTH` 個 descriptor 在飛、每個在途
+invocation 自己的 slab／result 區域，co-sim 上 context 的 queue 確實被填到 4，但 DPTI 鏈路本身
+（一筆 84 byte 的 descriptor 約 420 拍、一塊 1 KiB slab 約 5000 拍，對上 k = 16 的 tile 約 125 拍
+的 compute）讓同一顆陣列上連續 invocation 的 fold 幾乎不可能在前一個 publish 之前開始；主機路徑能
+兌現的是跨陣列的並行與「不必每筆等結果」，PE 層的重疊要由本節的 bench（internal job port）證明；
+(2) DPTI 結果讀回在
 模擬裡 8x8 一塊約 850 拍（4x4 約 213），是 host 永遠就緒時的物理瓶頸，且讀回的 beat 走同一個 AXI
 read engine，會把同時進行的 fill 擋住數百拍（`compare_timeline.py` 標成 fill-stalled；mitigation
 是把 `dpti_output_cdc` 的 FIFO 加深到能放一整個 burst 並以整個 burst 的空間 gate 讀回）；(3) 多顆

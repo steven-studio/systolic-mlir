@@ -5,6 +5,12 @@
 add_executable(runtime-dispatch-test runtime_dispatch_test.cpp)
 target_link_libraries(runtime-dispatch-test PRIVATE systolic_fpga_runtime)
 
+# The asynchronous runtime on its own (docs/ASYNC.md: modes A, B, C, D, X, V
+# against a bitstream with the completion record); run_e2e.sh --mode async
+# runs it before the compiler cases.
+add_executable(runtime-async-test runtime_async_test.cpp)
+target_link_libraries(runtime-async-test PRIVATE systolic_fpga_runtime)
+
 # The harness's handling of the bitstream configuration, on the host only (no
 # FPGA, no co-simulation): cmake --build build --target check-e2e-config
 add_custom_target(check-e2e-config

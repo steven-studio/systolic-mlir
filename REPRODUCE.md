@@ -185,9 +185,12 @@ The regression fixture checks:
 
 `start_cycle` is compiler-generated scheduling metadata.
 `--lower-systolic-matmul-tile-to-fpga` passes it, with `est_cycles`, into
-the job descriptor the runtime writes (registers 0x18 / 0x1C). The runtime
-submits one invocation at a time and waits for its result, so the value
-should still not be read as hardware-enforced launch timing.
+the job descriptor the runtime writes (registers 0x18 / 0x1C). The
+synchronous runtime submits one invocation at a time and waits for its
+result, and the asynchronous one (section 8b) keeps up to PIPELINE_DEPTH in
+flight per array; either way the value should not be read as
+hardware-enforced launch timing (the hardware scheduler's clock is
+session-global and only a lower bound).
 
 Machine-checkable regression:
 
@@ -320,9 +323,65 @@ configuration is not independently verified: the FPGA does not report its
 K_MAX.
 
 The co-simulation (`test/e2e/cosim/build.sh`, Verilator) runs the RTL of the
-bitstream's tag `tile-pipelined-1x8x8-3x4x4-20261009`, with only the Xilinx
-IP replaced, behind the unmodified runtime. It is a simulation: a board run
-is the only evidence about the board. See `docs/E2E.md`.
+working tree (`RTL_REV=tile-pipelined-1x8x8-3x4x4-20261009` for the archived
+bitstream's), with only the Xilinx IP replaced, behind the unmodified runtime.
+It is a simulation: a board run is the only evidence about the board. See
+`docs/E2E.md`.
+
+## 8b. The asynchronous runtime (`docs/ASYNC.md`)
+
+A second runtime keeps the four arrays busy at once: up to PIPELINE_DEPTH
+descriptors in flight per array (the context's job queue, 4 in this tree's
+RTL; docs/COSTMODEL.md section 8), each with its own operand slab and
+result tile in DDR, a further slab staged ahead, results attributed by the
+job_id of a 16-byte completion record the bitstream sends ahead of every
+tile. It needs a bitstream built from this tree's RTL (`dma_top_build.tcl`
+writes `COMPLETION_HEADER=1` and `PIPELINE_DEPTH=4` into its
+fpga_config.txt); the co-simulation built by `test/e2e/cosim/build.sh` from
+the working tree has both (docs/ASYNC.md section 9 has the evidence runs).
+
+    test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1, PIPELINE_DEPTH=4
+    cmake --build build --target check-systolic           # 86 lit tests, eight for the async lowering and dynamic offsets
+    test/e2e/run_e2e.sh --backend cosim                   # --mode sync: systolic-matmul --sync on every case
+    test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
+    SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
+
+On a configuration with COMPLETION_HEADER=1 the asynchronous runtime is the
+default of `systolic-matmul` and of `systolic-cc --runtime board` (no flag):
+every tile of a GEMM is submitted without waiting for the one before it and
+one wait per GEMM collects the results; `--sync` / `--submission sync` keep
+the synchronous entry point, one invocation at a time. `docs/ASYNC.md`
+section 10 has the submission evidence (`SYSTOLIC_RUNTIME_TRACE=1` host
+trace + the co-simulation's COSIM_JOB stamps through
+`tools/cosim_overlap_evidence.py`).
+
+`runtime-async-test` runs the experiments of `docs/ASYNC.md` as modes
+(A one array, B every array, C with the slab staged behind the running
+job, D two GEMMs interleaved, X the fold order checked bit for bit against
+the synchronous entry point, V the refusals, S the submission semantics --
+every submit back before the first completion, descriptors queued behind
+in-flight ones -- Q backpressure with the host queue cut to one, M three
+GEMMs waited for out of order, P the poll / timed-wait / release API, F a
+transport failure in the middle of a submission); `--gemm MxNxK` sizes
+them. The runtime drives the link from a transfer thread of its own
+(docs/ASYNC.md section 11): fpga_tile_submit packs and queues, fpga_gemm_poll
+and fpga_tile_poll never block, fpga_gemm_wait_for takes a timeout,
+fpga_gemm_release frees a polled GEMM. The software model (soft_runtime.c)
+implements the same API, so `systolic-cc --runtime soft --submission async`
+checks a program's asynchronous lowering without the board
+(test/SystolicCC/async.c). A GEMM whose output view is placed by an
+integer parameter (C[r0 + i][j], a dynamic offset) is lowered end to end
+(test/SystolicCC/dynoffset.c; docs/ASYNC.md section 11.2). The
+RTL changes have their own benches:
+
+    rtl/multi_200t/tile_pipelined/dma/tb/run_top_sim.sh v1 16 1 1          # the six regression gates, as before
+    COMPLETION_HEADER=1 rtl/multi_200t/tile_pipelined/dma/tb/run_dpti_direct.sh all
+    (cd rtl/multi_200t/tile_pipelined/dma/tb && iverilog -g2012 -I ../../../../../test/e2e/cosim \
+        -o /tmp/tb_arb tb_dpti_bus_arbiter.sv ../dpti_bus_arbiter.sv && vvp /tmp/tb_arb)
+
+The co-simulation shows correctness and that the overlap happens (the
+runtime's counters, the RTL's VIO counters); it runs at Verilator's speed, so
+the speed-up itself is a board measurement (`docs/ASYNC.md`, Section 6).
 
 
 ## 8a. Cost model, binary search, K_MAX exploration
@@ -381,8 +440,8 @@ or, using the existing build directory:
 
 A successful reproduction should end with:
 
-    Total Discovered Tests: 38
-      Passed: 38 (100.00%)
+    Total Discovered Tests: 79
+      Passed: 79 (100.00%)
 
 For FPGA measurement provenance and the exact sources of paper numbers,
 see:

@@ -1408,6 +1408,12 @@ struct AffineMatmulToSystolicPass
                     SystolicDialect>();
   }
 
+  /// The systolic.gemm index the next GEMM lowered through a plan gets
+  /// (SystolicTilePlan.h nextSystolicGemmIndex): numbered like the linalg
+  /// path's GEMMs, so the asynchronous FPGA lowering can hand this GEMM's
+  /// tiles to the runtime as one GEMM.
+  int64_t nextGemmIndex = 0;
+
   /// Lowers one GEMM, or leaves it untouched and returns why not and how the
   /// nest is classified (docs/AFFINE_GEMM_MAPPING.md section 9).
   LogicalResult lowerOne(const LogicalMatmul &matmul,
@@ -1675,7 +1681,7 @@ struct AffineMatmulToSystolicPass
     Value result;
     if (plan) {
       result = emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor,
-                                    *plan, fleet);
+                                    *plan, fleet, nextGemmIndex++);
     } else {
       result = MatmulTileOp::create(
           builder, loc, cTensor.getType(), aTensor, bTensor, cTensor,
@@ -1754,6 +1760,7 @@ struct AffineMatmulToSystolicPass
         };
     reportNormalizations(normalizeParallelotopeDomains(module.getOperation()));
     hoistRepetitionLoops(module, assumeNoAlias, classify);
+    nextGemmIndex = nextSystolicGemmIndex(module);
 
     SmallVector<AffineMatmulCandidate> candidates;
     collectAffineMatmulCandidates(module.getOperation(), candidates);

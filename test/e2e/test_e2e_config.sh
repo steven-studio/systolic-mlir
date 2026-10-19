@@ -98,6 +98,7 @@ while read -r k8 k4 slab; do
 K_MAX_4X4=$k4
 SLAB_BYTES=$slab
 PIPELINE_DEPTH=1
+COMPLETION_HEADER=0
 SOURCE=$f"
     [ $rc -eq 0 ] && [ "$out" = "$want" ] && ok "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4 -> slab $slab, pipeline depth 1 (not recorded)" \
         || bad "K_MAX_8X8 = $k8, K_MAX_4X4 = $k4" "$out"
@@ -126,6 +127,25 @@ for bad_depth in 0 65 04 x4; do
     [ $rc -ne 0 ] && has "$out" "PIPELINE_DEPTH = '$bad_depth' is not a decimal integer in 1..64" \
         && ok "PIPELINE_DEPTH = '$bad_depth' refused" || bad "PIPELINE_DEPTH = '$bad_depth'" "$out"
 done
+
+# COMPLETION_HEADER (the 16-byte completion record ahead of every result) and
+# DDR_BYTES (the DDR the bitstream can address): recorded next to
+# PIPELINE_DEPTH by the pipelined RTL's co-simulation and bitstream builds;
+# read together, and COMPLETION_HEADER takes only 0 or 1.
+f=$(cfg "pipe4_hdr.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nPIPELINE_DEPTH=4\nCOMPLETION_HEADER=1\nDDR_BYTES=1048576\n")
+out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
+[ $rc -eq 0 ] && has "$out" "PIPELINE_DEPTH=4" && has "$out" "COMPLETION_HEADER=1" && ok "PIPELINE_DEPTH = 4 with COMPLETION_HEADER = 1 and DDR_BYTES read" \
+    || bad "PIPELINE_DEPTH = 4 with COMPLETION_HEADER = 1" "$out"
+for bad_hdr in 2 x; do
+    f=$(cfg "hdr_bad_$bad_hdr.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nCOMPLETION_HEADER=$bad_hdr\n")
+    out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
+    [ $rc -ne 0 ] && has "$out" "COMPLETION_HEADER = '$bad_hdr' is not 0 or 1" \
+        && ok "COMPLETION_HEADER = '$bad_hdr' refused" || bad "COMPLETION_HEADER = '$bad_hdr'" "$out"
+done
+f=$(cfg "ddr_bad.txt" "K_MAX_8X8=16\nK_MAX_4X4=16\nDDR_BYTES=0\n")
+out=$(SYSTOLIC_FPGA_CONFIG="$f" "$RTTEST" --print-config 2>&1); rc=$?
+[ $rc -ne 0 ] && has "$out" "DDR_BYTES = '0' is not a decimal integer" \
+    && ok "DDR_BYTES = '0' refused" || bad "DDR_BYTES = '0'" "$out"
 
 echo "== runtime-dispatch-test: the cases follow each capacity"
 out=$(SYSTOLIC_FPGA_CONFIG="$WORK/k24_12.txt" "$RTTEST" --list 2>&1); rc=$?

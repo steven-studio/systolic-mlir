@@ -35,7 +35,7 @@ mkdir -p "$OUT"
 if [ "$CMD" = build ]; then
   command -v verilator >/dev/null 2>&1 || { echo "verilator not found"; exit 127; }
   EXTRA=()
-  for f in "$DMA/dpti_sync245_phy.sv" "$DMA/dpti_sync245_fifo.sv" \
+  for f in "$DMA/dpti_bus_arbiter.sv" "$DMA/dpti_sync245_phy.sv" "$DMA/dpti_sync245_fifo.sv" \
            "$DMA/dpti_clk_gen.sv" "$DMA/dpti_link_ctrl.sv"; do [ -f "$f" ] && EXTRA+=("$f"); done
   [ -f "$DMA/dpti_link_ctrl.sv" ] && DEF="$DEF -DHAS_LINK_CTRL"
   rm -rf "$OBJ"

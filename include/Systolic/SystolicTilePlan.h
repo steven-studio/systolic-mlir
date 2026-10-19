@@ -62,6 +62,9 @@ struct SystolicTileBlock {
   int64_t m = 0;
   int64_t n = 0;
   int64_t acceleratorId = 0;
+  /// The optimizer's task index of this block (its position in the
+  /// decomposition): what systolic.tile names, see emitSystolicTilePlan.
+  int64_t taskIndex = 0;
   SmallVector<SystolicTileInvocation> invocations;
 };
 
@@ -82,9 +85,24 @@ planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N, int64_t K,
 /// extract_slice of C, its invocations' systolic.matmul_tile chain on slices
 /// of A and B, and an insert_slice back, threaded block to block. Returns
 /// the final C.
+///
+/// gemmIndex >= 0: every matmul_tile also carries the discardable attributes
+/// the asynchronous FPGA lowering needs (TileMatmulForFpga.cpp async=true,
+/// docs/ASYNC.md) to hand a GEMM's tiles to the runtime without waiting for
+/// each one: systolic.gemm = gemmIndex (which GEMM of the module),
+/// systolic.tile = the block's task index (which output block of it),
+/// systolic.k_index / systolic.k_count (which K fold of that block, of how
+/// many). The synchronous lowering ignores them; -1 emits none.
 Value emitSystolicTilePlan(OpBuilder &builder, Location loc, Value A, Value B,
                            Value C, const SystolicTilePlan &plan,
-                           const SystolicFleet &fleet);
+                           const SystolicFleet &fleet, int64_t gemmIndex = -1);
+
+/// The first systolic.gemm index no matmul_tile of `module` carries yet: 0
+/// in a fresh module, one past the largest index present otherwise. Both IR
+/// producers number the GEMMs they emit from it, so a module through which
+/// the linalg and the affine path both run keeps every GEMM's index unique
+/// (the asynchronous lowering groups a GEMM's tiles by it).
+int64_t nextSystolicGemmIndex(ModuleOp module);
 
 } // namespace systolic
 } // namespace mlir

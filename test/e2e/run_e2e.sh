@@ -54,6 +54,26 @@
 #   --cases a,b,...   only these cases (names as gen_cases.py prints them)
 #   --keep-going      run the cases even when the runtime layer could not
 #                     reach the FPGA
+#   --timing          time every case: the host wall-clock of the whole
+#                     systolic-matmul run and the runtime's own per-invocation
+#                     breakdown (SYSTOLIC_RUNTIME_TIMING=1 is exported to the
+#                     cases; the runtime prints one `[fpga-runtime] timing`
+#                     line at close, `[fpga-async] timing` with --mode async).
+#                     The rows land in <out>/timing.tsv and
+#                     tools/e2e_timing.py prints the table. Verdicts are not
+#                     affected. Other SYSTOLIC_DPTI_* and SYSTOLIC_ASYNC_*
+#                     variables (LATENCY_MS, SETTLE_US, STAGE, ...) pass
+#                     through to the cases as exported.
+#   --mode sync|async sync (default): every case through the synchronous
+#                     runtime (systolic-matmul --sync), one
+#                     fpga_matmul_tiled_auto_scheduled per tile, each waited
+#                     for. async: systolic-matmul --async, the asynchronous runtime
+#                     (fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait,
+#                     docs/ASYNC.md); the runtime layer step also runs
+#                     runtime-async-test, and the configuration must say
+#                     COMPLETION_HEADER=1 (a bitstream with the completion
+#                     record). The verdict checks that the lowered IR calls
+#                     the runtime of the chosen mode.
 #   --build-dir DIR   the CMake build directory (default: build)
 #   --cosim-dir DIR   the co-simulation to run (default: BUILD/cosim)
 #   --out DIR         where the cases and the summary go (default:
@@ -92,6 +112,8 @@ ONLY=""
 PROFILE=""
 CHECK_ONLY=0
 KEEP_GOING=0
+TIMING=0
+RTMODE=sync
 while [ $# -gt 0 ]; do
     case "$1" in
         --backend)      BACKEND="$2"; shift 2 ;;
@@ -107,11 +129,14 @@ while [ $# -gt 0 ]; do
         --extra-k)      EXTRA_K="$2"; shift 2 ;;
         --cases)        ONLY="$2"; shift 2 ;;
         --keep-going)   KEEP_GOING=1; shift ;;
+        --timing)       TIMING=1; shift ;;
+        --mode)         RTMODE="$2"; shift 2 ;;
         -h|--help)      usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 case "$BACKEND" in board|cosim) ;; *) echo "--backend board|cosim" >&2; exit 2 ;; esac
+case "$RTMODE" in sync|async) ;; *) echo "--mode sync|async" >&2; exit 2 ;; esac
 [ "$MODES" -le 1 ] || { echo "--quick, --fixed-only, --kmax-cases and --regression exclude each other" >&2; exit 2; }
 if [ -n "$EXTRA_K" ] && { [ "$MODE" = quick ] || [ "$MODE" = fixed ] ||
                           ! [[ "$EXTRA_K" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; }; then
@@ -121,10 +146,21 @@ fi
 
 MATMUL="$BUILD/bin/systolic-matmul"
 RTTEST="$BUILD/bin/runtime-dispatch-test"
+RTASYNC="$BUILD/bin/runtime-async-test"
 VERDICT="$HERE/e2e_verdict.py"
+# systolic-matmul chooses by itself (batch submission wherever the bitstream
+# has the completion record); each mode asks for its runtime explicitly, so
+# the sync mode keeps exercising the synchronous path on such a bitstream.
+MATMUL_FLAGS=(--sync)
+[ "$RTMODE" = async ] && MATMUL_FLAGS=(--async)
 for b in "$MATMUL" "$RTTEST"; do
     [ -x "$b" ] || { echo "missing $b -- build first (cmake --build $BUILD)" >&2; exit 2; }
 done
+grep -q -- '--sync' "$MATMUL" || { echo "$MATMUL predates --sync -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
+if [ "$RTMODE" = async ]; then
+    [ -x "$RTASYNC" ] || { echo "missing $RTASYNC -- build first (cmake --build $BUILD)" >&2; exit 2; }
+    grep -q -- '--async' "$MATMUL" || { echo "$MATMUL predates --async -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
+fi
 # An older runtime-dispatch-test has no --print-config and would run its
 # cases -- open the link -- when asked for the configuration.
 grep -q -- '--print-config' "$RTTEST" || {
@@ -269,6 +305,21 @@ if [ -n "$SHA" ] && [ "$SHA" != unknown ]; then
 else
     META+=("BITSTREAM_SHA256: not recorded${BIT:+ (BITSTREAM = $BIT)}")
 fi
+# COMPLETION_HEADER=1: every result the bitstream sends starts with the
+# 16-byte completion record (docs/ASYNC.md phase 2); the verdict counts the
+# bytes back accordingly, and --mode async needs it.
+HEADER=$(cfg_values "$GIVEN" COMPLETION_HEADER | tail -1)
+case "$HEADER" in
+    1) META+=("COMPLETION_HEADER = 1: results carry the completion record") ;;
+    ""|0) META+=("COMPLETION_HEADER: ${HEADER:-not recorded} (bare result tiles)"); HEADER=0 ;;
+    *) fail_config "$GIVEN: COMPLETION_HEADER = '$HEADER' is not 0 or 1" ;;
+esac
+[ "$RTMODE" = async ] && [ "$HEADER" != 1 ] &&
+    fail_config "--mode async needs a bitstream with the completion record, and $GIVEN does not say COMPLETION_HEADER=1"
+# PIPELINE_DEPTH: the context's job queue, the asynchronous runtime's
+# descriptor credit per array (docs/ASYNC.md section 9); 1 when not recorded.
+DEPTH=$(cfg_values "$GIVEN" PIPELINE_DEPTH | tail -1)
+[[ "$DEPTH" =~ ^[1-9][0-9]*$ ]] || DEPTH=1
 rest=""
 for key in VARIANT USE_V2 RTL_GIT_REV RTL_TREE_DIRTY RTL_SOURCE TIMING_MET WNS_NS WHS_NS BUILT; do
     v=$(cfg_values "$GIVEN" "$key" | tail -1)
@@ -311,6 +362,7 @@ OUT="$(cd "$OUT" && pwd)"
     echo "configuration"
     echo "  host       K_MAX_8X8 = $K8, K_MAX_4X4 = $K4, $SLAB-byte operand slab"
     echo "             (the runtime's parser; SYSTOLIC_FPGA_CONFIG=$GIVEN, from $HOW)"
+    echo "  runtime    $RTMODE$([ "$RTMODE" = async ] && echo ' (systolic-matmul --async: fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait)' || echo ' (systolic-matmul --sync: one fpga_matmul_tiled_auto_scheduled per tile)')"
     echo "  metadata   (the same file)"
     for m in ${META[@]+"${META[@]}"}; do echo "             $m"; done
     echo "  hardware   $HW"
@@ -334,6 +386,7 @@ fi
 "${GEN[@]}" > "$OUT/cases/generated.txt" || { echo "gen_cases.py failed" >&2; exit 2; }
 : > "$OUT/case_list.txt"
 : > "$OUT/not_run.txt"
+[ "$TIMING" = 1 ] && printf 'case\texit\twall_us\truntime_timing\n' > "$OUT/timing.tsv"
 while read -r name; do
     [ -n "$ONLY" ] && case ",$ONLY," in *",$name,"*) ;; *) continue ;; esac
     echo "$name" >> "$OUT/case_list.txt"
@@ -463,6 +516,12 @@ if [ "$CHECK_ONLY" = 1 ]; then
     plan_rc=$?
     sed 's/^/   /' "$OUT/runtime_dispatch_plan.txt"
     echo
+    if [ "$RTMODE" = async ]; then
+        echo "== runtime layer: the modes runtime-async-test would run"
+        "$RTASYNC" --list > "$OUT/runtime_async_plan.txt" 2>&1 || plan_rc=$?
+        sed 's/^/   /' "$OUT/runtime_async_plan.txt"
+        echo
+    fi
     echo "== E2E cases this run would send ($(wc -l < "$OUT/case_list.txt" | tr -d ' ') case(s); $MODE)"
     tr '\n' ' ' < "$OUT/case_list.txt" | fold -s -w 96 | sed 's/^/   /'
     echo
@@ -503,6 +562,31 @@ else
 fi
 echo
 
+# ---- 1b. the asynchronous runtime on its own (--mode async) -----------------
+# runtime-async-test: one device, every device without and with the slab
+# staged behind the running job, two GEMMs interleaved, the fold order
+# checked bit for bit against the synchronous entry point, and the
+# refusals; a 16x16x32 GEMM (20 tiles) unless SYSTOLIC_E2E_ASYNC_GEMM says
+# otherwise. Its verdict joins the dispatch test's in "runtime layer".
+if [ "$RTMODE" = async ] && [ "$rt_class" != TRANSPORT ] && [ "$rt_class" != CONFIG ]; then
+    echo "== runtime layer: the asynchronous runtime (runtime-async-test --mode all)"
+    "$RTASYNC" --mode all --gemm "${SYSTOLIC_E2E_ASYNC_GEMM:-16x16x32}" > "$OUT/runtime_async.txt" 2>&1
+    ra_rc=$?
+    [ "$LIVE_SIM" = 1 ] && settle_sessions
+    sed 's/^/   /' "$OUT/runtime_async.txt" | grep -v -E 'libftdi_cosim|^   \[fpga-(async|runtime)\] (timing|submit|stage|descriptor|completion|accumulate|hold|gemm|session)'
+    case $ra_rc in
+        0) ra_class=PASS ;; 1) ra_class=MISMATCH ;; 2) ra_class=CONFIG ;;
+        3) ra_class=TRANSPORT ;; 4) ra_class=SUBMISSION ;; *) ra_class=FAIL ;;
+    esac
+    if [ "$ra_class" != PASS ]; then
+        rt_class=$ra_class
+        rt="FAIL -- runtime-async-test $ra_class (exit $ra_rc): $(grep -E '^RUNTIME ASYNC:' "$OUT/runtime_async.txt" | tail -1 | sed -E 's/^RUNTIME ASYNC: (FAIL -- )?//')"
+    else
+        rt="PASS (runtime-dispatch-test and runtime-async-test)"
+    fi
+    echo
+fi
+
 # ---- 2. every case through the whole pipeline ------------------------------
 SKIP_ALL=""
 if [ "$KEEP_GOING" = 0 ] && { [ "$rt_class" = TRANSPORT ] || [ "$rt_class" = CONFIG ]; }; then
@@ -522,8 +606,20 @@ while read -r name; do
     mkdir -p "$d/ir"
     cp "$OUT/cases/$name.txt" "$d/input.txt"
     [ "$LIVE_SIM" = 1 ] && before=$(sessions_opened)
-    "$MATMUL" --dump-ir="$d/ir" < "$d/input.txt" > "$d/output.txt" 2>&1
-    rc=$?
+    if [ "$TIMING" = 1 ]; then
+        t0=$(date +%s%N)
+        SYSTOLIC_RUNTIME_TIMING=1 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} --dump-ir="$d/ir" < "$d/input.txt" > "$d/output.txt" 2>&1
+        rc=$?
+        t1=$(date +%s%N)
+        # case, exit, wall-clock of the whole run (compile + JIT + FPGA), the
+        # runtime's own line (empty when the run never reached the close)
+        printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$(( (t1 - t0) / 1000 ))" \
+            "$(grep -m1 -E '^\[fpga-(runtime|async)\] timing ' "$d/output.txt" | sed -E 's/^\[fpga-(runtime|async)\] timing /\1 /')" \
+            >> "$OUT/timing.tsv"
+    else
+        "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} --dump-ir="$d/ir" < "$d/input.txt" > "$d/output.txt" 2>&1
+        rc=$?
+    fi
     total=$((total + 1))
 
     sim=()
@@ -539,7 +635,7 @@ while read -r name; do
     fi
     IFS=$'\t' read -r cls rtrc tiles inv to back cov note < <(
         python3 "$VERDICT" "$d" --exit "$rc" --k8 "$K8" --k4 "$K4" --slab "$SLAB" \
-            --source "$GIVEN" ${sim[@]+"${sim[@]}"})
+            --source "$GIVEN" --mode "$RTMODE" --header "$HEADER" ${sim[@]+"${sim[@]}"})
     [ -n "${cls:-}" ] || { cls=FAIL; rtrc=-; tiles=-; inv=-; to=-; back=-; cov=-; note="e2e_verdict.py gave no verdict"; }
     SEEN="$SEEN$cls $name
 "
@@ -557,35 +653,49 @@ not_run=$(awk 'END { print NR }' "$OUT/not_run.txt")
 echo | tee -a "$OUT/summary.txt"
 
 # ---- 3. a broken link is reported, not computed around (co-simulation) ---
-# The co-simulation's libftdi fails write #7 of the session: the 5th WRITE32
-# of the first of five descriptors (16x8x4). The MEM_WRITE (9 B and the slab)
-# and four WRITE32s (4 x 6 B) are all that may reach the RTL -- no submit, so
-# no result -- and systolic-matmul must exit 4 with the runtime's -6, a
-# transport failure. 16x8x4 is five invocations as long as every
-# K_MAX >= 4; with a shallower bitstream the count differs and the check is
-# skipped.
+# The co-simulation's libftdi fails write #7 of the session. Synchronous
+# runtime: the 5th WRITE32 of the first of five descriptors (16x8x4) -- the
+# MEM_WRITE (9 B and the slab) and four WRITE32s (4 x 6 B) are all that may
+# reach the RTL -- no submit, so no result -- and systolic-matmul must exit
+# 4 with the runtime's -6, a transport failure. Asynchronous runtime (burst
+# submission, docs/ASYNC.md section 9: every slab a device has room for
+# goes out before its descriptors, each MEM_WRITE as two writes, the 9-byte
+# header and the slab): write #7 is the fourth slab's header, so three slabs
+# reach the RTL and the runtime's -4 is reported; that order holds while
+# the arrays have room for four slabs each (PIPELINE_DEPTH >= 3), else the
+# check is skipped. 16x8x4 is five invocations as long as every K_MAX >= 4;
+# with a shallower bitstream the count differs and the check is skipped.
 df_ok=1
-DF_BYTES=$(( 9 + SLAB + 4 * 6 ))
+if [ "$RTMODE" = async ]; then
+    DF_BYTES=$(( 3 * (9 + SLAB) )); DF_RC=-4
+    DF_WHAT="the fourth slab's MEM_WRITE header (burst submission: slabs first)"
+else
+    DF_BYTES=$(( 9 + SLAB + 4 * 6 )); DF_RC=-6
+    DF_WHAT="the 5th WRITE32 of the first descriptor"
+fi
 if [ "$BACKEND" = cosim ] && [ -n "$SKIP_ALL" ]; then
     echo "dispatch failure reported: NOT RUN ($SKIP_ALL)" | tee -a "$OUT/summary.txt"
+elif [ "$BACKEND" = cosim ] && [ "$RTMODE" = async ] && [ "$DEPTH" -lt 3 ]; then
+    echo "dispatch failure reported: NOT TESTED (PIPELINE_DEPTH = $DEPTH: the asynchronous runtime's write order differs)" \
+        | tee -a "$OUT/summary.txt"
 elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
-    echo "== dispatch failure: write #7 of the session fails (5th WRITE32 of the first descriptor)"
+    echo "== dispatch failure: write #7 of the session fails ($DF_WHAT)"
     d="$OUT/dispatch_failure"
     mkdir -p "$d"
     python3 "$HERE/gen_cases.py" "$d/gen" > /dev/null
     cp "$d/gen/16x8x4_mixed.txt" "$d/input.txt"
     before=$(sessions_opened)
-    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" < "$d/input.txt" > "$d/output.txt" 2>&1
+    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} < "$d/input.txt" > "$d/output.txt" 2>&1
     frc=$?
     settle_sessions
     read -r frecv fcons fsent < <(cosim_bytes "$((before + 1))")
     sed -n -E 's/^ *(DPTI: .*)/   runtime: \1/p; s/^(FPGA dispatch: .*)/   \1/p' "$d/output.txt"
     echo "   exit $frc; RTL received ${frecv:--} B, consumed ${fcons:--} B, sent ${fsent:--} B"
     if [ $frc -eq 4 ] &&
-       grep -q '^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error -6)' "$d/output.txt" &&
+       grep -q "^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error $DF_RC)" "$d/output.txt" &&
        grep -q "DPTI: $DF_BYTES B to the FPGA, 0 B back" "$d/output.txt" &&
        [ "$frecv" = "$DF_BYTES" ] && [ "$fcons" = "$DF_BYTES" ] && [ "$fsent" = 0 ]; then
-        df="PASS (TRANSPORT, rc=-6, as injected)"
+        df="PASS (TRANSPORT, rc=$DF_RC, as injected)"
     else
         df=FAIL; df_ok=0
     fi
@@ -604,6 +714,7 @@ for c in MISMATCH CONFIG TRANSPORT SUBMISSION INPUT COMPILE FAIL; do
     [ "$n" -gt 0 ] && fails="$fails${fails:+, }$c $n (first: $(first "$c"))"
 done
 cases_line="E2E cases: $pass/$total PASS on backend $BACKEND"
+[ "$RTMODE" = async ] && cases_line="$cases_line (async runtime)"
 [ -n "$fails" ] && cases_line="$cases_line; $fails"
 [ "$not_run" -gt 0 ] && cases_line="$cases_line; NOT RUN $not_run (see the NOT_RUN rows)"
 
@@ -619,6 +730,7 @@ coverage=$(awk -F'\t' -v k8="$K8" -v k4="$K4" '
 {
     echo "configuration: K_MAX_8X8 = $K8, K_MAX_4X4 = $K4, $SLAB-byte operand slab ($GIVEN, from $HOW)"
     echo "hardware: $HW"
+    echo "runtime mode: $RTMODE (COMPLETION_HEADER = $HEADER)"
     echo "configuration refusal: $cfg"
     echo "runtime layer: $rt"
     echo "$cases_line"
@@ -632,6 +744,7 @@ ok=1
 [ "$df_ok" = 1 ] || ok=0
 if [ "$ok" = 1 ]; then
     verdict="E2E: PASS on backend $BACKEND (K_MAX_8X8 = $K8, K_MAX_4X4 = $K4)"
+    [ "$RTMODE" = async ] && verdict="E2E: PASS on backend $BACKEND, async runtime (K_MAX_8X8 = $K8, K_MAX_4X4 = $K4)"
     [ "$BACKEND" = board ] && verdict="$verdict -- hardware configuration not independently verified"
     [ "$not_run" -gt 0 ] && verdict="$verdict; $not_run case(s) NOT RUN"
 else
@@ -644,4 +757,8 @@ else
     verdict="E2E: FAIL -- $why"
 fi
 echo "$verdict" | tee -a "$OUT/summary.txt"
+if [ "$TIMING" = 1 ] && [ -s "$OUT/timing.tsv" ]; then
+    echo | tee -a "$OUT/summary.txt"
+    python3 "$ROOT/tools/e2e_timing.py" "$OUT" | tee -a "$OUT/summary.txt"
+fi
 [ "$ok" = 1 ]

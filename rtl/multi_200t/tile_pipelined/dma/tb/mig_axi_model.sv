@@ -23,7 +23,9 @@
  */
 
 module mig_7series_0 #(
-  parameter integer MEM_WORDS = 32768,     // 32-bit words: room for K_MAX = 256
+  parameter integer MEM_WORDS = 262144,    // 32-bit words: 1 MiB (test/e2e/cosim/build.sh
+                                           // records it as DDR_BYTES; the asynchronous
+                                           // runtime fits its per-device slots in it)
   parameter integer WB_REGION = 4096       // byte address where results start
                                            // (default; +wb_region=<bytes> overrides,
                                            // because the boundary moves with K_MAX
@@ -108,9 +110,31 @@ module mig_7series_0 #(
   int   w_addr, w_left, w_burst_base, w_burst_len;
   logic w_open = 1'b0;
 
+  // +w_stall=N: a W beat is accepted, then wready stays low for N cycles --
+  // the controller refusing data mid-burst, which stretches every write burst
+  // so a bench can place a second master's request inside it on purpose
+  // (tb_dpti_direct.sv's AXI write-channel collision test). 0 (default) is
+  // the model as it always was: wready high.
+  integer w_stall = 0;
+  integer w_stall_ctr = 0;
+
   initial begin
-    s_axi_awready = 1'b1; s_axi_wready = 1'b1;
+    if (!$value$plusargs("w_stall=%d", w_stall)) w_stall = 0;
+    s_axi_awready = 1'b1; s_axi_wready = (w_stall == 0);
     s_axi_bvalid  = 1'b0; s_axi_bresp  = 2'b00; s_axi_bid = 2'b00;
+  end
+
+  always_ff @(posedge ui_clk) begin
+    if (ui_clk_sync_rst) begin
+      s_axi_wready <= (w_stall == 0); w_stall_ctr <= 0;
+    end else if (w_stall > 0) begin
+      if (s_axi_wvalid && s_axi_wready) begin
+        s_axi_wready <= 1'b0; w_stall_ctr <= w_stall;
+      end else if (!s_axi_wready) begin
+        if (w_stall_ctr <= 1) s_axi_wready <= 1'b1;
+        else                  w_stall_ctr <= w_stall_ctr - 1;
+      end
+    end
   end
 
   always_ff @(posedge ui_clk) begin
@@ -122,6 +146,11 @@ module mig_7series_0 #(
       if (s_axi_awvalid && s_axi_awready) begin
         if (w_open) begin
           $display("  FAIL: AW accepted while a burst was still open");
+          errors <= errors + 1;
+        end
+        if (int'(s_axi_awaddr) + (int'(s_axi_awlen) + 1) * BPB > MEM_WORDS * 4) begin
+          $display("  FAIL: write burst beyond the %0d-byte DDR model: addr %0d len %0d",
+                   MEM_WORDS * 4, s_axi_awaddr, s_axi_awlen + 1);
           errors <= errors + 1;
         end
         w_burst_base <= int'(s_axi_awaddr);

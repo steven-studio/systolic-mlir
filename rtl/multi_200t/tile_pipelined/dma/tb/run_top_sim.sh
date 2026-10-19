@@ -100,6 +100,7 @@ verilator --binary -Wno-fatal --timing --public-flat-rw $GEN \
     "$DMA/systolic_dma_top.sv" \
     "$DMA/systolic_accel_context.sv" \
     "$DMA/dpti_host_rx.sv" \
+    "$DMA/dpti_bus_arbiter.sv" \
     "$DMA/dpti_byte_tx.sv" \
     "$DMA/dpti_sync245_phy.sv" \
     "$DMA/dpti_sync245_fifo.sv" \

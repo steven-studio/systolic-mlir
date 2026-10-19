@@ -8,6 +8,8 @@
 
 #include "Systolic/SystolicTilePlan.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 #include "Systolic/CostModel.h"
 #include "Systolic/DeviceConfig.h"
 #include "Systolic/SystolicOps.h"
@@ -361,6 +363,7 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
     block.m = m;
     block.n = n;
     block.acceleratorId = task.acceleratorId;
+    block.taskIndex = static_cast<int64_t>(taskIndex);
 
     for (int64_t j = 0; j < numInvocations; ++j) {
       const int64_t k0 = j * kStep;
@@ -386,10 +389,20 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
   return plan;
 }
 
+int64_t mlir::systolic::nextSystolicGemmIndex(ModuleOp module) {
+  int64_t next = 0;
+  module.walk([&](MatmulTileOp tile) {
+    if (auto gemm = tile->getAttrOfType<IntegerAttr>("systolic.gemm"))
+      next = std::max<int64_t>(next, gemm.getInt() + 1);
+  });
+  return next;
+}
+
 Value mlir::systolic::emitSystolicTilePlan(OpBuilder &builder, Location loc,
                                            Value A, Value B, Value C,
                                            const SystolicTilePlan &plan,
-                                           const SystolicFleet &fleet) {
+                                           const SystolicFleet &fleet,
+                                           int64_t gemmIndex) {
   Type elementType = cast<RankedTensorType>(A.getType()).getElementType();
   SmallVector<OpFoldResult> strides(2, builder.getIndexAttr(1));
 
@@ -407,7 +420,7 @@ Value mlir::systolic::emitSystolicTilePlan(OpBuilder &builder, Location loc,
 
     auto tileTy = RankedTensorType::get({block.m, block.n}, elementType);
 
-    for (const SystolicTileInvocation &inv : block.invocations) {
+    for (auto [j, inv] : llvm::enumerate(block.invocations)) {
       SmallVector<OpFoldResult> aOff{offM, builder.getIndexAttr(inv.k0)};
       SmallVector<OpFoldResult> aSize{builder.getIndexAttr(block.m),
                                       builder.getIndexAttr(inv.k)};
@@ -420,13 +433,26 @@ Value mlir::systolic::emitSystolicTilePlan(OpBuilder &builder, Location loc,
       Value bTile =
           tensor::ExtractSliceOp::create(builder, loc, B, bOff, bSize, strides);
 
-      cTile = MatmulTileOp::create(
+      auto tile = MatmulTileOp::create(
           builder, loc, tileTy, aTile, bTile, cTile,
           builder.getI64IntegerAttr(block.m),
           builder.getI64IntegerAttr(block.n), builder.getI64IntegerAttr(inv.k),
           /*device=*/fleet.symbols[block.acceleratorId],
           /*est_cycles=*/builder.getI64IntegerAttr(inv.estCycles),
           /*start_cycle=*/builder.getI64IntegerAttr(inv.startCycle));
+      // The tile's place in its GEMM, for the asynchronous FPGA lowering
+      // (the header's note on gemmIndex).
+      if (gemmIndex >= 0) {
+        tile->setAttr("systolic.gemm", builder.getI64IntegerAttr(gemmIndex));
+        tile->setAttr("systolic.tile",
+                      builder.getI64IntegerAttr(block.taskIndex));
+        tile->setAttr("systolic.k_index",
+                      builder.getI64IntegerAttr(static_cast<int64_t>(j)));
+        tile->setAttr("systolic.k_count",
+                      builder.getI64IntegerAttr(
+                          static_cast<int64_t>(block.invocations.size())));
+      }
+      cTile = tile.getResult();
     }
 
     result = tensor::InsertSliceOp::create(builder, loc, cTile, result, cOff,

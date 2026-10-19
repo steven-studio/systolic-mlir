@@ -250,6 +250,7 @@ if {[info exists ::env(SYSTOLIC_PROJ_TAG)]} {
     puts "SYSTOLIC_PROJ_TAG=$PROJ_TAG  PROJ_DIR = $PROJ_DIR"
 }
 
+
 # Where the result tile is written back.  One page clear of the operand image,
 # which is K_MAX_8X8*8*N bytes long (1 KiB at K8 = 16, 16 KiB at 256; the top's
 # RX_BYTES is sized by K_MAX_8X8), so that an address error in either direction
@@ -296,6 +297,7 @@ set SRC [list \
     $SCRIPT_DIR/systolic_accel_context.sv \
     $SCRIPT_DIR/dma_engine_multi.sv \
     $SCRIPT_DIR/dpti_host_rx.sv \
+    $SCRIPT_DIR/dpti_bus_arbiter.sv \
     $SCRIPT_DIR/dpti_byte_rx.sv \
     $SCRIPT_DIR/dpti_write32_decoder.sv \
     $SCRIPT_DIR/dpti_mem_write_decoder.sv \
@@ -493,8 +495,11 @@ proc build_body {} {
     # request.  n_inv's INIT is 1, so a freshly programmed board runs exactly
     # what it ran before the invocation loop existed -- the single-invocation
     # numbers in the paper are reproducible without touching a probe.
-    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {20} CONFIG.C_NUM_PROBE_OUT {2}]
-    for {set i 0} {$i < 20} {incr i} {
+    # Oct 2026: 25 probes in -- probe_in20..24 are the asynchronous host's
+    # evidence (overlap2/overlap4 cycles, idle gap of context 0 and 1, the
+    # completion counter rb_seq); see systolic_dma_top.sv.
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {25} CONFIG.C_NUM_PROBE_OUT {2}]
+    for {set i 0} {$i < 25} {incr i} {
         lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
     }
     lappend vio_cfg CONFIG.C_PROBE_OUT0_WIDTH {4} CONFIG.C_PROBE_OUT0_INIT_VAL {0x1}
@@ -680,6 +685,13 @@ proc write_fpga_config {path bit wns whs dpti_io_ok} {
     puts $f "VARIANT=$VARIANT"
     puts $f "USE_V2=$USE_V2"
     puts $f "HOST_SLAB_BYTES=[expr {$slab * 8 * $NARR}]"
+    # Every result read back starts with a 16-byte completion record
+    # (systolic_dma_top.sv, readback section); the runtime reads it only when
+    # this line says so, so a bitstream built before it still works.
+    puts $f "COMPLETION_HEADER=1"
+    # The board's DDR3 (Nexys Video: 512 MiB); the asynchronous runtime fits
+    # its per-device operand and result slots in it.
+    puts $f "DDR_BYTES=536870912"
     # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH, the
     # default this build takes): invocations one accelerator holds at a time.
     # The compiler declares the fleet's pipelining from it; the archived
@@ -1169,6 +1181,12 @@ proc read_vio {} {
     set extdbg [pval $all_probes HEX      external_debug_sticky  probe_in17]
     set phydbg [pval $all_probes HEX      dpti_phy_debug_sync  probe_in18]
     set clkact [pval $all_probes HEX      dpti_clk_activity_sync probe_in19]
+    # the asynchronous host's evidence (probe_in20..24), counted from reset
+    set ovl2   [pval $all_probes UNSIGNED overlap2_cycles        probe_in20]
+    set ovl4   [pval $all_probes UNSIGNED overlap4_cycles        probe_in21]
+    set gap0   [pval $all_probes UNSIGNED idle_gap_cycles\[0\]   probe_in22]
+    set gap1   [pval $all_probes UNSIGNED idle_gap_cycles\[1\]   probe_in23]
+    set cseq   [pval $all_probes UNSIGNED rb_seq                 probe_in24]
     if {$nrun eq "" || $nrun == 0} { set nrun 1 }
 
     if {$wchk eq "" || $cyc eq ""} {
@@ -1217,6 +1235,13 @@ proc read_vio {} {
     puts "  external debug     = 0x$extdbg"
     puts "  DPTI physical debug = 0x$phydbg"
     puts "  DPTI clock activity = 0x$clkact"
+    puts ""
+    puts "  --- asynchronous host (counted from reset) ---"
+    puts "  completions issued (rb_seq)       = $cseq"
+    puts "  cycles with >= 2 arrays in fold   = $ovl2"
+    puts "  cycles with 4 arrays in fold      = $ovl4"
+    puts "  idle gap, context 0 (8x8)  cycles = $gap0   (job_done -> next job_fire, summed)"
+    puts "  idle gap, context 1 (4x4#0) cycles = $gap1"
     puts ""
     puts "  any error latched   = $er"
     puts ""

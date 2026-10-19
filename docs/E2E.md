@@ -168,7 +168,7 @@ b971b79 的 RTL，Verilator 模擬中每個 PE 的 MAC 次數 = k，`docs/COSTMO
 封存的 bitstream 在板上只跑過 k = 16。現在 K 不是 16 的倍數時會送 k < 16 的 descriptor；
 這個組合在封存的 bitstream 上**沒有板測、也沒有用它的 RTL 模擬過**（FPGA Board
 Regression：NOT RUN）。
-runtime 同步執行：一次一個 invocation，結果回來才送下一個。
+有 completion record 的 bitstream（設定檔 `COMPLETION_HEADER=1`）上 `systolic-matmul` 預設走非同步 runtime：同一個 GEMM 的 tile 全部先 submit、每顆陣列最多 `PIPELINE_DEPTH` 筆 descriptor 在飛、一個 wait 收齊（`docs/ASYNC.md` 第 10 節）；`--mode sync`（`systolic-matmul --sync`）才是同步 runtime，一次一個 invocation、結果回來才送下一個，沒有 record 的舊 bitstream 只有這條路。
 
 失敗時（`runtime/fpga_matmul_tiled.h`）：參數錯誤在送出任何東西之前就回傳
 （-10 K、-11 device／tile、-12 null、-13 打包、-15 `est_cycles = 0`、-16
@@ -317,9 +317,12 @@ test/e2e/run_e2e.sh --backend board
 test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_cosim.so
 ```
 
-- RTL 取自 bitstream 的 git revision（預設上面那個 tag，`RTL_REV=` 可改，
-  `RTL_DIR=.` 用 working tree），source list 與 generics 照 `dma_top_build.tcl`
-  （external scheduler、無 legacy job port、v1 operand path）。K_MAX 預設 16／16；
+- RTL 預設取自 working tree（`RTL_REV=<tag 或 commit>` 改成某個 revision，例如
+  bitstream 的 tag；`RTL_DIR=` 指另一棵樹），source list 與 generics 照 `dma_top_build.tcl`
+  （external scheduler、無 legacy job port、v1 operand path；`fpga_config.txt` 寫
+  `COMPLETION_HEADER=1`（RTL 有 completion record 時）、`PIPELINE_DEPTH=4`（context 的
+  `JOB_QUEUE_DEPTH`）與 `DDR_BYTES=1048576`（`tb/mig_axi_model.sv` 的 1 MiB），
+  `docs/ASYNC.md` 第 9 節）。K_MAX 預設 16／16；
   有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）可用同名環境變數各自設定
   （十進位、不帶前導零；co-sim 的範圍是 1..1024：DDR model 只有 128 KiB，而 runtime
   把 slab 放在 0x10000，`ceil(K/8)·512` byte 要放得進 64 KiB——這是模擬環境的限制，
@@ -359,20 +362,38 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 |---|---|---|
 | Linalg → Systolic | `systolic-opt --systolic-binary-search-tile-matmul test/Systolic/linalg_to_systolic_4x4x4.mlir` | 1 個 `systolic.matmul_tile ... m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0` |
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
-| lit | `cmake --build build --target check-systolic` | 38/38 |
+| Systolic → FPGA（非同步） | `systolic-opt --systolic-fpga-pipeline="async=true" test/Systolic/fpga_lowering_async.mlir` | `llvm.call @fpga_gemm_begin`、每個 tile 一個 `@fpga_tile_submit`、`@fpga_gemm_wait`（`docs/ASYNC.md`） |
+| Affine → FPGA（非同步） | `systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --lower-systolic-matmul-tile-to-fpga="async=true" test/Systolic/affine_to_fpga_pipeline_async.mlir` | 一個 begin、10 個 submit、最後一個 submit 之後才有唯一的 wait（C 不經 scratch） |
+| lit | `cmake --build build --target check-systolic` | 87/87 |
+| Affine fleet 的 PIPELINE_DEPTH | `systolic-opt --systolic-declare-fpga-fleet="pipeline-depth=4" --affine-matmul-to-systolic=report=true test/Systolic/declare_fpga_fleet_pipelined.mlir` | device 帶 `pipeline_depth = 4 reduce_cycles = 69 feed_gap = 26`，16x16x16 makespan 949（depth 1：1245）、第二個 8x8 tile `start_cycle = 42` |
 | E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
 | runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
+| 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V/S/Q/M/P/F 十一個 mode；S 印每個 submit 回來的時間對第一筆 completion，P 是 poll／timed wait／release，F 是提交中途的鏈路失敗） |
+| Dynamic offset（C 的 view 由參數決定） | `systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --lower-systolic-matmul-tile-to-fpga="async=true" test/Systolic/affine_to_fpga_symbolic.mlir`；`test/SystolicCC/dynoffset.c`（lit，soft）；cosim：`systolic-cc --runtime board --verify test/SystolicCC/dynoffset.c` | subview 的 offset 是 `%r0` 的 index、`memref.extract_strided_metadata` 算指標；12 個 GEMM、91 tiles verify 逐位元（`docs/ASYNC.md` 第 11 節） |
 | E2E | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> test/e2e/run_e2e.sh --backend board` | `E2E: PASS`（`E2E cases: N/N PASS`；N 依設定而定） |
+| E2E（非同步） | 同上加 `--mode async` | `E2E: PASS on backend board, async runtime`；verdict 另外檢查 IR 呼叫的是 `fpga_tile_submit` |
 
 ## 6. 已知限制
 
-- runtime 一次一個 invocation：`fpga_matmul_tiled_auto_scheduled` 是同步的，所以板子上
-  四顆陣列在時間上沒有並行，同一顆陣列上連續的 invocation 也沒有。RTL 這一側（2026-10-18）
-  已經不再是限制：每個 context 有 4 深的 job queue，下一個 invocation 的 fill 在前一個 fold
-  開始時發出、下一個 fold 在前一個 tile 還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，
-  `eval/pipeline_overlap/run.sh`）；co-sim 與板子要兌現它需要 runtime 多個 invocation 在途，
-  以及每個在途 invocation 自己的 slab／result 區域。`start_cycle` 有寫進 descriptor，但不能讀成
-  硬體強制的發射時間。
+- 同步 runtime（`--mode sync`／`systolic-matmul --sync`、`systolic-cc --submission sync`，
+  以及沒有 completion record 的舊 bitstream 上唯一的路）一次一個 invocation：
+  `fpga_matmul_tiled_auto_scheduled` 是同步的，host 每個 job 寫 slab、送 descriptor、等結果，
+  四顆陣列在時間上沒有並行，同一顆陣列上連續的 invocation 也沒有。這是該 entry point 的
+  契約（呼叫回來時結果已在 C），保留給相容；它不再是預設。RTL 這一側（2026-10-18）也不是
+  限制：每個 context 有 4 深的 job queue，下一個 invocation 的 fill 在前一個 fold 開始時發出、
+  下一個 fold 在前一個 tile 還在歸約時放行（`docs/COSTMODEL.md` 第 8 節，
+  `eval/pipeline_overlap/run.sh`）。
+- `run_e2e.sh --mode async`／`systolic-matmul --async`（有 record 的 bitstream 上
+  `systolic-matmul`、`systolic-cc --runtime board` 不加旗標的預設）走非同步 runtime
+  （`runtime/fpga_async_runtime.h`，`docs/ASYNC.md`）：同一個 GEMM 的 tile 全部先 submit、
+  之後再收結果，每顆陣列最多 `PIPELINE_DEPTH`（設定檔；RTL 的 `JOB_QUEUE_DEPTH`，4）個
+  descriptor 在飛、每個在飛的 job 有自己的 slab 與 result 區域、下一個 slab 先 stage、
+  四顆同時忙、多個 GEMM 可交錯；要 `COMPLETION_HEADER=1` 的 bitstream（每個結果前有
+  16 byte 的 completion record）。設定檔沒有 `PIPELINE_DEPTH`（封存的 bitstream）時每顆
+  陣列一個 outstanding descriptor。`start_cycle` 有寫進 descriptor，但不能讀成硬體強制的
+  發射時間。
+- `COMPLETION_HEADER=1` 的 bitstream 配同步 runtime 也可以：runtime 讀設定檔知道要先
+  讀 record；舊 bitstream（沒有這個鍵）照舊讀裸 tile。非同步 runtime 只接新 bitstream。
 - 每次 invocation 的 MEM_WRITE 都是整塊 slab（`HOST_SLAB_BYTES`，最深幾何的
   `ceil(K_MAX/8)·512` byte）：小 tile 也付整塊的 USB 傳輸，K_MAX 越深越多。FPGA 端只讀
   `ceil(k/8)` 個 window。
