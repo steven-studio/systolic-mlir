@@ -20,10 +20,11 @@
  *
  *   A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs
  *   (or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no
- *   batch subscript: it would be broadcast over the batch (a stride-0 view), or A
- *   and C merged over (b, i) -- neither is lowered (the recognizer: b is read by
- *   A and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers
- *   batches every operand carries).
+ *   batch subscript.  b is read by A and C only -- a second coordinate in the row
+ *   role -- and since 2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21, the
+ *   dimension-intersection partitioning) it partitions the GEMM: one 4x4x4 GEMM
+ *   per value of b into its own slab C[b], B shared by the two partitions.
+ *   Offloaded as 2 batches of one tile.
  *
  * Array dimensions: A: float[2][4][4]   B: float[4][4]   C: float[2][4][4]
  * Loop order (outer to inner): b [batch P], i [row I], j [column J], k [reduction K]
@@ -32,20 +33,17 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: a batched GEMM with an operand shared by every batch (no batch subscript: C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM with A reshaped -- but the operand would need a stride-0 or merged view, not lowered (the recognizer: two coordinates read by one GEMM role)
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported since 2026-10-19, docs/AFFINE_GEMM_MAPPING.md section 21) the dimension-intersection partitioning: the loops read by C only, and the extra coordinates of a row or column role (the loops of C & A beyond M, of C & B beyond N, chosen by the rule of section 21), are batch loops; each partitions the GEMM into independent slabs of C and the factor that does not read it is shared by the partitions; the per-partition GEMM is one dense GEMM of affine views (casespec.partition_decomposition, by enumeration)
+ *   re-decided: 2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21): OUT_OF_SCOPE (an operand shared by every batch, not lowered) before; ACCEPT since -- a partition on b with B shared
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: 2 separate coordinates are read by one GEMM role
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

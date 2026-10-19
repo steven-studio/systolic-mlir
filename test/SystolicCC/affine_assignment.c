@@ -17,8 +17,10 @@
 // The nests that must stay on the host: an assignment inside a reduction loop
 // of four iterations (every product but the last is lost), batches that
 // overlap in C, an inner-dimension overrun (compiled, not executed: undefined
-// in C), a factor that may alias C, an element-wise product, a broadcast
-// factor (a stride-0 view, not lowered), a product plus a constant.
+// in C), a factor that may alias C, an element-wise product, a product plus a
+// constant. (bcast_assign, C[i][j] = A[0] * B[j], is offloaded since
+// 2026-10-19: i is read by C only, a partition with both factors shared --
+// docs section 21 -- three slabs of a 1 x 5 x 1 assignment.)
 //
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
@@ -47,13 +49,13 @@
 // PLAN-DAG: note: 'batched_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'rep_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'overwrite_k' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'overlap_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 181: two iterations of the assignment C = A * B write the same element of C (its subscripts are not injective on the iteration domain): the later product overwrites the earlier one -- not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20))
-// PLAN-DAG: note: 'oob_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 184: A is accessed out of bounds along dimension 1)
-// PLAN-DAG: note: 'alias_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 187: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias)
+// PLAN-DAG: note: 'overlap_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 183: two iterations of the assignment C = A * B write the same element of C (its subscripts are not injective on the iteration domain): the later product overwrites the earlier one -- not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20))
+// PLAN-DAG: note: 'oob_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 186: A is accessed out of bounds along dimension 1)
+// PLAN-DAG: note: 'alias_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it (line 189: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias)
 // PLAN-DAG: note: 'elementwise' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'bcast_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'bcast_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 6 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'plus_const' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN: wrote {{.*}} (22 function(s) offloaded
+// PLAN: wrote {{.*}} (23 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -85,7 +87,7 @@
 // ALL: [case] overlap_assign: equal, NOT OFFLOADED (0)
 // ALL: [case] alias_assign: equal, NOT OFFLOADED (0)
 // ALL: [case] elementwise: equal, NOT OFFLOADED (0)
-// ALL: [case] bcast_assign: equal, NOT OFFLOADED (0)
+// ALL: [case] bcast_assign: equal, offloaded (6)
 // ALL: [case] plus_const: equal, NOT OFFLOADED (0)
 // ALL: [semantics] assignment vs accumulation on the same inputs: consistent (C_acc - C_initial == C_assign, 15 elements)
 // ALL: PASS: 0 differ
@@ -93,7 +95,7 @@
 // Every offloaded call also against the function as written, on the CPU:
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-22: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-23: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Without the permission to reassociate (the strict default), every assignment
@@ -189,6 +191,7 @@ void alias_assign(float A[3][5], float B[restrict 5], float C[restrict 3][5]) {
 void elementwise(float A[restrict 5], float B[restrict 5], float C[restrict 5]) {
   for (int i = 0; i < 5; ++i) C[i] = A[i] * B[i];
 }
+/* a C-only loop: a partition (section 21), both factors shared */
 void bcast_assign(float A[restrict 3], float B[restrict 5], float C[restrict 3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[i][j] = A[0] * B[j];
 }

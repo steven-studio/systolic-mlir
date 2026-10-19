@@ -168,3 +168,14 @@ the details are in `docs/AFFINE_GEMM_MAPPING.md` section 19.9.
 - The review's driver (19 cases), 244 formerly flagged and 1,200 fresh random nests: predictor =
   compiler, 0 flagged.
 - The FPGA board: NOT RUN.
+
+**2026-10-19 -- the demotion limitation closed in part (docs/AFFINE_GEMM_MAPPING.md section 21,
+dimension-intersection partitioning).** The recognizer now constructs the decomposition that demotes
+loops to batch loops when the demoted loops are read by C alone in dimensions of their own: a loop
+read by C only, and the extra coordinates of a row or column role (`C[b][i][j] += A[b][i][k] B[k][j]`,
+case_086; `C[i][j] += A[i][k] B[k][i]`, case_124: j read by C only), each partitioning the GEMM into
+independent slabs of C with the factor that does not read it shared. Re-decided ACCEPT (basis
+`dimension_partition`): case_086, case_124. Still a documented limitation: a loop read by both
+factors and not by C beyond the reduction (basis `partial_reduction`), a loop read by one factor
+only (basis `broadcast`), partitions whose outputs overlap or share a merged dimension (basis
+`demotion`), and SQ-1.

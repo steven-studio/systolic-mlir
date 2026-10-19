@@ -2002,6 +2002,147 @@ mlir::systolic::recognizeLogicalMatmul(
   // roles, an operand reading one coordinate in two dimensions.
   bool relaxableRefusal = false;
 
+  // ---------------------------------------------------------------------
+  // Dimension-intersection partitioning (docs/AFFINE_GEMM_MAPPING.md section
+  // 21, 2026-10-19). The loops read by all three operands are batch loops in
+  // every decomposition (section 19.2); the analyses below make batch loops
+  // of some others too ("demoted" loops), each partitioning the GEMM into
+  // independent slabs of C:
+  //   - a loop read by C only (C[b][i][j] += A[i][k] * B[k][j]): both factors
+  //     are shared by its partitions;
+  //   - the loops of a row or column role that are not one dense coordinate
+  //     (C[p][i][j] += A[p][i][k] * B[k][j]: p and i are both read by A and
+  //     C, in separate dimensions): one dense sub-coordinate stays the role,
+  //     the others partition the GEMM, and the factor that does not read them
+  //     (B) is shared by the partitions.
+  // A demoted loop must be read by C alone in a dimension of its own (the
+  // partitions' outputs are then disjoint slabs of C; with the exact
+  // bijection of section 19.13 every slab is one GEMM). A loop read by both
+  // factors and not by C is never demoted: its batches would all accumulate
+  // into one slab of C -- a K-fold, a partial-C reduction, not constructed
+  // (C[i][j] += A[r][i][k] * B[r][k][j]); nor is a loop read by one factor
+  // only (a broadcast, section 10). The choice among several legal roles:
+  // chooseDemotion below. On a domain that is not a box the readers decide
+  // nothing (section 19.7): no demotion.
+  // ---------------------------------------------------------------------
+  SmallVector<bool> demoted(numIterationDims, false);
+  {
+    SmallVector<unsigned> readersOf(numIterationDims, 0);
+    for (const Subscript &sub : subscripts)
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (sub.onDomain.coefficients[d] != 0)
+          readersOf[d] |= 1u << sub.operand;
+    if (boxDomain)
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (readersOf[d] == 0b100)
+          demoted[d] = true;
+  }
+  // The loops of a row or column role an analysis refused as not one dense
+  // coordinate: the retry below demotes some of them (nullopt: no retry).
+  std::optional<SmallVector<unsigned>> demotionCandidate;
+  auto tripCountOf = [&](unsigned d) -> std::optional<int64_t> {
+    affine::AffineForOp loop =
+        affine::getForInductionVarOwner(iterationIVs[d]);
+    std::optional<int64_t> lower =
+        loop ? constantLoopBound(loop, /*lower=*/true) : std::nullopt;
+    std::optional<int64_t> upper =
+        loop ? constantLoopBound(loop, /*lower=*/false) : std::nullopt;
+    if (!lower || !upper)
+      return std::nullopt;
+    return checkedTripCount(*lower, *upper, loop.getStep().getSExtValue());
+  };
+  auto innermostCDim = [&](unsigned d) {
+    int dim = -1;
+    for (const Subscript &sub : subscripts)
+      if (sub.operand == 2 && sub.onDomain.coefficients[d] != 0)
+        dim = std::max(dim, int(sub.dim));
+    return dim;
+  };
+  // Which loops of a refused role to demote. The role's loops joined by a
+  // subscript form components (A[4p + i] joins p and i); the component of the
+  // largest extent (the product of its trip counts: the largest tiles, the
+  // fewest partitions; ties: the one read in C's innermost dimension, then
+  // the lowest loop) stays the role and the others are demoted; a single
+  // component that is not one coordinate keeps its loop of the largest
+  // extent (same ties). Empty when a trip count is not a constant.
+  auto chooseDemotion =
+      [&](ArrayRef<unsigned> loops) -> SmallVector<unsigned> {
+    SmallVector<unsigned> parent(numIterationDims);
+    std::iota(parent.begin(), parent.end(), 0u);
+    auto find = [&](unsigned x) {
+      while (parent[x] != x)
+        x = parent[x] = parent[parent[x]];
+      return x;
+    };
+    for (const Subscript &sub : subscripts) {
+      std::optional<unsigned> first;
+      for (unsigned d : loops) {
+        if (sub.onDomain.coefficients[d] == 0)
+          continue;
+        if (!first)
+          first = find(d);
+        else
+          parent[find(d)] = *first;
+      }
+    }
+    struct Component {
+      SmallVector<unsigned> loops;
+      int64_t extent;
+      int cDim;
+    };
+    SmallVector<Component> components;
+    for (unsigned d : loops) {
+      const unsigned root = find(d);
+      Component *component = nullptr;
+      for (Component &c : components)
+        if (find(c.loops.front()) == root)
+          component = &c;
+      if (!component) {
+        components.push_back(Component{{}, 1, -1});
+        component = &components.back();
+      }
+      std::optional<int64_t> trips = tripCountOf(d);
+      std::optional<int64_t> extent =
+          trips ? llvm::checkedMul(component->extent, *trips) : std::nullopt;
+      if (!extent)
+        return {};
+      component->loops.push_back(d);
+      component->extent = *extent;
+      component->cDim = std::max(component->cDim, innermostCDim(d));
+    }
+    auto better = [](const Component &x, const Component &y) {
+      if (x.extent != y.extent)
+        return x.extent > y.extent;
+      if (x.cDim != y.cDim)
+        return x.cDim > y.cDim;
+      return x.loops.front() < y.loops.front();
+    };
+    const Component *keep = &components.front();
+    for (const Component &c : components)
+      if (better(c, *keep))
+        keep = &c;
+    SmallVector<unsigned> result;
+    if (components.size() > 1) {
+      for (const Component &c : components)
+        if (&c != keep)
+          llvm::append_range(result, c.loops);
+      return result;
+    }
+    unsigned best = keep->loops.front();
+    for (unsigned d : keep->loops) {
+      Component x{{d}, *tripCountOf(d), innermostCDim(d)};
+      Component y{{best}, *tripCountOf(best), innermostCDim(best)};
+      if (better(x, y))
+        best = d;
+    }
+    for (unsigned d : keep->loops)
+      if (d != best)
+        result.push_back(d);
+    return result;
+  };
+  // (partitionOutputsDisjoint, the check that a demoted loop is read by C
+  // alone, follows the refusal helpers below.)
+
   // The verdicts of the two analyses below -- PROVEN_INVALID (not a GEMM in
   // any decomposition) and VALID_BUT_LOWERING_UNSUPPORTED (a batched GEMM
   // after demoting loops, not constructed) -- rest on Theorem 3 for a box
@@ -2023,6 +2164,38 @@ mlir::systolic::recognizeLogicalMatmul(
                             "decide nothing (docs/AFFINE_GEMM_MAPPING.md "
                             "section 19.7)");
   };
+  // A demoted loop (section 21) is read by C alone in a dimension of its own
+  // (with other batch loops at most): the partitions' outputs are disjoint
+  // slabs. C reading it together with a role coordinate -- C[p + i][j], a
+  // merged C[3p + i][j] -- would make the partitions overlap (an
+  // accumulation in order, valid but not an independent partition) or a
+  // merged output dimension: not constructed.
+  auto partitionOutputsDisjoint = [&]() -> LogicalResult {
+    for (const Subscript &sub : subscripts) {
+      if (sub.operand != 2)
+        continue;
+      int demotedLoop = -1;
+      bool other = false;
+      for (unsigned d = 0; d < numIterationDims; ++d) {
+        if (sub.onDomain.coefficients[d] == 0)
+          continue;
+        if (demoted[d])
+          demotedLoop = demotedLoop < 0 ? int(d) : demotedLoop;
+        else if (!isBatchLoop[d])
+          other = true;
+      }
+      if (demotedLoop >= 0 && other)
+        return unsupportedRoles(
+            llvm::Twine("loop ") + llvm::Twine(demotedLoop) +
+            " would partition the GEMM (dimension-intersection "
+            "partitioning, docs/AFFINE_GEMM_MAPPING.md section 21), but C "
+            "reads it in dimension " + llvm::Twine(sub.dim) +
+            " together with a role coordinate: the partitions' outputs would "
+            "not be independent slabs of C (overlapping, or one merged "
+            "dimension) -- not constructed");
+    }
+    return success();
+  };
 
   // 2. The analysis by groups and roles (its refusals set why/mappingClass).
   auto byGroups = [&]() -> LogicalResult {
@@ -2033,7 +2206,10 @@ mlir::systolic::recognizeLogicalMatmul(
       if (sub.onDomain.coefficients[d] != 0)
         readsLoop[d][sub.operand] = true;
   for (unsigned d = 0; d < numIterationDims; ++d)
-    isBatchLoop[d] = readsLoop[d][0] && readsLoop[d][1] && readsLoop[d][2];
+    isBatchLoop[d] =
+        (readsLoop[d][0] && readsLoop[d][1] && readsLoop[d][2]) || demoted[d];
+  if (failed(partitionOutputsDisjoint()))
+    return failure();
   // C reads every batch coordinate alone: a subscript of C with a batch loop
   // and any other loop would move the output position with the batch -- the
   // coupled and skewed placements (C[i + j][j] with A[i + j][k],
@@ -2183,15 +2359,44 @@ mlir::systolic::recognizeLogicalMatmul(
   // in dimensions of their own or as offsets of their role dimensions
   // (ISSUE-007): nothing to match against C here. What each dimension adds
   // per batch value is recorded in the operands' layouts below.
-  for (auto [groups, role] :
-       {std::pair{&groupsWithFirst, "the first factor and C"},
-        std::pair{&groupsWithSecond, "the second factor and C"},
-        std::pair{&reductionGroups, "both factors (the reduction)"}})
-    if (groups->size() > 1)
+  for (auto [groups, role, r] :
+       {std::tuple{&groupsWithFirst, "the first factor and C", 0u},
+        std::tuple{&groupsWithSecond, "the second factor and C", 1u},
+        std::tuple{&reductionGroups, "both factors (the reduction)", 2u}})
+    if (groups->size() > 1) {
+      // Two reduction coordinates (C[i][j] += A[r][i][k] * B[r][k][j]): the
+      // extra one is not a partition -- its batches would all accumulate into
+      // one slab of C -- but a K-fold summed into C, a partial-C reduction
+      // (docs section 21): not constructed.
+      if (r == 2)
+        return unsupportedRoles(
+            llvm::Twine(groups->size()) + " separate coordinates are read by " +
+            role + ": one GEMM role over several coordinates needs a merged "
+            "(reshaped) view, not lowered; as a batch the extra reduction "
+            "coordinate would accumulate every batch into one slab of C "
+            "(requires a partial-C reduction, docs/AFFINE_GEMM_MAPPING.md "
+            "section 21)");
+      // Several coordinates in a row or column role: all but one of them
+      // partition the GEMM (dimension-intersection partitioning, section
+      // 21) -- the retry demotes them to batch loops.
+      if (boxDomain) {
+        SmallVector<unsigned> loops;
+        for (unsigned g : *groups)
+          for (unsigned d = 0; d < numIterationDims; ++d)
+            if (!isBatchLoop[d] && findLoop(d) == groupRoot[g] &&
+                (readsLoop[d][0] || readsLoop[d][1] || readsLoop[d][2]))
+              loops.push_back(d);
+        llvm::sort(loops);
+        demotionCandidate = loops;
+      }
       return unsupportedRoles(llvm::Twine(groups->size()) +
                          " separate coordinates are read by " + role +
                          ": one GEMM role over several coordinates needs a "
-                         "merged (reshaped) view, not lowered");
+                         "merged (reshaped) view, not lowered (a partition "
+                         "on the extra coordinates needs constant trip "
+                         "counts and a box domain, docs/AFFINE_GEMM_MAPPING.md "
+                         "section 21)");
+    }
 
   // Which factor is A. A = (I, K), B = (K, J), C = (I, J): the factor that
   // shares a coordinate with C... both do; prefer the assignment that
@@ -2379,6 +2584,57 @@ mlir::systolic::recognizeLogicalMatmul(
                      reason + " -- operand-specific decompositions of one "
                      "coordinate are not lowered (spec question SQ-1)");
     coordinate[r] = *shared;
+    // A row or column role whose group has several loops must be one dense
+    // coordinate of them (Theorem 3, S2: a mixed radix); else all but one of
+    // its loops partition the GEMM (section 21) -- the retry demotes them.
+    // The dense partition checks the reduction role the same way (and the
+    // roles again) once the mapping is built.
+    if (r < 2 && boxDomain && !emptyDomain) {
+      SmallVector<unsigned> groupLoops;
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (!isBatchLoop[d] && findLoop(d) == groupRoot[*role.group] &&
+            (readsLoop[d][0] || readsLoop[d][1] || readsLoop[d][2]))
+          groupLoops.push_back(d);
+      if (groupLoops.size() > 1) {
+        auto form = extractLinearForm(shared->expr, numIterationDims);
+        lattice::IntVector magnitudes;
+        SmallVector<int64_t> trips;
+        int64_t scale = 0;
+        bool known = succeeded(form);
+        for (unsigned d : groupLoops) {
+          affine::AffineForOp loop =
+              affine::getForInductionVarOwner(iterationIVs[d]);
+          std::optional<int64_t> trip = tripCountOf(d);
+          std::optional<int64_t> c =
+              known && loop ? llvm::checkedMul(form->coefficients[d],
+                                               loop.getStepAsInt())
+                            : std::nullopt;
+          std::optional<int64_t> g = c ? lattice::gcd(scale, *c) : std::nullopt;
+          if (!trip || !g) {
+            known = false;
+            break;
+          }
+          magnitudes.push_back(*c);
+          trips.push_back(*trip);
+          scale = *g;
+        }
+        if (known && scale != 0)
+          for (int64_t &m : magnitudes)
+            m /= scale;
+        if (!known || scale == 0 ||
+            !lattice::mixedRadixExtent(magnitudes, trips)) {
+          demotionCandidate = groupLoops;
+          return unsupportedRoles(
+              llvm::Twine("logical coordinate ") + role.name +
+              " is driven by " + llvm::Twine(groupLoops.size()) +
+              " loops that do not enumerate it densely (or its loops' "
+              "bounds are not constant): no box of " + role.name +
+              " values (with all but one of them as batch loops it would be "
+              "a batched GEMM, constructed only with constant trip counts, "
+              "docs/AFFINE_GEMM_MAPPING.md section 21)");
+        }
+      }
+    }
   }
 
   // Batch coordinates: every dimension of C that reads batch loops only is a
@@ -2425,6 +2681,11 @@ mlir::systolic::recognizeLogicalMatmul(
     static constexpr const char *kRole[] = {"I", "J", "K"};
     std::array<SmallVector<unsigned>, 3> roleLoops;
     for (unsigned d = 0; d < numIterationDims; ++d) {
+      // A demoted loop (section 21) is a batch loop whatever its readers.
+      if (demoted[d]) {
+        isBatchLoop[d] = true;
+        continue;
+      }
       switch (readers[d]) {
       case 0b111:
         isBatchLoop[d] = true;
@@ -2449,6 +2710,8 @@ mlir::systolic::recognizeLogicalMatmul(
             "section 10)");
       }
     }
+    if (failed(partitionOutputsDisjoint()))
+      return failure();
     if (roleLoops[0].empty() && roleLoops[1].empty() && roleLoops[2].empty())
       return refuseRoles("every loop is read by all three operands: no row, "
                     "column or reduction coordinate -- an element-wise "
@@ -2490,6 +2753,10 @@ mlir::systolic::recognizeLogicalMatmul(
         for (unsigned j = i + 1; j < forms.size(); ++j) {
           if (proportional(forms[i], forms[j]))
             continue;
+          // A row or column role over several coordinates: all but one of
+          // them partition the GEMM (section 21) -- the retry demotes them.
+          if (r < 2 && boxDomain)
+            demotionCandidate = roleLoops[r];
           if (subscripts[i].operand == subscripts[j].operand)
             return unsupportedRoles(
                 llvm::Twine(kOperandName[subscripts[i].operand]) +
@@ -2498,7 +2765,12 @@ mlir::systolic::recognizeLogicalMatmul(
                 "(dimensions " + llvm::Twine(subscripts[i].dim) + " and " +
                 llvm::Twine(subscripts[j].dim) + "): separate coordinates "
                 "in one GEMM role need a merged (reshaped) view, not "
-                "lowered");
+                "lowered" +
+                (r == 2 ? " (as a batch the extra reduction coordinate would "
+                          "accumulate every batch into one slab of C: "
+                          "requires a partial-C reduction, docs/"
+                          "AFFINE_GEMM_MAPPING.md section 21)"
+                        : ""));
           return unknown(
               llvm::Twine("logical coordinate ") + kRole[r] + " (" +
               kOperandName[subscripts[i].operand] + "'s dimension " +
@@ -2613,14 +2885,26 @@ mlir::systolic::recognizeLogicalMatmul(
     std::array<std::pair<int64_t, int64_t>, 3> ordinal;
     for (unsigned r = 0; r < 3; ++r) {
       FailureOr<std::pair<int64_t, int64_t>> o = roleOrdinal(r);
-      if (failed(o))
-        return unsupportedRoles(llvm::Twine("logical coordinate ") + kRole[r] +
-                           " is driven by " + llvm::Twine(roleLoops[r].size()) +
-                           " loops that do not enumerate it densely (or its "
-                           "loops' bounds are not constant): no box of " +
-                           kRole[r] + " values (with all but one of them as "
-                           "batch loops it would be a batched GEMM, which is "
-                           "not constructed)");
+      if (failed(o)) {
+        // A row or column role that is not one dense coordinate: all but
+        // one of its loops partition the GEMM (section 21) -- the retry
+        // demotes them; a reduction role is not partitioned.
+        if (r < 2 && boxDomain && roleLoops[r].size() > 1)
+          demotionCandidate = roleLoops[r];
+        return unsupportedRoles(
+            llvm::Twine("logical coordinate ") + kRole[r] + " is driven by " +
+            llvm::Twine(roleLoops[r].size()) +
+            " loops that do not enumerate it densely (or its loops' bounds "
+            "are not constant): no box of " + kRole[r] +
+            " values (with all but one of them as batch loops it would be a "
+            "batched GEMM, which is " +
+            (r == 2 ? "not constructed for a reduction coordinate: every "
+                      "batch would accumulate into one slab of C, a "
+                      "partial-C reduction, docs/AFFINE_GEMM_MAPPING.md "
+                      "section 21)"
+                    : "constructed only with constant trip counts, section "
+                      "21)"));
+      }
       ordinal[r] = *o;
     }
     lattice::IntVector lamI, lamJ;
@@ -2837,18 +3121,43 @@ mlir::systolic::recognizeLogicalMatmul(
       *mappingClass = savedClass;
     return success();
   };
-  if (!positional()) {
-    if (failed(groupsOrReaders()))
-      return failure();
-  } else if (positionalIsCoupled()) {
-    // A coupled positional reading is never lowerable (one loop drives two
-    // of its coordinates; that loop is read by all three operands): the
-    // classification by readers decides, and its refusal is the reason.
-    resetResult();
-    if (failed(groupsOrReaders()))
-      return failure();
-  } else if (failed(recordPrefix())) {
-    return failure();
+  // The analyses, with the dimension-intersection partitioning (section 21):
+  // when an analysis refuses a row or column role as not one dense
+  // coordinate, the loops chooseDemotion names become batch loops and the
+  // analyses run again, until they succeed or nothing is left to demote
+  // (every pass demotes at least one loop, so at most numIterationDims
+  // passes). The positional form cannot succeed once it failed, so the
+  // retries use the analyses by groups and readers only.
+  {
+    bool positionalForm = positional();
+    for (unsigned pass = 0;; ++pass) {
+      demotionCandidate.reset();
+      LogicalResult decided = failure();
+      if (pass > 0) {
+        resetResult();
+        decided = groupsOrReaders();
+      } else if (!positionalForm) {
+        decided = groupsOrReaders();
+      } else if (positionalIsCoupled()) {
+        // A coupled positional reading is never lowerable (one loop drives
+        // two of its coordinates; that loop is read by all three operands):
+        // the classification by readers decides, and its refusal is the
+        // reason.
+        resetResult();
+        decided = groupsOrReaders();
+      } else {
+        decided = recordPrefix();
+      }
+      if (succeeded(decided))
+        break;
+      if (!demotionCandidate || pass >= numIterationDims)
+        return failure();
+      SmallVector<unsigned> toDemote = chooseDemotion(*demotionCandidate);
+      if (toDemote.empty())
+        return failure();
+      for (unsigned d : toDemote)
+        demoted[d] = true;
+    }
   }
 
   AffineExpr logicalI = coordinate[0].expr;
@@ -3105,6 +3414,9 @@ mlir::systolic::recognizeLogicalMatmul(
       accumulates ? add.getFastmath() : mul.getFastmath(),
       arith::FastMathFlags::reassoc);
   result.accumulates = accumulates;
+  for (unsigned d = 0; d < numIterationDims; ++d)
+    if (demoted[d])
+      result.demotedLoops.push_back(d);
 
   MLIRContext *context = candidate.anchor->getContext();
   const unsigned numLogicalDims = numPartitionDims + 3;

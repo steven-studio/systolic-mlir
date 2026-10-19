@@ -2252,3 +2252,110 @@ checked against each other on the same inputs) and `affine_assignment_signzero.c
 products of a zero factor: numerically equal, bitwise different, accepted by `--verify-rtol`).
 The probe matrices `phase1/{before,after,after2}` record every form's classification before and
 after. The FPGA board was not run.
+
+---
+
+## 21. Dimension-intersection partitioning: the three-operand model (2026-10-19)
+
+The task of 2026-10-19: when C, A and B have more iteration dimensions than one GEMM's M, N, K,
+classify the extra dimensions by the intersections of the sets of loops each operand reads, and
+partition the nest into independent GEMM batches where that is safe.
+
+### 21.1 The model, made precise
+
+Loops x_1 … x_n of n_s ≥ 2 iterations on a box (a loop of one iteration is a constant on the
+domain, Lemma 0; a loop no access uses is a repetition loop, §19.13.3). X ∈ {A, B, C} **reads**
+loop s iff some subscript of X has a nonzero coefficient on x_s in its domain form -- the affine
+access analysis, not the spelling (A[i + j][k] reads i and j in one dimension; A[2i][k] reads i).
+D_X = {s : X reads s}; this is the readers relation of §19.2, and the regions of the three sets
+are the loop classes:
+
+| region | loops | role |
+|---|---|---|
+| D_A ∩ D_B ∩ D_C | triple intersection | batch, in every decomposition (G1: not I, J or K) -- ISSUE-006/007, unchanged |
+| (D_A ∩ D_C) \ D_B | the M candidates | I, or a **partition** (this section); B shared by the partitions |
+| (D_B ∩ D_C) \ D_A | the N candidates | J, or a partition; A shared |
+| (D_A ∩ D_B) \ D_C | the K candidates | K; never a partition (its batches would all accumulate into one slab of C: a K-fold, **a partial-C reduction** -- not constructed) |
+| D_C \ (D_A ∪ D_B) | C only | a partition with both factors shared |
+| D_A \ (D_B ∪ D_C), D_B \ (D_A ∪ D_C) | one factor only | a broadcast / a reduction over a loop C does not read (§10): refused, unchanged |
+
+The task's M = (D_C ∩ D_A) \ D_B etc. are these regions as SETS of loops; a role must be ONE
+dense coordinate of its loops (Theorem 3, S2). The rules "dim(C ∩ A) > 1 ⇒ partition" and
+"dim(A ∩ B) > 2 ⇒ batch" are therefore refined: the first holds with the choice rule of 21.3 and
+the output condition of 21.2; the second is false -- an extra A ∩ B loop is a reduction.
+
+### 21.2 Definition and theorem
+
+A nest with the loop classes above is **partitioned** on a set P' of loops ("demoted" loops:
+the C-only loops, and the loops of a row or column role that are not its kept sub-coordinate)
+iff, with P' added to the batch loops, the nest is a batched GEMM of affine views (§19.1: G1-G4,
+one dense coordinate per role, C injective per batch, the exact bijection of §19.13) and
+
+- **(P1)** every demoted loop is read by C only in dimensions whose subscript reads batch loops
+  (no role coordinate in that dimension) -- the partitions write **disjoint slabs** of C (with
+  the bijection, distinct batch ordinals are distinct slabs); the partitions are then independent
+  (any order, in parallel) and each keeps C's initial value in its slab;
+- **(P2)** a demoted loop is read by C (it is an output coordinate): a loop read by both factors
+  and not by C is never demoted (its batches would accumulate into one slab); one read by one
+  factor only is a broadcast;
+- the operand(s) that do not read a demoted loop are read-only (§7) and shared by its partitions
+  (their views have no batch term in it).
+
+**Theorem 7 (partitioning) [proved].** Under these conditions the batched lowering of §16.2
+(Theorem 5: the batch loops re-emitted in order around the tiles of an exact partition, every
+operand read through its view at the batch's offset) performs exactly the nest's updates, each
+slab of C receiving exactly its own GEMM, with K and the floating-point policy of §6 unchanged.
+*Proof.* P' ∪ (the triple loops) are batch loops of a decomposition satisfying G1-G4, so Theorem 6
+applies; P1 makes the slabs disjoint, so the sequential order of the batches is immaterial to
+the result and each slab's contributions are its own K-sums. ∎
+
+Counterexamples that bound the model (each a probe of `~/work/integration-backups-20261016/
+dim-intersection-validation/phase1/`): `C[p + i][j] += A[p][i][k] B[k][j]` (p and i both read by
+A and C; the per-batch GEMM is valid but the partitions overlap -- a legal sequential
+accumulation, not an independent partition: VALID_BUT_LOWERING_UNSUPPORTED); `C[3p + i][j]` (a
+merged output dimension: not partitioned, same class); `C[i][j] += A[r][i][k] B[r][k][j]` (r in
+A ∩ B \ C: a partial-C reduction, refused with that wording); `A[i + 3p][k]` with `C[p][i][j]`
+(one merged coordinate for A, two for C: only the demotion of p is valid -- the IV sets alone
+decide nothing); a loop read by one factor only (a01, b01, case_090/095/123/125).
+
+### 21.3 The choice rule (several legal M or N)
+
+When a row or column role is not one dense coordinate (several groups in the analysis by groups;
+non-proportional restrictions or a non-dense mixed radix in either analysis), its loops joined
+by a subscript form components; the component of the **largest extent** (the product of its
+trip counts: the largest tiles, the fewest partitions; ties: the one read in C's innermost
+dimension, then the first loop of the nest) stays the role and the others are demoted; a single
+component that is not one coordinate keeps its loop of the largest extent (same ties). The
+analyses then run again with the demoted loops as batch loops, until they succeed or nothing is
+left to demote (at most one pass per loop). Deterministic; the executable specification
+(`casespec.partition_decomposition`, `_choose_demotion`) and the mapping oracle
+(`classify_loops`) apply the same rule, and verify the result by enumeration. Any kept
+sub-coordinate gives a valid GEMM; the rule only fixes which one is built.
+
+### 21.4 Implementation (recognizer only)
+
+`recognizeLogicalMatmul` (AffineMatmulAnalysis.cpp): the C-only loops are demoted before the
+analyses; the analysis by groups records the loops of a row or column role with several groups
+or a non-dense group, the readers analysis those of a role with non-proportional restrictions or
+a non-dense radix; the dispatcher demotes per 21.3 and re-runs the analyses by groups and
+readers (the positional form, once failed, is not retried). Both analyses treat a demoted loop
+as a batch loop (the layouts' batch terms, C's batch dimensions as rows of P*) and refuse (P1)
+("loop p would partition the GEMM ... C reads it together with a role coordinate"). A second
+reduction coordinate is refused with the partial-C-reduction wording. `LogicalMatmul::demotedLoops`
+records the partition for diagnostics; the discovery pass prints `partition: loop(s) ... demoted
+to batch loops`, the lowering remark `..., partitioned on N demoted loop(s)`. The dense
+partition, the exact bijection, getLogicalOperand (an operand without batch terms is the whole
+memref: shared), the lowering, the runtime and the front end are unchanged.
+
+### 21.5 Verification (2026-10-19; `~/work/integration-backups-20261016/dim-intersection-validation/`)
+
+`test/Systolic/affine_gemm_dimension_partition.mlir` and `test/SystolicCC/affine_dimension_partition.c`
+(the forms of the task's lists: triple, C ∩ A extra, C ∩ B extra, two of each, mixed, permuted,
+offset and strided batch dimensions, K = 1 outer products, rank-1 and mixed-rank inputs,
+rectangular, skewed and merged factor views, C only, an assignment, an inner partition loop --
+each executed on the software runtime and in mock-FPGA mode against the loops as written, bitwise,
+with `--verify`; the partial-C reduction, overlapping and merged outputs, one-factor loops,
+aliasing, flat collisions, out-of-bounds and assignment overwrites refused). Showcase case_086
+(`C[b][i][j] += A[b][i][k] B[k][j]`) and case_124 (`C[i][j] += A[i][k] B[k][i]`, j read by C only)
+are re-decided ACCEPT (basis `dimension_partition`). The mapping oracle models the rule
+(`classify_loops`) and checks every lowered partition address by address.

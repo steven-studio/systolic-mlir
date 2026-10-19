@@ -261,13 +261,17 @@ func.func @sq1(%A: memref<8x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noa
   return
 }
 // -----
-// MUST BE REFUSED: C[i0][i1][j] with A[i0][i1][k] -- the I loops i0 and i1 are read
-// through two different dimensions: two coordinates in one role (a merged, reshaped
-// view would be needed).
+// RE-DECIDED 2026-10-19 (section 21): C[i0][i1][j] with A[i0][i1][k] -- the I loops i0
+// and i1 are read through two different dimensions: two coordinates in one role. The
+// dimension-intersection partitioning keeps the coordinate of the larger extent (i1, 4)
+// as I and partitions the GEMM on i0 (B shared by the two partitions): lowered as 2
+// batches of one 4 x 4 x 4 tile (was refused: a merged view would have been needed).
 // CHECK-LABEL: func.func @separate_coordinates
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: 2 separate coordinates are read by the first factor and C
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         bufferization.to_tensor %arg1 restrict : memref<4x4xf32>
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), partitioned on 1 demoted loop(s), batched: 2 batch iteration(s) of 1 batch loop(s)
+// DISC:        partition: loop(s) 0 demoted to batch loops
 func.func @separate_coordinates(%A: memref<2x4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<2x4x4xf32> {llvm.noalias}) {
   affine.for %i0 = 0 to 2 {
     affine.for %i1 = 0 to 4 {

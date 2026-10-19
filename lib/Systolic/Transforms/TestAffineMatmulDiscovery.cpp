@@ -503,6 +503,15 @@ struct TestAffineMatmulDiscoveryPass
                              "written once, lowered as the K = 1 GEMM into "
                              "a zeroed C)")
                    << "\n";
+      // Dimension-intersection partitioning (docs section 21): the loops
+      // made batch loops beyond those read by all three operands.
+      if (!result.demotedLoops.empty()) {
+        llvm::errs() << "  partition: loop(s) ";
+        llvm::interleave(result.demotedLoops, llvm::errs(), "+");
+        llvm::errs() << " demoted to batch loops (each partitions the GEMM "
+                        "into independent slabs of C; the factor that does "
+                        "not read it is shared)\n";
+      }
 
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);

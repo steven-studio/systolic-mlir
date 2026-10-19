@@ -353,11 +353,15 @@ func.func @coupled_a(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<4x4xf32> {ll
 }
 
 // -----
-// MUST STAY REJECTED. B[k][i] with C[i][j]: i is read by all three operands
-// (a batch loop), so nothing but C reads j -- a broadcast along j.
+// RE-DECIDED 2026-10-19 (section 21): B[k][i] with C[i][j]: i is read by all three
+// operands (a batch loop); j is read by C only -- a partition with both factors
+// shared (the dimension-intersection partitioning): per (i, j) the 1 x 1 x 4 dot
+// product C[i][j] += sum_k A[i][k] B[k][i] (every column gets the diagonal of A B).
+// Lowered, 16 batch iterations (was refused as a broadcast).
 // CHECK-LABEL: func.func @wrong_coordinate_b
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: a coordinate is read by C only
+// CHECK:       systolic.matmul_tile {{.*}} m = 1 n = 1 k = 4
+// REMARK:      remark: affine GEMM 1x1x4 lowered as 1 exact region(s), partitioned on 1 demoted loop(s), batched: 16 batch iteration(s) of 2 batch loop(s)
+// DISC:        partition: loop(s) 1 demoted to batch loops
 func.func @wrong_coordinate_b(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {

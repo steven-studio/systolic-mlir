@@ -893,6 +893,116 @@ def generate(rng):
 # ---------------------------------------------------------------------------
 # The decision, by enumeration.
 
+def classify_loops(nest):
+    """The compiler's classification of the loops of two or more iterations,
+    with the dimension-intersection partitioning of docs/AFFINE_GEMM_MAPPING.md
+    section 21 (2026-10-19): a loop read by all three operands is a batch loop;
+    one read by C only is a batch loop too (both factors shared by its
+    partitions); A and C: I, B and C: J, A and B: K; one factor only: a
+    broadcast (refused).  A row or column role that is not one dense
+    coordinate -- its subscripts' restrictions not proportional to one
+    direction, or the coordinate not a dense mixed radix of its loops -- keeps
+    one sub-coordinate and its other loops become batch loops (the compiler's
+    chooseDemotion: the loops joined by a subscript form components; the
+    component of the largest extent stays, ties to the one read in C's
+    innermost dimension, then the first loop; a single component keeps its
+    loop of the largest extent); the analyses run again.  A demoted loop must
+    be read by C alone in a dimension of its own (else UNSUPPORTED: the
+    partitions' outputs would overlap).  A reduction role that is not one
+    coordinate is refused (a partial-C reduction).
+    Returns (batch_loops, role_loops, directions, demoted, None) or
+    (None, None, None, None, (verdict, why))."""
+    n = len(nest.loops)
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
+             for name in "ABC"}
+    triple = reads["A"] & reads["B"] & reads["C"]
+    demoted = {s for s in range(n) if many[s] and s in reads["C"]
+               and s not in reads["A"] and s not in reads["B"]}
+    for s in range(n):
+        if many[s] and s not in reads["C"] and len([nm for nm in "AB" if s in reads[nm]]) == 1:
+            return None, None, None, None, ("REJECT", "loop %d is read by one operand only (a broadcast)" % s)
+
+    def choose(cand):
+        cand = sorted(cand)
+        parent = {s: s for s in cand}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        for name in "ABC":
+            for f in nest.ops[name][1]:
+                here = [s for s in cand if f[0][s] != 0]
+                for s in here[1:]:
+                    parent[find(s)] = find(here[0])
+        c_dim = {s: max([d for d, f in enumerate(nest.ops["C"][1]) if f[0][s] != 0] or [-1]) for s in cand}
+        comps = {}
+        for s in cand:
+            comps.setdefault(find(s), []).append(s)
+        comps = list(comps.values())
+
+        def key(ss):
+            ext = 1
+            for s in ss:
+                ext *= trips(*nest.loops[s])
+            return (-ext, -max(c_dim[s] for s in ss), min(ss))
+        keep = min(comps, key=key)
+        if len(comps) > 1:
+            return {s for ss in comps if ss is not keep for s in ss}
+        best = min(keep, key=lambda s: key([s]))
+        return {s for s in keep if s != best}
+
+    for _ in range(n + 1):
+        batch_loops = sorted(triple | demoted)
+        role_loops = {"I": sorted((reads["A"] & reads["C"]) - set(batch_loops)),
+                      "J": sorted((reads["B"] & reads["C"]) - set(batch_loops)),
+                      "K": sorted((reads["A"] & reads["B"]) - set(batch_loops))}
+        # a demoted loop is read by C alone in a dimension of its own
+        for d, f in enumerate(nest.ops["C"][1]):
+            dem = [s for s in range(n) if f[0][s] != 0 and s in demoted]
+            if dem and any(f[0][s] != 0 and many[s] and s not in batch_loops for s in range(n)):
+                return None, None, None, None, ("UNSUPPORTED", "loop %d would partition the GEMM but C reads it in dimension %d together with a role coordinate (the partitions' outputs would not be independent slabs)" % (dem[0], d))
+        if batch_loops and not any(role_loops.values()):
+            return None, None, None, None, ("REJECT", "an element-wise product (every coordinate a batch one)")
+        directions, candidate = {}, None
+        for role, loops in role_loops.items():
+            if not loops:
+                continue
+            forms = [[f[0][s] for s in loops] for name in "ABC" for f in nest.ops[name][1]]
+            nonzero = [f for f in forms if any(f)]
+            if any(a[s] * b[t] != a[t] * b[s] for a in nonzero for b in nonzero
+                   for s in range(len(loops)) for t in range(len(loops))):
+                if role in "IJ":
+                    candidate = loops
+                    break
+                return None, None, None, None, ("REJECT", "role K is read through two different combinations of its loops (a partial-C reduction / separate reduction coordinates)")
+            g = nonzero[0]
+            # the coordinate's values over the role's box, taken once and consecutively?
+            values = {}
+            pts_role = itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
+                                           for lb, ub, st in (nest.loops[s] for s in loops)])
+            vals = sorted({sum(c * x for c, x in zip(g, pt)) for pt in pts_role})
+            count = 1
+            for s in loops:
+                count *= trips(*nest.loops[s])
+            step = vals[1] - vals[0] if len(vals) > 1 else 1
+            if len(vals) != count or any(b - a != step for a, b in zip(vals, vals[1:])):
+                if role in "IJ" and len(loops) > 1:
+                    candidate = loops
+                    break
+                return None, None, None, None, ("REJECT", "role %s is not one dense coordinate of its loops" % role)
+            directions[role] = g
+        if candidate is None:
+            return batch_loops, role_loops, directions, sorted(demoted), None
+        chosen = choose(candidate)
+        if not chosen:
+            return None, None, None, None, ("REJECT", "role over several coordinates, no demotion")
+        demoted |= chosen
+    return None, None, None, None, ("REJECT", "the demotion did not converge")
+
+
 def decide(nest):
     pts = nest.points()
     if not pts:
@@ -913,37 +1023,13 @@ def decide(nest):
             if min(vals) < 0 or max(vals) >= shape[d]:
                 return ("REJECT", "%s is accessed out of bounds along dimension %d" % (name, d))
 
-    # The roles by readers (docs/AFFINE_GEMM_MAPPING.md section 19.2, the
-    # definition): a loop of two or more iterations read by all three
-    # operands is a batch loop; by A and C, I; by B and C, J; by A and B, K;
-    # by one operand, a broadcast. C may read batch loops anywhere (no C
-    # purity since 2026-10-16); what C must be is injective per batch (G2).
-    n = len(nest.loops)
-    many = [trips(*loop) >= 2 for loop in nest.loops]
-    reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
-             for name in "ABC"}
-    batch_loops = sorted(reads["A"] & reads["B"] & reads["C"])
-    role_loops = {"I": sorted((reads["A"] & reads["C"]) - set(batch_loops)),
-                  "J": sorted((reads["B"] & reads["C"]) - set(batch_loops)),
-                  "K": sorted((reads["A"] & reads["B"]) - set(batch_loops))}
-    for s in range(n):
-        if many[s] and s not in batch_loops and not any(s in l for l in role_loops.values()):
-            return ("REJECT", "loop %d is read by one operand only (a broadcast)" % s)
-    if batch_loops and not any(role_loops.values()):
-        return ("REJECT", "an element-wise product (every coordinate a batch one)")
-    # Every subscript's restriction to a role's loops: proportional to one
-    # direction (one coordinate per role; SQ-1 and separate coordinates fail).
-    directions = {}
-    for role, loops in role_loops.items():
-        if not loops:
-            continue
-        forms = [[f[0][s] for s in loops] for name in "ABC" for f in nest.ops[name][1]]
-        nonzero = [f for f in forms if any(f)]
-        if any(a[s] * b[t] != a[t] * b[s] for a in nonzero for b in nonzero
-               for s in range(len(loops)) for t in range(len(loops))):
-            return ("REJECT", "role %s is read through two different combinations of its loops "
-                    "(SQ-1 or separate coordinates)" % role)
-        directions[role] = nonzero[0]
+    # The roles by readers with the dimension-intersection partitioning
+    # (classify_loops; docs sections 19.2 and 21). C may read batch loops
+    # anywhere (no C purity since 2026-10-16) except that a demoted loop is
+    # read alone; what C must be is injective per batch (G2).
+    batch_loops, role_loops, directions, demoted, reject = classify_loops(nest)
+    if reject is not None:
+        return reject
     # Per batch iteration: a GEMM of affine views, every iteration the same.
     groups = {}
     for x in pts:
@@ -1502,11 +1588,16 @@ def check_views(nest, mnk, views, pts=None):
 
 
 def batch_loops_of(nest):
-    n = len(nest.loops)
-    many = [trips(*loop) >= 2 for loop in nest.loops]
-    reads = [{s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
-             for name in "ABC"]
-    return sorted(reads[0] & reads[1] & reads[2])
+    """The loops the compiler re-emits around the tiles: those read by all
+    three operands and the demoted ones (classify_loops, docs section 21)."""
+    batch, _, _, _, reject = classify_loops(nest)
+    if reject is not None:
+        n = len(nest.loops)
+        many = [trips(*loop) >= 2 for loop in nest.loops]
+        reads = [{s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
+                 for name in "ABC"]
+        return sorted(reads[0] & reads[1] & reads[2])
+    return list(batch)
 
 
 def batch_offset_in_role(nest):

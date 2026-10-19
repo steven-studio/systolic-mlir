@@ -1696,6 +1696,9 @@ struct AffineMatmulToSystolicPass
                     << " exact region(s)";
       if (!matmul.accumulates)
         remark << " (an assignment C = A B: C zeroed before the tiles)";
+      if (!matmul.demotedLoops.empty())
+        remark << ", partitioned on " << matmul.demotedLoops.size()
+               << " demoted loop(s)";
       if (plan)
         remark << " on " << fleet.resources.size()
                << " accelerator(s): makespan = "

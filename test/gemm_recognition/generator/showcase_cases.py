@@ -385,10 +385,15 @@ Ng(86, "batched_shared_b", "batched",
    arr("A", (2, 4, 4), ("b", "i", "k")), arr("B", (4, 4), ("k", "j")), arr("C", (2, 4, 4), ("b", "i", "j")),
    math_note="A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n"
              "(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no\n"
-             "batch subscript: it would be broadcast over the batch (a stride-0 view), or A\n"
-             "and C merged over (b, i) -- neither is lowered (the recognizer: b is read by\n"
-             "A and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers\n"
-             "batches every operand carries).")
+             "batch subscript.  b is read by A and C only -- a second coordinate in the row\n"
+             "role -- and since 2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21, the\n"
+             "dimension-intersection partitioning) it partitions the GEMM: one 4x4x4 GEMM\n"
+             "per value of b into its own slab C[b], B shared by the two partitions.\n"
+             "Offloaded as 2 batches of one tile.",
+   issue="ISSUE-008",
+   redecided="2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21): OUT_OF_SCOPE (an operand "
+             "shared by every batch, not lowered) before; ACCEPT since -- a partition on b with "
+             "B shared")
 Ng(87, "coupled_i_plus_j", "coupled_mapping",
    [L("i", 0, 8, "I"), L("j", 0, 8, "J"), L("k", 0, 8, "K")],
    arr("A", (15, 8), ("i + j", "k")), arr("B", (8, 8), ("k", "j")), arr("C", (15, 8), ("i + j", "j")),
@@ -965,11 +970,13 @@ Bn(124, "b_column_is_the_row_coordinate", "coupled_mapping",
              "read by all three operands (a batch loop), k by A and B (K), j by C only (a\n"
              "broadcast): the canonical decomposition fails.  With j demoted to a batch\n"
              "loop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=\n"
-             "sum_K A[i][K] B[K][i].  Mathematically valid; the demotion is not\n"
-             "implemented: a documented limitation.  Expected refusal at recognition: 'a\n"
-             "coordinate is read by C only' (j).  Re-decided 2026-10-16 (ISSUE-008; REJECT\n"
-             "before).",
-   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
+             "sum_K A[i][K] B[K][i].  Mathematically valid; since 2026-10-19 (docs section\n"
+             "21, the dimension-intersection partitioning) a loop read by C only is a\n"
+             "partition with both factors shared: offloaded as 8 x 8 batches of a 1 x 1 x 8\n"
+             "dot product (every column of C receives the same diagonal).  Re-decided\n"
+             "2026-10-16 (ISSUE-008; REJECT before) and 2026-10-19 (ACCEPT).",
+   issue="ISSUE-008",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; 2026-10-19 (section 21): ACCEPT -- the compiler constructs that partition')
 Bn(125, "a_on_its_diagonal", "singular_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_class="batched_rank1_by_demotion",

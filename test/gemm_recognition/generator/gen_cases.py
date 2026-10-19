@@ -75,7 +75,7 @@ STMTS = ["+=", "=C+AB", "=AB+C", "+=BA"]
 MUTATIONS = ["transpose_A", "transpose_B", "transpose_C", "coupled_C_row", "coupled_A_and_C_row",
              "singular", "elementwise", "output_in_reduction", "no_accumulation", "subtract", "alpha",
              "init_inside", "double", "no_restrict", "reversed_rows", "repeat_inside_K", "triple", "sum",
-             "batched", "scalar_acc"]
+             "batched", "scalar_acc", "batched_shared_B", "batched_shared_A", "batched_c_only"]
 
 # --------------------------------------------------------------------------
 # building blocks
@@ -447,6 +447,38 @@ def mutate(case: Case, mutation: str, rng) -> Case:
         for arr in (A, B, C):
             arr.subs = ("b",) + tuple(arr.subs)
             arr.dims = (nb,) + tuple(arr.dims)
+    elif mutation in ("batched_shared_B", "batched_shared_A", "batched_c_only"):
+        # The dimension-intersection partitioning (docs/AFFINE_GEMM_MAPPING.md
+        # section 21, 2026-10-19): a batch coordinate one factor (or both) does
+        # not read -- C[b] += A[b] B, C[b] += A B[b], C[b] += A B -- is a
+        # partition of the GEMM into the slabs C[b], the factor(s) without it
+        # shared by the partitions.
+        nb = 2
+        carried = {"batched_shared_B": (A, C), "batched_shared_A": (B, C), "batched_c_only": (C,)}[mutation]
+        # A factor is shared only when the role b sits next to (I when B does
+        # not read b, J when A does not) has a loop of two or more iterations:
+        # when that role runs once, b would simply BE the role (a loop of one
+        # iteration is a constant on the domain -- the readers' canonical
+        # decomposition, a plain GEMM of M or N = nb, not a partition), so
+        # every operand carries b instead (the batched mutation's shape).
+        joined = {"batched_shared_B": "I", "batched_shared_A": "J"}.get(mutation)
+        role_runs_once = joined is not None and all(lp.trip() == 1 for lp in c.loops if lp.role == joined)
+        if role_runs_once:
+            carried = (A, B, C)
+        c.loops.insert(0, Loop(var="b", lb=0, ub=nb, step=1, role="P"))
+        for arr in carried:
+            arr.subs = ("b",) + tuple(arr.subs)
+            arr.dims = (nb,) + tuple(arr.dims)
+        c.math_class = ""
+        if role_runs_once:
+            c.math_note = ("A batched GEMM, every operand reading the batch coordinate b (ISSUE-006): "
+                           "the %s role runs once, so a factor not reading b would make b that role "
+                           "(a plain GEMM), not a partition." % joined)
+        else:
+            c.math_note = ("A batched GEMM with %s not reading the batch coordinate b: a partition on b "
+                           "(docs/AFFINE_GEMM_MAPPING.md section 21), the shared factor(s) read by every "
+                           "partition." % {"batched_shared_B": "B", "batched_shared_A": "A",
+                                           "batched_c_only": "A and B"}[mutation])
     else:
         raise ValueError(mutation)
     c.arrays = {k: v for k, v in c.arrays.items()}

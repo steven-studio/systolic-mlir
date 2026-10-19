@@ -55,18 +55,18 @@
 // DISC:       reason: a coordinate is read by the second factor only: the other operands would be broadcast along it
 // DISC-NEXT:  class: VALID_BUT_LOWERING_UNSUPPORTED
 // DISC:       unique logical matmul count: 0
-// DISC:       reason: a coordinate is read by C only: the other operands would be broadcast along it
-// DISC-NEXT:  class: VALID_BUT_LOWERING_UNSUPPORTED
-// DISC:       unique logical matmul count: 0
+// DISC:       unique logical matmul count: 1
+// DISC:       partition: loop(s) 1 demoted to batch loops
+// DISC:       dense logical GEMM: yes, I/J/K on loops //2, batched over loop(s) 0+1 (64 batch iteration(s))
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: no (logical coordinate K is driven by 2 loops that do not enumerate it densely
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: yes, I/J/K on loops 0//2, batched over loop(s) 1 (8 batch iteration(s))
 // DISC:       reason: {{.*}}the accumulator is loaded and stored at different elements of C
 // DISC:       unique logical matmul count: 0
-// DISC:       reason: a coordinate is read by C only: the other operands would be broadcast along it
-// DISC-NEXT:  class: VALID_BUT_LOWERING_UNSUPPORTED
-// DISC:       unique logical matmul count: 0
+// DISC:       unique logical matmul count: 1
+// DISC:       partition: loop(s) 0 demoted to batch loops
+// DISC:       dense logical GEMM: yes, I/J/K on loops {{.*}}, batched over loop(s) 0 (8 batch iteration(s))
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: yes
 // DISC:       unique logical matmul count: 1
@@ -167,7 +167,7 @@
 // CHECK-NOT:   systolic.matmul_tile
 // CHECK-LABEL: func.func @wrong_coordinate
 // CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:       systolic.matmul_tile {{.*}} m = 1 n = 1 k = 8
 // CHECK-LABEL: func.func @reduction_multiplicity
 // CHECK:       affine.for
 // CHECK-NOT:   systolic.matmul_tile
@@ -179,7 +179,7 @@
 // CHECK-NOT:   systolic.matmul_tile
 // CHECK-LABEL: func.func @broadcast_once
 // CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:       systolic.matmul_tile {{.*}} m = 1 n = 8 k = 8
 // CHECK-LABEL: func.func @oob_static
 // CHECK:       affine.for
 // CHECK-NOT:   systolic.matmul_tile
@@ -621,8 +621,10 @@ func.func @reduction_in_output(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x
 
 // -----
 
-// wrong_coordinate: B[k][i]: B reads I where J belongs -- i is read by A, B and C and j by C only (every j receives the same sum, a broadcast); VALID_BUT_LOWERING_UNSUPPORTED
-// expected: REJECT
+// wrong_coordinate: B[k][i]: B reads I where J belongs -- i is read by A, B and C and j by C only (every j receives the same sum).
+// RE-DECIDED 2026-10-19 (docs section 21, the dimension-intersection partitioning): j, read by C only, partitions the
+// GEMM with both factors shared -- per (i, j) the 1 x 1 x 8 dot product C[i][j] += sum_k A[i][k] B[k][i]; lowered.
+// expected: ACCEPT
 func.func @wrong_coordinate(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %x0 = 0 to 8 {
     affine.for %x1 = 0 to 8 {
@@ -706,8 +708,10 @@ func.func @acc_different_element(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<
 
 // -----
 
-// broadcast_once: A[t][k], t runs once, with C[i][j]: A reads one row for every I (a broadcast, rho = 0)
-// expected: REJECT
+// broadcast_once: A[t][k], t runs once, with C[i][j]: A reads one row for every I (a broadcast, rho = 0).
+// RE-DECIDED 2026-10-19 (docs section 21): i is read by C only -- a partition with both factors shared: per i
+// the 1 x 8 x 8 GEMM C[i][:] += A[2][:] B; lowered as 8 partitions.
+// expected: ACCEPT
 func.func @broadcast_once(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %x0 = 0 to 8 {
     affine.for %x1 = 2 to 3 {

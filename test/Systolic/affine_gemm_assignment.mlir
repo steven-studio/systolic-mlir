@@ -249,14 +249,17 @@ func.func @flat_collision_assign(%A: memref<3xf32> {llvm.noalias}, %B: memref<5x
 
 // -----
 
-// 10. Not lowered: a broadcast factor, C[i][j] = A[0] * B[j] (i is read by C
-//     only: A would be a stride-0 view). VALID_BUT_LOWERING_UNSUPPORTED, as
-//     for the accumulation form (docs section 10).
+// 10. C[i][j] = A[0] * B[j]: i is read by C only. Since 2026-10-19 (section 21)
+//     such a loop partitions the GEMM with both factors shared: per i the
+//     1 x 5 x 1 assignment C[i][:] = A[0] * B[:], its slab zeroed first (was
+//     refused as a broadcast).
 // CHECK-LABEL: func.func @broadcast_assign
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        recognition result: failure
-// DISC-NEXT:   reason: a coordinate is read by C only: the other operands would be broadcast along it
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %{{.*}} = 0 to 3 {
+// CHECK:         affine.store %{{.*}} : memref<1x5xf32, strided<[5, 1], offset: ?>>
+// CHECK:         systolic.matmul_tile {{.*}} m = 1 n = 5 k = 1
+// REMARK:      remark: affine GEMM 1x5x1 lowered as 1 exact region(s) (an assignment C = A B: C zeroed before the tiles), partitioned on 1 demoted loop(s), batched: 3 batch iteration(s) of 1 batch loop(s)
+// DISC:        recognition result: success
+// DISC:        partition: loop(s) 0 demoted to batch loops
 func.func @broadcast_assign(%A: memref<3xf32> {llvm.noalias}, %B: memref<5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 3 {
     affine.for %j = 0 to 5 {

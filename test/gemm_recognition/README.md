@@ -77,7 +77,13 @@ one `arith.mulf` of them and one `affine.store` of the product: the assignment `
 K = 1 GEMM into a zeroed C, accepted only when every element of C is written once (a loop of two
 or more iterations that no subscript of C reads is refused as an overwrite, PROVEN_INVALID; batches
 overlapping in C are refused by the lowering's injectivity proof; the lowering zeroes C's window
-before the tiles); every loop of the chain is used by an access, and no access
+before the tiles); since 2026-10-19 also the dimension-intersection partitioning (docs section 21): a
+loop read by C only, and the extra loops of a row or column role that is not one dense
+coordinate (`C[p][i][j] += A[p][i][k] * B[k][j]`: p), are demoted to batch loops by the rule of
+section 21.3 (the analyses run again with them as batch loops; a demoted loop must be read by C
+alone in a dimension of its own; the factor that does not read it is shared by the partitions; a
+loop read by both factors and not by C is never demoted -- a partial-C reduction, refused);
+every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
 all three, followed by `A = (I, K)`, `B = (K, J)`, `C = (I, J)` where the two operands that share
@@ -259,8 +265,9 @@ only on (I, J), each subscript being an injective affine function of its coordin
 Then `C'(I,J) += A'(I,K) B'(K,J)` with `A'`, `B'`, `C'` the operands' own views. Mathematically
 the following are *also* GEMMs (and are marked as such) but are **outside** this compiler's
 specification by explicit, documented decision (DOCUMENTED_LIMITATION): a batched GEMM with an
-operand shared by every batch (`C[b] += A[b] B`: B would be broadcast over the batch, or A and C
-merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the
+operand shared by every batch whose partitioned decomposition is not valid (`C[b] += A[b] B` is inside
+the specification since 2026-10-19 as a partition on b, basis `dimension_partition`, docs section 21;
+it stays outside when the batch coordinate is not read by C alone in a dimension of its own), alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the
 nest or a scalar accumulator (the assignment `C = A * B` that writes every element once is inside
 the specification since 2026-10-19, see below), double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
@@ -271,9 +278,10 @@ whose every loop is a repetition loop of two or more iterations around one scala
 multiply-accumulate (no loop of a GEMM to anchor on; basis `no_gemm_loop`, 2026-10-18 -- the
 nest of loops that run once is the 1 x 1 x 1 GEMM and is offloaded), and -- since
 ISSUE-008 -- a nest that is a batched GEMM only under a decomposition other than its readers'
-(a loop read by one operand: a stride-0 role or a batch loop, basis `broadcast`; separate
-coordinates in one role, a role that is not one dense coordinate, C not injective per batch:
-basis `demotion`; `docs/AFFINE_GEMM_MAPPING.md` section 19.2 -- the executable specification
+(a loop read by one FACTOR only: a stride-0 role, basis `broadcast`; a loop read by both factors
+and not by C beyond the reduction: basis `partial_reduction`; separate coordinates in one role or a
+role that is not one dense coordinate whose partition of section 21 is not valid, C not injective
+per batch: basis `demotion`; `docs/AFFINE_GEMM_MAPPING.md` section 19.2 -- the executable specification
 exhibits the decomposition, the compiler constructs only the canonical one). (Transposed
 operand views, one operand reading a shared coordinate in the direction opposite to the other's
 — a negative-stride view — and matrix-vector products were on this list until 2026-10-15; they are
@@ -314,7 +322,16 @@ the accumulation form's (`dense_gemm`, `batched`, ...) plus `assignment`; the fa
 hold no zeros, `casespec.factor_nonzero`). An assignment that writes an element of C more than once (a reduction loop of two
 or more iterations, `C[i][j] = A[i][k] * B[k][j]`; a loop only the factors read; batches
 overlapping in C, `C[i + b][j] = A[b][i] * B[b][j]`) is not a GEMM of its operands: REJECT, basis
-`not_gemm_overwrite`.
+`not_gemm_overwrite`. Since 2026-10-19 also the **dimension-intersection partitioning** (docs section
+21, basis `dimension_partition`): a loop read by C only (`C[b][i][j] += A[i][k] * B[k][j]`) and the
+extra loops of a row or column role (`C[p][i][j] += A[p][i][k] * B[k][j]`, `C[q][i][j] += A[i][k] *
+B[q][k][j]`, several of them, mixed with triple-intersection batch loops, permuted, offset or strided
+batch dimensions, K = 1 outer products, rank-1 factors, skewed and merged factor views) are batch
+loops partitioning the GEMM into independent slabs of C, the factor that does not read them shared
+(`casespec.partition_decomposition`: the rule of section 21.3, verified by enumeration; the
+partitions' outputs must be disjoint -- `C[p + i][j]` and the merged `C[3p + i][j]` stay OUT_OF_SCOPE
+`demotion`). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
+B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition.
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=

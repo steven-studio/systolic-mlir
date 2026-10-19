@@ -18,10 +18,11 @@
  *   read by all three operands (a batch loop), k by A and B (K), j by C only (a
  *   broadcast): the canonical decomposition fails.  With j demoted to a batch
  *   loop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=
- *   sum_K A[i][K] B[K][i].  Mathematically valid; the demotion is not
- *   implemented: a documented limitation.  Expected refusal at recognition: 'a
- *   coordinate is read by C only' (j).  Re-decided 2026-10-16 (ISSUE-008; REJECT
- *   before).
+ *   sum_K A[i][K] B[K][i].  Mathematically valid; since 2026-10-19 (docs section
+ *   21, the dimension-intersection partitioning) a loop read by C only is a
+ *   partition with both factors shared: offloaded as 8 x 8 batches of a 1 x 1 x 8
+ *   dot product (every column of C receives the same diagonal).  Re-decided
+ *   2026-10-16 (ISSUE-008; REJECT before) and 2026-10-19 (ACCEPT).
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -30,21 +31,17 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: (docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.2, 10) a loop read by one operand only: a GEMM of affine views in which that loop is a role the other operand's view is constant along (a stride-0 view, C[i][j] += A[i][k] * B[k][i]: j as J with A and B constant along it is excluded by G2 unless N = 1, so j is K with A constant along it, or a batch loop), found by casespec.generalized_gemm_on_domain's search; the compiler refuses the broadcast (section 10: a stride-0 view is not lowered): a documented limitation
- *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported since 2026-10-19, docs/AFFINE_GEMM_MAPPING.md section 21) the dimension-intersection partitioning: the loops read by C only, and the extra coordinates of a row or column role (the loops of C & A beyond M, of C & B beyond N, chosen by the rule of section 21), are batch loops; each partitions the GEMM into independent slabs of C and the factor that does not read it is shared by the partitions; the per-partition GEMM is one dense GEMM of affine views (casespec.partition_decomposition, by enumeration)
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; 2026-10-19 (section 21): ACCEPT -- the compiler constructs that partition
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: a coordinate is read by C only: the other operands would be broadcast along it
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

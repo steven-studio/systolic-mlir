@@ -15423,26 +15423,26 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "a batched GEMM with an operand shared by every batch (no batch subscript: C[b] += A[b] B): valid -- B broadcast over the batch, or one stacked GEMM with A reshaped -- but the operand would need a stride-0 or merged view, not lowered (the recognizer: two coordinates read by one GEMM role)",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-19, docs/AFFINE_GEMM_MAPPING.md section 21) the dimension-intersection partitioning: the loops read by C only, and the extra coordinates of a row or column role (the loops of C & A beyond M, of C & B beyond N, chosen by the rule of section 21), are batch loops; each partitions the GEMM into independent slabs of C and the factor that does not read it is shared by the partitions; the per-partition GEMM is one dense GEMM of affine views (casespec.partition_decomposition, by enumeration)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "2 separate coordinates are read by one GEMM role"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
-   "redecided": null,
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21): OUT_OF_SCOPE (an operand shared by every batch, not lowered) before; ACCEPT since -- a partition on b with B shared",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
@@ -15450,7 +15450,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": 90,
-   "math_note": "A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no\nbatch subscript: it would be broadcast over the batch (a stride-0 view), or A\nand C merged over (b, i) -- neither is lowered (the recognizer: b is read by\nA and C only, a second I coordinate).  Legal, unsupported (ISSUE-006 lowers\nbatches every operand carries).",
+   "math_note": "A batched GEMM whose B is shared by every batch: C[b] += A[b] B.  Valid GEMMs\n(or, stacking the batches, one 8x4x4 GEMM with A reshaped).  B carries no\nbatch subscript.  b is read by A and C only -- a second coordinate in the row\nrole -- and since 2026-10-19 (docs/AFFINE_GEMM_MAPPING.md section 21, the\ndimension-intersection partitioning) it partitions the GEMM: one 4x4x4 GEMM\nper value of b into its own slab C[b], B shared by the two partitions.\nOffloaded as 2 batches of one tile.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_086.c -o case_086 && ./case_086",
@@ -21980,33 +21980,33 @@
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
     "mathematical_gemm": true,
-    "recognition": "OUT_OF_SCOPE",
-    "offload": "stays_on_host",
-    "basis": "(docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.2, 10) a loop read by one operand only: a GEMM of affine views in which that loop is a role the other operand's view is constant along (a stride-0 view, C[i][j] += A[i][k] * B[k][i]: j as J with A and B constant along it is excluded by G2 unless N = 1, so j is K with A constant along it, or a batch loop), found by casespec.generalized_gemm_on_domain's search; the compiler refuses the broadcast (section 10: a stride-0 view is not lowered): a documented limitation",
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(supported since 2026-10-19, docs/AFFINE_GEMM_MAPPING.md section 21) the dimension-intersection partitioning: the loops read by C only, and the extra coordinates of a row or column role (the loops of C & A beyond M, of C & B beyond N, chosen by the rule of section 21), are batch loops; each partitions the GEMM into independent slabs of C and the factor that does not read it is shared by the partitions; the per-partition GEMM is one dense GEMM of affine views (casespec.partition_decomposition, by enumeration)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "a coordinate is read by C only: the other operands would be broadcast along it"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "DOCUMENTED_LIMITATION",
-   "issue": null,
-   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct",
+   "classification": "TRUE_POSITIVE",
+   "issue": "ISSUE-008",
+   "redecided": "2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; 2026-10-19 (section 21): ACCEPT -- the compiler constructs that partition",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -20878,
-   "math_note": "C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\nin C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n(A B)[i][i].  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is\nread by all three operands (a batch loop), k by A and B (K), j by C only (a\nbroadcast): the canonical decomposition fails.  With j demoted to a batch\nloop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=\nsum_K A[i][K] B[K][i].  Mathematically valid; the demotion is not\nimplemented: a documented limitation.  Expected refusal at recognition: 'a\ncoordinate is read by C only' (j).  Re-decided 2026-10-16 (ISSUE-008; REJECT\nbefore).",
+   "math_note": "C[i][j] += A[i][k] * B[k][i]: B's column is the row coordinate i, j appears\nin C only.  Every column of C receives the diagonal of A B: C[i][j] +=\n(A B)[i][i].  By the readers (docs/AFFINE_GEMM_MAPPING.md section 19.2) i is\nread by all three operands (a batch loop), k by A and B (K), j by C only (a\nbroadcast): the canonical decomposition fails.  With j demoted to a batch\nloop it is a batched GEMM: per (i, j) the 1 x 1 x 8 dot product C[i][j] +=\nsum_K A[i][K] B[K][i].  Mathematically valid; since 2026-10-19 (docs section\n21, the dimension-intersection partitioning) a loop read by C only is a\npartition with both factors shared: offloaded as 8 x 8 batches of a 1 x 1 x 8\ndot product (every column of C receives the same diagonal).  Re-decided\n2026-10-16 (ISSUE-008; REJECT before) and 2026-10-19 (ACCEPT).",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_124.c -o case_124 && ./case_124",

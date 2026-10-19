@@ -340,6 +340,17 @@ struct LogicalMatmul {
   // §20).
   bool accumulates = true;
 
+  // Dimension-intersection partitioning (docs/AFFINE_GEMM_MAPPING.md §21):
+  // the loops (iteration dimensions, in the order of logicalMapping's
+  // columns) the recognizer made batch loops beyond those read by all three
+  // operands -- a loop read by C only, or a loop of a row or column role that
+  // was not one dense coordinate (C[p][i][j] += A[p][i][k] * B[k][j]: p).
+  // Each partitions the GEMM into independent slabs of C; the factor that
+  // does not read it is shared by the partitions. Empty for a plain or a
+  // canonically batched GEMM. Diagnostics only: the batch machinery treats
+  // them as any other batch loop.
+  SmallVector<unsigned> demotedLoops;
+
   // The task's exact mapping (reported by the discovery pass, not decided).
   ExactMapping exactMapping;
 };
