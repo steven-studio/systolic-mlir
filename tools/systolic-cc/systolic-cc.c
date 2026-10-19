@@ -880,9 +880,16 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
                    waited for before the next: the software model (unless
                    --submission async, which it implements too), a
                    bitstream without the record, or --submission sync. */
-static int fleet_config(driver *d, long *k8, long *k4, int *header) {
+static int fleet_config(driver *d, long *k8, long *k4, int *header,
+                        long *depth) {
   const options *a = d->a;
   *header = 0;
+  /* PIPELINE_DEPTH of the configuration (the context's job queue, 1 when
+     not recorded: the archived bitstream, the software model): the fleet is
+     declared pipelined when it is more than 1, as systolic-matmul declares
+     it from the same record, so the schedule describes the loaded hardware
+     whatever the submission mode is. */
+  *depth = 1;
   if (strcmp(a->runtime, "board") != 0) {
     *k8 = a->k_max_8x8;
     *k4 = a->k_max_4x4;
@@ -918,6 +925,18 @@ static int fleet_config(driver *d, long *k8, long *k4, int *header) {
   *k4 = strtol(p4 + 10, NULL, 10);
   const char *ph = strstr(r.out, "COMPLETION_HEADER=");
   *header = ph && ph[18] == '1';
+  const char *pd = strstr(r.out, "PIPELINE_DEPTH=");
+  if (pd) {
+    char *end = NULL;
+    long v = strtol(pd + 15, &end, 10);
+    if (end == pd + 15 || v < 1) {
+      snprintf(d->error, sizeof d->error,
+               "the runtime reports an unusable PIPELINE_DEPTH for %s: %s",
+               config, r.out);
+      return -1;
+    }
+    *depth = v;
+  }
   return 0;
 }
 
@@ -966,15 +985,15 @@ static int compile(driver *d) {
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
   char *cfront = format("%s/systolic-cfront", a->self_dir);
   char *offload_rt = format("%s/runtime/offload", SYSTOLIC_SOURCE_DIR);
-  long k8, k4;
+  long k8, k4, depth;
   int header;
-  if (fleet_config(d, &k8, &k4, &header) != 0)
+  if (fleet_config(d, &k8, &k4, &header, &depth) != 0)
     return -1;
   const int async = choose_async(d, header);
   if (async < 0)
     return -1;
   char *fleet = format("--systolic-declare-fpga-fleet=k-max-8x8=%ld "
-                       "k-max-4x4=%ld", k8, k4);
+                       "k-max-4x4=%ld pipeline-depth=%ld", k8, k4, depth);
   char *phys = format("--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=%ld "
                       "phys-k-max-4x4=%ld%s", k8, k4,
                       async ? " async=true" : "");
@@ -1181,8 +1200,9 @@ static int compile(driver *d) {
     bprintf(&plan, "{\n \"source\": \"%s\",\n \"runtime\": \"%s\",\n"
                    " \"submission\": \"%s\",\n"
                    " \"k_max_8x8\": %ld,\n \"k_max_4x4\": %ld,\n"
+                   " \"pipeline_depth\": %ld,\n"
                    " \"verify\": %s,\n \"offloaded\": [", src, a->runtime,
-            async ? "asynchronous" : "synchronous", k8, k4,
+            async ? "asynchronous" : "synchronous", k8, k4, depth,
             a->verify ? "true" : "false");
     for (size_t i = 0; i < noffload; ++i)
       bprintf(&plan, "%s\"%s\"", i ? ", " : "", offload[i].name);
@@ -1301,7 +1321,8 @@ static int compile(driver *d) {
   push(&link, a->output);
   if (run(d, &link, "linking", NULL, NULL, &r))
     return -1;
-  log_note("wrote %s (%zu function(s) offloaded, runtime: %s, %s; "
+  log_note("wrote %s (%zu function(s) offloaded, runtime: %s, %s, "
+           "scheduled for %s contexts (PIPELINE_DEPTH=%ld); "
            "intermediates in %s)", a->output, noffload,
            strcmp(a->runtime, "soft") == 0 ? "software model, NOT the FPGA"
                                            : "FPGA board",
@@ -1309,7 +1330,7 @@ static int compile(driver *d) {
                    "fpga_gemm_wait per GEMM)"
                  : "synchronous submission (one fpga_matmul_tiled_auto_"
                    "scheduled per tile)",
-           a->keep_dir);
+           depth > 1 ? "pipelined" : "serialized", depth, a->keep_dir);
   return 0;
 }
 

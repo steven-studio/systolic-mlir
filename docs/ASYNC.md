@@ -233,7 +233,9 @@ tile/s），**看不出重疊帶來的加速**；它證明的是正確性與「�
   k-ordered 累加永遠等不齊，lowering 直接報錯。`test/Systolic/fpga_lowering_async_split.mlir`、
   `bad_fpga_lowering_async.mlir`（read_between_folds）。
 - `systolic-cc --runtime board`：`runtime-dispatch-test --print-config` 多印 `COMPLETION_HEADER=`，
-  有 record 就把 `async=true` 交給 lowering（`--submission auto|sync|async`，預設 auto；async 在
+  有 record 就把 `async=true` 交給 lowering；同一份輸出的 `PIPELINE_DEPTH` 交給
+  `--systolic-declare-fpga-fleet=... pipeline-depth=D`（D > 1 宣告 pipelined fleet，與
+  `systolic-matmul` 同一規則，`docs/COSTMODEL.md` 第 8 節）（`--submission auto|sync|async`，預設 auto；async 在
   soft runtime 或沒有 record 的設定上被拒絕）；`runtime/offload/board_stats.c` 同時回報兩個
   runtime 的統計並關閉兩條 session，shim 的 FPGA／CPU 判定不變。soft runtime 只有同步 entry
   point，lit 的 `test/SystolicCC` 照舊走同步 lowering。

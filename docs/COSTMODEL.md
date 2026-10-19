@@ -255,7 +255,16 @@ D = 1 時逐 cycle 等於第 1 節的序列模型。binary search 的 capacity �
 `SystolicTilePlan` 的 `start_cycle` 是 transfers-free 的 `feedStart_j`（序列化時仍是前面
 compute term 的加總），`systolic-cost --verify` 重算 stream 比對區間。`systolic-cost --pipelined`
 / `timeline` 印出事件；`systolic-matmul` 從 `fpga_config.txt` 的 `PIPELINE_DEPTH` 決定宣告哪一種
-fleet（封存的 bitstream 沒有這一行 → 序列化）。
+fleet（封存的 bitstream 沒有這一行 → 序列化）。C／affine 路徑同一條規則（2026-10-19）：
+`--systolic-declare-fpga-fleet=... pipeline-depth=D`（D > 1 宣告 pipelined，預設 1），`systolic-cc`
+從 `runtime-dispatch-test --print-config` 讀 `PIPELINE_DEPTH` 傳入（`25-plan.json` 記 `pipeline_depth`），
+`test/e2e/affine_c/run.sh` 亦同；在此之前 C 路徑永遠宣告序列化 fleet，16x16x16 報 1245 而非 949、
+第二個 8x8 tile 的 `start_cycle` 是 125 而非 42（`test/Systolic/declare_fpga_fleet_pipelined.mlir`）。
+序列化的 `start_cycle` 在 v1 上無害（fill-bound，fold 間隔 267 > 125），但在 v2 的 4x4 鏈上會被硬體
+scheduler 的 `cycle_counter >= req_start_cycle` 拿來 hold fold（十個 k = 16 job：makespan 1296 對 1105）。
+模型的 makespan 是 **hardware schedule makespan**（descriptor 被接受到結果寫回 DDR，陣列時脈）；
+host 的提交開銷（DPTI 的 slab／descriptor／讀回）與 end-to-end 時間另計（`docs/ASYNC.md` 第 10 節），
+同步提交時模型預測的重疊在 host 端不會兌現。
 
 **驗證（`eval/pipeline_overlap/run.sh`）。** `tb_pipeline_overlap.sv` 把 K-fold 鏈以硬體願意接受的
 速度送進去，逐 job 蓋章（fire / grant / fill / fold / feed / cv / wbacc / done / rb），每塊結果

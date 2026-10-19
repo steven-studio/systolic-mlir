@@ -364,7 +364,8 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 | Systolic → FPGA | `systolic-opt --systolic-fpga-pipeline test/Systolic/systolic_to_fpga.mlir` | 只剩 LLVM dialect、`llvm.call @fpga_matmul_tiled_auto_scheduled` |
 | Systolic → FPGA（非同步） | `systolic-opt --systolic-fpga-pipeline="async=true" test/Systolic/fpga_lowering_async.mlir` | `llvm.call @fpga_gemm_begin`、每個 tile 一個 `@fpga_tile_submit`、`@fpga_gemm_wait`（`docs/ASYNC.md`） |
 | Affine → FPGA（非同步） | `systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --lower-systolic-matmul-tile-to-fpga="async=true" test/Systolic/affine_to_fpga_pipeline_async.mlir` | 一個 begin、10 個 submit、最後一個 submit 之後才有唯一的 wait（C 不經 scratch） |
-| lit | `cmake --build build --target check-systolic` | 86/86 |
+| lit | `cmake --build build --target check-systolic` | 87/87 |
+| Affine fleet 的 PIPELINE_DEPTH | `systolic-opt --systolic-declare-fpga-fleet="pipeline-depth=4" --affine-matmul-to-systolic=report=true test/Systolic/declare_fpga_fleet_pipelined.mlir` | device 帶 `pipeline_depth = 4 reduce_cycles = 69 feed_gap = 26`，16x16x16 makespan 949（depth 1：1245）、第二個 8x8 tile `start_cycle = 42` |
 | E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
 | runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
 | 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V/S/Q/M/P/F 十一個 mode；S 印每個 submit 回來的時間對第一筆 completion，P 是 poll／timed wait／release，F 是提交中途的鏈路失敗） |

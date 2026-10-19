@@ -107,6 +107,9 @@ if [ "$BACKEND" = board ]; then
   hw4="$(sed -n 's/^K_MAX_4X4=//p' <<< "$cfg")"
   hwhdr="$(sed -n 's/^COMPLETION_HEADER=//p' <<< "$cfg")"
   hwdepth="$(sed -n 's/^PIPELINE_DEPTH=//p' <<< "$cfg")"
+  # The context's job queue (1 when the record has none): > 1 declares the
+  # pipelined fleet to the compiler, as systolic-matmul does.
+  [[ "$hwdepth" =~ ^[1-9][0-9]*$ ]] || hwdepth=1
   for pair in "K_MAX_8X8 ${K_MAX_8X8_GIVEN:-} $hw8" "K_MAX_4X4 ${K_MAX_4X4_GIVEN:-} $hw4"; do
     set -- $pair
     if [ $# = 3 ] && [ "$2" != "$3" ]; then
@@ -126,9 +129,9 @@ if [ "$BACKEND" = board ]; then
     got="$(sha256sum "$bit" | cut -d' ' -f1)"
     [ "$got" = "$sha" ] || {
       echo "BITSTREAM_SHA256 = $sha, but $bit hashes to $got" >&2; exit 2; }
-    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4, BITSTREAM_SHA256 matches $(basename "$bit"); board contents trusted, not read back"
+    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4 PIPELINE_DEPTH=$hwdepth, BITSTREAM_SHA256 matches $(basename "$bit"); board contents trusted, not read back"
   else
-    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4, bitstream hash NOT checked (BITSTREAM or BITSTREAM_SHA256 missing)"
+    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4 PIPELINE_DEPTH=$hwdepth, bitstream hash NOT checked (BITSTREAM or BITSTREAM_SHA256 missing)"
   fi
 fi
 
@@ -286,7 +289,7 @@ else
   KERNEL=gemm_systolic
 fi
 
-FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$K_MAX_8X8 k-max-4x4=$K_MAX_4X4"
+FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$K_MAX_8X8 k-max-4x4=$K_MAX_4X4 pipeline-depth=${hwdepth:-1}"
 PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$K_MAX_8X8 phys-k-max-4x4=$K_MAX_4X4$([ "$ASYNC" = 1 ] && echo ' async=true')"
 
 # ---------------------------------------------------------------------------
