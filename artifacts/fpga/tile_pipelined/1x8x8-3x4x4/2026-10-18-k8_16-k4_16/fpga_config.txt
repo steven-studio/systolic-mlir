@@ -1,0 +1,24 @@
+# fpga_config.txt -- written by dma_top_build.tcl with this bitstream
+K_MAX_8X8=16
+K_MAX_4X4=16
+N=8
+NUM_8X8=1
+NUM_4X4=3
+K_DIM=16
+VARIANT=v1
+USE_V2=0
+HOST_SLAB_BYTES=1024
+PIPELINE_DEPTH=4
+BITSTREAM=/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4/systolic_dma.runs/impl_1/systolic_dma_top.bit
+BITSTREAM_SHA256=ad0f74e88be45696ec357ccd2ec03a206b63f0dbf2445b32686cd11242b6d48c
+RTL_GIT_REV=ff68494adc78ccfe7e91b5a93296a310ad04df79
+RTL_TREE_DIRTY=0
+WNS_NS=0.142204
+WHS_NS=0.048905
+TIMING_MET=1
+DPTI_IO_GATE=PASS
+DPTI_CLKOUT0_PHASE=0.0
+IMPL_PLACE_DIRECTIVE=AltSpreadLogic_high
+IMPL_ROUTE_DIRECTIVE=Explore
+IMPL_INCREMENTAL_REF=none
+BUILT=2026-10-18T15:43:13+0800
