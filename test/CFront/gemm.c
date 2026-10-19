@@ -8,13 +8,13 @@
 // RUN: systolic-opt %t.mlir -o /dev/null
 // RUN: systolic-opt --systolic-declare-fpga-fleet --test-affine-matmul-discovery %t.mlir -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=PART
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic %t.mlir \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true %t.mlir \
 // RUN:   | FileCheck %s --check-prefix=SYS
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga --systolic-runtime-to-llvm %t.mlir \
 // RUN:   | FileCheck %s --check-prefix=LLVM
 // RUN: %cfront %s -DM=20 -DN=12 -DK=40 -o %t.edge.mlir
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic %t.edge.mlir \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true %t.edge.mlir \
 // RUN:   | FileCheck %s --check-prefix=EDGE
 
 void gemm(float A[restrict M][K], float B[restrict K][N],

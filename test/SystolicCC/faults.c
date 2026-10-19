@@ -8,8 +8,8 @@
 // result the runtime does not report is a NUMERICAL MISMATCH (exit 4), and
 // only --verify can see it.
 //
-// RUN: %systolic-cc --verify %s -o %t.verify > /dev/null 2>&1
-// RUN: %systolic-cc %s -o %t.plain > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.verify > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation %s -o %t.plain > /dev/null 2>&1
 //
 // No fault: correct.
 // RUN: %t.verify 2>&1 | FileCheck %s --check-prefix=CLEAN

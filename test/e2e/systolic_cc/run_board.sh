@@ -73,9 +73,11 @@ for src in "${PROGRAMS[@]}"; do
   name="$(basename "$src" .c)"
   out="$OUT_ROOT/$name"
   mkdir -p "$out"
-  if ! "$CC" --runtime=board --verify --explain "$src" -o "$out/$name" \
+  # --fp-reassociation: offloading reassociates the fp sums (the strict
+  # default keeps every GEMM on the host; docs/AFFINE_GEMM_MAPPING.md section 6).
+  if ! "$CC" --runtime=board --fp-reassociation --verify --explain "$src" -o "$out/$name" \
       > "$out/compile.log" 2>&1 ||
-     ! "$CC" --runtime=soft "$src" -o "$out/$name.soft" \
+     ! "$CC" --runtime=soft --fp-reassociation "$src" -o "$out/$name.soft" \
       > "$out/compile.soft.log" 2>&1 ||
      ! "$SYSTOLIC_CFRONT_CLANG" -std=c11 "$src" -o "$out/$name.cpu" \
       > "$out/compile.cpu.log" 2>&1; then

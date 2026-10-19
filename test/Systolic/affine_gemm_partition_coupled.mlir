@@ -1,18 +1,26 @@
 // RUN: systolic-opt --test-affine-matmul-discovery %s -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s
 //
+// C[b][b + i][j] += A[b][b + i][k] * B[b][k][j]. RE-DECIDED 2026-10-16 (docs/
+// AFFINE_GEMM_MAPPING.md section 19.3): the batch loop b moves C's and A's I views, it does
+// not drive I. Per b the GEMM C'(I, J) = C[b][I + b][J] += A[b][I + b][K] * B[b][K][J], C'
+// injective. Before: the positional reading I = b + i, refused by the dense partition
+// ("loop 0 drives a batch coordinate and I").
+//
 // CHECK: recognition result: failure
 // CHECK: unique logical matmul count: 1
 // CHECK: recognition result: success
 // CHECK: T[0] = [1 0 0 0]
-// CHECK: T[1] = [1 1 0 0]
+// CHECK: T[1] = [0 1 0 0]
 // CHECK: T[2] = [0 0 1 0]
 // CHECK: T[3] = [0 0 0 1]
 // CHECK: c = [0 0 0 0]
-// CHECK: row extent: unknown
+// CHECK: batch terms A: dimension 0 = 0 + 1*x0, dimension 1 += 1*x0
+// CHECK: batch terms C: dimension 0 = 0 + 1*x0, dimension 1 += 1*x0
+// CHECK: row extent: static 4
 // CHECK: column extent: static 4
 // CHECK: reduction extent: static 4
-// CHECK: dense logical GEMM: no (batched GEMM (a partition prefix P* of 1 coordinates) is not supported)
+// CHECK: dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 // CHECK: partition count: 1
 
 func.func @affine_gemm_partition_coupled(

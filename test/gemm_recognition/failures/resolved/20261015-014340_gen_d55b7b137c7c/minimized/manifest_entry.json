@@ -1,0 +1,138 @@
+{
+ "id": "gen_d55b7b137c7c",
+ "file": "min/gen_d55b7b137c7c.c",
+ "name": "gen_positive_ijk_8x17x1_repeat_inside_K",
+ "set": "generated",
+ "category": "mutation_repeat_inside_K",
+ "kernel": "gen_d55b7b137c7c_kernel",
+ "mathematical_class": "gemm",
+ "is_valid_gemm": true,
+ "gemm_tags": [
+  "repeated_2"
+ ],
+ "c_program_valid": true,
+ "in_affine_c_subset": true,
+ "element_type": "float",
+ "statement": "=C+AB",
+ "kernel_style": "plain",
+ "loops": [
+  {
+   "var": "i",
+   "role": "I",
+   "lb": 0,
+   "ub_exclusive": 2,
+   "step": 2,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "j",
+   "role": "J",
+   "lb": 3,
+   "ub_exclusive": 4,
+   "step": 1,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "k",
+   "role": "K",
+   "lb": 1,
+   "ub_exclusive": 2,
+   "step": 1,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "rr",
+   "role": "R",
+   "lb": 0,
+   "ub_exclusive": 2,
+   "step": 1,
+   "cmp": "<",
+   "trip": 2
+  }
+ ],
+ "arrays": {
+  "a": {
+   "name": "A",
+   "dims": [
+    15,
+    3
+   ],
+   "subscripts": [
+    "i",
+    "2 * k"
+   ],
+   "restrict": true,
+   "elem": "float"
+  },
+  "b": {
+   "name": "B",
+   "dims": [
+    3,
+    23
+   ],
+   "subscripts": [
+    "2 * k",
+    "j + 3"
+   ],
+   "restrict": true,
+   "elem": "float"
+  },
+  "c": {
+   "name": "C",
+   "dims": [
+    15,
+    23
+   ],
+   "subscripts": [
+    "i",
+    "j + 3"
+   ],
+   "restrict": true,
+   "elem": "float"
+  }
+ },
+ "repetitions": 2,
+ "logical_extents": {
+  "I": 1,
+  "J": 1,
+  "K": 1
+ },
+ "expected": {
+  "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+  "mathematical_gemm": true,
+  "recognition": "OUT_OF_SCOPE",
+  "offload": "stays_on_host",
+  "basis": "AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop inside the reduction cannot be moved outward (not a legal interchange); test/SystolicCC/depth.c d4_illegal",
+  "runtime": "the program's own check must pass on every backend (kernel == references)"
+ },
+ "current_implementation": {
+  "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+  "frontend": "translated",
+  "recognition": "reject",
+  "hoisting_required": false,
+  "dense_partition": "not_reached",
+  "lowering": "not_reached",
+  "driver": "stays_on_host",
+  "reject_stage": "recognition",
+  "reject_reason": "loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations)"
+ },
+ "classification": "DOCUMENTED_LIMITATION",
+ "issue": null,
+ "has_independent_reference": true,
+ "reference_kinds": [
+  "direct",
+  "logical_view",
+  "python_oracle_checksum"
+ ],
+ "expected_checksum": -548,
+ "math_note": "",
+ "tested": false,
+ "how_to_run": {
+  "cpu": "cc -std=c11 -O1 showcase/min/gen_d55b7b137c7c.c -o gen_d55b7b137c7c && ./gen_d55b7b137c7c",
+  "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/min/gen_d55b7b137c7c.c -o gen_d55b7b137c7c && ./gen_d55b7b137c7c",
+  "stages": "python3 scripts/run_showcase.py --case gen_d55b7b137c7c"
+ }
+}

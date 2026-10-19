@@ -219,6 +219,7 @@ typedef struct {
   const char *fpga_config, *keep_dir, *std, *opt_level;
   long k_max_8x8, k_max_4x4;
   int verify;
+  int fp_reassociation;         /* --fp-reassociation */
   double verify_rtol;
   strvec defines, includes;
   const char *self_dir;        /* where this executable is: systolic-cfront */
@@ -872,6 +873,16 @@ static void add_flags(strvec *v, const options *a) {
   push(v, format("-I%s/runtime/offload", SYSTOLIC_SOURCE_DIR));
 }
 
+/* The front end's flags: the permission to reassociate floating-point sums,
+   as fastmath<reassoc> on its arith ops (docs/AFFINE_GEMM_MAPPING.md
+   section 6). Never given to the host compile: the program as written runs
+   there unchanged. */
+static void add_frontend_flags(strvec *v, const options *a) {
+  add_flags(v, a);
+  if (a->fp_reassociation)
+    push(v, "--fp-reassociation");
+}
+
 static int compile(driver *d) {
   const options *a = d->a;
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
@@ -904,7 +915,7 @@ static int compile(driver *d) {
                        "--interface", kpath(d, "10-interface.json"),
                        "--gemm-sites", kpath(d, "10-gemm-sites.json"), src, "-o",
                        kpath(d, "10-frontend.mlir"), NULL);
-  add_flags(&cmd, a);
+  add_frontend_flags(&cmd, a);
   result r;
   if (run(d, &cmd, "the C front end", NULL, NULL, &r) != 0)
     return -1;
@@ -1039,8 +1050,16 @@ static int compile(driver *d) {
       char *why = NULL;
       if (n == 0) {
         char *reason = remark_reason(remarks, info.line, info.end_line);
-        why = format("no GEMM the systolic arrays can run was recognized in "
-                     "it%s", reason);
+        /* A GEMM that was recognized but may not be reassociated is not
+           "no GEMM": say what is missing (docs/AFFINE_GEMM_MAPPING.md
+           section 6). */
+        if (strstr(reason, "floating-point reassociation is not permitted"))
+          why = format("its GEMM is offloaded only with permission to "
+                       "reassociate floating-point sums (--fp-reassociation)%s",
+                       reason);
+        else
+          why = format("no GEMM the systolic arrays can run was recognized in "
+                       "it%s", reason);
       } else if (strcmp(json_string(json_get(fn, "storage_class"), ""),
                         "static") == 0 ||
                  json_bool(json_get(fn, "inline"), 0)) {
@@ -1112,7 +1131,7 @@ static int compile(driver *d) {
     strvec c3 = argv_of(cfront, "--clang", a->clang, format("-std=%s", a->std),
                         "--symbol-suffix=" KERNEL_SUFFIX, src, "-o",
                         kpath(d, "30-kernels.mlir"), NULL);
-    add_flags(&c3, a);
+    add_frontend_flags(&c3, a);
     for (size_t i = 0; i < noffload; ++i)
       push(&c3, format("--function=%s", offload[i].name));
     if (run(d, &c3, "the C front end (offloaded functions)", NULL, NULL, &r))
@@ -1219,7 +1238,8 @@ static void usage(void) {
           "usage: systolic-cc [--clang CLANG] [--build-dir DIR] "
           "[--llvm-build DIR] [--runtime soft|board] [--fpga-config FILE] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
-          "[--keep-dir DIR] [--explain] [-DNAME[=VAL]] [-IDIR] [-std=STD] "
+          "[--keep-dir DIR] [--explain] [--fp-reassociation] [-DNAME[=VAL]] "
+          "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
 }
@@ -1289,6 +1309,8 @@ int main(int argc, char **argv) {
       explain = 1;
     } else if (strcmp(s, "--verify") == 0) {
       a.verify = 1;
+    } else if (strcmp(s, "--fp-reassociation") == 0) {
+      a.fp_reassociation = 1;
     } else if ((v = option_value(s, "--keep-dir", &i, argc, argv))) {
       a.keep_dir = v;
     } else if (strcmp(s, "-o") == 0) {

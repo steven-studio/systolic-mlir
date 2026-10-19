@@ -5,7 +5,7 @@
 // it did not recognize reports that the CPU ran it; the axpy loop is not a
 // GEMM and reports nothing.
 //
-// RUN: %systolic-cc --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: %t | FileCheck %s --check-prefix=OUT --match-full-lines
 
 #include <stdio.h>

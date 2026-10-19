@@ -1,0 +1,124 @@
+{
+ "source": "/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c",
+ "kernel": "gen_55eeb58cd4f7_kernel",
+ "workdir": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7",
+ "not_run": {},
+ "cpu": {
+  "stage": "cpu",
+  "run": {
+   "cmd": "cc -std=c11 -O1 -Wall -Wextra /home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/cpu",
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "seconds": 0.091
+  },
+  "result": "pass",
+  "execute": {
+   "stage": "execute",
+   "run": {
+    "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/cpu",
+    "rc": 0,
+    "stdout": "[gemm_recognition] gen_55eeb58cd4f7 gen_positive_kji_1x1x1_repeat_inside_K: generated / mutation_repeat_inside_K, class gemm\n[gemm_recognition] references: direct and logical-view agree (5 elements)\n[gemm_recognition] references: checksum -6 matches the Python oracle\n[gemm_recognition] kernel: equal to the reference (5 elements, exact), checksum -6\nRESULT gen_55eeb58cd4f7 PASS\n",
+    "stderr": "",
+    "seconds": 0.001
+   },
+   "result": "pass",
+   "rc": 0,
+   "verified_lines": [],
+   "mismatch_lines": [],
+   "gemm_labels": []
+  }
+ },
+ "frontend": {
+  "stage": "frontend",
+  "run": {
+   "cmd": "/home/claude/systolic-mlir-src/build/bin/systolic-cfront --clang /home/claude/llvm/build/bin/clang --function=gen_55eeb58cd4f7_kernel /home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/10-frontend.mlir",
+   "rc": 0,
+   "stdout": "",
+   "stderr": "",
+   "seconds": 0.051
+  },
+  "result": "translated",
+  "mlir": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/10-frontend.mlir"
+ },
+ "discovery": {
+  "stage": "discovery",
+  "run": {
+   "cmd": "/home/claude/systolic-mlir-src/build/bin/systolic-opt '--systolic-declare-fpga-fleet=k-max-8x8=16 k-max-4x4=16' --test-affine-matmul-discovery /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/10-frontend.mlir -o /dev/null",
+   "rc": 0,
+   "stdout": "",
+   "stderr": "candidate count: 2\nrecognition result: failure\nrecognition result: failure\nunique logical matmul count: 0\n",
+   "seconds": 0.005
+  },
+  "unique_matmuls": 0,
+  "candidate_count": 2,
+  "recognition": "reject",
+  "dense": "not_reached",
+  "fleet_partition": "not_reached",
+  "row_extent": null,
+  "column_extent": null,
+  "reduction_extent": null,
+  "T": null,
+  "c": null,
+  "result": "ok"
+ },
+ "lowering": {
+  "stage": "lowering",
+  "run": {
+   "cmd": "/home/claude/systolic-mlir-src/build/bin/systolic-opt '--systolic-declare-fpga-fleet=k-max-8x8=16 k-max-4x4=16' --affine-matmul-to-systolic=report=true /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/10-frontend.mlir -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/20-systolic.mlir",
+   "rc": 0,
+   "stdout": "",
+   "stderr": "gen_55eeb58cd4f7.c:80:3: remark: affine GEMM 1x1x1 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 272 cycles (read + compute + write), 1 output block(s); the enclosing loops run it 2 time(s)\ngen_55eeb58cd4f7.c:80:3: note: see current operation: \naffine.for %arg4 = 0 to 1 {\n  affine.for %arg5 = 0 to 1 {\n    affine.for %arg6 = 2 to 3 {\n      %4 = affine.load %arg2[%arg6 + 2, %arg5] : memref<?x1xf32>\n      %5 = affine.load %arg0[%arg6 + 2, %arg4] : memref<?x1xf32>\n      %6 = affine.load %arg1[%arg4, %arg5] : memref<?x1xf32>\n      %7 = arith.mulf %5, %6 : f32\n      %8 = arith.addf %4, %7 : f32\n      affine.store %8, %arg2[%arg6 + 2, %arg5] : memref<?x1xf32>\n    }\n  }\n}\n",
+   "seconds": 0.006
+  },
+  "result": "lowered",
+  "M": 1,
+  "N": 1,
+  "K": 1,
+  "regions": 1,
+  "makespan": 272,
+  "enclosing_repetitions": 2,
+  "matmul_tiles": 1,
+  "affine_for_left": 1
+ },
+ "driver": {
+  "stage": "driver",
+  "run": {
+   "cmd": "/home/claude/systolic-mlir-src/build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS --clang /home/claude/llvm/build/bin/clang --build-dir /home/claude/systolic-mlir-src/build --llvm-build /home/claude/llvm/build --keep-dir /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog.systolic /home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c -o /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog",
+   "rc": 0,
+   "stdout": "",
+   "stderr": "/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:96:1: note: 'elem' is outside the supported C subset and is not translated: only functions returning void are supported (got 'float')\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:98:1: note: 'mul' is outside the supported C subset and is not translated: only functions returning void are supported (got 'float')\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:101:32: note: 'init' is outside the supported C subset and is not translated: array accesses must subscript a parameter directly (no pointer arithmetic)\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:107:1: note: 'checksum' is outside the supported C subset and is not translated: only functions returning void are supported (got 'double')\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:124:51: note: 'reference_direct' is outside the supported C subset and is not translated: expression 'CallExpr' is not supported\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:134:3: note: 'reference_logical' is outside the supported C subset and is not translated: local variables are not supported (only for-loop counters)\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:163:1: note: 'first_diff' is outside the supported C subset and is not translated: only functions returning void are supported (got 'long')\n/home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:169:1: note: 'main' is outside the supported C subset and is not translated: only functions returning void are supported (got 'int')\nsystolic-cc: /home/claude/systolic-mlir-src/test/gemm_recognition/generated/batch_enumerate_enum_60/gen_55eeb58cd4f7.c:79:1: note: 'gen_55eeb58cd4f7_kernel' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 2 invocation(s) per call (the loops around them repeat them)\nsystolic-cc: wrote /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog (1 function(s) offloaded, runtime: software model, NOT the FPGA; intermediates in /tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog.systolic)\n",
+   "seconds": 0.291
+  },
+  "runtime": "soft",
+  "result": "offloaded",
+  "planned_invocations": 1,
+  "planned_per_call": 2,
+  "exe": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog",
+  "functions_offloaded": 1,
+  "runtime_description": "software model, NOT the FPGA"
+ },
+ "execute": {
+  "stage": "execute",
+  "run": {
+   "cmd": "/tmp/claude-0/-home-claude/543a1223-6aa4-5ccc-919f-04c239e419e6/scratchpad/loop2/gen_55eeb58cd4f7/prog",
+   "rc": 0,
+   "stdout": "[gemm_recognition] gen_55eeb58cd4f7 gen_positive_kji_1x1x1_repeat_inside_K: generated / mutation_repeat_inside_K, class gemm\n[gemm_recognition] references: direct and logical-view agree (5 elements)\n[gemm_recognition] references: checksum -6 matches the Python oracle\n[systolic-cc] CPU Executed: GEMM #1\n[gemm_recognition] invocations: 2 (backend software runtime model (soft_runtime.c), not the FPGA, hardware=0, failed=0)\n[gemm_recognition] kernel: equal to the reference (5 elements, exact), checksum -6\nRESULT gen_55eeb58cd4f7 PASS\n",
+   "stderr": "systolic-cc: gen_55eeb58cd4f7_kernel (gen_55eeb58cd4f7.c:79): verified: 5 elements equal the CPU reference (bitwise)\n",
+   "seconds": 0.003
+  },
+  "result": "pass",
+  "rc": 0,
+  "invocations": 2,
+  "backend": "software runtime model (soft_runtime.c), not the FPGA",
+  "hardware": 0,
+  "failed_invocations": 0,
+  "verified_lines": [
+   "verified: 5 elements equal the CPU reference (bitwise)"
+  ],
+  "mismatch_lines": [],
+  "gemm_labels": [
+   "CPU"
+  ]
+ }
+}

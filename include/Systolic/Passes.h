@@ -104,6 +104,7 @@ void registerConv2DToFpgaPass();
 //===----------------------------------------------------------------------===//
 
 void registerTestAffineMatmulDiscoveryPass();
+void registerTestIntegerLatticePass();
 
 //===----------------------------------------------------------------------===//
 // The Linalg -> FPGA pipeline (SystolicPipelines.cpp), shared by systolic-opt

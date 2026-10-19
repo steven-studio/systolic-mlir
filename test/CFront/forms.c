@@ -6,7 +6,7 @@
 // RUN: %cfront %s -o %t.mlir
 // RUN: FileCheck %s --input-file=%t.mlir
 // RUN: systolic-opt %t.mlir -o /dev/null
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic %t.mlir 2>&1 \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true %t.mlir 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=SYS
 
 // Loop forms: <=, i++, i += S, i = i + S, nonzero lower bounds; integer

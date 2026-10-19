@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   -split-input-file %s | FileCheck %s
 
 // An affine GEMM on the 1x8x8 + 3x4x4 fleet: the recognized nest is

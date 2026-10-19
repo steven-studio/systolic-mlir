@@ -8,6 +8,8 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   SystolicMaterializeSchedulePass.cpp
   SystolicBinarySearchTileMatmulPass.cpp
   TestAffineMatmulDiscovery.cpp
+  IntegerLattice.cpp
+  TestIntegerLattice.cpp
   ConvertMatmulToSystolic.cpp
   ExpandPEArrayToMac.cpp
   TileMatmulForFpga.cpp

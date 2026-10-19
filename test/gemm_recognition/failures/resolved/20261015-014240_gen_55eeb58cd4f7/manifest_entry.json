@@ -1,0 +1,161 @@
+{
+ "id": "gen_55eeb58cd4f7",
+ "file": "gen_55eeb58cd4f7.c",
+ "name": "gen_positive_kji_1x1x1_repeat_inside_K",
+ "set": "generated",
+ "category": "mutation_repeat_inside_K",
+ "kernel": "gen_55eeb58cd4f7_kernel",
+ "mathematical_class": "gemm",
+ "is_valid_gemm": true,
+ "gemm_tags": [
+  "repeated_2"
+ ],
+ "c_program_valid": true,
+ "in_affine_c_subset": true,
+ "element_type": "float",
+ "statement": "+=",
+ "kernel_style": "plain",
+ "loops": [
+  {
+   "var": "k",
+   "role": "K",
+   "lb": 0,
+   "ub_exclusive": 1,
+   "step": 1,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "j",
+   "role": "J",
+   "lb": 0,
+   "ub_exclusive": 1,
+   "step": 1,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "i",
+   "role": "I",
+   "lb": 2,
+   "ub_exclusive": 3,
+   "step": 1,
+   "cmp": "<",
+   "trip": 1
+  },
+  {
+   "var": "rr",
+   "role": "R",
+   "lb": 0,
+   "ub_exclusive": 2,
+   "step": 1,
+   "cmp": "<",
+   "trip": 2
+  }
+ ],
+ "arrays": {
+  "a": {
+   "name": "A",
+   "dims": [
+    5,
+    1
+   ],
+   "subscripts": [
+    "i + 2",
+    "k"
+   ],
+   "restrict": true,
+   "elem": "float"
+  },
+  "b": {
+   "name": "B",
+   "dims": [
+    1,
+    1
+   ],
+   "subscripts": [
+    "k",
+    "j"
+   ],
+   "restrict": true,
+   "elem": "float"
+  },
+  "c": {
+   "name": "C",
+   "dims": [
+    5,
+    1
+   ],
+   "subscripts": [
+    "i + 2",
+    "j"
+   ],
+   "restrict": true,
+   "elem": "float"
+  }
+ },
+ "repetitions": 2,
+ "logical_extents": {
+  "I": 1,
+  "J": 1,
+  "K": 1
+ },
+ "expected": {
+  "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+  "mathematical_gemm": true,
+  "recognition": "OUT_OF_SCOPE",
+  "offload": "stays_on_host",
+  "basis": "AffineMatmulToSystolic.cpp hoistRepetitionLoops: a repeating loop inside the reduction cannot be moved outward (not a legal interchange); test/SystolicCC/depth.c d4_illegal",
+  "runtime": "the program's own check must pass on every backend (kernel == references)"
+ },
+ "current_implementation": {
+  "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+  "frontend": "translated",
+  "recognition": "reject",
+  "hoisting_required": false,
+  "dense_partition": "not_reached",
+  "lowering": "not_reached",
+  "driver": "stays_on_host",
+  "reject_stage": "recognition",
+  "reject_reason": "loop 3 of the nest repeats the accumulation inside it, and moving it outward is not a legal loop interchange (it would reorder dependent iterations)"
+ },
+ "classification": "DOCUMENTED_LIMITATION",
+ "issue": null,
+ "has_independent_reference": true,
+ "reference_kinds": [
+  "direct",
+  "logical_view",
+  "python_oracle_checksum"
+ ],
+ "expected_checksum": -6,
+ "math_note": "",
+ "tested": false,
+ "how_to_run": {
+  "cpu": "cc -std=c11 -O1 showcase/batch_enumerate_enum_60/gen_55eeb58cd4f7.c -o gen_55eeb58cd4f7 && ./gen_55eeb58cd4f7",
+  "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/batch_enumerate_enum_60/gen_55eeb58cd4f7.c -o gen_55eeb58cd4f7 && ./gen_55eeb58cd4f7",
+  "stages": "python3 scripts/run_showcase.py --case gen_55eeb58cd4f7"
+ },
+ "generated_from": {
+  "mode": "enumerate",
+  "seed": "enum",
+  "index": 107,
+  "family": "mutation",
+  "mutation": "repeat_inside_K",
+  "reproduce": "python3 generator/gen_cases.py --reproduce enumerate:enum:107"
+ },
+ "features": [
+  "K:lt_kmax",
+  "MN:tiny",
+  "classification:DOCUMENTED_LIMITATION",
+  "family:repeat_inside_K",
+  "loops:4",
+  "offset:a",
+  "offset:c",
+  "order:KJI",
+  "origin:nonzero",
+  "repetition",
+  "stmt:+=",
+  "style:plain",
+  "tag:repeated_2"
+ ]
+}

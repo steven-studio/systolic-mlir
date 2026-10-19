@@ -7,7 +7,7 @@
 // that say where each GEMM ran. Software runtime model (NOT the FPGA): this
 // is a compiler-correctness test.
 //
-// RUN: %systolic-cc --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --verify --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // RUN: %t > %t.out 2> %t.err
 // RUN: FileCheck %s --check-prefix=VERIFY --input-file=%t.err
 // RUN: FileCheck %s --check-prefix=LABELS --input-file=%t.out
@@ -16,7 +16,7 @@
 // RUN: grep -v '^\[systolic-cc\]' %t.out | diff %t.cpu.out -
 //
 // Without --explain the compiler says nothing.
-// RUN: %systolic-cc %s -o %t.quiet 2>&1 | count 0
+// RUN: %systolic-cc --fp-reassociation %s -o %t.quiet 2>&1 | count 0
 
 #include <stdio.h>
 
