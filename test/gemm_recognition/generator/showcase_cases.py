@@ -514,8 +514,10 @@ Ng(97, "no_accumulation", "reduction_mismatch",
    math_note="C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\n"
              "wins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\n"
              "last row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\n"
-             "Expected rejection at recognition: the stored value is a mulf, not an addf\n"
-             "of the accumulator.")
+             "Expected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,\n"
+             "2026-10-19): the reduction loop k runs eight times and is not a subscript of\n"
+             "C, so the assignment writes every element eight times -- an overwrite, not\n"
+             "the K = 1 GEMM into a zeroed C that an assignment writing each element once is.")
 Ng(98, "subtract_product", "scaled_product",
    ijk(8, 8, 8), *std_arrays(8, 8, 8), stmt="-=",
    math_note="C -= A B: the GEMM with alpha = -1, valid.  The front end emits arith.subf;\n"

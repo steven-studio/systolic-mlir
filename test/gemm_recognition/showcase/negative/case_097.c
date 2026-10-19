@@ -10,13 +10,15 @@
  *     C[i][j] = A[i][k] * B[k][j]
  *
  *   Not a dense GEMM of these operands because:
- *     - the statement overwrites C instead of accumulating into it
+ *     - the statement overwrites C (C = A * B, no accumulation) and some element of C is written more than once: only the last product survives, not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20)
  *
  *   C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one
  *   wins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's
  *   last row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).
- *   Expected rejection at recognition: the stored value is a mulf, not an addf
- *   of the accumulator.
+ *   Expected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,
+ *   2026-10-19): the reduction loop k runs eight times and is not a subscript of
+ *   C, so the assignment writes every element eight times -- an overwrite, not
+ *   the K = 1 GEMM into a zeroed C that an assignment writing each element once is.
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -26,7 +28,7 @@
  *
  * Mathematical GEMM: NO
  * Expected recognition (specification): REJECT
- *   basis: the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)
+ *   basis: the assignment C = A * B writes some element of C more than once (a reduction loop of two or more iterations, batches overlapping in C): only the last product survives, not the GEMM of A and B -- an assignment is the K = 1 GEMM into a zeroed C only when every element is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
@@ -35,7 +37,7 @@
  *   lowering (--affine-matmul-to-systolic):  not_reached
  *   driver (systolic-cc):                    stays_on_host
  *   rejection at: recognition
- *   reason: the stored value must be an arith.addf of the accumulator load and a product; there is no accumulation
+ *   reason: the statement overwrites C (C = A * B, no accumulation) and a loop of the nest, which runs more than once, is not a subscript of C: only the last product survives
  * Classification: TRUE NEGATIVE
  *   Not a dense GEMM of these operands; the compiler must keep refusing it.
  *

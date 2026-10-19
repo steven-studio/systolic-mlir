@@ -496,6 +496,13 @@ struct TestAffineMatmulDiscoveryPass
       printBatchTerms("C", result.layoutC);
       if (result.reductionMayReassociate)
         llvm::errs() << "  reduction: reassoc permitted\n";
+      llvm::errs() << "  statement: "
+                   << (result.accumulates
+                           ? "C = C + A * B (accumulation)"
+                           : "C = A * B (assignment: every element of C "
+                             "written once, lowered as the K = 1 GEMM into "
+                             "a zeroed C)")
+                   << "\n";
 
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);

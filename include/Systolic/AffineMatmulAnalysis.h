@@ -325,8 +325,20 @@ struct LogicalMatmul {
   // flag: the program permits reassociating the reduction
   // (docs/AFFINE_GEMM_MAPPING.md §6). The systolic execution sums each tile
   // from zero and adds the sum to C, so it is offloaded only with this
-  // permission or the pass's allow-fp-reassociation option.
+  // permission or the pass's allow-fp-reassociation option. For an
+  // assignment (below) the flag is read from the product's `arith.mulf`, the
+  // nest's only floating-point operation.
   bool reductionMayReassociate = false;
+
+  // True for C = C + A * B (the accumulation into C's prior value). False for
+  // the assignment C = A * B: no accumulator load, every element of C written
+  // exactly once on the iteration domain (the recognizer refuses a loop of two
+  // or more iterations that C does not read; the lowering proves C's index
+  // map injective on the whole domain), so the nest is the K = 1 GEMM into a
+  // zeroed C, C = 0 + A * B, and is lowered as that: C's logical window is
+  // zeroed before the tiles accumulate into it (docs/AFFINE_GEMM_MAPPING.md
+  // §20).
+  bool accumulates = true;
 
   // The task's exact mapping (reported by the discovery pass, not decided).
   ExactMapping exactMapping;

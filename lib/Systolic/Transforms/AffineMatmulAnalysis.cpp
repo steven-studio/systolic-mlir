@@ -57,7 +57,8 @@ collectAccessIterationIVs(affine::AffineLoadOp lhsLoad,
 
   collectUsedIVs(lhsLoad.getIndices());
   collectUsedIVs(rhsLoad.getIndices());
-  collectUsedIVs(accLoad.getIndices());
+  if (accLoad) // none for an assignment C = A * B
+    collectUsedIVs(accLoad.getIndices());
   collectUsedIVs(store.getIndices());
 
   // Recover the enclosing affine.for chain around the MAC, initially from
@@ -1085,15 +1086,19 @@ void mlir::systolic::collectAffineMatmulCandidates(
 
     // A shallower nest (one or two loops: a matrix-vector or dot product,
     // a GEMM with a role of extent one, docs/AFFINE_GEMM_MAPPING.md section 2)
-    // is a candidate only when its innermost body stores an arith.addf -- the
-    // three-deep rule below is unchanged.
+    // is a candidate only when its innermost body stores an arith.addf (an
+    // accumulation C = C + A * B) or an arith.mulf (an assignment C = A * B,
+    // the K = 1 GEMM into a zeroed C, section 20) -- the three-deep rule below
+    // is unchanged.
     auto storesSum = [](affine::AffineForOp loop) {
       unsigned storesOfSum = 0;
       for (Operation &op : *loop.getBody()) {
         if (isa<affine::AffineForOp>(op))
           return false;
         if (auto store = dyn_cast<affine::AffineStoreOp>(op))
-          storesOfSum += store.getValue().getDefiningOp<arith::AddFOp>() != nullptr;
+          storesOfSum +=
+              store.getValue().getDefiningOp<arith::AddFOp>() != nullptr ||
+              store.getValue().getDefiningOp<arith::MulFOp>() != nullptr;
       }
       return storesOfSum == 1;
     };
@@ -1521,7 +1526,8 @@ mlir::systolic::recognizeLogicalMatmul(
   const char *const notOneMac =
       "the innermost body is not exactly one multiply-accumulate "
       "C = C + A * B (three affine.load, one arith.mulf, one arith.addf, one "
-      "affine.store)";
+      "affine.store) nor one assignment C = A * B (two affine.load, one "
+      "arith.mulf, one affine.store)";
   for (Operation &op : *chain.back().getBody()) {
     if (auto load = dyn_cast<affine::AffineLoadOp>(op))
       loads.push_back(load);
@@ -1559,56 +1565,76 @@ mlir::systolic::recognizeLogicalMatmul(
     dbgOut() << "\n";
   }
 
-  // Canonical GEMM currently expected to contain:
+  // The two statement forms (docs/AFFINE_GEMM_MAPPING.md sections 2, 20):
   //
-  //   A load
-  //   B load
-  //   C load
-  //   C store
+  //   accumulation  C = C + A * B    A load, B load, C load, C store
+  //   assignment    C = A * B        A load, B load, C store
+  //
+  // An assignment has no accumulator: it is the K = 1 GEMM into a zeroed C
+  // when every element of C is written exactly once on the iteration domain
+  // (checked once the subscripts are known, below, and proven exactly by the
+  // lowering); the lowering zeroes C's window before the tiles.
   //
   // This is only the first recognition checkpoint.  We have not yet
   // established multiply-accumulate semantics or recovered logical I/J/K.
-  if (loads.size() != 3 || stores.size() != 1)
+  if (stores.size() != 1 || (loads.size() != 3 && loads.size() != 2))
     return refuse(notOneMac);
 
   affine::AffineStoreOp store = stores.front();
+  const bool accumulates = loads.size() == 3;
 
   // Follow the SSA def-use chain backward from the stored value.
-  auto add = store.getValue().getDefiningOp<arith::AddFOp>();
-  if (!add)
-    return refuse("the stored value is not an arith.addf");
-
   affine::AffineLoadOp accLoad;
   arith::MulFOp mul;
+  arith::AddFOp add;
+  if (accumulates) {
+    add = store.getValue().getDefiningOp<arith::AddFOp>();
+    if (!add)
+      return refuse("the stored value is not an arith.addf");
 
-  // Accept either:
-  //
-  //   acc + lhs * rhs
-  //
-  // or, because addf is commutative:
-  //
-  //   lhs * rhs + acc
-  if (auto load = add.getLhs().getDefiningOp<affine::AffineLoadOp>()) {
-    if (auto candidateMul =
-            add.getRhs().getDefiningOp<arith::MulFOp>()) {
-      accLoad = load;
-      mul = candidateMul;
-    }
-  }
-
-  if (!accLoad || !mul) {
-    if (auto load =
-            add.getRhs().getDefiningOp<affine::AffineLoadOp>()) {
+    // Accept either:
+    //
+    //   acc + lhs * rhs
+    //
+    // or, because addf is commutative:
+    //
+    //   lhs * rhs + acc
+    if (auto load = add.getLhs().getDefiningOp<affine::AffineLoadOp>()) {
       if (auto candidateMul =
-              add.getLhs().getDefiningOp<arith::MulFOp>()) {
+              add.getRhs().getDefiningOp<arith::MulFOp>()) {
         accLoad = load;
         mul = candidateMul;
       }
     }
-  }
 
-  if (!accLoad || !mul)
-    return refuse("the stored value is not a load plus a product");
+    if (!accLoad || !mul) {
+      if (auto load =
+              add.getRhs().getDefiningOp<affine::AffineLoadOp>()) {
+        if (auto candidateMul =
+                add.getLhs().getDefiningOp<arith::MulFOp>()) {
+          accLoad = load;
+          mul = candidateMul;
+        }
+      }
+    }
+
+    if (!accLoad || !mul)
+      return refuse("the stored value is not a load plus a product");
+  } else {
+    // Two loads: the stored value must be their product and nothing else
+    // (a sum with a constant, a negation or a second product in the body is
+    // not C = A * B).
+    mul = store.getValue().getDefiningOp<arith::MulFOp>();
+    if (!mul)
+      return refuse("the stored value is not an arith.addf of the "
+                    "accumulator and a product (C = C + A * B) nor an "
+                    "arith.mulf of two loads (C = A * B)");
+    for (Operation &op : *chain.back().getBody())
+      if (isa<arith::AddFOp>(op) ||
+          (isa<arith::MulFOp>(op) && &op != mul.getOperation()))
+        return refuse("the body of an assignment C = A * B holds an "
+                      "arith.addf or a second arith.mulf besides the product");
+  }
 
   auto lhsLoad =
       mul.getLhs().getDefiningOp<affine::AffineLoadOp>();
@@ -1619,10 +1645,15 @@ mlir::systolic::recognizeLogicalMatmul(
     return refuse("a factor of the product is not an affine.load");
   // Three different loads: the accumulator's and one per factor. (A factor
   // that is the accumulator's own load, or one load used as both factors,
-  // is not C += A * B.)
+  // is not C += A * B.) An assignment: one load per factor.
   if (lhsLoad == rhsLoad || lhsLoad == accLoad || rhsLoad == accLoad)
-    return refuse("the two factors and the accumulator are not three "
-                  "different loads");
+    return refuse(accumulates ? "the two factors and the accumulator are not "
+                                "three different loads"
+                              : "the two factors are not two different loads");
+  // (An assignment that stores to a memref it also reads as a factor is
+  // decided by the lowering's aliasing rule, as the accumulation form is:
+  // lowered when the factor's window is provably disjoint from C's, UNKNOWN
+  // otherwise -- later products may read elements the nest wrote.)
 
   auto iterationIVs =
       collectAccessIterationIVs(lhsLoad, rhsLoad, accLoad, store);
@@ -1711,13 +1742,19 @@ mlir::systolic::recognizeLogicalMatmul(
   // The accumulator must be read from and written back to the same
   // memref location -- at every iteration, so as functions on the iteration
   // domain: the same map and operands, or (checked below, once the access
-  // maps are normalized) subscripts with identical domain forms.
-  if (accLoad.getMemref() != store.getMemref())
+  // maps are normalized) subscripts with identical domain forms. An
+  // assignment has no accumulator load: C's access is the store's.
+  if (accumulates && accLoad.getMemref() != store.getMemref())
     return refuse("the accumulator is loaded from one memref and stored to "
                   "another");
   const bool sameAccumulatorAccess =
-      accLoad.getMap() == store.getMap() &&
-      llvm::equal(accLoad.getIndices(), store.getIndices());
+      !accumulates || (accLoad.getMap() == store.getMap() &&
+                       llvm::equal(accLoad.getIndices(), store.getIndices()));
+  // C's access map and indices: the accumulator load's (the store's agree on
+  // the domain, checked below) or, for an assignment, the store's.
+  const AffineMap cAccessMap = accumulates ? accLoad.getMap() : store.getMap();
+  const ValueRange cAccessIndices =
+      accumulates ? accLoad.getIndices() : store.getIndices();
 
   // Recover canonical logical GEMM coordinates from access operands:
   //
@@ -1733,8 +1770,7 @@ mlir::systolic::recognizeLogicalMatmul(
       normalizeAccessMap(rhsLoad.getMap(), rhsLoad.getIndices(),
                          iterationIVs);
   auto normalizedAcc =
-      normalizeAccessMap(accLoad.getMap(), accLoad.getIndices(),
-                         iterationIVs);
+      normalizeAccessMap(cAccessMap, cAccessIndices, iterationIVs);
 
   if (failed(normalizedLhs) ||
       failed(normalizedRhs) ||
@@ -1831,6 +1867,57 @@ mlir::systolic::recognizeLogicalMatmul(
                        "'s value on the iteration domain overflows 64-bit "
                        "arithmetic");
       subscripts.push_back({operand, dim, expr, *onDomain});
+    }
+
+  // An assignment C = A * B writes each element of C exactly once only when
+  // every loop of two or more iterations is a subscript of C on the domain
+  // (docs/AFFINE_GEMM_MAPPING.md section 20): a loop C does not read -- a
+  // reduction loop, or a loop the factors read -- writes the same elements
+  // again at every iteration and only its last product survives: the result
+  // is not the GEMM of A and B (not a GEMM at all). A loop that runs once is a
+  // constant on the domain (Lemma 0) and writes nothing twice. Whether C's
+  // subscripts are injective on the whole domain (batches overlapping in C)
+  // is proven by the lowering (verifyOutputWrittenOnce).
+  if (!accumulates)
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (single[d])
+        continue;
+      const bool readByC = llvm::any_of(subscripts, [&](const Subscript &s) {
+        return s.operand == 2 && s.onDomain.coefficients[d] != 0;
+      });
+      if (readByC)
+        continue;
+      affine::AffineForOp loop =
+          affine::getForInductionVarOwner(iterationIVs[d]);
+      std::optional<int64_t> lower =
+          loop ? constantLoopBound(loop, /*lower=*/true) : std::nullopt;
+      std::optional<int64_t> upper =
+          loop ? constantLoopBound(loop, /*lower=*/false) : std::nullopt;
+      // A loop of no iteration (constant bounds, upper <= lower) writes
+      // nothing: an empty GEMM, reported by the dense partition as such
+      // (SQ-2), as for an accumulation.
+      if (lower && upper && *upper <= *lower)
+        continue;
+      std::optional<int64_t> trips =
+          lower && upper ? checkedTripCount(*lower, *upper,
+                                            loop.getStep().getSExtValue())
+                         : std::nullopt;
+      if (!trips)
+        return unknown(llvm::Twine("the assignment C = A * B does not read "
+                                   "loop ") +
+                       llvm::Twine(d) +
+                       " in any subscript of C and the loop's trip count is "
+                       "not a constant: whether it writes elements of C more "
+                       "than once is not decided");
+      return refuse(llvm::Twine("the statement overwrites C (C = A * B, no "
+                                "accumulation) and loop ") +
+                    llvm::Twine(d) +
+                    " of the nest, which runs more than once, is not a "
+                    "subscript of C: every iteration of it writes the same "
+                    "elements of C again and only the last product survives "
+                    "-- not the GEMM of A and B (an assignment is the K = 1 "
+                    "GEMM into a zeroed C only when every element of C is "
+                    "written once: docs/AFFINE_GEMM_MAPPING.md section 20)");
     }
 
   auto exprText = [](AffineExpr expr) {
@@ -2549,16 +2636,29 @@ mlir::systolic::recognizeLogicalMatmul(
         lamI, lamJ, ordinal[0].second, ordinal[1].second);
     if (!injective)
       return unknown("C's injectivity check overflows 64-bit arithmetic");
-    if (!injective->injective())
+    if (!injective->injective()) {
+      // (A std::string, not a Twine: a Twine of temporaries dangles.)
+      const std::string collision =
+          (llvm::Twine("C's view is not injective on the (I, J) box: the "
+                       "outputs with ordinals (I, J) and (I + ") +
+           llvm::Twine(injective->collision->first) + ", J + " +
+           llvm::Twine(injective->collision->second) +
+           ") write the same element of C")
+              .str();
+      // For an assignment the later product overwrites the earlier one: the
+      // result is not the GEMM of A and B in any decomposition (section 20).
+      if (!accumulates)
+        return refuseRoles(collision +
+                           ": the assignment C = A * B overwrites it, only "
+                           "the last product survives -- not the GEMM of A "
+                           "and B (docs/AFFINE_GEMM_MAPPING.md section 20)");
       return unsupportedRoles(
-          llvm::Twine("C's view is not injective on the (I, J) box: the "
-                      "outputs with ordinals (I, J) and (I + ") +
-          llvm::Twine(injective->collision->first) + ", J + " +
-          llvm::Twine(injective->collision->second) +
-          ") write the same element of C, so one tile would lose an update "
+          collision +
+          ", so one tile would lose an update "
           "(G2, docs/AFFINE_GEMM_MAPPING.md section 19.3); a decomposition "
           "with the J (or I) loops as batch loops would be valid, and is not "
           "constructed");
+    }
     }
 
     // The result. The coordinates' expressions; each operand's view of a
@@ -2927,11 +3027,16 @@ mlir::systolic::recognizeLogicalMatmul(
   logicalK.print(dbgOut());
   dbgOut() << "\n";
 
-  dbgOut() << "  accumulator read-modify-write verified\n";
-  dbgOut() << "  MAC dataflow recognized\n";
-  dbgOut() << "    accumulator load: ";
-  accLoad.getOperation()->print(dbgOut());
-  dbgOut() << "\n";
+  if (accumulates) {
+    dbgOut() << "  accumulator read-modify-write verified\n";
+    dbgOut() << "  MAC dataflow recognized\n";
+    dbgOut() << "    accumulator load: ";
+    accLoad.getOperation()->print(dbgOut());
+    dbgOut() << "\n";
+  } else {
+    dbgOut() << "  assignment C = A * B: every element of C written once "
+                "(the K = 1 GEMM into a zeroed C)\n";
+  }
 
   dbgOut() << "    lhs load: ";
   lhsLoad.getOperation()->print(dbgOut());
@@ -2992,8 +3097,14 @@ mlir::systolic::recognizeLogicalMatmul(
   result.layoutA = layoutA;
   result.layoutB = layoutB;
   result.layoutC = layoutC;
+  // The program's permission to reassociate (docs section 6): the flag of
+  // the accumulation's addf -- or, for an assignment (no addf), of the
+  // product's mulf, the nest's only floating-point operation (the systolic
+  // execution still starts each tile from +0: a -0 product becomes +0).
   result.reductionMayReassociate = arith::bitEnumContainsAll(
-      add.getFastmath(), arith::FastMathFlags::reassoc);
+      accumulates ? add.getFastmath() : mul.getFastmath(),
+      arith::FastMathFlags::reassoc);
+  result.accumulates = accumulates;
 
   MLIRContext *context = candidate.anchor->getContext();
   const unsigned numLogicalDims = numPartitionDims + 3;
@@ -4414,9 +4525,11 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
         ++others;
       }
     }
-    bool macBody = loads == 3 && stores == 1 && muls == 1 && adds == 1 &&
-                   others == 0;
-    if (macBody) {
+    // C = C + A * B (three loads, an addf) or the assignment C = A * B (two
+    // loads, no addf; docs section 20).
+    bool macBody = stores == 1 && muls == 1 && others == 0 &&
+                   ((loads == 3 && adds == 1) || (loads == 2 && adds == 0));
+    if (macBody && loads == 3) {
       auto add = store.getValueToStore().getDefiningOp<arith::AddFOp>();
       affine::AffineLoadOp acc;
       arith::MulFOp mul;
@@ -4440,6 +4553,11 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
                 acc.getMemRef() == store.getMemRef() &&
                 acc.getAffineMap().getNumResults() ==
                     store.getAffineMap().getNumResults();
+    } else if (macBody) {
+      auto mul = store.getValueToStore().getDefiningOp<arith::MulFOp>();
+      macBody = mul && mul.getLhs().getDefiningOp<affine::AffineLoadOp>() &&
+                mul.getRhs().getDefiningOp<affine::AffineLoadOp>() &&
+                mul.getLhs() != mul.getRhs();
     }
     if (!macBody || !llvm::all_of(band, [](affine::AffineForOp loop) {
           return loop.getNumResults() == 0 && loop.getStepAsInt() >= 1;

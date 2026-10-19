@@ -393,8 +393,15 @@ def mutate(case: Case, mutation: str, rng) -> Case:
                        "2026-10-16).")
     elif mutation == "no_accumulation":
         c.stmt = "=AB"
-        c.math_class = "not_gemm_overwrite"
-        c.math_note = "The last reduction iteration overwrites C: an outer product of the last column/row."
+        if casespec.c_written_once(c):
+            # every element of C written once: the K = 1 GEMM into a zeroed C
+            # (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19), a GEMM
+            c.math_class = ""
+            c.math_note = ("C = A * B writes every element of C exactly once: the K = 1 GEMM into a "
+                           "zeroed C, C = 0 + A B (docs/AFFINE_GEMM_MAPPING.md section 20).")
+        else:
+            c.math_class = "not_gemm_overwrite"
+            c.math_note = "The last reduction iteration overwrites C: an outer product of the last column/row."
     elif mutation == "subtract":
         c.stmt = "-="
     elif mutation == "alpha":

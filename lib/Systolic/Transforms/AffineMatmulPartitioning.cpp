@@ -864,6 +864,141 @@ mlir::systolic::verifyLogicalBijection(const LogicalMatmul &matmul,
   return success();
 }
 
+/// `expr` as scale * (sum_s coefficients[s] x_s + constant) accumulated into
+/// `coefficients` / `constant`: a sum of dims, constants and products by a
+/// constant, in checked 64-bit arithmetic. False for anything else (mod,
+/// floordiv, ceildiv, a symbol, an overflow).
+static bool accumulateLinearForm(AffineExpr expr, int64_t scale,
+                                 SmallVectorImpl<int64_t> &coefficients,
+                                 int64_t &constant) {
+  if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+    if (dim.getPosition() >= coefficients.size())
+      return false;
+    std::optional<int64_t> sum =
+        llvm::checkedAdd(coefficients[dim.getPosition()], scale);
+    if (!sum)
+      return false;
+    coefficients[dim.getPosition()] = *sum;
+    return true;
+  }
+  if (auto value = dyn_cast<AffineConstantExpr>(expr)) {
+    std::optional<int64_t> term = llvm::checkedMul(scale, value.getValue());
+    std::optional<int64_t> sum =
+        term ? llvm::checkedAdd(constant, *term) : std::nullopt;
+    if (!sum)
+      return false;
+    constant = *sum;
+    return true;
+  }
+  auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+  if (!binary)
+    return false;
+  if (expr.getKind() == AffineExprKind::Add)
+    return accumulateLinearForm(binary.getLHS(), scale, coefficients,
+                                constant) &&
+           accumulateLinearForm(binary.getRHS(), scale, coefficients,
+                                constant);
+  if (expr.getKind() != AffineExprKind::Mul)
+    return false;
+  AffineExpr other = binary.getLHS();
+  auto factor = dyn_cast<AffineConstantExpr>(binary.getRHS());
+  if (!factor) {
+    factor = dyn_cast<AffineConstantExpr>(binary.getLHS());
+    other = binary.getRHS();
+  }
+  if (!factor)
+    return false;
+  std::optional<int64_t> scaled = llvm::checkedMul(scale, factor.getValue());
+  return scaled && accumulateLinearForm(other, *scaled, coefficients, constant);
+}
+
+LogicalResult
+mlir::systolic::verifyOutputWrittenOnce(const LogicalMatmul &matmul,
+                                        std::string *why) {
+  if (matmul.accumulates)
+    return success(); // C = C + A * B: contributions are summed, not lost
+  if (!matmul.sourceDomain || !matmul.normalization.domain)
+    return fail(why, "the GEMM has no exact source iteration domain");
+  const unsigned n = matmul.sourceDomain->getNumDimVars();
+  const auto &S = matmul.normalization.sourceTransformation;
+  if (matmul.sourceDomain->getNumSymbolVars() != 0 || S.size() != n ||
+      !matmul.accessC || matmul.accessC.getNumDims() != n ||
+      matmul.accessC.getNumSymbols() != 0)
+    return fail(why, "C's access map does not match the iteration domain");
+  for (unsigned s = 0; s < n; ++s)
+    for (unsigned t = 0; t < n; ++t)
+      if (S[s].size() != n || (s == t) != (S[s][t] != 0) ||
+          (s == t && S[s][s] < 1))
+        return fail(why, "the source normalization is not a positive diagonal");
+  // The extent n_s of every loop (ordinals 0 .. n_s - 1).
+  SmallVector<int64_t> extentOf(n, 0);
+  for (unsigned s = 0; s < n; ++s) {
+    std::optional<int64_t> ub = matmul.normalization.domain->getConstantBound64(
+        presburger::BoundType::UB, s);
+    if (!ub || *ub < 0)
+      return fail(why, "the normalized iteration domain is not a box");
+    extentOf[s] = *ub + 1;
+  }
+  // C's indices as integer maps of z: index_r = sum_s Phi[r][s] (S[s][s] z_s
+  // + origin_s) + constant; the constant terms drop out of a difference.
+  const unsigned rows = matmul.accessC.getNumResults();
+  SmallVector<SmallVector<BigInt>> M(rows, SmallVector<BigInt>(n, BigInt(0)));
+  for (unsigned r = 0; r < rows; ++r) {
+    SmallVector<int64_t> coefficients(n, 0);
+    int64_t constant = 0;
+    if (!accumulateLinearForm(matmul.accessC.getResult(r), 1, coefficients,
+                              constant))
+      return fail(why, "a subscript of C is not a linear form of the loop "
+                       "counters");
+    for (unsigned s = 0; s < n; ++s)
+      M[r][s] = BigInt(coefficients[s]) * BigInt(S[s][s]);
+  }
+  // Injective on the z box: no nonzero difference delta (|delta_s| <= n_s -
+  // 1) with M delta = 0. With the first nonzero component positive (the
+  // opposite difference otherwise), one integer polytope per position.
+  SmallVector<unsigned> free;
+  for (unsigned s = 0; s < n; ++s)
+    if (extentOf[s] >= 2)
+      free.push_back(s);
+  for (unsigned first = 0; first < free.size(); ++first) {
+    const unsigned m = free.size();
+    presburger::IntegerPolyhedron kernel(
+        presburger::PresburgerSpace::getSetSpace(m));
+    for (unsigned r = 0; r < rows; ++r) {
+      SmallVector<BigInt> row(m + 1, BigInt(0));
+      bool any = false;
+      for (unsigned t = 0; t < m; ++t) {
+        row[t] = M[r][free[t]];
+        any |= row[t] != BigInt(0);
+      }
+      if (any)
+        kernel.addEquality(row);
+    }
+    for (unsigned t = 0; t < m; ++t) {
+      const BigInt bound(extentOf[free[t]] - 1);
+      SmallVector<BigInt> lower(m + 1, BigInt(0)), upper(m + 1, BigInt(0));
+      lower[t] = BigInt(1);
+      upper[t] = BigInt(-1);
+      if (t < first) { // delta_t = 0
+        kernel.addEquality(lower);
+        continue;
+      }
+      // t == first: 1 <= delta_t <= n_t - 1; after: |delta_t| <= n_t - 1
+      lower.back() = t == first ? BigInt(-1) : bound;
+      upper.back() = bound;
+      kernel.addInequality(lower);
+      kernel.addInequality(upper);
+    }
+    if (!kernel.isIntegerEmpty())
+      return fail(why, "two iterations of the assignment C = A * B write the "
+                       "same element of C (its subscripts are not injective "
+                       "on the iteration domain): the later product "
+                       "overwrites the earlier one -- not the GEMM of A and "
+                       "B (docs/AFFINE_GEMM_MAPPING.md section 20)");
+  }
+  return success();
+}
+
 FailureOr<SmallVector<LogicalPartition, 1>>
 mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul,
                                        ArrayRef<LogicalBox> boxes,

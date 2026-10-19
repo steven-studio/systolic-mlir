@@ -409,10 +409,23 @@ class Case:
 # --------------------------------------------------------------------------
 
 
-def elem_value(e: int, seed: int) -> int:
+def elem_value(e: int, seed: int, nonzero: bool = False) -> int:
     """The value of flat element e of an array initialised with `seed`:
-    integers in [-3, 3].  C: (e * 37 + seed * 101) % 103 % 7 - 3, e, seed >= 0."""
-    return (e * 37 + seed * 101) % 103 % 7 - 3
+    integers in [-3, 3].  C: (e * 37 + seed * 101) % 103 % 7 - 3, e, seed >= 0.
+    With `nonzero`, a 0 is replaced by 1 (C: elem_nz)."""
+    v = (e * 37 + seed * 101) % 103 % 7 - 3
+    return v if v or not nonzero else 1
+
+
+def factor_nonzero(case: "Case", name: str) -> bool:
+    """The factors of an offloaded assignment C = A * B hold no zeros: a -0
+    product (a zero times a negative factor) comes back from the tiles as +0
+    -- the documented deviation of docs/AFFINE_GEMM_MAPPING.md sections 6
+    and 20, which a bitwise check would report -- so the data avoids it.
+    Accumulations keep the plain data (C starts non-zero, so a -0 product
+    cannot change C's sign)."""
+    return (case.stmt == "=AB" and case.role_of_name(name) in ("a", "b")
+            and c_written_once(case))
 
 
 def array_seed(case: Case, name: str) -> int:
@@ -1029,6 +1042,63 @@ def _alias_verdict(case: "Case"):
 # --------------------------------------------------------------------------
 
 
+def c_written_once(case: Case) -> bool:
+    """An assignment C = A * B is the K = 1 GEMM into a zeroed C only when
+    every element of C is written exactly once: C's address is injective on
+    the iteration domain (docs/AFFINE_GEMM_MAPPING.md section 20). Decided by
+    enumeration (the loops are small). A loop no access uses rewrites the same
+    value (the hoist rules decide it, as for an accumulation): the writes are
+    keyed by its counter. True when a subscript leaves its array (the
+    out-of-bounds rules decide that case) or is not affine."""
+    try:
+        forms = {role: arr.forms() for role, arr in case.arrays.items()}
+    except NotAffine:
+        return True
+    used = set()
+    for fl in forms.values():
+        for f in fl:
+            used |= f.vars()
+    rep_vars = [lp.var for lp in case.loops if lp.var not in used]
+    cforms, dims = forms["c"], case.c.dims
+    seen, env, loops = set(), {}, case.loops
+    dup = [False]
+
+    def rec(depth):
+        if dup[0]:
+            return
+        if depth == len(loops):
+            idx = [f.eval(env) for f in cforms]
+            # the leading dimension of a C array parameter is dynamic in the
+            # memref (the program's guarantee, docs section 19.11 G3): an
+            # overrun of it is still a distinct address, only the inner
+            # dimensions bound the index
+            for pos, (d, i) in enumerate(zip(dims, idx)):
+                if i < 0 or (pos >= 1 and i >= d):
+                    raise IndexError("out of bounds")
+            key = (flat_index(dims, idx), tuple(env[v] for v in rep_vars))
+            if key in seen:
+                dup[0] = True
+            seen.add(key)
+            return
+        lp = loops[depth]
+        for v in lp.values(env):
+            env[lp.var] = v
+            rec(depth + 1)
+
+    try:
+        rec(0)
+    except IndexError:
+        return True
+    return not dup[0]
+
+
+def mac_like(case: Case) -> bool:
+    """A statement the GEMM decisions apply to: a multiply-accumulate form, or
+    the assignment C = A * B that writes every element of C once (the K = 1
+    GEMM into a zeroed C, docs/AFFINE_GEMM_MAPPING.md section 20)."""
+    return case.stmt in MAC_STMTS or (case.stmt == "=AB" and c_written_once(case))
+
+
 def evaluate(case: Case, snapshot: bool = False):
     """Return {'c0': C before, 'c': C after, <name>: flat int arrays},
     evaluating the statement over the loop domain exactly as the C kernel
@@ -1040,7 +1110,8 @@ def evaluate(case: Case, snapshot: bool = False):
     data = {}
     for name in case.array_names():
         arr = case.arrays[case.role_of_name(name)]
-        data[name] = [elem_value(e, array_seed(case, name)) for e in range(volume(arr.dims))]
+        nz = factor_nonzero(case, name)
+        data[name] = [elem_value(e, array_seed(case, name), nz) for e in range(volume(arr.dims))]
     c0 = list(data[case.c.name])
     forms = {role: arr.forms() for role, arr in case.arrays.items()}
 
@@ -1176,9 +1247,15 @@ def analyse(case: Case) -> dict:
     if case.stmt == "+=triple":
         dense = False
         reasons.append("the product has three factors (A * B * D)")
-    if case.stmt == "=AB":
+    # An assignment C = A * B is the K = 1 GEMM into a zeroed C when every
+    # element of C is written exactly once (docs/AFFINE_GEMM_MAPPING.md
+    # section 20, 2026-10-19); the reduction then has extent one (no K loop of
+    # two or more iterations, since C does not read K).
+    if case.stmt == "=AB" and not c_written_once(case):
         dense = False
-        reasons.append("the statement overwrites C instead of accumulating into it")
+        reasons.append("the statement overwrites C (C = A * B, no accumulation) and some element "
+                       "of C is written more than once: only the last product survives, not the "
+                       "GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20)")
     # A reduction no loop enumerates has extent one (SQ-4, decided
     # 2026-10-15: a role of extent one needs no loop; the K = 1 requirement of
     # 2026-10-18 -- C[i][j] += A[i][0] * B[0][j] is the K = 1 GEMM): A and B
@@ -1286,6 +1363,8 @@ def analyse(case: Case) -> dict:
             tags.append("alpha_minus_one")
         if case.kernel_style in ("init_inside", "scalar_acc"):
             tags.append("beta_zero")
+        if case.stmt == "=AB":
+            tags.append("assignment_zero_c")
         if repeat > 1:
             tags.append("repeated_%d" % repeat)
         if case.a.name == case.b.name:
@@ -1821,9 +1900,19 @@ def predict(case: Case) -> dict:
         return stop("recognition", "the accumulated value must be an arith.mulf of two loads, "
                     "not an arith.addf")
     if case.stmt == "=AB":
-        ex["recognition"] = "reject"
-        return stop("recognition", "the stored value must be an arith.addf of the accumulator "
-                    "load and a product; there is no accumulation")
+        # An assignment (docs section 20): the recognizer refuses a loop of two
+        # or more iterations that no subscript of C reads (the last product
+        # wins); the remaining overwrites -- batches overlapping in C -- are
+        # refused by the lowering's injectivity proof (below).
+        c_vars = set()
+        for f in sforms["c"]:
+            c_vars |= f.vars()
+        if any(lp.trip() >= 2 and lp.var in used_vars and lp.var not in c_vars
+               for lp in loops):
+            ex["recognition"] = "reject"
+            return stop("recognition", "the statement overwrites C (C = A * B, no accumulation) "
+                        "and a loop of the nest, which runs more than once, is not a subscript "
+                        "of C: only the last product survives")
     if case.stmt == "-=":
         ex["recognition"] = "reject"
         return stop("recognition", "the stored value is an arith.subf, not an arith.addf")
@@ -2121,6 +2210,14 @@ def predict(case: Case) -> dict:
                         "or pass assume-no-alias" % nm)
     # (one array as both factors: two different views of one memref are two
     # read-only operand views since 2026-10-18, docs section 7 / 19.12)
+    # An assignment whose batches overlap in C (C injective per batch, not on
+    # the whole domain): the lowering's injectivity proof refuses it
+    # (verifyOutputWrittenOnce, docs section 20).
+    if case.stmt == "=AB" and not c_written_once(case):
+        ex["lowering"] = "unsupported"
+        return stop("lowering", "two iterations of the assignment C = A * B write the same "
+                    "element of C (its subscripts are not injective on the iteration domain): "
+                    "the later product overwrites the earlier one")
     ex["lowering"] = "supported"
 
     # ---- driver: systolic-cc policy
@@ -2274,6 +2371,15 @@ SPEC_BASIS = {
               "with N = 1: its rank-1 operands get a unit dimension (memref.expand_shape), "
               "docs/AFFINE_GEMM_MAPPING.md section 2",
     "not_gemm": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "not_gemm_overwrite": "the assignment C = A * B writes some element of C more than once (a "
+                          "reduction loop of two or more iterations, batches overlapping in C): "
+                          "only the last product survives, not the GEMM of A and B -- an "
+                          "assignment is the K = 1 GEMM into a zeroed C only when every element "
+                          "is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)",
+    "assignment": "(supported since 2026-10-19) the assignment C = A * B whose every element of C "
+                  "is written exactly once is the K = 1 GEMM into a zeroed C: the lowering zeroes "
+                  "C's logical window and the tiles accumulate into it "
+                  "(docs/AFFINE_GEMM_MAPPING.md section 20)",
     "dense_on_domain": "(P0.4, P0.5) not a GEMM as written, but its loops that run once are constants "
                        "on the iteration domain, and there the nest is a dense GEMM of strided views "
                        "(decided by enumerating the points: casespec.gemm_on_domain; "
@@ -2692,6 +2798,9 @@ def spec_expect(case: Case) -> dict:
         out["recognition"] = rec
         out["basis_key"] = key
         out["basis"] = SPEC_BASIS[key]
+        if rec == "ACCEPT" and case.stmt == "=AB":
+            # the assignment form of that GEMM (docs section 20)
+            out["basis"] += "; " + SPEC_BASIS["assignment"]
         out["offload"] = {"ACCEPT": "offloaded", "UNDETERMINED": "undetermined"}.get(rec, "stays_on_host")
         if rec == "UNDETERMINED":
             out["spec_question"] = key
@@ -2705,7 +2814,7 @@ def spec_expect(case: Case) -> dict:
     # no loop of a GEMM to anchor on -- a documented limitation (the
     # compiler decides nothing: UNKNOWN).
     if (case.loops and an.get("affine") and case.kernel_style != "init_inside"
-            and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA")
+            and mac_like(case)
             and all(lp.trip() >= 2 for lp in case.loops)
             and not any(f.vars() for arr in case.arrays.values() for f in arr.forms())):
         return done("OUT_OF_SCOPE", "no_gemm_loop")
@@ -2729,7 +2838,7 @@ def spec_expect(case: Case) -> dict:
         # iteration on the domain.
         batched_ext = (batched_gemm_on_domain(case)
                        if case.kernel_style not in ("init_inside", "scalar_acc")
-                       and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") else None)
+                       and mac_like(case) else None)
         if batched_ext:
             out["legal_gemm"] = True
             two_unit = sum(1 for k in "IJK" if batched_ext[k] == 1) >= 2
@@ -2748,7 +2857,7 @@ def spec_expect(case: Case) -> dict:
         # a nest on its domain (P0.4, P0.5).
         if (any(lp.trip() == 1 for lp in case.loops)
                 and case.kernel_style not in ("init_inside", "scalar_acc")
-                and case.stmt in ("+=", "=C+AB", "=AB+C", "+=BA") and gemm_on_domain(case)):
+                and mac_like(case) and gemm_on_domain(case)):
             out["legal_gemm"] = True
             if gemm_on_domain(case) == "repeat_in_reduction":
                 return done("OUT_OF_SCOPE", "repeat_in_reduction")
@@ -2770,8 +2879,10 @@ def spec_expect(case: Case) -> dict:
         # and then excluded by their own rule (alpha, init_inside), so that a
         # scaled or re-initialised GEMM of affine views is 'a valid GEMM the
         # specification excludes', never 'not a GEMM'.
-        if case.stmt in ("+=sum", "+=triple", "=AB"):
+        if case.stmt in ("+=sum", "+=triple"):
             return done("REJECT", "not_gemm")
+        if case.stmt == "=AB" and not c_written_once(case):
+            return done("REJECT", "not_gemm_overwrite")
         g = generalized_gemm_on_domain(case)
         if g and g["verdict"] in ("ACCEPT", "DEMOTION", "SQ1"):
             out["legal_gemm"] = True
@@ -3225,14 +3336,19 @@ def _spec_domain(case: Case) -> dict:
         out["recognition"] = rec
         out["basis_key"] = key
         out["basis"] = SPEC_BASIS[key]
+        if rec == "ACCEPT" and case.stmt == "=AB":
+            # the assignment form of that GEMM (docs section 20)
+            out["basis"] += "; " + SPEC_BASIS["assignment"]
         out["offload"] = {"ACCEPT": "offloaded", "UNDETERMINED": "undetermined"}.get(rec, "stays_on_host")
         if rec == "UNDETERMINED":
             out["spec_question"] = key
         case.spec = out
         return out
 
-    if not an.get("affine") or case.stmt in ("+=sum", "+=triple", "=AB"):
+    if not an.get("affine") or case.stmt in ("+=sum", "+=triple"):
         return done("REJECT", "not_gemm")
+    if case.stmt == "=AB" and not c_written_once(case):
+        return done("REJECT", "not_gemm_overwrite")
     if case.kernel_style == "scalar_acc":
         return done("OUT_OF_SCOPE", "scalar_acc")
     used = set()
@@ -3476,7 +3592,9 @@ def reference_logical_text(case: Case) -> Optional[str]:
     A, B, C = case.a, case.b, case.c
     pl = groups.get("P", [])
     E = case.elem
-    zero = case.kernel_style in ("init_inside", "scalar_acc")
+    # beta = 0: C re-initialised inside the nest, a scalar accumulator, or the
+    # assignment C = A * B (the K = 1 GEMM into a zeroed C, docs section 20)
+    zero = case.kernel_style in ("init_inside", "scalar_acc") or case.stmt == "=AB"
 
     def ordinal_expr(g):
         ls = groups.get(g, [])     # no loop: a coordinate of extent one, ordinal 0
@@ -3522,8 +3640,15 @@ def reference_logical_text(case: Case) -> Optional[str]:
     lines.append("  " * d2 + "Cv[%s][%s] = %s;" % (ordinal_expr("I"), ordinal_expr("J"),
                                                   "0" if zero else _flat_text(C, C.name + "f")))
     reps = an.get("repetitions", 1)
-    lines.append(ind2 + "/* the GEMM C' += A' x B' (M=%d, N=%d, K=%d)%s */" % (
-        M, N, K, ", repeated %d times" % reps if reps > 1 else ""))
+    # an assignment's repetitions rewrite the same values (idempotent): the
+    # GEMM into the zeroed C' runs once (docs section 20)
+    if case.stmt == "=AB":
+        lines.append(ind2 + "/* the GEMM C' = A' x B' into the zeroed C' (M=%d, N=%d, K=%d)%s */" % (
+            M, N, K, "; the %d repetitions of the nest rewrite the same values" % reps if reps > 1 else ""))
+        reps = 1
+    else:
+        lines.append(ind2 + "/* the GEMM C' += A' x B' (M=%d, N=%d, K=%d)%s */" % (
+            M, N, K, ", repeated %d times" % reps if reps > 1 else ""))
     lines.append(ind2 + "for (long rep = 0; rep < %d; ++rep)" % reps)
     lines.append(ind2 + "  for (long I = 0; I < %d; ++I)" % M)
     lines.append(ind2 + "    for (long J = 0; J < %d; ++J)" % N)
@@ -3591,7 +3716,8 @@ def math_description(case: Case) -> List[str]:
         ext = an["extents"]
         v = an["views"]
         out.append("")
-        out.append("Logical GEMM: C'(I,J) += A'(I,K) * B'(K,J)   M=%d N=%d K=%d%s%s" % (
+        out.append("Logical GEMM: C'(I,J) %s A'(I,K) * B'(K,J)   M=%d N=%d K=%d%s%s" % (
+            "= (C zeroed first: an assignment, docs section 20)" if case.stmt == "=AB" else "+=",
             ext["I"], ext["J"], ext["K"],
             ", one per value of batch coordinate %s" % ", ".join(lp.var for lp in case.loops if lp.role == "P")
             if an["math_class"] == "gemm_batched" else "",
@@ -3746,6 +3872,9 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     h += ["  " + r for r in refs]
     h.append("The references never call the kernel or any compiler-generated code and share")
     h.append("no index code with it.  Data: small integers in [-3, 3], C starts non-zero;")
+    if any(factor_nonzero(case, n) for n in case.array_names()):
+        h.append("the factors of this assignment hold no zeros (a -0 product would come back from")
+        h.append("the tiles as +0: docs/AFFINE_GEMM_MAPPING.md sections 6 and 20);")
     h.append("every partial sum is an integer far below 2^24, so the float results are")
     h.append("exact and compared for exact equality -- no tolerance.")
     h.append("")
@@ -3793,6 +3922,12 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("")
     out.append("/* small integers in [-3, 3]; the same formula as generator/casespec.py */")
     out.append("static %s elem(long e, long seed) { return (%s)((e * 37 + seed * 101) %% 103 %% 7 - 3); }" % (E, E))
+    nz_names = [n for n in case.array_names() if factor_nonzero(case, n)]
+    if nz_names:
+        out.append("/* an assignment C = A * B: its factors without zeros -- a -0 product (a zero times")
+        out.append("   a negative factor) comes back from the tiles as +0, the documented deviation of")
+        out.append("   docs/AFFINE_GEMM_MAPPING.md sections 6 and 20, which a bitwise check would report */")
+        out.append("static %s elem_nz(long e, long seed) { %s v = elem(e, seed); return v != 0 ? v : (%s)1; }" % (E, E, E))
     if case.stmt != "+=sum":
         out.append("/* the product through a call: the references are not GEMM statements */")
         out.append("static %s mul(%s x, %s y) { return x * y; }" % (E, E, E))
@@ -3800,8 +3935,9 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("static void init(void) {")
     for n in case.array_names():
         arr = case.arrays[case.role_of_name(n)]
-        out.append("  for (long e = 0; e < %d; ++e) (&%s%s)[e] = elem(e, %d);" % (
-            volume(arr.dims), n, "[0]" * len(arr.dims), array_seed(case, n)))
+        out.append("  for (long e = 0; e < %d; ++e) (&%s%s)[e] = %s(e, %d);" % (
+            volume(arr.dims), n, "[0]" * len(arr.dims), "elem_nz" if n in nz_names else "elem",
+            array_seed(case, n)))
     out.append("}")
     out.append("")
     out.append("/* checksum: sum of C[e] * ((e % 97) + 1) over the flat array (exact in double) */")

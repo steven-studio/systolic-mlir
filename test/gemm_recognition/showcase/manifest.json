@@ -17231,7 +17231,7 @@
     "mathematical_gemm": false,
     "recognition": "REJECT",
     "offload": "stays_on_host",
-    "basis": "the nest is not a dense GEMM of its operands (analyse(): see why_not_a_dense_gemm)",
+    "basis": "the assignment C = A * B writes some element of C more than once (a reduction loop of two or more iterations, batches overlapping in C): only the last product survives, not the GEMM of A and B -- an assignment is the K = 1 GEMM into a zeroed C only when every element is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)",
     "spec_question": null,
     "runtime": "the program's own check must pass on every backend (kernel == references)"
    },
@@ -17244,7 +17244,7 @@
     "lowering": "not_reached",
     "driver": "stays_on_host",
     "reject_stage": "recognition",
-    "reject_reason": "the stored value must be an arith.addf of the accumulator load and a product; there is no accumulation"
+    "reject_reason": "the statement overwrites C (C = A * B, no accumulation) and a loop of the nest, which runs more than once, is not a subscript of C: only the last product survives"
    },
    "classification": "TRUE_NEGATIVE",
    "issue": null,
@@ -17255,7 +17255,7 @@
     "python_oracle_checksum"
    ],
    "expected_checksum": -4,
-   "math_note": "C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\nwins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\nlast row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\nExpected rejection at recognition: the stored value is a mulf, not an addf\nof the accumulator.",
+   "math_note": "C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\nwins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\nlast row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\nExpected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,\n2026-10-19): the reduction loop k runs eight times and is not a subscript of\nC, so the assignment writes every element eight times -- an overwrite, not\nthe K = 1 GEMM into a zeroed C that an assignment writing each element once is.",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_097.c -o case_097 && ./case_097",
@@ -17263,7 +17263,7 @@
     "stages": "python3 scripts/run_showcase.py --case case_097"
    },
    "why_not_a_dense_gemm": [
-    "the statement overwrites C instead of accumulating into it"
+    "the statement overwrites C (C = A * B, no accumulation) and some element of C is written more than once: only the last product survives, not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20)"
    ]
   },
   {

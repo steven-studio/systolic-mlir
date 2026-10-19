@@ -2153,3 +2153,102 @@ for a 10-tile A·Aᵀ, and the same for a plain Bᵀ) -- a cost of the existing 
 this change. The front end's gaps are listed in §19.13.1, the executable specification's limits
 (`non_box_undecided`, `non_box_unenumerated`) in §19.13.6. The FPGA board was not run for any of
 this section's results.
+
+---
+
+## 20. Assignment nests: C = A · B as the K = 1 GEMM into a zeroed C (2026-10-19)
+
+The task of 2026-10-19 (the rank screening): accept the mathematically legal, safely lowerable
+two-dimensional, degenerate and rank-1 nests the recognizer refused, first of all
+
+```
+C[i][j] = A[i] * B[j]      C[i][j] = A[j] * B[i]      C[i][j] += A[i] * B[j]      C[i][j] += A[j] * B[i]
+```
+
+The audit (`~/work/integration-backups-20261016/outer-product-validation/`) found every
+**accumulation** form already recognized and lowered (rank-1 outer products, transposed and
+permuted ones, mixed ranks, K = 1 by constant subscripts or a one-iteration loop, M = 1 / N = 1
+with the reduction kept, offsets, strides, transposed, flattened and skewed views, batches: §2,
+§19), and every **assignment** form `C = A * B` refused -- not a candidate (the shallow-nest filter
+wanted an `arith.addf` store) or "not exactly one multiply-accumulate". The recognizer modelled only
+`C = C + A * B`. This section defines the assignment and how it is lowered; nothing else of the
+screening changed (broadcasts stay unsupported, §10; element-wise products stay refused, §19.1).
+
+### 20.1 Definition
+
+An **assignment nest** is a perfect `affine.for` chain whose innermost body holds two
+`affine.load`, one `arith.mulf` of the two loads, one `affine.store` of the product and nothing
+else. It is a GEMM of its operands iff
+
+- **(A1)** the subscripts satisfy the conditions of §19 as for an accumulation (roles by readers or
+  groups, every subscript an affine view of its roles plus batch terms, C injective per batch,
+  the exact bijection of §19.13), and
+- **(A2)** C's full index map is injective on the whole iteration domain D: every element of C is
+  written exactly once.
+
+**Theorem 5 (assignment = K = 1 GEMM, zero start) [proved].** Under (A1) and (A2) the reduction
+coordinate K has extent 1 (a loop of two or more iterations that only the factors read would write
+the same C element at each of its values, against (A2)); each element C(P*, I, J) receives exactly
+one product, so the nest computes `C = 0 + A'·B'` with K = 1 -- the batched or plain GEMM of §19.1
+into a C whose prior value is replaced by zero. In exact arithmetic the values are identical;
+under IEEE the lowered form computes 0 + (0 + a b) where the loop computes a b: the +0 start of the
+tile turns a −0 product into +0, exactly the deviation §6 already lists for a one-term tile, so
+the strict-FP policy applies unchanged. *Proof:* by (A2) the contributions to one element form a
+set of size one; the view and bijection arguments of Theorem 1 give the product's operands. ∎
+
+(A2) fails in two ways, both refused as PROVEN_INVALID ("not a GEMM of A and B"):
+
+- a loop of two or more iterations that no subscript of C reads -- a reduction loop
+  (`C[i][j] = A[i][k] * B[k][j]`, k of 4: the last product wins), or a loop read only by the
+  factors (`C[i][0] = A[i] * B[j]`, `C[i] = A[i] * B[j]`); the recognizer refuses it on the domain
+  forms of the subscripts (a loop that runs once is a constant, Lemma 0; a trip count that is not
+  a constant leaves it UNKNOWN);
+- batches that overlap in C, `C[i + b][j] = A[b][i] * B[b][j]` or `C[i][j + k] = A[i][k] * B[k][j]`
+  (per batch C is injective and the accumulation form is a batched GEMM of views, §19.3); the
+  lowering refuses it with `verifyOutputWrittenOnce`: C's indices as an integer map of the box of
+  ordinals z (x = S z + origin, the box `verifyLogicalBijection` proved the domain equal to), no
+  nonzero difference δ with |δ_s| ≤ n_s − 1 in its kernel -- the argument of §19.13 step 4,
+  Presburger integer emptiness, one polytope per first nonzero position.
+
+A flattened C with collisions (`C[4i + j] = A[i] * B[j]`, j < 5) is refused by G2 at recognition,
+PROVEN_INVALID for an assignment (an overwrite) where the accumulation form is "valid, not
+constructed" (a tile would lose an update). A repetition loop (read by no access) around an
+assignment rewrites the same values: the hoist of §19.13.3 moves it outward as for an accumulation
+(the interchange keeps the per-element order of the writes), and the GEMM then runs once per
+iteration of it -- idempotent, the loop's result. A factor that may alias C is decided by the
+lowering's rule of §7 as for an accumulation (lowered when the windows are provably disjoint,
+UNKNOWN otherwise). The front end's site finder (`systolic-cfront --gemm-sites`) is unchanged:
+assignment nests, like the K = 1 accumulations of two loops, are not sites and get the driver's
+synthetic-site path (one report per call); the runtime ABI is untouched.
+
+### 20.2 Implementation
+
+- `collectAffineMatmulCandidates`: a shallow nest (one or two loops) is a candidate when its
+  innermost body stores an `arith.addf` or an `arith.mulf`.
+- `recognizeLogicalMatmul`: two loads and a stored `arith.mulf` of them are the assignment form
+  (`LogicalMatmul::accumulates = false`); C's access is the store's; the overwrite check above;
+  `reductionMayReassociate` is read from the product's `fastmath<reassoc>` (the nest's only
+  floating-point operation; `systolic-cfront --fp-reassociation` marks mulf as it marks addf).
+  The discovery pass prints `statement: C = A * B (assignment: ...)` or `C = C + A * B`.
+- `normalizeParallelotopeDomains` accepts the two-load body (non-box assignment domains are
+  normalized like accumulations); `hoistRepetitionLoops` needed no change.
+- `AffineMatmulToSystolic::lowerOne`: after the partition, the bijection and the FP permission,
+  `verifyOutputWrittenOnce` and K = 1 are required; then, inside the batch loops, C's logical
+  window -- the materialized view, exactly the elements the nest writes -- is zeroed with
+  `affine.for` / `affine.store 0.0` before `bufferization.to_tensor` takes it, and the unchanged
+  tile plan accumulates into it. The remark reads `... lowered as R exact region(s) (an assignment
+  C = A B: C zeroed before the tiles)`; the strict-FP refusal names the product.
+
+### 20.3 Verification (2026-10-19; evidence in `~/work/integration-backups-20261016/outer-product-validation/`)
+
+`test/Systolic/affine_gemm_assignment.mlir` (the IR of the zeroing, the remarks, the discovery
+lines and classes of 12 nests, strict FP) and `test/SystolicCC/affine_assignment.c` (22 offloaded
+kernels -- the four forms above, permuted outputs, mixed ranks, K = 1 constant and one-iteration
+reductions, 1 × 7 / 7 × 1 / 9 × 13 over six tiles, offsets, strides, a strided, a flattened, a
+skewed and a reversed C, transposed rank-2 factors, a batched and a repeated nest -- each bitwise
+equal to the loops as written on integer data with a nonzero initial C, on the software runtime
+and in mock-FPGA mode, `--verify` 22 of 22; seven nests that must stay on the host; the two forms
+checked against each other on the same inputs) and `affine_assignment_signzero.c` (the −0
+products of a zero factor: numerically equal, bitwise different, accepted by `--verify-rtol`).
+The probe matrices `phase1/{before,after,after2}` record every form's classification before and
+after. The FPGA board was not run.

@@ -137,6 +137,17 @@ LogicalResult verifyLogicalBijection(const LogicalMatmul &matmul,
                                      const DenseLogicalGemm &dense,
                                      std::string *why);
 
+/// For an assignment C = A * B (matmul.accumulates false): C's full index
+/// map, as an integer map of the box of its loops' ordinals z (x = S z +
+/// origin, the box verifyLogicalBijection proved the domain equal to), is
+/// injective -- no nonzero difference delta of two points of the box with the
+/// same C indices (Presburger integer emptiness, the argument of
+/// verifyLogicalBijection step 4) -- so every element of C is written exactly
+/// once and the nest is the K = 1 GEMM into a zeroed C (docs section 20).
+/// Call after verifyLogicalBijection succeeded. `why` on failure.
+LogicalResult verifyOutputWrittenOnce(const LogicalMatmul &matmul,
+                                      std::string *why);
+
 /// Partition a dense logical GEMM into the given boxes -- the policy is the
 /// caller's (for the systolic fleet: SystolicTilePlan.h) -- and prove that
 /// they are an exact partition of its iteration domain before returning

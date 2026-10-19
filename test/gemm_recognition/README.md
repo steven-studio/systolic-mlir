@@ -72,7 +72,12 @@ that does not wrap is translated, docs section 19.13.1).
 down to the innermost) whose innermost body holds exactly three `affine.load`, one
 `affine.store`, one `arith.mulf`, one `arith.addf` and nothing else; the stored value is
 `addf(load C, mulf(load, load))` (either order of the add); the accumulator is loaded and stored
-through the same map and indices; every loop of the chain is used by an access, and no access
+through the same map and indices -- or, since 2026-10-19 (docs section 20), two `affine.load`,
+one `arith.mulf` of them and one `affine.store` of the product: the assignment `C = A * B`, the
+K = 1 GEMM into a zeroed C, accepted only when every element of C is written once (a loop of two
+or more iterations that no subscript of C reads is refused as an overwrite, PROVEN_INVALID; batches
+overlapping in C are refused by the lowering's injectivity proof; the lowering zeroes C's window
+before the tiles); every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
 all three, followed by `A = (I, K)`, `B = (K, J)`, `C = (I, J)` where the two operands that share
@@ -256,7 +261,8 @@ the following are *also* GEMMs (and are marked as such) but are **outside** this
 specification by explicit, documented decision (DOCUMENTED_LIMITATION): a batched GEMM with an
 operand shared by every batch (`C[b] += A[b] B`: B would be broadcast over the batch, or A and C
 merged over (b, i)), alpha ≠ 1 (including `-=`), beta = 0 written as an initialisation inside the
-nest or a scalar accumulator, double or mixed precision, operands that may alias C, a repetition loop of more than
+nest or a scalar accumulator (the assignment `C = A * B` that writes every element once is inside
+the specification since 2026-10-19, see below), double or mixed precision, operands that may alias C, a repetition loop of more than
 one iteration inside a reduction loop of more than one iteration (hoisting it would reorder the
 accumulation; with a single-iteration reduction the hoist is legal and the nest is offloaded —
 `failures/resolved/NOTE-001`; two different views of one array as A and B were in this list
@@ -299,7 +305,16 @@ reading batch loops in its role dimensions, injective per batch (`C[i + k][j]`, 
 with `A[i + j][k]`), skewed and merged views (`A[i][i + k]`, `B[j + k][j]`, `C[2i + j][j]`,
 `C[4i + j]` with `j` in [0, 4) -- recognized since 2026-10-16, lowered since 2026-10-18 as
 explicit `memref.reinterpret_cast` views, docs section 19.11), and batched GEMMs with two of
-M, N, K equal to 1 per batch (SQ-5, decided 2026-10-16).
+M, N, K equal to 1 per batch (SQ-5, decided 2026-10-16); since 2026-10-19 also the assignment
+`C = A * B` whose every element of C is written exactly once (`casespec.c_written_once`; docs
+section 20: the K = 1 GEMM into a zeroed C -- `C[i][j] = A[i] * B[j]`, `C[i][j] = A[j] * B[i]`,
+`C[j][i] = A[i] * B[j]`, `C[i][j] = A[i][0] * B[0][j]`, offsets, strides, transposed, flattened,
+skewed and batched views of it -- lowered with C's window zeroed before the tiles; the basis is
+the accumulation form's (`dense_gemm`, `batched`, ...) plus `assignment`; the factors' test data
+hold no zeros, `casespec.factor_nonzero`). An assignment that writes an element of C more than once (a reduction loop of two
+or more iterations, `C[i][j] = A[i][k] * B[k][j]`; a loop only the factors read; batches
+overlapping in C, `C[i + b][j] = A[b][i] * B[b][j]`) is not a GEMM of its operands: REJECT, basis
+`not_gemm_overwrite`.
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=

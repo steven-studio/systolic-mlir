@@ -1530,12 +1530,43 @@ struct AffineMatmulToSystolicPass
     // ((C + a1 b1) + a2 b2) + ...; even a one-term tile turns a -0 product
     // into +0. The program must permit reassociation.
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // An assignment C = A * B (docs section 20): every element of C is
+    // written exactly once -- C's subscripts injective on the whole iteration
+    // domain, batches included (the recognizer refused the loops C does not
+    // read; a batch coordinate may still shift C's window onto an earlier
+    // batch's) -- and the reduction has extent one (each element gets one
+    // product; follows from the injectivity, checked here for the
+    // zero-then-accumulate lowering below). Decided before the floating-point
+    // permission: a nest that is no GEMM is PROVEN_INVALID whatever the
+    // permission.
+    // ------------------------------------------------------------------
+    if (!matmul.accumulates) {
+      if (failed(verifyOutputWrittenOnce(matmul, &why))) {
+        mappingClass = GemmMappingClass::ProvenInvalid;
+        return failure();
+      }
+      if (K != 1) {
+        why = "the assignment C = A * B has a reduction of extent " +
+              std::to_string(K) + ": only its last product would survive";
+        mappingClass = GemmMappingClass::ProvenInvalid;
+        return failure();
+      }
+    }
+
     if (!matmul.reductionMayReassociate && !allowFpReassociation) {
-      why = "floating-point reassociation is not permitted: the systolic "
-            "execution sums each tile from zero and adds the sum to C, a "
-            "different order of IEEE additions than the loop's (mark the "
-            "accumulation reassoc -- systolic-cc --fp-reassociation -- or "
-            "pass allow-fp-reassociation)";
+      why = matmul.accumulates
+                ? "floating-point reassociation is not permitted: the "
+                  "systolic execution sums each tile from zero and adds the "
+                  "sum to C, a different order of IEEE additions than the "
+                  "loop's (mark the accumulation reassoc -- systolic-cc "
+                  "--fp-reassociation -- or pass allow-fp-reassociation)"
+                : "floating-point reassociation is not permitted: the "
+                  "systolic execution sums each tile from zero (+0) and "
+                  "writes the sum to C, so a -0 product of the assignment "
+                  "C = A * B becomes +0 (mark the product reassoc -- "
+                  "systolic-cc --fp-reassociation -- or pass "
+                  "allow-fp-reassociation)";
       mappingClass = GemmMappingClass::ProvenValid;
       return failure();
     }
@@ -1619,6 +1650,26 @@ struct AffineMatmulToSystolicPass
     Value bTensor =
         sharedInput ? aTensor : asTensor(view(*rhs), *rhs, /*writable=*/false);
     Value cView = view(*out);
+    if (!matmul.accumulates) {
+      // C = A * B: the tiles accumulate into C's prior value (C + sum from
+      // zero), so the window the nest writes -- exactly the logical M x N view
+      // (verifyLogicalBijection, verifyOutputWrittenOnce) -- is zeroed first,
+      // per batch iteration, before the tensor of C is taken. The result is
+      // 0 + (0 + a b): the product, except that a -0 product becomes +0
+      // (section 6, the permission checked above).
+      Value zero = arith::ConstantOp::create(builder, loc,
+                                             builder.getZeroAttr(elementType));
+      auto rows = affine::AffineForOp::create(builder, loc, 0, out->shape[0],
+                                              /*step=*/1);
+      builder.setInsertionPointToStart(rows.getBody());
+      auto columns = affine::AffineForOp::create(builder, loc, 0,
+                                                 out->shape[1], /*step=*/1);
+      builder.setInsertionPointToStart(columns.getBody());
+      affine::AffineStoreOp::create(
+          builder, loc, zero, cView,
+          ValueRange{rows.getInductionVar(), columns.getInductionVar()});
+      builder.setInsertionPointAfter(rows);
+    }
     Value cTensor = asTensor(cView, *out, /*writable=*/true);
 
     Value result;
@@ -1643,6 +1694,8 @@ struct AffineMatmulToSystolicPass
                     << "affine GEMM " << M << "x" << N << "x" << K
                     << " lowered as " << partitions->size()
                     << " exact region(s)";
+      if (!matmul.accumulates)
+        remark << " (an assignment C = A B: C zeroed before the tiles)";
       if (plan)
         remark << " on " << fleet.resources.size()
                << " accelerator(s): makespan = "
