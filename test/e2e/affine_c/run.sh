@@ -25,6 +25,15 @@
 #                                  runtime ABI -- NOT the FPGA
 #          BACKEND=board           the real runtime (libsystolic_fpga_runtime):
 #                                  DPTI to the programmed 1x8x8 + 3x4x4 board
+#          SUBMISSION=auto (default) | sync | async
+#                                  board only: async lowers the GEMM to the
+#                                  asynchronous runtime (fpga_gemm_begin, one
+#                                  fpga_tile_submit per tile, one
+#                                  fpga_gemm_wait: every tile submitted
+#                                  without waiting for the one before it);
+#                                  auto chooses it when the configuration
+#                                  says COMPLETION_HEADER=1, sync keeps one
+#                                  fpga_matmul_tiled_auto_scheduled per tile
 #
 # Every intermediate is kept under build/test-output/affine_c_gemm/MxNxK
 # (OUT= overrides). Each stage is reported PASS, FAIL, BLOCKED or NOT RUN;
@@ -62,6 +71,11 @@ K_MAX_4X4="${K_MAX_4X4:-16}"
 ORDER="${ORDER:-ijk}"
 BACKEND="${BACKEND:-soft}"
 FRONTEND="${FRONTEND:-c}"
+SUBMISSION="${SUBMISSION:-auto}"
+case "$SUBMISSION" in
+  auto|sync|async) ;;
+  *) echo "SUBMISSION must be auto, sync or async, got '$SUBMISSION'" >&2; exit 2 ;;
+esac
 case "$FRONTEND" in
   c|fixture) ;;
   *) echo "FRONTEND must be c or fixture, got '$FRONTEND'" >&2; exit 2 ;;
@@ -91,6 +105,11 @@ if [ "$BACKEND" = board ]; then
     echo "the runtime refuses SYSTOLIC_FPGA_CONFIG=$SYSTOLIC_FPGA_CONFIG: $cfg" >&2; exit 2; }
   hw8="$(sed -n 's/^K_MAX_8X8=//p' <<< "$cfg")"
   hw4="$(sed -n 's/^K_MAX_4X4=//p' <<< "$cfg")"
+  hwhdr="$(sed -n 's/^COMPLETION_HEADER=//p' <<< "$cfg")"
+  hwdepth="$(sed -n 's/^PIPELINE_DEPTH=//p' <<< "$cfg")"
+  # The context's job queue (1 when the record has none): > 1 declares the
+  # pipelined fleet to the compiler, as systolic-matmul does.
+  [[ "$hwdepth" =~ ^[1-9][0-9]*$ ]] || hwdepth=1
   for pair in "K_MAX_8X8 ${K_MAX_8X8_GIVEN:-} $hw8" "K_MAX_4X4 ${K_MAX_4X4_GIVEN:-} $hw4"; do
     set -- $pair
     if [ $# = 3 ] && [ "$2" != "$3" ]; then
@@ -110,11 +129,25 @@ if [ "$BACKEND" = board ]; then
     got="$(sha256sum "$bit" | cut -d' ' -f1)"
     [ "$got" = "$sha" ] || {
       echo "BITSTREAM_SHA256 = $sha, but $bit hashes to $got" >&2; exit 2; }
-    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4, BITSTREAM_SHA256 matches $(basename "$bit"); board contents trusted, not read back"
+    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4 PIPELINE_DEPTH=$hwdepth, BITSTREAM_SHA256 matches $(basename "$bit"); board contents trusted, not read back"
   else
-    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4, bitstream hash NOT checked (BITSTREAM or BITSTREAM_SHA256 missing)"
+    CONFIG_NOTE="K_MAX_8X8=$hw8 K_MAX_4X4=$hw4 PIPELINE_DEPTH=$hwdepth, bitstream hash NOT checked (BITSTREAM or BITSTREAM_SHA256 missing)"
   fi
 fi
+
+# The lowering: batch submission wherever the bitstream reports completions.
+ASYNC=0
+if [ "$BACKEND" = board ]; then
+  case "$SUBMISSION" in
+    async) [ "${hwhdr:-0}" = 1 ] || {
+             echo "SUBMISSION=async needs a configuration with COMPLETION_HEADER=1; $SYSTOLIC_FPGA_CONFIG says '${hwhdr:-nothing}'" >&2; exit 2; }
+           ASYNC=1 ;;
+    auto)  [ "${hwhdr:-0}" = 1 ] && ASYNC=1 ;;
+  esac
+elif [ "$SUBMISSION" = async ]; then
+  echo "SUBMISSION=async needs BACKEND=board (the software model has only the synchronous entry point)" >&2; exit 2
+fi
+SUBMISSION_NOTE="$([ "$ASYNC" = 1 ] && echo "asynchronous: fpga_gemm_begin / fpga_tile_submit per tile / fpga_gemm_wait, PIPELINE_DEPTH=${hwdepth:-?} in flight per array" || echo "synchronous: one fpga_matmul_tiled_auto_scheduled per tile")"
 
 OUT="${OUT:-$ROOT/build/test-output/affine_c_gemm/${M}x${N}x${K}$([ "$ORDER" = ijk ] || echo "-$ORDER")$([ "$BACKEND" = soft ] || echo "-$BACKEND")$([ "$FRONTEND" = c ] || echo "-$FRONTEND")}"
 mkdir -p "$OUT"
@@ -256,8 +289,8 @@ else
   KERNEL=gemm_systolic
 fi
 
-FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$K_MAX_8X8 k-max-4x4=$K_MAX_4X4"
-PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$K_MAX_8X8 phys-k-max-4x4=$K_MAX_4X4"
+FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$K_MAX_8X8 k-max-4x4=$K_MAX_4X4 pipeline-depth=${hwdepth:-1}"
+PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$K_MAX_8X8 phys-k-max-4x4=$K_MAX_4X4$([ "$ASYNC" = 1 ] && echo ' async=true')"
 
 # ---------------------------------------------------------------------------
 # 3. Affine analysis and partition (report only; the IR is not changed).
@@ -278,7 +311,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Affine -> systolic.matmul_tile (partition, devices, schedule).
 if run "Affine -> Systolic dialect" "$OUT/40-systolic.log" \
-    "$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true" \
+    "$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
     "$OUT/20-gemm.affine.mlir" -o "$OUT/40-systolic.mlir"; then
   tiles="$(grep -c 'systolic.matmul_tile' "$OUT/40-systolic.mlir")"
   assigned="$(grep -c 'systolic.matmul_tile.* on @acc_.* est_cycles = [0-9]* start_cycle = [0-9]*' "$OUT/40-systolic.mlir")"
@@ -295,10 +328,25 @@ fi
 # 5. matmul_tile -> FPGA runtime calls.
 if run "Systolic -> FPGA runtime calls" "$OUT/50-fpga.log" \
     "$SYSTOLIC_OPT" "$PHYS" "$OUT/40-systolic.mlir" -o "$OUT/50-fpga.mlir"; then
-  calls="$(grep -c 'llvm.call @fpga_matmul_tiled_auto_scheduled' "$OUT/50-fpga.mlir")"
   ok=0
-  [ "$calls" = "$tiles" ] && ! grep -q 'systolic\.' "$OUT/50-fpga.mlir" && ok=1
-  check "Systolic -> FPGA runtime calls" "$ok" "$calls runtime calls"
+  if [ "$ASYNC" = 1 ]; then
+    # One GEMM: one begin, a submit per tile, and the one wait after the
+    # last submit (nothing between two submits reads a result).
+    calls="$(grep -c 'llvm.call @fpga_tile_submit' "$OUT/50-fpga.mlir")"
+    begins="$(grep -c 'llvm.call @fpga_gemm_begin' "$OUT/50-fpga.mlir")"
+    waits="$(grep -c 'llvm.call @fpga_gemm_wait' "$OUT/50-fpga.mlir")"
+    last_submit="$(grep -n 'llvm.call @fpga_tile_submit' "$OUT/50-fpga.mlir" | tail -1 | cut -d: -f1)"
+    first_wait="$(grep -n 'llvm.call @fpga_gemm_wait' "$OUT/50-fpga.mlir" | head -1 | cut -d: -f1)"
+    [ "$calls" = "$tiles" ] && [ "$begins" = 1 ] && [ "$waits" = 1 ] &&
+      [ "${first_wait:-0}" -gt "${last_submit:-0}" ] &&
+      ! grep -q 'systolic\.' "$OUT/50-fpga.mlir" && ok=1
+    check "Systolic -> FPGA runtime calls" "$ok" \
+      "$calls fpga_tile_submit between $begins fpga_gemm_begin and $waits fpga_gemm_wait (wait at line ${first_wait:-?}, last submit at line ${last_submit:-?})"
+  else
+    calls="$(grep -c 'llvm.call @fpga_matmul_tiled_auto_scheduled' "$OUT/50-fpga.mlir")"
+    [ "$calls" = "$tiles" ] && ! grep -q 'systolic\.' "$OUT/50-fpga.mlir" && ok=1
+    check "Systolic -> FPGA runtime calls" "$ok" "$calls runtime calls"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -326,9 +374,10 @@ if [ "$BACKEND" = board ]; then
                "$ROOT/build/runtime/libsystolic_fpga_runtime.a"
                $(pkg-config --libs libftdi1) -lstdc++)
   RUN_ENV=(env SYSTOLIC_FPGA_CONFIG="$SYSTOLIC_FPGA_CONFIG"
-           SYSTOLIC_RUNTIME_TRACE=1)
+           SYSTOLIC_RUNTIME_TRACE=1 SYSTOLIC_RUNTIME_TIMING=1)
   CHECK_NAME="Numerical check vs CPU reference (FPGA board over DPTI)"
   record "Board configuration" "PASS" "$CONFIG_NOTE"
+  record "Submission" "PASS" "$SUBMISSION_NOTE"
 else
   RUNTIME_SRC=("$ROOT/runtime/offload/soft_runtime.c" -I"$ROOT/runtime/offload")
   RUN_ENV=(env SOFT_K_MAX_8X8="$K_MAX_8X8" SOFT_K_MAX_4X4="$K_MAX_4X4")
@@ -353,10 +402,17 @@ if run "$CHECK_NAME" "$OUT/90-run.txt" "${RUN_ENV[@]}" "$OUT/80-gemm-test"; then
 fi
 
 if [ "$BACKEND" = board ]; then
-  hw_calls="$(grep -c '^\[fpga-runtime\] job' "$OUT/90-run.txt" 2>/dev/null || true)"
+  if [ "$ASYNC" = 1 ]; then
+    hw_calls="$(grep -c '^\[fpga-async\] accumulate' "$OUT/90-run.txt" 2>/dev/null || true)"
+    batch="$(grep -o 'before_first_completion=[0-9]* behind_inflight=[0-9]* credit_waits=[0-9]* submits_blocked=[0-9]*' "$OUT/90-run.txt" | tail -1)"
+    hw_note="$hw_calls tile(s) accumulated from completion records (runtime trace); ${batch:-no timing line}"
+  else
+    hw_calls="$(grep -c '^\[fpga-runtime\] job' "$OUT/90-run.txt" 2>/dev/null || true)"
+    hw_note="$hw_calls invocations completed on the board (runtime trace)"
+  fi
   if grep -q 'Verification (FPGA hardware): PASS' "$OUT/90-run.txt" 2>/dev/null; then
     record "FPGA execution" "PASS" \
-      "$hw_calls invocations completed on the board (runtime trace); $(grep 'bytes to / from' "$OUT/90-run.txt")"
+      "$hw_note; $(grep 'bytes to / from' "$OUT/90-run.txt")"
   elif [ -f "$OUT/90-run.txt" ] && grep -q 'runtime backend = FPGA' "$OUT/90-run.txt"; then
     BROKEN=1
     record "FPGA execution" "FAIL" \
@@ -370,8 +426,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-printf '\nC GEMM %sx%sx%s (loop order %s, %s runtime) through the affine path  (artifacts: %s)\n\n' \
-  "$M" "$N" "$K" "$ORDER" "$BACKEND" "$OUT"
+printf '\nC GEMM %sx%sx%s (loop order %s, %s runtime, %s submission) through the affine path  (artifacts: %s)\n\n' \
+  "$M" "$N" "$K" "$ORDER" "$BACKEND" "$([ "$ASYNC" = 1 ] && echo asynchronous || echo synchronous)" "$OUT"
 for i in "${!STAGES[@]}"; do
   printf '  %-8s %-58s %s\n' "${STATUS[$i]}" "${STAGES[$i]}" "${NOTES[$i]}"
 done | tee "$OUT/summary.txt"

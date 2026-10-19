@@ -265,6 +265,18 @@ int load_config(fpga_runtime_config_t &cfg) {
                             " (no sign, no leading zeros)");
             if (key == "K_MAX_8X8") { cfg.k_max_8x8 = v; have8 = true; }
             else                    { cfg.k_max_4x4 = v; have4 = true; }
+        } else if (key == "COMPLETION_HEADER") {
+            if (val != "0" && val != "1")
+                return fail(key + " = '" + val + "' is not 0 or 1");
+            cfg.completion_header = (val == "1") ? 1u : 0u;
+        } else if (key == "DDR_BYTES") {
+            // The DDR behind the bitstream, when the record says (the
+            // co-simulation's model); the asynchronous runtime sizes its
+            // per-device slots to it.
+            if (!parse_count(val, 0xFFFFFFFFu, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1..4294967295 "
+                            "(no sign, no leading zeros)");
+            cfg.ddr_bytes = v;
         } else if (key == "PIPELINE_DEPTH") {
             // The context's job queue: how many invocations the bitstream
             // holds per accelerator. The compiler declares the fleet's
@@ -327,7 +339,45 @@ struct ScheduledRuntime {
     bool                  refusal_reported = false;
 
     fpga_runtime_stats_t  stats{};
+
+    /* Every successful invocation's wall-clock, in microseconds, in order,
+     * for the median / p95 of the SYSTOLIC_RUNTIME_TIMING summary. Reset
+     * with the stats. */
+    std::vector<uint32_t> invocation_us;
 };
+
+/*
+ * SYSTOLIC_DPTI_SETTLE_US: the pause between the MEM_WRITE and the
+ * descriptor. 1000 (1 ms) is what the board runs used and stays the
+ * default; 0 removes it. The acceptance logic of the RTL already holds a
+ * descriptor until the staged slab is in DDR (systolic_dma_top.sv,
+ * core_job_ready: !hs_busy), so the pause is a measured quantity, not a
+ * correctness requirement -- docs/ASYNC.md records what it costs.
+ */
+uint32_t settle_us() {
+    static long v = -1;
+    if (v < 0) {
+        v = 1000;
+        if (const char *s = std::getenv("SYSTOLIC_DPTI_SETTLE_US")) {
+            char *end = nullptr;
+            const long t = std::strtol(s, &end, 10);
+            if (*s && end && !*end && t >= 0 && t <= 1000000)
+                v = t;
+            else
+                std::fprintf(stderr,
+                             "[fpga-runtime] SYSTOLIC_DPTI_SETTLE_US='%s' ignored: "
+                             "expected 0..1000000\n", s);
+        }
+    }
+    return static_cast<uint32_t>(v);
+}
+
+using clock_t_ = std::chrono::steady_clock;
+
+unsigned long long ns_between(clock_t_::time_point a, clock_t_::time_point b) {
+    return static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+}
 
 ScheduledRuntime &runtime_state() {
     static ScheduledRuntime state;
@@ -353,6 +403,41 @@ uint32_t read_timeout_ms() {
     }
     return timeout;
 }
+
+} // namespace
+
+/*
+ * Read one completion record from the session. 0, or -7 (read failed),
+ * -8 (timed out), -9 (the magic is not there: the host is out of step).
+ */
+int fpga_runtime_read_completion(fpga_completion_t *out) {
+    ScheduledRuntime &rt = runtime_state();
+    unsigned char h[FPGA_COMPLETION_BYTES];
+    const int rc = dpti_ftdi_read_exact_session(
+        rt.session, h, FPGA_COMPLETION_BYTES, read_timeout_ms());
+    if (rc != 0)
+        return rc == -4 ? -8 : -7;
+    auto u32 = [&](int i) -> unsigned {
+        return static_cast<unsigned>(h[i]) | (static_cast<unsigned>(h[i + 1]) << 8) |
+               (static_cast<unsigned>(h[i + 2]) << 16) | (static_cast<unsigned>(h[i + 3]) << 24);
+    };
+    out->magic         = u32(0);
+    out->job_id        = u32(4);
+    out->device_id     = h[8];
+    out->status        = h[9];
+    out->payload_bytes = static_cast<unsigned>(h[10]) | (static_cast<unsigned>(h[11]) << 8);
+    out->seq           = u32(12);
+    if (out->magic != FPGA_COMPLETION_MAGIC) {
+        std::fprintf(stderr,
+                     "[fpga-runtime] completion record magic 0x%08x (expected 0x%08x): "
+                     "the host is out of step with the link\n",
+                     out->magic, FPGA_COMPLETION_MAGIC);
+        return -9;
+    }
+    return 0;
+}
+
+namespace {
 
 int scheduled_invocation(
     int M, int K, int N,
@@ -416,6 +501,8 @@ int scheduled_invocation(
      * board run. The call is synchronous -- the result is back before it
      * returns -- so the next call can reuse the same DDR regions.
      */
+    const clock_t_::time_point t_start = clock_t_::now();
+
     const int mem_rc =
         dpti_ftdi_mem_write_session(
             rt.session,
@@ -428,9 +515,14 @@ int scheduled_invocation(
         return -4;
     }
 
-    // Kept from the board-verified sequence: let MEM_WRITE settle.
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(1));
+    const clock_t_::time_point t_mem_write = clock_t_::now();
+
+    // Kept from the board-verified sequence: let MEM_WRITE settle
+    // (1 ms unless SYSTOLIC_DPTI_SETTLE_US says otherwise).
+    if (const uint32_t us = settle_us())
+        std::this_thread::sleep_for(std::chrono::microseconds(us));
+
+    const clock_t_::time_point t_settle = clock_t_::now();
 
     dpti_job_t job = {};
 
@@ -471,10 +563,40 @@ int scheduled_invocation(
         return submit_rc == -6 ? -6 : -5;
     }
 
+    const clock_t_::time_point t_submit = clock_t_::now();
+
     const uint32_t result_bytes_len =
         static_cast<uint32_t>(P * P * sizeof(float));
 
     std::array<unsigned char, 8 * 8 * sizeof(float)> result_bytes{};
+
+    // A bitstream with the completion record sends it ahead of the tile:
+    // the job_id and device it names must be this invocation's, and the
+    // payload length the tile's. Anything else means the host and the link
+    // are out of step (or the descriptor was refused), and this session
+    // sends nothing more.
+    if (hw.cfg.completion_header) {
+        fpga_completion_t c{};
+        const int hdr_rc = fpga_runtime_read_completion(&c);
+        if (hdr_rc != 0) {
+            rt.link_failed = true;
+            return hdr_rc;
+        }
+        if (c.job_id != job.job_id || c.device_id != device_id ||
+            c.status != FPGA_COMPLETION_OK || c.payload_bytes != result_bytes_len) {
+            std::fprintf(
+                stderr,
+                "[fpga-runtime] completion record job=%u device=%u status=%u "
+                "payload=%u B does not match invocation job=%u device=%u "
+                "(%u B expected)%s\n",
+                c.job_id, c.device_id, c.status, c.payload_bytes,
+                job.job_id, device_id, result_bytes_len,
+                c.status == FPGA_COMPLETION_BAD_K ? "; the bitstream refused k" :
+                c.status == FPGA_COMPLETION_BAD_DEV ? "; the bitstream has no such device" : "");
+            rt.link_failed = true;
+            return -9;
+        }
+    }
 
     // The synchronization point: the whole P x P tile is back.
     const int read_rc =
@@ -487,6 +609,22 @@ int scheduled_invocation(
     if (read_rc != 0) {
         rt.link_failed = true;
         return read_rc == -4 ? -8 : -7;
+    }
+
+    const clock_t_::time_point t_read = clock_t_::now();
+
+    {
+        fpga_runtime_stats_t &s = rt.stats;
+        const unsigned long long total = ns_between(t_start, t_read);
+        s.ns_total     += total;
+        s.ns_mem_write += ns_between(t_start, t_mem_write);
+        s.ns_settle    += ns_between(t_mem_write, t_settle);
+        s.ns_submit    += ns_between(t_settle, t_submit);
+        s.ns_read      += ns_between(t_submit, t_read);
+        if (s.ns_min == 0 || total < s.ns_min) s.ns_min = total;
+        if (total > s.ns_max)                  s.ns_max = total;
+        if (rt.invocation_us.size() < (1u << 20))
+            rt.invocation_us.push_back(static_cast<uint32_t>(total / 1000));
     }
 
     /*
@@ -587,7 +725,58 @@ void fpga_runtime_get_stats(fpga_runtime_stats_t *out) {
 
 void fpga_runtime_reset_stats(void) {
     runtime_state().stats = fpga_runtime_stats_t{};
+    runtime_state().invocation_us.clear();
 }
+
+namespace {
+
+/*
+ * SYSTOLIC_RUNTIME_TIMING=1: one machine-readable line on stderr at close
+ * (and at every stats reset that follows invocations), so a harness run
+ * keeps the host-side cost of every case next to its verdict without the
+ * driver having to know about timing at all. Percentiles are of the
+ * per-invocation wall-clock (nearest-rank).
+ */
+void report_timing(ScheduledRuntime &rt) {
+    if (!env_flag("SYSTOLIC_RUNTIME_TIMING"))
+        return;
+    const fpga_runtime_stats_t &s = rt.stats;
+    if (s.invocations == 0 && rt.invocation_us.empty())
+        return;
+
+    std::vector<uint32_t> sorted(rt.invocation_us);
+    std::sort(sorted.begin(), sorted.end());
+    auto rank = [&](double q) -> unsigned long long {
+        if (sorted.empty())
+            return 0;
+        size_t i = static_cast<size_t>(q * static_cast<double>(sorted.size()));
+        if (i >= sorted.size())
+            i = sorted.size() - 1;
+        return sorted[i];
+    };
+
+    std::fprintf(
+        stderr,
+        "[fpga-runtime] timing invocations=%llu total_us=%llu min_us=%llu "
+        "median_us=%llu p95_us=%llu max_us=%llu mem_write_us=%llu "
+        "settle_us=%llu submit_us=%llu read_us=%llu settle_cfg_us=%u "
+        "bytes_to_fpga=%llu bytes_from_fpga=%llu\n",
+        s.invocations,
+        s.ns_total / 1000,
+        s.ns_min / 1000,
+        rank(0.5),
+        rank(0.95),
+        s.ns_max / 1000,
+        s.ns_mem_write / 1000,
+        s.ns_settle / 1000,
+        s.ns_submit / 1000,
+        s.ns_read / 1000,
+        settle_us(),
+        s.bytes_to_fpga,
+        s.bytes_from_fpga);
+}
+
+} // namespace
 
 int fpga_runtime_get_config(fpga_runtime_config_t *out) {
     const LoadedConfig &hw = config_state();
@@ -596,8 +785,50 @@ int fpga_runtime_get_config(fpga_runtime_config_t *out) {
     return hw.rc;
 }
 
+unsigned fpga_runtime_device_geometry(unsigned device_id) {
+    return static_cast<unsigned>(physical_geometry(device_id));
+}
+
+unsigned fpga_runtime_device_k_max(const fpga_runtime_config_t *cfg,
+                                   unsigned device_id) {
+    return cfg ? physical_k_max(*cfg, device_id) : 0;
+}
+
+int fpga_runtime_pack_operand_slab(int M, int K, int N, int P, int k_max,
+                                   const float *A, const float *B,
+                                   unsigned char *slab, unsigned slab_bytes) {
+    if (!A || !B || !slab)
+        return -12;
+    if (K < 1 || K > k_max)
+        return -10;
+    if (M < 1 || N < 1 || M > P || N > P)
+        return -11;
+    const size_t windows = static_cast<size_t>((K + 7) / 8);
+    if (slab_bytes < windows * 128 * 4)
+        return -13;
+
+    std::memset(slab, 0, slab_bytes);
+    auto store = [&](int word_index, float value) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof bits);
+        unsigned char *p = slab + static_cast<size_t>(word_index) * 4;
+        p[0] = static_cast<unsigned char>(bits);
+        p[1] = static_cast<unsigned char>(bits >> 8);
+        p[2] = static_cast<unsigned char>(bits >> 16);
+        p[3] = static_cast<unsigned char>(bits >> 24);
+    };
+    for (int k = 0; k < K; ++k) {
+        for (int row = 0; row < M; ++row)
+            store(scheduled_payload_index_a(k, row), A[row * K + k]);
+        for (int col = 0; col < N; ++col)
+            store(scheduled_payload_index_b(k, col), B[k * N + col]);
+    }
+    return 0;
+}
+
 void fpga_runtime_close(void) {
     ScheduledRuntime &rt = runtime_state();
+    report_timing(rt);
     if (rt.session) {
         dpti_ftdi_close(rt.session);
         rt.session = nullptr;

@@ -37,7 +37,11 @@
  *     real runtime (DPTI to the programmed board; SYSTOLIC_FPGA_CONFIG names
  *     its bitstream, else the archived K_MAX 16 / 16 one); --runtime=soft,
  *     the software model of the runtime ABI -- NOT the FPGA: its GEMMs
- *     report "CPU Executed".
+ *     report "CPU Executed". On a bitstream with the completion record
+ *     (COMPLETION_HEADER=1) the kernels call the asynchronous runtime: every
+ *     tile of a GEMM submitted without waiting for the one before it, one
+ *     wait per GEMM (--submission auto, the default; sync keeps one
+ *     synchronous call per tile, async insists and is refused elsewhere).
  *
  * The compiler prints only errors, unless --explain (what it offloads and
  * why not).
@@ -217,8 +221,10 @@ static const char *base_name(const char *path) {
 typedef struct {
   const char *source, *output, *clang, *build_dir, *llvm_build, *runtime;
   const char *fpga_config, *keep_dir, *std, *opt_level;
+  const char *submission;      /* auto | sync | async (see fleet_config) */
   long k_max_8x8, k_max_4x4;
   int verify;
+  int fp_reassociation;         /* --fp-reassociation */
   double verify_rtol;
   strvec defines, includes;
   const char *self_dir;        /* where this executable is: systolic-cfront */
@@ -576,6 +582,29 @@ static void array_desc(const json_value *p, long long *count, const char **ct) {
   *ct = c_type(json_string(json_get(p, "elem"), "f32"));
 }
 
+/* The leading extent of an array parameter as a C expression, evaluable in
+   the shim where the parameters are in scope: the constant the front end
+   computed, or -- when a subscript uses a parameter (a dynamic offset) --
+   the expression of the parameters it wrote (leading_extent_expr). */
+static char *leading_extent_expr(const json_value *p) {
+  const char *e = json_string(json_get(p, "leading_extent_expr"), NULL);
+  if (e)
+    return format("((long long)%s)", e);
+  return format("%lldLL", json_int(json_get(p, "leading_extent"), 0));
+}
+
+/* Element count of a written array parameter, as a C expression. */
+static char *count_expr(const json_value *p) {
+  char *lead = leading_extent_expr(p);
+  const json_value *dims = json_get(p, "inner_dims");
+  long long inner = 1;
+  for (size_t d = 0; d < json_size(dims); ++d)
+    inner *= json_int(json_at(dims, d), 1);
+  char *r = format("(%s * %lldLL)", lead, inner);
+  free(lead);
+  return r;
+}
+
 /* The C entry point of each offloaded function NAME.
  *
  *   1. Snapshot every array NAME writes (the exact rows its accesses reach).
@@ -646,7 +675,13 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         }
         bprintf(&kargs, ", 0");
         bprintf(&kdecl, ", int64_t");
-        for (size_t d = 0; d < rank; ++d) {
+        {
+          char *lead = leading_extent_expr(p);
+          bprintf(&kargs, ", %s", lead);
+          bprintf(&kdecl, ", int64_t");
+          free(lead);
+        }
+        for (size_t d = 1; d < rank; ++d) {
           bprintf(&kargs, ", %lld", sizes[d]);
           bprintf(&kdecl, ", int64_t");
         }
@@ -659,8 +694,11 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         bprintf(&kdecl, "%s%s", kdecl.n ? ", " : "",
                 c_type(json_string(json_get(p, "elem"), "f32")));
       } else {
+        /* An integer parameter: i32 / i64 as the front end typed it. */
+        const char *ctype = json_string(json_get(p, "ctype"), "int");
         bprintf(&kargs, "%s%s", kargs.n ? ", " : "", pname);
-        bprintf(&kdecl, "%sint", kdecl.n ? ", " : "");
+        bprintf(&kdecl, "%s%s", kdecl.n ? ", " : "",
+                strstr(ctype, "long") ? "long long" : "int");
       }
     }
     const char *name = offload[f].name, *symbol = offload[f].symbol;
@@ -703,10 +741,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      bprintf(&b, "  %s *save_%s = malloc(%lld * sizeof(%s) + 1);\n", ct, pname,
-              count, ct);
-      bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %lld * sizeof(%s)); "
-                  "else snapshots = 0;\n", pname, pname, pname, count, ct);
+      char *n = count_expr(p);
+      bprintf(&b, "  %s *save_%s = malloc(%s * sizeof(%s) + 1);\n", ct, pname,
+              n, ct);
+      bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %s * sizeof(%s)); "
+                  "else snapshots = 0;\n", pname, pname, pname, n, ct);
+      free(n);
     }
     bprintf(&b, "  int completed = 0, hw = 0;\n");
     bprintf(&b, "  if (snapshots) {\n"
@@ -731,8 +771,10 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      bprintf(&b, "    if (snapshots) memcpy(%s, save_%s, %lld * sizeof(%s));\n",
-              pname, pname, count, ct);
+      char *n = count_expr(p);
+      bprintf(&b, "    if (snapshots) memcpy(%s, save_%s, %s * sizeof(%s));\n",
+              pname, pname, n, ct);
+      free(n);
     }
     bprintf(&b, "    %s%s(", name, REFERENCE_SUFFIX);
     for (size_t i = 0; i < np; ++i)
@@ -750,10 +792,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const char *ct, *pname = json_string(json_get(p, "name"), "");
         long long count;
         array_desc(p, &count, &ct);
-        bprintf(&b, "    %s *ref_%s = malloc(%lld * sizeof(%s) + 1);\n", ct,
-                pname, count, ct);
-        bprintf(&b, "    memcpy(ref_%s, save_%s, %lld * sizeof(%s));\n", pname,
-                pname, count, ct);
+        char *n = count_expr(p);
+        bprintf(&b, "    %s *ref_%s = malloc(%s * sizeof(%s) + 1);\n", ct,
+                pname, n, ct);
+        bprintf(&b, "    memcpy(ref_%s, save_%s, %s * sizeof(%s));\n", pname,
+                pname, n, ct);
+        free(n);
       }
       bprintf(&b, "    __systolic_cc_quiet = 1;\n    %s%s(", name,
               REFERENCE_SUFFIX);
@@ -774,7 +818,9 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const char *ct, *pname = json_string(json_get(p, "name"), "");
         long long count;
         array_desc(p, &count, &ct);
-        bprintf(&b, "    for (long e = 0; e < %lld; ++e) {\n", count);
+        char *n = count_expr(p);
+        bprintf(&b, "    for (long long e = 0; e < %s; ++e) {\n", n);
+        free(n);
         bprintf(&b, "      %s got = ((%s *)%s)[e], want = ref_%s[e];\n", ct, ct,
                 pname, pname);
         if (rtol > 0) {
@@ -822,8 +868,29 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
 
 /* --------------------------------------------------------------- compile */
 
-static int fleet_k_max(driver *d, long *k8, long *k4) {
+/* The fleet the kernels are compiled for: K_MAX_8X8 / K_MAX_4X4, and whether
+   the bitstream reports completions (COMPLETION_HEADER=1), which decides the
+   runtime the kernels call:
+     asynchronous  fpga_gemm_begin, one fpga_tile_submit per tile, one
+                   fpga_gemm_wait per GEMM (runtime/fpga_async_runtime.h):
+                   every tile submitted without waiting for the one before
+                   it, PIPELINE_DEPTH descriptors in flight per array, each
+                   completion record matched to its tile. The default for
+                   --runtime board on such a bitstream (--submission auto).
+     synchronous   one fpga_matmul_tiled_auto_scheduled per tile, each
+                   waited for before the next: the software model (unless
+                   --submission async, which it implements too), a
+                   bitstream without the record, or --submission sync. */
+static int fleet_config(driver *d, long *k8, long *k4, int *header,
+                        long *depth) {
   const options *a = d->a;
+  *header = 0;
+  /* PIPELINE_DEPTH of the configuration (the context's job queue, 1 when
+     not recorded: the archived bitstream, the software model): the fleet is
+     declared pipelined when it is more than 1, as systolic-matmul declares
+     it from the same record, so the schedule describes the loaded hardware
+     whatever the submission mode is. */
+  *depth = 1;
   if (strcmp(a->runtime, "board") != 0) {
     *k8 = a->k_max_8x8;
     *k4 = a->k_max_4x4;
@@ -833,9 +900,9 @@ static int fleet_k_max(driver *d, long *k8, long *k4) {
                                       : getenv("SYSTOLIC_FPGA_CONFIG");
   if (!config) {
     /* The runtime's own default without SYSTOLIC_FPGA_CONFIG: the archived
-       1x8x8 + 3x4x4 bitstream, K_MAX 16 / 16 (runtime/fpga_matmul_tiled.h).
-       A board that holds another K_MAX refuses the invocations, and every
-       GEMM then runs on the CPU. */
+       1x8x8 + 3x4x4 bitstream, K_MAX 16 / 16 (runtime/fpga_matmul_tiled.h),
+       no completion record. A board that holds another K_MAX refuses the
+       invocations, and every GEMM then runs on the CPU. */
     *k8 = 16;
     *k4 = 16;
     return 0;
@@ -857,7 +924,49 @@ static int fleet_k_max(driver *d, long *k8, long *k4) {
   }
   *k8 = strtol(p8 + 10, NULL, 10);
   *k4 = strtol(p4 + 10, NULL, 10);
+  const char *ph = strstr(r.out, "COMPLETION_HEADER=");
+  *header = ph && ph[18] == '1';
+  const char *pd = strstr(r.out, "PIPELINE_DEPTH=");
+  if (pd) {
+    char *end = NULL;
+    long v = strtol(pd + 15, &end, 10);
+    if (end == pd + 15 || v < 1) {
+      snprintf(d->error, sizeof d->error,
+               "the runtime reports an unusable PIPELINE_DEPTH for %s: %s",
+               config, r.out);
+      return -1;
+    }
+    *depth = v;
+  }
   return 0;
+}
+
+/* Whether the kernels call the asynchronous runtime (see fleet_config). */
+static int choose_async(driver *d, int header) {
+  const options *a = d->a;
+  const int board = strcmp(a->runtime, "board") == 0;
+  if (strcmp(a->submission, "sync") == 0)
+    return 0;
+  if (strcmp(a->submission, "async") == 0) {
+    /* The software model implements the asynchronous API too (a queue run
+       at polls and waits), so a program's asynchronous lowering can be
+       checked without the board; it is not its default, which keeps the
+       model's one-call-one-invocation fault semantics for --runtime soft. */
+    if (!board)
+      return 1;
+    if (!header) {
+      snprintf(d->error, sizeof d->error,
+               "--submission async needs a bitstream with the completion "
+               "record (COMPLETION_HEADER=1 in the configuration); %s has "
+               "none",
+               a->fpga_config ? a->fpga_config
+               : getenv("SYSTOLIC_FPGA_CONFIG") ? getenv("SYSTOLIC_FPGA_CONFIG")
+               : "the default configuration");
+      return -1;
+    }
+    return 1;
+  }
+  return board && header;
 }
 
 /* The flags every compile of the user's source gets (the front end's two
@@ -872,18 +981,33 @@ static void add_flags(strvec *v, const options *a) {
   push(v, format("-I%s/runtime/offload", SYSTOLIC_SOURCE_DIR));
 }
 
+/* The front end's flags: the permission to reassociate floating-point sums,
+   as fastmath<reassoc> on its arith ops (docs/AFFINE_GEMM_MAPPING.md
+   section 6). Never given to the host compile: the program as written runs
+   there unchanged. */
+static void add_frontend_flags(strvec *v, const options *a) {
+  add_flags(v, a);
+  if (a->fp_reassociation)
+    push(v, "--fp-reassociation");
+}
+
 static int compile(driver *d) {
   const options *a = d->a;
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
   char *cfront = format("%s/systolic-cfront", a->self_dir);
   char *offload_rt = format("%s/runtime/offload", SYSTOLIC_SOURCE_DIR);
-  long k8, k4;
-  if (fleet_k_max(d, &k8, &k4) != 0)
+  long k8, k4, depth;
+  int header;
+  if (fleet_config(d, &k8, &k4, &header, &depth) != 0)
+    return -1;
+  const int async = choose_async(d, header);
+  if (async < 0)
     return -1;
   char *fleet = format("--systolic-declare-fpga-fleet=k-max-8x8=%ld "
-                       "k-max-4x4=%ld", k8, k4);
+                       "k-max-4x4=%ld pipeline-depth=%ld", k8, k4, depth);
   char *phys = format("--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=%ld "
-                      "phys-k-max-4x4=%ld", k8, k4);
+                      "phys-k-max-4x4=%ld%s", k8, k4,
+                      async ? " async=true" : "");
 
   char src[PATH_MAX];
   if (!realpath(a->source, src)) {
@@ -904,7 +1028,7 @@ static int compile(driver *d) {
                        "--interface", kpath(d, "10-interface.json"),
                        "--gemm-sites", kpath(d, "10-gemm-sites.json"), src, "-o",
                        kpath(d, "10-frontend.mlir"), NULL);
-  add_flags(&cmd, a);
+  add_frontend_flags(&cmd, a);
   result r;
   if (run(d, &cmd, "the C front end", NULL, NULL, &r) != 0)
     return -1;
@@ -1039,8 +1163,16 @@ static int compile(driver *d) {
       char *why = NULL;
       if (n == 0) {
         char *reason = remark_reason(remarks, info.line, info.end_line);
-        why = format("no GEMM the systolic arrays can run was recognized in "
-                     "it%s", reason);
+        /* A GEMM that was recognized but may not be reassociated is not
+           "no GEMM": say what is missing (docs/AFFINE_GEMM_MAPPING.md
+           section 6). */
+        if (strstr(reason, "floating-point reassociation is not permitted"))
+          why = format("its GEMM is offloaded only with permission to "
+                       "reassociate floating-point sums (--fp-reassociation)%s",
+                       reason);
+        else
+          why = format("no GEMM the systolic arrays can run was recognized in "
+                       "it%s", reason);
       } else if (strcmp(json_string(json_get(fn, "storage_class"), ""),
                         "static") == 0 ||
                  json_bool(json_get(fn, "inline"), 0)) {
@@ -1085,9 +1217,12 @@ static int compile(driver *d) {
   {
     buffer plan = {0};
     bprintf(&plan, "{\n \"source\": \"%s\",\n \"runtime\": \"%s\",\n"
+                   " \"submission\": \"%s\",\n"
                    " \"k_max_8x8\": %ld,\n \"k_max_4x4\": %ld,\n"
-                   " \"verify\": %s,\n \"offloaded\": [", src, a->runtime, k8,
-            k4, a->verify ? "true" : "false");
+                   " \"pipeline_depth\": %ld,\n"
+                   " \"verify\": %s,\n \"offloaded\": [", src, a->runtime,
+            async ? "asynchronous" : "synchronous", k8, k4, depth,
+            a->verify ? "true" : "false");
     for (size_t i = 0; i < noffload; ++i)
       bprintf(&plan, "%s\"%s\"", i ? ", " : "", offload[i].name);
     bprintf(&plan, "],\n \"translated_not_offloaded\": [");
@@ -1112,7 +1247,7 @@ static int compile(driver *d) {
     strvec c3 = argv_of(cfront, "--clang", a->clang, format("-std=%s", a->std),
                         "--symbol-suffix=" KERNEL_SUFFIX, src, "-o",
                         kpath(d, "30-kernels.mlir"), NULL);
-    add_flags(&c3, a);
+    add_frontend_flags(&c3, a);
     for (size_t i = 0; i < noffload; ++i)
       push(&c3, format("--function=%s", offload[i].name));
     if (run(d, &c3, "the C front end (offloaded functions)", NULL, NULL, &r))
@@ -1205,10 +1340,16 @@ static int compile(driver *d) {
   push(&link, a->output);
   if (run(d, &link, "linking", NULL, NULL, &r))
     return -1;
-  log_note("wrote %s (%zu function(s) offloaded, runtime: %s; intermediates "
-           "in %s)", a->output, noffload,
+  log_note("wrote %s (%zu function(s) offloaded, runtime: %s, %s, "
+           "scheduled for %s contexts (PIPELINE_DEPTH=%ld); "
+           "intermediates in %s)", a->output, noffload,
            strcmp(a->runtime, "soft") == 0 ? "software model, NOT the FPGA"
-                                           : "FPGA board", a->keep_dir);
+                                           : "FPGA board",
+           async ? "asynchronous submission (fpga_tile_submit per tile, one "
+                   "fpga_gemm_wait per GEMM)"
+                 : "synchronous submission (one fpga_matmul_tiled_auto_"
+                   "scheduled per tile)",
+           depth > 1 ? "pipelined" : "serialized", depth, a->keep_dir);
   return 0;
 }
 
@@ -1218,8 +1359,10 @@ static void usage(void) {
   fprintf(stderr,
           "usage: systolic-cc [--clang CLANG] [--build-dir DIR] "
           "[--llvm-build DIR] [--runtime soft|board] [--fpga-config FILE] "
+          "[--submission auto|sync|async] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
-          "[--keep-dir DIR] [--explain] [-DNAME[=VAL]] [-IDIR] [-std=STD] "
+          "[--keep-dir DIR] [--explain] [--fp-reassociation] [-DNAME[=VAL]] "
+          "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
 }
@@ -1255,6 +1398,7 @@ int main(int argc, char **argv) {
   if (!a.llvm_build)
     a.llvm_build = format("%s/work/llvm-project/build", getenv("HOME") ? getenv("HOME") : "");
   a.runtime = "board";
+  a.submission = "auto";
   a.k_max_8x8 = 16;
   a.k_max_4x4 = 16;
   a.std = "c11";
@@ -1279,6 +1423,12 @@ int main(int argc, char **argv) {
       a.runtime = v;
     } else if ((v = option_value(s, "--fpga-config", &i, argc, argv))) {
       a.fpga_config = v;
+    } else if ((v = option_value(s, "--submission", &i, argc, argv))) {
+      if (strcmp(v, "auto") && strcmp(v, "sync") && strcmp(v, "async")) {
+        fprintf(stderr, "systolic-cc: --submission must be auto, sync or async\n");
+        return 2;
+      }
+      a.submission = v;
     } else if ((v = option_value(s, "--k-max-8x8", &i, argc, argv))) {
       a.k_max_8x8 = strtol(v, NULL, 10);
     } else if ((v = option_value(s, "--k-max-4x4", &i, argc, argv))) {
@@ -1289,6 +1439,8 @@ int main(int argc, char **argv) {
       explain = 1;
     } else if (strcmp(s, "--verify") == 0) {
       a.verify = 1;
+    } else if (strcmp(s, "--fp-reassociation") == 0) {
+      a.fp_reassociation = 1;
     } else if ((v = option_value(s, "--keep-dir", &i, argc, argv))) {
       a.keep_dir = v;
     } else if (strcmp(s, "-o") == 0) {

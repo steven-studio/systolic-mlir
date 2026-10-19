@@ -2,6 +2,7 @@
 """e2e_verdict.py -- the verdict on one run_e2e.sh case, from what it left.
 
     e2e_verdict.py CASE_DIR --exit N --k8 K8 --k4 K4 --slab BYTES --source PATH
+                   [--mode sync|async] [--header 0|1]
                    [--cosim RECEIVED CONSUMED SENT SESSION | --cosim-error TEXT]
 
 CASE_DIR is <out>/<case>, named MxNxK_<values> (gen_cases.py), holding
@@ -11,7 +12,12 @@ configuration as the harness resolved it (runtime-dispatch-test
 --print-config) and PATH the file it came from. --cosim gives the case's
 co-simulation session: the bytes the simulated FT2232H received from the
 host, the bytes the RTL consumed (RD#) and sent (WR#); --cosim-error says why
-there is no such session.
+there is no such session. --mode names the runtime the case was meant to run
+on (ir/20-fpga.mlir must call that runtime: one
+fpga_matmul_tiled_auto_scheduled per tile, or one fpga_tile_submit per tile
+between fpga_gemm_begin and fpga_gemm_wait); --header 1 says the bitstream
+sends the 16-byte completion record ahead of every result tile, so the bytes
+back are counted with it.
 
 Prints one line, tab-separated:
 
@@ -20,8 +26,10 @@ Prints one line, tab-separated:
 CLASS is one of
     PASS        the FPGA result equals the CPU reference, every tile was one
                 FPGA invocation, every invocation carried the configured
-                slab, and (co-simulation) the RTL consumed and sent exactly
-                the bytes the runtime counted
+                slab, the bytes back are the result tiles (with the
+                completion record when --header 1), the lowered IR calls the
+                runtime of --mode, and (co-simulation) the RTL consumed and
+                sent exactly the bytes the runtime counted
     MISMATCH    the FPGA result differs from the CPU reference (exit 1)
     CONFIG      the configuration: refused by systolic-matmul (exit 4,
                 SYSTOLIC_FPGA_CONFIG=...), runtime rc -16, or it did not
@@ -34,7 +42,8 @@ CLASS is one of
                 call refused after such a failure); on the co-simulation
                 also the RTL moving other bytes than the runtime counted
     SUBMISSION  the runtime refused or could not submit an invocation:
-                rc -5, -10, -11, -12, -13, -15
+                rc -5, -10, -11, -12, -13, -15 (asynchronous runtime also
+                -17, -18, -19)
     INPUT       systolic-matmul refused the input (exit 2)
     COMPILE     the compiler failed (exit 3)
     FAIL        anything else (no verdict line, tiles != invocations, ...)
@@ -54,10 +63,19 @@ from pathlib import Path
 # (runtime/fpga_matmul_tiled.cpp, runtime/dpti_runtime.c).
 MEM_WRITE_HEADER = 9
 DESCRIPTOR_BYTES = 14 * 6
+# ... and gets back the P x P fp32 result tile, preceded by the 16-byte
+# completion record on a bitstream that has it (COMPLETION_HEADER=1).
+COMPLETION_BYTES = 16
 
 DEVICES = {"acc_8x8_0": (0, 8), "acc_4x4_0": (1, 4), "acc_4x4_1": (2, 4), "acc_4x4_2": (3, 4)}
-TRANSPORT_RC = {-3, -4, -6, -7, -8, -14}
-SUBMISSION_RC = {-5, -10, -11, -12, -13, -15}
+TRANSPORT_RC = {-3, -4, -6, -7, -8, -9, -14}
+SUBMISSION_RC = {-5, -10, -11, -12, -13, -15, -17, -18, -19}
+
+# The runtime calls the lowering emits (ir/20-fpga.mlir), per mode.
+SYNC_CALL_RE = re.compile(r"llvm\.call @fpga_matmul_tiled_auto_scheduled\(")
+ASYNC_SUBMIT_RE = re.compile(r"llvm\.call @fpga_tile_submit\(")
+ASYNC_BEGIN_RE = re.compile(r"llvm\.call @fpga_gemm_begin\(")
+ASYNC_WAIT_RE = re.compile(r"llvm\.call @fpga_gemm_wait\(")
 
 NAME_RE = re.compile(r"^(\d+)x(\d+)x(\d+)_")
 TILE_RE = re.compile(r"systolic\.matmul_tile .* m = (\d+) n = (\d+) k = (\d+) on @(\w+)")
@@ -96,6 +114,8 @@ def verdict(a):
     ir_path = d / "ir" / "10-systolic.mlir"
     ir = ir_path.read_text(errors="replace") if ir_path.exists() else ""
     tiles = [(int(m), int(n), int(k), dev) for m, n, k, dev in TILE_RE.findall(ir)]
+    fpga_path = d / "ir" / "20-fpga.mlir"
+    fpga_ir = fpga_path.read_text(errors="replace") if fpga_path.exists() else None
 
     inv = INV_RE.search(out) or RUNTIME_RE.search(out)
     inv = int(inv.group(1)) if inv else None
@@ -177,6 +197,22 @@ def verdict(a):
                 return row("FAIL", f"the tiles cover {macs} multiply-adds; "
                                    f"{big_m}x{big_n}x{big_k} has {big_m * big_n * big_k}")
 
+    # ---- the lowered IR calls the runtime of the chosen mode ----------------
+    if fpga_ir is not None and tiles:
+        sync_calls = len(SYNC_CALL_RE.findall(fpga_ir))
+        submits = len(ASYNC_SUBMIT_RE.findall(fpga_ir))
+        begins = len(ASYNC_BEGIN_RE.findall(fpga_ir))
+        waits = len(ASYNC_WAIT_RE.findall(fpga_ir))
+        if a.mode == "async":
+            if submits != len(tiles) or begins != 1 or waits != 1 or sync_calls:
+                return row("FAIL", f"--mode async, but the lowered IR has {submits} fpga_tile_submit, "
+                                   f"{begins} fpga_gemm_begin, {waits} fpga_gemm_wait and {sync_calls} "
+                                   f"fpga_matmul_tiled_auto_scheduled call(s) for {len(tiles)} tile(s)")
+        elif sync_calls != len(tiles) or submits or begins or waits:
+            return row("FAIL", f"--mode sync, but the lowered IR has {sync_calls} "
+                               f"fpga_matmul_tiled_auto_scheduled and {submits} fpga_tile_submit "
+                               f"call(s) for {len(tiles)} tile(s)")
+
     # ---- what the run itself says ------------------------------------------
     if a.exit == 0:
         if not re.search(r"^Verification: PASS", out, re.M):
@@ -187,6 +223,13 @@ def verdict(a):
         if to is None or to != inv * per:
             return row("CONFIG", f"operand slab: {to} B to the FPGA for {inv} invocation(s), "
                                  f"not {inv} x (9 + {a.slab} + 84) = {inv * per} B")
+        # Every tile comes back as its device's P x P fp32 tile, with the
+        # completion record ahead of it on a bitstream that has one.
+        want_back = sum(DEVICES[dev][1] ** 2 * 4 + (COMPLETION_BYTES if a.header else 0)
+                        for _, _, _, dev in tiles)
+        if back is None or back != want_back:
+            return row("FAIL", f"{back} B back for {inv} invocation(s), not the {want_back} B of "
+                               f"their result tiles{' and completion records' if a.header else ''}")
         if a.cosim_error:
             return row("FAIL", a.cosim_error)
         if a.cosim:
@@ -233,6 +276,8 @@ def main():
     ap.add_argument("--k4", type=int, required=True)
     ap.add_argument("--slab", type=int, required=True)
     ap.add_argument("--source", required=True)
+    ap.add_argument("--mode", choices=("sync", "async"), default="sync")
+    ap.add_argument("--header", type=int, choices=(0, 1), default=0)
     ap.add_argument("--cosim", nargs=4, type=int, metavar=("RECEIVED", "CONSUMED", "SENT", "SESSION"))
     ap.add_argument("--cosim-error")
     a = ap.parse_args()

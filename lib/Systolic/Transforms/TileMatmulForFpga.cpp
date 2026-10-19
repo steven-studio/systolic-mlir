@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <optional>
 
 using namespace mlir;
@@ -64,6 +66,25 @@ namespace {
 // Runtime 的语意是 C_out = C_in + A x B(linalg.matmul / matmul_tile 的
 // 语意):一次 invocation 的乘积由 FPGA 算,runtime 把它加回 C 所在的
 // buffer,所以依 c_in 串起来的 K invocation 会正确累加。
+//
+// async=true: the same tiles go to the asynchronous runtime
+// (runtime/fpga_async_runtime.h) instead,
+//
+//   %g = llvm.call @fpga_gemm_begin(M, N, K, tiles)          once per GEMM
+//        llvm.call @fpga_tile_submit(%g, tile, k_index, k_count,
+//                                    m, k, n, A, B, C, ldc, dev, S, E)
+//        llvm.call @fpga_gemm_wait(%g)                        once per GEMM
+//
+// where a submit returns as soon as the operands are packed and the wait
+// returns once every tile of the GEMM has been accumulated into C. The
+// GEMM, output block and K fold of a tile come from the discardable
+// attributes --systolic-binary-search-tile-matmul sets (systolic.gemm,
+// systolic.tile, systolic.k_index, systolic.k_count). C is never staged:
+// every submit points straight into the output buffer with its row
+// stride, so results of different tiles can land in it in any order. The
+// wait of a GEMM is placed before the first op that reads its result (or
+// at the end of the block), so independent GEMMs of one function overlap
+// on the FPGA and a GEMM that reads another's result waits for it.
 // -----------------------------------------------------------------------
 
 // The arrays of the 1x8x8 + 3x4x4 bitstream: systolic_dma_top's device
@@ -196,11 +217,22 @@ struct FpgaInvocation {
   int64_t deviceId;
   int64_t startCycle, estCycles;
   RankedTensorType aTy, bTy, cTy;
+  // The tile's place in its GEMM (systolic.gemm / tile / k_index / k_count);
+  // -1 when the attributes are absent. Only the asynchronous lowering needs
+  // them.
+  int64_t gemm = -1, tile = -1, kIndex = -1, kCount = -1;
 };
+
+// The four discardable attributes --systolic-binary-search-tile-matmul sets.
+static constexpr StringLiteral kGemmAttr = "systolic.gemm";
+static constexpr StringLiteral kTileAttr = "systolic.tile";
+static constexpr StringLiteral kKIndexAttr = "systolic.k_index";
+static constexpr StringLiteral kKCountAttr = "systolic.k_count";
 
 static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
                                                  ModuleOp module,
-                                                 const PhysicalKMax &physK) {
+                                                 const PhysicalKMax &physK,
+                                                 bool async) {
   FlatSymbolRefAttr deviceRef = op.getDeviceAttr();
   if (!deviceRef)
     return op.emitError("FPGA lowering requires an assigned accelerator "
@@ -280,7 +312,75 @@ static FailureOr<FpgaInvocation> checkInvocation(MatmulTileOp op,
            << inv.aTy.getElementType() << ", " << inv.bTy.getElementType()
            << ", " << inv.cTy.getElementType();
 
+  auto gemmAttr = op->getAttrOfType<IntegerAttr>(kGemmAttr);
+  auto tileAttr = op->getAttrOfType<IntegerAttr>(kTileAttr);
+  auto kIndexAttr = op->getAttrOfType<IntegerAttr>(kKIndexAttr);
+  auto kCountAttr = op->getAttrOfType<IntegerAttr>(kKCountAttr);
+  if (gemmAttr && tileAttr && kIndexAttr && kCountAttr) {
+    inv.gemm = gemmAttr.getInt();
+    inv.tile = tileAttr.getInt();
+    inv.kIndex = kIndexAttr.getInt();
+    inv.kCount = kCountAttr.getInt();
+    if (inv.gemm < 0 || inv.tile < 0 || inv.kCount < 1 || inv.kIndex < 0 ||
+        inv.kIndex >= inv.kCount || inv.tile > std::numeric_limits<int32_t>::max() ||
+        inv.kCount > std::numeric_limits<int32_t>::max())
+      return op.emitError("systolic.gemm/tile/k_index/k_count must be "
+                          "non-negative with 0 <= k_index < k_count; got ")
+             << inv.gemm << ", " << inv.tile << ", " << inv.kIndex << ", "
+             << inv.kCount;
+  } else if (async) {
+    return op.emitError("the asynchronous FPGA lowering needs the "
+                        "systolic.gemm, systolic.tile, systolic.k_index and "
+                        "systolic.k_count attributes "
+                        "--systolic-binary-search-tile-matmul sets on every "
+                        "matmul_tile");
+  }
+
   return inv;
+}
+
+// The asynchronous runtime's three entry points (runtime/fpga_async_runtime.h):
+//   void *fpga_gemm_begin(int M, int N, int K, unsigned tiles);
+//   int   fpga_tile_submit(void *gemm, unsigned tile_id, unsigned k_index,
+//                          unsigned k_count, int m, int k, int n,
+//                          const float *A, const float *B, float *C, int ldc,
+//                          unsigned device_id, unsigned start_cycle,
+//                          unsigned est_cycles);
+//   int   fpga_gemm_wait(void *gemm);
+struct AsyncRuntime {
+  LLVM::LLVMFuncOp begin, submit, wait;
+};
+
+static LLVM::LLVMFuncOp declareRuntimeFn(ModuleOp module, OpBuilder &builder,
+                                         StringRef name,
+                                         LLVM::LLVMFunctionType fnTy) {
+  if (auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
+    return fn;
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(module.getBody());
+  return LLVM::LLVMFuncOp::create(builder, module.getLoc(), name, fnTy);
+}
+
+static AsyncRuntime getOrDeclareAsyncRuntime(ModuleOp module,
+                                             OpBuilder &builder) {
+  auto ptrTy = LLVM::LLVMPointerType::get(builder.getContext());
+  auto i32Ty = builder.getI32Type();
+  AsyncRuntime rt;
+  rt.begin = declareRuntimeFn(
+      module, builder, "fpga_gemm_begin",
+      LLVM::LLVMFunctionType::get(ptrTy, {i32Ty, i32Ty, i32Ty, i32Ty},
+                                  /*isVarArg=*/false));
+  rt.submit = declareRuntimeFn(
+      module, builder, "fpga_tile_submit",
+      LLVM::LLVMFunctionType::get(
+          i32Ty,
+          {ptrTy, i32Ty, i32Ty, i32Ty, i32Ty, i32Ty, i32Ty, ptrTy, ptrTy,
+           ptrTy, i32Ty, i32Ty, i32Ty, i32Ty},
+          /*isVarArg=*/false));
+  rt.wait = declareRuntimeFn(
+      module, builder, "fpga_gemm_wait",
+      LLVM::LLVMFunctionType::get(i32Ty, {ptrTy}, /*isVarArg=*/false));
+  return rt;
 }
 
 static LLVM::LLVMFuncOp getOrDeclareRuntime(ModuleOp module,
@@ -365,11 +465,39 @@ struct OutputBlock {
   SmallVector<unsigned> tiles; // indices into the pass's tile list, in order
   tensor::InsertSliceOp insert;
 
-  // Where %R comes from: an argument of the function, or the insert_slice
-  // of an earlier block of the same chain.
-  bool rootIsArgument = false;
+  // Where %R comes from: a buffer nothing else reaches -- a tensor argument
+  // of the function, or the restrict, writable to_tensor of a row-major
+  // memref that --affine-matmul-to-systolic brackets a GEMM's output with
+  // -- or the insert_slice of an earlier block of the same chain.
+  bool rootIsExclusiveBuffer = false;
   Operation *previousInsert = nullptr;
 };
+
+/// The restrict, writable to_tensor of a row-major memref of the tensor's
+/// own shape (the identity layout, or a strided view with unit column
+/// stride -- static or not: the one the affine front end takes of a memref
+/// argument, or of the block a run-time offset names): the one tensor view
+/// of that buffer, which the lowering may therefore write through directly
+/// (the front end's bracket of a GEMM's output, bufferization.to_tensor %C
+/// restrict writable ... materialize_in_destination %result in %C). A
+/// dynamic offset or row stride is read from the memref at run time
+/// (memref.extract_strided_metadata), see lowerOutputBlock.
+static bool isExclusiveBufferView(Value r) {
+  auto toTensor = r.getDefiningOp<bufferization::ToTensorOp>();
+  if (!toTensor || !toTensor.getRestrict() || !toTensor.getWritable())
+    return false;
+  auto memrefTy = dyn_cast<MemRefType>(toTensor.getBuffer().getType());
+  auto tensorTy = dyn_cast<RankedTensorType>(r.getType());
+  if (!memrefTy || !tensorTy || memrefTy.getRank() != 2 ||
+      !memrefTy.hasStaticShape() ||
+      memrefTy.getShape() != tensorTy.getShape())
+    return false;
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (failed(memrefTy.getStridesAndOffset(strides, offset)))
+    return false;
+  return strides.size() == 2 && strides[1] == 1;
+}
 
 static std::optional<OutputBlock>
 matchOutputBlock(unsigned head, ArrayRef<MatmulTileOp> tiles,
@@ -412,12 +540,14 @@ matchOutputBlock(unsigned head, ArrayRef<MatmulTileOp> tiles,
     return std::nullopt;
 
   if (auto arg = dyn_cast<BlockArgument>(r))
-    block.rootIsArgument =
+    block.rootIsExclusiveBuffer =
         arg.getOwner()->isEntryBlock() &&
         isa<FunctionOpInterface>(arg.getOwner()->getParentOp());
+  else if (isExclusiveBufferView(r))
+    block.rootIsExclusiveBuffer = true;
   else
     block.previousInsert = r.getDefiningOp<tensor::InsertSliceOp>();
-  if (!block.rootIsArgument && !block.previousInsert)
+  if (!block.rootIsExclusiveBuffer && !block.previousInsert)
     return std::nullopt;
   return block;
 }
@@ -455,8 +585,12 @@ static SmallVector<bool> findInterleavedBlocks(ArrayRef<OutputBlock> blocks,
 class RuntimeCallLowering {
 public:
   RuntimeCallLowering(IRRewriter &rewriter, LLVM::LLVMFuncOp runtimeFn,
-                      ArrayRef<MatmulTileOp> tiles, TileCapacity maxTile)
-      : rewriter(rewriter), runtimeFn(runtimeFn), maxTile(maxTile) {
+                      std::optional<AsyncRuntime> asyncRuntime,
+                      ArrayRef<MatmulTileOp> tiles,
+                      ArrayRef<FpgaInvocation> invocations,
+                      TileCapacity maxTile)
+      : rewriter(rewriter), runtimeFn(runtimeFn), asyncRuntime(asyncRuntime),
+        maxTile(maxTile) {
     // A function argument that is only ever sliced into A and B tiles is
     // read through one buffer for the whole function: every one of those
     // slices is staged from it, and nothing writes it. (One to_buffer per
@@ -474,63 +608,325 @@ public:
           llvm::hasNItems(source.getUses(), uses))
         sharedSources.insert(source);
     }
+
+    if (asyncRuntime) {
+      rewriter.setListener(&listener);
+      allTiles.assign(tiles.begin(), tiles.end());
+      for (auto [op, inv] : llvm::zip_equal(tiles, invocations)) {
+        GemmState &g = gemms[inv.gemm];
+        if (!g.firstTile) {
+          g.firstTile = op;
+          g.firstBlock = op->getBlock();
+          g.firstTileId = inv.tile;
+        }
+        ++g.tileCount;
+        if (inv.tile == g.firstTileId)
+          g.k += inv.k;
+        tileGemm[MatmulTileOp(op).getOperation()] = &g;
+      }
+    }
   }
 
-  /// One output block: C staged once, accumulated by every invocation.
+  ~RuntimeCallLowering() {
+    if (asyncRuntime)
+      rewriter.setListener(nullptr);
+  }
+
+  /// Asynchronous mode: the tiles of one GEMM must share a block, since the
+  /// GEMM is opened before its first tile and waited for in that block.
+  LogicalResult checkAsyncLayout(ArrayRef<MatmulTileOp> tiles,
+                                 ArrayRef<FpgaInvocation> invocations) {
+    for (auto [op, inv] : llvm::zip_equal(tiles, invocations)) {
+      MatmulTileOp tile = op;
+      Operation *first = gemms[inv.gemm].firstTile;
+      if (tile->getBlock() != first->getBlock())
+        return tile.emitError("the asynchronous FPGA lowering needs every "
+                              "matmul_tile of a GEMM (systolic.gemm = ")
+               << inv.gemm << ") in one block; this one is not in the block "
+                              "of the GEMM's first tile";
+    }
+    return success();
+  }
+
+  /// Asynchronous mode: open every GEMM before its first tile, while every
+  /// tile is still in place.
+  void beginGemms() {
+    for (auto &[id, g] : gemms) {
+      MatmulTileOp first = cast<MatmulTileOp>(g.firstTile);
+      Location loc = first.getLoc();
+      rewriter.setInsertionPoint(first);
+      currentGemm = &g;
+      // M x N of the GEMM: the whole output when the first tile's C is a
+      // block of it, else that tile's own C.
+      int64_t m = 0, n = 0;
+      if (tensor::ExtractSliceOp slice = stageableSlice(first.getCIn())) {
+        auto srcTy = cast<RankedTensorType>(slice.getSource().getType());
+        m = srcTy.getDimSize(0);
+        n = srcTy.getDimSize(1);
+      } else {
+        auto cTy = cast<RankedTensorType>(first.getCIn().getType());
+        m = cTy.getDimSize(0);
+        n = cTy.getDimSize(1);
+      }
+      LLVM::CallOp begin = LLVM::CallOp::create(
+          rewriter, loc, asyncRuntime->begin,
+          ValueRange{i32(loc, m), i32(loc, n), i32(loc, g.k),
+                     i32(loc, g.tileCount)});
+      g.handle = begin->getResult(0);
+      g.beginOp = begin.getOperation();
+      g.m = m;
+      g.n = n;
+      currentGemm = nullptr;
+    }
+    // What each GEMM reads and writes through the front end's views, for
+    // the ordering below (waitGemms): a GEMM that touches a buffer an
+    // earlier one writes waits for it first.
+    for (MatmulTileOp op : allTiles) {
+      auto it = tileGemm.find(op.getOperation());
+      if (it == tileGemm.end())
+        continue;
+      GemmState &g = *it->second;
+      collectViews(op.getA(), g.readViews);
+      collectViews(op.getB(), g.readViews);
+      collectViews(op.getCIn(), g.writeViews);
+    }
+  }
+
+  /// One output block: C staged once, accumulated by every invocation --
+  /// or, asynchronously, every invocation submitted with a pointer into
+  /// the output buffer itself.
   void lowerOutputBlock(const OutputBlock &block,
                         ArrayRef<MatmulTileOp> tiles,
                         ArrayRef<FpgaInvocation> invocations) {
     tensor::ExtractSliceOp extract = block.extract;
     Location loc = extract.getLoc();
     const FpgaInvocation &firstInv = invocations[block.tiles.front()];
+    GemmState *g = asyncRuntime ? &gemms[firstInv.gemm] : nullptr;
+    currentGemm = g;
 
     // %R's buffer, the m x n block of it, and the tile it is staged in.
     rewriter.setInsertionPoint(extract);
     Value r = extract.getSource();
     auto rTy = cast<RankedTensorType>(r.getType());
-    Value rMemref = tensorToMemref(rewriter, loc, r, rTy, /*readOnly=*/false);
-    Value cBlock = memref::SubViewOp::create(
-        rewriter, loc, rMemref, extract.getStaticOffsets(),
-        extract.getStaticSizes(), extract.getStaticStrides());
-    Value cTile = scratchTile(loc, scratchFor(extract).c,
-                              {firstInv.m, firstInv.n});
-    memref::CopyOp::create(rewriter, loc, cBlock, cTile);
-    Value cPtr = memrefToLLVMPtr(rewriter, loc, cTile);
+    Value rMemref = rootBuffer(loc, r, rTy);
+    Value cPtr;
+    Value cTile, cBlock;
+    Value ldc;
+    if (asyncRuntime) {
+      // The block's top-left element in the buffer of %R, through its
+      // layout: the identity, or the row-major strided view the affine
+      // front end takes of a memref argument (isExclusiveBufferView). A
+      // static offset and row stride fold into the pointer here; a dynamic
+      // one -- the view of a block a run-time offset names -- is read from
+      // the memref's descriptor at run time and the pointer computed from
+      // it, so the offset's actual value reaches the runtime.
+      ArrayRef<int64_t> offsets = extract.getStaticOffsets();
+      auto memrefTy = cast<MemRefType>(rMemref.getType());
+      SmallVector<int64_t> strides;
+      int64_t offset = 0;
+      if (failed(memrefTy.getStridesAndOffset(strides, offset))) {
+        strides = {rTy.getDimSize(1), 1};
+        offset = 0;
+      }
+      if (!ShapedType::isDynamic(offset) && !ShapedType::isDynamic(strides[0])) {
+        ldc = i32(loc, strides[0]);
+        cPtr = elementPtr(loc, rMemref,
+                          offset + offsets[0] * strides[0] + offsets[1] * strides[1]);
+      } else {
+        auto meta = memref::ExtractStridedMetadataOp::create(rewriter, loc, rMemref);
+        Value rowStride = meta.getStrides()[0];
+        Value base = memref::ExtractAlignedPointerAsIndexOp::create(
+            rewriter, loc, meta.getBaseBuffer());
+        // element = offset + o0 * stride0 + o1 * stride1 (stride1 is 1)
+        Value linear = meta.getOffset();
+        if (offsets[0] != 0)
+          linear = arith::AddIOp::create(
+              rewriter, loc, linear,
+              arith::MulIOp::create(
+                  rewriter, loc, rowStride,
+                  arith::ConstantIndexOp::create(rewriter, loc, offsets[0])));
+        if (offsets[1] != 0)
+          linear = arith::AddIOp::create(
+              rewriter, loc, linear,
+              arith::ConstantIndexOp::create(rewriter, loc, offsets[1]));
+        Value bytes = arith::MulIOp::create(
+            rewriter, loc, linear, arith::ConstantIndexOp::create(rewriter, loc, 4));
+        Value addr = arith::AddIOp::create(rewriter, loc, base, bytes);
+        Value asI64 = arith::IndexCastOp::create(rewriter, loc,
+                                                 rewriter.getI64Type(), addr);
+        cPtr = LLVM::IntToPtrOp::create(
+            rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+            asI64);
+        ldc = arith::IndexCastOp::create(rewriter, loc, rewriter.getI32Type(),
+                                         rowStride);
+      }
+    } else {
+      cBlock = memref::SubViewOp::create(
+          rewriter, loc, rMemref, extract.getStaticOffsets(),
+          extract.getStaticSizes(), extract.getStaticStrides());
+      cTile = scratchTile(loc, scratchFor(extract).c, {firstInv.m, firstInv.n});
+      memref::CopyOp::create(rewriter, loc, cBlock, cTile);
+      cPtr = memrefToLLVMPtr(rewriter, loc, cTile);
+    }
 
     for (unsigned idx : block.tiles) {
       MatmulTileOp op = tiles[idx];
       rewriter.setInsertionPoint(op);
-      emitCall(op, invocations[idx], cPtr);
+      if (asyncRuntime)
+        emitAsyncCall(op, invocations[idx], g->handle, cPtr, ldc);
+      else
+        emitCall(op, invocations[idx], cPtr);
     }
 
     tensor::InsertSliceOp insert = block.insert;
     rewriter.setInsertionPoint(insert);
-    memref::CopyOp::create(rewriter, loc, cTile, cBlock);
+    if (!asyncRuntime)
+      memref::CopyOp::create(rewriter, loc, cTile, cBlock);
     Value result = bufferization::ToTensorOp::create(
         rewriter, loc, rTy, rMemref, /*restrict=*/true, /*writable=*/true);
     rewriter.replaceOp(insert, result);
+    if (g) {
+      g->results.push_back(result);
+      resultOwner[result] = g;
+    }
 
     for (unsigned idx : llvm::reverse(block.tiles)) {
       MatmulTileOp op = tiles[idx];
       rewriter.eraseOp(op);
     }
     rewriter.eraseOp(extract);
+    currentGemm = nullptr;
   }
 
   /// A matmul_tile outside an output block: C is read (c_in) and written
   /// (the accumulated result) in place in a buffer of the c_in tensor.
   void lowerInvocation(MatmulTileOp op, const FpgaInvocation &inv) {
     Location loc = op.getLoc();
+    GemmState *g = asyncRuntime ? &gemms[inv.gemm] : nullptr;
+    currentGemm = g;
     rewriter.setInsertionPoint(op);
 
     Value cMemref = tensorToMemref(rewriter, loc, op.getCIn(), inv.cTy,
                                    /*readOnly=*/false);
-    emitCall(op, inv, memrefToLLVMPtr(rewriter, loc, cMemref));
+    if (asyncRuntime)
+      emitAsyncCall(op, inv, g->handle, elementPtr(loc, cMemref, 0),
+                    i32(loc, inv.n));
+    else
+      emitCall(op, inv, memrefToLLVMPtr(rewriter, loc, cMemref));
 
-    // The runtime has accumulated the result into cMemref.
+    // The runtime has accumulated (or, asynchronously, will accumulate) the
+    // result into cMemref.
     auto toTensor = bufferization::ToTensorOp::create(
         rewriter, loc, inv.cTy, cMemref, /*restrict=*/true, /*writable=*/true);
     rewriter.replaceOp(op, toTensor.getResult());
+    if (g) {
+      g->results.push_back(toTensor.getResult());
+      resultOwner[toTensor.getResult()] = g;
+    }
+    currentGemm = nullptr;
+  }
+
+  /// Asynchronous mode: every GEMM is waited for before the first op that
+  /// reads any of its results -- the earliest user, in the GEMM's block,
+  /// of a result tensor that is not one of the ops this lowering created
+  /// for the GEMM itself -- or, with no such reader, at the end of the
+  /// block. Independent GEMMs of one function therefore overlap on the
+  /// FPGA, and a GEMM that reads another's result waits for it first.
+  ///
+  /// A reader that comes before the GEMM's last submit (a tile outside an
+  /// output block: its result is inserted into the full matrix at once)
+  /// splits the GEMM: the tiles submitted so far are waited for there and
+  /// the rest go under a new fpga_gemm_begin, since the runtime refuses a
+  /// submit after the wait. The split can only fall between output tiles
+  /// -- the runtime accumulates a tile's K folds within one GEMM, so a tile
+  /// with folds on both sides would never complete -- and is refused
+  /// otherwise.
+  LogicalResult waitGemms() {
+    for (auto &[id, g] : gemms) {
+      Block *block = g.firstBlock;
+      if (!block)
+        continue;
+      SmallVector<Operation *> readers;
+      for (Value result : g.results)
+        for (Operation *user : result.getUsers()) {
+          Operation *inBlock = block->findAncestorOpInBlock(*user);
+          if (inBlock && !g.internal.contains(inBlock))
+            readers.push_back(inBlock);
+        }
+      // A later GEMM of the block that reads or writes, through the front
+      // end's views, a buffer this one writes: its begin is a reader too
+      // (the memory dependence is not in SSA). Views of one buffer whose
+      // static boxes do not intersect are independent; a view at a
+      // run-time offset is not provably so and orders the GEMMs.
+      for (auto &[otherId, other] : gemms) {
+        if (&other == &g || !other.beginOp || other.beginOp->getBlock() != block ||
+            !g.beginOp || !g.beginOp->isBeforeInBlock(other.beginOp))
+          continue;
+        bool depends = false;
+        for (Value w : g.writeViews) {
+          for (Value r : other.readViews)
+            depends = depends || viewsMayAlias(w, r);
+          for (Value w2 : other.writeViews)
+            depends = depends || viewsMayAlias(w, w2);
+        }
+        if (depends)
+          readers.push_back(other.beginOp);
+      }
+      llvm::sort(readers, [](Operation *a, Operation *b) {
+        return a->isBeforeInBlock(b);
+      });
+      readers.erase(std::unique(readers.begin(), readers.end()),
+                    readers.end());
+
+      Location loc = g.handle.getLoc();
+      Value handle = g.handle;
+      size_t segment = 0; // the first submit of the GEMM currently open
+      for (Operation *reader : readers) {
+        size_t upto = segment;
+        while (upto < g.submits.size() &&
+               g.submits[upto].op->isBeforeInBlock(reader))
+          ++upto;
+        if (upto == segment)
+          continue; // nothing submitted since the last wait
+        const bool split = upto < g.submits.size();
+        if (split) {
+          DenseMap<int64_t, int64_t> folds;
+          for (size_t i = segment; i < upto; ++i)
+            ++folds[g.submits[i].tile];
+          for (size_t i = segment; i < upto; ++i) {
+            const Submit &sub = g.submits[i];
+            if (folds[sub.tile] != sub.kCount)
+              return reader->emitError("the asynchronous FPGA lowering must "
+                                       "wait for GEMM ")
+                     << id << " here, before all of its tiles are submitted, "
+                     << "but output tile " << sub.tile << " has only "
+                     << folds[sub.tile] << " of its " << sub.kCount
+                     << " K folds in by then; the runtime accumulates a "
+                        "tile's folds within one GEMM";
+          }
+        }
+        rewriter.setInsertionPoint(reader);
+        LLVM::CallOp::create(rewriter, loc, asyncRuntime->wait,
+                             ValueRange{handle});
+        segment = upto;
+        if (split) {
+          LLVM::CallOp begin = LLVM::CallOp::create(
+              rewriter, loc, asyncRuntime->begin,
+              ValueRange{i32(loc, g.m), i32(loc, g.n), i32(loc, g.k),
+                         i32(loc, static_cast<int64_t>(g.submits.size() -
+                                                       segment))});
+          handle = begin->getResult(0);
+          for (size_t i = segment; i < g.submits.size(); ++i)
+            g.submits[i].op->setOperand(0, handle);
+        }
+      }
+      if (segment < g.submits.size()) {
+        rewriter.setInsertionPoint(block->getTerminator());
+        LLVM::CallOp::create(rewriter, loc, asyncRuntime->wait,
+                             ValueRange{handle});
+      }
+    }
+    return success();
   }
 
   /// The A and B slices staged from their sources' buffers have no user
@@ -546,6 +942,133 @@ private:
     Value a, b, c;
   };
 
+  /// One fpga_tile_submit of a GEMM, in emission (block) order.
+  struct Submit {
+    Operation *op;
+    int64_t tile, kIndex, kCount;
+  };
+
+  /// What the asynchronous lowering keeps per GEMM.
+  struct GemmState {
+    Operation *firstTile = nullptr;   // in program order; erased by the lowering
+    Block *firstBlock = nullptr;
+    int64_t firstTileId = -1;
+    int64_t tileCount = 0;
+    int64_t m = 0, n = 0;             // the output, as fpga_gemm_begin was told
+    int64_t k = 0;                    // the reduction, from the first output tile's folds
+    Value handle;                     // the fpga_gemm_begin result
+    Operation *beginOp = nullptr;     // the fpga_gemm_begin call
+    SmallVector<Value> results;       // the to_tensor values standing for its output
+    SmallVector<Submit> submits;      // its fpga_tile_submit calls, in order
+    DenseSet<Operation *> internal;   // ops this lowering created for it
+    // The memrefs its tiles read (A, B) and write (C) through to_tensor
+    // views that are not this lowering's results -- the affine front end's
+    // brackets -- for the ordering of GEMMs that touch one buffer.
+    SmallVector<Value> readViews, writeViews;
+  };
+
+  /// A memref view's place in its root buffer: the root, and the box
+  /// [row0, row1) x [col0, col1) when the view's offsets and sizes are
+  /// static (a subview with static operands, or the whole static memref).
+  struct ViewBox {
+    Value root;
+    bool known = false;
+    int64_t row0 = 0, row1 = 0, col0 = 0, col1 = 0;
+  };
+
+  static Value viewRoot(Value memref) {
+    while (auto view = memref.getDefiningOp<ViewLikeOpInterface>())
+      memref = view.getViewSource();
+    return memref;
+  }
+
+  static ViewBox viewBox(Value memref) {
+    ViewBox b;
+    b.root = viewRoot(memref);
+    auto ty = dyn_cast<MemRefType>(memref.getType());
+    if (!ty || ty.getRank() != 2)
+      return b;
+    if (auto sub = memref.getDefiningOp<memref::SubViewOp>()) {
+      if (sub.getSource() != b.root || !sub.getOffsets().empty() ||
+          !sub.getSizes().empty() || !sub.getStrides().empty())
+        return b;   // a view of a view, or dynamic operands: unknown
+      ArrayRef<int64_t> off = sub.getStaticOffsets(), sz = sub.getStaticSizes(),
+                        st = sub.getStaticStrides();
+      b.row0 = off[0]; b.row1 = off[0] + (sz[0] - 1) * st[0] + 1;
+      b.col0 = off[1]; b.col1 = off[1] + (sz[1] - 1) * st[1] + 1;
+      b.known = true;
+      return b;
+    }
+    if (memref == b.root && ty.hasStaticShape()) {
+      b.row0 = 0; b.row1 = ty.getDimSize(0);
+      b.col0 = 0; b.col1 = ty.getDimSize(1);
+      b.known = true;
+    }
+    return b;
+  }
+
+  /// Whether two views may touch the same element: the same root buffer,
+  /// unless both are static boxes that do not intersect. Different roots
+  /// are taken as disjoint (the front end's restrict arguments; the
+  /// linalg path has no memref views at all).
+  static bool viewsMayAlias(Value a, Value b) {
+    ViewBox x = viewBox(a), y = viewBox(b);
+    if (x.root != y.root)
+      return false;
+    if (!x.known || !y.known)
+      return true;
+    const bool rowsApart = x.row1 <= y.row0 || y.row1 <= x.row0;
+    const bool colsApart = x.col1 <= y.col0 || y.col1 <= x.col0;
+    return !(rowsApart || colsApart);
+  }
+
+  /// The front-end views a tile operand reads: the to_tensor memrefs behind
+  /// its tensor, through extract_slice / insert_slice chains, ignoring
+  /// this lowering's own result tensors (those dependences are SSA).
+  void collectViews(Value tensor, SmallVectorImpl<Value> &out) {
+    for (unsigned hops = 0; tensor && hops < 64; ++hops) {
+      if (resultOwner.contains(tensor))
+        return;
+      if (auto toTensor = tensor.getDefiningOp<bufferization::ToTensorOp>()) {
+        if (isa<MemRefType>(toTensor.getBuffer().getType()) &&
+            !llvm::is_contained(out, toTensor.getBuffer()))
+          out.push_back(toTensor.getBuffer());
+        return;
+      }
+      if (auto slice = tensor.getDefiningOp<tensor::ExtractSliceOp>()) {
+        tensor = slice.getSource();
+        continue;
+      }
+      if (auto insert = tensor.getDefiningOp<tensor::InsertSliceOp>()) {
+        tensor = insert.getDest();
+        continue;
+      }
+      if (auto tile = tensor.getDefiningOp<MatmulTileOp>()) {
+        tensor = tile.getCIn();
+        continue;
+      }
+      return;
+    }
+  }
+
+  /// Every op created while a GEMM is being lowered is that GEMM's own: a
+  /// use of one of its result tensors by such an op (the next block's
+  /// to_buffer, a pointer computation) is not a read of the result.
+  struct InternalOpListener : public RewriterBase::Listener {
+    explicit InternalOpListener(RuntimeCallLowering &owner) : owner(owner) {}
+    void notifyOperationInserted(Operation *op,
+                                 OpBuilder::InsertPoint previous) override {
+      (void)previous;
+      if (owner.currentGemm)
+        owner.currentGemm->internal.insert(op);
+    }
+    RuntimeCallLowering &owner;
+  };
+
+  Value i32(Location loc, int64_t v) {
+    return arith::ConstantIntOp::create(rewriter, loc, v, 32);
+  }
+
   Scratch &scratchFor(Operation *op) {
     auto fn = op->getParentOfType<FunctionOpInterface>();
     Scratch &scratch = scratchOf[fn];
@@ -559,7 +1082,8 @@ private:
       };
       scratch.a = stackBuffer(maxTile.a);
       scratch.b = stackBuffer(maxTile.b);
-      scratch.c = stackBuffer(maxTile.c);
+      // The asynchronous lowering never stages C.
+      scratch.c = asyncRuntime ? scratch.a : stackBuffer(maxTile.c);
     }
     return scratch;
   }
@@ -572,10 +1096,47 @@ private:
         /*strides=*/ArrayRef<int64_t>{shape[1], 1});
   }
 
+  /// A pointer to element `linearIndex` of an identity-layout f32 memref.
+  Value elementPtr(Location loc, Value memref, int64_t linearIndex) {
+    Value base =
+        memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, memref);
+    if (linearIndex != 0) {
+      Value off = arith::ConstantIndexOp::create(rewriter, loc,
+                                                 linearIndex * 4);
+      base = arith::AddIOp::create(rewriter, loc, base, off);
+    }
+    Value asI64 = arith::IndexCastOp::create(rewriter, loc,
+                                             rewriter.getI64Type(), base);
+    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+    return LLVM::IntToPtrOp::create(rewriter, loc, ptrTy, asI64);
+  }
+
+  /// The buffer of an output block's %R: the memref behind a to_tensor (the
+  /// affine front end's bracket of C, or the previous block's result), else
+  /// a to_buffer of the tensor.
+  /// Another GEMM's result is read through a to_buffer of the tensor, so
+  /// that the read is a use of that result and waitGemms waits for it
+  /// first.
+  Value rootBuffer(Location loc, Value r, RankedTensorType rTy) {
+    auto owner = resultOwner.find(r);
+    if (owner != resultOwner.end() && owner->second != currentGemm)
+      return tensorToMemref(rewriter, loc, r, rTy, /*readOnly=*/false);
+    if (auto toTensor = r.getDefiningOp<bufferization::ToTensorOp>())
+      if (isa<MemRefType>(toTensor.getBuffer().getType()))
+        return toTensor.getBuffer();
+    return tensorToMemref(rewriter, loc, r, rTy, /*readOnly=*/false);
+  }
+
   /// The buffer a staged slice is read from: the function-wide one of a
-  /// shared source, else a to_buffer right here.
+  /// shared source, the memref behind a to_tensor (the affine front end's
+  /// view of an argument -- any layout, since the slice is copied out of it
+  /// with memref.copy), else a to_buffer right here.
   Value sourceBuffer(Location loc, Value source) {
     auto sourceTy = cast<RankedTensorType>(source.getType());
+    if (!resultOwner.contains(source))
+      if (auto toTensor = source.getDefiningOp<bufferization::ToTensorOp>())
+        if (isa<MemRefType>(toTensor.getBuffer().getType()))
+          return toTensor.getBuffer();
     if (!sharedSources.contains(source))
       return tensorToMemref(rewriter, loc, source, sourceTy,
                             /*readOnly=*/true);
@@ -608,25 +1169,47 @@ private:
     return memrefToLLVMPtr(rewriter, loc, buffer);
   }
 
-  /// The runtime call of one invocation, its C tile at cPtr.
+  /// The synchronous runtime call of one invocation, its C tile at cPtr.
   void emitCall(MatmulTileOp op, const FpgaInvocation &inv, Value cPtr) {
     Location loc = op.getLoc();
     Scratch &scratch = scratchFor(op);
     Value aPtr = stageOperand(loc, op.getA(), inv.aTy, scratch.a);
     Value bPtr = stageOperand(loc, op.getB(), inv.bTy, scratch.b);
 
-    auto i32 = [&](int64_t v) -> Value {
-      return arith::ConstantIntOp::create(rewriter, loc, v, 32);
-    };
-
     LLVM::CallOp::create(rewriter, loc, runtimeFn,
-                         ValueRange{i32(inv.m), i32(inv.k), i32(inv.n), aPtr,
-                                    bPtr, cPtr, i32(inv.deviceId),
-                                    i32(inv.startCycle), i32(inv.estCycles)});
+                         ValueRange{i32(loc, inv.m), i32(loc, inv.k),
+                                    i32(loc, inv.n), aPtr, bPtr, cPtr,
+                                    i32(loc, inv.deviceId),
+                                    i32(loc, inv.startCycle),
+                                    i32(loc, inv.estCycles)});
+  }
+
+  /// The asynchronous submit of one invocation: C at cPtr with row stride
+  /// ldc (an i32 value), in the GEMM `handle`. The operands are packed by
+  /// the runtime before the call returns, so the scratch tiles are reused
+  /// as before.
+  void emitAsyncCall(MatmulTileOp op, const FpgaInvocation &inv, Value handle,
+                     Value cPtr, Value ldc) {
+    Location loc = op.getLoc();
+    Scratch &scratch = scratchFor(op);
+    Value aPtr = stageOperand(loc, op.getA(), inv.aTy, scratch.a);
+    Value bPtr = stageOperand(loc, op.getB(), inv.bTy, scratch.b);
+
+    LLVM::CallOp call = LLVM::CallOp::create(
+        rewriter, loc, asyncRuntime->submit,
+        ValueRange{handle, i32(loc, inv.tile), i32(loc, inv.kIndex),
+                   i32(loc, inv.kCount), i32(loc, inv.m), i32(loc, inv.k),
+                   i32(loc, inv.n), aPtr, bPtr, cPtr, ldc,
+                   i32(loc, inv.deviceId), i32(loc, inv.startCycle),
+                   i32(loc, inv.estCycles)});
+    if (currentGemm)
+      currentGemm->submits.push_back(
+          {call.getOperation(), inv.tile, inv.kIndex, inv.kCount});
   }
 
   IRRewriter &rewriter;
   LLVM::LLVMFuncOp runtimeFn;
+  std::optional<AsyncRuntime> asyncRuntime;
   // Scratch tile sizes: the largest tiles any accelerator of the bitstream
   // takes, from its physical K_MAX.
   TileCapacity maxTile;
@@ -634,7 +1217,15 @@ private:
   SmallVector<tensor::ExtractSliceOp> stagedSlices;
   llvm::DenseSet<Value> sharedSources;
   DenseMap<Value, Value> sharedBuffers;
+  // Asynchronous mode.
+  std::map<int64_t, GemmState> gemms;   // ordered: begins in GEMM order
+  GemmState *currentGemm = nullptr;
+  SmallVector<MatmulTileOp> allTiles;
+  DenseMap<Operation *, GemmState *> tileGemm;
+  DenseMap<Value, GemmState *> resultOwner;  // this lowering's result tensors
+  InternalOpListener listener{*this};
 };
+
 
 struct LowerSystolicMatmulTileToFpgaPass
     : public PassWrapper<LowerSystolicMatmulTileToFpgaPass,
@@ -648,9 +1239,11 @@ struct LowerSystolicMatmulTileToFpgaPass
       : PassWrapper(other) {
     copyOptionValuesFrom(&other);
   }
-  LowerSystolicMatmulTileToFpgaPass(int64_t kMax8x8, int64_t kMax4x4) {
+  LowerSystolicMatmulTileToFpgaPass(int64_t kMax8x8, int64_t kMax4x4,
+                                    bool asynchronous = false) {
     physKMax8x8 = kMax8x8;
     physKMax4x4 = kMax4x4;
+    async = asynchronous;
   }
 
   // The loaded bitstream's reduction capacity per geometry: the synthesis
@@ -667,6 +1260,17 @@ struct LowerSystolicMatmulTileToFpgaPass
       llvm::cl::desc("K_MAX_4X4 of the loaded bitstream: reduction steps "
                      "one invocation of each 4x4 accelerator holds"),
       llvm::cl::init(16)};
+  // The asynchronous runtime (runtime/fpga_async_runtime.h): one
+  // fpga_gemm_begin per GEMM, one fpga_tile_submit per tile, one
+  // fpga_gemm_wait before the GEMM's result is read. Needs the
+  // systolic.gemm/tile/k_index/k_count attributes on every tile and a
+  // bitstream with the completion record (docs/ASYNC.md).
+  Option<bool> async{
+      *this, "async",
+      llvm::cl::desc("Emit calls of the asynchronous runtime (fpga_gemm_begin, "
+                     "fpga_tile_submit, fpga_gemm_wait) instead of one "
+                     "synchronous fpga_matmul_tiled_auto_scheduled per tile"),
+      llvm::cl::init(false)};
 
   StringRef getArgument() const final {
     return "lower-systolic-matmul-tile-to-fpga";
@@ -712,7 +1316,8 @@ struct LowerSystolicMatmulTileToFpgaPass
     for (MatmulTileOp op : tiles) {
       if (FlatSymbolRefAttr ref = op.getDeviceAttr())
         usedDevices.insert(ref.getRootReference().getValue());
-      FailureOr<FpgaInvocation> inv = checkInvocation(op, module, physK);
+      FailureOr<FpgaInvocation> inv =
+          checkInvocation(op, module, physK, async);
       if (failed(inv)) {
         failedAny = true;
         continue;
@@ -733,7 +1338,12 @@ struct LowerSystolicMatmulTileToFpgaPass
       return;
 
     OpBuilder builder(module.getContext());
-    LLVM::LLVMFuncOp runtimeFn = getOrDeclareRuntime(module, builder);
+    LLVM::LLVMFuncOp runtimeFn;
+    std::optional<AsyncRuntime> asyncRuntime;
+    if (async)
+      asyncRuntime = getOrDeclareAsyncRuntime(module, builder);
+    else
+      runtimeFn = getOrDeclareRuntime(module, builder);
 
     // Output blocks first (see "Operand staging"), then any tile outside
     // one.
@@ -757,10 +1367,12 @@ struct LowerSystolicMatmulTileToFpgaPass
 
     // A block is staged only if
     //  - %R is a buffer nothing else reaches: a function argument that only
-    //    this chain uses, or the result of the previous *staged* block of
-    //    the chain. Any other tensor (tensor.empty, linalg.fill, a loop-
-    //    carried value, ...) can share its buffer in place with tensors
-    //    that the restrict to_tensor would hide from bufferization;
+    //    this chain uses, the restrict writable to_tensor of a memref that
+    //    only this chain uses (the affine front end's output bracket), or
+    //    the result of the previous *staged* block of the chain. Any other
+    //    tensor (tensor.empty, linalg.fill, a loop-carried value, ...) can
+    //    share its buffer in place with tensors that the restrict to_tensor
+    //    would hide from bufferization;
     //  - it does not interleave with another block, since all blocks of a
     //    function accumulate in the same C scratch tile.
     // Everything else goes through bufferization as tensors.
@@ -770,7 +1382,7 @@ struct LowerSystolicMatmulTileToFpgaPass
     llvm::DenseSet<Operation *> stagedInserts;
     for (auto [block, overlaps] : llvm::zip_equal(candidates, interleaved)) {
       const bool safeRoot =
-          block.rootIsArgument ||
+          block.rootIsExclusiveBuffer ||
           (block.previousInsert && stagedInserts.contains(block.previousInsert));
       if (overlaps || !safeRoot)
         continue;
@@ -781,8 +1393,16 @@ struct LowerSystolicMatmulTileToFpgaPass
     }
 
     IRRewriter rewriter(module.getContext());
-    RuntimeCallLowering lowering(rewriter, runtimeFn, tiles,
-                                 maxTileElements(physK));
+    RuntimeCallLowering lowering(rewriter, runtimeFn, asyncRuntime, tiles,
+                                 invocations, maxTileElements(physK));
+
+    if (async) {
+      if (failed(lowering.checkAsyncLayout(tiles, invocations))) {
+        signalPassFailure();
+        return;
+      }
+      lowering.beginGemms();
+    }
 
     for (const OutputBlock &block : blocks)
       lowering.lowerOutputBlock(block, tiles, invocations);
@@ -791,7 +1411,15 @@ struct LowerSystolicMatmulTileToFpgaPass
       if (!inBlock[i])
         lowering.lowerInvocation(tiles[i], invocations[i]);
 
+    // The staged slices go first: a slice of a GEMM's result that another
+    // GEMM stages from would otherwise count as a reader of that result and
+    // pull the wait ahead of the staging copy it feeds.
     lowering.eraseStagedSlices();
+
+    if (async && failed(lowering.waitGemms())) {
+      signalPassFailure();
+      return;
+    }
 
     // Every matmul_tile is now a runtime call, so systolic.device is
     // compile-time metadata only and nothing references it any more.
@@ -813,6 +1441,13 @@ mlir::systolic::createTileMatmulForFpgaPass(int64_t physKMax8x8,
                                             int64_t physKMax4x4) {
   return std::make_unique<LowerSystolicMatmulTileToFpgaPass>(physKMax8x8,
                                                              physKMax4x4);
+}
+
+std::unique_ptr<Pass>
+mlir::systolic::createTileMatmulForFpgaPass(int64_t physKMax8x8,
+                                            int64_t physKMax4x4, bool async) {
+  return std::make_unique<LowerSystolicMatmulTileToFpgaPass>(
+      physKMax8x8, physKMax4x4, async);
 }
 
 void mlir::systolic::registerTileMatmulForFpgaPass() {

@@ -93,7 +93,7 @@ void modulo(float a[restrict 64]) {
 }
 
 void downward(float a[restrict 64]) {
-  for (int i = 63; i >= 0; i--)
+  for (int i = 63; i >= 0; i++)
     a[i] = 0.0f;
 }
 
@@ -132,7 +132,7 @@ void int_value(float a[restrict 64]) {
 }
 
 // Expected diagnostics (absolute positions in this file):
-// SYMBOLIC: unsupported.c:33:23: error: 'n' is not an integer constant (loop bounds and steps must be static)
+// SYMBOLIC: unsupported.c:33:23: error: the loop bound must be an integer constant or an affine expression of the enclosing loop counters
 // WHILE: unsupported.c:38:3: error: local variables are not supported (only for-loop counters)
 // IF: unsupported.c:45:5: error: statement 'IfStmt' is not supported
 // CALL: unsupported.c:52:12: error: expression 'CallExpr' is not supported
@@ -142,8 +142,8 @@ void int_value(float a[restrict 64]) {
 // WRITTEN: unsupported.c:78:32: error: the loop counter is modified in the loop body
 // NONAFFINE: unsupported.c:87:9: error: subscript multiplies two non-constant terms; not an affine expression
 // MODULO: unsupported.c:92:7: error: subscript is not an affine expression of the loop counters
-// DOWN: unsupported.c:96:20: error: the loop condition must be 'counter < bound' or 'counter <= bound'
-// NE: unsupported.c:101:19: error: the loop condition must be 'counter < bound' or 'counter <= bound'
+// DOWN: unsupported.c:96:28: error: the loop step must be negative (the condition '>=' counts down)
+// NE: unsupported.c:101:19: error: the loop condition must be 'counter < bound', 'counter <= bound', 'counter > bound' or 'counter >= bound'
 // INT: unsupported.c:105:16: error: parameter 'a' of type 'int *restrict' is not a float/double array or scalar
 // RET: unsupported.c:110:1: error: only functions returning void are supported (got 'float')
 // OVERFLOW: unsupported.c:114:3: error: the loop counter could overflow 'int'

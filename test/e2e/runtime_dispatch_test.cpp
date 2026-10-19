@@ -210,9 +210,10 @@ int main(int argc, char **argv) {
   const int k4 = static_cast<int>(hw.k_max_4x4);
 
   if (mode == "--print-config") {
-    std::printf("K_MAX_8X8=%u\nK_MAX_4X4=%u\nSLAB_BYTES=%u\nPIPELINE_DEPTH=%u\nSOURCE=%s\n",
+    std::printf("K_MAX_8X8=%u\nK_MAX_4X4=%u\nSLAB_BYTES=%u\nPIPELINE_DEPTH=%u\n"
+                "COMPLETION_HEADER=%u\nSOURCE=%s\n",
                 hw.k_max_8x8, hw.k_max_4x4, hw.slab_bytes, hw.pipeline_depth,
-                hw.source);
+                hw.completion_header, hw.source);
     return 0;
   }
 

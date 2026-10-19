@@ -3,9 +3,13 @@
 # run_board.sh (--compile-only | --board-is-free) [PROGRAM.c ...]
 #
 # C programs compiled by systolic-cc for the FPGA (--runtime=board --verify)
-# and run on it: every offloaded call goes through the real runtime, DPTI and
-# the programmed 1x8x8 + 3x4x4 bitstream, and is checked against the same
-# function compiled for the CPU. The default programs are test/SystolicCC's,
+# and run on it: every offloaded call goes through the real runtime (the
+# asynchronous one on a bitstream with the completion record: every tile
+# submitted without waiting for the one before it, one wait per GEMM), DPTI
+# and the programmed 1x8x8 + 3x4x4 bitstream, and is checked against the same
+# function compiled for the CPU. With LD_PRELOAD=build/cosim/libftdi_cosim.so
+# and SYSTOLIC_DPTI_COSIM_SOCKET set the same binaries run on the Verilator
+# co-simulation instead (test/e2e/cosim). The default programs are test/SystolicCC's,
 # whose compiler correctness lit already checks on the software runtime
 # model; this script is the hardware run of the same binaries' code.
 #
@@ -73,9 +77,11 @@ for src in "${PROGRAMS[@]}"; do
   name="$(basename "$src" .c)"
   out="$OUT_ROOT/$name"
   mkdir -p "$out"
-  if ! "$CC" --runtime=board --verify --explain "$src" -o "$out/$name" \
+  # --fp-reassociation: offloading reassociates the fp sums (the strict
+  # default keeps every GEMM on the host; docs/AFFINE_GEMM_MAPPING.md section 6).
+  if ! "$CC" --runtime=board --fp-reassociation --verify --explain "$src" -o "$out/$name" \
       > "$out/compile.log" 2>&1 ||
-     ! "$CC" --runtime=soft "$src" -o "$out/$name.soft" \
+     ! "$CC" --runtime=soft --fp-reassociation "$src" -o "$out/$name.soft" \
       > "$out/compile.soft.log" 2>&1 ||
      ! "$SYSTOLIC_CFRONT_CLANG" -std=c11 "$src" -o "$out/$name.cpu" \
       > "$out/compile.cpu.log" 2>&1; then
@@ -124,7 +130,7 @@ for src in "${PROGRAMS[@]}"; do
   printf '  %-9s %s  (exit %d; GEMMs: %d FPGA, %d CPU, %d fell back to the CPU; %s hardware invocations; %s)\n' \
     "$verdict" "$name" "$rc" "$(grep -c 'FPGA Executed' "$out/gemms.txt")" \
     "$(grep -c 'CPU Executed' "$out/gemms.txt")" "$fell_back" \
-    "$(grep -c '^\[fpga-runtime\] job' "$out/run.log")" \
+    "$(grep -c -E '^\[fpga-runtime\] job|^\[fpga-async\] accumulate' "$out/run.log")" \
     "$(grep -c 'verified:' "$out/run.log") verified call(s)"
 done
 exit $status

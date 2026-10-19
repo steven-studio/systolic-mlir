@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic \
+// RUN: systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic=allow-fp-reassociation=true \
 // RUN:   --lower-systolic-matmul-tile-to-fpga --systolic-runtime-to-llvm %s \
 // RUN:   | FileCheck %s
 

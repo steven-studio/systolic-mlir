@@ -11,6 +11,7 @@
 //   systolic.matmul_tile ... on @acc_* est_cycles start_cycle
 //     --lower-systolic-matmul-tile-to-fpga     one runtime call per tile
 //   llvm.call @fpga_matmul_tiled_auto_scheduled(m, k, n, A, B, C, dev, ...)
+//     (async=true: @fpga_gemm_begin / @fpga_tile_submit / @fpga_gemm_wait)
 //     --systolic-runtime-to-llvm               bufferize, lower to LLVM
 //   LLVM dialect
 //
@@ -82,6 +83,14 @@ void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
   bufferization::buildBufferDeallocationPipeline(pm);
   pm.addPass(createConvertBufferizationToMemRefPass());
 
+  // Affine loops first: expand-strided-metadata rewrites a subview whose
+  // offset is dynamic into an affine.apply with that offset as a symbol, and
+  // an offset computed from an affine.for counter (a batched GEMM's batch
+  // index, ISSUE-006) is an affine dimension, which the apply's verifier
+  // refuses as a symbol. Once the loops are scf.for the operand is neither,
+  // which affine.apply allows; the applies expand-strided-metadata itself
+  // creates are lowered by the second pass.
+  pm.addPass(createLowerAffinePass());
   pm.addPass(memref::createExpandStridedMetadataPass());
   pm.addPass(createLowerAffinePass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
@@ -96,9 +105,10 @@ void mlir::systolic::buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm) {
 void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm,
                                                int64_t physKMax8x8,
                                                int64_t physKMax4x4,
-                                               double sharedReadBytesPerCycle) {
+                                               double sharedReadBytesPerCycle,
+                                               bool async) {
   pm.addPass(createSystolicBinarySearchTileMatmulPass(sharedReadBytesPerCycle));
-  pm.addPass(createTileMatmulForFpgaPass(physKMax8x8, physKMax4x4));
+  pm.addPass(createTileMatmulForFpgaPass(physKMax8x8, physKMax4x4, async));
   buildSystolicRuntimeToLLVMPipeline(pm);
 }
 
@@ -123,6 +133,12 @@ struct SystolicFpgaPipelineOptions
                      "(default: the fleet's reference, 3.51; 0: each array "
                      "fills independently)"),
       llvm::cl::init(::systolic::fpga::kSharedReadWordsPerCycle)};
+  Option<bool> async{
+      *this, "async",
+      llvm::cl::desc("Lower to the asynchronous runtime (fpga_gemm_begin / "
+                     "fpga_tile_submit / fpga_gemm_wait) instead of one "
+                     "synchronous call per tile"),
+      llvm::cl::init(false)};
 };
 } // namespace
 
@@ -141,6 +157,7 @@ void mlir::systolic::registerSystolicPipelines() {
         buildSystolicFpgaPipeline(
             pm, options.physKMax8x8, options.physKMax4x4,
             ::systolic::fpga::sharedReadBytesPerCycle(
-                options.sharedReadWordsPerCycle));
+                options.sharedReadWordsPerCycle),
+            options.async);
       });
 }

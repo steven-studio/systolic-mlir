@@ -54,17 +54,21 @@ case "$BACKEND" in
     cfg="$("$ROOT/build/bin/runtime-dispatch-test" --print-config)"
     k8="$(sed -n 's/^K_MAX_8X8=//p' <<< "$cfg")"
     k4="$(sed -n 's/^K_MAX_4X4=//p' <<< "$cfg")"
+    depth="$(sed -n 's/^PIPELINE_DEPTH=//p' <<< "$cfg")"
+    [[ "$depth" =~ ^[1-9][0-9]*$ ]] || depth=1
     RUNTIME=("$ROOT/runtime/offload/board_stats.c" -I"$ROOT/runtime" -I"$ROOT/runtime/offload"
              "$ROOT/build/runtime/libsystolic_fpga_runtime.a"
              $(pkg-config --libs libftdi1) -lstdc++)
     PHYS="--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8=$k8 phys-k-max-4x4=$k4"
-    FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$k8 k-max-4x4=$k4" ;;
+    FLEET="--systolic-declare-fpga-fleet=k-max-8x8=$k8 k-max-4x4=$k4 pipeline-depth=$depth" ;;
   *) echo "BACKEND must be soft or board" >&2; exit 2 ;;
 esac
 
 set -x
 "$SYSTOLIC_OPT" "$OUT/20-affine.mlir" -o /dev/null
-"$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true" \
+# allow-fp-reassociation: offloading reassociates the fp sums (the strict
+# default keeps every GEMM on the host; docs/AFFINE_GEMM_MAPPING.md section 6).
+"$SYSTOLIC_OPT" "$FLEET" "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" \
   "$OUT/20-affine.mlir" -o "$OUT/40-systolic.mlir"
 "$SYSTOLIC_OPT" "$PHYS" "$OUT/40-systolic.mlir" -o "$OUT/50-fpga.mlir"
 "$SYSTOLIC_OPT" --systolic-runtime-to-llvm "$OUT/50-fpga.mlir" \

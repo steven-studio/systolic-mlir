@@ -14,7 +14,7 @@
 // the program's results equal those of the same file compiled by clang alone
 // (an independent CPU build) and the in-program reference below.
 //
-// RUN: %systolic-cc --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: fallback.c:[[#FPGA_GEMM:]]:1: note: 'fpga_gemm' is offloaded: 10 systolic tile invocation(s)
 // PLAN-DAG: fallback.c:[[#TWO_NESTS:]]:1: note: 'two_nests' is offloaded: 2 systolic tile invocation(s)
 //
@@ -54,7 +54,7 @@
 // With --verify every result is also checked against the CPU reference, on
 // failure too: three offloaded calls (cpu_gemm is not offloaded); the last
 // fpga_gemm call fails at invocation 12.
-// RUN: %systolic-cc --verify %s -o %t.v > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 SOFT_RUNTIME_FAULT=fail SOFT_RUNTIME_FAULT_AT=12 %t.v > %t.v.out 2> %t.v.err
 // RUN: FileCheck %s --check-prefix=F12 --input-file=%t.v.out --match-full-lines
 // RUN: grep -v '^\[systolic-cc\]' %t.v.out | diff %t.cpu.out -

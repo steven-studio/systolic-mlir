@@ -8,7 +8,9 @@
 // term, so the cost model prices the tile at its compute term: the 4x4
 // array finishes it in k + 2*4 - 2 + 95 = 105 cycles against
 // 4 + 2*8 - 2 + 95 = 113 on the 8x8, so the binary search puts it on the
-// first 4x4. K = 4 <= k_max: one invocation.
+// first 4x4. K = 4 <= k_max: one invocation -- fold 0 of 1 of output block 0
+// of GEMM 0, as the tile's systolic.gemm/tile/k_index/k_count attributes
+// say (docs/ASYNC.md).
 
 module {
   systolic.device @acc_8x8_0 rows = 8 cols = 8 dataflow = output_stationary k_max = 16 tile_overhead = 95
@@ -21,7 +23,7 @@ module {
   // CHECK: %[[CT:.*]] = tensor.extract_slice %[[C]][0, 0] [4, 4] [1, 1]
   // CHECK: %[[AT:.*]] = tensor.extract_slice %[[A]][0, 0] [4, 4] [1, 1]
   // CHECK: %[[BT:.*]] = tensor.extract_slice %[[B]][0, 0] [4, 4] [1, 1]
-  // CHECK: %[[T:.*]] = systolic.matmul_tile %[[AT]], %[[BT]], %[[CT]] m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0 :
+  // CHECK: %[[T:.*]] = systolic.matmul_tile %[[AT]], %[[BT]], %[[CT]] m = 4 n = 4 k = 4 on @acc_4x4_0 est_cycles = 105 start_cycle = 0 {systolic.gemm = 0 : i64, systolic.k_count = 1 : i64, systolic.k_index = 0 : i64, systolic.tile = 0 : i64} :
   // CHECK: %[[R:.*]] = tensor.insert_slice %[[T]] into %[[C]][0, 0] [4, 4] [1, 1]
   // CHECK: return %[[R]]
   // CHECK-NOT: linalg.matmul

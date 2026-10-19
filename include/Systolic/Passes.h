@@ -87,6 +87,12 @@ std::unique_ptr<Pass> createTileMatmulForFpgaPass();
 /// hold physKMax4x4 reduction steps per invocation (K_MAX_8X8, K_MAX_4X4).
 std::unique_ptr<Pass> createTileMatmulForFpgaPass(int64_t physKMax8x8,
                                                   int64_t physKMax4x4);
+/// ... and, with async, emitting the asynchronous runtime's calls
+/// (fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait, docs/ASYNC.md)
+/// instead of one synchronous call per tile.
+std::unique_ptr<Pass> createTileMatmulForFpgaPass(int64_t physKMax8x8,
+                                                  int64_t physKMax4x4,
+                                                  bool async);
 void registerTileMatmulForFpgaPass();
 
 //===----------------------------------------------------------------------===//
@@ -104,6 +110,7 @@ void registerConv2DToFpgaPass();
 //===----------------------------------------------------------------------===//
 
 void registerTestAffineMatmulDiscoveryPass();
+void registerTestIntegerLatticePass();
 
 //===----------------------------------------------------------------------===//
 // The Linalg -> FPGA pipeline (SystolicPipelines.cpp), shared by systolic-opt
@@ -124,9 +131,12 @@ void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
 /// array fills independently). --systolic-fpga-pipeline defaults them to
 /// 16, 16 (the archived bitstream) and the fleet's shared read reference
 /// (Systolic/FpgaFleet.h).
+/// async: the FPGA lowering targets the asynchronous runtime
+/// (--systolic-fpga-pipeline="async=true", docs/ASYNC.md).
 void buildSystolicFpgaPipeline(OpPassManager &pm, int64_t physKMax8x8,
                                int64_t physKMax4x4,
-                               double sharedReadBytesPerCycle);
+                               double sharedReadBytesPerCycle,
+                               bool async = false);
 void registerSystolicPipelines();
 
 /// Dialects and bufferization external models the pipeline needs.

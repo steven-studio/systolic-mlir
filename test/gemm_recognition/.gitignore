@@ -1,0 +1,5 @@
+# batches of the unbounded generator are reproducible from their seed/index
+# (generator/gen_cases.py --reproduce); the registry, coverage and loop state are kept
+generated/batch_*/
+__pycache__/
+*.pyc

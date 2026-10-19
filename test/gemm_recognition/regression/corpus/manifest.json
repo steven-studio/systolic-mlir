@@ -1,0 +1,449 @@
+{
+ "kind": "regression_corpus",
+ "cases": [
+  {
+   "id": "gen_06c950c874b9",
+   "file": "gen_06c950c874b9.c",
+   "name": "gen_positive_kij_1x1x1_repeat_inside_K",
+   "set": "generated",
+   "category": "mutation_repeat_inside_K",
+   "kernel": "gen_06c950c874b9_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "repeated_2"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 1,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 2,
+     "ub_exclusive": 3,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 1,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "rr",
+     "role": "R",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      5,
+      1
+     ],
+     "subscripts": [
+      "i + 2",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      1,
+      1
+     ],
+     "subscripts": [
+      "k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      5,
+      1
+     ],
+     "subscripts": [
+      "i + 2",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 2,
+   "logical_extents": {
+    "I": 1,
+    "J": 1,
+    "K": 1
+   },
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -78,
+   "math_note": "",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/corpus/gen_06c950c874b9.c -o gen_06c950c874b9 && ./gen_06c950c874b9",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/corpus/gen_06c950c874b9.c -o gen_06c950c874b9 && ./gen_06c950c874b9",
+    "stages": "python3 scripts/run_showcase.py --case gen_06c950c874b9"
+   },
+   "origin": "failures/resolved/20261015-014240_gen_06c950c874b9",
+   "generated_from": {
+    "mode": "enumerate",
+    "seed": "enum",
+    "index": 106,
+    "family": "mutation",
+    "mutation": "repeat_inside_K",
+    "reproduce": "python3 generator/gen_cases.py --family mixed --reproduce enumerate:enum:106"
+   },
+   "note": "first recorded as a false positive by the loop; resolved as a specification refinement (failures/resolved/NOTE-001)"
+  },
+  {
+   "id": "gen_55eeb58cd4f7",
+   "file": "gen_55eeb58cd4f7.c",
+   "name": "gen_positive_kji_1x1x1_repeat_inside_K",
+   "set": "generated",
+   "category": "mutation_repeat_inside_K",
+   "kernel": "gen_55eeb58cd4f7_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "repeated_2"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "+=",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 0,
+     "ub_exclusive": 1,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 0,
+     "ub_exclusive": 1,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 2,
+     "ub_exclusive": 3,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "rr",
+     "role": "R",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      5,
+      1
+     ],
+     "subscripts": [
+      "i + 2",
+      "k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      1,
+      1
+     ],
+     "subscripts": [
+      "k",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      5,
+      1
+     ],
+     "subscripts": [
+      "i + 2",
+      "j"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 2,
+   "logical_extents": {
+    "I": 1,
+    "J": 1,
+    "K": 1
+   },
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": -38,
+   "math_note": "",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/corpus/gen_55eeb58cd4f7.c -o gen_55eeb58cd4f7 && ./gen_55eeb58cd4f7",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/corpus/gen_55eeb58cd4f7.c -o gen_55eeb58cd4f7 && ./gen_55eeb58cd4f7",
+    "stages": "python3 scripts/run_showcase.py --case gen_55eeb58cd4f7"
+   },
+   "origin": "failures/resolved/20261015-014240_gen_55eeb58cd4f7",
+   "generated_from": {
+    "mode": "enumerate",
+    "seed": "enum",
+    "index": 107,
+    "family": "mutation",
+    "mutation": "repeat_inside_K",
+    "reproduce": "python3 generator/gen_cases.py --family mixed --reproduce enumerate:enum:107"
+   },
+   "note": "first recorded as a false positive by the loop; resolved as a specification refinement (failures/resolved/NOTE-001)"
+  },
+  {
+   "id": "gen_d55b7b137c7c",
+   "file": "gen_d55b7b137c7c.c",
+   "name": "gen_positive_ijk_8x17x1_repeat_inside_K",
+   "set": "generated",
+   "category": "mutation_repeat_inside_K",
+   "kernel": "gen_d55b7b137c7c_kernel",
+   "mathematical_class": "gemm",
+   "is_valid_gemm": true,
+   "gemm_tags": [
+    "repeated_2"
+   ],
+   "c_program_valid": true,
+   "in_affine_c_subset": true,
+   "element_type": "float",
+   "statement": "=C+AB",
+   "kernel_style": "plain",
+   "loops": [
+    {
+     "var": "i",
+     "role": "I",
+     "lb": 0,
+     "ub_exclusive": 16,
+     "step": 2,
+     "cmp": "<",
+     "trip": 8
+    },
+    {
+     "var": "j",
+     "role": "J",
+     "lb": 3,
+     "ub_exclusive": 20,
+     "step": 1,
+     "cmp": "<",
+     "trip": 17
+    },
+    {
+     "var": "k",
+     "role": "K",
+     "lb": 1,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 1
+    },
+    {
+     "var": "rr",
+     "role": "R",
+     "lb": 0,
+     "ub_exclusive": 2,
+     "step": 1,
+     "cmp": "<",
+     "trip": 2
+    }
+   ],
+   "arrays": {
+    "a": {
+     "name": "A",
+     "dims": [
+      15,
+      3
+     ],
+     "subscripts": [
+      "i",
+      "2 * k"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "b": {
+     "name": "B",
+     "dims": [
+      3,
+      23
+     ],
+     "subscripts": [
+      "2 * k",
+      "j + 3"
+     ],
+     "restrict": true,
+     "elem": "float"
+    },
+    "c": {
+     "name": "C",
+     "dims": [
+      15,
+      23
+     ],
+     "subscripts": [
+      "i",
+      "j + 3"
+     ],
+     "restrict": true,
+     "elem": "float"
+    }
+   },
+   "repetitions": 2,
+   "logical_extents": {
+    "I": 8,
+    "J": 17,
+    "K": 1
+   },
+   "expected": {
+    "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand",
+    "runtime": "the program's own check must pass on every backend (kernel == references)"
+   },
+   "current_implementation": {
+    "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
+    "frontend": "translated",
+    "recognition": "accept",
+    "hoisting_required": true,
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
+   },
+   "classification": "TRUE_POSITIVE",
+   "issue": null,
+   "has_independent_reference": true,
+   "reference_kinds": [
+    "direct",
+    "logical_view",
+    "python_oracle_checksum"
+   ],
+   "expected_checksum": 168,
+   "math_note": "",
+   "tested": false,
+   "how_to_run": {
+    "cpu": "cc -std=c11 -O1 showcase/corpus/gen_d55b7b137c7c.c -o gen_d55b7b137c7c && ./gen_d55b7b137c7c",
+    "soft": "build/bin/systolic-cc --runtime=soft --explain --verify -DGEMM_RECOGNITION_STATS showcase/corpus/gen_d55b7b137c7c.c -o gen_d55b7b137c7c && ./gen_d55b7b137c7c",
+    "stages": "python3 scripts/run_showcase.py --case gen_d55b7b137c7c"
+   },
+   "origin": "failures/resolved/20261015-014340_gen_d55b7b137c7c",
+   "generated_from": {
+    "mode": "random",
+    "seed": "777",
+    "index": 47,
+    "family": "mutation",
+    "mutation": "repeat_inside_K",
+    "reproduce": "python3 generator/gen_cases.py --family mutation --reproduce random:777:47"
+   },
+   "note": "first recorded as a false positive by the loop; resolved as a specification refinement (failures/resolved/NOTE-001)"
+  }
+ ]
+}

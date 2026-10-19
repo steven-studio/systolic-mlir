@@ -100,10 +100,10 @@ MEM_WRITE 那一欄是 host 端：每次 invocation 都要 MEM_WRITE 整塊 slab
    收益還不算小，所以不建議更淺。
 
 **證據不足的部分（照實說）**：RAMB18 與 timing 只有估計，沒有合成；beta 3.51 / 3.627
-不是本 bitstream 的實測值；head-of-line 與 readback 只在模擬中量過；目前的 runtime 一次
-只發一個 invocation（四顆陣列在板上今天不會同時執行），所以 `shared351` 的 makespan
-是「四顆同時執行」這個 RTL 做得到的情況的預測，不是現在板上的行為。**FPGA Board
-Regression：NOT RUN。**
+不是本 bitstream 的實測值；head-of-line 與 readback 只在模擬中量過；同步 runtime 一次
+只發一個 invocation，非同步 runtime（`docs/ASYNC.md`）四顆同時忙但只在 co-sim 跑過，所以
+`shared351` 的 makespan 是「四顆同時執行」這個 RTL 做得到的情況的預測，不是現在板上量到的
+行為。**FPGA Board Regression：NOT RUN。**
 
 ## 5. 重現
 
