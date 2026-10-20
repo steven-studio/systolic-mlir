@@ -45,6 +45,17 @@
 #                     backend behind the same stand-in stops after the
 #                     runtime layer's transport failure (cases NOT RUN), or
 #                     with --keep-going reports each case TRANSPORT
+#   mode F            runtime-async-test's mode F (a link failure the
+#                     co-simulation's stand-in injects) is NOT APPLICABLE on
+#                     the board and runs on the co-simulation: --list per
+#                     backend and from SYSTOLIC_DPTI_COSIM_SOCKET; naming F
+#                     on the board is refused before the link (exit 2); a
+#                     failed run (the stand-in, no socket) stays a failure
+#                     with F NOT APPLICABLE; an empty mode list is a
+#                     failure; run_e2e.sh refuses a runtime-async-test
+#                     without --backend, plans F per backend, and keeps a
+#                     runtime-dispatch-test failure in the runtime layer when
+#                     runtime-async-test passes
 # Exit status 0 only if every check passes (SKIPs do not fail).
 set -uo pipefail
 
@@ -444,6 +455,126 @@ else
         && has "$out" "E2E cases: 0/2 PASS on backend board; TRANSPORT 2" \
         && ok "board, no link, --keep-going: each case TRANSPORT, exit 4, runtime rc -3" \
         || bad "board, no link, --keep-going" "$(grep -E '_mixed|E2E' <<< "$out")"
+fi
+
+# ---- the asynchronous runtime's mode F: co-simulation only -------------------
+# runtime-async-test's mode F needs a link failure injected by the
+# co-simulation's stand-in for libftdi (SYSTOLIC_DPTI_COSIM_FAIL_WRITE; the
+# runtime never reads it): on the board it is NOT APPLICABLE -- neither a
+# pass nor a failure, the exit status is the other modes' -- and on the
+# co-simulation it runs. --list opens no link; the runs go to the stand-in
+# without a socket, so a link they opened would fail at once (rc -3).
+echo "== runtime-async-test: mode F NOT APPLICABLE on the board, run on the co-simulation"
+RTASYNC="$BUILD/bin/runtime-async-test"
+fhdr=$(cfg "k16_16_hdr.txt" 'K_MAX_8X8=16\nK_MAX_4X4=16\nCOMPLETION_HEADER=1\nPIPELINE_DEPTH=4\n')
+if [ ! -x "$RTASYNC" ]; then
+    bad "no $RTASYNC -- build first (cmake --build $BUILD)"
+else
+    lb=$(env -u SYSTOLIC_DPTI_COSIM_SOCKET SYSTOLIC_FPGA_CONFIG="$fhdr" "$RTASYNC" --list --backend board 2>&1); rb=$?
+    lc=$(env -u SYSTOLIC_DPTI_COSIM_SOCKET SYSTOLIC_FPGA_CONFIG="$fhdr" "$RTASYNC" --list --backend cosim 2>&1); rcs=$?
+    mb=$(grep '^mode ' <<< "$lb" | grep -v '^mode F  ')
+    mc=$(grep '^mode ' <<< "$lc" | grep -v '^mode F  ')
+    [ $rb -eq 0 ] && [ $rcs -eq 0 ] && [ -n "$mb" ] && [ "$mb" = "$mc" ] \
+        && [ "$(grep -c 'NOT APPLICABLE' <<< "$lb")" = 1 ] && grep -q '^mode F  .* -- NOT APPLICABLE on the board: ' <<< "$lb" \
+        && grep -q '^mode F  ' <<< "$lc" && ! has "$lc" "NOT APPLICABLE" \
+        && ok "--list per backend: the same modes; F alone NOT APPLICABLE, on the board alone" \
+        || bad "--list --backend board / cosim" "$lb
+$lc"
+    out=$(env -u SYSTOLIC_DPTI_COSIM_SOCKET SYSTOLIC_FPGA_CONFIG="$fhdr" "$RTASYNC" --list 2>&1)
+    out2=$(SYSTOLIC_DPTI_COSIM_SOCKET="$WORK/no.sock" SYSTOLIC_FPGA_CONFIG="$fhdr" "$RTASYNC" --list 2>&1)
+    has "$out" "backend: board (SYSTOLIC_DPTI_COSIM_SOCKET is not set)" && grep -q '^mode F  .*NOT APPLICABLE' <<< "$out" \
+        && has "$out2" "backend: cosim (SYSTOLIC_DPTI_COSIM_SOCKET is set)" && ! has "$out2" "NOT APPLICABLE" \
+        && ok "no --backend: SYSTOLIC_DPTI_COSIM_SOCKET decides (unset: board, F NOT APPLICABLE; set: cosim)" \
+        || bad "the backend from SYSTOLIC_DPTI_COSIM_SOCKET" "$out
+$out2"
+    if [ -z "$SHIM" ]; then
+        skip "runtime-async-test runs without a link: no libftdi_cosim.so under $BUILD"
+    else
+        nolink() { env -u SYSTOLIC_DPTI_COSIM_SOCKET LD_PRELOAD="$SHIM" SYSTOLIC_FPGA_CONFIG="$fhdr" "$RTASYNC" "$@" 2>&1; }
+        for list in F A,F; do
+            out=$(nolink --mode "$list" --backend board); rc=$?
+            [ $rc -eq 2 ] && has "$out" "RUNTIME ASYNC: NOT APPLICABLE -- mode F on the board; nothing was sent" \
+                && ! grep -qE '^\[(DPTI|fpga-)' <<< "$out" \
+                && ok "--mode $list --backend board: refused (exit 2) before the link opens" \
+                || bad "--mode $list --backend board (exit $rc)" "$out"
+        done
+        out=$(nolink --mode all --backend board); rc=$?
+        [ $rc -eq 3 ] && grep -q '^mode A (.*): TRANSPORT rc=-3$' <<< "$out" && grep -q '^mode F (.*): NOT APPLICABLE -- ' <<< "$out" \
+            && grep -qE '^RUNTIME ASYNC: FAIL -- TRANSPORT 1 \(first: rc=-3, mode A\); NOT RUN [0-9]+ \(first: rc=-14, mode B\); NOT APPLICABLE 1 \(mode F: co-simulation only\)$' <<< "$out" \
+            && ok "--mode all --backend board without a link: TRANSPORT (exit 3); F NOT APPLICABLE does not make it a pass" \
+            || bad "--mode all --backend board without a link (exit $rc)" "$out"
+        out=$(nolink --mode all --backend cosim); rc=$?
+        [ $rc -eq 3 ] && grep -q '^mode F (.*): NOT RUN rc=-14$' <<< "$out" && ! has "$out" "NOT APPLICABLE" \
+            && ok "--mode all --backend cosim without a link: F NOT RUN after the failure, never NOT APPLICABLE" \
+            || bad "--mode all --backend cosim without a link (exit $rc)" "$out"
+        out=$(nolink --mode A); rc=$?
+        [ $rc -eq 3 ] && grep -q '^mode A (.*): TRANSPORT rc=-3$' <<< "$out" && ! has "$out" "NOT APPLICABLE" \
+            && ok "--mode A (the board by default) without a link: TRANSPORT (exit 3), nothing NOT APPLICABLE" \
+            || bad "--mode A without a link (exit $rc)" "$out"
+        out=$(nolink --mode ,); rc=$?
+        [ $rc -eq 4 ] && grep -q '^RUNTIME ASYNC: FAIL -- no mode ran$' <<< "$out" \
+            && ok "--mode , (no mode): FAIL (exit 4), never a vacuous PASS" || bad "--mode , (exit $rc)" "$out"
+    fi
+
+    # run_e2e.sh plans mode F per backend.
+    out=$(SYSTOLIC_FPGA_CONFIG="$fhdr" bash "$RUN" --backend board --mode async --quick --build-dir "$BUILD" \
+              --check-config --out "$WORK/fb" 2>&1); rc=$?
+    [ $rc -eq 0 ] && grep -q '^   mode F  .*NOT APPLICABLE on the board' <<< "$out" && has "$out" "check-config: PASS" \
+        && ok "board --mode async --check-config: the plan has mode F NOT APPLICABLE" \
+        || bad "board --mode async --check-config (exit $rc)" "$(grep -E 'mode F|check-config' <<< "$out")"
+    simh="$WORK/cosim_hdr"; mkdir -p "$simh"; cp "$fhdr" "$simh/fpga_config.txt"
+    out=$(bash "$RUN" --backend cosim --mode async --quick --build-dir "$BUILD" --cosim-dir "$simh" \
+              --check-config --out "$WORK/fc" 2>&1); rc=$?
+    [ $rc -eq 0 ] && grep -q '^   mode F  ' <<< "$out" && ! has "$out" "NOT APPLICABLE" && has "$out" "check-config: PASS" \
+        && ok "cosim --mode async --check-config: the plan runs mode F" \
+        || bad "cosim --mode async --check-config (exit $rc)" "$(grep -E 'mode F|check-config' <<< "$out")"
+
+    # A runtime-async-test without --backend (an old build) is refused.
+    old="$WORK/oldbuild/bin"; mkdir -p "$old"
+    ln -s "$MATMUL" "$old/systolic-matmul"; ln -s "$RTTEST" "$old/runtime-dispatch-test"
+    printf '#!/bin/sh\necho "a runtime-async-test from before the backend option"\nexit 2\n' > "$old/runtime-async-test"
+    chmod +x "$old/runtime-async-test"
+    out=$(SYSTOLIC_FPGA_CONFIG="$fhdr" bash "$RUN" --backend board --mode async --quick --build-dir "$WORK/oldbuild" \
+              --check-config --out "$WORK/fo" 2>&1); rc=$?
+    [ $rc -eq 2 ] && has "$out" "predates --backend" \
+        && ok "run_e2e.sh --mode async with a runtime-async-test without --backend: refused (exit 2)" \
+        || bad "run_e2e.sh with an old runtime-async-test (exit $rc)" "$(tail -3 <<< "$out")"
+
+    # The runtime layer keeps a runtime-dispatch-test failure when
+    # runtime-async-test passes: stand-ins report a mismatch and a pass
+    # (canned, no link); the case then runs against the stand-in for libftdi
+    # without a socket (TRANSPORT).
+    if [ -n "$SHIM" ]; then
+        st="$WORK/stand-ins/bin"; mkdir -p "$st"
+        ln -s "$MATMUL" "$st/systolic-matmul"
+        cat > "$st/runtime-dispatch-test" <<EOF
+#!/usr/bin/env bash
+# --print-config and --list as the real one; a run reports a mismatch.
+case "\${1:-}" in --print-config|--list) exec "$RTTEST" "\$@" ;; esac
+"$RTTEST" --list | head -1
+echo "8x16x8 full tile, k = K_MAX, device 0 (8x8)  rc=0  MISMATCH"
+echo "RUNTIME DISPATCH: FAIL -- MISMATCH 1 (first: rc=0, 8x16x8 full tile, k = K_MAX, device 0 (8x8))"
+exit 1
+EOF
+        cat > "$st/runtime-async-test" <<EOF
+#!/usr/bin/env bash
+# --list (--backend ...) as the real one; a run reports a pass.
+case " \$* " in *" --list "*) exec "$RTASYNC" "\$@" ;; esac
+echo "mode A (one device (0), no staging): PASS"
+echo "RUNTIME ASYNC: PASS"
+exit 0
+EOF
+        chmod +x "$st/runtime-dispatch-test" "$st/runtime-async-test"
+        out=$(env -u SYSTOLIC_DPTI_COSIM_SOCKET LD_PRELOAD="$SHIM" SYSTOLIC_FPGA_CONFIG="$fhdr" bash "$RUN" \
+                  --backend board --mode async --quick --cases 4x4x4_mixed --build-dir "$WORK/stand-ins" \
+                  --out "$WORK/fs" 2>&1); rc=$?
+        [ $rc -eq 1 ] && grep -q '^runtime layer: FAIL -- MISMATCH (exit 1): .*; runtime-async-test PASS' <<< "$out" \
+            && ! grep -q '^runtime layer: PASS' <<< "$out" && grep -q '^E2E: FAIL -- runtime layer MISMATCH' <<< "$out" \
+            && ok "runtime-dispatch-test MISMATCH, runtime-async-test PASS: the runtime layer stays FAIL -- MISMATCH" \
+            || bad "runtime layer after a runtime-dispatch-test failure (exit $rc)" "$(grep -E '^(runtime layer|E2E)' <<< "$out")"
+    else
+        skip "the runtime layer after a runtime-dispatch-test failure: no libftdi_cosim.so under $BUILD"
+    fi
 fi
 
 echo

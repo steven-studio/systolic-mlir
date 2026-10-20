@@ -70,10 +70,14 @@
 #                     for. async: systolic-matmul --async, the asynchronous runtime
 #                     (fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait,
 #                     docs/ASYNC.md); the runtime layer step also runs
-#                     runtime-async-test, and the configuration must say
-#                     COMPLETION_HEADER=1 (a bitstream with the completion
-#                     record). The verdict checks that the lowered IR calls
-#                     the runtime of the chosen mode.
+#                     runtime-async-test --backend <this backend>, and the
+#                     configuration must say COMPLETION_HEADER=1 (a bitstream
+#                     with the completion record). Its mode F (a link
+#                     failure only the co-simulation's libftdi injects) is
+#                     NOT APPLICABLE on the board -- reported, never counted
+#                     as a pass -- and must PASS on the co-simulation. The
+#                     verdict checks that the lowered IR calls the runtime
+#                     of the chosen mode.
 #   --build-dir DIR   the CMake build directory (default: build)
 #   --cosim-dir DIR   the co-simulation to run (default: BUILD/cosim)
 #   --out DIR         where the cases and the summary go (default:
@@ -88,7 +92,8 @@
 # PASS, MISMATCH (numerical), CONFIG, TRANSPORT, SUBMISSION, INPUT, COMPILE,
 # FAIL, with the raw exit status and runtime return code -- or NOT RUN (K
 # beyond systolic-matmul's input limit; the runtime layer could not reach
-# the FPGA); 3. co-simulation only: an injected write failure must be
+# the FPGA); 3. co-simulation only (NOT APPLICABLE on the board, where no
+# write failure can be injected): an injected write failure must be
 # reported as a transport failure. Each case leaves
 # <out>/<case>/{input.txt,output.txt,ir/}; the summary is <out>/summary.txt.
 # Exit status: 0 everything that ran passed; 2 the configuration was refused
@@ -160,6 +165,8 @@ grep -q -- '--sync' "$MATMUL" || { echo "$MATMUL predates --sync -- rebuild it (
 if [ "$RTMODE" = async ]; then
     [ -x "$RTASYNC" ] || { echo "missing $RTASYNC -- build first (cmake --build $BUILD)" >&2; exit 2; }
     grep -q -- '--async' "$MATMUL" || { echo "$MATMUL predates --async -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
+    # An older runtime-async-test has no --backend: it would refuse the option.
+    grep -q -- '--backend' "$RTASYNC" || { echo "$RTASYNC predates --backend -- rebuild it (cmake --build $BUILD)" >&2; exit 2; }
 fi
 # An older runtime-dispatch-test has no --print-config and would run its
 # cases -- open the link -- when asked for the configuration.
@@ -518,7 +525,7 @@ if [ "$CHECK_ONLY" = 1 ]; then
     echo
     if [ "$RTMODE" = async ]; then
         echo "== runtime layer: the modes runtime-async-test would run"
-        "$RTASYNC" --list > "$OUT/runtime_async_plan.txt" 2>&1 || plan_rc=$?
+        "$RTASYNC" --list --backend "$BACKEND" > "$OUT/runtime_async_plan.txt" 2>&1 || plan_rc=$?
         sed 's/^/   /' "$OUT/runtime_async_plan.txt"
         echo
     fi
@@ -567,10 +574,17 @@ echo
 # staged behind the running job, two GEMMs interleaved, the fold order
 # checked bit for bit against the synchronous entry point, and the
 # refusals; a 16x16x32 GEMM (20 tiles) unless SYSTOLIC_E2E_ASYNC_GEMM says
-# otherwise. Its verdict joins the dispatch test's in "runtime layer".
+# otherwise. Its verdict joins the dispatch test's in "runtime layer": a
+# failure of runtime-dispatch-test keeps its class and text, and the
+# asynchronous runtime's result is added to it.
+# --backend: mode F (a link failure in the middle of a submission) needs the
+# write failure the co-simulation's libftdi injects; on the board it is
+# NOT APPLICABLE -- reported, neither a pass nor a failure, the exit status
+# is the other modes' -- and on the co-simulation it must PASS.
+ra_na=""
 if [ "$RTMODE" = async ] && [ "$rt_class" != TRANSPORT ] && [ "$rt_class" != CONFIG ]; then
-    echo "== runtime layer: the asynchronous runtime (runtime-async-test --mode all)"
-    "$RTASYNC" --mode all --gemm "${SYSTOLIC_E2E_ASYNC_GEMM:-16x16x32}" > "$OUT/runtime_async.txt" 2>&1
+    echo "== runtime layer: the asynchronous runtime (runtime-async-test --mode all --backend $BACKEND)"
+    "$RTASYNC" --mode all --backend "$BACKEND" --gemm "${SYSTOLIC_E2E_ASYNC_GEMM:-16x16x32}" > "$OUT/runtime_async.txt" 2>&1
     ra_rc=$?
     [ "$LIVE_SIM" = 1 ] && settle_sessions
     sed 's/^/   /' "$OUT/runtime_async.txt" | grep -v -E 'libftdi_cosim|^   \[fpga-(async|runtime)\] (timing|submit|stage|descriptor|completion|accumulate|hold|gemm|session)'
@@ -578,11 +592,25 @@ if [ "$RTMODE" = async ] && [ "$rt_class" != TRANSPORT ] && [ "$rt_class" != CON
         0) ra_class=PASS ;; 1) ra_class=MISMATCH ;; 2) ra_class=CONFIG ;;
         3) ra_class=TRANSPORT ;; 4) ra_class=SUBMISSION ;; *) ra_class=FAIL ;;
     esac
-    if [ "$ra_class" != PASS ]; then
+    ra_na=$(sed -nE 's/^mode ([A-Z]) \(.*\): NOT APPLICABLE -- .*/\1/p' "$OUT/runtime_async.txt" | paste -sd, -)
+    ra_text=$(grep -E '^RUNTIME ASYNC:' "$OUT/runtime_async.txt" | tail -1 | sed -E 's/^RUNTIME ASYNC: (FAIL -- )?//')
+    if [ "$BACKEND" = cosim ] && [ "$ra_class" = PASS ] && ! grep -qE '^mode F \(.*\): PASS$' "$OUT/runtime_async.txt"; then
+        ra_class=FAIL
+        ra_text="mode F did not PASS on the co-simulation${ra_na:+ (NOT APPLICABLE: $ra_na)}: the injected link failure was not checked"
+    fi
+    na_note=""
+    [ -n "$ra_na" ] && na_note="; mode $ra_na NOT APPLICABLE on the board: the co-simulation injects the link failure it needs"
+    if [ "$rt_class" != PASS ]; then
+        if [ "$ra_class" = PASS ]; then
+            rt="$rt; runtime-async-test PASS$na_note"
+        else
+            rt="$rt; runtime-async-test $ra_class (exit $ra_rc): $ra_text"
+        fi
+    elif [ "$ra_class" != PASS ]; then
         rt_class=$ra_class
-        rt="FAIL -- runtime-async-test $ra_class (exit $ra_rc): $(grep -E '^RUNTIME ASYNC:' "$OUT/runtime_async.txt" | tail -1 | sed -E 's/^RUNTIME ASYNC: (FAIL -- )?//')"
+        rt="FAIL -- runtime-async-test $ra_class (exit $ra_rc): $ra_text"
     else
-        rt="PASS (runtime-dispatch-test and runtime-async-test)"
+        rt="PASS (runtime-dispatch-test and runtime-async-test$na_note)"
     fi
     echo
 fi
@@ -703,6 +731,9 @@ elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
 elif [ "$BACKEND" = cosim ]; then
     echo "dispatch failure reported: NOT TESTED (K_MAX < 4: 16x8x4 is not five invocations)" \
         | tee -a "$OUT/summary.txt"
+else
+    echo "dispatch failure reported: NOT APPLICABLE on the board (the write failure is injected by the co-simulation's stand-in for libftdi)" \
+        | tee -a "$OUT/summary.txt"
 fi
 
 # ---- summary ------------------------------------------------------------------
@@ -747,6 +778,7 @@ if [ "$ok" = 1 ]; then
     [ "$RTMODE" = async ] && verdict="E2E: PASS on backend $BACKEND, async runtime (K_MAX_8X8 = $K8, K_MAX_4X4 = $K4)"
     [ "$BACKEND" = board ] && verdict="$verdict -- hardware configuration not independently verified"
     [ "$not_run" -gt 0 ] && verdict="$verdict; $not_run case(s) NOT RUN"
+    [ -n "$ra_na" ] && verdict="$verdict; runtime-async-test mode $ra_na NOT APPLICABLE (co-simulation only)"
 else
     why=""
     [ "$cfg_ok" = 1 ] || why="configuration refusal FAIL"

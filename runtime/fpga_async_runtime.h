@@ -79,7 +79,10 @@ extern "C" {
  * -14 refused after a link failure), plus
  *   -17  the tile is inconsistent with the GEMM: k_index >= k_count, a
  *        k_count that differs from an earlier submit of the same tile_id,
- *        a k_index submitted twice, or a submit after the GEMM's wait
+ *        a k_index submitted twice, or a submit after the GEMM's wait; and,
+ *        from the wait, an output tile not all of whose k_count folds were
+ *        accepted (one refused at submit, or never submitted): it can never
+ *        be accumulated in order, so its accepted folds fail with -17
  *   -18  the bitstream refused the descriptor (completion status BAD_K or
  *        BAD_DEV): this tile ran nowhere; the link stays in step
  *   -19  the bitstream has no completion record (COMPLETION_HEADER is not
@@ -204,7 +207,12 @@ int fpga_tile_poll(fpga_gemm_t *gemm, unsigned tile_id, unsigned k_index,
  * completed; the first error of the GEMM's tiles (or the link's) when some
  * failed; -20 when the timeout passed first. The GEMM stays open in every
  * case: release it with fpga_gemm_release (or wait with fpga_gemm_wait). No
- * tile may be submitted to the GEMM after its first wait. */
+ * tile may be submitted to the GEMM after its first wait: the first wait
+ * (or wait_for, whatever its timeout) seals the GEMM, and every output tile
+ * whose k_count folds were not all accepted fails then with -17 -- its folds
+ * already held at once, those still on their way when they arrive -- so the
+ * GEMM completes (polls see it done) instead of waiting for a fold that
+ * never comes, and a refused fold never leaves 0 over a partial K-sum. */
 #define FPGA_ASYNC_WAIT_FOREVER 0xffffffffu
 int fpga_gemm_wait_for(fpga_gemm_t *gemm, unsigned timeout_ms);
 
@@ -218,6 +226,11 @@ int fpga_gemm_release(fpga_gemm_t *gemm);
 int fpga_async_runtime_last_error(void);
 
 typedef struct {
+    /* fpga_tile_submit calls; one refused before it queued anything (any
+     * nonzero return) counts here and in tiles_failed, as a failed
+     * invocation of the synchronous entry point does, and its code can be
+     * first_error (for a handle that is no open GEMM, the failed begin's
+     * code). The GEMM's own wait still reports only its accepted tiles. */
     unsigned long long tiles_submitted;
     unsigned long long tiles_completed;             /* results accumulated */
     unsigned long long tiles_failed;

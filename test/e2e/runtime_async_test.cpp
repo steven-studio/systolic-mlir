@@ -51,16 +51,41 @@
 //       accepted, the wait reports -4, every tile is failed (none done, none
 //       lost), nothing but the 3 slabs crossed the link, a further begin is
 //       refused (-14), and after fpga_async_runtime_close a new session runs
-//       a GEMM correctly
+//       a GEMM correctly. Co-simulation only: the failure is injected by the
+//       co-simulation's stand-in for libftdi (the runtime never reads
+//       SYSTOLIC_DPTI_COSIM_FAIL_WRITE), so on the board F is NOT
+//       APPLICABLE. It checks no computation the other modes do not (its one
+//       checked GEMM is mode C's shape and staging).
+//   H   an output tile whose K folds were not all accepted (a fold refused at
+//       submit: k beyond the device's K_MAX, as in a program compiled for a
+//       deeper bitstream): the GEMM's first wait seals it, and the wait
+//       reports -17 within a bound instead of waiting for ever for the
+//       missing fold -- the accepted fold of that tile FAILED -17, the other
+//       output tile done and exact, the failed tile's C untouched; also when
+//       the GEMM is sealed by a timed-out wait and then only polled, and
+//       when the trailing fold is the refused one (no success over a partial
+//       K-sum); the link stays in step for the GEMM after it. Bounded waits
+//       only, so a runtime without the seal fails the mode, not the run.
 //
-//   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F | all] [--gemm MxNxK]
-//                      [--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]
+//   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F,H | all] [--gemm MxNxK]
+//                      [--devices 0,1,2,3] [--stage 0|1] [--backend board|cosim]
+//                      [--print-config] [--list]
+//
+// --backend says what is behind the link: the RTL co-simulation (cosim) or
+// the board. Without it: cosim when SYSTOLIC_DPTI_COSIM_SOCKET is set (the
+// co-simulation's libftdi cannot connect without it), else board.
+// --mode all (the default) runs every mode that can run on that backend and
+// reports the others NOT APPLICABLE, with the reason; a mode named in --mode
+// that cannot run there is refused before the link opens (exit 2).
 //
 // Every mode is reported as PASS, MISMATCH, TRANSPORT (link failure),
-// SUBMISSION (a tile refused or an unexpected code), CONFIG or NOT RUN (the
-// link had failed before it), with the runtime's own counters next to it.
-// Exit status as runtime-dispatch-test's: 0 all as expected; 2 configuration,
-// 3 transport, 4 submission / unexpected, 1 numerical mismatch.
+// SUBMISSION (a tile refused or an unexpected code), CONFIG, NOT RUN (the
+// link had failed before it) or NOT APPLICABLE (it cannot run on this
+// backend: neither a pass nor a failure), with the runtime's own counters
+// next to it. Exit status as runtime-dispatch-test's: 0 every mode that ran
+// as expected, and at least one ran; 2 configuration (or a mode asked for by
+// name is NOT APPLICABLE), 3 transport, 4 submission / unexpected / no mode
+// ran, 1 numerical mismatch. NOT APPLICABLE never changes it.
 
 #include "fpga_async_runtime.h"
 #include "fpga_matmul_tiled.h"
@@ -255,10 +280,12 @@ int run_gemm(Gemm &g, const std::vector<TileSpec> &tiles, int *submit_rc,
 }
 
 struct Options {
-  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'};
+  std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F', 'H'};
+  bool all = true;    // --mode all: a mode that cannot run on the backend is NOT APPLICABLE
   int M = 16, N = 16, K = 32;
   std::vector<unsigned> devices = {0, 1, 2, 3};
   int stage = -1;     // -1: the mode decides
+  int backend = -1;   // -1: SYSTOLIC_DPTI_COSIM_SOCKET decides; 0 board; 1 cosim
   bool print_config = false, list = false;
 };
 
@@ -272,10 +299,11 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v) return false;
       o.modes.clear();
-      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'}; continue; }
+      o.all = std::string(v) == "all";
+      if (o.all) { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F', 'H'}; continue; }
       for (const char *p = v; *p; ++p)
         if (*p != ',') {
-          if (!std::strchr("ABCDXVSQMPF", *p)) return false;
+          if (!std::strchr("ABCDXVSQMPFH", *p)) return false;
           o.modes.push_back(*p);
         }
     } else if (a == "--gemm") {
@@ -294,6 +322,10 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v || (std::string(v) != "0" && std::string(v) != "1")) return false;
       o.stage = v[0] - '0';
+    } else if (a == "--backend") {
+      const char *v = value();
+      if (!v || (std::string(v) != "board" && std::string(v) != "cosim")) return false;
+      o.backend = std::string(v) == "cosim" ? 1 : 0;
     } else return false;
   }
   return true;
@@ -357,8 +389,9 @@ int main(int argc, char **argv) {
   Options o;
   if (!parse_options(argc, argv, o)) {
     std::fprintf(stderr,
-                 "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F|all] [--gemm MxNxK] "
-                 "[--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]\n");
+                 "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F,H|all] [--gemm MxNxK] "
+                 "[--devices 0,1,2,3] [--stage 0|1] [--backend board|cosim] [--print-config] "
+                 "[--list]\n");
     return 2;
   }
 
@@ -389,13 +422,30 @@ int main(int argc, char **argv) {
   }
   Config cfg{static_cast<int>(hw.k_max_8x8), static_cast<int>(hw.k_max_4x4), hw.slab_bytes};
 
+  // What is behind the link. Mode F needs the co-simulation's write-failure
+  // injection: its stand-in for libftdi reads SYSTOLIC_DPTI_COSIM_FAIL_WRITE
+  // (the runtime never does) and cannot connect without
+  // SYSTOLIC_DPTI_COSIM_SOCKET, so without that variable no injection can
+  // happen.
+  const char *sock = std::getenv("SYSTOLIC_DPTI_COSIM_SOCKET");
+  const bool sock_set = sock && *sock;
+  const bool cosim = o.backend >= 0 ? o.backend == 1 : sock_set;
+
   std::printf("configuration: K_MAX_8X8 = %d, K_MAX_4X4 = %d, %u-byte operand slab, "
               "completion record (%s)\n", cfg.k8, cfg.k4, cfg.slab, hw.source);
+  std::printf("backend: %s (%s)\n", cosim ? "cosim" : "board",
+              o.backend >= 0 ? "--backend"
+              : cosim        ? "SYSTOLIC_DPTI_COSIM_SOCKET is set"
+                             : "SYSTOLIC_DPTI_COSIM_SOCKET is not set");
+  if (o.backend == 0 && sock_set)
+    std::printf("note: --backend board while SYSTOLIC_DPTI_COSIM_SOCKET is set: if this link "
+                "is the co-simulation, mode F could run (--backend cosim)\n");
   std::printf("GEMM %dx%dx%d; devices", o.M, o.N, o.K);
   for (unsigned d : o.devices) std::printf(" %u", d);
   std::printf("\n\n");
 
-  struct Plan { char mode; std::string what; int stage; };
+  // na: why the mode cannot run on this backend (empty: it can).
+  struct Plan { char mode; std::string what; int stage; std::string na = {}; };
   std::vector<Plan> plans;
   for (char m : o.modes) {
     switch (m) {
@@ -410,12 +460,34 @@ int main(int argc, char **argv) {
     case 'M': plans.push_back({m, "three GEMMs of different shapes interleaved, waited for out of order, each checked while the others are outstanding", 1}); break;
     case 'P': plans.push_back({m, "poll / timed wait / release semantics: never blocking, states observed, -20 / -17 / -21 where due", 1}); break;
     case 'F': plans.push_back({m, "transport failure mid-submission (SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7): nothing lost, -4, -14 after, recovery after close", 1}); break;
+    case 'H': plans.push_back({m, "an output tile missing a fold refused at submit: the sealed GEMM's wait reports -17 within a bound, never waits for ever", 1}); break;
     }
   }
+  for (Plan &p : plans)
+    if (p.mode == 'F' && !cosim)
+      // (No "libftdi_cosim" in these lines: run_e2e.sh hides the lines that
+      // name it, the stand-in's connection notices.)
+      p.na = "no write-failure injector on this backend (SYSTOLIC_DPTI_COSIM_FAIL_WRITE is "
+             "honoured only by the co-simulation's stand-in for libftdi; the runtime never "
+             "reads it)";
   if (o.list) {
-    for (const Plan &p : plans) std::printf("mode %c  %s\n", p.mode, p.what.c_str());
+    for (const Plan &p : plans)
+      std::printf("mode %c  %s%s%s\n", p.mode, p.what.c_str(),
+                  p.na.empty() ? "" : " -- NOT APPLICABLE on the board: ", p.na.c_str());
     return 0;
   }
+  // A mode asked for by name that cannot run here is refused before the link
+  // opens; --mode all reports it NOT APPLICABLE and runs the others.
+  if (!o.all)
+    for (const Plan &p : plans)
+      if (!p.na.empty()) {
+        std::printf("mode %c (%s): NOT APPLICABLE on the board -- %s; asked for by name, so "
+                    "nothing is run (--mode all runs every other mode)\n",
+                    p.mode, p.what.c_str(), p.na.c_str());
+        std::printf("RUNTIME ASYNC: NOT APPLICABLE -- mode %c on the board; nothing was sent\n",
+                    p.mode);
+        return 2;
+      }
 
   int count[UNKNOWN + 1] = {};
   int first_rc[UNKNOWN + 1] = {};
@@ -430,8 +502,18 @@ int main(int argc, char **argv) {
                 detail.empty() ? "" : ("\n    " + detail).c_str());
   };
 
+  // NOT APPLICABLE is neither a pass nor a failure: it is counted apart from
+  // every class above and never changes the verdict or the exit status.
+  int not_applicable = 0;
+  std::string na_modes;
   bool link_failed = false;
   for (const Plan &p : plans) {
+    if (!p.na.empty()) {
+      ++not_applicable;
+      na_modes += p.mode;
+      std::printf("mode %c (%s): NOT APPLICABLE -- %s\n", p.mode, p.what.c_str(), p.na.c_str());
+      continue;
+    }
     if (link_failed) {
       report(p, NOT_RUN, -14, "the link failed in an earlier mode");
       continue;
@@ -901,6 +983,10 @@ int main(int argc, char **argv) {
         }
         const int wrc = fpga_gemm_wait_for(h, FPGA_ASYNC_WAIT_FOREVER);
         expect("wait after the failure", wrc, -4);
+        if (wrc == 0)
+          detail += "\n    the injected write failure never happened: SYSTOLIC_DPTI_COSIM_FAIL_WRITE "
+                    "is honoured only by the co-simulation's stand-in for libftdi -- is this "
+                    "link the board? (--backend board reports F NOT APPLICABLE)";
         fpga_gemm_status_t st;
         expect("poll", fpga_gemm_poll(h, &st), 0);
         expect("link_failed", st.link_failed, 1);
@@ -1029,17 +1115,163 @@ int main(int argc, char **argv) {
       const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
       detail += "\n    " + stats_line(s, wall);
       report(p, ok ? PASS : (link_failed ? TRANSPORT : SUBMISSION), ok ? 0 : -1, detail);
+    } else if (p.mode == 'H') {
+      std::string detail;
+      bool ok = true;
+      auto expect = [&](const char *what, long long got, long long want) {
+        char b[200];
+        std::snprintf(b, sizeof b, "%s%s: %lld (expected %lld)", detail.empty() ? "" : "\n    ",
+                      what, got, want);
+        detail += b;
+        if (got != want) ok = false;
+      };
+      // Bounded waits only: against a runtime that waits for the missing fold
+      // for ever, this mode fails instead of hanging the run.
+      const unsigned bound_ms = 60000;
+      // k = K_MAX + 1 must be refused at submit, not sent to the bitstream.
+      setenv("SYSTOLIC_ASYNC_VIOLATE", "0", 1);
+      fpga_async_runtime_close();
+      set_stage(o, p.stage);
+      fpga_async_runtime_reset_stats();
+      std::vector<float> a(static_cast<size_t>(4) * (cfg.k4 + 1), 1.0f);
+      std::vector<float> b(static_cast<size_t>(cfg.k4 + 1) * 4, 1.0f);
+      auto poll_done = [&](fpga_gemm_t *h, fpga_gemm_status_t &st) {
+        const clock_t_::time_point until = clock_t_::now() + std::chrono::milliseconds(bound_ms);
+        do {
+          if (fpga_gemm_poll(h, &st) != 0) return false;
+          if (st.done) return true;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (clock_t_::now() < until);
+        return false;
+      };
+      // Output tile 0 of a 4x8 C: fold 0 of 2 refused (k = K_MAX + 1 on device
+      // 1), fold 1 accepted; output tile 1 (columns 4..7) complete, k = 1.
+      auto submit_three = [&](fpga_gemm_t *h, std::vector<float> &c) {
+        expect("tile 0 fold 0/2, k = K_MAX + 1 on device 1",
+               fpga_tile_submit(h, 0, 0, 2, 4, cfg.k4 + 1, 4, a.data(), b.data(), c.data(), 8, 1, 0, 101), -10);
+        expect("tile 0 fold 1/2, k = 1",
+               fpga_tile_submit(h, 0, 1, 2, 4, 1, 4, a.data(), b.data(), c.data(), 8, 1, 0, 101), 0);
+        expect("tile 1 fold 0/1, k = 1",
+               fpga_tile_submit(h, 1, 0, 1, 4, 1, 4, a.data(), b.data(), c.data() + 4, 8, 1, 0, 101), 0);
+      };
+      {
+        std::vector<float> c(32, 0.0f);
+        fpga_gemm_t *h = fpga_gemm_begin(4, 8, 2, 2);
+        if (!h) {
+          expect("begin", fpga_async_runtime_last_error(), 0);
+        } else {
+          submit_three(h, c);
+          expect("wait_for (bounded)", fpga_gemm_wait_for(h, bound_ms), -17);
+          fpga_gemm_status_t st;
+          expect("poll", fpga_gemm_poll(h, &st), 0);
+          expect("done", st.done, 1);
+          expect("completed", st.completed, 1);
+          expect("failed", st.failed, 1);
+          expect("held", st.held, 0);
+          expect("first_error", st.first_error, -17);
+          fpga_tile_status_t ts;
+          fpga_tile_poll(h, 0, 0, &ts);
+          expect("tile 0 fold 0 (refused): state UNKNOWN", ts.state, FPGA_TILE_UNKNOWN);
+          fpga_tile_poll(h, 0, 1, &ts);
+          expect("tile 0 fold 1: state FAILED", ts.state, FPGA_TILE_FAILED);
+          expect("tile 0 fold 1: error", ts.error, -17);
+          fpga_tile_poll(h, 1, 0, &ts);
+          expect("tile 1: state DONE", ts.state, FPGA_TILE_DONE);
+          int written0 = 0, wrong1 = 0;
+          for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+              if (c[static_cast<size_t>(i) * 8 + j] != 0.0f) ++written0;
+              if (c[static_cast<size_t>(i) * 8 + 4 + j] != 1.0f) ++wrong1;
+            }
+          expect("elements of the failed tile written", written0, 0);
+          expect("elements of tile 1 wrong", wrong1, 0);
+          expect("release", fpga_gemm_release(h), 0);
+          // The session statistics count the refused submit as a submitted,
+          // failed invocation (the kernels read them, not the code), and the
+          // refusal came first.
+          fpga_async_stats_t ss; fpga_async_runtime_get_stats(&ss);
+          expect("session tiles_submitted (2 accepted + 1 refused)", static_cast<long long>(ss.tiles_submitted), 3);
+          expect("session tiles_failed (the refused one + the dropped fold)", static_cast<long long>(ss.tiles_failed), 2);
+          expect("session first_error (the refusal)", ss.first_error, -10);
+        }
+      }
+      // The same GEMM sealed by a timed-out wait, then only polled.
+      {
+        std::vector<float> c(32, 0.0f);
+        fpga_gemm_t *h = fpga_gemm_begin(4, 8, 2, 2);
+        if (!h) {
+          expect("begin (polled)", fpga_async_runtime_last_error(), 0);
+        } else {
+          submit_three(h, c);
+          const int w = fpga_gemm_wait_for(h, 1);
+          if (w != -20) expect("wait_for(1 ms): -20, or -17 if already resolved", w, -17);
+          fpga_gemm_status_t st{};
+          const char *policy = std::getenv("SYSTOLIC_ASYNC_READ_POLICY");
+          if (!(policy && !std::strcmp(policy, "wait"))) {
+            expect("done by polls alone within the bound", poll_done(h, st), 1);
+          } else {
+            // That policy reads the link only while a caller waits: polls
+            // alone complete no GEMM there (mode P's neither).
+            detail += "\n    (SYSTOLIC_ASYNC_READ_POLICY=wait: polls do not read the link; "
+                      "the sealed GEMM is completed by a bounded wait)";
+            expect("done by a bounded wait", fpga_gemm_wait_for(h, bound_ms), -17);
+            expect("poll", fpga_gemm_poll(h, &st), 0);
+          }
+          expect("polled: failed", st.failed, 1);
+          expect("polled: first_error", st.first_error, -17);
+          expect("polled: release", fpga_gemm_release(h), 0);
+        }
+      }
+      // The trailing fold refused: fold 0/2 accepted, fold 1/2 refused.
+      {
+        std::vector<float> c(32, 0.0f);
+        fpga_gemm_t *h = fpga_gemm_begin(4, 4, 2, 1);
+        if (!h) {
+          expect("begin (trailing)", fpga_async_runtime_last_error(), 0);
+        } else {
+          expect("trailing: fold 0/2, k = 1",
+                 fpga_tile_submit(h, 0, 0, 2, 4, 1, 4, a.data(), b.data(), c.data(), 8, 1, 0, 101), 0);
+          expect("trailing: fold 1/2, k = K_MAX + 1",
+                 fpga_tile_submit(h, 0, 1, 2, 4, cfg.k4 + 1, 4, a.data(), b.data(), c.data(), 8, 1, 0, 101), -10);
+          expect("trailing: wait_for (bounded): no success over a partial K-sum",
+                 fpga_gemm_wait_for(h, bound_ms), -17);
+          expect("trailing: release", fpga_gemm_release(h), 0);
+        }
+      }
+      // The link is still in step for the GEMM after them.
+      {
+        Gemm g = make_gemm(8, 8, cfg.k4, true);
+        const std::vector<TileSpec> tiles = decompose(8, 8, cfg.k4, {1, 2, 3}, cfg, false);
+        int submit_rc = 0;
+        const int rc = run_gemm(g, tiles, &submit_rc);
+        expect("a GEMM after them: submit", submit_rc, 0);
+        expect("a GEMM after them: wait", rc, 0);
+        int first = -1;
+        if (rc == 0 && submit_rc == 0) expect("its mismatches", mismatches_vs_ref(g, &first), 0);
+        if (rc != 0 && class_of_rc(rc) == TRANSPORT) link_failed = true;
+      }
+      fpga_async_stats_t s; fpga_async_runtime_get_stats(&s);
+      const double wall = std::chrono::duration<double, std::milli>(clock_t_::now() - t0).count();
+      detail += "\n    " + stats_line(s, wall);
+      report(p, ok ? PASS : (link_failed ? TRANSPORT : SUBMISSION), ok ? 0 : -1, detail);
     }
   }
 
   fpga_async_runtime_close();
 
   const int failures = count[MISMATCH] + count[TRANSPORT] + count[SUBMISSION] + count[CONFIG] + count[UNKNOWN];
-  if (failures == 0 && count[NOT_RUN] == 0) {
-    std::printf("\nRUNTIME ASYNC: PASS\n");
+  const std::string na_note =
+      not_applicable ? "NOT APPLICABLE " + std::to_string(not_applicable) + " (mode " + na_modes +
+                           ": co-simulation only)"
+                     : "";
+  if (failures == 0 && count[NOT_RUN] == 0 && count[PASS] > 0) {
+    std::printf("\nRUNTIME ASYNC: PASS%s%s%s\n", na_note.empty() ? "" : " -- ", na_note.c_str(),
+                na_note.empty() ? "" : ", every other mode PASS");
     return 0;
   }
   std::string summary;
+  if (failures == 0 && count[NOT_RUN] == 0)   // nothing ran: never a pass
+    summary = "no mode ran";
   for (Class c : {CONFIG, TRANSPORT, SUBMISSION, UNKNOWN, MISMATCH, NOT_RUN}) {
     if (count[c] == 0) continue;
     char buf[320];
@@ -1047,9 +1279,11 @@ int main(int argc, char **argv) {
                   class_name(c), count[c], first_rc[c], first_what[c].c_str());
     summary += buf;
   }
+  if (!na_note.empty()) summary += "; " + na_note;
   std::printf("\nRUNTIME ASYNC: FAIL -- %s\n", summary.c_str());
   if (count[CONFIG]) return 2;
   if (count[TRANSPORT] || count[NOT_RUN]) return 3;
   if (count[SUBMISSION] || count[UNKNOWN]) return 4;
-  return 1;
+  if (count[MISMATCH]) return 1;
+  return 4;   // nothing ran
 }

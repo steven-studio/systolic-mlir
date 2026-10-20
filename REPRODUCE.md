@@ -343,8 +343,17 @@ the working tree has both (docs/ASYNC.md section 9 has the evidence runs).
     test/e2e/cosim/build.sh                               # COMPLETION_HEADER=1, PIPELINE_DEPTH=4
     cmake --build build --target check-systolic           # 86 lit tests, eight for the async lowering and dynamic offsets
     test/e2e/run_e2e.sh --backend cosim                   # --mode sync: systolic-matmul --sync on every case
-    test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case
-    SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test --mode all
+    test/e2e/run_e2e.sh --backend cosim --mode async      # systolic-matmul --async on every case,
+                                                          # runtime-async-test --mode all --backend cosim first
+    cmake --build build --target check-e2e-cosim-regressions  # co-simulation regressions (own simulations)
+
+runtime-async-test on its own against the co-simulation needs the
+simulation's stand-in for libftdi and its socket, or it opens the real
+FT2232H: `LD_PRELOAD=build/cosim/libftdi_cosim.so
+SYSTOLIC_DPTI_COSIM_SOCKET=<socket of a running Vcosim>
+SYSTOLIC_FPGA_CONFIG=build/cosim/fpga_config.txt build/bin/runtime-async-test
+--mode all --backend cosim`. On the board: `--backend board`, where mode F
+(a link failure only the co-simulation can inject) is NOT APPLICABLE.
 
 On a configuration with COMPLETION_HEADER=1 the asynchronous runtime is the
 default of `systolic-matmul` and of `systolic-cc --runtime board` (no flag):

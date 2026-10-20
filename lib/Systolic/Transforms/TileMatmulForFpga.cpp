@@ -79,9 +79,14 @@ namespace {
 // returns once every tile of the GEMM has been accumulated into C. The
 // GEMM, output block and K fold of a tile come from the discardable
 // attributes --systolic-binary-search-tile-matmul sets (systolic.gemm,
-// systolic.tile, systolic.k_index, systolic.k_count). C is never staged:
-// every submit points straight into the output buffer with its row
-// stride, so results of different tiles can land in it in any order. The
+// systolic.tile, systolic.k_index, systolic.k_count). C is not staged per
+// tile: every submit points straight into the output buffer with its row
+// stride, so results of different tiles can land in it in any order --
+// when that buffer is row-major with a static row stride of at least its
+// row length (isRuntimeAddressable: the runtime refuses ldc < n). Any other
+// view of the output (rows backwards, one row stored down a column, a
+// run-time row stride) is staged once per GEMM in one contiguous M x N
+// buffer that the submits point into instead (lowerOutputBlock). The
 // wait of a GEMM is placed before the first op that reads its result (or
 // at the end of the block), so independent GEMMs of one function overlap
 // on the FPGA and a GEMM that reads another's result waits for it.
@@ -480,8 +485,10 @@ struct OutputBlock {
 /// of that buffer, which the lowering may therefore write through directly
 /// (the front end's bracket of a GEMM's output, bufferization.to_tensor %C
 /// restrict writable ... materialize_in_destination %result in %C). A
-/// dynamic offset or row stride is read from the memref at run time
-/// (memref.extract_strided_metadata), see lowerOutputBlock.
+/// dynamic offset is read from the memref at run time
+/// (memref.extract_strided_metadata), see lowerOutputBlock; for the
+/// asynchronous runtime a view it cannot address in place
+/// (isRuntimeAddressable) is staged in one contiguous buffer per GEMM.
 static bool isExclusiveBufferView(Value r) {
   auto toTensor = r.getDefiningOp<bufferization::ToTensorOp>();
   if (!toTensor || !toTensor.getRestrict() || !toTensor.getWritable())
@@ -497,6 +504,22 @@ static bool isExclusiveBufferView(Value r) {
   if (failed(memrefTy.getStridesAndOffset(strides, offset)))
     return false;
   return strides.size() == 2 && strides[1] == 1;
+}
+
+/// Whether the asynchronous runtime can accumulate into this layout in place:
+/// fpga_tile_submit adds a tile at C[i * ldc + j], takes ldc as an i32 and
+/// refuses ldc < n, so the row stride must be static, at least the row
+/// length and at most INT32_MAX, the column stride 1. Any other view of an
+/// output (rows backwards, one row stored down a column, a run-time row
+/// stride) is staged in a contiguous buffer, see lowerOutputBlock.
+static bool isRuntimeAddressable(MemRefType memrefTy) {
+  SmallVector<int64_t> strides;
+  int64_t offset = 0;
+  if (memrefTy.getRank() != 2 || failed(memrefTy.getStridesAndOffset(strides, offset)))
+    return false;
+  return strides[1] == 1 && !ShapedType::isDynamic(strides[0]) &&
+         strides[0] >= memrefTy.getDimSize(1) &&
+         strides[0] <= std::numeric_limits<int32_t>::max();
 }
 
 static std::optional<OutputBlock>
@@ -709,6 +732,30 @@ public:
     Value r = extract.getSource();
     auto rTy = cast<RankedTensorType>(r.getType());
     Value rMemref = rootBuffer(loc, r, rTy);
+    if (asyncRuntime && block.rootIsExclusiveBuffer && !isa<BlockArgument>(r) &&
+        !isRuntimeAddressable(cast<MemRefType>(rMemref.getType()))) {
+      // The runtime adds a tile at C[i * ldc + j] and refuses ldc < n, so a
+      // view whose rows are not a static stride of at least their length
+      // apart (rows backwards, one row stored down a column, a run-time
+      // stride) cannot be written through. Stage the whole view once per
+      // GEMM: a contiguous M x N buffer, filled from the view after the
+      // GEMM's begin (so after any wait an earlier GEMM's ordering put
+      // there); every block of the chain accumulates into it with ldc = N,
+      // and the front end's materialize_in_destination of the chain's
+      // result -- a reader, so waitGemms waits before it -- copies it back.
+      // The deallocation pipeline frees it after that copy.
+      auto staged = memref::AllocOp::create(
+          rewriter, loc, MemRefType::get(rTy.getShape(), rTy.getElementType()));
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        Operation *after = g->beginOp;
+        if (after->getBlock() == staged->getBlock() && after->isBeforeInBlock(staged))
+          after = staged;
+        rewriter.setInsertionPointAfter(after);
+        memref::CopyOp::create(rewriter, loc, rMemref, staged);
+      }
+      rMemref = staged;
+    }
     Value cPtr;
     Value cTile, cBlock;
     Value ldc;

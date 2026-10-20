@@ -40,7 +40,10 @@ extern "C" {
 //    -8  the result tile did not arrive within SYSTOLIC_DPTI_TIMEOUT_MS
 //    -9  the completion record did not match this invocation (another
 //        job_id or device, or the bitstream refused the descriptor): the
-//        link is out of step with the host, nothing more is sent
+//        link is out of step with the host, nothing more is sent; or a
+//        completion record arrived although the configuration does not
+//        say COMPLETION_HEADER=1 (a configuration of another bitstream, or
+//        none): refused before anything of it reaches C
 //   -14  refused: an earlier call on this session failed with -3 .. -9
 int fpga_matmul_tiled_auto_scheduled(
     int M, int K, int N,
@@ -131,7 +134,9 @@ typedef struct {
      * back starts with a 16-byte completion record (magic, job_id,
      * device_id, status, payload bytes, seq) -- bitstreams built from
      * dma_top_build.tcl after 2026-10-14. 0 (the default, and every older
-     * bitstream): bare tiles, matched by order. */
+     * bitstream): bare tiles, matched by order; a completion record that
+     * arrives anyway (the bitstream sends them) is refused with -9 at the
+     * first result instead of being read as tile data. */
     unsigned completion_header;
 } fpga_runtime_config_t;
 
@@ -161,6 +166,17 @@ int fpga_runtime_get_config(fpga_runtime_config_t *out);
 // point reads its own, and the asynchronous runtime (fpga_async_runtime.h)
 // parses records out of its own receive buffer.
 int fpga_runtime_read_completion(fpga_completion_t *out);
+
+// The job_id epoch (bits 31..24; job_id = epoch << 24 | sequence) of a new
+// session, for both runtimes: for the first session of the process a random
+// one -- so that a completion record another program left on the link (one
+// killed with jobs in flight; a board can deliver its results after the next
+// session's purge) does not carry a job_id this program expects, but by a
+// 1-in-254 chance -- and then the next one of the previous session. Always
+// 1..254: 0 was every process's first epoch until 2026-10-20 (the
+// synchronous runtime's ids started at 0), 255 is reserved.
+// SYSTOLIC_DPTI_EPOCH=<1..254> fixes the first one (tests).
+unsigned fpga_runtime_next_epoch(unsigned previous);
 
 // The device table and the slab format, for the asynchronous runtime, which
 // stages the same slabs for the same arrays through its own session.

@@ -46,6 +46,15 @@ record，job_id／device／status／payload 任何一項對不上就回 -9 並�
 設定檔沒寫（舊 bitstream）就照舊讀裸 tile。所以**舊 bitstream + 新 runtime、新 bitstream +
 同步 runtime 都能用**；只有非同步 runtime 一定要新 bitstream。
 
+DPTI 沒有暫存器可讀，host 只能從設定檔知道 bitstream 送不送 record。設定檔沒寫
+`COMPLETION_HEADER=1`（包括完全沒有設定檔時的 built-in default）卻接上會送 record 的
+bitstream 時，2026-10-20 之前同步 runtime 把 record 當成 tile 的前 16 byte 讀進來：rc 0、
+數字是錯的（C[0] 3.717e15 就是 magic 被當成 float），tile 的尾巴留在鏈路上給下一次讀，
+`systolic-cc --runtime=board` 的程式印 `FPGA Executed` 並以 0 結束。現在沒有
+`COMPLETION_HEADER=1` 時每個結果的前 16 byte 先單獨讀：開頭是 record 的 magic 就回 -9、
+stderr 一行指出用的是哪個設定檔，這條 session 停用，什麼都不會加進 C（systolic-cc 的程式
+因此在 CPU 上算）；不是 magic 就讀剩下的 tile（沒有 record 的舊 bitstream 照常）。
+
 ### 2.2 `dpti_bus_arbiter.sv`：FT2232H 匯流排一次一個方向
 
 原本 `dpti_byte_rx` 與 `dpti_byte_tx` 各自直接驅動腳位：RXF# 低就讀、有東西就寫，
@@ -89,7 +98,11 @@ grant 制：`w_grant ∈ {NONE, HS, WB, SD}`，持有者發完 AW 與 W、等到
   `dpti_bus_arbiter.sv` 就是 1）。新 bitstream 的 K_MAX 用 16／16。
 - 沒做：RESET 暫存器與 frontend timeout（提案列為選配）。鏈路失步時的恢復手段仍是重開
   session（`ftdi_usb_purge_buffers`）；非同步 runtime 用 job_id 的 epoch 位元（31..24）
-  辨認上一個 session 遲到的 record 並丟掉。
+  辨認上一個 session 遲到的 record 並丟掉。（2026-10-20 更正：epoch 原本每個 process 都從 1
+  開始、同步 runtime 的 job_id 每個 process 都從 0 開始，所以這只在同一個 process 裡成立——
+  另一個程式（例如帶著在飛的 job 被殺掉的）留下的 record 會被當成自己的結果。現在兩個
+  runtime 的 job_id 都是 `epoch<<24 | seq`，process 的第一個 session 用隨機的 epoch（1..254），
+  見第 3.2 節。）
 - 沒動：XDC、SIWU#（要另外批准）、`eval/`、`artifacts/`。
 
 ### 2.6 沙盒實跑結果（Verilator 5.020／Icarus 12；不是板子）
@@ -134,7 +147,7 @@ int fpga_gemm_wait(fpga_gemm_t *g);
 |---|---|
 | credit | 每顆 device：descriptor `depth` + stage 1，`depth` = 設定檔的 `PIPELINE_DEPTH`（context 的 job queue，本樹的 RTL 是 4；沒有這個鍵的舊 bitstream 是 1；`SYSTOLIC_ASYNC_DEPTH` 可往下調，不會高於 `PIPELINE_DEPTH`，上限 8）。預設的 burst 模式（`SYSTOLIC_ASYNC_BURST=1`）先把一顆 device 的 operand slot 全部填滿（`depth + 1` 塊 slab）或等到 `fpga_gemm_wait` 才送它**第一批** descriptor，讓 context 連續收到 job（第 9 節）；之後只要該 device 有 job 在飛，stage 好的 descriptor 一有 credit 就送（在飛的 job 佔著 operand slot 直到 completion，第一批之後 slot 永遠填不滿——2026-10-19 之前 burst 模式在長 GEMM 上因此退化成每顆一次一筆，第 10 節）；`SYSTOLIC_ASYNC_STAGE=0` 時每顆 device 仍然一次一個 descriptor（mode A／B） |
 | DDR slot | 每顆 device `depth + 1` 個 operand slot（`0x10000 + (dev*(depth+1)+slot)*slab_bytes`，256 B 對齊）與 `depth` 個 result slot（`0x3000 + (dev*depth+slot)*256`，16 B 對齊），以 free mask 配置；一個 job 的兩個 slot 在它的 completion record 讀到之後才釋放（context 在 fold 之前就讀完 slab，result tile 在 record 的 payload 之前就離開 DDR），所以 staged 的 slab 永遠不會覆蓋陣列還可能在讀的那塊、result slot 不會在 host 拿到之前被覆蓋；設定檔有 `DDR_BYTES`（co-sim 寫 1 MiB）時 depth 會降到 operand 區域放得下為止 |
-| job_id | `epoch<<24 \| seq`：epoch 每開一次 session +1（1..255），seq 24 bit；上一個 session 遲到的 record 查不到 PJT 就丟掉 |
+| job_id | `epoch<<24 \| seq`：epoch 每開一次 session 換下一個，process 的第一個 session 隨機（1..254；0 不用、255 保留；`SYSTOLIC_DPTI_EPOCH` 可固定第一個，測試用），seq 24 bit；上一個 session 或另一個程式遲到的 record 查不到 PJT 就丟掉（兩個程式同 epoch 的機率 1/254）。同步 runtime 用同樣的格式，它對不上的 record 回 -9 |
 | PJT | `job_id → Tile*`（在飛的 tile）；completion 回來依 job_id 找，device／payload 對不上 = 失步（-9，整條 session 停用） |
 | 送出順序 | 各 device 佇列 FIFO，多顆 device 都能 stage 時先給最早 submit 的 tile（全域序號）；沒有優先權反轉，不需要 aging |
 | 讀的時機 | `SYSTOLIC_ASYNC_READ_POLICY`：`blocked`（預設）＝寫到沒東西能寫了才讀；`always`＝每次 pump 都讀一次；`wait`＝只在 `fpga_gemm_wait` 與佇列到上限時讀。板上一次空讀要付一個 latency timer 週期（FT2232H 沒資料時等 timer 到才回應 IN），cosim 看不出差別——板上量 |
@@ -151,6 +164,24 @@ int fpga_gemm_wait(fpga_gemm_t *g);
 同步版的 -3..-16 意義不變；新增 -17（tile 與 GEMM 不一致：`k_index >= k_count`、同一
 `tile_id` 的 `k_count` 不同、同一 fold 送兩次、wait 之後再 submit）、-18（bitstream 拒絕
 這筆 descriptor）、-19（設定檔沒有 `COMPLETION_HEADER=1`，這個 runtime 不能用）。
+
+GEMM 的第一次 wait／wait_for（不論 timeout）把它封住：之後不收 submit，而且 `k_count`
+個 fold 沒有全部被收下的輸出 tile（有 fold 在 submit 時被拒，例如 k 超過這個 bitstream 的
+K_MAX——為更深的 K_MAX 編譯的程式——或根本沒送）永遠不能照 k_index 順序累加：它在封住時
+以 -17 失敗，已經 held 的 fold 立刻失敗、還在路上的到了就丟掉，GEMM 的 wait 回 -17（stderr
+一行 `[fpga-async] incomplete K folds: ...`）。在這之前（2026-10-20），被拒的 fold 不留任何
+紀錄，後面已收下的 fold 被 held 等一個永遠不會來的 fold，`fpga_gemm_wait` 沒有期限、鏈路
+timeout 也管不到它，程式永遠卡住；被拒的是最後一個 fold 時則回 0、C 只有部分 K 的和。編譯出
+的 kernel 在涵蓋一個輸出 tile 的 wait 之前送完它所有的 fold，所以 submit 全被收下的 GEMM 不會
+觸發。軟體模型（`soft_runtime.c`）做同樣的檢查。
+
+submit 時被拒（任何非 0 的回傳）的 tile 是一次失敗的 invocation：session 統計
+（`fpga_async_stats_t` 的 `tiles_submitted`、`tiles_failed`、`first_error`，handle 不是開著的 GEMM
+時記失敗的 begin 的錯誤碼）把它算進去，就像同步 entry point 算被拒的呼叫——編譯出的 kernel
+不看回傳碼，`board_stats.c`／shim 與 `systolic-matmul` 看的是統計；GEMM 自己的 wait 仍只報
+它收下的 tile（mode V 的語意不變）。一個 session 的前 8 筆拒絕印在 stderr（`[fpga-async]
+refused at submit: ...`，-11 附 `ldc`；鏈路失敗後的 -14 不印）。2026-10-20 之前拒絕不留紀錄，
+只有 shim 的 invocation 計數看得出來。軟體模型同樣計數，它的同步 wrapper 不重複計。
 
 ### 3.4 `SYSTOLIC_RUNTIME_TIMING=1` 的輸出
 
@@ -174,6 +205,11 @@ C 沒被碰、之後的 GEMM 正常）。2026-10-18 多了三個（第 10 節）
 `SYSTOLIC_ASYNC_QUEUE_LIMIT=1`、GEMM 放大四倍，submit 必須等空位——等的是任一舊 job 的
 completion 騰出的 operand slot，不是前一筆 job；在飛數永不超過 depth）、M（三個不同形狀的
 GEMM 輪流送、反序 wait，每個 GEMM 在自己的 wait 回來後、其他兩個還在飛時就逐元素檢查）。
+2026-10-20 加 H（第 3.3 節的封住：輸出 tile 的 fold 0 在 submit 時以 -10 被拒、fold 1 收下，
+有期限的 wait 必須回 -17 而不是 -20；fold 1 FAILED/-17、另一個輸出 tile DONE 且正確、失敗的
+tile 的 C 沒被碰；用逾時的 wait_for 封住後只 poll 也要在期限內 done；被拒的是最後一個 fold 時
+wait 回 -17；之後的 GEMM 正常。只用有期限的 wait，沒有封住的 runtime 讓這個 mode 失敗而不是
+卡住整個測試；板子上也能跑）。
 2026-10-19 再加 P（poll／wait_for／release 的語意，第 11.1 節）與 F（提交中途鏈路失敗）。
 A–D 用小整數，逐元素對 int64 參考。`--gemm MxNxK`、
 `--devices`、`--stage` 可調；每個 mode 自己開關一個 session。
@@ -225,6 +261,15 @@ tile/s），**看不出重疊帶來的加速**；它證明的是正確性與「�
   後面，後面的 submit 被 runtime 以 -17 拒絕——affine／C 路徑的非同步 lowering 實際上只跑第
   一個 tile（systolic-cc 的程式因此全部 fallback 到 CPU）。
   `test/Systolic/affine_to_fpga_pipeline_async.mlir`（含 C front end 的 strided 形狀）。
+  2026-10-20：runtime 在 `C[i * ldc + j]` 累加、`ldc` 是 i32、`ldc < n` 回 -11，所以只有 row stride
+  是靜態、介於 row 長度與 INT32_MAX 之間的 view 能直接寫（`isRuntimeAddressable`）。反向的 row
+  （`C[11 - i][j]` 的 `strided<[-10, 1]>`，含 run-time offset 的版本）、存成一行的單一 row（3x1 array
+  的 1x3 view，stride 1 < n）、run-time 的 row stride：每個 GEMM 一塊連續的 M x N buffer，在 GEMM 的
+  begin 之後從 view 複製進去，每個 block 以 `ldc = N` submit 進它，wait 之後由 front end 的
+  `materialize_in_destination` 複製回去（deallocation pipeline 之後釋放）。之前這種 view 以負的或太小的
+  `ldc` submit、被 runtime 拒絕、不留紀錄，C 沒被寫：直接呼叫 kernel 的程式得到錯的結果，systolic-cc
+  的程式整個函式（連同同一函式裡已在 FPGA 上跑完的 GEMM）fallback 到 CPU。
+  `test/Systolic/affine_to_fpga_async_views{,_large}.mlir`、`test/SystolicCC/async_views.c`。
 - 仍走 per-tile fallback 的 GEMM（C 的根是 `tensor.empty`／`linalg.fill`、loop-carried、
   interleaved：`fpga_operand_staging_fallback.mlir` 的形狀）：reader（每個 block 的
   `insert_slice`）出現在後面的 submit 之前時，lowering 在那裡 wait、再開一個新的
@@ -240,8 +285,9 @@ tile/s），**看不出重疊帶來的加速**；它證明的是正確性與「�
   runtime 的統計並關閉兩條 session，shim 的 FPGA／CPU 判定不變。soft runtime 只有同步 entry
   point，lit 的 `test/SystolicCC` 照舊走同步 lowering。
 - `test/e2e/run_e2e.sh --mode async`：所有 case 用 `systolic-matmul --async`；runtime
-  layer 多跑 `runtime-async-test --mode all`（GEMM 大小可用 `SYSTOLIC_E2E_ASYNC_GEMM`
-  改）；`e2e_verdict.py --mode async --header 1` 檢查 `ir/20-fpga.mlir` 裡正好每個 tile
+  layer 多跑 `runtime-async-test --mode all --backend <backend>`（GEMM 大小可用
+  `SYSTOLIC_E2E_ASYNC_GEMM` 改；mode F 只能在 co-sim 跑，板子上是 NOT APPLICABLE，
+  co-sim 上必須 PASS）；`e2e_verdict.py --mode async --header 1` 檢查 `ir/20-fpga.mlir` 裡正好每個 tile
   一個 `fpga_tile_submit`、一個 begin、一個 wait、沒有同步呼叫，以及收回的 byte 數 =
   Σ(P×P×4 + 16)。`--mode sync`（預設）的 summary 行格式與原本完全相同（`check-e2e-config`
   仍照舊比對），只多了 `--header` 的收回 byte 檢查。
@@ -310,7 +356,7 @@ timing 若不收斂（arbiter 在 60 MHz 的 dpti_clkout 域、grant arbiter 在
 export SYSTOLIC_FPGA_CONFIG=<新 bitstream 的 fpga_config.txt>
 export SYSTOLIC_RUNTIME_TIMING=1 SYSTOLIC_DPTI_LATENCY_MS=1
 build/bin/runtime-dispatch-test                                    # 先確認同步路徑在新 bitstream 上 PASS
-build/bin/runtime-async-test --mode all                            # 正確性
+build/bin/runtime-async-test --mode all --backend board            # 正確性（mode F 只在 co-sim：NOT APPLICABLE）
 build/bin/runtime-async-test --mode A,B,C,D --gemm 64x64x64        # 計時：span_us、tiles/s
 SYSTOLIC_ASYNC_READ_POLICY=always build/bin/runtime-async-test --mode C --gemm 64x64x64
 SYSTOLIC_ASYNC_READ_POLICY=wait   build/bin/runtime-async-test --mode C --gemm 64x64x64
@@ -482,7 +528,8 @@ completion 立刻補上。
 - **擁有權**（header 第一段）：A、B 在 submit 裡讀完、回來後可重用；C 是呼叫者的，transfer thread
   在 completion 到時寫它，從 submit 到 poll／wait 回報 done 之前呼叫者不能讀寫；handle 從 begin 到
   wait／release／close 有效；slab、descriptor、DDR slot、record、job_id 是 runtime 的。
-- **錯誤**：submit 後鏈路失敗（mode F，`SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`）：失敗前收下的 submit
+- **錯誤**：submit 後鏈路失敗（mode F，`SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`；只有 co-sim 的
+  libftdi 替身注入這個失敗，板子上 mode F 是 NOT APPLICABLE）：失敗前收下的 submit
   全部以 -4 失敗、之後的 submit 回 -14、wait 回 -4、`fpga_tile_poll` 每筆都是 failed/-4、C 一個元素
   都沒被碰、鏈路上只有三塊 slab（3099 B）、之後的 begin 回 NULL/-14，close 之後新 session 正常。
   refusal（mode V）、k-ordered 累加（mode X）、多 GEMM（mode D／M）都不變。
@@ -511,14 +558,16 @@ soft --submission async` 因此可用（預設仍是 sync，lit 的 `test/Systol
 
 | 階段 | 之前 | 現在 |
 |---|---|---|
-| C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式），shim 用它們在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數 |
+| C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式）：shim 用 `leading_extent_expr` 在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數，用 `leading_min_expr` 把最小 row 為負的呼叫（任何一個 array，讀的或寫的）交給 CPU（2026-10-20） |
 | 辨識（`AffineMatmulAnalysis.cpp`） | access map 有 symbol → failure | `separateSymbols`：每個 result 拆成 loop 部分 + symbol 部分（+ 常數），symbol 部分非線性（symbol×dim、floordiv）→ failure；loop 部分照舊辨識；symbol 部分存成 `LogicalMatmul::symbolicA/B/C`（0 dim、S symbol、每個 memref 維度一個 result）+ `symbolsA/B/C` |
 | view（`AffineMatmulToSystolic.cpp`） | `std::array<int64_t,2> offsets` 靜態 subview | `LogicalOperand::symbolic`：有 symbol 的維度以 `arith` 運算算出 index 值，`memref.subview %C[%off, 0] [8, 16] [1, 1]` → `memref<8x16xf32, strided<[16, 1], offset: ?>>`；有 symbol 的維度不做靜態邊界檢查（與動態 extent 同一條規則：nest 自己的保證，tile 不碰 nest 沒碰的元素）；A×A 的 `sameView` 連 symbol 一起比 |
-| lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset／stride 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代 |
+| lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代；row stride 不是靜態且介於 row 長度與 INT32_MAX 之間的 view（反向的 row、單一 row、run-time stride）每個 GEMM 先 stage 到一塊連續 buffer（第 6 節，2026-10-20） |
 | runtime | 指標 + ldc | 不變 |
 
-同一個編譯出的函式可以用任何 offset 呼叫（`dynoffset.c`：同一函式 0／8／16／24／5 等呼叫，每次
-verify 的元素數 `(r0 + 8) × 16` 不同）。邊界 tile、K fold（40 = 16+16+8）、access stride（`C[2i + r0]`）、
+同一個編譯出的函式可以用任何讓每個 access 落在指標之後（最小 row ≥ 0）的 offset 呼叫（`dynoffset.c`：
+同一函式 0／8／16／24／5 等呼叫，每次 verify 的元素數 `(r0 + 8) × 16` 不同）；最小 row 為負的呼叫
+（指標指在 array 中間、`C[r0 + i][j]` 而 r0 < 0，合法的 C）照原樣在 CPU 上跑：kernel 的 view、shim
+的 snapshot／還原／verify 都從指標指的元素開始（`SystolicCC/negoffset.c`）。邊界 tile、K fold（40 = 16+16+8）、access stride（`C[2i + r0]`）、
 兩個 GEMM 在同一函式都走完整路徑；仍拒絕的：A 與 C 是同一 memref 的 view（「A may overlap C」，不
 因 offset 運算式不同就當成不重疊）、無號參數、`off + i*ldc`（symbol × counter）、符號化的 loop 邊界。
 
@@ -572,6 +621,10 @@ makespan（descriptor 連續到達、queue 被餵滿）小 1.1–8 倍——板�
 - 辨識器的 logical coordinate 是所有 operand 共用的：只有 C 有常數 offset（`C[i+1][j] += A[i][k]…`）或
   只有 C 有 stride 仍不被辨識（與 symbol 無關的既有邊界）。
 - symbol 只能是加法項（常數係數）；symbol × counter、symbol 在 loop 邊界、無號參數：拒絕。
+- run time 的最小 row 為負（access 落在 array 參數的指標之前）的呼叫不 offload，在 CPU 上照原樣跑
+  （shim 在任何 local 之前檢查 `leading_min_expr`，讀的與寫的 array 都算）。內層維度的 symbol
+  offset（`C[i][c0 + j]`）沒有 run-time 範圍檢查：值必須落在該維度內，跟 ISO C 對 array 下標的要求
+  一樣（辨識器的 in-bounds 假設）。
 - 軟體模型的非同步 API 在 poll／wait 時才算（沒有 thread）；它是契約的模型，不是硬體。
 - `fpga_tile_submit` 在 host queue 滿時仍會等（等空位，不是等 job）；沒有「立即回 EAGAIN」的變體。
 
