@@ -253,7 +253,11 @@ static Value materializeOffset(OpBuilder &builder, Location loc,
     case AffineExprKind::Mul:
       return arith::MulIOp::create(builder, loc, lhs, rhs);
     default:
-      llvm_unreachable("separateSymbols keeps only sums and constant products");
+      // separateSymbols refuses floordiv, ceildiv and mod. Not
+      // llvm_unreachable: in a build without assertions that is undefined
+      // behaviour, which once lowered s0 floordiv 2 as s0 * 2.
+      llvm::report_fatal_error(
+          "materializeOffset: a symbolic offset that is not a sum of products");
     }
   };
   Value v = build(expr);

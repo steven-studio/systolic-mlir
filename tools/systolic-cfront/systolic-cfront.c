@@ -1598,14 +1598,12 @@ static env_entry *array_access(translator *tr, const json_value *node,
       unsupported(node, "the access reaches row %lld of '%s', so the array's "
                         "extent does not fit in 64 bits",
                   hi[0], referenced_name(base));
-    for (size_t d = 0; d < count; ++d) {
-      if (!info->has_ranges || lo[d] < info->lo[d])
-        info->lo[d] = lo[d];
-      if (!info->has_ranges || hi[d] > info->hi[d])
-        info->hi[d] = hi[d];
-    }
     /* The leading subscript's range as a C expression of the parameters:
-       the extreme over the accesses, each "constant + symbolic terms". */
+       the extreme over the accesses, each "constant + symbolic terms".
+       Built before info->lo / hi take this access in: the fold of the
+       earlier static accesses below must not see this access's loop part
+       without its symbolic terms (an extreme too large, past the caller's
+       array when the terms are negative). */
     if (count && (sym[0] || info->lo_expr)) {
       char *lo_e = format("(%lldLL%s)", lo[0], sym[0] ? sym[0] : "");
       char *hi_e = format("(%lldLL%s)", hi[0], sym[0] ? sym[0] : "");
@@ -1630,6 +1628,12 @@ static env_entry *array_access(translator *tr, const json_value *node,
         info->lo_expr = l2;
         info->hi_expr = h2;
       }
+    }
+    for (size_t d = 0; d < count; ++d) {
+      if (!info->has_ranges || lo[d] < info->lo[d])
+        info->lo[d] = lo[d];
+      if (!info->has_ranges || hi[d] > info->hi[d])
+        info->hi[d] = hi[d];
     }
     info->has_ranges = 1;
   }
@@ -2522,7 +2526,10 @@ static char *parameter(translator *tr, const json_value *p) {
       e->name = name;
       e->cname = xstrdup(pname);
       e->is_signed = strstr(t, "unsigned") == NULL && strcmp(t, "_Bool") != 0;
-      e->sym_name = format("%s_idx", name);
+      /* Reserved like every other SSA name of the function (name is
+         "%stem"): a loop counter or parameter spelled <stem>_idx gets
+         another name, whichever comes first. */
+      e->sym_name = unique(tr, format("%s_idx", name + 1));
       e->bits = strstr(t, "long") ? 64 : 32;
       return format("%s: i%d %s", name, e->bits, loc_text(tr, p));
     }
@@ -2695,6 +2702,10 @@ static void function(translator *tr, const json_value *fn) {
   tr->counter = 0;
   tr->env_n = 0;
   tr->acc_n = 0;
+  /* A function abandoned through unsupported() inside a subscript leaves the
+     flag set (array_access clears it on its normal exit only): every function
+     starts outside a subscript, where an integer parameter is no symbol. */
+  tr->in_subscript = 0;
   char *args = xstrdup("");
   for (size_t i = 0; i < nparams; ++i) {
     if (!json_get(params[i], "name"))

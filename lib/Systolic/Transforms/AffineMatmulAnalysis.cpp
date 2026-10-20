@@ -146,6 +146,12 @@ recoverSourceDomain(ValueRange iterationIVs) {
 /// `stripped` gets d + c (over the dims, no symbols). Failure when a result
 /// is not of that form (a product of a symbol and a loop counter, a floordiv
 /// or a mod involving a symbol): there is no view offset that stands for it.
+/// The symbol part must be a sum of products: a floordiv, ceildiv or mod of
+/// symbols (s0 floordiv 2; simplification also makes one of
+/// (4 * d0 + s0) floordiv 4) splits off cleanly but is no run-time offset
+/// the lowering builds (materializeOffset in AffineMatmulToSystolic.cpp),
+/// so the access stays UNKNOWN, as a mod/div subscript does
+/// (docs/AFFINE_GEMM_MAPPING.md section 10).
 static FailureOr<AffineMap> separateSymbols(AffineMap map,
                                             AffineMap &stripped) {
   MLIRContext *context = map.getContext();
@@ -163,6 +169,14 @@ static FailureOr<AffineMap> separateSymbols(AffineMap map,
     AffineExpr symPart = simplifyAffineExpr(symPlusConst - constPart, nd, ns);
     if (simplifyAffineExpr(dimPart + symPart, nd, ns) !=
         simplifyAffineExpr(e, nd, ns))
+      return failure();
+    bool divOrMod = false;
+    symPart.walk([&](AffineExpr sub) {
+      divOrMod |= sub.getKind() == AffineExprKind::FloorDiv ||
+                  sub.getKind() == AffineExprKind::CeilDiv ||
+                  sub.getKind() == AffineExprKind::Mod;
+    });
+    if (divOrMod)
       return failure();
     dimParts.push_back(dimPart);
     symParts.push_back(symPart);
