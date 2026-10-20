@@ -98,7 +98,11 @@ grant 制：`w_grant ∈ {NONE, HS, WB, SD}`，持有者發完 AW 與 W、等到
   `dpti_bus_arbiter.sv` 就是 1）。新 bitstream 的 K_MAX 用 16／16。
 - 沒做：RESET 暫存器與 frontend timeout（提案列為選配）。鏈路失步時的恢復手段仍是重開
   session（`ftdi_usb_purge_buffers`）；非同步 runtime 用 job_id 的 epoch 位元（31..24）
-  辨認上一個 session 遲到的 record 並丟掉。
+  辨認上一個 session 遲到的 record 並丟掉。（2026-10-20 更正：epoch 原本每個 process 都從 1
+  開始、同步 runtime 的 job_id 每個 process 都從 0 開始，所以這只在同一個 process 裡成立——
+  另一個程式（例如帶著在飛的 job 被殺掉的）留下的 record 會被當成自己的結果。現在兩個
+  runtime 的 job_id 都是 `epoch<<24 | seq`，process 的第一個 session 用隨機的 epoch（1..254），
+  見第 3.2 節。）
 - 沒動：XDC、SIWU#（要另外批准）、`eval/`、`artifacts/`。
 
 ### 2.6 沙盒實跑結果（Verilator 5.020／Icarus 12；不是板子）
@@ -143,7 +147,7 @@ int fpga_gemm_wait(fpga_gemm_t *g);
 |---|---|
 | credit | 每顆 device：descriptor `depth` + stage 1，`depth` = 設定檔的 `PIPELINE_DEPTH`（context 的 job queue，本樹的 RTL 是 4；沒有這個鍵的舊 bitstream 是 1；`SYSTOLIC_ASYNC_DEPTH` 可往下調，不會高於 `PIPELINE_DEPTH`，上限 8）。預設的 burst 模式（`SYSTOLIC_ASYNC_BURST=1`）先把一顆 device 的 operand slot 全部填滿（`depth + 1` 塊 slab）或等到 `fpga_gemm_wait` 才送它**第一批** descriptor，讓 context 連續收到 job（第 9 節）；之後只要該 device 有 job 在飛，stage 好的 descriptor 一有 credit 就送（在飛的 job 佔著 operand slot 直到 completion，第一批之後 slot 永遠填不滿——2026-10-19 之前 burst 模式在長 GEMM 上因此退化成每顆一次一筆，第 10 節）；`SYSTOLIC_ASYNC_STAGE=0` 時每顆 device 仍然一次一個 descriptor（mode A／B） |
 | DDR slot | 每顆 device `depth + 1` 個 operand slot（`0x10000 + (dev*(depth+1)+slot)*slab_bytes`，256 B 對齊）與 `depth` 個 result slot（`0x3000 + (dev*depth+slot)*256`，16 B 對齊），以 free mask 配置；一個 job 的兩個 slot 在它的 completion record 讀到之後才釋放（context 在 fold 之前就讀完 slab，result tile 在 record 的 payload 之前就離開 DDR），所以 staged 的 slab 永遠不會覆蓋陣列還可能在讀的那塊、result slot 不會在 host 拿到之前被覆蓋；設定檔有 `DDR_BYTES`（co-sim 寫 1 MiB）時 depth 會降到 operand 區域放得下為止 |
-| job_id | `epoch<<24 \| seq`：epoch 每開一次 session +1（1..255），seq 24 bit；上一個 session 遲到的 record 查不到 PJT 就丟掉 |
+| job_id | `epoch<<24 \| seq`：epoch 每開一次 session 換下一個，process 的第一個 session 隨機（1..254；0 不用、255 保留；`SYSTOLIC_DPTI_EPOCH` 可固定第一個，測試用），seq 24 bit；上一個 session 或另一個程式遲到的 record 查不到 PJT 就丟掉（兩個程式同 epoch 的機率 1/254）。同步 runtime 用同樣的格式，它對不上的 record 回 -9 |
 | PJT | `job_id → Tile*`（在飛的 tile）；completion 回來依 job_id 找，device／payload 對不上 = 失步（-9，整條 session 停用） |
 | 送出順序 | 各 device 佇列 FIFO，多顆 device 都能 stage 時先給最早 submit 的 tile（全域序號）；沒有優先權反轉，不需要 aging |
 | 讀的時機 | `SYSTOLIC_ASYNC_READ_POLICY`：`blocked`（預設）＝寫到沒東西能寫了才讀；`always`＝每次 pump 都讀一次；`wait`＝只在 `fpga_gemm_wait` 與佇列到上限時讀。板上一次空讀要付一個 latency timer 週期（FT2232H 沒資料時等 timer 到才回應 IN），cosim 看不出差別——板上量 |

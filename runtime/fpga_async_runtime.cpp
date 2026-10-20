@@ -1107,7 +1107,7 @@ bool open_session(Runtime &r) {
         r.link_error = -3;
         return false;
     }
-    r.epoch = (r.epoch % 255u) + 1u;
+    r.epoch = fpga_runtime_next_epoch(r.epoch);
     r.next_seq = 0;
     r.bytes_written_base = dpti_ftdi_bytes_written(r.session);
     r.bytes_read_base = dpti_ftdi_bytes_read(r.session);

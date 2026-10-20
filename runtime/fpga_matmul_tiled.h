@@ -167,6 +167,17 @@ int fpga_runtime_get_config(fpga_runtime_config_t *out);
 // parses records out of its own receive buffer.
 int fpga_runtime_read_completion(fpga_completion_t *out);
 
+// The job_id epoch (bits 31..24; job_id = epoch << 24 | sequence) of a new
+// session, for both runtimes: for the first session of the process a random
+// one -- so that a completion record another program left on the link (one
+// killed with jobs in flight; a board can deliver its results after the next
+// session's purge) does not carry a job_id this program expects, but by a
+// 1-in-254 chance -- and then the next one of the previous session. Always
+// 1..254: 0 was every process's first epoch until 2026-10-20 (the
+// synchronous runtime's ids started at 0), 255 is reserved.
+// SYSTOLIC_DPTI_EPOCH=<1..254> fixes the first one (tests).
+unsigned fpga_runtime_next_epoch(unsigned previous);
+
 // The device table and the slab format, for the asynchronous runtime, which
 // stages the same slabs for the same arrays through its own session.
 //

@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -327,7 +329,10 @@ unsigned physical_k_max(const fpga_runtime_config_t &cfg, unsigned device_id) {
 
 struct ScheduledRuntime {
     DptiFtdiSession      *session = nullptr;
-    unsigned              next_job_id = 0;
+    // job_id = epoch << 24 | next_seq: a new epoch per session
+    // (fpga_runtime_next_epoch), random for the process's first.
+    unsigned              epoch = 0;
+    unsigned              next_seq = 0;
 
     /*
      * The session could not be opened, or a MEM_WRITE, descriptor or result
@@ -405,6 +410,26 @@ uint32_t read_timeout_ms() {
 }
 
 } // namespace
+
+unsigned fpga_runtime_next_epoch(unsigned previous) {
+    if (previous >= 1 && previous <= 254)
+        return previous % 254u + 1u;
+    if (const char *e = std::getenv("SYSTOLIC_DPTI_EPOCH")) {
+        char *end = nullptr;
+        const unsigned long v = std::strtoul(e, &end, 10);
+        if (end && *end == '\0' && v >= 1 && v <= 254)
+            return static_cast<unsigned>(v);
+        std::fprintf(stderr, "[fpga-runtime] SYSTOLIC_DPTI_EPOCH='%s' is not 1..254; ignored\n", e);
+    }
+    unsigned seed = 0;
+    try {
+        seed = std::random_device{}();
+    } catch (...) {
+        seed = static_cast<unsigned>(getpid()) * 2654435761u ^
+               static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count());
+    }
+    return seed % 254u + 1u;
+}
 
 /*
  * Read one completion record from the session. 0, or -7 (read failed),
@@ -487,6 +512,8 @@ int scheduled_invocation(
             rt.link_failed = true;
             return -3;
         }
+        rt.epoch = fpga_runtime_next_epoch(rt.epoch);
+        rt.next_seq = 0;
     }
 
     // One MEM_WRITE of the bitstream's fixed payload length; this device's
@@ -526,7 +553,7 @@ int scheduled_invocation(
 
     dpti_job_t job = {};
 
-    job.job_id = rt.next_job_id++;
+    job.job_id = (rt.epoch << 24) | (rt.next_seq++ & 0x00ffffffu);
     job.device_id = device_id;
 
     /*

@@ -67,6 +67,15 @@
 #           tree's bench probes signals only the record RTL has), a
 #           header-less configuration must PASS there (no false refusal);
 #           else that check is SKIPPED.
+#   jobid   job ids of different programs differ: both runtimes pick the
+#           job_id epoch (bits 31..24) at random per process
+#           (SYSTOLIC_DPTI_EPOCH fixes it, for tests). A completion record
+#           an earlier program left on the link (its first result, injected
+#           at the session's start with SYSTOLIC_DPTI_COSIM_INJECT_RX, as a
+#           board can deliver one after the next session's purge) is never
+#           taken for this program's result: the synchronous runtime refuses
+#           it (-9), the asynchronous one ignores it and runs correctly; and
+#           four programs started in a row do not all use one epoch.
 #
 # Exit status 0 only if every check passes (a SKIP is not a pass).
 set -uo pipefail
@@ -76,7 +85,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench,modef,negoffset,kmax,views,header"
+SECTIONS="bench,modef,negoffset,kmax,views,header,jobid"
 PRERECORD=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -93,8 +102,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench|modef|negoffset|kmax|views|header) ;;
-        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax, views, header)" >&2; exit 2 ;;
+        bench|modef|negoffset|kmax|views|header|jobid) ;;
+        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax, views, header, jobid)" >&2; exit 2 ;;
     esac
 done
 
@@ -532,6 +541,93 @@ section_header() {
     [ $rc -eq 0 ] && has "$out" "RUNTIME DISPATCH: PASS" && ! has "$out" "does not say COMPLETION_HEADER=1" \
         && ok "header: RTL without the record, header-less configuration: runtime-dispatch-test PASS (no false refusal)" \
         || bad "header: RTL without the record (exit $rc)" "$(grep -E 'rc=-|RUNTIME DISPATCH' <<< "$out" | head -3)"
+    stop_cosim
+}
+
+# first_job_id CAPTURE: the job_id of the first descriptor in the bytes a
+# runtime wrote (WRITE32 to JOB_ID, 0x04), decimal.
+first_job_id() {
+    python3 -I - "$1" <<'EOF'
+import sys
+data = open(sys.argv[1], "rb").read()
+i = 0
+while i < len(data):
+    if data[i] == 0x01:
+        if data[i + 1] == 0x04:
+            print(int.from_bytes(data[i + 2:i + 6], "little"))
+            sys.exit(0)
+        i += 6
+    elif data[i] == 0x02:
+        i += 9 + int.from_bytes(data[i + 5:i + 9], "little")
+    else:
+        sys.exit("capture: byte 0x%02x at %d is no opcode" % (data[i], i))
+sys.exit("capture: no descriptor")
+EOF
+}
+
+# stale_result JOB_ID: device 0's completion record for JOB_ID and its 8x8
+# result (every element 2.0) -- what a program that left with that job in
+# flight leaves on the link.
+stale_result() {
+    python3 -I - "$1" <<'EOF'
+import struct, sys
+job = int(sys.argv[1])
+record = struct.pack("<IIBBHI", 0x59534A43, job, 0, 0, 256, 7)
+sys.stdout.buffer.write(record + struct.pack("<64f", *([2.0] * 64)))
+EOF
+}
+
+section_jobid() {
+    D="$OUT/jobid"
+    mkdir -p "$D"
+    local out rc j first i epochs n
+    start_cosim "$D/run" || { bad "jobid: the co-simulation did not open $SOCK"; return; }
+    # The synchronous runtime: program 1 (epoch 5) runs; its first result,
+    # left on the link, starts program 2's session (epoch 6).
+    out=$(SYSTOLIC_DPTI_EPOCH=5 SYSTOLIC_DPTI_COSIM_CAPTURE="$D/sync1.bin" host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1); rc=$?
+    echo "$out" > "$D/sync1.log"
+    settle 1
+    j=$(first_job_id "$D/sync1.bin") && stale_result "$j" > "$D/stale_sync.bin" \
+        || { bad "jobid: program 1 (exit $rc)" "$(tail -2 <<< "$out")"; stop_cosim; return; }
+    out=$(SYSTOLIC_DPTI_EPOCH=6 SYSTOLIC_DPTI_COSIM_INJECT_RX="$D/stale_sync.bin" host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1); rc=$?
+    echo "$out" > "$D/sync2.log"
+    settle 2
+    first=$(grep -m1 -oE 'rc=-?[0-9]+' <<< "$out")
+    if [ "$first" = "rc=-9" ] && has "$out" "does not match invocation" && ! grep -qE 'rc=0 +MISMATCH' <<< "$out"; then
+        ok "jobid: synchronous: program 1's result (job_id $j) at program 2's start is refused (rc -9), not taken as its own"
+    else
+        bad "jobid: synchronous: program 1's result (job_id $j) at program 2's start (first ${first:-none})" \
+            "$(grep -E 'rc=|does not match|RUNTIME' <<< "$out" | head -4)"
+    fi
+    # The asynchronous runtime, the same way.
+    out=$(SYSTOLIC_DPTI_EPOCH=5 SYSTOLIC_DPTI_COSIM_CAPTURE="$D/async1.bin" host 900 "$BUILD/bin/runtime-async-test" --mode A 2>&1); rc=$?
+    echo "$out" > "$D/async1.log"
+    settle 3
+    j=$(first_job_id "$D/async1.bin") && stale_result "$j" > "$D/stale_async.bin" \
+        || { bad "jobid: asynchronous program 1 (exit $rc)" "$(tail -2 <<< "$out")"; stop_cosim; return; }
+    out=$(SYSTOLIC_DPTI_EPOCH=6 SYSTOLIC_DPTI_COSIM_INJECT_RX="$D/stale_async.bin" host 900 "$BUILD/bin/runtime-async-test" --mode A 2>&1); rc=$?
+    echo "$out" > "$D/async2.log"
+    settle 4
+    if [ $rc -eq 0 ] && grep -q '^mode A (.*): PASS$' <<< "$out" && has "$out" "injected bytes"; then
+        printf -v j '0x%08x' "$j"
+        ok "jobid: asynchronous: program 1's result (job_id $j) at program 2's start is ignored; program 2 PASS"
+    else
+        bad "jobid: asynchronous: program 1's result at program 2's start (exit $rc)" "$(grep -E '^mode A|RUNTIME|mismatch' <<< "$out" | head -3)"
+    fi
+    # Four programs without SYSTOLIC_DPTI_EPOCH.
+    epochs=""
+    for i in 1 2 3 4; do
+        out=$(SYSTOLIC_DPTI_COSIM_CAPTURE="$D/random$i.bin" host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1)
+        settle $((4 + i))
+        j=$(first_job_id "$D/random$i.bin") || j=-16777216
+        epochs="$epochs $((j >> 24))"
+    done
+    n=$(tr ' ' '\n' <<< "$epochs" | grep -v '^$' | sort -u | wc -l)
+    if [ "$n" -gt 1 ] && ! tr ' ' '\n' <<< "$epochs" | grep -qxE '0|255|-1'; then
+        ok "jobid: four programs in a row: epochs$epochs (in 1..254, not all one)"
+    else
+        bad "jobid: four programs in a row: epochs$epochs (expected 1..254, not all one)"
+    fi
     stop_cosim
 }
 

@@ -38,11 +38,17 @@ static long g_writes = 0;
 /* SYSTOLIC_DPTI_COSIM_CORRUPT_READ=<n>: the n-th byte the session reads (from
  * 1) comes back with its low bit flipped -- a wrong result the link does not
  * report, to check that a test fails on it.
- * SYSTOLIC_DPTI_COSIM_NO_FAULTS=1: neither injection happens, as on the
- * board, whose libftdi reads neither variable -- for tests that let the
+ * SYSTOLIC_DPTI_COSIM_INJECT_RX=<file>: the session's reads return the
+ * file's bytes first, then the link's -- what a board can still deliver
+ * after the next session's purge (results of an earlier program beyond the
+ * FT2232H's transmit buffer), which the co-simulation drains instead.
+ * SYSTOLIC_DPTI_COSIM_NO_FAULTS=1: no injection happens, as on the board,
+ * whose libftdi reads none of these variables -- for tests that let the
  * co-simulation stand for the board. */
 static long g_corrupt_read_at = 0;
 static long g_read_bytes = 0;
+static unsigned char *g_inject = NULL;
+static long g_inject_len = 0, g_inject_off = 0;
 
 static int fail(struct ftdi_context *ftdi, int code, const char *msg) {
   if (ftdi)
@@ -99,6 +105,21 @@ int ftdi_usb_open(struct ftdi_context *ftdi, int vendor, int product) {
       g_corrupt_read_at =
           (faults && corrupt_at && *corrupt_at) ? strtol(corrupt_at, NULL, 10) : 0;
       g_read_bytes = 0;
+      free(g_inject);
+      g_inject = NULL;
+      g_inject_len = g_inject_off = 0;
+      const char *inject = getenv("SYSTOLIC_DPTI_COSIM_INJECT_RX");
+      FILE *in = (faults && inject && *inject) ? fopen(inject, "rb") : NULL;
+      if (in) {
+        if (fseek(in, 0, SEEK_END) == 0 && (g_inject_len = ftell(in)) > 0 &&
+            fseek(in, 0, SEEK_SET) == 0 && (g_inject = malloc((size_t)g_inject_len)) &&
+            fread(g_inject, 1, (size_t)g_inject_len, in) == (size_t)g_inject_len)
+          fprintf(stderr, "[libftdi_cosim] the session's reads start with %ld injected bytes\n",
+                  g_inject_len);
+        else
+          g_inject_len = 0;
+        fclose(in);
+      }
       fprintf(stderr, "[libftdi_cosim] connected to RTL co-simulation at %s\n",
               path);
       return 0;
@@ -120,6 +141,9 @@ int ftdi_usb_close(struct ftdi_context *ftdi) {
     fclose(g_capture);
     g_capture = NULL;
   }
+  free(g_inject);
+  g_inject = NULL;
+  g_inject_len = g_inject_off = 0;
   return 0;
 }
 
@@ -172,6 +196,15 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf,
 int ftdi_read_data(struct ftdi_context *ftdi, unsigned char *buf, int size) {
   if (g_sock < 0)
     return fail(ftdi, -666, "libftdi_cosim: not open");
+
+  if (g_inject_off < g_inject_len && size > 0) {
+    long n = g_inject_len - g_inject_off;
+    if (n > size)
+      n = size;
+    memcpy(buf, g_inject + g_inject_off, (size_t)n);
+    g_inject_off += n;
+    return (int)n;
+  }
 
   ssize_t n = recv(g_sock, buf, (size_t)size, MSG_DONTWAIT);
   if (n > 0) {
