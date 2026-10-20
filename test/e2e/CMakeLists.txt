@@ -18,3 +18,12 @@ add_custom_target(check-e2e-config
   DEPENDS runtime-dispatch-test systolic-matmul
   USES_TERMINAL
   COMMENT "E2E configuration checks (host only)")
+
+# Regression checks that need the RTL co-simulation (cosim/build.sh first);
+# every program runs against the simulation, never a board:
+# cmake --build build --target check-e2e-cosim-regressions
+add_custom_target(check-e2e-cosim-regressions
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_cosim_regressions.sh --build-dir ${CMAKE_BINARY_DIR}
+  DEPENDS runtime-dispatch-test
+  USES_TERMINAL
+  COMMENT "E2E co-simulation regressions (needs build/cosim)")

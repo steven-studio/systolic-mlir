@@ -339,10 +339,14 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   write/read 接到 UNIX socket；opcode、descriptor、DDR staging、結果讀回全由 RTL 做。
 - 每個 session 記三個數：從 host 收到的、RTL 用 RD# 讀走的、RTL 用 WR# 送出的
   byte 數。host 關閉之後，模擬的板子照常跑，直到 RTL 讀完 host 寫出的每個 byte、送完
-  host 已 submit 的每個 job 的結果（最多 2^22 個 FIFO clock），這段送出的東西丟掉——
+  host 已 submit 的每個 job 欠的東西——completion record 加結果 tile；RTL 拒絕的
+  descriptor 只有 16 byte 的 record（最多 2^22 個 FIFO clock），這段送出的東西丟掉——
   板子上，下一個 session 的 `ftdi_usb_purge_buffers()` 也會把它丟掉。板子比這個模擬快
-  約千倍：不這樣做的話，帶著未完成 job 離開的 host 會把那個 job 的結果留給下一個
-  session。
+  約千倍：不這樣做的話，帶著未完成 job 離開的 host 會把那個 job 的 record 與結果留給
+  下一個 session。RTL 送出的 byte 按 completion record 分段（magic、bytes 10..11 的
+  payload 長度），每個 submit 一個 record；沒有 record 的 RTL 照結果的 byte 數算。host
+  寫的 byte 不是 opcode 時，跟 `dpti_command_frontend.sv` 一樣讀掉、略過。
+  `test/e2e/run_cosim_regressions.sh --section bench` 檢查這幾種離開的方式。
 - `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>` 讓 session 的第 n 次 `ftdi_write_data()`
   像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查用它）。
 - 有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）建出來的 co-simulation，每個 job
