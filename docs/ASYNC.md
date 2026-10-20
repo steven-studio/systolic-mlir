@@ -162,6 +162,14 @@ timeout 也管不到它，程式永遠卡住；被拒的是最後一個 fold 時
 的 kernel 在涵蓋一個輸出 tile 的 wait 之前送完它所有的 fold，所以 submit 全被收下的 GEMM 不會
 觸發。軟體模型（`soft_runtime.c`）做同樣的檢查。
 
+submit 時被拒（任何非 0 的回傳）的 tile 是一次失敗的 invocation：session 統計
+（`fpga_async_stats_t` 的 `tiles_submitted`、`tiles_failed`、`first_error`，handle 不是開著的 GEMM
+時記失敗的 begin 的錯誤碼）把它算進去，就像同步 entry point 算被拒的呼叫——編譯出的 kernel
+不看回傳碼，`board_stats.c`／shim 與 `systolic-matmul` 看的是統計；GEMM 自己的 wait 仍只報
+它收下的 tile（mode V 的語意不變）。一個 session 的前 8 筆拒絕印在 stderr（`[fpga-async]
+refused at submit: ...`，-11 附 `ldc`；鏈路失敗後的 -14 不印）。2026-10-20 之前拒絕不留紀錄，
+只有 shim 的 invocation 計數看得出來。軟體模型同樣計數，它的同步 wrapper 不重複計。
+
 ### 3.4 `SYSTOLIC_RUNTIME_TIMING=1` 的輸出
 
 關閉 session 時印一行 `[fpga-async] timing tiles= completed= failed= gemms= span_us=

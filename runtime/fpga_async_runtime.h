@@ -226,6 +226,11 @@ int fpga_gemm_release(fpga_gemm_t *gemm);
 int fpga_async_runtime_last_error(void);
 
 typedef struct {
+    /* fpga_tile_submit calls; one refused before it queued anything (any
+     * nonzero return) counts here and in tiles_failed, as a failed
+     * invocation of the synchronous entry point does, and its code can be
+     * first_error (for a handle that is no open GEMM, the failed begin's
+     * code). The GEMM's own wait still reports only its accepted tiles. */
     unsigned long long tiles_submitted;
     unsigned long long tiles_completed;             /* results accumulated */
     unsigned long long tiles_failed;

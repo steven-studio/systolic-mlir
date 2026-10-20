@@ -321,10 +321,12 @@ fpga_gemm_t *fpga_gemm_begin(int M, int N, int K, unsigned tiles_hint) {
 
 int fpga_async_runtime_last_error(void) { return rt.last_begin_error; }
 
-int fpga_tile_submit(fpga_gemm_t *h, unsigned tile_id, unsigned k_index,
-                     unsigned k_count, int m, int k, int n, const float *A,
-                     const float *B, float *C, int ldc, unsigned device_id,
-                     unsigned start_cycle, unsigned est_cycles) {
+/* fpga_tile_submit without the session's count of a refusal (the
+   synchronous entry point counts its own). */
+static int tile_submit(fpga_gemm_t *h, unsigned tile_id, unsigned k_index,
+                       unsigned k_count, int m, int k, int n, const float *A,
+                       const float *B, float *C, int ldc, unsigned device_id,
+                       unsigned start_cycle, unsigned est_cycles) {
   (void)start_cycle;
   fpga_gemm_t *g = find_gemm(h);
   if (!g || g->waited)
@@ -378,6 +380,24 @@ int fpga_tile_submit(fpga_gemm_t *h, unsigned tile_id, unsigned k_index,
   ++g->queued;
   ++rt.submits;
   return 0;
+}
+
+/* A refused submit is a failed invocation of the session (the compiled
+   kernels ignore the code; the shim reads systolic_offload_stats), as in
+   fpga_async_runtime.cpp; the GEMM's own result is untouched. A handle
+   that is no open GEMM is counted with the failed begin's error. */
+int fpga_tile_submit(fpga_gemm_t *h, unsigned tile_id, unsigned k_index,
+                     unsigned k_count, int m, int k, int n, const float *A,
+                     const float *B, float *C, int ldc, unsigned device_id,
+                     unsigned start_cycle, unsigned est_cycles) {
+  const int rc = tile_submit(h, tile_id, k_index, k_count, m, k, n, A, B, C, ldc,
+                             device_id, start_cycle, est_cycles);
+  if (rc != 0) {
+    ++rt.failed_calls;
+    if (rt.first_error == 0)
+      rt.first_error = !find_gemm(h) && rt.last_begin_error ? rt.last_begin_error : rc;
+  }
+  return rc;
 }
 
 int fpga_gemm_poll(fpga_gemm_t *h, fpga_gemm_status_t *out) {
@@ -547,8 +567,8 @@ int fpga_matmul_tiled_auto_scheduled(int M, int K, int N, const float *A,
   fpga_gemm_t *g = fpga_gemm_begin(M, N, K, 1);
   if (!g)
     return rt.last_begin_error;
-  int rc = fpga_tile_submit(g, 0, 0, 1, M, K, N, A, B, C, N, device_id,
-                            start_cycle, est_cycles);
+  int rc = tile_submit(g, 0, 0, 1, M, K, N, A, B, C, N, device_id,
+                       start_cycle, est_cycles);
   if (rc != 0) {
     note_error(g, rc);
     free_gemm(g);

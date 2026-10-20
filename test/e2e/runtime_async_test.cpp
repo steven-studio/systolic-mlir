@@ -1186,6 +1186,13 @@ int main(int argc, char **argv) {
           expect("elements of the failed tile written", written0, 0);
           expect("elements of tile 1 wrong", wrong1, 0);
           expect("release", fpga_gemm_release(h), 0);
+          // The session statistics count the refused submit as a submitted,
+          // failed invocation (the kernels read them, not the code), and the
+          // refusal came first.
+          fpga_async_stats_t ss; fpga_async_runtime_get_stats(&ss);
+          expect("session tiles_submitted (2 accepted + 1 refused)", static_cast<long long>(ss.tiles_submitted), 3);
+          expect("session tiles_failed (the refused one + the dropped fold)", static_cast<long long>(ss.tiles_failed), 2);
+          expect("session first_error (the refusal)", ss.first_error, -10);
         }
       }
       // The same GEMM sealed by a timed-out wait, then only polled.

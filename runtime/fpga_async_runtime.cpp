@@ -228,6 +228,7 @@ struct Runtime {
     int                   link_error = 0;
     int                   last_begin_error = 0;
     bool                  refusal_reported = false;
+    unsigned              submit_refusals_reported = 0;   // printed by refuse()
 
     unsigned              epoch = 0;          // job_id bits 31..24, per session
     uint32_t              next_seq = 0;       // job_id bits 23..0
@@ -457,6 +458,37 @@ void retire(Runtime &r, Gemm &g, int error) {
         if (r.stats.first_error == 0)
             r.stats.first_error = error;
     }
+}
+
+/* fpga_tile_submit refused the tile before queueing it, with code rc:
+ * nothing of it reaches the link or its GEMM, whose wait reports only its
+ * accepted tiles. The invocation the caller asked for did not run, so the
+ * session statistics count it as submitted and failed, as the synchronous
+ * entry point counts a refused call: the compiled kernels ignore the code
+ * and their callers read the statistics (board_stats.c, systolic-matmul).
+ * A handle that is no open GEMM (fpga_gemm_begin returned NULL, and said
+ * why) is counted with the begin's error and not printed; a refusal after a
+ * link failure is not printed either (the failure was). Under the lock. */
+int refuse(Runtime &r, int rc, bool no_gemm, unsigned tile_id, unsigned k_index,
+           unsigned k_count, unsigned device, int m, int k, int n, int ldc) {
+    ++r.stats.tiles_submitted;
+    ++r.stats.tiles_failed;
+    if (r.stats.first_error == 0)
+        r.stats.first_error = no_gemm && r.last_begin_error ? r.last_begin_error : rc;
+    if (!no_gemm && rc != -14 && r.submit_refusals_reported < 8) {
+        ++r.submit_refusals_reported;
+        std::fprintf(stderr,
+                     "[fpga-async] refused at submit: tile %u fold %u/%u on device %u "
+                     "(%dx%d, k=%d, ldc=%d): rc=%d%s\n",
+                     tile_id, k_index, k_count, device, m, n, k, ldc, rc,
+                     rc == -10 ? " -- k outside 1..K_MAX of the device in the run-time "
+                                 "configuration: compiled for another bitstream?"
+                     : rc == -11 ? " -- device, tile size or ldc < n" : "");
+        if (r.submit_refusals_reported == 8)
+            std::fprintf(stderr, "[fpga-async] (this session's further refusals at submit "
+                                 "are counted, not printed)\n");
+    }
+    return rc;
 }
 
 void accumulate(Runtime &r, Tile &t) {
@@ -1182,6 +1214,7 @@ void clear_session(Runtime &r) {
     r.link_failed = false;
     r.link_error = 0;
     r.refusal_reported = false;
+    r.submit_refusals_reported = 0;
     r.span_started = false;
 }
 
@@ -1335,32 +1368,38 @@ int fpga_tile_submit(fpga_gemm_t *handle,
     Runtime &r = rt();
     const clock_t_::time_point t0 = clock_t_::now();
     std::unique_lock<std::mutex> lk(r.mu);
+    // Every refusal below is counted in the session statistics (refuse()).
+    auto refused = [&](int rc, bool no_gemm = false) {
+        return refuse(r, rc, no_gemm, tile_id, k_index, k_count, device_id, m, k, n, ldc);
+    };
     Gemm *g = find_gemm(r, handle);
-    if (!g || g->waited)
-        return -17;
+    if (!g)
+        return refused(-17, true);
+    if (g->waited)
+        return refused(-17);
     if (r.link_failed)
-        return -14;
+        return refused(-14);
     const unsigned P = device_id < DEVICES ? r.dev[device_id].P : 0;
     if (P == 0)
-        return -11;
+        return refused(-11);
     const unsigned k_max = r.dev[device_id].k_max;
     if (k < 1 || (static_cast<unsigned>(k) > k_max && !r.set.violate))
-        return -10;
+        return refused(-10);
     if (m < 1 || n < 1 || static_cast<unsigned>(m) > P || static_cast<unsigned>(n) > P)
-        return -11;
+        return refused(-11);
     if (!A || !B || !C)
-        return -12;
+        return refused(-12);
     if (ldc < n)
-        return -11;
+        return refused(-11);
     if (est_cycles == 0)
-        return -15;
+        return refused(-15);
     if (k_count == 0 || k_index >= k_count)
-        return -17;
+        return refused(-17);
     {
         auto it = g->outputs.find(tile_id);
         if (it != g->outputs.end() &&
             (it->second.k_count != k_count || it->second.submitted.count(k_index)))
-            return -17;
+            return refused(-17);
     }
     const unsigned slab_bytes = r.cfg.slab_bytes;
     const bool violate = r.set.violate;
@@ -1376,22 +1415,24 @@ int fpga_tile_submit(fpga_gemm_t *handle,
         m, pack_k, n, static_cast<int>(P), static_cast<int>(k_max), A, B,
         t->slab.data(), static_cast<unsigned>(t->slab.size()));
     (void)violate;
-    if (prc != 0)
-        return -13;
 
     lk.lock();
+    if (prc != 0)
+        return refused(-13);
     // The link may have failed while the slab was packed; the GEMM may have
     // been released by another caller thread.
     g = find_gemm(r, handle);
-    if (!g || g->waited)
-        return -17;
+    if (!g)
+        return refused(-17, true);
+    if (g->waited)
+        return refused(-17);
     if (r.link_failed)
-        return -14;
+        return refused(-14);
     OutputTile &ot = g->outputs[tile_id];
     if (ot.k_count == 0)
         ot.k_count = k_count;
     else if (ot.k_count != k_count || ot.submitted.count(k_index))
-        return -17;
+        return refused(-17);
     ot.submitted.insert(k_index);
     t->gemm = g;
     t->job_id = (static_cast<uint32_t>(r.epoch) << 24) | (r.next_seq++ & 0x00ffffffu);
