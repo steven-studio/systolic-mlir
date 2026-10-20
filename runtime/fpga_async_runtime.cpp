@@ -94,6 +94,7 @@ struct OutputTile {
     unsigned k_count = 0;
     unsigned next_k = 0;
     bool     failed = false;                  // a fold failed: the rest are dropped
+    int      error = 0;                       // why, for the folds dropped later (0: -14)
     std::set<unsigned> submitted;             // k_index values seen
     std::map<unsigned, std::unique_ptr<Tile>> early;   // received ahead of next_k
 };
@@ -481,8 +482,9 @@ void deliver(Runtime &r, std::unique_ptr<Tile> tile) {
     if (ot.failed) {
         trace("drop job=0x%08x: output tile %u of gemm %u already failed",
               tile->job_id, tile->tile_id, g.id);
-        set_state(*tile, FPGA_TILE_FAILED, -14);
-        retire(r, g, -14);
+        const int why = ot.error ? ot.error : -14;
+        set_state(*tile, FPGA_TILE_FAILED, why);
+        retire(r, g, why);
         return;
     }
     if (tile->k_index != ot.next_k) {
@@ -1195,11 +1197,53 @@ Runtime::~Runtime() {
     }
 }
 
+/* The GEMM is sealed by its first wait or wait_for: no tile is accepted
+ * after it. An output tile not all of whose k_count folds were accepted --
+ * one refused at submit (k beyond this bitstream's K_MAX: a program compiled
+ * for a deeper one), or never submitted -- can never be accumulated in
+ * k_index order. It fails now with -17, its held folds at once and those
+ * still on their way when they arrive, and the GEMM reports it, instead of
+ * waiting for ever for the missing fold (a fold held behind one that never
+ * comes keeps the GEMM outstanding, and no link timeout covers it) or
+ * reporting 0 over a partial K-sum. Compiled kernels submit every fold of an
+ * output tile before the wait that covers it, so a GEMM whose submits were
+ * all accepted never trips this. Under the lock. */
+void seal(Runtime &r, Gemm &g) {
+    unsigned tiles = 0, held = 0;
+    for (auto &kv : g.outputs) {
+        OutputTile &ot = kv.second;
+        if (ot.failed || ot.submitted.size() == ot.k_count)
+            continue;
+        ot.failed = true;
+        ot.error = -17;
+        ++tiles;
+        for (auto &h : ot.early) {
+            set_state(*h.second, FPGA_TILE_FAILED, -17);
+            retire(r, g, -17);
+            ++held;
+        }
+        ot.early.clear();
+        if (g.first_error == 0)
+            g.first_error = -17;
+    }
+    if (tiles) {
+        std::fprintf(stderr,
+                     "[fpga-async] incomplete K folds: gemm %u has %u output tile(s) with "
+                     "folds that were refused at submit or never submitted; they fail "
+                     "(rc=-17), %u held fold(s) dropped\n",
+                     g.id, tiles, held);
+        r.cv_caller.notify_all();
+    }
+}
+
 /* fpga_gemm_wait_for, with the lock held. */
 int wait_locked(Runtime &r, std::unique_lock<std::mutex> &lk, Gemm *g,
                 unsigned timeout_ms) {
     const clock_t_::time_point t0 = clock_t_::now();
-    g->waited = true;
+    if (!g->waited) {
+        g->waited = true;
+        seal(r, *g);
+    }
     // Burst mode releases every staged descriptor while someone waits: the
     // caller wants results, not a fuller burst.
     ++r.waiting;

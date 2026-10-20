@@ -428,12 +428,37 @@ int fpga_tile_poll(fpga_gemm_t *h, unsigned tile_id, unsigned k_index,
   return 0;
 }
 
+/* The GEMM is sealed by its first wait: an output tile not all of whose
+   k_count folds were accepted (one refused at submit) can never be
+   accumulated in k_index order, and its jobs not yet run fail with -17 -- as
+   in fpga_async_runtime.cpp, where the wait would otherwise never end. */
+static void seal(fpga_gemm_t *g) {
+  for (size_t i = 0; i < g->noutputs; ++i) {
+    struct output *o = &g->outputs[i];
+    unsigned accepted = 0;
+    for (unsigned mask = o->submitted_mask; mask; mask &= mask - 1)
+      ++accepted;
+    if (o->failed || accepted == o->k_count)
+      continue;
+    o->failed = 1;
+    for (size_t n = 0; n < g->njobs; ++n) {
+      job *live = g->jobs[n];
+      if (live->tile_id == o->tile_id &&
+          (live->state == FPGA_TILE_QUEUED || live->state == FPGA_TILE_HELD))
+        finish_job(live, -17);
+    }
+  }
+}
+
 int fpga_gemm_wait_for(fpga_gemm_t *h, unsigned timeout_ms) {
   (void)timeout_ms;   /* the model's jobs always complete within the call */
   fpga_gemm_t *g = find_gemm(h);
   if (!g)
     return -17;
-  g->waited = 1;
+  if (!g->waited) {
+    g->waited = 1;
+    seal(g);
+  }
   while (g->outstanding > 0 && !rt.link_failed && run_one())
     ;
   trim_queue();

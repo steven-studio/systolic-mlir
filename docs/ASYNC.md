@@ -152,6 +152,16 @@ int fpga_gemm_wait(fpga_gemm_t *g);
 `tile_id` 的 `k_count` 不同、同一 fold 送兩次、wait 之後再 submit）、-18（bitstream 拒絕
 這筆 descriptor）、-19（設定檔沒有 `COMPLETION_HEADER=1`，這個 runtime 不能用）。
 
+GEMM 的第一次 wait／wait_for（不論 timeout）把它封住：之後不收 submit，而且 `k_count`
+個 fold 沒有全部被收下的輸出 tile（有 fold 在 submit 時被拒，例如 k 超過這個 bitstream 的
+K_MAX——為更深的 K_MAX 編譯的程式——或根本沒送）永遠不能照 k_index 順序累加：它在封住時
+以 -17 失敗，已經 held 的 fold 立刻失敗、還在路上的到了就丟掉，GEMM 的 wait 回 -17（stderr
+一行 `[fpga-async] incomplete K folds: ...`）。在這之前（2026-10-20），被拒的 fold 不留任何
+紀錄，後面已收下的 fold 被 held 等一個永遠不會來的 fold，`fpga_gemm_wait` 沒有期限、鏈路
+timeout 也管不到它，程式永遠卡住；被拒的是最後一個 fold 時則回 0、C 只有部分 K 的和。編譯出
+的 kernel 在涵蓋一個輸出 tile 的 wait 之前送完它所有的 fold，所以 submit 全被收下的 GEMM 不會
+觸發。軟體模型（`soft_runtime.c`）做同樣的檢查。
+
 ### 3.4 `SYSTOLIC_RUNTIME_TIMING=1` 的輸出
 
 關閉 session 時印一行 `[fpga-async] timing tiles= completed= failed= gemms= span_us=
@@ -174,6 +184,11 @@ C 沒被碰、之後的 GEMM 正常）。2026-10-18 多了三個（第 10 節）
 `SYSTOLIC_ASYNC_QUEUE_LIMIT=1`、GEMM 放大四倍，submit 必須等空位——等的是任一舊 job 的
 completion 騰出的 operand slot，不是前一筆 job；在飛數永不超過 depth）、M（三個不同形狀的
 GEMM 輪流送、反序 wait，每個 GEMM 在自己的 wait 回來後、其他兩個還在飛時就逐元素檢查）。
+2026-10-20 加 H（第 3.3 節的封住：輸出 tile 的 fold 0 在 submit 時以 -10 被拒、fold 1 收下，
+有期限的 wait 必須回 -17 而不是 -20；fold 1 FAILED/-17、另一個輸出 tile DONE 且正確、失敗的
+tile 的 C 沒被碰；用逾時的 wait_for 封住後只 poll 也要在期限內 done；被拒的是最後一個 fold 時
+wait 回 -17；之後的 GEMM 正常。只用有期限的 wait，沒有封住的 runtime 讓這個 mode 失敗而不是
+卡住整個測試；板子上也能跑）。
 2026-10-19 再加 P（poll／wait_for／release 的語意，第 11.1 節）與 F（提交中途鏈路失敗）。
 A–D 用小整數，逐元素對 int64 參考。`--gemm MxNxK`、
 `--devices`、`--stage` 可調；每個 mode 自己開關一個 session。

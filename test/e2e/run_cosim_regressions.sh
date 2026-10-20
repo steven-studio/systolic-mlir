@@ -40,6 +40,12 @@
 #           verified bitwise, all in one session, and the output equals the
 #           program compiled by clang alone -- also when a link write fails
 #           (each such run on a fresh co-simulation).
+#   kmax    test/e2e/systolic_cc/kmax_mismatch.c built for K_MAX 32 / 32 and
+#           run against this 16 / 16 co-simulation, both submissions, under
+#           timeout -s KILL: every fold but the last is refused at submit;
+#           the program must finish within the bound, with every GEMM on the
+#           CPU and the output of the program compiled by clang alone (the
+#           asynchronous runtime used to wait for ever for the refused folds).
 #
 # Exit status 0 only if every check passes.
 set -uo pipefail
@@ -49,7 +55,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench,modef,negoffset"
+SECTIONS="bench,modef,negoffset,kmax"
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-dir) BUILD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
@@ -64,8 +70,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench|modef|negoffset) ;;
-        *) echo "unknown section: $s (sections: bench, modef, negoffset)" >&2; exit 2 ;;
+        bench|modef|negoffset|kmax) ;;
+        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax)" >&2; exit 2 ;;
     esac
 done
 
@@ -380,6 +386,38 @@ section_negoffset() {
             fi
             stop_cosim
         done
+    done
+}
+
+section_kmax() {
+    D="$OUT/kmax"
+    mkdir -p "$D"
+    local src="$ROOT/test/e2e/systolic_cc/kmax_mismatch.c" sub out rc t0 secs
+    sed -E 's/^K_MAX_8X8=.*/K_MAX_8X8=32/; s/^K_MAX_4X4=.*/K_MAX_4X4=32/' "$CFG" > "$D/fpga_config_k32.txt"
+    "$CLANG" -std=c11 "$src" -o "$D/cpu" && "$D/cpu" > "$D/cpu.out" || { bad "kmax: the clang build"; return; }
+    for sub in async sync; do
+        "$BUILD/bin/systolic-cc" --runtime=board --fpga-config "$D/fpga_config_k32.txt" --clang "$CLANG" \
+            --build-dir "$BUILD" --llvm-build "$LLVM_BUILD" --submission "$sub" --fp-reassociation \
+            "$src" -o "$D/k32.$sub" > "$D/k32.$sub.cc.log" 2>&1 \
+            || { bad "kmax: systolic-cc --submission $sub" "$(tail -3 "$D/k32.$sub.cc.log")"; continue; }
+        grep -q 'k = 32' "$D/k32.$sub.systolic/40-systolic.mlir" 2>/dev/null \
+            || grep -q 'k = 32' "$D/k32.$sub.systolic/20-systolic.mlir" \
+            || { bad "kmax: the $sub build folds no k = 32"; continue; }
+        start_cosim "$D/run.$sub" || { bad "kmax: the co-simulation did not open $SOCK"; continue; }
+        t0=$(date +%s)
+        # The run-time configuration is this co-simulation's: 16 / 16.
+        out=$(host 180 "$D/k32.$sub" 2> "$D/k32.$sub.err"); rc=$?
+        secs=$(( $(date +%s) - t0 ))
+        echo "$out" > "$D/k32.$sub.out"
+        if [ $rc -eq 0 ] && grep -v '^\[systolic-cc\]' <<< "$out" | diff -q "$D/cpu.out" - > /dev/null \
+           && [ "$(grep -c '^\[systolic-cc\] CPU Executed' <<< "$out")" = 4 ] \
+           && ! grep -q '^\[systolic-cc\] FPGA Executed' <<< "$out"; then
+            ok "kmax ($sub): built for K_MAX 32, run on 16: four GEMMs on the CPU, output equal to clang's, ${secs} s"
+        else
+            bad "kmax ($sub): built for K_MAX 32, run on 16 (exit $rc$( [ $rc -eq 137 ] && echo ': killed at the 180 s bound'), ${secs} s)" \
+                "$(grep 'Executed' <<< "$out"; tail -2 "$D/k32.$sub.err")"
+        fi
+        stop_cosim
     done
 }
 
