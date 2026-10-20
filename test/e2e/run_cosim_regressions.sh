@@ -142,7 +142,12 @@ stop_cosim() {
     fi
     rm -f -- "${SOCK:?}"
 }
-cleanup() { stop_cosim; rmdir -- "${SOCKDIR:?}" 2>/dev/null; }
+# (A run_e2e.sh record an interrupted modef section left in $SOCKDIR goes too.)
+cleanup() {
+    stop_cosim
+    [ ! -f "$SOCKDIR/guard/.run_e2e_out" ] || rm -rf -- "${SOCKDIR:?}/guard"
+    rmdir -- "${SOCKDIR:?}" 2>/dev/null
+}
 trap cleanup EXIT
 
 # start_cosim DIR [VCOSIM]: a fresh co-simulation (this one's, or another
@@ -350,7 +355,8 @@ section_modef() {
     # On the co-simulation the harness requires F to PASS: a runtime-async-test
     # that takes the co-simulation for the board (F NOT APPLICABLE there) must
     # fail the runtime layer. run_e2e.sh --backend cosim starts its own
-    # co-simulation.
+    # co-simulation, on a socket in its --out directory: it runs in $SOCKDIR
+    # (sun_path, as above), and its record is then kept in $D/guard.
     shadow="$D/shadow/bin"
     mkdir -p "$shadow"
     ln -sf "$BUILD/bin/systolic-matmul" "$shadow/systolic-matmul"
@@ -365,8 +371,10 @@ exec "$BUILD/bin/runtime-async-test" "\${args[@]}"
 EOF
     chmod +x "$shadow/runtime-async-test"
     out=$(SYSTOLIC_DPTI_TIMEOUT_MS=600000 timeout -s KILL 1800 bash "$HERE/run_e2e.sh" --backend cosim --mode async \
-              --quick --cases 4x4x4_mixed --build-dir "$D/shadow" --cosim-dir "$COSIM_DIR" --out "$D/guard" 2>&1); rc=$?
+              --quick --cases 4x4x4_mixed --build-dir "$D/shadow" --cosim-dir "$COSIM_DIR" --out "$SOCKDIR/guard" 2>&1); rc=$?
     echo "$out" > "$D/guard.log"
+    [ ! -f "$D/guard/.run_e2e_out" ] || rm -rf -- "${D:?}/guard"
+    mv -T -- "$SOCKDIR/guard" "$D/guard" || bad "modef: the guard run's record could not be moved from $SOCKDIR/guard to $D/guard"
     [ $rc -eq 1 ] && grep -q '^runtime layer: FAIL -- runtime-async-test FAIL (exit 0): mode F did not PASS on the co-simulation' <<< "$out" \
         && grep -q '^E2E: FAIL -- runtime layer FAIL' <<< "$out" \
         && ok "modef: on the co-simulation, mode F NOT APPLICABLE fails the runtime layer" \
