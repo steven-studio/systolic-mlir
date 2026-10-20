@@ -32,6 +32,14 @@
 #           runtime layer if F does not PASS there; a wrong result (one read
 #           byte flipped, SYSTOLIC_DPTI_COSIM_CORRUPT_READ) must still fail
 #           the tool and the harness on the board model.
+#   negoffset
+#           test/SystolicCC/negoffset.c built by systolic-cc --runtime=board
+#           --verify, both submissions: calls whose integer arguments put an
+#           accessed row before an array argument's first element run on the
+#           CPU and never reach the link, the others run on the FPGA and are
+#           verified bitwise, all in one session, and the output equals the
+#           program compiled by clang alone -- also when a link write fails
+#           (each such run on a fresh co-simulation).
 #
 # Exit status 0 only if every check passes.
 set -uo pipefail
@@ -41,7 +49,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench,modef"
+SECTIONS="bench,modef,negoffset"
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-dir) BUILD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
@@ -56,8 +64,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench|modef) ;;
-        *) echo "unknown section: $s (sections: bench, modef)" >&2; exit 2 ;;
+        bench|modef|negoffset) ;;
+        *) echo "unknown section: $s (sections: bench, modef, negoffset)" >&2; exit 2 ;;
     esac
 done
 
@@ -68,9 +76,12 @@ CFG="$COSIM_DIR/fpga_config.txt"
     echo "no co-simulation in $COSIM_DIR -- run test/e2e/cosim/build.sh" >&2; exit 2; }
 grep -qx 'COMPLETION_HEADER=1' "$CFG" || {
     echo "$CFG: this co-simulation's RTL sends no completion record; these checks need the working tree's RTL (test/e2e/cosim/build.sh)" >&2; exit 2; }
-for t in runtime-dispatch-test runtime-async-test systolic-matmul; do
+for t in runtime-dispatch-test runtime-async-test systolic-matmul systolic-cc; do
     [ -x "$BUILD/bin/$t" ] || { echo "no $BUILD/bin/$t -- build the project first" >&2; exit 2; }
 done
+# The C compiler and LLVM build systolic-cc uses (the build's own).
+CLANG=$(sed -nE 's/^SYSTOLIC_CFRONT_CLANG:[A-Z]*=(.*)$/\1/p' "$BUILD/CMakeCache.txt")
+LLVM_BUILD=$(sed -nE 's/^LLVM_DIR:[A-Z]*=(.*)\/lib\/cmake\/llvm$/\1/p' "$BUILD/CMakeCache.txt")
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 2; }
 mkdir -p "$OUT" || exit 2
 
@@ -317,6 +328,59 @@ EOF
         && grep -q '^E2E: FAIL -- runtime layer FAIL' <<< "$out" \
         && ok "modef: on the co-simulation, mode F NOT APPLICABLE fails the runtime layer" \
         || bad "modef: run_e2e.sh --backend cosim with F NOT APPLICABLE (exit $rc)" "$(grep -E '^(runtime layer|E2E)' <<< "$out")"
+}
+
+# build_cc SRC OUT FLAGS...: systolic-cc for this co-simulation's bitstream.
+build_cc() {
+    local src=$1 out=$2; shift 2
+    [ -x "$CLANG" ] && [ -d "$LLVM_BUILD" ] || { echo "no clang / LLVM build in $BUILD/CMakeCache.txt"; return 1; }
+    "$BUILD/bin/systolic-cc" --runtime=board --fpga-config "$CFG" --clang "$CLANG" --build-dir "$BUILD" \
+        --llvm-build "$LLVM_BUILD" "$@" "$src" -o "$out" > "$out.cc.log" 2>&1
+}
+
+section_negoffset() {
+    D="$OUT/negoffset"
+    mkdir -p "$D"
+    local src="$ROOT/test/SystolicCC/negoffset.c" sub out rc n before
+    "$CLANG" -std=c11 "$src" -o "$D/cpu" && "$D/cpu" > "$D/cpu.out" || { bad "negoffset: the clang build"; return; }
+    for sub in sync async; do
+        build_cc "$src" "$D/neg.$sub" --submission "$sub" --fp-reassociation --verify \
+            || { bad "negoffset: systolic-cc --submission $sub" "$(tail -3 "$D/neg.$sub.cc.log")"; continue; }
+        start_cosim "$D/run.$sub" || { bad "negoffset: the co-simulation did not open $SOCK"; continue; }
+        out=$(host 900 "$D/neg.$sub" 2> "$D/neg.$sub.err"); rc=$?
+        echo "$out" > "$D/neg.$sub.out"
+        settle 1
+        # Seven calls reach a row before an argument's first element, six do not
+        # (seven GEMM executions, gemm_mixed running two).
+        if [ $rc -eq 0 ] && grep -v '^\[systolic-cc\]' <<< "$out" | diff -q "$D/cpu.out" - > /dev/null \
+           && [ "$(grep -c '^\[systolic-cc\] FPGA Executed' <<< "$out")" = 7 ] \
+           && [ "$(grep -c '^\[systolic-cc\] CPU Executed' <<< "$out")" = 8 ] \
+           && [ "$(grep -c ': verified: .* (bitwise)$' "$D/neg.$sub.err")" = 6 ] \
+           && [ "$(grep -c ': ran on the CPU: ' "$D/neg.$sub.err")" = 7 ] \
+           && ! grep -qi mismatch "$D/neg.$sub.err" && [ "$(opened)" = 1 ]; then
+            ok "negoffset ($sub): 7 GEMMs on the FPGA verified bitwise, 8 on the CPU, one session, output equal to clang's"
+        else
+            bad "negoffset ($sub) (exit $rc, $(opened) session(s))" \
+                "$(grep -E 'Executed' <<< "$out" | sort | uniq -c; tail -2 "$D/neg.$sub.err")"
+        fi
+        stop_cosim
+        # A link write that fails: the calls from then on run on the CPU, and the
+        # result is still the program's. A failed write can leave a command cut
+        # in the RTL, so each such run has a co-simulation of its own.
+        for n in 3 40; do
+            start_cosim "$D/fail$n.$sub" || { bad "negoffset: the co-simulation did not open $SOCK"; continue; }
+            out=$(SYSTOLIC_DPTI_COSIM_FAIL_WRITE=$n host 900 "$D/neg.$sub" 2> "$D/neg.$sub.fail$n.err"); rc=$?
+            echo "$out" > "$D/neg.$sub.fail$n.out"
+            if [ $rc -eq 0 ] && grep -v '^\[systolic-cc\]' <<< "$out" | diff -q "$D/cpu.out" - > /dev/null \
+               && grep -q 'injected failure of write' "$D/neg.$sub.fail$n.err" \
+               && ! grep -qi mismatch "$D/neg.$sub.fail$n.err"; then
+                ok "negoffset ($sub): link write $n fails: output equal to clang's"
+            else
+                bad "negoffset ($sub): link write $n fails (exit $rc)" "$(tail -3 "$D/neg.$sub.fail$n.err")"
+            fi
+            stop_cosim
+        done
+    done
 }
 
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do

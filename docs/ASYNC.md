@@ -513,14 +513,16 @@ soft --submission async` 因此可用（預設仍是 sync，lit 的 `test/Systol
 
 | 階段 | 之前 | 現在 |
 |---|---|---|
-| C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式），shim 用它們在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數 |
+| C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式）：shim 用 `leading_extent_expr` 在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數，用 `leading_min_expr` 把最小 row 為負的呼叫（任何一個 array，讀的或寫的）交給 CPU（2026-10-20） |
 | 辨識（`AffineMatmulAnalysis.cpp`） | access map 有 symbol → failure | `separateSymbols`：每個 result 拆成 loop 部分 + symbol 部分（+ 常數），symbol 部分非線性（symbol×dim、floordiv）→ failure；loop 部分照舊辨識；symbol 部分存成 `LogicalMatmul::symbolicA/B/C`（0 dim、S symbol、每個 memref 維度一個 result）+ `symbolsA/B/C` |
 | view（`AffineMatmulToSystolic.cpp`） | `std::array<int64_t,2> offsets` 靜態 subview | `LogicalOperand::symbolic`：有 symbol 的維度以 `arith` 運算算出 index 值，`memref.subview %C[%off, 0] [8, 16] [1, 1]` → `memref<8x16xf32, strided<[16, 1], offset: ?>>`；有 symbol 的維度不做靜態邊界檢查（與動態 extent 同一條規則：nest 自己的保證，tile 不碰 nest 沒碰的元素）；A×A 的 `sameView` 連 symbol 一起比 |
 | lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset／stride 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代 |
 | runtime | 指標 + ldc | 不變 |
 
-同一個編譯出的函式可以用任何 offset 呼叫（`dynoffset.c`：同一函式 0／8／16／24／5 等呼叫，每次
-verify 的元素數 `(r0 + 8) × 16` 不同）。邊界 tile、K fold（40 = 16+16+8）、access stride（`C[2i + r0]`）、
+同一個編譯出的函式可以用任何讓每個 access 落在指標之後（最小 row ≥ 0）的 offset 呼叫（`dynoffset.c`：
+同一函式 0／8／16／24／5 等呼叫，每次 verify 的元素數 `(r0 + 8) × 16` 不同）；最小 row 為負的呼叫
+（指標指在 array 中間、`C[r0 + i][j]` 而 r0 < 0，合法的 C）照原樣在 CPU 上跑：kernel 的 view、shim
+的 snapshot／還原／verify 都從指標指的元素開始（`SystolicCC/negoffset.c`）。邊界 tile、K fold（40 = 16+16+8）、access stride（`C[2i + r0]`）、
 兩個 GEMM 在同一函式都走完整路徑；仍拒絕的：A 與 C 是同一 memref 的 view（「A may overlap C」，不
 因 offset 運算式不同就當成不重疊）、無號參數、`off + i*ldc`（symbol × counter）、符號化的 loop 邊界。
 
@@ -574,6 +576,10 @@ makespan（descriptor 連續到達、queue 被餵滿）小 1.1–8 倍——板�
 - 辨識器的 logical coordinate 是所有 operand 共用的：只有 C 有常數 offset（`C[i+1][j] += A[i][k]…`）或
   只有 C 有 stride 仍不被辨識（與 symbol 無關的既有邊界）。
 - symbol 只能是加法項（常數係數）；symbol × counter、symbol 在 loop 邊界、無號參數：拒絕。
+- run time 的最小 row 為負（access 落在 array 參數的指標之前）的呼叫不 offload，在 CPU 上照原樣跑
+  （shim 在任何 local 之前檢查 `leading_min_expr`，讀的與寫的 array 都算）。內層維度的 symbol
+  offset（`C[i][c0 + j]`）沒有 run-time 範圍檢查：值必須落在該維度內，跟 ISO C 對 array 下標的要求
+  一樣（辨識器的 in-bounds 假設）。
 - 軟體模型的非同步 API 在 poll／wait 時才算（沒有 thread）；它是契約的模型，不是硬體。
 - `fpga_tile_submit` 在 host queue 滿時仍會等（等空位，不是等 job）；沒有「立即回 EAGAIN」的變體。
 

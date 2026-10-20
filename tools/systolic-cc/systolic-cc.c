@@ -24,9 +24,11 @@
  *     FPGA ran it: hardware runtime, no failed invocation, exactly the
  *     planned number of invocations. If not, the kernel's writes are undone
  *     and NAME__systolic_reference -- the function as written -- runs on the
- *     CPU instead (CPU fallback; the program goes on). With --verify
- *     (testing) the result is also compared with the reference (exit 4 on a
- *     mismatch).
+ *     CPU instead (CPU fallback; the program goes on). A call whose integer
+ *     arguments place an access before the first element an array argument
+ *     points to (a negative run-time row offset) is not offloaded at all and
+ *     runs as written on the CPU. With --verify (testing) the result is also
+ *     compared with the reference (exit 4 on a mismatch).
  *  6. Every GEMM loop nest of the program (systolic-cfront --gemm-sites)
  *     reports how it ran, once per execution, on stdout:
  *       [systolic-cc] FPGA Executed: GEMM #N
@@ -607,6 +609,13 @@ static char *count_expr(const json_value *p) {
 
 /* The C entry point of each offloaded function NAME.
  *
+ *   0. A call whose integer arguments make an access reach a row before the
+ *      first element an array argument points to (the run-time minimum row,
+ *      leading_min_expr, below 0 -- legal C on a pointer into an array) is
+ *      not offloaded: the kernel's views, the snapshot, the undo and the
+ *      check below all start at that element, so the call goes straight to
+ *      step 5 without a snapshot and runs as written on the CPU. Evaluated
+ *      before any local of the shim, which could shadow a parameter.
  *   1. Snapshot every array NAME writes (the exact rows its accesses reach).
  *      Without the snapshot (malloc failed) the FPGA is not tried.
  *   2. Run the compiled kernel; its invocations go through the runtime.
@@ -730,10 +739,24 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
                 times, sites[s].lowered);
     }
 
+    /* Step 0: the run-time minimum row of every array (read or written)
+       whose subscripts use a parameter. */
+    buffer guard = {0};
+    for (size_t i = 0; i < np; ++i) {
+      const json_value *p = json_at(params, i);
+      const char *min = json_string(json_get(p, "leading_min_expr"), NULL);
+      if (min && strcmp(json_string(json_get(p, "kind"), ""), "memref") == 0)
+        bprintf(&guard, "%s(long long)(%s) < 0LL", guard.n ? " || " : "", min);
+    }
+
     bprintf(&b, "void %s(%s);\n", symbol, kdecl.n ? kdecl.text : "void");
     bprintf(&b, "void %s%s(%s);\n", name, REFERENCE_SUFFIX, decl_text);
     bprintf(&b, "void %s(%s) {\n", name, decl_text);
-    bprintf(&b, "  once();\n  int snapshots = 1;\n");
+    if (guard.n)
+      bprintf(&b, "  once();\n  const int __systolic_cc_rows_ok = !(%s);\n"
+                  "  int snapshots = __systolic_cc_rows_ok;\n", guard.text);
+    else
+      bprintf(&b, "  once();\n  int snapshots = 1;\n");
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
       if (!is_written_memref(p))
@@ -742,8 +765,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       long long count;
       array_desc(p, &count, &ct);
       char *n = count_expr(p);
-      bprintf(&b, "  %s *save_%s = malloc(%s * sizeof(%s) + 1);\n", ct, pname,
-              n, ct);
+      if (guard.n)
+        bprintf(&b, "  %s *save_%s = snapshots ? malloc(%s * sizeof(%s) + 1) : NULL;\n",
+                ct, pname, n, ct);
+      else
+        bprintf(&b, "  %s *save_%s = malloc(%s * sizeof(%s) + 1);\n", ct, pname,
+                n, ct);
       bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %s * sizeof(%s)); "
                   "else snapshots = 0;\n", pname, pname, pname, n, ct);
       free(n);
@@ -848,6 +875,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
                   "elements equal the CPU reference (%s)\\n\", checked);\n",
               name, where, how_text);
       bprintf(&b, "  }\n");
+      if (guard.n)
+        bprintf(&b, "  else if (!__systolic_cc_rows_ok)\n"
+                    "    fprintf(stderr, \"systolic-cc: %s (%s): ran on the CPU: at "
+                    "these arguments an access reaches a row before the first "
+                    "element of an argument array; nothing to compare\\n\");\n",
+                name, where);
     }
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
@@ -856,6 +889,7 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
                 json_string(json_get(p, "name"), ""));
     }
     bprintf(&b, "}\n\n");
+    free(guard.text);
     free(where);
     free(decl.text);
     free(kargs.text);
