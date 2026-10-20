@@ -636,7 +636,14 @@ static char *count_expr(const json_value *p) {
  *      original values, and its GEMM nests report "CPU Executed" themselves.
  *
  * With --verify (testing) the result is compared with
- * NAME__systolic_reference run silently on copies of the original arrays. */
+ * NAME__systolic_reference run silently on copies of the original arrays.
+ *
+ * NAME's parameters are in scope in its shim, and the extents and counts are
+ * expressions of them: every local and helper of the shim carries the
+ * implementation's reserved prefix __systolic_cc_ (arrays by parameter
+ * index, never by the user's name), so none shadows a parameter or is
+ * shadowed by one, and each array's element count is evaluated once at the
+ * top. */
 static char *shim_source(const function_info *offload, size_t n, int verify,
                          double rtol, const char *source,
                          const gemm_site *sites, size_t nsites) {
@@ -648,9 +655,9 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
               "#include <string.h>\n\n");
   bprintf(&b, "void __systolic_cc_gemm_executed(int on_fpga);\n"
               "extern int __systolic_cc_quiet;\n\n");
-  bprintf(&b, "static void close_runtime(void) { systolic_offload_close(); }\n"
-              "static void once(void) {\n  static int done;\n"
-              "  if (!done) { done = 1; atexit(close_runtime); }\n}\n\n");
+  bprintf(&b, "static void __systolic_cc_close_runtime(void) { systolic_offload_close(); }\n"
+              "static void __systolic_cc_once(void) {\n  static int done;\n"
+              "  if (!done) { done = 1; atexit(__systolic_cc_close_runtime); }\n}\n\n");
   char *how_text = rtol <= 0 ? format("bitwise")
                              : format("relative tolerance %g", rtol);
   for (size_t f = 0; f < n; ++f) {
@@ -731,11 +738,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       }
       long long times = sites[s].executions < 0 ? 1 : sites[s].executions;
       if (times == 1)
-        bprintf(&labels, "    __systolic_cc_gemm_executed(hw && %d);\n",
+        bprintf(&labels, "    __systolic_cc_gemm_executed(__systolic_cc_hw && %d);\n",
                 sites[s].lowered);
       else
-        bprintf(&labels, "    for (long long n = 0; n < %lldLL; ++n)\n"
-                         "      __systolic_cc_gemm_executed(hw && %d);\n",
+        bprintf(&labels, "    for (long long __systolic_cc_n = 0; __systolic_cc_n < %lldLL; "
+                         "++__systolic_cc_n)\n"
+                         "      __systolic_cc_gemm_executed(__systolic_cc_hw && %d);\n",
                 times, sites[s].lowered);
     }
 
@@ -752,11 +760,20 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
     bprintf(&b, "void %s(%s);\n", symbol, kdecl.n ? kdecl.text : "void");
     bprintf(&b, "void %s%s(%s);\n", name, REFERENCE_SUFFIX, decl_text);
     bprintf(&b, "void %s(%s) {\n", name, decl_text);
+    bprintf(&b, "  __systolic_cc_once();\n");
     if (guard.n)
-      bprintf(&b, "  once();\n  const int __systolic_cc_rows_ok = !(%s);\n"
-                  "  int snapshots = __systolic_cc_rows_ok;\n", guard.text);
-    else
-      bprintf(&b, "  once();\n  int snapshots = 1;\n");
+      bprintf(&b, "  const int __systolic_cc_rows_ok = !(%s);\n", guard.text);
+    /* The element count of each written array, from the parameters. */
+    for (size_t i = 0; i < np; ++i) {
+      const json_value *p = json_at(params, i);
+      if (!is_written_memref(p))
+        continue;
+      char *n = count_expr(p);
+      bprintf(&b, "  const long long __systolic_cc_count%zu = %s;\n", i, n);
+      free(n);
+    }
+    bprintf(&b, "  int __systolic_cc_snapshots = %s;\n",
+            guard.n ? "__systolic_cc_rows_ok" : "1");
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
       if (!is_written_memref(p))
@@ -764,32 +781,36 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      char *n = count_expr(p);
       if (guard.n)
-        bprintf(&b, "  %s *save_%s = snapshots ? malloc(%s * sizeof(%s) + 1) : NULL;\n",
-                ct, pname, n, ct);
+        bprintf(&b, "  %s *__systolic_cc_save%zu = __systolic_cc_snapshots ? "
+                    "malloc(__systolic_cc_count%zu * sizeof(%s) + 1) : NULL;\n",
+                ct, i, i, ct);
       else
-        bprintf(&b, "  %s *save_%s = malloc(%s * sizeof(%s) + 1);\n", ct, pname,
-                n, ct);
-      bprintf(&b, "  if (save_%s) memcpy(save_%s, %s, %s * sizeof(%s)); "
-                  "else snapshots = 0;\n", pname, pname, pname, n, ct);
-      free(n);
+        bprintf(&b, "  %s *__systolic_cc_save%zu = "
+                    "malloc(__systolic_cc_count%zu * sizeof(%s) + 1);\n",
+                ct, i, i, ct);
+      bprintf(&b, "  if (__systolic_cc_save%zu) memcpy(__systolic_cc_save%zu, %s, "
+                  "__systolic_cc_count%zu * sizeof(%s)); "
+                  "else __systolic_cc_snapshots = 0;\n", i, i, pname, i, ct);
     }
-    bprintf(&b, "  int completed = 0, hw = 0;\n");
-    bprintf(&b, "  if (snapshots) {\n"
-                "    systolic_offload_stats_t before, after;\n"
-                "    systolic_offload_stats(&before);\n"
+    bprintf(&b, "  int __systolic_cc_completed = 0, __systolic_cc_hw = 0;\n");
+    bprintf(&b, "  if (__systolic_cc_snapshots) {\n"
+                "    systolic_offload_stats_t __systolic_cc_before, __systolic_cc_after;\n"
+                "    systolic_offload_stats(&__systolic_cc_before);\n"
                 "    %s(%s);\n"
-                "    systolic_offload_stats(&after);\n"
-                "    unsigned long long inv = 0;\n"
-                "    for (int d = 0; d < 4; ++d)\n"
-                "      inv += after.per_device[d] - before.per_device[d];\n"
-                "    completed = after.failed == before.failed && %s;\n"
-                "    hw = after.is_hardware;\n"
+                "    systolic_offload_stats(&__systolic_cc_after);\n"
+                "    unsigned long long __systolic_cc_inv = 0;\n"
+                "    for (int __systolic_cc_d = 0; __systolic_cc_d < 4; ++__systolic_cc_d)\n"
+                "      __systolic_cc_inv += __systolic_cc_after.per_device[__systolic_cc_d] -\n"
+                "                           __systolic_cc_before.per_device[__systolic_cc_d];\n"
+                "    __systolic_cc_completed =\n"
+                "        __systolic_cc_after.failed == __systolic_cc_before.failed && %s;\n"
+                "    __systolic_cc_hw = __systolic_cc_after.is_hardware;\n"
                 "  }\n", symbol, kargs.n ? kargs.text : "",
-                count_known ? format("inv == %lldULL", expected)
+                count_known ? format("__systolic_cc_inv == %lldULL", expected)
                             : format("%s", "1 /* invocation count unknown */"));
-    bprintf(&b, "  if (completed) {\n%s  } else {\n", labels.n ? labels.text : "");
+    bprintf(&b, "  if (__systolic_cc_completed) {\n%s  } else {\n",
+            labels.n ? labels.text : "");
     /* Undo whatever the kernel wrote, then run the function as written. */
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
@@ -798,10 +819,8 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
       const char *ct, *pname = json_string(json_get(p, "name"), "");
       long long count;
       array_desc(p, &count, &ct);
-      char *n = count_expr(p);
-      bprintf(&b, "    if (snapshots) memcpy(%s, save_%s, %s * sizeof(%s));\n",
-              pname, pname, n, ct);
-      free(n);
+      bprintf(&b, "    if (__systolic_cc_snapshots) memcpy(%s, __systolic_cc_save%zu, "
+                  "__systolic_cc_count%zu * sizeof(%s));\n", pname, i, i, ct);
     }
     bprintf(&b, "    %s%s(", name, REFERENCE_SUFFIX);
     for (size_t i = 0; i < np; ++i)
@@ -811,20 +830,18 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
 
     if (verify) {
       /* The reference on copies of the original arrays, silently. */
-      bprintf(&b, "  if (snapshots) {\n");
+      bprintf(&b, "  if (__systolic_cc_snapshots) {\n");
       for (size_t i = 0; i < np; ++i) {
         const json_value *p = json_at(params, i);
         if (!is_written_memref(p))
           continue;
-        const char *ct, *pname = json_string(json_get(p, "name"), "");
+        const char *ct;
         long long count;
         array_desc(p, &count, &ct);
-        char *n = count_expr(p);
-        bprintf(&b, "    %s *ref_%s = malloc(%s * sizeof(%s) + 1);\n", ct,
-                pname, n, ct);
-        bprintf(&b, "    memcpy(ref_%s, save_%s, %s * sizeof(%s));\n", pname,
-                pname, n, ct);
-        free(n);
+        bprintf(&b, "    %s *__systolic_cc_ref%zu = malloc(__systolic_cc_count%zu * "
+                    "sizeof(%s) + 1);\n", ct, i, i, ct);
+        bprintf(&b, "    memcpy(__systolic_cc_ref%zu, __systolic_cc_save%zu, "
+                    "__systolic_cc_count%zu * sizeof(%s));\n", i, i, i, ct);
       }
       bprintf(&b, "    __systolic_cc_quiet = 1;\n    %s%s(", name,
               REFERENCE_SUFFIX);
@@ -832,12 +849,12 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const json_value *p = json_at(params, i);
         const char *pname = json_string(json_get(p, "name"), "");
         if (is_written_memref(p))
-          bprintf(&b, "%s(void *)ref_%s", i ? ", " : "", pname);
+          bprintf(&b, "%s(void *)__systolic_cc_ref%zu", i ? ", " : "", i);
         else
           bprintf(&b, "%s%s", i ? ", " : "", pname);
       }
       bprintf(&b, ");\n    __systolic_cc_quiet = 0;\n"
-                  "    unsigned long long checked = 0, bad = 0;\n");
+                  "    unsigned long long __systolic_cc_checked = 0, __systolic_cc_bad = 0;\n");
       for (size_t i = 0; i < np; ++i) {
         const json_value *p = json_at(params, i);
         if (!is_written_memref(p))
@@ -845,34 +862,38 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
         const char *ct, *pname = json_string(json_get(p, "name"), "");
         long long count;
         array_desc(p, &count, &ct);
-        char *n = count_expr(p);
-        bprintf(&b, "    for (long long e = 0; e < %s; ++e) {\n", n);
-        free(n);
-        bprintf(&b, "      %s got = ((%s *)%s)[e], want = ref_%s[e];\n", ct, ct,
-                pname, pname);
+        bprintf(&b, "    for (long long __systolic_cc_e = 0; __systolic_cc_e < "
+                    "__systolic_cc_count%zu; ++__systolic_cc_e) {\n", i);
+        bprintf(&b, "      %s __systolic_cc_got = ((%s *)%s)[__systolic_cc_e],\n"
+                    "         __systolic_cc_want = __systolic_cc_ref%zu[__systolic_cc_e];\n",
+                ct, ct, pname, i);
         if (rtol > 0) {
           char *r = shortest(rtol);
-          bprintf(&b, "      int same = fabs((double)got - want) <= %s * "
-                      "fmax(fabs((double)got), fabs((double)want));\n", r);
+          bprintf(&b, "      int __systolic_cc_same =\n"
+                      "          fabs((double)__systolic_cc_got - __systolic_cc_want) <= %s *\n"
+                      "          fmax(fabs((double)__systolic_cc_got), "
+                      "fabs((double)__systolic_cc_want));\n", r);
           free(r);
         } else {
-          bprintf(&b, "      int same = memcmp(&got, &want, sizeof got) == 0;\n");
+          bprintf(&b, "      int __systolic_cc_same = memcmp(&__systolic_cc_got, "
+                      "&__systolic_cc_want, sizeof __systolic_cc_got) == 0;\n");
         }
-        bprintf(&b, "      ++checked;\n      if (!same && bad++ == 0)\n");
+        bprintf(&b, "      ++__systolic_cc_checked;\n"
+                    "      if (!__systolic_cc_same && __systolic_cc_bad++ == 0)\n");
         bprintf(&b, "        fprintf(stderr, \"systolic-cc: %s (%s): first "
-                    "mismatch %s[%%ld]: result %%.9g, CPU reference "
-                    "%%.9g\\n\", e, (double)got, (double)want);\n", name,
-                where, pname);
-        bprintf(&b, "    }\n    free(ref_%s);\n", pname);
+                    "mismatch %s[%%lld]: result %%.9g, CPU reference "
+                    "%%.9g\\n\", __systolic_cc_e, (double)__systolic_cc_got, "
+                    "(double)__systolic_cc_want);\n", name, where, pname);
+        bprintf(&b, "    }\n    free(__systolic_cc_ref%zu);\n", i);
       }
-      bprintf(&b, "    if (bad) {\n");
+      bprintf(&b, "    if (__systolic_cc_bad) {\n");
       bprintf(&b, "      fprintf(stderr, \"systolic-cc: %s (%s): NUMERICAL "
                   "MISMATCH: %%llu of %%llu elements differ from the CPU "
-                  "reference (%s)\\n\", bad, checked);\n", name, where,
-              how_text);
+                  "reference (%s)\\n\", __systolic_cc_bad, __systolic_cc_checked);\n",
+              name, where, how_text);
       bprintf(&b, "      exit(4);\n    }\n");
       bprintf(&b, "    fprintf(stderr, \"systolic-cc: %s (%s): verified: %%llu "
-                  "elements equal the CPU reference (%s)\\n\", checked);\n",
+                  "elements equal the CPU reference (%s)\\n\", __systolic_cc_checked);\n",
               name, where, how_text);
       bprintf(&b, "  }\n");
       if (guard.n)
@@ -885,8 +906,7 @@ static char *shim_source(const function_info *offload, size_t n, int verify,
     for (size_t i = 0; i < np; ++i) {
       const json_value *p = json_at(params, i);
       if (is_written_memref(p))
-        bprintf(&b, "  free(save_%s);\n",
-                json_string(json_get(p, "name"), ""));
+        bprintf(&b, "  free(__systolic_cc_save%zu);\n", i);
     }
     bprintf(&b, "}\n\n");
     free(guard.text);
