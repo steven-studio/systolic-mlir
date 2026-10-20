@@ -37,7 +37,9 @@
  *     Loops that are not GEMMs report nothing.
  *  7. Everything is linked with a runtime: --runtime=board (default), the
  *     real runtime (DPTI to the programmed board; SYSTOLIC_FPGA_CONFIG names
- *     its bitstream, else the archived K_MAX 16 / 16 one); --runtime=soft,
+ *     its bitstream, else the archived K_MAX 16 / 16 one, without the
+ *     completion record: a bitstream that sends the record is refused at
+ *     the first result and every GEMM runs on the CPU); --runtime=soft,
  *     the software model of the runtime ABI -- NOT the FPGA: its GEMMs
  *     report "CPU Executed". On a bitstream with the completion record
  *     (COMPLETION_HEADER=1) the kernels call the asynchronous runtime: every
@@ -955,8 +957,10 @@ static int fleet_config(driver *d, long *k8, long *k4, int *header,
   if (!config) {
     /* The runtime's own default without SYSTOLIC_FPGA_CONFIG: the archived
        1x8x8 + 3x4x4 bitstream, K_MAX 16 / 16 (runtime/fpga_matmul_tiled.h),
-       no completion record. A board that holds another K_MAX refuses the
-       invocations, and every GEMM then runs on the CPU. */
+       no completion record, so the synchronous lowering. A bitstream that
+       sends the record (the current RTL) is refused at the first result
+       (-9), and every GEMM then runs on the CPU; a deeper K is refused by
+       the runtime (-10). Name the bitstream's fpga_config.txt to use it. */
     *k8 = 16;
     *k4 = 16;
     return 0;

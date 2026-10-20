@@ -46,6 +46,15 @@ record，job_id／device／status／payload 任何一項對不上就回 -9 並�
 設定檔沒寫（舊 bitstream）就照舊讀裸 tile。所以**舊 bitstream + 新 runtime、新 bitstream +
 同步 runtime 都能用**；只有非同步 runtime 一定要新 bitstream。
 
+DPTI 沒有暫存器可讀，host 只能從設定檔知道 bitstream 送不送 record。設定檔沒寫
+`COMPLETION_HEADER=1`（包括完全沒有設定檔時的 built-in default）卻接上會送 record 的
+bitstream 時，2026-10-20 之前同步 runtime 把 record 當成 tile 的前 16 byte 讀進來：rc 0、
+數字是錯的（C[0] 3.717e15 就是 magic 被當成 float），tile 的尾巴留在鏈路上給下一次讀，
+`systolic-cc --runtime=board` 的程式印 `FPGA Executed` 並以 0 結束。現在沒有
+`COMPLETION_HEADER=1` 時每個結果的前 16 byte 先單獨讀：開頭是 record 的 magic 就回 -9、
+stderr 一行指出用的是哪個設定檔，這條 session 停用，什麼都不會加進 C（systolic-cc 的程式
+因此在 CPU 上算）；不是 magic 就讀剩下的 tile（沒有 record 的舊 bitstream 照常）。
+
 ### 2.2 `dpti_bus_arbiter.sv`：FT2232H 匯流排一次一個方向
 
 原本 `dpti_byte_rx` 與 `dpti_byte_tx` 各自直接驅動腳位：RXF# 低就讀、有東西就寫，

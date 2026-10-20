@@ -53,8 +53,22 @@
 #           the FPGA, verified bitwise, no submit refused, output equal to
 #           the program compiled by clang alone (such views used to be
 #           submitted with ldc < n, refused, and run on the CPU).
+#   header  the synchronous runtime with a configuration that does not say
+#           COMPLETION_HEADER=1 against this RTL, which sends a 16-byte
+#           completion record ahead of every result: runtime-dispatch-test
+#           must refuse its first result (-9, the configuration named), never
+#           read the record as tile data, twice in a row (the link stays in
+#           step), and pass with the right configuration; a systolic-cc
+#           program built and run without any configuration (the runtime's
+#           built-in default) must run on the CPU with the program's output.
+#           With --prerecord-cosim-dir (a co-simulation of RTL without the
+#           record, built by that revision's own bench, e.g. git archive
+#           5d6f01a test/e2e/cosim rtl, then its test/e2e/cosim/build.sh: this
+#           tree's bench probes signals only the record RTL has), a
+#           header-less configuration must PASS there (no false refusal);
+#           else that check is SKIPPED.
 #
-# Exit status 0 only if every check passes.
+# Exit status 0 only if every check passes (a SKIP is not a pass).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,11 +76,13 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench,modef,negoffset,kmax,views"
+SECTIONS="bench,modef,negoffset,kmax,views,header"
+PRERECORD=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-dir) BUILD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
         --cosim-dir) COSIM_DIR="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
+        --prerecord-cosim-dir) PRERECORD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
         --out)       OUT="$2"; shift 2 ;;
         --section)   SECTIONS="$2"; shift 2 ;;
         -h|--help)   awk 'NR > 2 && !/^#/ { exit } NR > 2 { sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
@@ -77,8 +93,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench|modef|negoffset|kmax|views) ;;
-        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax, views)" >&2; exit 2 ;;
+        bench|modef|negoffset|kmax|views|header) ;;
+        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax, views, header)" >&2; exit 2 ;;
     esac
 done
 
@@ -98,7 +114,8 @@ LLVM_BUILD=$(sed -nE 's/^LLVM_DIR:[A-Z]*=(.*)\/lib\/cmake\/llvm$/\1/p' "$BUILD/C
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 2; }
 mkdir -p "$OUT" || exit 2
 
-passed=0; failed=0
+passed=0; failed=0; skipped=0
+skip() { skipped=$((skipped + 1)); echo "SKIP: $1"; }
 ok()  { passed=$((passed + 1)); echo "PASS: $1"; }
 bad() { failed=$((failed + 1)); echo "FAIL: $1"; [ $# -gt 1 ] && [ -n "$2" ] && sed 's/^/      /' <<< "$2"; return 0; }
 has() { grep -qF -- "$2" <<< "$1"; }
@@ -119,11 +136,12 @@ stop_cosim() {
 cleanup() { stop_cosim; rmdir -- "${SOCKDIR:?}" 2>/dev/null; }
 trap cleanup EXIT
 
-# start_cosim DIR: a fresh co-simulation, logging to DIR/cosim.log.
+# start_cosim DIR [VCOSIM]: a fresh co-simulation (this one's, or another
+# build's Vcosim), logging to DIR/cosim.log.
 start_cosim() {
     mkdir -p "$1"
     LOG="$1/cosim.log"
-    "$VCOSIM" +socket="$SOCK" +max_sessions=0 \
+    "${2:-$VCOSIM}" +socket="$SOCK" +max_sessions=0 \
         > >(grep --line-buffered -v -E '^(JOBFIREDBG|SCHEDHS|SCHTRACE|JOBHS) ' > "$LOG") 2>&1 &
     COSIM_PID=$!
     for _ in $(seq 100); do [ -S "$SOCK" ] && return 0; sleep 0.1; done
@@ -144,11 +162,14 @@ close_line() { grep -m1 "^cosim: session $1 closed" "$LOG"; }
 
 # host SECONDS CMD...: CMD as a host of this section's co-simulation, never a
 # board: the stand-in for libftdi serves the link, and it connects only to
-# $SOCK.
+# $SOCK. The configuration is this co-simulation's, or HOSTCFG's (none: no
+# SYSTOLIC_FPGA_CONFIG at all).
 host() {
     local t=$1; shift
-    LD_PRELOAD="$SHIM" SYSTOLIC_DPTI_COSIM_SOCKET="$SOCK" SYSTOLIC_FPGA_CONFIG="$CFG" \
-    SYSTOLIC_DPTI_TIMEOUT_MS="${SYSTOLIC_DPTI_TIMEOUT_MS:-600000}" \
+    local cfg=(SYSTOLIC_FPGA_CONFIG="${HOSTCFG:-$CFG}")
+    [ "${HOSTCFG:-}" = none ] && cfg=()
+    env -u SYSTOLIC_FPGA_CONFIG LD_PRELOAD="$SHIM" SYSTOLIC_DPTI_COSIM_SOCKET="$SOCK" "${cfg[@]}" \
+        SYSTOLIC_DPTI_TIMEOUT_MS="${SYSTOLIC_DPTI_TIMEOUT_MS:-600000}" \
         timeout -s KILL "$t" "$@"
 }
 served() { has "$1" "[libftdi_cosim] connected to RTL co-simulation at $SOCK"; }
@@ -452,11 +473,73 @@ section_views() {
     stop_cosim
 }
 
+section_header() {
+    D="$OUT/header"
+    mkdir -p "$D"
+    local out rc n first noh="$D/fpga_config_no_header.txt" src="$ROOT/test/SystolicCC/program.c"
+    # This co-simulation's configuration without its COMPLETION_HEADER line.
+    grep -v '^COMPLETION_HEADER=' "$CFG" > "$noh"
+    start_cosim "$D/run" || { bad "header: the co-simulation did not open $SOCK"; return; }
+    for n in 1 2; do
+        out=$(HOSTCFG="$noh" host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1); rc=$?
+        echo "$out" > "$D/no_header_$n.log"
+        settle "$n"
+        first=$(grep -m1 -oE 'rc=-?[0-9]+' <<< "$out")
+        if [ $rc -ne 0 ] && served "$out" && [ "$first" = "rc=-9" ] \
+           && has "$out" "does not say COMPLETION_HEADER=1" && ! grep -qE 'rc=0 +MISMATCH' <<< "$out"; then
+            ok "header: no COMPLETION_HEADER=1, run $n: the first result refused (rc -9, the configuration named), no record read as a tile"
+        else
+            bad "header: no COMPLETION_HEADER=1, run $n (exit $rc, first ${first:-none})" \
+                "$(grep -E 'rc=|COMPLETION|RUNTIME DISPATCH' <<< "$out" | head -4)"
+        fi
+    done
+    out=$(host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1); rc=$?
+    echo "$out" > "$D/with_header.log"
+    settle 3
+    [ $rc -eq 0 ] && has "$out" "RUNTIME DISPATCH: PASS" \
+        && ok "header: then with the co-simulation's configuration: runtime-dispatch-test PASS (session 3)" \
+        || bad "header: with the co-simulation's configuration (exit $rc)" "$(tail -2 <<< "$out")"
+    # A systolic-cc program built and run without any configuration: the
+    # built-in default of the compiler and of the synchronous runtime.
+    "$CLANG" -std=c11 "$src" -o "$D/cpu" && "$D/cpu" > "$D/cpu.out" || { bad "header: the clang build"; stop_cosim; return; }
+    "$BUILD/bin/systolic-cc" --runtime=board --clang "$CLANG" --build-dir "$BUILD" --llvm-build "$LLVM_BUILD" \
+        --fp-reassociation "$src" -o "$D/program" > "$D/program.cc.log" 2>&1 \
+        || { bad "header: systolic-cc without a configuration" "$(tail -3 "$D/program.cc.log")"; stop_cosim; return; }
+    out=$(HOSTCFG=none host 900 "$D/program" 2> "$D/program.err"); rc=$?
+    echo "$out" > "$D/program.out"
+    settle 4
+    if [ $rc -eq 0 ] && grep -v '^\[systolic-cc\]' <<< "$out" | diff -q "$D/cpu.out" - > /dev/null \
+       && grep -q '^\[systolic-cc\] CPU Executed' <<< "$out" && ! grep -q '^\[systolic-cc\] FPGA Executed' <<< "$out" \
+       && grep -q 'does not say COMPLETION_HEADER=1' "$D/program.err"; then
+        ok "header: a systolic-cc program with no configuration: refused at its first result, run on the CPU, output equal to clang's"
+    else
+        bad "header: a systolic-cc program with no configuration (exit $rc)" \
+            "$(grep 'Executed' <<< "$out" | head -3; grep -m2 -E 'COMPLETION|rc=' "$D/program.err")"
+    fi
+    stop_cosim
+    if [ -z "$PRERECORD" ]; then
+        skip "header: a header-less configuration on RTL without the record (no --prerecord-cosim-dir)"
+        return
+    fi
+    if grep -qx 'COMPLETION_HEADER=1' "$PRERECORD/fpga_config.txt"; then
+        bad "header: $PRERECORD is a co-simulation of RTL with the record"
+        return
+    fi
+    start_cosim "$D/prerecord" "$PRERECORD/Vcosim" || { bad "header: the pre-record co-simulation did not open $SOCK"; return; }
+    out=$(HOSTCFG="$PRERECORD/fpga_config.txt" host 900 "$BUILD/bin/runtime-dispatch-test" 2>&1); rc=$?
+    echo "$out" > "$D/prerecord.log"
+    settle 1
+    [ $rc -eq 0 ] && has "$out" "RUNTIME DISPATCH: PASS" && ! has "$out" "does not say COMPLETION_HEADER=1" \
+        && ok "header: RTL without the record, header-less configuration: runtime-dispatch-test PASS (no false refusal)" \
+        || bad "header: RTL without the record (exit $rc)" "$(grep -E 'rc=-|RUNTIME DISPATCH' <<< "$out" | head -3)"
+    stop_cosim
+}
+
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     echo "== $s"
     "section_$s"
 done
 
 echo
-echo "run_cosim_regressions: $passed passed, $failed failed"
+echo "run_cosim_regressions: $passed passed, $failed failed$( [ $skipped -gt 0 ] && echo ", $skipped skipped")"
 [ $failed -eq 0 ]

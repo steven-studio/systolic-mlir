@@ -40,7 +40,10 @@ extern "C" {
 //    -8  the result tile did not arrive within SYSTOLIC_DPTI_TIMEOUT_MS
 //    -9  the completion record did not match this invocation (another
 //        job_id or device, or the bitstream refused the descriptor): the
-//        link is out of step with the host, nothing more is sent
+//        link is out of step with the host, nothing more is sent; or a
+//        completion record arrived although the configuration does not
+//        say COMPLETION_HEADER=1 (a configuration of another bitstream, or
+//        none): refused before anything of it reaches C
 //   -14  refused: an earlier call on this session failed with -3 .. -9
 int fpga_matmul_tiled_auto_scheduled(
     int M, int K, int N,
@@ -131,7 +134,9 @@ typedef struct {
      * back starts with a 16-byte completion record (magic, job_id,
      * device_id, status, payload bytes, seq) -- bitstreams built from
      * dma_top_build.tcl after 2026-10-14. 0 (the default, and every older
-     * bitstream): bare tiles, matched by order. */
+     * bitstream): bare tiles, matched by order; a completion record that
+     * arrives anyway (the bitstream sends them) is refused with -9 at the
+     * first result instead of being read as tile data. */
     unsigned completion_header;
 } fpga_runtime_config_t;
 

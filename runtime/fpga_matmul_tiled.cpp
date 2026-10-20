@@ -598,13 +598,43 @@ int scheduled_invocation(
         }
     }
 
-    // The synchronization point: the whole P x P tile is back.
-    const int read_rc =
-        dpti_ftdi_read_exact_session(
-            rt.session,
-            result_bytes.data(),
-            result_bytes_len,
-            read_timeout_ms());
+    // The synchronization point: the whole P x P tile is back. A
+    // configuration that does not say COMPLETION_HEADER=1 (the built-in
+    // default included) reads bare tiles; a bitstream that sends the record
+    // ahead of every result (systolic_dma_top.sv's completion record) would
+    // have it read as the tile's first 16 bytes -- rc 0, wrong numbers, the
+    // tile's tail left on the link for the next read. So those 16 bytes are
+    // read on their own first: the record's magic there means the
+    // configuration is not this bitstream's, and nothing of it reaches C.
+    int read_rc = 0;
+    if (hw.cfg.completion_header) {
+        read_rc = dpti_ftdi_read_exact_session(
+            rt.session, result_bytes.data(), result_bytes_len, read_timeout_ms());
+    } else {
+        read_rc = dpti_ftdi_read_exact_session(
+            rt.session, result_bytes.data(), FPGA_COMPLETION_BYTES, read_timeout_ms());
+        if (read_rc == 0) {
+            const unsigned magic =
+                static_cast<unsigned>(result_bytes[0]) |
+                (static_cast<unsigned>(result_bytes[1]) << 8) |
+                (static_cast<unsigned>(result_bytes[2]) << 16) |
+                (static_cast<unsigned>(result_bytes[3]) << 24);
+            if (magic == FPGA_COMPLETION_MAGIC) {
+                std::fprintf(
+                    stderr,
+                    "[fpga-runtime] a completion record arrived, but the configuration "
+                    "(%s) does not say COMPLETION_HEADER=1: this bitstream sends one "
+                    "ahead of every result. Refused (rc=-9); nothing of it reaches C. "
+                    "Name the bitstream's fpga_config.txt in SYSTOLIC_FPGA_CONFIG.\n",
+                    hw.cfg.source);
+                rt.link_failed = true;
+                return -9;
+            }
+            read_rc = dpti_ftdi_read_exact_session(
+                rt.session, result_bytes.data() + FPGA_COMPLETION_BYTES,
+                result_bytes_len - FPGA_COMPLETION_BYTES, read_timeout_ms());
+        }
+    }
 
     if (read_rc != 0) {
         rt.link_failed = true;
