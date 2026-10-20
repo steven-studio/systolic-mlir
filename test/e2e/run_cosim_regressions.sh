@@ -77,7 +77,8 @@
 #           it (-9), the asynchronous one ignores it and runs correctly; and
 #           four programs started in a row do not all use one epoch.
 #
-# Exit status 0 only if every check passes (a SKIP is not a pass).
+# Exit status 0 only if no check fails. A SKIP is counted and reported as a
+# SKIP, never as a pass, and does not fail the run (as in test_e2e_config.sh).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
