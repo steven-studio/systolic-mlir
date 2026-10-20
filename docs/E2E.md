@@ -254,6 +254,11 @@ cmake --build build --target check-e2e-config        # 即 test/e2e/test_e2e_con
    這個 K，列為 n/a）、K_MAX；k = K_MAX + 1 在 device 1 與 0 上必須回傳 -10、什麼都不送。數值是
    小整數，K_MAX 到 16376 都在 binary32 內精確。它印出的設定必須與上面解析的相同。`--list`
    只列出會送的 invocation、`--print-config` 只印設定，兩者都不開連線。
+   `--mode async` 時接著跑 `runtime-async-test --mode all --backend <backend>`（第 5 節）：
+   mode F 要 co-sim 的 libftdi 替身注入寫入失敗，板子上是 NOT APPLICABLE——印出原因，不算 PASS
+   也不算 FAIL，結束碼只看其他 mode；co-sim 上 F 必須 PASS，否則 runtime layer FAIL。
+   `runtime-dispatch-test` 失敗時，runtime layer 保留它的分類與 FAIL，`runtime-async-test`
+   的結果接在後面。`--check-config` 列出的 mode 計畫依 `--backend` 標出 NOT APPLICABLE。
 2. 每組 case 走 `systolic-matmul` 全程（`gen_cases.py`）：
    - 預設：36 組固定案例（形狀 1x1x1、2x3x4、4x4x4、8x8x8、8x4x16、16x8x4、16x8x40、
      17x9x33、32x32x32，各四種值：全 0、正、負、混合），加上 K_MAX 邊界案例：12x12xK，K = 1、
@@ -270,7 +275,9 @@ cmake --build build --target check-e2e-config        # 即 test/e2e/test_e2e_con
      的 fold、N > M 的多 tile、8x8 上的部分 tile。與其他模式互斥，可加 `--extra-k`。
    - K 超過 `systolic-matmul` 的輸入上限（K ≤ 4096，從它的 `--help` 讀）的 case 不跑，列為
      NOT RUN 並寫明原因。
-3. 只在 co-sim：故意弄壞一次傳輸。session 的第 7 次 write（第一個 descriptor 的
+3. 只在 co-sim（板子上印 `dispatch failure reported: NOT APPLICABLE on the board`：注入寫入
+   失敗的是 co-sim 的 `libftdi_cosim.so`，runtime 不讀 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE`）：
+   故意弄壞一次傳輸。session 的第 7 次 write（第一個 descriptor 的
    第 5 個 WRITE32）失敗時，`systolic-matmul` 必須以 4 結束、runtime 回報
    `first error -6`（TRANSPORT），RTL 只收到並讀走 MEM_WRITE 與 4 個 WRITE32（`9 + slab + 24`
    byte，16／16 時 1057 B）——沒有 submit，所以也沒有任何結果送回。16x8x4 要是五次
@@ -348,7 +355,14 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   寫的 byte 不是 opcode 時，跟 `dpti_command_frontend.sv` 一樣讀掉、略過。
   `test/e2e/run_cosim_regressions.sh --section bench` 檢查這幾種離開的方式。
 - `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=<n>` 讓 session 的第 n 次 `ftdi_write_data()`
-  像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查用它）。
+  像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查與 `runtime-async-test` 的 mode F
+  用它）。只有 `libftdi_cosim.so` 讀它，runtime 與真的 libftdi1 都不讀：板子上沒有任何寫入會因
+  它失敗，所以這兩項在板子上是 NOT APPLICABLE，不是 FAIL，也不是 PASS。
+  `SYSTOLIC_DPTI_COSIM_CORRUPT_READ=<n>` 把 session 讀到的第 n 個 byte 的最低位元翻轉（鏈路
+  不報錯的錯誤結果）；`SYSTOLIC_DPTI_COSIM_NO_FAULTS=1` 讓兩種注入都不發生，跟板子一樣——
+  `test/e2e/run_cosim_regressions.sh --section modef` 用它讓 co-sim 代替板子，檢查
+  `run_e2e.sh --backend board --mode async` 的結果（F NOT APPLICABLE、其他全部 PASS），
+  並用 CORRUPT_READ 確認 NOT APPLICABLE 蓋不掉真正的錯誤。
 - 有 `K_MAX_8X8`／`K_MAX_4X4` 參數的 RTL（`RTL_DIR=.`）建出來的 co-simulation，每個 job
   的結果寫回 DDR 時印一行 `COSIM_STEPS`：descriptor 的 k、每個 PE 實際做的 MAC 次數、
   feeder 送進 row 0／column 0 的 operand 數、`k_dim`、job 被接受與結果進 DDR 的 cycle
@@ -372,10 +386,11 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
 | Affine fleet 的 PIPELINE_DEPTH | `systolic-opt --systolic-declare-fpga-fleet="pipeline-depth=4" --affine-matmul-to-systolic=report=true test/Systolic/declare_fpga_fleet_pipelined.mlir` | device 帶 `pipeline_depth = 4 reduce_cycles = 69 feed_gap = 26`，16x16x16 makespan 949（depth 1：1245）、第二個 8x8 tile `start_cycle = 42` |
 | E2E 設定（host 端） | `cmake --build build --target check-e2e-config` | `test_e2e_config: N passed, 0 failed` |
 | runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-dispatch-test`（板子，或 `run_e2e.sh --backend cosim`） | `RUNTIME DISPATCH: PASS` |
-| 非同步 runtime → FPGA | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all`（要 `COMPLETION_HEADER=1` 的 bitstream） | `RUNTIME ASYNC: PASS`（A/B/C/D/X/V/S/Q/M/P/F 十一個 mode；S 印每個 submit 回來的時間對第一筆 completion，P 是 poll／timed wait／release，F 是提交中途的鏈路失敗） |
+| 非同步 runtime → FPGA | 板子：`SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> build/bin/runtime-async-test --mode all --backend board`（要 `COMPLETION_HEADER=1` 的 bitstream）；co-sim：`run_e2e.sh --backend cosim --mode async`（它用 `LD_PRELOAD=libftdi_cosim.so` 與 `--backend cosim` 跑同一個測試）。沒給 `--backend` 時，`SYSTOLIC_DPTI_COSIM_SOCKET` 有設就當 co-sim，沒設就當板子 | 板子：`RUNTIME ASYNC: PASS -- NOT APPLICABLE 1 (mode F: co-simulation only), every other mode PASS`（F 是提交中途的鏈路失敗，靠 co-sim 的 libftdi 替身注入，板子上不能執行，列為 NOT APPLICABLE：不算通過也不算失敗，結束碼只看其他 mode；指名 `--mode F --backend board` 會在開連線前以 2 拒絕；沒有任何 mode 執行是 FAIL）；co-sim：`RUNTIME ASYNC: PASS`（含 F；co-sim 上 F 不會是 NOT APPLICABLE）。S 印每個 submit 回來的時間對第一筆 completion，P 是 poll／timed wait／release |
 | Dynamic offset（C 的 view 由參數決定） | `systolic-opt --systolic-declare-fpga-fleet --affine-matmul-to-systolic --lower-systolic-matmul-tile-to-fpga="async=true" test/Systolic/affine_to_fpga_symbolic.mlir`；`test/SystolicCC/dynoffset.c`（lit，soft）；cosim：`systolic-cc --runtime board --verify test/SystolicCC/dynoffset.c` | subview 的 offset 是 `%r0` 的 index、`memref.extract_strided_metadata` 算指標；12 個 GEMM、91 tiles verify 逐位元（`docs/ASYNC.md` 第 11 節） |
 | E2E | `SYSTOLIC_FPGA_CONFIG=<fpga_config.txt> test/e2e/run_e2e.sh --backend board` | `E2E: PASS`（`E2E cases: N/N PASS`；N 依設定而定） |
-| E2E（非同步） | 同上加 `--mode async` | `E2E: PASS on backend board, async runtime`；verdict 另外檢查 IR 呼叫的是 `fpga_tile_submit` |
+| E2E（非同步） | 同上加 `--mode async` | `E2E: PASS on backend board, async runtime (...) -- hardware configuration not independently verified; runtime-async-test mode F NOT APPLICABLE (co-simulation only)`，`runtime layer: PASS (...; mode F NOT APPLICABLE on the board: ...)`；任何一個執行了的 mode 或 case 失敗仍是 `E2E: FAIL`。co-sim 上 F 必須 PASS。verdict 另外檢查 IR 呼叫的是 `fpga_tile_submit` |
+| Co-sim 回歸 | `cmake --build build --target check-e2e-cosim-regressions`（先 `test/e2e/cosim/build.sh`） | `run_cosim_regressions: N passed, 0 failed` |
 
 ## 6. 已知限制
 

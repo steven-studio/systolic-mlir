@@ -23,6 +23,15 @@
 #           not after the drain's time limit). The hosts are replays of the
 #           first jobs runtime-dispatch-test sends; after each one
 #           runtime-dispatch-test runs again and must PASS.
+#   modef   runtime-async-test's mode F needs a link failure injected by the
+#           co-simulation's stand-in for libftdi, which the board's libftdi
+#           never injects: with the co-simulation standing for the board
+#           (SYSTOLIC_DPTI_COSIM_NO_FAULTS=1), run_e2e.sh --backend board
+#           --mode async must PASS with F NOT APPLICABLE; on the
+#           co-simulation F must run and PASS, and the harness must fail the
+#           runtime layer if F does not PASS there; a wrong result (one read
+#           byte flipped, SYSTOLIC_DPTI_COSIM_CORRUPT_READ) must still fail
+#           the tool and the harness on the board model.
 #
 # Exit status 0 only if every check passes.
 set -uo pipefail
@@ -32,7 +41,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench"
+SECTIONS="bench,modef"
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-dir) BUILD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
@@ -47,8 +56,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench) ;;
-        *) echo "unknown section: $s (sections: bench)" >&2; exit 2 ;;
+        bench|modef) ;;
+        *) echo "unknown section: $s (sections: bench, modef)" >&2; exit 2 ;;
     esac
 done
 
@@ -59,7 +68,7 @@ CFG="$COSIM_DIR/fpga_config.txt"
     echo "no co-simulation in $COSIM_DIR -- run test/e2e/cosim/build.sh" >&2; exit 2; }
 grep -qx 'COMPLETION_HEADER=1' "$CFG" || {
     echo "$CFG: this co-simulation's RTL sends no completion record; these checks need the working tree's RTL (test/e2e/cosim/build.sh)" >&2; exit 2; }
-for t in runtime-dispatch-test; do
+for t in runtime-dispatch-test runtime-async-test systolic-matmul; do
     [ -x "$BUILD/bin/$t" ] || { echo "no $BUILD/bin/$t -- build the project first" >&2; exit 2; }
 done
 command -v python3 >/dev/null || { echo "python3 not found" >&2; exit 2; }
@@ -238,6 +247,76 @@ section_bench() {
     left 8 "$D/capture.bin" 1 0 "$((kmax8 + 1))" "one job the RTL refuses (k = K_MAX + 1)"
     dispatch 9 "after it"
     stop_cosim
+}
+
+section_modef() {
+    D="$OUT/modef"
+    start_cosim "$D" || { bad "modef: the co-simulation did not open $SOCK"; return; }
+    local out rc shadow
+    # On the co-simulation (the default backend with the socket set) F runs
+    # its injected link failure and PASSes.
+    out=$(host 900 "$BUILD/bin/runtime-async-test" --mode F 2>&1); rc=$?
+    echo "$out" > "$D/F_cosim.log"
+    [ $rc -eq 0 ] && served "$out" && has "$out" "backend: cosim (SYSTOLIC_DPTI_COSIM_SOCKET is set)" \
+        && grep -q '^mode F (.*): PASS$' <<< "$out" && has "$out" "RUNTIME ASYNC: PASS" \
+        && ok "modef: on the co-simulation mode F runs its injected link failure and PASSes" \
+        || bad "modef: mode F on the co-simulation (exit $rc)" "$(grep -E '^(backend|mode F|RUNTIME)' <<< "$out")"
+
+    # The board's run, reproduced: the co-simulation standing for the board,
+    # no write can be made to fail. Every other mode and case must PASS, F is
+    # NOT APPLICABLE -- reported, never counted as a pass.
+    out=$(SYSTOLIC_DPTI_COSIM_NO_FAULTS=1 host 1800 bash "$HERE/run_e2e.sh" --backend board --mode async \
+              --quick --build-dir "$BUILD" --out "$D/board_model" 2>&1); rc=$?
+    echo "$out" > "$D/board_model.log"
+    [ $rc -eq 0 ] && grep -q '^   mode F (.*): NOT APPLICABLE -- ' <<< "$out" \
+        && has "$out" "dispatch failure reported: NOT APPLICABLE on the board" \
+        && grep -q '^E2E cases: 26/26 PASS on backend board (async runtime)$' <<< "$out" \
+        && grep -q '^runtime layer: PASS (runtime-dispatch-test and runtime-async-test; mode F NOT APPLICABLE on the board' <<< "$out" \
+        && grep -q '^E2E: PASS on backend board, async runtime .*; runtime-async-test mode F NOT APPLICABLE (co-simulation only)$' <<< "$out" \
+        && ok "modef: board model (no fault injection): E2E PASS, 26/26, mode F NOT APPLICABLE" \
+        || bad "modef: board model, run_e2e.sh --backend board --mode async --quick (exit $rc)" \
+               "$(grep -E '^(runtime layer|E2E|dispatch failure)|^   mode F' <<< "$out")"
+
+    # NOT APPLICABLE never hides a failure: one read byte flipped in every
+    # session, on the board model.
+    out=$(SYSTOLIC_DPTI_COSIM_CORRUPT_READ=40 host 900 "$BUILD/bin/runtime-async-test" --mode all --backend board 2>&1); rc=$?
+    echo "$out" > "$D/corrupt_tool.log"
+    [ $rc -ne 0 ] && [ $rc -ne 2 ] && grep -q '^RUNTIME ASYNC: FAIL -- .*; NOT APPLICABLE 1 (mode F: co-simulation only)$' <<< "$out" \
+        && grep -q '^mode A (.*): MISMATCH' <<< "$out" \
+        && ok "modef: a corrupted result on the board model: runtime-async-test FAIL (exit $rc), F's NOT APPLICABLE does not make it a pass" \
+        || bad "modef: a corrupted result, runtime-async-test --backend board (exit $rc)" "$(grep -E '^(mode A|RUNTIME)' <<< "$out")"
+    out=$(SYSTOLIC_DPTI_COSIM_CORRUPT_READ=40 host 1800 bash "$HERE/run_e2e.sh" --backend board --mode async \
+              --quick --cases 4x4x4_mixed --build-dir "$BUILD" --out "$D/corrupt_harness" 2>&1); rc=$?
+    echo "$out" > "$D/corrupt_harness.log"
+    [ $rc -eq 1 ] && grep -q '^runtime layer: FAIL -- MISMATCH' <<< "$out" && grep -q '^E2E: FAIL -- runtime layer MISMATCH' <<< "$out" \
+        && ok "modef: a corrupted result on the board model: runtime layer FAIL, E2E FAIL" \
+        || bad "modef: a corrupted result, run_e2e.sh --backend board (exit $rc)" "$(grep -E '^(runtime layer|E2E)' <<< "$out")"
+    stop_cosim
+
+    # On the co-simulation the harness requires F to PASS: a runtime-async-test
+    # that takes the co-simulation for the board (F NOT APPLICABLE there) must
+    # fail the runtime layer. run_e2e.sh --backend cosim starts its own
+    # co-simulation.
+    shadow="$D/shadow/bin"
+    mkdir -p "$shadow"
+    ln -sf "$BUILD/bin/systolic-matmul" "$shadow/systolic-matmul"
+    ln -sf "$BUILD/bin/runtime-dispatch-test" "$shadow/runtime-dispatch-test"
+    cat > "$shadow/runtime-async-test" <<EOF
+#!/usr/bin/env bash
+# A runtime-async-test that takes the co-simulation for the board:
+# --backend cosim becomes --backend board.
+args=()
+for a in "\$@"; do [ "\$a" = cosim ] && a=board; args+=("\$a"); done
+exec "$BUILD/bin/runtime-async-test" "\${args[@]}"
+EOF
+    chmod +x "$shadow/runtime-async-test"
+    out=$(SYSTOLIC_DPTI_TIMEOUT_MS=600000 timeout -s KILL 1800 bash "$HERE/run_e2e.sh" --backend cosim --mode async \
+              --quick --cases 4x4x4_mixed --build-dir "$D/shadow" --cosim-dir "$COSIM_DIR" --out "$D/guard" 2>&1); rc=$?
+    echo "$out" > "$D/guard.log"
+    [ $rc -eq 1 ] && grep -q '^runtime layer: FAIL -- runtime-async-test FAIL (exit 0): mode F did not PASS on the co-simulation' <<< "$out" \
+        && grep -q '^E2E: FAIL -- runtime layer FAIL' <<< "$out" \
+        && ok "modef: on the co-simulation, mode F NOT APPLICABLE fails the runtime layer" \
+        || bad "modef: run_e2e.sh --backend cosim with F NOT APPLICABLE (exit $rc)" "$(grep -E '^(runtime layer|E2E)' <<< "$out")"
 }
 
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do

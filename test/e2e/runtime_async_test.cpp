@@ -51,16 +51,31 @@
 //       accepted, the wait reports -4, every tile is failed (none done, none
 //       lost), nothing but the 3 slabs crossed the link, a further begin is
 //       refused (-14), and after fpga_async_runtime_close a new session runs
-//       a GEMM correctly
+//       a GEMM correctly. Co-simulation only: the failure is injected by the
+//       co-simulation's stand-in for libftdi (the runtime never reads
+//       SYSTOLIC_DPTI_COSIM_FAIL_WRITE), so on the board F is NOT
+//       APPLICABLE. It checks no computation the other modes do not (its one
+//       checked GEMM is mode C's shape and staging).
 //
 //   runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F | all] [--gemm MxNxK]
-//                      [--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]
+//                      [--devices 0,1,2,3] [--stage 0|1] [--backend board|cosim]
+//                      [--print-config] [--list]
+//
+// --backend says what is behind the link: the RTL co-simulation (cosim) or
+// the board. Without it: cosim when SYSTOLIC_DPTI_COSIM_SOCKET is set (the
+// co-simulation's libftdi cannot connect without it), else board.
+// --mode all (the default) runs every mode that can run on that backend and
+// reports the others NOT APPLICABLE, with the reason; a mode named in --mode
+// that cannot run there is refused before the link opens (exit 2).
 //
 // Every mode is reported as PASS, MISMATCH, TRANSPORT (link failure),
-// SUBMISSION (a tile refused or an unexpected code), CONFIG or NOT RUN (the
-// link had failed before it), with the runtime's own counters next to it.
-// Exit status as runtime-dispatch-test's: 0 all as expected; 2 configuration,
-// 3 transport, 4 submission / unexpected, 1 numerical mismatch.
+// SUBMISSION (a tile refused or an unexpected code), CONFIG, NOT RUN (the
+// link had failed before it) or NOT APPLICABLE (it cannot run on this
+// backend: neither a pass nor a failure), with the runtime's own counters
+// next to it. Exit status as runtime-dispatch-test's: 0 every mode that ran
+// as expected, and at least one ran; 2 configuration (or a mode asked for by
+// name is NOT APPLICABLE), 3 transport, 4 submission / unexpected / no mode
+// ran, 1 numerical mismatch. NOT APPLICABLE never changes it.
 
 #include "fpga_async_runtime.h"
 #include "fpga_matmul_tiled.h"
@@ -256,9 +271,11 @@ int run_gemm(Gemm &g, const std::vector<TileSpec> &tiles, int *submit_rc,
 
 struct Options {
   std::vector<char> modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'};
+  bool all = true;    // --mode all: a mode that cannot run on the backend is NOT APPLICABLE
   int M = 16, N = 16, K = 32;
   std::vector<unsigned> devices = {0, 1, 2, 3};
   int stage = -1;     // -1: the mode decides
+  int backend = -1;   // -1: SYSTOLIC_DPTI_COSIM_SOCKET decides; 0 board; 1 cosim
   bool print_config = false, list = false;
 };
 
@@ -272,7 +289,8 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v) return false;
       o.modes.clear();
-      if (std::string(v) == "all") { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'}; continue; }
+      o.all = std::string(v) == "all";
+      if (o.all) { o.modes = {'A', 'B', 'C', 'D', 'X', 'V', 'S', 'Q', 'M', 'P', 'F'}; continue; }
       for (const char *p = v; *p; ++p)
         if (*p != ',') {
           if (!std::strchr("ABCDXVSQMPF", *p)) return false;
@@ -294,6 +312,10 @@ bool parse_options(int argc, char **argv, Options &o) {
       const char *v = value();
       if (!v || (std::string(v) != "0" && std::string(v) != "1")) return false;
       o.stage = v[0] - '0';
+    } else if (a == "--backend") {
+      const char *v = value();
+      if (!v || (std::string(v) != "board" && std::string(v) != "cosim")) return false;
+      o.backend = std::string(v) == "cosim" ? 1 : 0;
     } else return false;
   }
   return true;
@@ -358,7 +380,8 @@ int main(int argc, char **argv) {
   if (!parse_options(argc, argv, o)) {
     std::fprintf(stderr,
                  "usage: runtime-async-test [--mode A,B,C,D,X,V,S,Q,M,P,F|all] [--gemm MxNxK] "
-                 "[--devices 0,1,2,3] [--stage 0|1] [--print-config] [--list]\n");
+                 "[--devices 0,1,2,3] [--stage 0|1] [--backend board|cosim] [--print-config] "
+                 "[--list]\n");
     return 2;
   }
 
@@ -389,13 +412,30 @@ int main(int argc, char **argv) {
   }
   Config cfg{static_cast<int>(hw.k_max_8x8), static_cast<int>(hw.k_max_4x4), hw.slab_bytes};
 
+  // What is behind the link. Mode F needs the co-simulation's write-failure
+  // injection: its stand-in for libftdi reads SYSTOLIC_DPTI_COSIM_FAIL_WRITE
+  // (the runtime never does) and cannot connect without
+  // SYSTOLIC_DPTI_COSIM_SOCKET, so without that variable no injection can
+  // happen.
+  const char *sock = std::getenv("SYSTOLIC_DPTI_COSIM_SOCKET");
+  const bool sock_set = sock && *sock;
+  const bool cosim = o.backend >= 0 ? o.backend == 1 : sock_set;
+
   std::printf("configuration: K_MAX_8X8 = %d, K_MAX_4X4 = %d, %u-byte operand slab, "
               "completion record (%s)\n", cfg.k8, cfg.k4, cfg.slab, hw.source);
+  std::printf("backend: %s (%s)\n", cosim ? "cosim" : "board",
+              o.backend >= 0 ? "--backend"
+              : cosim        ? "SYSTOLIC_DPTI_COSIM_SOCKET is set"
+                             : "SYSTOLIC_DPTI_COSIM_SOCKET is not set");
+  if (o.backend == 0 && sock_set)
+    std::printf("note: --backend board while SYSTOLIC_DPTI_COSIM_SOCKET is set: if this link "
+                "is the co-simulation, mode F could run (--backend cosim)\n");
   std::printf("GEMM %dx%dx%d; devices", o.M, o.N, o.K);
   for (unsigned d : o.devices) std::printf(" %u", d);
   std::printf("\n\n");
 
-  struct Plan { char mode; std::string what; int stage; };
+  // na: why the mode cannot run on this backend (empty: it can).
+  struct Plan { char mode; std::string what; int stage; std::string na = {}; };
   std::vector<Plan> plans;
   for (char m : o.modes) {
     switch (m) {
@@ -412,10 +452,31 @@ int main(int argc, char **argv) {
     case 'F': plans.push_back({m, "transport failure mid-submission (SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7): nothing lost, -4, -14 after, recovery after close", 1}); break;
     }
   }
+  for (Plan &p : plans)
+    if (p.mode == 'F' && !cosim)
+      // (No "libftdi_cosim" in these lines: run_e2e.sh hides the lines that
+      // name it, the stand-in's connection notices.)
+      p.na = "no write-failure injector on this backend (SYSTOLIC_DPTI_COSIM_FAIL_WRITE is "
+             "honoured only by the co-simulation's stand-in for libftdi; the runtime never "
+             "reads it)";
   if (o.list) {
-    for (const Plan &p : plans) std::printf("mode %c  %s\n", p.mode, p.what.c_str());
+    for (const Plan &p : plans)
+      std::printf("mode %c  %s%s%s\n", p.mode, p.what.c_str(),
+                  p.na.empty() ? "" : " -- NOT APPLICABLE on the board: ", p.na.c_str());
     return 0;
   }
+  // A mode asked for by name that cannot run here is refused before the link
+  // opens; --mode all reports it NOT APPLICABLE and runs the others.
+  if (!o.all)
+    for (const Plan &p : plans)
+      if (!p.na.empty()) {
+        std::printf("mode %c (%s): NOT APPLICABLE on the board -- %s; asked for by name, so "
+                    "nothing is run (--mode all runs every other mode)\n",
+                    p.mode, p.what.c_str(), p.na.c_str());
+        std::printf("RUNTIME ASYNC: NOT APPLICABLE -- mode %c on the board; nothing was sent\n",
+                    p.mode);
+        return 2;
+      }
 
   int count[UNKNOWN + 1] = {};
   int first_rc[UNKNOWN + 1] = {};
@@ -430,8 +491,18 @@ int main(int argc, char **argv) {
                 detail.empty() ? "" : ("\n    " + detail).c_str());
   };
 
+  // NOT APPLICABLE is neither a pass nor a failure: it is counted apart from
+  // every class above and never changes the verdict or the exit status.
+  int not_applicable = 0;
+  std::string na_modes;
   bool link_failed = false;
   for (const Plan &p : plans) {
+    if (!p.na.empty()) {
+      ++not_applicable;
+      na_modes += p.mode;
+      std::printf("mode %c (%s): NOT APPLICABLE -- %s\n", p.mode, p.what.c_str(), p.na.c_str());
+      continue;
+    }
     if (link_failed) {
       report(p, NOT_RUN, -14, "the link failed in an earlier mode");
       continue;
@@ -901,6 +972,10 @@ int main(int argc, char **argv) {
         }
         const int wrc = fpga_gemm_wait_for(h, FPGA_ASYNC_WAIT_FOREVER);
         expect("wait after the failure", wrc, -4);
+        if (wrc == 0)
+          detail += "\n    the injected write failure never happened: SYSTOLIC_DPTI_COSIM_FAIL_WRITE "
+                    "is honoured only by the co-simulation's stand-in for libftdi -- is this "
+                    "link the board? (--backend board reports F NOT APPLICABLE)";
         fpga_gemm_status_t st;
         expect("poll", fpga_gemm_poll(h, &st), 0);
         expect("link_failed", st.link_failed, 1);
@@ -1035,11 +1110,18 @@ int main(int argc, char **argv) {
   fpga_async_runtime_close();
 
   const int failures = count[MISMATCH] + count[TRANSPORT] + count[SUBMISSION] + count[CONFIG] + count[UNKNOWN];
-  if (failures == 0 && count[NOT_RUN] == 0) {
-    std::printf("\nRUNTIME ASYNC: PASS\n");
+  const std::string na_note =
+      not_applicable ? "NOT APPLICABLE " + std::to_string(not_applicable) + " (mode " + na_modes +
+                           ": co-simulation only)"
+                     : "";
+  if (failures == 0 && count[NOT_RUN] == 0 && count[PASS] > 0) {
+    std::printf("\nRUNTIME ASYNC: PASS%s%s%s\n", na_note.empty() ? "" : " -- ", na_note.c_str(),
+                na_note.empty() ? "" : ", every other mode PASS");
     return 0;
   }
   std::string summary;
+  if (failures == 0 && count[NOT_RUN] == 0)   // nothing ran: never a pass
+    summary = "no mode ran";
   for (Class c : {CONFIG, TRANSPORT, SUBMISSION, UNKNOWN, MISMATCH, NOT_RUN}) {
     if (count[c] == 0) continue;
     char buf[320];
@@ -1047,9 +1129,11 @@ int main(int argc, char **argv) {
                   class_name(c), count[c], first_rc[c], first_what[c].c_str());
     summary += buf;
   }
+  if (!na_note.empty()) summary += "; " + na_note;
   std::printf("\nRUNTIME ASYNC: FAIL -- %s\n", summary.c_str());
   if (count[CONFIG]) return 2;
   if (count[TRANSPORT] || count[NOT_RUN]) return 3;
   if (count[SUBMISSION] || count[UNKNOWN]) return 4;
-  return 1;
+  if (count[MISMATCH]) return 1;
+  return 4;   // nothing ran
 }

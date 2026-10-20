@@ -240,8 +240,9 @@ tile/s），**看不出重疊帶來的加速**；它證明的是正確性與「�
   runtime 的統計並關閉兩條 session，shim 的 FPGA／CPU 判定不變。soft runtime 只有同步 entry
   point，lit 的 `test/SystolicCC` 照舊走同步 lowering。
 - `test/e2e/run_e2e.sh --mode async`：所有 case 用 `systolic-matmul --async`；runtime
-  layer 多跑 `runtime-async-test --mode all`（GEMM 大小可用 `SYSTOLIC_E2E_ASYNC_GEMM`
-  改）；`e2e_verdict.py --mode async --header 1` 檢查 `ir/20-fpga.mlir` 裡正好每個 tile
+  layer 多跑 `runtime-async-test --mode all --backend <backend>`（GEMM 大小可用
+  `SYSTOLIC_E2E_ASYNC_GEMM` 改；mode F 只能在 co-sim 跑，板子上是 NOT APPLICABLE，
+  co-sim 上必須 PASS）；`e2e_verdict.py --mode async --header 1` 檢查 `ir/20-fpga.mlir` 裡正好每個 tile
   一個 `fpga_tile_submit`、一個 begin、一個 wait、沒有同步呼叫，以及收回的 byte 數 =
   Σ(P×P×4 + 16)。`--mode sync`（預設）的 summary 行格式與原本完全相同（`check-e2e-config`
   仍照舊比對），只多了 `--header` 的收回 byte 檢查。
@@ -310,7 +311,7 @@ timing 若不收斂（arbiter 在 60 MHz 的 dpti_clkout 域、grant arbiter 在
 export SYSTOLIC_FPGA_CONFIG=<新 bitstream 的 fpga_config.txt>
 export SYSTOLIC_RUNTIME_TIMING=1 SYSTOLIC_DPTI_LATENCY_MS=1
 build/bin/runtime-dispatch-test                                    # 先確認同步路徑在新 bitstream 上 PASS
-build/bin/runtime-async-test --mode all                            # 正確性
+build/bin/runtime-async-test --mode all --backend board            # 正確性（mode F 只在 co-sim：NOT APPLICABLE）
 build/bin/runtime-async-test --mode A,B,C,D --gemm 64x64x64        # 計時：span_us、tiles/s
 SYSTOLIC_ASYNC_READ_POLICY=always build/bin/runtime-async-test --mode C --gemm 64x64x64
 SYSTOLIC_ASYNC_READ_POLICY=wait   build/bin/runtime-async-test --mode C --gemm 64x64x64
@@ -482,7 +483,8 @@ completion 立刻補上。
 - **擁有權**（header 第一段）：A、B 在 submit 裡讀完、回來後可重用；C 是呼叫者的，transfer thread
   在 completion 到時寫它，從 submit 到 poll／wait 回報 done 之前呼叫者不能讀寫；handle 從 begin 到
   wait／release／close 有效；slab、descriptor、DDR slot、record、job_id 是 runtime 的。
-- **錯誤**：submit 後鏈路失敗（mode F，`SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`）：失敗前收下的 submit
+- **錯誤**：submit 後鏈路失敗（mode F，`SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`；只有 co-sim 的
+  libftdi 替身注入這個失敗，板子上 mode F 是 NOT APPLICABLE）：失敗前收下的 submit
   全部以 -4 失敗、之後的 submit 回 -14、wait 回 -4、`fpga_tile_poll` 每筆都是 failed/-4、C 一個元素
   都沒被碰、鏈路上只有三塊 slab（3099 B）、之後的 begin 回 NULL/-14，close 之後新 session 正常。
   refusal（mode V）、k-ordered 累加（mode X）、多 GEMM（mode D／M）都不變。
