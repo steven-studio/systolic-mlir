@@ -248,6 +248,15 @@ tile/s），**看不出重疊帶來的加速**；它證明的是正確性與「�
   後面，後面的 submit 被 runtime 以 -17 拒絕——affine／C 路徑的非同步 lowering 實際上只跑第
   一個 tile（systolic-cc 的程式因此全部 fallback 到 CPU）。
   `test/Systolic/affine_to_fpga_pipeline_async.mlir`（含 C front end 的 strided 形狀）。
+  2026-10-20：runtime 在 `C[i * ldc + j]` 累加、`ldc` 是 i32、`ldc < n` 回 -11，所以只有 row stride
+  是靜態、介於 row 長度與 INT32_MAX 之間的 view 能直接寫（`isRuntimeAddressable`）。反向的 row
+  （`C[11 - i][j]` 的 `strided<[-10, 1]>`，含 run-time offset 的版本）、存成一行的單一 row（3x1 array
+  的 1x3 view，stride 1 < n）、run-time 的 row stride：每個 GEMM 一塊連續的 M x N buffer，在 GEMM 的
+  begin 之後從 view 複製進去，每個 block 以 `ldc = N` submit 進它，wait 之後由 front end 的
+  `materialize_in_destination` 複製回去（deallocation pipeline 之後釋放）。之前這種 view 以負的或太小的
+  `ldc` submit、被 runtime 拒絕、不留紀錄，C 沒被寫：直接呼叫 kernel 的程式得到錯的結果，systolic-cc
+  的程式整個函式（連同同一函式裡已在 FPGA 上跑完的 GEMM）fallback 到 CPU。
+  `test/Systolic/affine_to_fpga_async_views{,_large}.mlir`、`test/SystolicCC/async_views.c`。
 - 仍走 per-tile fallback 的 GEMM（C 的根是 `tensor.empty`／`linalg.fill`、loop-carried、
   interleaved：`fpga_operand_staging_fallback.mlir` 的形狀）：reader（每個 block 的
   `insert_slice`）出現在後面的 submit 之前時，lowering 在那裡 wait、再開一個新的
@@ -539,7 +548,7 @@ soft --submission async` 因此可用（預設仍是 sync，lit 的 `test/Systol
 | C front end（`tools/systolic-cfront`） | 下標用到非 counter 的整數（`C[r0 + i][j]`）→「subscript uses 'r0', which is not an enclosing loop counter」 | 有號整數參數是 nest 的 affine symbol：函式入口 `%r0_idx = arith.index_cast %r0 : i32 to index`，下標 `(symbol(%r0_idx) + %i)`；無號參數拒絕（wrap 不是 affine）；`symbol × counter` 拒絕（semi-affine）。interface JSON 多 `leading_extent_expr`／`leading_min_expr`（參數的 C 運算式）：shim 用 `leading_extent_expr` 在 run time 算 memref 的 size[0] 與 snapshot／verify 的元素數，用 `leading_min_expr` 把最小 row 為負的呼叫（任何一個 array，讀的或寫的）交給 CPU（2026-10-20） |
 | 辨識（`AffineMatmulAnalysis.cpp`） | access map 有 symbol → failure | `separateSymbols`：每個 result 拆成 loop 部分 + symbol 部分（+ 常數），symbol 部分非線性（symbol×dim、floordiv）→ failure；loop 部分照舊辨識；symbol 部分存成 `LogicalMatmul::symbolicA/B/C`（0 dim、S symbol、每個 memref 維度一個 result）+ `symbolsA/B/C` |
 | view（`AffineMatmulToSystolic.cpp`） | `std::array<int64_t,2> offsets` 靜態 subview | `LogicalOperand::symbolic`：有 symbol 的維度以 `arith` 運算算出 index 值，`memref.subview %C[%off, 0] [8, 16] [1, 1]` → `memref<8x16xf32, strided<[16, 1], offset: ?>>`；有 symbol 的維度不做靜態邊界檢查（與動態 extent 同一條規則：nest 自己的保證，tile 不碰 nest 沒碰的元素）；A×A 的 `sameView` 連 symbol 一起比 |
-| lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset／stride 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代 |
+| lowering（`TileMatmulForFpga.cpp`） | root 要靜態 offset | `isExclusiveBufferView` 收任何 row-major（stride[1]=1）的 restrict writable to_tensor；同步路徑用 subview + memref.copy（layout 任意）；非同步路徑 offset 動態時 `memref.extract_strided_metadata` 讀 descriptor，指標 = aligned base + (offset + o0·stride0 + o1)·4、`ldc` = stride0（i32 值）——參數的實際值一路到 runtime，沒有截斷、沒有常數替代；row stride 不是靜態且介於 row 長度與 INT32_MAX 之間的 view（反向的 row、單一 row、run-time stride）每個 GEMM 先 stage 到一塊連續 buffer（第 6 節，2026-10-20） |
 | runtime | 指標 + ldc | 不變 |
 
 同一個編譯出的函式可以用任何讓每個 access 落在指標之後（最小 row ≥ 0）的 offset 呼叫（`dynoffset.c`：

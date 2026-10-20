@@ -46,6 +46,13 @@
 #           the program must finish within the bound, with every GEMM on the
 #           CPU and the output of the program compiled by clang alone (the
 #           asynchronous runtime used to wait for ever for the refused folds).
+#   views   test/SystolicCC/async_views.c (outputs written in reverse row
+#           order, per batch, one row down a column, a forward view at an
+#           offset, a reversed GEMM after a forward one) built by systolic-cc
+#           --runtime=board --verify, asynchronous submission: every GEMM on
+#           the FPGA, verified bitwise, no submit refused, output equal to
+#           the program compiled by clang alone (such views used to be
+#           submitted with ldc < n, refused, and run on the CPU).
 #
 # Exit status 0 only if every check passes.
 set -uo pipefail
@@ -55,7 +62,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 BUILD="$ROOT/build"
 COSIM_DIR=""
 OUT=""
-SECTIONS="bench,modef,negoffset,kmax"
+SECTIONS="bench,modef,negoffset,kmax,views"
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-dir) BUILD="$(cd "$2" && pwd)" || exit 2; shift 2 ;;
@@ -70,8 +77,8 @@ COSIM_DIR="${COSIM_DIR:-$BUILD/cosim}"
 OUT="${OUT:-$BUILD/cosim-regressions}"
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
     case "$s" in
-        bench|modef|negoffset|kmax) ;;
-        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax)" >&2; exit 2 ;;
+        bench|modef|negoffset|kmax|views) ;;
+        *) echo "unknown section: $s (sections: bench, modef, negoffset, kmax, views)" >&2; exit 2 ;;
     esac
 done
 
@@ -419,6 +426,30 @@ section_kmax() {
         fi
         stop_cosim
     done
+}
+
+section_views() {
+    D="$OUT/views"
+    mkdir -p "$D"
+    local src="$ROOT/test/SystolicCC/async_views.c" out rc
+    "$CLANG" -std=c11 "$src" -o "$D/cpu" && "$D/cpu" > "$D/cpu.out" || { bad "views: the clang build"; return; }
+    build_cc "$src" "$D/views" --fp-reassociation --verify \
+        || { bad "views: systolic-cc" "$(tail -3 "$D/views.cc.log")"; return; }
+    grep -q 'llvm.call @fpga_tile_submit' "$D/views.systolic/50-fpga.mlir" \
+        || { bad "views: the build does not use the asynchronous runtime"; return; }
+    start_cosim "$D/run" || { bad "views: the co-simulation did not open $SOCK"; return; }
+    out=$(host 900 "$D/views" 2> "$D/views.err"); rc=$?
+    echo "$out" > "$D/views.out"
+    if [ $rc -eq 0 ] && grep -v '^\[systolic-cc\]' <<< "$out" | diff -q "$D/cpu.out" - > /dev/null \
+       && [ "$(grep -c '^\[systolic-cc\] FPGA Executed' <<< "$out")" = 6 ] \
+       && ! grep -q '^\[systolic-cc\] CPU Executed' <<< "$out" \
+       && [ "$(grep -c ': verified: .* (bitwise)$' "$D/views.err")" = 5 ] \
+       && ! grep -q 'refused at submit' "$D/views.err" && ! grep -qi mismatch "$D/views.err"; then
+        ok "views: six GEMMs on the FPGA, five calls verified bitwise, no refusal, output equal to clang's"
+    else
+        bad "views (exit $rc)" "$(grep 'Executed' <<< "$out"; grep -E 'refused|verified|MISMATCH' "$D/views.err" | head -4)"
+    fi
+    stop_cosim
 }
 
 for s in $(tr ',' ' ' <<< "$SECTIONS"); do
