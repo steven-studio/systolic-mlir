@@ -21,7 +21,7 @@
 > only thing the MLIR codegen entry points reach today.
 
 結果檔目前叫 `runtime/harness/sweep_out/sweep_results_nexys_8x8.csv`，
-**檔名是錯的**（見 `REPRODUCE.md` 第 2.1 節）。
+**檔名是錯的**（見 `docs/PROVENANCE.md` 第 3.1 節）。
 
 ## 注意
 
