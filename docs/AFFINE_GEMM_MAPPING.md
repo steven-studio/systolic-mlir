@@ -2253,6 +2253,27 @@ products of a zero factor: numerically equal, bitwise different, accepted by `--
 The probe matrices `phase1/{before,after,after2}` record every form's classification before and
 after. The FPGA board was not run.
 
+### 20.4 The assignment policy (2026-10-21)
+
+An assignment C = A * B is considered further only in two cases:
+
+- (A) its actual reduction has one iteration, K = 1: the loops of two or more iterations that C
+  does not read are none (a reduction loop that runs once is a constant, Lemma 0);
+- (B) the index association dimension of its factors is 0 and it maps to the GEMM with a virtual
+  K = 1. The index association dimension is the rank of P Q^T, where P and Q are the factors'
+  reduction index vectors: their rows on the loops of two or more iterations that C does not read
+  (section 22). It is not a row-space intersection.
+
+Every other assignment is refused (PROVEN_INVALID), whatever its K. An overwrite is never turned
+into an accumulation: assignments never get reduction batch loops (section 23). The check above
+(every loop of two or more iterations a subscript of C) already implies (A) and (B), and the
+recognizer states the policy as an explicit check after it. Even then, the write semantics is
+proven before lowering: every element of C written exactly once (verifyOutputWrittenOnce), K = 1
+in the lowering, C zeroed before the tiles, the operand views and the iteration domain checked as
+for any GEMM. Lowered examples: `C[i][j] = A[i][k] * B[k][j]` with k running once,
+`C[b][i][j] = A[b][i] * B[b][j]`. Refused: `C[i][j] = A[i][k] * B[l][j]`,
+`C[i][j] = A[i][x0 - x1] * B[x0][j]` (test/SystolicCC/affine_reduction_batches.c).
+
 ---
 
 ## 21. Dimension-intersection partitioning: the three-operand model (2026-10-19)
@@ -2417,7 +2438,7 @@ section 23. Test: test/Systolic/affine_gemm_r8_structure.mlir.
 Whether a nest is a GEMM does not follow from these numbers alone. Section 23 builds the
 decomposition and lets the existing checks decide.
 
-## 23. Reduction-batch partitioning (2026-10-21, opt-in)
+## 23. Reduction-batch partitioning (2026-10-21, on by default)
 
 ### 23.1 The problem
 
@@ -2432,8 +2453,11 @@ the others, computes it exactly.
 
 ### 23.2 The method
 
-With `--affine-matmul-to-systolic=reduction-batches=true` (systolic-cc `--reduction-batches`;
-discovery `reduction-batches=true`), on a box domain and for a multiply-accumulate nest:
+By default -- `--affine-matmul-to-systolic=reduction-batches=false` (systolic-cc
+`--no-reduction-batches`; discovery `reduction-batches=false`) turns it off -- on a box domain as
+written and for a multiply-accumulate nest (a nest whose domain normalization rewrites its counters,
+x = U x' with U != I, keeps the decision of sections 19-21: no integer basis transformation widens
+the recognition in Phase 1):
 
 1. A loop of Z read by one factor only becomes a **reduction batch loop** (RB). With S empty, this
    gives the virtual K = 1 of T5: RB = {k, l}.
@@ -2480,9 +2504,11 @@ checks them with a relative tolerance, and does not call that bitwise equality.
 
 ### 23.5 What changes, what does not
 
-- **Without the option nothing changes.** The recognizer gives the same verdicts and the lowering
-  emits the same IR and remarks; this was checked byte for byte on every test/Systolic file.
-- **With the option**, these are lowered and verified bitwise against the program as written, with
+- **With the option off nothing changes.** The recognizer gives the verdicts of sections 19-21
+  and the lowering emits the same IR and remarks; this was checked byte for byte on every
+  test/Systolic file.
+- **With the option (the default)**, these are lowered and verified bitwise against the program
+  as written, with
   the synchronous and the asynchronous runtime (test/SystolicCC/affine_reduction_batches.c):
   - T1, T2, T5;
   - Case 1, Case 2;
@@ -2495,6 +2521,32 @@ checks them with a relative tolerance, and does not call that bitwise equality.
   The MLIR level is test/Systolic/affine_gemm_reduction_batches.mlir.
 - **Limits:**
   - one-dimensional C (`C[i + j]`, T4-like flat outputs) is Phase 2;
-  - non-box domains get no reduction batches (the readers decide nothing there, section 19.7);
+  - reduction batches only on a box as written: not on non-box domains (the readers decide nothing
+    there, section 19.7), nor on a nest whose normalization rewrote its counters (U != I);
   - every reduction batch iteration is a GEMM of its own with a wait, so device utilization is low
     when K is 1 (T5: one 3x5x1 tile per (k, l)).
+
+### 23.6 The default (2026-10-21) and the tests it re-decided
+
+Reduction-batch partitioning became the default the same day. Every existing expectation it
+changed was re-decided only after checking it against the policy (an accumulation on a box as
+written; every iteration once, every access the program's, every product with its multiplicity,
+the serial accumulation into C) and verifying it numerically, bitwise, against the loops as written
+with the synchronous and the asynchronous runtime:
+
+| Test | Case | Now |
+|---|---|---|
+| affine_gemm_batch_views.mlir | `@outer_of_sums` (T5), `@noninjective_reduction` | lowered: RB k0, k1 (K = 1); RB k0, K = k1 |
+| affine_gemm_dimension_partition.mlir | `@partial_reduction`, `@one_factor_only` | lowered: RB r, K = k; RB s, K = k |
+| affine_gemm_mapping.mlir | `@reduction_in_output`, `@reduction_multiplicity` | lowered: RB j (K = 1); RB u, K = k |
+| affine_gemm_exact_domains.mlir | `@duplicated_k` | lowered: RB k, K = l |
+| affine_gemm_bad_reduction.mlir | `C[i][j] += A[i][k] * B[i][j]` | recognized: RB k, K = 1 |
+| SystolicCC/affine_dimension_partition.c | `ab_extra`, `partial_with_triple`, `coupled_k`, `a_only` | offloaded, bitwise equal |
+| gemm_recognition showcase | case_090, case_095, case_123, case_125 | ACCEPT, basis `reduction_batches` |
+
+The pins "MUST STAY REJECTED" of `@outer_of_sums` and `@noninjective_reduction` were the policy of
+section 21; the tests now say why they are accepted, and the old behaviour stays pinned with
+`reduction-batches=false` where a test keeps an OFF prefix. The mapping oracle
+(Inputs/affine_gemm_mapping_oracle.py) models the reduction batches independently and checks every
+lowered one address by address and its serial write-back; casespec.py predicts them for the
+gemm_recognition generator and showcase.

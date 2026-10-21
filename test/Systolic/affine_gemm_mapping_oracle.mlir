@@ -45,6 +45,24 @@
 // element must lie inside its allocation. Nests the oracle refuses must not
 // be lowered.
 //
+// Since 2026-10-21 (docs section 23, reduction-batch partitioning on by
+// default) the oracle models the reduction batch loops too: loops C does not
+// read that are read by one factor only become RB loops (T5's virtual K = 1),
+// and when the loops both factors read are not one dense K, each in turn is K
+// (the longest first, ties the innermost) and the others RB; the first
+// decomposition that is a GEMM by enumeration is the verdict, else the
+// recognition of sections 19-21. A lowered RB nest is checked address by
+// address per RB value (every iteration once, each value's factor views, the
+// one slab of C they accumulate into), and C is read and written back inside
+// every batch loop (the serial accumulation). Strict FP lowers none of them.
+// Reduction batches are made only on the counters as written: a nest whose
+// domain normalization rewrites its counters (x = U x', U != I: a sheared
+// nest, a disguise with a nonzero shift row) keeps the decision of sections
+// 19-21. The nests the default newly lowers on seeds 1-3 (9, 10 and 6) are
+// ones the section 21 oracle had refused as broadcasts (a loop read by one
+// factor only) or partial-C reductions (K read through two combinations of
+// its loops, or not one dense coordinate).
+//
 // The oracle runs the systolic-opt of this build tree (lit substitutes the
 // tool's path), not whichever is first on PATH.
 //
@@ -53,6 +71,7 @@
 // RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 2 --count 400 > %t.2
 // RUN: FileCheck %s --input-file=%t.2
 // RUN: FileCheck %s --check-prefix=PI --input-file=%t.2
+// RUN: FileCheck %s --check-prefix=RBK --input-file=%t.2
 // RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 3 --count 400 > %t.3
 // RUN: FileCheck %s --input-file=%t.3
 // RUN: FileCheck %s --check-prefix=PI --input-file=%t.3
@@ -61,10 +80,14 @@
 // and each of its witnesses is checked (review of 2026-10-19).
 // PI:        refused triangles by class: PROVEN_INVALID {{[1-9][0-9]*}} (
 //
+// Seed 2 holds nests whose K is chosen among the loops both factors read (seed 3 none).
+// RBK:       reduction-batch partitioning: lowered {{[1-9][0-9]*}} (with a loop read by one factor only {{[0-9]+}}, K chosen among the loops both factors read {{[1-9][0-9]*}},
+//
 // CHECK-NOT: MISMATCH
 // CHECK:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}, refused by rule {{[1-9][0-9]*}} (triangles {{[1-9][0-9]*}}, C aliasing a factor {{[1-9][0-9]*}})
 // CHECK:     accepted with: transposed view {{[1-9][0-9]*}}, negative stride {{[1-9][0-9]*}}, M/N/K = 1 {{[1-9][0-9]*}}, an operand of rank != 2 {{[1-9][0-9]*}}, a loop that runs once {{[1-9][0-9]*}}, batched {{[1-9][0-9]*}} (a factor's view moving with the batch {{[1-9][0-9]*}}), A and B both transposed {{[1-9][0-9]*}}, a max/min loop bound {{[1-9][0-9]*}} (of a batch loop {{[1-9][0-9]*}}), mutations role_in_k {{[1-9][0-9]*}} and batch_once {{[1-9][0-9]*}}, a sheared domain {{[1-9][0-9]*}} (chained {{[1-9][0-9]*}}, with a step > 1 {{[1-9][0-9]*}}, with a max/min bound {{[1-9][0-9]*}}), one array as both factors {{[1-9][0-9]*}} (through two different views {{[1-9][0-9]*}}, through one view {{[1-9][0-9]*}}, served by one tensor {{[1-9][0-9]*}}), K = 1 {{[1-9][0-9]*}} (without a reduction loop {{[1-9][0-9]*}}), a box in disguise {{[1-9][0-9]*}}, a degenerate triangle {{[1-9][0-9]*}}
 // CHECK:     generalized mapping: batched with C reading a batch loop in a role dimension {{[1-9][0-9]*}}, batched with two unit extents {{[1-9][0-9]*}}, skewed or merged views (lowered) {{[1-9][0-9]*}}, C not injective (refused) {{[0-9]+}}, domain outside the normalized family (refused) {{[1-9][0-9]*}}, C the base of a factor (refused) {{[1-9][0-9]*}}, out of bounds after a shear (rejected) {{[1-9][0-9]*}}, C not injective after a shear (refused) {{[0-9]+}}
+// CHECK:     reduction-batch partitioning: lowered {{[1-9][0-9]*}} (with a loop read by one factor only {{[1-9][0-9]*}}, K chosen among the loops both factors read {{[0-9]+}}, virtual K = 1 {{[1-9][0-9]*}}, with an output batch too {{[0-9]+}}, on a sheared or disguised domain {{[0-9]+}})
 // CHECK:     refused triangles by class: PROVEN_INVALID {{[0-9]+}} (each checked: not centrally symmetric with the stated witness, the stacked access map of full rank, three memrefs), UNKNOWN {{[1-9][0-9]*}}, VALID_BUT_LOWERING_UNSUPPORTED {{[0-9]+}}, PROVEN_VALID {{[0-9]+}}, not recognized {{[0-9]+}}
 // CHECK:     mismatches: 0
 //
@@ -76,6 +99,16 @@
 //
 // STRICT-NOT: MISMATCH
 // STRICT:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}, refused by rule {{[1-9][0-9]*}} (triangles {{[1-9][0-9]*}}, C aliasing a factor {{[1-9][0-9]*}}) (pass run without the reassociation permission)
-// STRICT:     not lowered (strict mode): {{[1-9][0-9]*}} outside the normalized family, {{[1-9][0-9]*}} with C the base of a factor
+// STRICT:     not lowered (strict mode): {{[1-9][0-9]*}} outside the normalized family, {{[1-9][0-9]*}} with C the base of a factor, {{[1-9][0-9]*}} with reduction batch loops
 // STRICT:     refused triangles by class: PROVEN_INVALID {{[0-9]+}} (each checked: not centrally symmetric with the stated witness, the stacked access map of full rank, three memrefs), UNKNOWN {{[1-9][0-9]*}}, VALID_BUT_LOWERING_UNSUPPORTED {{[0-9]+}}, PROVEN_VALID {{[0-9]+}}, not recognized {{[0-9]+}}
 // STRICT:     mismatches: 0
+//
+// With reduction-batches=false (the recognition of sections 19-21 alone) no
+// reduction batch loop is made, and the oracle decides without them.
+// RUN: %python %S/Inputs/affine_gemm_mapping_oracle.py --opt systolic-opt --seed 1 --count 400 --no-reduction-batches \
+// RUN:   | FileCheck %s --check-prefix=NORB
+//
+// NORB-NOT: MISMATCH
+// NORB:     oracle: 400 nests, accept {{[1-9][0-9]+}}, reject {{[1-9][0-9]+}}, skipped {{[0-9]+}}, refused by rule {{[1-9][0-9]*}} (triangles {{[1-9][0-9]*}}, C aliasing a factor {{[1-9][0-9]*}})
+// NORB:     reduction-batch partitioning (off): lowered 0 (
+// NORB:     mismatches: 0

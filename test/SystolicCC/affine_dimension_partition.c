@@ -8,7 +8,17 @@
 // the GEMM into independent slabs of C, each one GEMM; a loop read by both
 // factors and not by C is a second reduction coordinate (a partial-C
 // reduction: refused), one read by one factor only a broadcast (refused), and
-// a partition whose slabs would overlap is refused. Each offloaded kernel is
+// a partition whose slabs would overlap is refused.
+//
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+// default): the two refusals above for C += A * B were policies of section 21.
+// A loop C does not read (a second contraction loop, a one-factor loop, or a
+// loop of a coupled reduction subscript) is now a reduction batch loop (RB):
+// for each of its values one GEMM with offset factor views, accumulated into
+// the same slab of C in order. ab_extra, partial_with_triple, coupled_k and
+// a_only are offloaded for that reason (each case says which loop is RB and
+// which is K). Assignments never get reduction batches (assign_overwrite still
+// stays on the host). Each offloaded kernel is
 // compared bitwise with a CPU reference that runs the loops as written on
 // integer-valued data (the factors without zeros) with a NONZERO initial C.
 //
@@ -36,18 +46,18 @@
 // PLAN-DAG: note: 'c_only' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ca_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'inner_partition' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
-// PLAN-DAG: note: 'ab_extra' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'ab_extra' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'assign_overwrite' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: two iterations of the assignment C = A * B write the same element of C
 // PLAN-DAG: note: 'cross_alias' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: A may overlap C
 // PLAN-DAG: note: 'overlap_c' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'coupled_k' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'coupled_k' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'c_as_factor' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: B may overlap C
 // PLAN-DAG: note: 'flat_collision' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'a_only' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'a_only' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'oob_c' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: C is accessed out of bounds along dimension 2)
 // PLAN-DAG: note: 'merged_c' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN-DAG: note: 'partial_with_triple' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN: wrote {{.*}} (20 function(s) offloaded
+// PLAN-DAG: note: 'partial_with_triple' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
+// PLAN: wrote {{.*}} (24 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -73,22 +83,22 @@
 // ALL: [case] c_only: equal, offloaded (4)
 // ALL: [case] ca_assign: equal, offloaded (4)
 // ALL: [case] inner_partition: equal, offloaded (4)
-// ALL: [case] ab_extra: equal, NOT OFFLOADED (0)
+// ALL: [case] ab_extra: equal, offloaded (4)
 // ALL: [case] assign_overwrite: equal, NOT OFFLOADED (0)
 // ALL: [case] cross_alias: equal, NOT OFFLOADED (0)
 // ALL: [case] overlap_c: equal, NOT OFFLOADED (0)
-// ALL: [case] coupled_k: equal, NOT OFFLOADED (0)
+// ALL: [case] coupled_k: equal, offloaded (4)
 // ALL: [case] c_as_factor: equal, NOT OFFLOADED (0)
 // ALL: [case] flat_collision: equal, NOT OFFLOADED (0)
-// ALL: [case] a_only: equal, NOT OFFLOADED (0)
+// ALL: [case] a_only: equal, offloaded (4)
 // ALL: [case] merged_c: equal, NOT OFFLOADED (0)
-// ALL: [case] partial_with_triple: equal, NOT OFFLOADED (0)
+// ALL: [case] partial_with_triple: equal, offloaded (8)
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU:
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-20: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-24: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 
 #include <stdio.h>
@@ -170,8 +180,16 @@ void ca_assign(float A[restrict 2][3][4], float B[restrict 4][5], float C[restri
 void inner_partition(float A[restrict 3][2][4], float B[restrict 4][5], float C[restrict 3][2][5]) {
   for (int i = 0; i < 3; ++i) for (int p = 0; p < 2; ++p) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[i][p][j] += A[i][p][k] * B[k][j];
 }
-/* must stay on the host */
-/* N1, N14: a shared reduction dimension missing in C (a partial-C reduction) */
+/* must stay on the host (except ab_extra, partial_with_triple, coupled_k and
+   a_only: RE-DECIDED 2026-10-21, see each) */
+/* N1, N14: a shared reduction dimension missing in C (a partial-C reduction).
+   RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+   default): both are offloaded. Refusing a partial-C reduction was a policy of
+   section 21; the 2026-10-21 research policy accepts it (docs section 23.5,
+   "two contraction loops, A[r][i][k]*B[r][k][j]"). ab_extra: RB = r (loop 0),
+   K = k, M = i, N = j. partial_with_triple: b (loop 0) stays a batch loop of
+   all three operands, RB = r (loop 1), K = k. Every product runs once and the
+   r iterations accumulate into the same slab of C in order. */
 void ab_extra(float A[restrict 2][3][4], float B[restrict 2][4][5], float C[restrict 3][5]) {
   for (int r = 0; r < 2; ++r) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[i][j] += A[r][i][k] * B[r][k][j];
 }
@@ -191,8 +209,13 @@ void overlap_c(float A[restrict 2][3][4], float B[restrict 4][5], float C[restri
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[p + i][j] += A[p][i][k] * B[k][j];
 }
 /* N5: incompatible access maps: the two factors read the reduction loops through
-   different combinations (A: k0 + 2 k1, B: k0 + k1) -- no shared coordinate,
-   and a reduction role is never partitioned (SQ-1, UNKNOWN) */
+   different combinations (A: k0 + 2 k1, B: k0 + k1) -- no shared coordinate.
+   RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+   default): offloaded. The refusal (SQ-1, UNKNOWN: a reduction role is never
+   partitioned) was a policy of section 21; the 2026-10-21 research policy
+   accepts it (docs section 23.2's example, Case 2-like). RB = k0 (loop 2),
+   K = k1 (loop 3): for each k0 the GEMM reads A[i][k0 + 2K] (stride 2) and
+   B[k0 + K][j], accumulated into C in k0 order. */
 void coupled_k(float A[restrict 3][4], float B[restrict 3][5], float C[restrict 3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k0 = 0; k0 < 2; ++k0) for (int k1 = 0; k1 < 2; ++k1) C[i][j] += A[i][k0 + 2 * k1] * B[k0 + k1][j];
 }
@@ -204,7 +227,14 @@ void c_as_factor(float A[restrict 2][3][4], float B[restrict 1], float C[3][4][5
 void flat_collision(float A[restrict 2][3][4], float B[restrict 4][5], float C[restrict 20]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[4 * p + 5 * i + j] += A[p][i][k] * B[k][j];
 }
-/* N9: a broadcast (a loop read by one factor only) */
+/* N9: a broadcast (a loop read by one factor only).
+   RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+   default): offloaded. Refusing the stride-0 broadcast was a policy of
+   section 21 (section 10); the 2026-10-21 research policy accepts it (docs
+   section 23.5, "A-only loops", the T5 kind of one-factor loop). RB = s
+   (loop 2), K = k (loop 3): for each s a GEMM with A offset by s and B shared,
+   accumulated into C in s order (B's elements are reused, every product runs
+   once). */
 void a_only(float A[restrict 3][2][4], float B[restrict 4][5], float C[restrict 3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int s = 0; s < 2; ++s) for (int k = 0; k < 4; ++k) C[i][j] += A[i][s][k] * B[k][j];
 }

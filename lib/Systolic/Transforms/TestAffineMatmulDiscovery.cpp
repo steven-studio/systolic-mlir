@@ -81,9 +81,9 @@ struct TestAffineMatmulDiscoveryPass
   Option<bool> reductionBatches{
       *this, "reduction-batches",
       llvm::cl::desc("Recognize with reduction-batch partitioning "
-                     "(docs/AFFINE_GEMM_MAPPING.md section 23), as "
-                     "--affine-matmul-to-systolic=reduction-batches=true"),
-      llvm::cl::init(false)};
+                     "(docs/AFFINE_GEMM_MAPPING.md section 23; on by default, "
+                     "as in --affine-matmul-to-systolic)"),
+      llvm::cl::init(true)};
 
   Option<bool> r8{
       *this, "r8",
@@ -212,19 +212,11 @@ struct TestAffineMatmulDiscoveryPass
     llvm::errs() << "R8 structure (diagnostic, not a decision):\n";
     // R8 is defined on the counters as written; a normalized nest's
     // counters are x' (x = U x'), another basis.
-    for (const DomainNormalization &dn : normalized) {
-      bool identity = true;
-      for (auto [r, row] : llvm::enumerate(dn.U))
-        for (auto [c, v] : llvm::enumerate(row))
-          identity &= v == (r == c ? 1 : 0);
-      if (!identity && (dn.outermost == candidate.anchor ||
-                        dn.outermost->isProperAncestor(candidate.anchor) ||
-                        candidate.anchor->isProperAncestor(dn.outermost))) {
-        llvm::errs() << "  not analysed: the domain normalization rewrote "
-                        "the counters of this nest (x = U x'), they are not "
-                        "the counters as written\n";
-        return;
-      }
+    if (countersRewritten(normalized, candidate.anchor)) {
+      llvm::errs() << "  not analysed: the domain normalization rewrote "
+                      "the counters of this nest (x = U x'), they are not "
+                      "the counters as written\n";
+      return;
     }
     std::string why;
     FailureOr<AffineGeometryScreening> g =
@@ -381,7 +373,8 @@ struct TestAffineMatmulDiscoveryPass
       std::string notRecognized;
       GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
       AffineMatmulRecognitionOptions recognition;
-      recognition.reductionBatches = reductionBatches;
+      recognition.reductionBatches =
+          reductionBatches && !countersRewritten(normalized, candidate.anchor);
       auto result = recognizeLogicalMatmul(candidate, &notRecognized,
                                            &notRecognizedClass, recognition);
 

@@ -4,9 +4,9 @@
 // factors), the ranks of the factors' reduction index vectors on Z (linear independence only),
 // intersect(A,B) (some a.b != 0), shared loop variables (some sum |a_t||b_t| > 0), the literal
 // reading, and the one-dimensional operands (Phase 2). A DIAGNOSTIC: every case also pins the
-// recognizer's verdict without reduction-batch partitioning (section 23), unchanged.
+// recognizer's verdict without reduction-batch partitioning (reduction-batches=false, section 23).
 //
-// RUN: systolic-opt "--test-affine-matmul-discovery=r8=true" -split-input-file %s \
+// RUN: systolic-opt "--test-affine-matmul-discovery=r8=true reduction-batches=false" -split-input-file %s \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s --check-prefix=R8
 // RUN: systolic-opt --test-affine-matmul-discovery -split-input-file %s -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=OFF

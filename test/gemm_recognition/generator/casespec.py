@@ -372,6 +372,12 @@ class Case:
     expect: dict = field(default_factory=dict)      # predict(): the current implementation's behaviour
     spec: dict = field(default_factory=dict)        # spec_expect(): what the specification requires
     classification: str = ""                        # classify_case()
+    # Why the compiler makes no reduction batch loop on this nest (docs
+    # section 23) although its readers are taken on a box: 'rewritten' when
+    # it is the box form of a nest whose counters the domain normalization
+    # rewrote with U != I (box_form: a nonzero shift row), 'non_box' for the
+    # surrogate of a nest left as written. Empty: reduction batches apply.
+    rb_blocked: str = ""
 
     @property
     def kernel(self):
@@ -525,6 +531,13 @@ def box_form(case: "Case") -> "Case":
             lp.cond = ""
         lp.lb_terms, lp.ub_terms = {}, {}
     box.analysis, box.expect, box.spec, box.classification = {}, {}, {}, ""
+    # x = U x' with U = I exactly when every shift row is zero (x_s = x'_s +
+    # l_s . x_<s for all x iff l_s = 0): a disguised box keeps its counters.
+    # With U != I the compiler's counters are the box's, not the program's,
+    # and it makes no reduction batch loop on the nest (countersRewritten,
+    # AffineMatmulToSystolic.cpp; docs section 23).
+    if any(c for terms in shift.values() for c in terms.values()):
+        box.rb_blocked = "rewritten"
     return box
 
 
@@ -746,6 +759,7 @@ def _normalized_view(case: "Case"):
         view = copy.deepcopy(case)
         view.loops = [copy.deepcopy(lp) for lp in case.loops if lp.var in pre] + box.loops
         view.arrays = box.arrays
+        view.rb_blocked = box.rb_blocked
         view.analysis, view.expect, view.spec, view.classification = {}, {}, {}, ""
         return view
     return None
@@ -1899,7 +1913,7 @@ def predict_by_readers(case, forms, loops, demoted=frozenset(), out=None):
     return (coords["I"], coords["J"], coords["K"], role_dims, batch, lowering), None
 
 
-def groups_or_readers(case, forms, loops):
+def groups_or_readers(case, forms, loops, reduction_batch=frozenset()):
     """The analysis by groups, then -- when it refuses only because a
     subscript is not role-pure -- the readers analysis
     (AffineMatmulAnalysis.cpp, groupsOrReaders), with the dimension-
@@ -1907,9 +1921,12 @@ def groups_or_readers(case, forms, loops):
     are batch loops from the start, and when an analysis refuses a row or
     column role as not one dense coordinate, the loops _choose_demotion
     names become batch loops and the analyses run again (at most once per
-    loop).  Returns (result, None) or (None, reason); the result's batch
+    loop).  `reduction_batch` names the reduction batch loops of docs
+    section 23 (loops C does not read, demoted from the start: see
+    predict).  Returns (result, None) or (None, reason); the result's batch
     variables include the demoted loops."""
     demoted = set(_c_only_loops(forms, loops)) if is_box_case(case) else set()
+    demoted |= set(reduction_batch)
     why = None
     for _ in range(len(loops) + 1):
         out = {}
@@ -1975,9 +1992,79 @@ def _hoist_blocked(case, loops, used_vars, max_points=200000):
     return None
 
 
+def _rb_loops(case: Case):
+    """The loops reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md
+    section 23) works on, on a box domain: (one, shared) -- the loops of two
+    or more iterations C does not read that one factor reads (always
+    reduction batch loops) and that both factors read (the candidates for K,
+    in the compiler's order of trying: the longest first, ties the
+    innermost).  Readers on the domain (a loop that runs once reads
+    nothing), as recognizeOnce's readersOf."""
+    rd = _readers_of(case)
+    index = {lp.var: i for i, lp in enumerate(case.loops)}
+    trip = {lp.var: lp.trip() for lp in case.loops}
+    one, shared = [], []
+    for lp in case.loops:
+        v = lp.var
+        if v in rd["c"]:
+            continue
+        ina, inb = v in rd["a"], v in rd["b"]
+        if ina != inb:
+            one.append(v)
+        elif ina and inb:
+            shared.append(v)
+    shared.sort(key=lambda v: (-trip[v], -index[v]))
+    return one, shared
+
+
+def _rb_eligible(case: Case) -> bool:
+    """Whether reduction-batch partitioning (docs section 23) is tried on the
+    nest: a box domain whose counters are the program's (no normalization
+    with U != I made it one: Case.rb_blocked), a multiply-accumulate
+    statement, a plain kernel."""
+    return (is_box_case(case) and not case.rb_blocked and case.stmt in MAC_STMTS
+            and case.kernel_style == "plain")
+
+
 def predict(case: Case) -> dict:
+    """The prediction (_predict_once) with reduction-batch partitioning
+    (docs/AFFINE_GEMM_MAPPING.md section 23, on by default since 2026-10-21;
+    AffineMatmulAnalysis.cpp recognizeLogicalMatmul): on a box domain whose
+    counters are the program's (_rb_eligible: not the box form of a nest the
+    domain normalization rewrote with U != I) and for an accumulation (C = C + A * B in any of its spellings), first with
+    the loops read by one factor only (and not by C) as reduction batch
+    loops; when that is no dense GEMM (recognition and dense partition) and
+    two or more loops are read by both factors and not by C, with each of
+    them in turn as K and the others as reduction batch loops, the longest
+    first (ties: the innermost); the first dense GEMM is taken, its lowering
+    and driver stages as predicted for it.  Otherwise the recognition without
+    the option decides (its stages and reason).  Assignments (C = A * B)
+    never get reduction batch loops (section 20, the assignment policy of
+    2026-10-21)."""
+    if _rb_eligible(case):
+        one, shared = _rb_loops(case)
+        attempts = [frozenset(one)]
+        if len(shared) >= 2:
+            attempts += [frozenset(one) | frozenset(v for v in shared if v != k) for k in shared]
+        for rb in attempts:
+            # (the first attempt without any reduction batch loop is the
+            # recognition without the option)
+            ex = _predict_once(case, rb)
+            if ex["recognition"] == "accept" and ex["dense_partition"] == "supported":
+                if rb:
+                    ex["reduction_batch_loops"] = [lp.var for lp in case.loops if lp.var in rb]
+                case.expect = ex
+                return ex
+    return _predict_once(case)
+
+
+def _predict_once(case: Case, reduction_batch=frozenset()) -> dict:
     """What each stage of the compiler is expected to do, from its rules as
-    read in the sources (README.md, 'What the compiler supports').  Fields:
+    read in the sources (README.md, 'What the compiler supports'), for one
+    recognition (`reduction_batch`: the reduction batch loops of docs
+    section 23, demoted from the start; the positional form knows no
+    demoted loop, so with any of them the analyses by groups and readers
+    decide).  Fields:
       frontend:          'translated' | 'rejected'
       recognition:       'accept' | 'reject' | 'not_reached'
       dense_partition:   'supported' | 'unsupported' | 'not_reached'
@@ -2113,6 +2200,8 @@ def predict(case: Case) -> dict:
         return tuple(_domain_form(f, loops) for f in (I, J, K))
 
     ka, kb = "a", "b"       # the arrays that are logical A and B
+    if reduction_batch:
+        positional = False    # the positional form knows no demoted loop (section 23)
     m = matches("a", "b") if positional else None
     if m is None and positional:
         m = matches("b", "a")
@@ -2140,7 +2229,7 @@ def predict(case: Case) -> dict:
     if m is not None and coupled(m):
         m = None
     if m is None:
-        grouped, why = groups_or_readers(case, forms, loops)
+        grouped, why = groups_or_readers(case, forms, loops, reduction_batch)
         if grouped is None:
             ex["recognition"] = "reject"
             return stop("recognition", why)
@@ -2463,7 +2552,10 @@ SPEC_BASIS = {
                  "B constant along it is excluded by G2 unless N = 1, so j is K with A constant along "
                  "it, or a batch loop), found by casespec.generalized_gemm_on_domain's search; the "
                  "compiler refuses the broadcast (section 10: a stride-0 view is not lowered): a "
-                 "documented limitation",
+                 "documented limitation; since 2026-10-21 (section 23) only when the loop cannot be "
+                 "a reduction batch loop either (an assignment, a non-box domain, the box form of a "
+                 "nest whose counters the normalization rewrote with U != I, or no valid "
+                 "reduction-batch decomposition: casespec.reduction_batch_decomposition)",
     "batched_shared": "a batched GEMM with an operand shared by every batch (no batch subscript: "
                       "C[b] += A[b] B) whose partitioned decomposition is not valid (the batch "
                       "coordinate is not read by C alone in a dimension of its own, or the "
@@ -2476,12 +2568,31 @@ SPEC_BASIS = {
                            "factor that does not read it is shared by the partitions; the "
                            "per-partition GEMM is one dense GEMM of affine views "
                            "(casespec.partition_decomposition, by enumeration)",
+    "reduction_batches": "(supported and on by default since 2026-10-21, docs/AFFINE_GEMM_MAPPING.md "
+                         "section 23; the research policy of 2026-10-21) reduction-batch "
+                         "partitioning: in an accumulation C += A * B on a box, the loops C does not "
+                         "read beyond one K coordinate -- read by one factor only (virtual K = 1 when "
+                         "no loop is read by both), or further loops read by both factors -- are "
+                         "reduction batch loops: for each of their values a GEMM of offset views, "
+                         "all of them accumulating into the same slab of C in order; the iteration "
+                         "domain, every access and every product's multiplicity are kept "
+                         "(casespec.reduction_batch_decomposition, by enumeration); lowered with "
+                         "--fp-reassociation (strict floating point refuses, section 23.4)",
+    "reduction_batches_rewritten": "a GEMM by reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md "
+                                   "section 23, casespec.reduction_batch_decomposition) on the box form of "
+                                   "a nest whose counters the domain normalization rewrote with U != I (a "
+                                   "sheared parallelotope, or an exact parallelotope with a nonzero shift "
+                                   "row; sections 19.12, 19.13): the compiler makes reduction batch loops "
+                                   "only on counters as written (countersRewritten), so such a nest keeps "
+                                   "the decision of sections 19-21 -- a documented limitation",
     "partial_reduction": "(docs/AFFINE_GEMM_MAPPING.md section 21) a loop read by both factors and "
                          "not by C beyond the reduction coordinate (C[i][j] += A[r][i][k] * "
                          "B[r][k][j]): the only valid decomposition makes it a batch loop whose "
                          "iterations all accumulate into one slab of C -- a K-fold summed into C, "
                          "a partial-C reduction, which the compiler does not construct (not an "
-                         "independent output partition): a documented limitation",
+                         "independent output partition): a documented limitation; since "
+                         "2026-10-21 (section 23) only when no reduction-batch decomposition is "
+                         "valid either (casespec.reduction_batch_decomposition)",
     "transposed": "(no longer a limitation since 2026-10-15, P0.2) a transposed operand is a "
                   "permuted view (memref.transpose of its subview), docs/AFFINE_GEMM_MAPPING.md "
                   "section 5; a dense GEMM like any other",
@@ -2941,7 +3052,7 @@ def _demoted_in(g):
     return [v.strip() for v in m.group(1).split(",")] if m else []
 
 
-def partition_decomposition(case: Case, max_points: int = 200000):
+def partition_decomposition(case: Case, max_points: int = 200000, reduction_batch=frozenset()):
     """The dimension-intersection partitioning of docs/AFFINE_GEMM_MAPPING.md
     section 21, as the specification defines it, by enumeration on the box:
     the loops read by C only are batch loops; a row or column role (the loops
@@ -2953,8 +3064,11 @@ def partition_decomposition(case: Case, max_points: int = 200000):
     _check_decomposition (every role one dense coordinate, C injective per
     batch, no stride-0 view) and the partitions' outputs are disjoint: C's
     elements over (demoted loops, I, J), the other loops at their first
-    values, are all distinct.  Returns {"demoted": [...], "ext": {...},
-    "batched": bool} or None."""
+    values, are all distinct.  `reduction_batch` (docs section 23,
+    reduction_batch_decomposition): loops C does not read that are batch
+    loops whose iterations accumulate into the same slab of C, in order --
+    excluded from the disjointness check (they are not output partitions).
+    Returns {"demoted": [...], "ext": {...}, "batched": bool} or None."""
     import itertools
     if not is_box_case(case):
         return None
@@ -2975,13 +3089,13 @@ def partition_decomposition(case: Case, max_points: int = 200000):
     demoted = set(_c_only_loops(forms, loops))
     for lp in many:
         rs = {r for r in "abc" if lp.var in readers[r]}
-        if len(rs) == 1 and rs != {"c"}:
+        if len(rs) == 1 and rs != {"c"} and lp.var not in reduction_batch:
             return None             # a broadcast (one factor only)
     for _ in range(len(loops) + 1):
         assignment = {}
         for lp in many:
             v = lp.var
-            if v in demoted or v in triple:
+            if v in demoted or v in triple or v in reduction_batch:
                 assignment[v] = "P"
             elif v in readers["a"] and v in readers["c"]:
                 assignment[v] = "I"
@@ -3017,12 +3131,13 @@ def partition_decomposition(case: Case, max_points: int = 200000):
         return None
     if res["stride0"]:
         return None
-    if not demoted:
+    if not demoted and not reduction_batch:
         return None
     # The partitions' outputs are disjoint: C's elements over (demoted, I, J)
     # distinct, with the other loops (the triple batch loops, K, the loops
     # that run once) at their first values.
     by_role = res["roles"]
+    # (a reduction batch loop is not a partition: fixed like K)
     fixed = {lp.var: lp.values()[0] for lp in loops
              if lp.var not in demoted and assignment.get(lp.var, "P") in "PK"}
     vary = [lp for lp in loops if lp.var in demoted or assignment.get(lp.var) in ("I", "J")]
@@ -3039,6 +3154,61 @@ def partition_decomposition(case: Case, max_points: int = 200000):
     order = {lp.var: i for i, lp in enumerate(case.loops)}
     return {"demoted": sorted(demoted, key=order.get), "ext": res["ext"],
             "batched": bool(triple) or bool(demoted)}
+
+
+def reduction_batch_decomposition(case: Case, max_points: int = 200000):
+    """Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23,
+    on by default since 2026-10-21), as the specification defines it, by
+    enumeration on the box: for an accumulation C += A * B, the loops C does
+    not read are split into K and reduction batch loops (RB) -- every loop
+    read by one factor only is RB (with no loop read by both factors: the
+    virtual K = 1); of the loops both factors read, all are K or one is K and
+    the others RB --, the loops C reads as in partition_decomposition
+    (batch, I, J, the partitions of section 21).  Valid when that
+    decomposition passes partition_decomposition's checks with the RB loops
+    as batch loops C does not read: every role one dense coordinate, C
+    injective per batch, the output partitions disjoint.  Since the box is a
+    product, (RB, the rest) is a bijection of the iterations: every iteration
+    -- every product, with its multiplicity -- runs once, every access reads
+    the element the program reads, and the RB iterations accumulate into the
+    same slab of C in order (the lowering reads and writes C back per RB
+    iteration).  The research policy of 2026-10-21 accepts such a
+    decomposition whenever it exists (repeated products are kept, not a
+    reason to refuse).  A single loop as K is always one dense coordinate,
+    so the choices tried -- all the shared loops as K, then each one as K,
+    the longest first (ties: the innermost), the compiler's order -- find a
+    decomposition whenever any choice of K (also none: all of them RB) gives
+    one.  A decomposition whose every reduction batch iteration is a
+    1 x 1 x 1 product is no GEMM (an element-wise product: non-degeneracy,
+    section 19.1, as for the batch loops).  Returns {"reduction_batch": [...], "k": [...], "demoted": [...],
+    "ext": {...}} or None (also when the nest needs no RB loop: no loop read
+    by one factor only and at most one read by both)."""
+    # (the specification: valid on a normalized box too, whatever the
+    # compiler does there -- spec_expect calls that a limitation)
+    if not is_box_case(case) or case.stmt not in MAC_STMTS or case.kernel_style != "plain":
+        return None
+    one, shared = _rb_loops(case)
+    choices = [frozenset()]
+    if len(shared) >= 2:
+        choices += [frozenset(v for v in shared if v != k) for k in shared]
+    order = {lp.var: i for i, lp in enumerate(case.loops)}
+    for extra in choices:
+        rb = frozenset(one) | extra
+        if not rb:
+            continue
+        part = partition_decomposition(case, max_points, reduction_batch=rb)
+        if part and all(part["ext"][r] == 1 for r in "IJK"):
+            # every reduction batch iteration a 1 x 1 x 1 product: an
+            # element-wise product, not a GEMM (non-degeneracy, docs section
+            # 19.1; SQ-5 decided two unit extents, not three) -- the compiler
+            # refuses it ('a batched GEMM with M = N = K = 1')
+            part = None
+        if part:
+            return {"reduction_batch": sorted(rb, key=order.get),
+                    "k": sorted((v for v in shared if v not in rb), key=order.get),
+                    "demoted": [v for v in part["demoted"] if v not in rb],
+                    "ext": part["ext"]}
+    return None
 
 
 def repeat_in_reduction(case: Case) -> bool:
@@ -3191,6 +3361,32 @@ def spec_expect(case: Case) -> dict:
             if repeat_in_reduction(case):
                 return done("OUT_OF_SCOPE", "repeat_in_reduction")
             return done("ACCEPT", "dimension_partition")
+        # Reduction-batch partitioning (docs section 23, on by default since
+        # 2026-10-21; the research policy of 2026-10-21): the loops C does not
+        # read beyond one K coordinate -- read by one factor only, or a second
+        # loop read by both -- are reduction batch loops whose iterations
+        # accumulate into the same slab of C in order.  Accumulations only
+        # (an assignment's twin stays not_gemm_overwrite above).
+        rbd = (reduction_batch_decomposition(case)
+               if not (g and g["verdict"] == "ACCEPT") else None)
+        if rbd:
+            out["legal_gemm"] = True
+            out["reduction_batch"] = rbd["reduction_batch"]
+            if rbd["demoted"]:
+                out["partition"] = rbd["demoted"]
+            if case.elem != "float":
+                return done("OUT_OF_SCOPE", "double")
+            if len({a.elem for a in case.arrays.values()}) > 1:
+                return done("OUT_OF_SCOPE", "mixed_types")
+            if _aliases_output(case):
+                return done(*_alias_verdict(case))
+            if repeat_in_reduction(case):
+                return done("OUT_OF_SCOPE", "repeat_in_reduction")
+            if case.rb_blocked:
+                # the box form of a nest the normalization rewrote with U != I:
+                # the compiler makes no reduction batch loop there
+                return done("OUT_OF_SCOPE", "reduction_batches_rewritten")
+            return done("ACCEPT", "reduction_batches")
         if g and g["verdict"] == "SQ1":
             return done("UNDETERMINED", "SQ-1")
         if g and g["verdict"] == "DEMOTION":
@@ -3490,6 +3686,8 @@ def _predict_domain(case: Case) -> dict:
     # (Lemma 0; review 2026-10-18 #23) --, and a refusal of the front end
     # predicted on it (a scalar accumulator) is the nest's (#25).
     sur = _surrogate(band, [lp.var for lp in band.loops if not lp.is_box()])
+    # the compiler's domain is no box: no reduction batch loop (section 23)
+    sur.rb_blocked = "non_box"
     sur_ex = predict(sur)
     if sur_ex.get("frontend") == "rejected":
         return _refused_by_frontend(case, sur_ex["reject_reason"])

@@ -1,7 +1,7 @@
 // REQUIRES: cfront-clang
 //
-// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23, opt-in:
-// systolic-cc --reduction-batches). The loops of a multiply-accumulate nest
+// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23, on by
+// default; systolic-cc --no-reduction-batches turns it off). The loops of a multiply-accumulate nest
 // that C does not read become reduction batch loops when that makes the nest a
 // GEMM: a loop read by one factor only, and -- when the loops both factors read
 // are not one GEMM coordinate -- all of those but the one that stays K. Each
@@ -12,11 +12,14 @@
 // with a CPU reference that runs the loops as written on integer-valued data
 // (the factors without zeros) with a NONZERO initial C; the permission to
 // reassociate (--fp-reassociation) is required, as for every accumulation.
+// Assignments (C = A * B) are considered only with an actual K = 1 or with no
+// reduction loop (virtual K = 1, index association dimension 0), and never get
+// reduction batch loops (section 20.4).
 //
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
-// RUN: %systolic-cc --reduction-batches --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 't1' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 't2' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 't5' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 32 invocation(s) per call (the loops around them repeat them)
@@ -32,7 +35,10 @@
 // PLAN-DAG: note: 'rb_negative' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'rb_constants' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 32 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 't2_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN: wrote {{.*}} (14 function(s) offloaded
+// PLAN-DAG: note: 'assign_k1' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
+// PLAN-DAG: note: 'assign_outer_batched' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
+// PLAN-DAG: note: 'assign_t5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN: wrote {{.*}} (16 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -53,39 +59,42 @@
 // ALL: [case] rb_negative: equal, offloaded (8)
 // ALL: [case] rb_constants: equal, offloaded (32)
 // ALL: [case] t2_assign: equal, NOT OFFLOADED (0)
+// ALL: [case] assign_k1: equal, offloaded (2)
+// ALL: [case] assign_outer_batched: equal, offloaded (4)
+// ALL: [case] assign_t5: equal, NOT OFFLOADED (0)
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU, with
 // the synchronous and the asynchronous submission (the asynchronous one waits
 // for each reduction batch iteration before the next reads C):
-// RUN: %systolic-cc --reduction-batches --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// RUN: %systolic-cc --reduction-batches --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.va 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-14: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-16: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Non-integer data (-DFRACTIONAL): the reduction batches reorder each sum, so
 // these results are checked within a relative tolerance -- not bitwise:
-// RUN: %systolic-cc --reduction-batches --fp-reassociation -DFRACTIONAL --verify --verify-rtol 1e-4 %s -o %t.f > /dev/null 2>&1
+// RUN: %systolic-cc --fp-reassociation -DFRACTIONAL --verify --verify-rtol 1e-4 %s -o %t.f > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.f 2>&1 >/dev/null | FileCheck %s --check-prefix=RTOL
-// RTOL-COUNT-14: verified: {{[0-9]+}} elements equal the CPU reference (relative tolerance 0.0001)
+// RTOL-COUNT-16: verified: {{[0-9]+}} elements equal the CPU reference (relative tolerance 0.0001)
 // RTOL-NOT: MISMATCH
 //
 // Strict floating point (no --fp-reassociation): nothing is offloaded.
-// RUN: %systolic-cc --reduction-batches --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
+// RUN: %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
 // STRICT-DAG: note: 't1' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't2' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't5' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT: wrote {{.*}} (0 function(s) offloaded
 //
-// Without --reduction-batches the recognition is unchanged: every kernel here
-// stays on the host.
-// RUN: %systolic-cc --fp-reassociation --explain %s -o %t.off 2>&1 | FileCheck %s --check-prefix=OFF
+// With --no-reduction-batches the recognition is that of sections 19-21: every
+// kernel here except the assignments with K = 1 stays on the host.
+// RUN: %systolic-cc --no-reduction-batches --fp-reassociation --explain %s -o %t.off 2>&1 | FileCheck %s --check-prefix=OFF
 // OFF-DAG: note: 't1' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't2' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// OFF: wrote {{.*}} (0 function(s) offloaded
+// OFF: wrote {{.*}} (2 function(s) offloaded
 
 #include <stdio.h>
 #include <string.h>
@@ -167,6 +176,21 @@ void t2_assign(float A[restrict 3][7], float B[restrict 4][5], float C[restrict 
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int x0 = 0; x0 < 4; ++x0) for (int x1 = 0; x1 < 4; ++x1) C[i][j] = A[i][x0 - x1 + 3] * B[x0][j];
 }
 
+/* assignment with an actual K = 1 (k runs once): considered, every element of C written once -- lowered into a zeroed C */
+void assign_k1(float A[restrict 3][1], float B[restrict 1][5], float C[restrict 3][5]) {
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 1; ++k) C[i][j] = A[i][k] * B[k][j];
+}
+
+/* assignment C[b][i][j] = A[b][i] * B[b][j]: no reduction loop, index association dimension 0, virtual K = 1 -- lowered */
+void assign_outer_batched(float A[restrict 2][3], float B[restrict 2][5], float C[restrict 2][3][5]) {
+  for (int b = 0; b < 2; ++b) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[b][i][j] = A[b][i] * B[b][j];
+}
+
+/* the assignment twin of T5 (C = A * B with k, l not read by C): overwrites, refused */
+void assign_t5(float A[restrict 3][4], float B[restrict 4][5], float C[restrict 3][5]) {
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) for (int l = 0; l < 4; ++l) C[i][j] = A[i][k] * B[l][j];
+}
+
 static float mul(float a, float b) { return a * b; }
 static void t1_ref(float A[3][7], float B[7][5], float C[3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int x0 = 0; x0 < 4; ++x0) for (int x1 = 0; x1 < 4; ++x1) C[i][j] = C[i][j] + mul(A[i][x0 - x1 + 3], B[x0 + x1][j]); }
@@ -198,6 +222,12 @@ static void rb_constants_ref(float A[4][6], float B[5][6], float C[4][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) for (int l = 0; l < 4; ++l) C[i + 1][j] = C[i + 1][j] + mul(A[i + 1][k + 2], B[l + 1][j + 1]); }
 static void t2_assign_ref(float A[3][7], float B[4][5], float C[3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int x0 = 0; x0 < 4; ++x0) for (int x1 = 0; x1 < 4; ++x1) C[i][j] = mul(A[i][x0 - x1 + 3], B[x0][j]); }
+static void assign_k1_ref(float A[3][1], float B[1][5], float C[3][5]) {
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 1; ++k) C[i][j] = mul(A[i][k], B[k][j]); }
+static void assign_outer_batched_ref(float A[2][3], float B[2][5], float C[2][3][5]) {
+  for (int b = 0; b < 2; ++b) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[b][i][j] = mul(A[b][i], B[b][j]); }
+static void assign_t5_ref(float A[3][4], float B[4][5], float C[3][5]) {
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) for (int l = 0; l < 4; ++l) C[i][j] = mul(A[i][k], B[l][j]); }
 
 /* Integer-valued data (results bitwise equal); with -DFRACTIONAL non-integer
    data, whose sums depend on the order of the additions. */
@@ -234,6 +264,9 @@ int main(void) {
   RUN(rb_negative, 24, 10, 15);
   RUN(rb_constants, 24, 30, 20);
   RUN(t2_assign, 21, 20, 15);
+  RUN(assign_k1, 3, 5, 15);
+  RUN(assign_outer_batched, 6, 10, 30);
+  RUN(assign_t5, 12, 20, 15);
   printf("%s: %d differ\n", differ ? "FAIL" : "PASS", differ);
 #ifdef FRACTIONAL
   return 0; /* the --verify shim checks the tolerance */

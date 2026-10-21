@@ -459,11 +459,18 @@ Ng(90, "singular_output_independent_of_i", "singular_mapping",
              "canonical decomposition fails.  With i and p demoted to batch loops it is a\n"
              "batched GEMM: per (i, j, p) the 1 x 1 x 4 dot product C[i][j] +=\n"
              "sum_K A[2j+K][p] B[K][j], the p batches accumulating into one element in\n"
-             "program order.  Mathematically valid; the compiler constructs only the\n"
-             "canonical decomposition (the demotion is not implemented): a documented\n"
-             "limitation.  Expected refusal at recognition: 'a coordinate is read by the\n"
-             "first factor only' (p).  Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
-   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
+             "program order.  Mathematically valid.  Until 2026-10-21 the compiler\n"
+             "constructed only the canonical decomposition and refused it at recognition\n"
+             "('a coordinate is read by the first factor only', p): a documented\n"
+             "limitation.  Since 2026-10-21 (docs/AFFINE_GEMM_MAPPING.md section 23,\n"
+             "reduction-batch partitioning on by default) p, read by A only, is a\n"
+             "reduction batch loop and k stays K; i (C only, section 21) and j (all three)\n"
+             "are batch loops: offloaded as 4 x 4 x 4 iterations of a 1 x 1 x 4 dot\n"
+             "product, the p iterations accumulating into C[i][j] in order -- the domain,\n"
+             "every access and every product kept.  Re-decided 2026-10-16 (ISSUE-008;\n"
+             "REJECT before) and 2026-10-21 (ACCEPT).",
+   issue="ISSUE-008",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default; the research policy of 2026-10-21): ACCEPT -- p (read by A only) is a reduction batch loop, k is K; i (C only) and j (all three) are batch loops: per (i, j, p) a 1 x 1 x 4 dot product accumulated into C[i][j] in order')
 Ng(91, "transposed_a", "transposed_operand",
    ijk(8, 8, 8), arr("A", (8, 8), ("k", "i")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_note="C += A^T B (the user's seed A[k][i], B[k][j], C[i][j]): a valid GEMM whose\n"
@@ -502,12 +509,17 @@ Ng(95, "reduction_index_in_output", "reduction_mismatch",
              "decomposition fails.  With j demoted to a batch loop it is a batched GEMM:\n"
              "per (k, j) the 8 x 1 x 1 tile C[I][k] += A[I][k] B[k][j] (a vector scaled by\n"
              "a scalar), the j batches accumulating into one column in program order.\n"
-             "Mathematically valid; the demotion is not implemented: a documented\n"
-             "limitation.  With a single-iteration j the canonical decomposition is that\n"
-             "batched GEMM and it is offloaded (SQ-5, decided 2026-10-16).  Expected\n"
-             "refusal at recognition: 'a coordinate is read by the second factor only' (j).\n"
-             "Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
-   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
+             "Mathematically valid.  With a single-iteration j the canonical decomposition\n"
+             "is that batched GEMM and it is offloaded (SQ-5, decided 2026-10-16).  Until\n"
+             "2026-10-21 refused at recognition ('a coordinate is read by the second factor\n"
+             "only', j): a documented limitation.  Since 2026-10-21 (docs section 23,\n"
+             "reduction-batch partitioning on by default) j, read by B only, is a reduction\n"
+             "batch loop with the virtual K = 1 (no loop is read by A and B without C), k a\n"
+             "batch loop: per (k, j) the 8 x 1 x 1 tile, the j iterations accumulating\n"
+             "into column k in order.  Re-decided 2026-10-16 (ISSUE-008; REJECT before)\n"
+             "and 2026-10-21 (ACCEPT).",
+   issue="ISSUE-008",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default; the research policy of 2026-10-21): ACCEPT -- j (read by B only) is a reduction batch loop, the virtual K = 1, k (all three) a batch loop: per (k, j) an 8 x 1 x 1 tile accumulated into column k in order')
 Ng(96, "alpha_scaled", "scaled_product",
    ijk(8, 8, 8), *std_arrays(8, 8, 8), stmt="+=alpha", alpha=2.0,
    math_note="C += alpha A B with a scalar parameter alpha = 2: the BLAS GEMM with alpha\n"
@@ -955,12 +967,16 @@ Bn(123, "output_on_the_diagonal", "singular_mapping",
              "fails.  With j demoted to a batch loop it is a batched GEMM: per j the\n"
              "8 x 1 x 8 GEMV C[I][I] += sum_K A[I][K] B[K][j] -- C's view I -> (I, I) is\n"
              "injective -- the j batches accumulating into the diagonal in program order.\n"
-             "Mathematically valid; the demotion is not implemented: a documented\n"
-             "limitation.  Expected refusal at recognition: 'a coordinate is read by the\n"
-             "second factor only' (j; the analysis by groups first finds C reading i in\n"
-             "both dimensions, which the readers analysis lifts).  Re-decided 2026-10-16\n"
-             "(ISSUE-008; REJECT before).",
-   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
+             "Mathematically valid.  Until 2026-10-21 refused at recognition ('a\n"
+             "coordinate is read by the second factor only', j; the analysis by groups\n"
+             "first finds C reading i in both dimensions, which the readers analysis\n"
+             "lifts): a documented limitation.  Since 2026-10-21 (docs section 23,\n"
+             "reduction-batch partitioning on by default) j, read by B only, is a\n"
+             "reduction batch loop and k stays K: per j the 8 x 1 x 8 GEMV into the\n"
+             "diagonal, the j iterations accumulating in order.  Re-decided 2026-10-16\n"
+             "(ISSUE-008; REJECT before) and 2026-10-21 (ACCEPT).",
+   issue="ISSUE-008",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default; the research policy of 2026-10-21): ACCEPT -- j (read by B only) is a reduction batch loop, k is K: per j an 8 x 1 x 8 GEMV accumulated into the diagonal of C in order')
 Bn(124, "b_column_is_the_row_coordinate", "coupled_mapping",
    ijk(8, 8, 8), arr("A", (8, 8), ("i", "k")), arr("B", (8, 8), ("k", "i")), arr("C", (8, 8), ("i", "j")),
    math_class="batched_dot_by_demotion",
@@ -986,11 +1002,15 @@ Bn(125, "a_on_its_diagonal", "singular_mapping",
              "(I), j by B and C (J), k by B only (a broadcast): the canonical decomposition\n"
              "fails.  With k demoted to a batch loop it is a batched GEMM: per k the\n"
              "8 x 8 x 1 rank-1 update C[I][J] += A[I][I] B[k][J] (A's view I -> (I, I)), the\n"
-             "k batches accumulating into C in program order.  Mathematically valid; the\n"
-             "demotion is not implemented: a documented limitation.  Expected refusal at\n"
-             "recognition: 'a coordinate is read by the second factor only' (k).\n"
-             "Re-decided 2026-10-16 (ISSUE-008; REJECT before).",
-   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct')
+             "k batches accumulating into C in program order.  Mathematically valid.\n"
+             "Until 2026-10-21 refused at recognition ('a coordinate is read by the second\n"
+             "factor only', k): a documented limitation.  Since 2026-10-21 (docs section\n"
+             "23, reduction-batch partitioning on by default) k, read by B only, is a\n"
+             "reduction batch loop with the virtual K = 1: per k the 8 x 8 x 1 rank-1\n"
+             "update, the k iterations accumulating into C in order.  Re-decided\n"
+             "2026-10-16 (ISSUE-008; REJECT before) and 2026-10-21 (ACCEPT).",
+   issue="ISSUE-008",
+   redecided='2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default; the research policy of 2026-10-21): ACCEPT -- k (read by B only) is a reduction batch loop, the virtual K = 1: per k an 8 x 8 x 1 rank-1 update accumulated into C in order')
 Bn(126, "a_column_couples_i_and_k", "coupled_mapping",
    ijk(8, 8, 8), arr("A", (8, 15), ("i", "i + k")), arr("B", (8, 8), ("k", "j")), arr("C", (8, 8), ("i", "j")),
    math_class="gemm_of_skewed_view",

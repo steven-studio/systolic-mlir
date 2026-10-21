@@ -82,7 +82,16 @@ loop read by C only, and the extra loops of a row or column role that is not one
 coordinate (`C[p][i][j] += A[p][i][k] * B[k][j]`: p), are demoted to batch loops by the rule of
 section 21.3 (the analyses run again with them as batch loops; a demoted loop must be read by C
 alone in a dimension of its own; the factor that does not read it is shared by the partitions; a
-loop read by both factors and not by C is never demoted -- a partial-C reduction, refused);
+loop read by both factors and not by C is never demoted by section 21 -- a partial-C reduction);
+since 2026-10-21 also the reduction-batch partitioning (docs section 23, on by default; systolic-cc
+`--no-reduction-batches`, pass option `reduction-batches=false` turn it off): on a box domain whose
+counters are the program's (not after a domain normalization that rewrote them with U != I -- a
+sheared parallelotope, or an exact parallelotope with a nonzero shift row; a disguised box whose
+shift rows are all zero, U = I, keeps them) and
+for an accumulation (never an assignment), a loop read by one factor only, and the loops both
+factors read beyond the one kept as K (all of them K first, then each in turn, the longest first,
+ties the innermost), are reduction batch loops run around the tiles, every iteration accumulating
+into the same slab of C in order (lowered only with the permission to reassociate);
 every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
@@ -279,7 +288,8 @@ multiply-accumulate (no loop of a GEMM to anchor on; basis `no_gemm_loop`, 2026-
 nest of loops that run once is the 1 x 1 x 1 GEMM and is offloaded), and -- since
 ISSUE-008 -- a nest that is a batched GEMM only under a decomposition other than its readers'
 (a loop read by one FACTOR only: a stride-0 role, basis `broadcast`; a loop read by both factors
-and not by C beyond the reduction: basis `partial_reduction`; separate coordinates in one role or a
+and not by C beyond the reduction: basis `partial_reduction` -- both since 2026-10-21 only when
+no reduction-batch decomposition, docs section 23, is valid either; separate coordinates in one role or a
 role that is not one dense coordinate whose partition of section 21 is not valid, C not injective
 per batch: basis `demotion`; `docs/AFFINE_GEMM_MAPPING.md` section 19.2 -- the executable specification
 exhibits the decomposition, the compiler constructs only the canonical one). (Transposed
@@ -331,7 +341,27 @@ loops partitioning the GEMM into independent slabs of C, the factor that does no
 (`casespec.partition_decomposition`: the rule of section 21.3, verified by enumeration; the
 partitions' outputs must be disjoint -- `C[p + i][j]` and the merged `C[3p + i][j]` stay OUT_OF_SCOPE
 `demotion`). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
-B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition.
+B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition --
+until 2026-10-21. Since 2026-10-21 (docs section 23, the research policy of 2026-10-21, basis
+`reduction_batches`) such loops, and the loops read by one factor only, are **reduction batch
+loops**: an accumulation `C += A * B` on a box is ACCEPTED whenever its loops decompose into
+batch, I, J, K and reduction batch loops (the loops C does not read beyond one K coordinate; with
+no loop read by both factors the virtual K = 1) that keep the iteration domain, every operand
+access and every product's multiplicity (repeated products are kept, not a reason to refuse), the
+reduction batch iterations accumulating into C serially, in order (`casespec.reduction_batch_decomposition`,
+by enumeration; the checks of `partition_decomposition` with the reduction batch loops as batch
+loops C does not read). Not for an assignment `C = A * B` (a loop C does not read overwrites:
+`not_gemm_overwrite`; assignments only with K = 1, or index association dimension 0 and a
+virtual K = 1: the assignment policy of 2026-10-21, docs section 20), not on a non-box domain, not
+on the box form of a nest whose counters the domain normalization rewrote with U != I (sections
+19.12, 19.13: the compiler makes reduction batch loops only on counters as written, so such a nest
+keeps the decision of sections 19-21 -- OUT_OF_SCOPE `reduction_batches_rewritten` when the
+decomposition exists; U = I, a box as written or a disguised box with zero shift rows, stays
+eligible), not
+when every reduction batch iteration is a 1 x 1 x 1 product (an element-wise product, section
+19.1); strict floating point still refuses
+(`--fp-reassociation`); one-dimensional C is Phase 2. Re-decided ACCEPT: case_090, case_095,
+case_123, case_125 (each with its record `redecided`).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=

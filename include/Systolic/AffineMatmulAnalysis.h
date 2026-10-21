@@ -354,7 +354,7 @@ struct LogicalMatmul {
   // section 23): reduction batch loops. For each of their values the nest is
   // a GEMM whose factor views are offset by them; all their values
   // accumulate into the same slab of C, in order. A subset of demotedLoops;
-  // empty unless the recognition ran with reductionBatches.
+  // empty when the recognition ran without reductionBatches.
   SmallVector<unsigned> reductionBatchLoops;
 
   // The task's exact mapping (reported by the discovery pass, not decided).
@@ -387,7 +387,8 @@ void collectAffineMatmulCandidates(
 /// Options of recognizeLogicalMatmul.
 struct AffineMatmulRecognitionOptions {
   /// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23,
-  /// opt-in). On a box domain, the loops of a multiply-accumulate nest that C
+  /// on by default). On a box domain, the loops of a multiply-accumulate nest
+  /// that C
   /// does not read become reduction batch loops when that makes the nest a
   /// dense GEMM: a loop read by one factor only (C[i][j] += A[i][k] * B[l][j]:
   /// k and l, with K = 1), and -- when the loops both factors read are not one
@@ -396,7 +397,8 @@ struct AffineMatmulRecognitionOptions {
   /// a reduction batch loop runs around the tiles, and its values accumulate
   /// into the same slab of C in order. When no such decomposition is a dense
   /// GEMM, the result, reason and class are those without the option.
-  bool reductionBatches = false;
+  /// Assignments (C = A * B) never get reduction batch loops (section 20.4).
+  bool reductionBatches = true;
 };
 
 /// Recover logical GEMM coordinates and access factorization.
@@ -467,6 +469,13 @@ struct DomainNormalization {
 /// the band untouched. Returns the normalizations applied, for the
 /// diagnostics.
 SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *root);
+
+/// Whether one of `normalized` rewrote the counters (U != I) of the band that
+/// holds `anchor`: the nest's counters are then not the ones as written, so
+/// R8 (section 22) is not analysed and no reduction batch loop is made
+/// (section 23: no integer basis transformation widens the recognition).
+bool countersRewritten(ArrayRef<DomainNormalization> normalized,
+                       Operation *anchor);
 
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient

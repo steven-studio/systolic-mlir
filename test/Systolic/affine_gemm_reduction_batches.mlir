@@ -1,5 +1,5 @@
-// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23, opt-in:
-// reduction-batches=true). The loops C does not read become reduction batch
+// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23, on by
+// default; reduction-batches=false turns it off). The loops C does not read become reduction batch
 // loops when that makes the nest a GEMM: a loop read by one factor only, and --
 // when the loops both factors read are not one dense GEMM coordinate -- all of
 // those but the one that stays K (the longest first, ties the innermost). A
@@ -10,7 +10,8 @@
 // accumulate in order. The checks pin, in order: the classification (prefix
 // DISC), the lowering with the permission to reassociate (REMARK and the IR),
 // that nothing is lowered without that permission (STRICT), and that without
-// the option the recognition is unchanged (OFF).
+// the option the recognition is that of sections 19-21 (OFF). Assignments are
+// considered only with K = 1 or a virtual K = 1 (section 20.4).
 //
 // RUN: systolic-opt "--test-affine-matmul-discovery=reduction-batches=true" -split-input-file %s \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s --check-prefix=DISC
@@ -20,8 +21,8 @@
 // RUN:   -split-input-file %s | FileCheck %s
 // RUN: systolic-opt "--affine-matmul-to-systolic=report=true classify=true reduction-batches=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=STRICT
-// RUN: systolic-opt --test-affine-matmul-discovery -split-input-file %s -o /dev/null 2>&1 \
-// RUN:   | FileCheck %s --check-prefix=OFF
+// RUN: systolic-opt "--test-affine-matmul-discovery=reduction-batches=false" -split-input-file %s \
+// RUN:   -o /dev/null 2>&1 | FileCheck %s --check-prefix=OFF
 // OFF-NOT: reduction batch:
 // STRICT-NOT: lowered as
 
@@ -459,6 +460,76 @@ func.func @t2_assign(%A: memref<3x7xf32> {llvm.noalias}, %B: memref<4x5xf32> {ll
   return
 }
 // -----
+// assignment with an actual K = 1 (k runs once): considered, every element of C written once -- lowered into a zeroed C
+// DISC:          dense logical GEMM: yes, I/J/K on loops 0/1/2
+// REMARK:      remark: affine GEMM 3x5x1 lowered as 1 exact region(s) (an assignment C = A B: C zeroed before the tiles)
+// STRICT:      remark: affine GEMM not lowered to systolic.matmul_tile: floating-po{{.*}}[PROVEN_VALID]
+// CHECK-LABEL: func.func @assign_k1(
+// CHECK:       affine.for
+// CHECK:       affine.for
+// CHECK:       bufferization.to_tensor {{.*}} restrict writable
+// CHECK-NEXT:  systolic.matmul_tile {{.*}} m = 3 n = 5 k = 1
+// CHECK-NEXT:  bufferization.materialize_in_destination {{.*}} in restrict writable
+func.func @assign_k1(%A: memref<3x1xf32> {llvm.noalias}, %B: memref<1x5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 3 {
+    affine.for %j = 0 to 5 {
+      affine.for %k = 0 to 1 {
+        %va = affine.load %A[%i, %k] : memref<3x1xf32>
+        %vb = affine.load %B[%k, %j] : memref<1x5xf32>
+        %prod = arith.mulf %va, %vb : f32
+        affine.store %prod, %C[%i, %j] : memref<3x5xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// assignment C[b][i][j] = A[b][i] * B[b][j]: no reduction loop, index association dimension 0, virtual K = 1 -- lowered
+// DISC:          dense logical GEMM: yes, I/J/K on loops 1/2/, batched over loop(s) 0 (2 batch iteration(s))
+// REMARK:      remark: affine GEMM 3x5x1 lowered as 1 exact region(s) (an assignment C = A B: C zeroed before the tiles), batched: 2 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 2 time(s)
+// STRICT:      remark: affine GEMM not lowered to systolic.matmul_tile: floating-po{{.*}}[PROVEN_VALID]
+// CHECK-LABEL: func.func @assign_outer_batched(
+// CHECK:       affine.for
+// CHECK:       affine.for
+// CHECK:       affine.for
+// CHECK:       bufferization.to_tensor {{.*}} restrict writable
+// CHECK-NEXT:  systolic.matmul_tile {{.*}} m = 3 n = 5 k = 1
+// CHECK-NEXT:  bufferization.materialize_in_destination {{.*}} in restrict writable
+func.func @assign_outer_batched(%A: memref<2x3xf32> {llvm.noalias}, %B: memref<2x5xf32> {llvm.noalias}, %C: memref<2x3x5xf32> {llvm.noalias}) {
+  affine.for %b = 0 to 2 {
+    affine.for %i = 0 to 3 {
+      affine.for %j = 0 to 5 {
+        %va = affine.load %A[%b, %i] : memref<2x3xf32>
+        %vb = affine.load %B[%b, %j] : memref<2x5xf32>
+        %prod = arith.mulf %va, %vb : f32
+        affine.store %prod, %C[%b, %i, %j] : memref<2x3x5xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// the assignment twin of T5 (C = A * B with k, l not read by C): overwrites, refused
+// DISC:          reason: the statement overwrites C (C = A * B, no accumulation) and loop 2 of the nest, which runs
+// DISC-NEXT:     class: PROVEN_INVALID
+// CHECK-LABEL: func.func @assign_t5(
+// CHECK-NOT:   systolic.matmul_tile
+func.func @assign_t5(%A: memref<3x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 3 {
+    affine.for %j = 0 to 5 {
+      affine.for %k = 0 to 4 {
+        affine.for %l = 0 to 4 {
+          %va = affine.load %A[%i, %k] : memref<3x4xf32>
+          %vb = affine.load %B[%l, %j] : memref<4x5xf32>
+          %prod = arith.mulf %va, %vb : f32
+          affine.store %prod, %C[%i, %j] : memref<3x5xf32>
+        }
+      }
+    }
+  }
+  return
+}
+// -----
 // a plain GEMM: unchanged with the option (no reduction batch loop)
 // DISC:          dense logical GEMM: yes, I/J/K on loops 0/1/2
 // REMARK:      remark: affine GEMM 3x5x4 lowered as 1 exact region(s)
@@ -501,6 +572,31 @@ func.func @t3_unchanged(%A: memref<3x3x4x8xf32> {llvm.noalias}, %B: memref<4x5x1
         %prod = arith.mulf %va, %vb : f32
         %sum = arith.addf %vc, %prod : f32
         affine.store %sum, %C[%i, %j] : memref<3x5xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+// T5 on a sheared domain (k in [i, i + 4)): the domain normalization rewrites the counters
+// (x = U x', U != I), so no reduction batch loop is made (no integer basis transformation widens
+// the recognition in Phase 1) and the decision of sections 19-21 stands: refused.
+// DISC:          reason: a coordinate is read by the first factor only: the other operands would be broadcast along
+// DISC-NEXT:     class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK-LABEL: func.func @t5_sheared(
+// CHECK-NOT:   systolic.matmul_tile
+func.func @t5_sheared(%A: memref<3x8xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
+  affine.for %i = 0 to 3 {
+    affine.for %j = 0 to 5 {
+      affine.for %k = affine_map<(d0) -> (d0)>(%i) to affine_map<(d0) -> (d0 + 4)>(%i) {
+        affine.for %l = 0 to 4 {
+          %va = affine.load %A[%i, %k] : memref<3x8xf32>
+          %vb = affine.load %B[%l, %j] : memref<4x5xf32>
+          %vc = affine.load %C[%i, %j] : memref<3x5xf32>
+          %prod = arith.mulf %va, %vb : f32
+          %sum = arith.addf %vc, %prod : f32
+          affine.store %sum, %C[%i, %j] : memref<3x5xf32>
+        }
       }
     }
   }

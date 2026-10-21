@@ -229,7 +229,7 @@ typedef struct {
   long k_max_8x8, k_max_4x4;
   int verify;
   int fp_reassociation;         /* --fp-reassociation */
-  int reduction_batches;        /* --reduction-batches */
+  int no_reduction_batches;     /* --no-reduction-batches */
   double verify_rtol;
   strvec defines, includes;
   const char *self_dir;        /* where this executable is: systolic-cfront */
@@ -1135,9 +1135,9 @@ static int compile(driver *d) {
   strvec not_offloaded = {0};
   if (nfns) {
     strvec c2 = argv_of(opt, fleet,
-                        a->reduction_batches
+                        a->no_reduction_batches
                             ? "--affine-matmul-to-systolic=report=true "
-                              "reduction-batches=true"
+                              "reduction-batches=false"
                             : "--affine-matmul-to-systolic=report=true",
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
@@ -1316,9 +1316,9 @@ static int compile(driver *d) {
     if (run(d, &c3, "the C front end (offloaded functions)", NULL, NULL, &r))
       return -1;
     strvec c4 = argv_of(opt, fleet,
-                        a->reduction_batches
+                        a->no_reduction_batches
                             ? "--affine-matmul-to-systolic="
-                              "reduction-batches=true"
+                              "reduction-batches=false"
                             : "--affine-matmul-to-systolic",
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
@@ -1429,7 +1429,7 @@ static void usage(void) {
           "[--submission auto|sync|async] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
           "[--keep-dir DIR] [--explain] [--fp-reassociation] "
-          "[--reduction-batches] [-DNAME[=VAL]] "
+          "[--no-reduction-batches] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
@@ -1510,7 +1510,9 @@ int main(int argc, char **argv) {
     } else if (strcmp(s, "--fp-reassociation") == 0) {
       a.fp_reassociation = 1;
     } else if (strcmp(s, "--reduction-batches") == 0) {
-      a.reduction_batches = 1;
+      /* the default (docs/AFFINE_GEMM_MAPPING.md section 23) */
+    } else if (strcmp(s, "--no-reduction-batches") == 0) {
+      a.no_reduction_batches = 1;
     } else if ((v = option_value(s, "--keep-dir", &i, argc, argv))) {
       a.keep_dir = v;
     } else if (strcmp(s, "-o") == 0) {

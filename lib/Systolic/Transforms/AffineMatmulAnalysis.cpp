@@ -2019,6 +2019,54 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
                     "written once: docs/AFFINE_GEMM_MAPPING.md section 20)");
     }
 
+  // The assignment policy (docs section 20.4, 2026-10-21): an assignment is
+  // considered further only when (A) its actual reduction has one iteration
+  // (K = 1), or (B) the index association dimension of its factors -- the
+  // rank of the dot products P Q^T of their reduction index vectors, the
+  // factors' rows on the loops of two or more iterations C does not read
+  // (section 22) -- is 0 and it maps to the GEMM with a virtual K = 1. Any
+  // other assignment is refused; an overwrite is never turned into an
+  // accumulation, and reduction batch loops are never made for it. After the
+  // check above every loop of two or more iterations is a subscript of C, so
+  // this holds (no reduction loop: K = 1, dimension 0); the write semantics
+  // -- every element of C written exactly once -- is proven by
+  // verifyOutputWrittenOnce, and the lowering requires K = 1 again.
+  if (!accumulates) {
+    std::array<lattice::IntMatrix, 3> rows;
+    SmallVector<int64_t> trips(numIterationDims, 2);
+    for (const Subscript &sub : subscripts)
+      rows[sub.operand].push_back(lattice::IntVector(
+          sub.onDomain.coefficients.begin(), sub.onDomain.coefficients.end()));
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (single[d]) {
+        trips[d] = 1;
+        continue;
+      }
+      // A loop of no iteration writes nothing (an empty GEMM, as above).
+      affine::AffineForOp loop =
+          affine::getForInductionVarOwner(iterationIVs[d]);
+      std::optional<int64_t> lower =
+          loop ? constantLoopBound(loop, /*lower=*/true) : std::nullopt;
+      std::optional<int64_t> upper =
+          loop ? constantLoopBound(loop, /*lower=*/false) : std::nullopt;
+      if (lower && upper && *upper <= *lower)
+        trips[d] = 0;
+    }
+    std::optional<AffineR8Structure> association =
+        computeR8Structure(rows, trips);
+    if (!association)
+      return unknown("the assignment C = A * B: the index association of its "
+                     "factors overflows 64-bit arithmetic");
+    if (!association->reductionLoops.empty() || association->coupling != 0)
+      return refuse(llvm::Twine("the assignment C = A * B reduces over ") +
+                    llvm::Twine(association->reductionLoops.size()) +
+                    " loop(s) C does not read (index association dimension " +
+                    llvm::Twine(association->coupling) +
+                    "): an assignment is considered only with K = 1, or with "
+                    "index association dimension 0 and a virtual K = 1 "
+                    "(docs/AFFINE_GEMM_MAPPING.md section 20.4)");
+  }
+
   auto exprText = [](AffineExpr expr) {
     std::string text;
     llvm::raw_string_ostream os(text);
@@ -4471,6 +4519,21 @@ mlir::systolic::computeR8Structure(const std::array<lattice::IntMatrix, 3> &rows
       it->push_back(s);
   }
   return r;
+}
+
+bool mlir::systolic::countersRewritten(
+    ArrayRef<DomainNormalization> normalized, Operation *anchor) {
+  for (const DomainNormalization &dn : normalized) {
+    bool identity = true;
+    for (auto [r, row] : llvm::enumerate(dn.U))
+      for (auto [c, v] : llvm::enumerate(row))
+        identity &= v == (r == c ? 1 : 0);
+    if (!identity && (dn.outermost == anchor ||
+                      dn.outermost->isProperAncestor(anchor) ||
+                      anchor->isProperAncestor(dn.outermost)))
+      return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

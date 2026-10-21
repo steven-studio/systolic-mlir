@@ -27,6 +27,11 @@
 // LLVM-LABEL: llvm.func @two_batch_offsets(
 // LLVM:       llvm.call @fpga_matmul_tiled_auto_scheduled
 // LLVM-NOT:   affine.
+// LLVM-LABEL: llvm.func @outer_of_sums(
+// LLVM:       llvm.call @fpga_matmul_tiled_auto_scheduled
+// LLVM-LABEL: llvm.func @noninjective_reduction(
+// LLVM:       llvm.call @fpga_matmul_tiled_auto_scheduled
+// LLVM-NOT:   affine.
 
 // The Phase 1 target: C[8i][j] += A[4i - j][5k] * B[5k][j], i in [1, 5),
 // j in [0, 4), k in [0, 4). Readers: i by A and C (I), k by A and B (K), j by
@@ -379,13 +384,35 @@ func.func @wrong_coordinate_b(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4
 }
 
 // -----
-// MUST STAY REJECTED (counterexample to "a reduction direction exists"):
-// C[i][j] += A[i][k0] * B[k1][j]. Along k0 + k1, C is constant and both Ka and
-// Kb change, yet the nest is (sum_u A[i][u]) * (sum_v B[v][j]), not A * B:
-// each reduction loop is read by one factor only.
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+// default): C[i][j] += A[i][k0] * B[k1][j]. The old pin "MUST STAY REJECTED"
+// (counterexample to "a reduction direction exists": the nest is
+// (sum_u A[i][u]) * (sum_v B[v][j]), each reduction loop read by one factor
+// only) was a policy of section 21; the 2026-10-21 research policy accepts
+// any M/N/K/Batch/RB decomposition that preserves the iteration domain, every
+// operand access, each product's multiplicity and the serial accumulation
+// into C (ground truth case T5). k0 and k1 (loops 2+3) are reduction batch
+// loops (not read by C); K is virtual (K = 1): for each (k0, k1) in order,
+// C(I, J) += A(I, k0) * B(k1, J), a 4x4x1 outer product of the column view
+// A[:, k0] and the row view B[k1, :], 16 GEMMs accumulated into the same C.
+// This is an accumulation (C += A*B), not an assignment.
 // CHECK-LABEL: func.func @outer_of_sums
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: a coordinate is read by the first factor only
+// CHECK:       affine.for %[[K0:.*]] = 0 to 4 {
+// CHECK:         affine.for %[[K1:.*]] = 0 to 4 {
+// CHECK:           %[[AOFF:.*]] = affine.apply #{{[a-z0-9_]+}}(%[[K0]], %[[K1]])
+// CHECK:           memref.subview %arg0[0, %[[AOFF]]] [4, 1] [1, 1]
+// CHECK:           %[[BOFF:.*]] = affine.apply #{{[a-z0-9_]+}}(%[[K0]], %[[K1]])
+// CHECK:           memref.subview %arg1[%[[BOFF]], 0] [1, 4] [1, 1]
+// CHECK:           systolic.matmul_tile {{.*}} m = 4 n = 4 k = 1
+// REMARK:      remark: affine GEMM 4x4x1 lowered as 1 exact region(s), 2 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 16 batch iteration(s) of 2 batch loop(s)
+// DISC:        recognition result: success
+// DISC:        batch terms A: dimension 1 = 0 + 1*x2
+// DISC:        batch terms B: dimension 0 = 0 + 1*x3
+// DISC:        statement: C = C + A * B (accumulation)
+// DISC:        reduction batch: loop(s) 2+3 (not read by C
+// DISC:        dense logical GEMM: yes, I/J/K on loops 0/1/, batched over loop(s) 2+3 (16 batch iteration(s))
+// DISC:        dense extents: M 4, N 4, K 1
+// DISC:        logical bijection: verified
 func.func @outer_of_sums(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {
@@ -405,13 +432,33 @@ func.func @outer_of_sums(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32>
 }
 
 // -----
-// MUST STAY REJECTED (counterexample to "Ka and Kb change together"):
-// A[i][k0 + k1] * B[k0 + k1][j] visits K = 1, 2, 3 more than once (a weighted
-// sum): the reduction is not a bijection onto [0, K) (Theorem 3 (S2)).
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+// default): A[i][k0 + k1] * B[k0 + k1][j]. The old pin "MUST STAY REJECTED"
+// (counterexample to "Ka and Kb change together": K = k0 + k1 visits 1..5
+// more than once, so k0 + k1 is not a bijection onto [0, K), Theorem 3 (S2))
+// was a policy of section 21; the 2026-10-21 research policy accepts the
+// decomposition because it keeps every product with its multiplicity (the
+// repeats are kept, not a reason to reject) and the serial accumulation into
+// C (ground truth case noninj). k0 (loop 2) is the reduction batch loop (not
+// read by C), k1 (loop 3) is K: for each k0 in order,
+// C(I, J) += sum_K A(I, k0 + K) * B(k0 + K, J), a 4x4x4 GEMM of the views
+// A[:, k0 : k0 + 4] and B[k0 : k0 + 4, :], 4 GEMMs accumulated into C.
 // CHECK-LABEL: func.func @noninjective_reduction
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:       affine.for %[[K0:.*]] = 0 to 4 {
+// CHECK:         %[[OFF:.*]] = affine.apply #{{[a-z0-9_]+}}(%[[K0]])
+// CHECK:         memref.subview %arg0[0, %[[OFF]]] [4, 4] [1, 1]
+// CHECK:         memref.subview %arg1[%[[OFF]], 0] [4, 4] [1, 1]
+// CHECK:         systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// REMARK:      remark: affine GEMM 4x4x4 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 4 batch iteration(s) of 1 batch loop(s)
 // DISC:        recognition result: success
-// DISC:        dense logical GEMM: no (
+// DISC:        reduction map: (d0, d1, d2, d3) -> (d3)
+// DISC:        batch terms A: dimension 1 += 1*x2
+// DISC:        batch terms B: dimension 0 += 1*x2
+// DISC:        statement: C = C + A * B (accumulation)
+// DISC:        reduction batch: loop(s) 2 (not read by C
+// DISC:        dense logical GEMM: yes, I/J/K on loops 0/1/3, batched over loop(s) 2 (4 batch iteration(s))
+// DISC:        dense extents: M 4, N 4, K 4
+// DISC:        logical bijection: verified
 func.func @noninjective_reduction(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {

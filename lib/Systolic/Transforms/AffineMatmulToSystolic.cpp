@@ -1519,8 +1519,9 @@ struct AffineMatmulToSystolicPass
                      "(docs/AFFINE_GEMM_MAPPING.md section 23): loops C does "
                      "not read may become reduction batch loops, run around "
                      "the tiles and accumulated into the same slab of C in "
-                     "order"),
-      llvm::cl::init(false)};
+                     "order (on by default; false: the recognition of "
+                     "sections 19-21 alone)"),
+      llvm::cl::init(true)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<affine::AffineDialect, bufferization::BufferizationDialect,
@@ -1886,7 +1887,11 @@ struct AffineMatmulToSystolicPass
                 << llvm::StringRef(lines).rtrim();
           }
         };
-    reportNormalizations(normalizeParallelotopeDomains(module.getOperation()));
+    // Reduction batches (section 23) are made only on nests whose counters
+    // are the ones as written: not after a normalization with U != I.
+    const SmallVector<DomainNormalization, 1> normalizations =
+        normalizeParallelotopeDomains(module.getOperation());
+    reportNormalizations(normalizations);
     hoistRepetitionLoops(module, assumeNoAlias, classify);
     nextGemmIndex = nextSystolicGemmIndex(module);
 
@@ -1896,7 +1901,9 @@ struct AffineMatmulToSystolicPass
     SmallVector<LogicalMatmul, 1> matmuls;
     for (AffineMatmulCandidate candidate : candidates) {
       AffineMatmulRecognitionOptions recognition;
-      recognition.reductionBatches = reductionBatches;
+      recognition.reductionBatches =
+          reductionBatches &&
+          !countersRewritten(normalizations, candidate.anchor);
       auto result =
           recognizeLogicalMatmul(candidate, nullptr, nullptr, recognition);
       if (failed(result))
