@@ -64,6 +64,13 @@
 #                     affected. Other SYSTOLIC_DPTI_* and SYSTOLIC_ASYNC_*
 #                     variables (LATENCY_MS, SETTLE_US, STAGE, ...) pass
 #                     through to the cases as exported.
+#   --cost-model v1|v2
+#                     the binary search's cost model for every systolic-matmul
+#                     run (v2, the default: docs/COSTMODEL_V2.md; v1:
+#                     docs/COSTMODEL.md). The cases' checks hold for either;
+#                     step 3 (the injected write failure) has one expected
+#                     outcome per model and fleet, since the write the
+#                     failure hits depends on the decomposition.
 #   --mode sync|async sync (default): every case through the synchronous
 #                     runtime (systolic-matmul --sync), one
 #                     fpga_matmul_tiled_auto_scheduled per tile, each waited
@@ -119,6 +126,7 @@ CHECK_ONLY=0
 KEEP_GOING=0
 TIMING=0
 RTMODE=sync
+COST_MODEL=v2
 while [ $# -gt 0 ]; do
     case "$1" in
         --backend)      BACKEND="$2"; shift 2 ;;
@@ -136,12 +144,14 @@ while [ $# -gt 0 ]; do
         --keep-going)   KEEP_GOING=1; shift ;;
         --timing)       TIMING=1; shift ;;
         --mode)         RTMODE="$2"; shift 2 ;;
+        --cost-model)   COST_MODEL="$2"; shift 2 ;;
         -h|--help)      usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 case "$BACKEND" in board|cosim) ;; *) echo "--backend board|cosim" >&2; exit 2 ;; esac
 case "$RTMODE" in sync|async) ;; *) echo "--mode sync|async" >&2; exit 2 ;; esac
+case "$COST_MODEL" in v1|v2) ;; *) echo "--cost-model v1|v2" >&2; exit 2 ;; esac
 [ "$MODES" -le 1 ] || { echo "--quick, --fixed-only, --kmax-cases and --regression exclude each other" >&2; exit 2; }
 if [ -n "$EXTRA_K" ] && { [ "$MODE" = quick ] || [ "$MODE" = fixed ] ||
                           ! [[ "$EXTRA_K" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; }; then
@@ -158,6 +168,7 @@ VERDICT="$HERE/e2e_verdict.py"
 # the sync mode keeps exercising the synchronous path on such a bitstream.
 MATMUL_FLAGS=(--sync)
 [ "$RTMODE" = async ] && MATMUL_FLAGS=(--async)
+MATMUL_FLAGS+=("--cost-model=$COST_MODEL")
 for b in "$MATMUL" "$RTTEST"; do
     [ -x "$b" ] || { echo "missing $b -- build first (cmake --build $BUILD)" >&2; exit 2; }
 done
@@ -681,23 +692,47 @@ not_run=$(awk 'END { print NR }' "$OUT/not_run.txt")
 echo | tee -a "$OUT/summary.txt"
 
 # ---- 3. a broken link is reported, not computed around (co-simulation) ---
-# The co-simulation's libftdi fails write #7 of the session. Synchronous
-# runtime: the 5th WRITE32 of the first of five descriptors (16x8x4) -- the
-# MEM_WRITE (9 B and the slab) and four WRITE32s (4 x 6 B) are all that may
-# reach the RTL -- no submit, so no result -- and systolic-matmul must exit
-# 4 with the runtime's -6, a transport failure. Asynchronous runtime (burst
-# submission, docs/ASYNC.md section 9: every slab a device has room for
-# goes out before its descriptors, each MEM_WRITE as two writes, the 9-byte
-# header and the slab): write #7 is the fourth slab's header, so three slabs
-# reach the RTL and the runtime's -4 is reported; that order holds while
-# the arrays have room for four slabs each (PIPELINE_DEPTH >= 3), else the
-# check is skipped. 16x8x4 is five invocations under Cost Model V1 (this
-# step runs systolic-matmul --cost-model=v1) as long as every K_MAX >= 4;
-# with a shallower bitstream the count differs and the check is skipped.
+# The co-simulation's libftdi fails write #7 of the session while
+# systolic-matmul runs 16x8x4. Which write that is depends on the
+# decomposition, so the step first checks the decomposition itself
+# (ir/10-systolic.mlir) against the one expected for this cost model and
+# fleet, then the outcome expected for it. Both were taken from runs on the
+# co-simulation (K_MAX 16 / 16, every K_MAX >= 4 decomposes 16x8x4 the same):
+#
+#   five    Cost Model V1 (any fleet) and V2 on a serialized fleet
+#           (PIPELINE_DEPTH = 1): one 8x8x4 tile on the 8x8, four 4x4x4
+#           tiles on the 4x4s (two on device 1) -- five invocations
+#   two     Cost Model V2 on a pipelined fleet (PIPELINE_DEPTH > 1): two
+#           8x8x4 tiles, both on the 8x8 -- two invocations
+#
+# Synchronous runtime, either decomposition: write #7 is the 5th WRITE32 of
+# the first descriptor; the MEM_WRITE (9 B and the slab) and four WRITE32s
+# (4 x 6 B) reach the RTL, no submit, no result; every call fails, the
+# runtime reports -6 (a transport failure) and systolic-matmul exits 4.
+# Asynchronous runtime (burst submission, docs/ASYNC.md section 9: every slab
+# a device has room for goes out before its descriptors, each MEM_WRITE as
+# two writes, the 9-byte header and the slab; PIPELINE_DEPTH >= 3, else the
+# check is skipped): five -- write #7 is the fourth slab's header, three
+# slabs reach the RTL, -4; two -- both slabs (writes 1-4), then the first
+# descriptor's first two WRITE32s (writes 5-6) reach the RTL and write #7,
+# its third WRITE32, fails: -6.
 df_ok=1
-if [ "$RTMODE" = async ]; then
+DF_MODEL="$COST_MODEL"
+if [ "$COST_MODEL" = v2 ] && [ "$DEPTH" -gt 1 ]; then
+    DF_DECOMP=two
+    DF_TILES="2 m=8 n=8 k=4 @acc_8x8_0"
+    DF_CALLS=2
+else
+    DF_DECOMP=five
+    DF_TILES="2 m=4 n=4 k=4 @acc_4x4_0;1 m=4 n=4 k=4 @acc_4x4_1;1 m=4 n=4 k=4 @acc_4x4_2;1 m=8 n=8 k=4 @acc_8x8_0"
+    DF_CALLS=5
+fi
+if [ "$RTMODE" = async ] && [ "$DF_DECOMP" = five ]; then
     DF_BYTES=$(( 3 * (9 + SLAB) )); DF_RC=-4
     DF_WHAT="the fourth slab's MEM_WRITE header (burst submission: slabs first)"
+elif [ "$RTMODE" = async ]; then
+    DF_BYTES=$(( 2 * (9 + SLAB) + 2 * 6 )); DF_RC=-6
+    DF_WHAT="the 3rd WRITE32 of the first descriptor, after both slabs (burst submission: slabs first)"
 else
     DF_BYTES=$(( 9 + SLAB + 4 * 6 )); DF_RC=-6
     DF_WHAT="the 5th WRITE32 of the first descriptor"
@@ -708,31 +743,33 @@ elif [ "$BACKEND" = cosim ] && [ "$RTMODE" = async ] && [ "$DEPTH" -lt 3 ]; then
     echo "dispatch failure reported: NOT TESTED (PIPELINE_DEPTH = $DEPTH: the asynchronous runtime's write order differs)" \
         | tee -a "$OUT/summary.txt"
 elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
-    echo "== dispatch failure: write #7 of the session fails ($DF_WHAT)"
+    echo "== dispatch failure: write #7 of the session fails ($DF_WHAT; cost model $DF_MODEL, 16x8x4 as $DF_CALLS invocations)"
     d="$OUT/dispatch_failure"
-    mkdir -p "$d"
+    mkdir -p "$d/ir"
     python3 "$HERE/gen_cases.py" "$d/gen" > /dev/null
     cp "$d/gen/16x8x4_mixed.txt" "$d/input.txt"
     before=$(sessions_opened)
-    # --cost-model=v1: the write order above is Cost Model V1's decomposition
-    # of 16x8x4 (five invocations); V2 runs it as two 8x8 invocations.
-    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} --cost-model=v1 < "$d/input.txt" > "$d/output.txt" 2>&1
+    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} --dump-ir="$d/ir" < "$d/input.txt" > "$d/output.txt" 2>&1
     frc=$?
     settle_sessions
     read -r frecv fcons fsent < <(cosim_bytes "$((before + 1))")
+    # the decomposition the compiler made: "count m=.. n=.. k=.. @device", sorted
+    tiles=$(sed -n -E 's/.*systolic\.matmul_tile .* m = ([0-9]+) n = ([0-9]+) k = ([0-9]+) on @([a-z0-9_]+) .*/m=\1 n=\2 k=\3 @\4/p' \
+                "$d/ir/10-systolic.mlir" 2>/dev/null | sort | uniq -c | sed -E 's/^ *//' | paste -sd';' -)
     sed -n -E 's/^ *(DPTI: .*)/   runtime: \1/p; s/^(FPGA dispatch: .*)/   \1/p' "$d/output.txt"
+    echo "   decomposition: ${tiles:-none} (expected: $DF_TILES)"
     echo "   exit $frc; RTL received ${frecv:--} B, consumed ${fcons:--} B, sent ${fsent:--} B"
-    if [ $frc -eq 4 ] &&
-       grep -q "^FPGA dispatch: FAIL -- 5 of 5 runtime call(s) failed (first error $DF_RC)" "$d/output.txt" &&
+    if [ "$tiles" = "$DF_TILES" ] && [ $frc -eq 4 ] &&
+       grep -q "^FPGA dispatch: FAIL -- $DF_CALLS of $DF_CALLS runtime call(s) failed (first error $DF_RC)" "$d/output.txt" &&
        grep -q "DPTI: $DF_BYTES B to the FPGA, 0 B back" "$d/output.txt" &&
        [ "$frecv" = "$DF_BYTES" ] && [ "$fcons" = "$DF_BYTES" ] && [ "$fsent" = 0 ]; then
-        df="PASS (TRANSPORT, rc=$DF_RC, as injected)"
+        df="PASS (TRANSPORT, rc=$DF_RC, as injected; cost model $DF_MODEL, $DF_CALLS invocations)"
     else
         df=FAIL; df_ok=0
     fi
     echo "dispatch failure reported: $df" | tee -a "$OUT/summary.txt"
 elif [ "$BACKEND" = cosim ]; then
-    echo "dispatch failure reported: NOT TESTED (K_MAX < 4: 16x8x4 is not five invocations)" \
+    echo "dispatch failure reported: NOT TESTED (K_MAX < 4: 16x8x4 is not the decomposition this step expects)" \
         | tee -a "$OUT/summary.txt"
 else
     echo "dispatch failure reported: NOT APPLICABLE on the board (the write failure is injected by the co-simulation's stand-in for libftdi)" \
@@ -765,6 +802,7 @@ coverage=$(awk -F'\t' -v k8="$K8" -v k4="$K4" '
     echo "configuration: K_MAX_8X8 = $K8, K_MAX_4X4 = $K4, $SLAB-byte operand slab ($GIVEN, from $HOW)"
     echo "hardware: $HW"
     echo "runtime mode: $RTMODE (COMPLETION_HEADER = $HEADER)"
+    echo "cost model: $COST_MODEL"
     echo "configuration refusal: $cfg"
     echo "runtime layer: $rt"
     echo "$cases_line"

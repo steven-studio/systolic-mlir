@@ -46,7 +46,9 @@ CLASS is one of
                 -17, -18, -19)
     INPUT       systolic-matmul refused the input (exit 2)
     COMPILE     the compiler failed (exit 3)
-    FAIL        anything else (no verdict line, tiles != invocations, ...)
+    FAIL        anything else (no verdict line, tiles != invocations, the
+                tiles not covering every C[i][j] over k = 0 .. K-1 exactly
+                once, ...)
 RT_RC is the runtime's raw return code (its first error), 0 when every call
 returned 0, "-" when the run did not get to the runtime. COVERAGE is
 d0..d3=<tiles per device>,edge=<edge tiles>,fold8/fold4=<1 if K was folded
@@ -79,6 +81,11 @@ ASYNC_WAIT_RE = re.compile(r"llvm\.call @fpga_gemm_wait\(")
 
 NAME_RE = re.compile(r"^(\d+)x(\d+)x(\d+)_")
 TILE_RE = re.compile(r"systolic\.matmul_tile .* m = (\d+) n = (\d+) k = (\d+) on @(\w+)")
+# A tile's operands: the A and B slices of the GEMM's arguments it reads.
+SLICE_RE = re.compile(r"^\s*(%[\w.]+) = tensor\.extract_slice (%arg\d+)\[(\d+), (\d+)\] "
+                      r"\[(\d+), (\d+)\] \[1, 1\]", re.M)
+TILE_OPS_RE = re.compile(r"systolic\.matmul_tile (%[\w.]+), (%[\w.]+), (%[\w.]+) "
+                         r"m = (\d+) n = (\d+) k = (\d+) on @(\w+)")
 HEADER_RE = re.compile(r"^  K_MAX_8X8 = (\d+), K_MAX_4X4 = (\d+) \((.*)\)$", re.M)
 FOLD_RE = re.compile(r"K folded by k_max = (\d+) on the 8x8, (\d+) on the 4x4s")
 INV_RE = re.compile(r"FPGA invocations = (\d+)")
@@ -91,6 +98,44 @@ DISPATCH_RE = re.compile(r"^FPGA dispatch: FAIL -- (\d+) of (\d+) runtime call\(
 CONFIG_RE = re.compile(r"^systolic-matmul: (SYSTOLIC_FPGA_CONFIG=.*)$", re.M)
 TOOL_RE = re.compile(r"^systolic-matmul: (?!C\[)(.*)$", re.M)
 ERROR_RE = re.compile(r"^.*\berror\b.*$", re.M)
+
+
+def exact_cover(ir, big_m, big_n, big_k):
+    """None if the tiles cover every C[i][j] over k = 0 .. K-1 exactly once
+    (no element, no k step missing, none computed twice), else why not. A
+    tile's rows and k range come from its A slice (%arg0[i0, k0] [m, k]), its
+    columns from its B slice (%arg1[k0, j0] [k, n])."""
+    slices = {name: (src, int(o0), int(o1), int(s0), int(s1))
+              for name, src, o0, o1, s0, s1 in SLICE_RE.findall(ir)}
+    spans = {}
+    for a, b, _, m, n, k, dev in TILE_OPS_RE.findall(ir):
+        m, n, k = int(m), int(n), int(k)
+        if a not in slices or b not in slices:
+            return f"a tile on @{dev} reads an operand that is not a slice of A or B"
+        asrc, i0, ka, am, ak = slices[a]
+        bsrc, kb, j0, bk, bn = slices[b]
+        if asrc != "%arg0" or bsrc != "%arg1":
+            return f"a tile on @{dev} reads {asrc} / {bsrc}, not A (%arg0) / B (%arg1)"
+        if (am, ak) != (m, k) or (bk, bn) != (k, n) or ka != kb:
+            return (f"a tile on @{dev} (m = {m} n = {n} k = {k}) reads A[{i0}:+{am}, {ka}:+{ak}] "
+                    f"and B[{kb}:+{bk}, {j0}:+{bn}]: the slices disagree with the tile")
+        if i0 + m > big_m or j0 + n > big_n or ka + k > big_k:
+            return f"a tile on @{dev} reaches past the {big_m}x{big_n}x{big_k} GEMM"
+        for i in range(i0, i0 + m):
+            for j in range(j0, j0 + n):
+                spans.setdefault((i, j), []).append((ka, ka + k))
+    for i in range(big_m):
+        for j in range(big_n):
+            cell = sorted(spans.get((i, j), []))
+            at = 0
+            for lo, hi in cell:
+                if lo != at:
+                    return (f"C[{i}][{j}]: k {at}..{lo - 1} computed by no tile" if lo > at else
+                            f"C[{i}][{j}]: k {lo}..{at - 1} computed twice")
+                at = hi
+            if at != big_k:
+                return f"C[{i}][{j}]: k {at}..{big_k - 1} computed by no tile"
+    return None
 
 
 def rc_class(rc):
@@ -196,6 +241,9 @@ def verdict(a):
             if macs != big_m * big_n * big_k:
                 return row("FAIL", f"the tiles cover {macs} multiply-adds; "
                                    f"{big_m}x{big_n}x{big_k} has {big_m * big_n * big_k}")
+            why = exact_cover(ir, big_m, big_n, big_k)
+            if why:
+                return row("FAIL", "the tiles do not cover the GEMM exactly once: " + why)
 
     # ---- the lowered IR calls the runtime of the chosen mode ----------------
     if fpga_ir is not None and tiles:

@@ -349,16 +349,25 @@ out=$(SYSTOLIC_FPGA_CONFIG="$WORK/k17_7.txt" bash "$RUN" --backend cosim --build
 # ---- verdicts -------------------------------------------------------------------
 echo "== e2e_verdict.py: one class per outcome, with the raw return code"
 SRC="$WORK/k24_12.txt"
-mkcase() {   # dir name, output.txt, IR tiles ("m n k device", ;-separated)
-    local d="$WORK/v/$1" t m n k dev
+mkcase() {   # dir name, output.txt, IR tiles ("m n k device [i0 j0 k0]", ;-separated)
+    # Each tile reads its A slice %arg0[i0, k0] [m, k] and its B slice
+    # %arg1[k0, j0] [k, n], as the lowering writes them (the verdict checks
+    # that the tiles cover the GEMM exactly once); without offsets a tile is
+    # at row 0, column 0, and its k range follows the previous tile's.
+    local d="$WORK/v/$1" t m n k dev i0 j0 k0 kacc=0 nt=0
     rm -rf "$d"; mkdir -p "$d/ir"
     printf '%b' "$2" > "$d/output.txt"
     : > "$d/ir/10-systolic.mlir"
     while IFS= read -r t; do
         [ -n "$t" ] || continue
-        read -r m n k dev <<< "$t"
-        printf '    %%0 = systolic.matmul_tile %%a, %%b, %%c m = %s n = %s k = %s on @%s est_cycles = 1 start_cycle = 0\n' \
-            "$m" "$n" "$k" "$dev" >> "$d/ir/10-systolic.mlir"
+        read -r m n k dev i0 j0 k0 <<< "$t"
+        i0=${i0:-0}; j0=${j0:-0}; k0=${k0:-$kacc}; kacc=$((k0 + k)); nt=$((nt + 1))
+        printf '    %%a%s = tensor.extract_slice %%arg0[%s, %s] [%s, %s] [1, 1] : tensor<?x?xf32> to tensor<%sx%sxf32>\n' \
+            "$nt" "$i0" "$k0" "$m" "$k" "$m" "$k" >> "$d/ir/10-systolic.mlir"
+        printf '    %%b%s = tensor.extract_slice %%arg1[%s, %s] [%s, %s] [1, 1] : tensor<?x?xf32> to tensor<%sx%sxf32>\n' \
+            "$nt" "$k0" "$j0" "$k" "$n" "$k" "$n" >> "$d/ir/10-systolic.mlir"
+        printf '    %%0 = systolic.matmul_tile %%a%s, %%b%s, %%c m = %s n = %s k = %s on @%s est_cycles = 1 start_cycle = 0\n' \
+            "$nt" "$nt" "$m" "$n" "$k" "$dev" >> "$d/ir/10-systolic.mlir"
     done < <(tr ';' '\n' <<< "$3")
     printf '%s\n' "$d"
 }
@@ -391,6 +400,8 @@ d=$(mkcase 8x8x25_mixed "$(header 24 12 "$SRC")\n$(runtime_ok 2234)\nVerificatio
 verdict "invocations that carried a 1024-byte slab, not 1536" CONFIG 0 "$d" 0
 d=$(mkcase 8x8x25_mixed "$(header 24 12 "$SRC")\n$(runtime_ok)\nVerification: PASS\n" '8 8 24 acc_8x8_0')
 verdict "a tile missing (the tiles do not cover the GEMM)" FAIL 0 "$d" 0
+d=$(mkcase 8x8x25_mixed "$(header 24 12 "$SRC")\n$(runtime_ok)\nVerification: PASS\n" '8 8 24 acc_8x8_0 0 0 0;8 8 1 acc_8x8_0 0 0 0')
+verdict "the multiply-adds add up, but k = 0 twice and k = 24 never" FAIL 0 "$d" 0
 d=$(mkcase 8x8x25_mixed "$(header 24 12 "$SRC")\n$(runtime_ok 3258 3)\nfirst mismatch: i=0 j=1  FPGA=5  CPU=4\nVerification: FAIL\n" "$TILES8")
 verdict "a numerical mismatch" MISMATCH 0 "$d" 1
 d=$(mkcase 8x8x25_mixed "systolic-matmul: SYSTOLIC_FPGA_CONFIG=$SRC: K_MAX_8X8 and K_MAX_4X4 are both required\n" "")
