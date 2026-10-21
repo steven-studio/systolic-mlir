@@ -62,6 +62,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Systolic/CostModel.h"
+#include "Systolic/CostModelV2.h"
 #include "Systolic/FpgaFleet.h"
 #include "Systolic/SystolicOptimizer.h"
 #include "Systolic/SystolicTiling.h"
@@ -101,6 +102,9 @@ struct FleetSpec {
   int64_t pipelineDepth = 1, reduceCycles = 0, feedGap = 0;
   // One invocation's fill rate, when not the fleet's v1 constant.
   double readBytesPerCycle = 0.0;
+  // The search's cost model (docs/COSTMODEL_V2.md); V2's operand path.
+  CostModelVersion costModel = CostModelVersion::V2;
+  bool beatWideOperandPath = false;
 };
 
 [[noreturn]] void die(const std::string &message) {
@@ -150,7 +154,9 @@ bool parseExtra(const std::string &text, FleetSpec &f) {
 std::map<std::string, std::string> parseOptions(int argc, char **argv,
                                                 int first) {
   static const char *const flags[] = {"--compute-only", "--tiles",
-                                      "--verify", "--pipelined"};
+                                      "--verify", "--pipelined",
+                                      "--v2-operand-path", "--serialized",
+                                      "--no-skip"};
   std::map<std::string, std::string> options;
   for (int i = first; i < argc; ++i) {
     std::string arg = argv[i];
@@ -231,6 +237,10 @@ FleetSpec fleetOptions(const std::map<std::string, std::string> &options) {
     die("--read-bytes-per-cycle must be a positive number");
   if (f.k8 < 1 || f.k4 < 1 || f.n8 < 0 || f.n4 < 0 || f.n8 + f.n4 < 1)
     die("K_MAX must be >= 1 and the fleet non-empty");
+  it = options.find("--cost-model");
+  if (it != options.end() && !parseCostModelVersion(it->second, f.costModel))
+    die("--cost-model must be v1 or v2");
+  f.beatWideOperandPath = options.count("--v2-operand-path") != 0;
   return f;
 }
 
@@ -267,6 +277,8 @@ SystolicOptimizerOptions optimizerOptions(const FleetSpec &f) {
   SystolicOptimizerOptions o;
   o.sharedReadBytesPerCycle =
       f.sharedReadWordsPerCycle * ::systolic::fpga::kElementBytes;
+  o.costModel = f.costModel;
+  o.beatWideOperandPath = f.beatWideOperandPath;
   return o;
 }
 
@@ -371,6 +383,12 @@ struct ScheduleSummary {
   int minimal = -1, monotone = -1;
   // --verify: the schedule is a valid one (validSchedule).
   int valid = -1;
+  // The model that priced the search, and V2's prediction of the schedule
+  // (-1 under V1).
+  CostModelVersion costModel = CostModelVersion::V1;
+  int64_t predictedDeviceMakespan = -1, predictedReadbackEnd = -1;
+  int64_t predictedArBursts = -1, predictedOperandBytes = -1;
+  int64_t predictedContentionCycles = -1;
 };
 
 /// An independent check of the optimizer's output: every original cell of
@@ -383,7 +401,18 @@ struct ScheduleSummary {
 /// makespan.
 bool validSchedule(int64_t m, int64_t n, int64_t k,
                    const ExactSystolicOptimizationResult &r,
-                   llvm::ArrayRef<SystolicArrayResource> fleet) {
+                   llvm::ArrayRef<SystolicArrayResource> fleet,
+                   const SystolicOptimizerOptions &opts) {
+  // Cost Model V2 prices tile n of an accelerator by its geometry's
+  // saturated stream (systolicGeometryStreams), rebuilt here independently.
+  llvm::SmallVector<GeometryStream> v2Streams;
+  if (r.costModel == CostModelVersion::V2) {
+    CostModelVersion used = CostModelVersion::V1;
+    auto streams = systolicGeometryStreams(m, n, k, fleet, opts, used);
+    if (mlir::failed(streams) || used != CostModelVersion::V2)
+      return false;
+    v2Streams = std::move(*streams);
+  }
   if (r.decomposition.size() != r.schedule.size())
     return false;
   std::vector<uint8_t> cover(static_cast<size_t>(m * n), 0);
@@ -429,9 +458,24 @@ bool validSchedule(int64_t m, int64_t n, int64_t k,
       return false;
     ::systolic::AcceleratorTimeline timeline(res->config);
     int64_t previousEnd = 0;
+    size_t round = 0;
     for (const auto &[start, index] : entry.second) {
       const ScheduledSystolicTile &s = r.schedule[index];
       int64_t tileStart = 0, tileEnd = 0;
+      if (!v2Streams.empty()) {
+        const GeometryStream *g = nullptr;
+        for (const GeometryStream &x : v2Streams)
+          if (x.geometry == res->arraySize)
+            g = &x;
+        if (!g || round >= g->tileEnd.size())
+          return false;
+        tileStart = g->tileStart[round];
+        tileEnd = g->tileEnd[round];
+        ++round;
+        if (s.startCycle != tileStart || s.endCycle != tileEnd)
+          return false;
+        continue;
+      }
       if (!timeline.pushTile(k, tileStart, tileEnd))
         return false;
       if (s.startCycle != tileStart || s.endCycle != tileEnd)
@@ -484,9 +528,15 @@ ScheduleSummary schedule(int64_t m, int64_t n, int64_t k, const FleetSpec &f,
   s.readBytes = result->totalReadBytes;
   s.sharedReadCycles = result->sharedReadCycles;
   s.checks = result->feasibilityChecks;
+  s.costModel = result->costModel;
+  s.predictedDeviceMakespan = result->predictedDeviceMakespan;
+  s.predictedReadbackEnd = result->predictedReadbackEnd;
+  s.predictedArBursts = result->predictedArBursts;
+  s.predictedOperandBytes = result->predictedOperandBytes;
+  s.predictedContentionCycles = result->predictedContentionCycles;
 
   if (verify) {
-    s.valid = validSchedule(m, n, k, *result, fleet) ? 1 : 0;
+    s.valid = validSchedule(m, n, k, *result, fleet, opts) ? 1 : 0;
     s.minimal = 1;
     s.monotone = 1;
     if (s.makespan > 0) {
@@ -527,6 +577,22 @@ void printSummary(const ScheduleSummary &s) {
               s.checks, s.tileSpan8, s.tileSpan4);
 }
 
+void printModelLine(const ScheduleSummary &s) {
+  // The model line: which model priced the search; V2 adds the chosen
+  // schedule's fleet simulation. (tile_cost_* / tile_span_* / read / compute
+  // / write above are V1's per-tile terms in either mode.)
+  if (s.costModel == CostModelVersion::V2)
+    std::printf("cost_model v2 planning_makespan=%" PRId64
+                " predicted_device_makespan=%" PRId64
+                " predicted_readback_end=%" PRId64 " ar=%" PRId64
+                " operand_bytes=%" PRId64 " contention_cycles=%" PRId64 "\n",
+                s.makespan, s.predictedDeviceMakespan, s.predictedReadbackEnd,
+                s.predictedArBursts, s.predictedOperandBytes,
+                s.predictedContentionCycles);
+  else
+    std::printf("cost_model v1\n");
+}
+
 int runSchedule(const std::map<std::string, std::string> &options,
                 bool verify) {
   const FleetSpec f = fleetOptions(options);
@@ -557,8 +623,10 @@ int runSchedule(const std::map<std::string, std::string> &options,
     std::printf("check valid=%s minimal=%s monotone=%s\n",
                 s.valid ? "yes" : "no", s.minimal ? "yes" : "no",
                 s.monotone ? "yes" : "no");
+    printModelLine(s);
     return (s.valid && s.minimal && s.monotone) ? 0 : 1;
   }
+  printModelLine(s);
   return 0;
 }
 
@@ -713,6 +781,121 @@ int runFleet(const std::map<std::string, std::string> &options) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// scan-feasible: the search's feasibility predicate at every deadline from
+// 0 to --to (default 2 x the search's T*), one problem build; reports every
+// deadline T with feasible(T) and not feasible(T + 1) (a monotonicity
+// counterexample), and the first feasible deadline (= T* when monotone).
+// ---------------------------------------------------------------------------
+
+int runScanFeasible(const std::map<std::string, std::string> &options) {
+  const FleetSpec f = fleetOptions(options);
+  const int64_t m = intOption(options, "--m", 0, true);
+  const int64_t n = intOption(options, "--n", 0, true);
+  const int64_t k = intOption(options, "--k", 0, true);
+  if (m < 1 || n < 1 || k < 1)
+    die("--m, --n and --k must be >= 1");
+  const llvm::SmallVector<SystolicArrayResource> fleet = makeFleet(f);
+  const SystolicOptimizerOptions opts = optimizerOptions(f);
+  auto result = optimizeSystolicBinarySearch(m, n, k, fleet, opts);
+  if (mlir::failed(result))
+    die("the search failed");
+  const int64_t to = intOption(options, "--to", 2 * result->makespan, false);
+  auto scan = scanSystolicDeadlineFeasibility(m, n, k, fleet, opts, 0, to);
+  if (mlir::failed(scan))
+    die("the scan failed");
+  int64_t first = -1, drops = 0;
+  for (int64_t t = 0; t <= to; ++t) {
+    if ((*scan)[t] && first < 0)
+      first = t;
+    if (t < to && (*scan)[t] && !(*scan)[t + 1]) {
+      ++drops;
+      std::printf("counterexample feasible(%" PRId64 ") and not feasible(%" PRId64
+                  ")\n", t, t + 1);
+    }
+  }
+  std::printf("scan m=%" PRId64 " n=%" PRId64 " k=%" PRId64 " deadlines=0..%" PRId64
+              " search_makespan=%" PRId64 " first_feasible=%" PRId64
+              " counterexamples=%" PRId64 " monotone=%s cost_model=%s\n",
+              m, n, k, to, result->makespan, first, drops,
+              drops == 0 && first == result->makespan ? "yes" : "no",
+              result->costModel == CostModelVersion::V2 ? "v2" : "v1");
+  return drops == 0 && first == result->makespan ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// fleet-sim: Cost Model V2's fleet simulator on a job list, in the format of
+// eval/cost_model_v2/tb_fleet_jobs.sv (dev k present dep gap per line), so
+// the RTL bench and the model run the same jobs.
+// ---------------------------------------------------------------------------
+
+int runFleetSim(const std::map<std::string, std::string> &options) {
+  const FleetSpec f = fleetOptions(options);
+  auto it = options.find("--jobs");
+  if (it == options.end())
+    die("fleet-sim needs --jobs FILE");
+  std::ifstream in(it->second);
+  if (!in)
+    die("cannot read " + it->second);
+  const bool beatWide = options.count("--v2-operand-path") != 0;
+  ::systolic::v2::FleetHardware hw = ::systolic::v2::fpgaFleet(
+      f.k8, f.k4, beatWide, f.pipelineDepth > 1 || !options.count("--serialized"));
+  hw.dptiPhasePs = intOption(options, "--dpti-phase-ps", hw.dptiPhasePs, false);
+  hw.dptiPeriodPs = intOption(options, "--dpti-period-ps", hw.dptiPeriodPs, false);
+  std::vector<::systolic::v2::FleetJob> jobs;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    std::istringstream ls(line);
+    ::systolic::v2::FleetJob j;
+    if (!(ls >> j.context >> j.k >> j.present >> j.dep >> j.gap))
+      continue;
+    jobs.push_back(j);
+  }
+  ::systolic::v2::FleetOptions o;
+  o.skipIdle = !options.count("--no-skip");
+  auto port = options.find("--port");
+  if (port != options.end()) {
+    if (port->second == "credit")
+      o.port = ::systolic::v2::PortPolicy::Credit;
+    else if (port->second != "inorder")
+      die("--port must be inorder or credit");
+  }
+  const ::systolic::v2::FleetResult r = ::systolic::v2::simulateFleet(hw, jobs, o);
+  if (!r.ok)
+    die("fleet simulation failed: " + r.error);
+  for (size_t i = 0; i < r.jobs.size(); ++i) {
+    const ::systolic::v2::FleetJobEvents &e = r.jobs[i];
+    std::printf("job %zu dev=%" PRId64 " k=%" PRId64 " offer=%" PRId64 " fire=%" PRId64
+                " fill=%" PRId64 " desc=%" PRId64 " last=%" PRId64 " land=%" PRId64
+                " fold=%" PRId64 " cv=%" PRId64 " wbreq=%" PRId64 " wbacc=%" PRId64
+                " done=%" PRId64 " take=%" PRId64 " rbdesc=%" PRId64 " rbdone=%" PRId64 "\n",
+                i, jobs[i].context, jobs[i].k, e.offer, e.fire, e.fillStart, e.desc,
+                e.lastBeat, e.land, e.fold, e.cv, e.wbReq, e.wbAcc, e.done, e.rbTake,
+                e.rbDesc, e.rbDone);
+  }
+  const ::systolic::v2::FleetStats &s = r.stats;
+  std::printf("fleet device_makespan=%" PRId64 " readback_end=%" PRId64
+              " last_byte_to_host=%" PRId64 " ar=%" PRId64 " operand_ar=%" PRId64
+              " max_outstanding=%" PRId64 " operand_bytes=%" PRId64
+              " readback_bytes=%" PRId64 " shared_cycles=%" PRId64
+              " r_stall_cycles=%" PRId64 " contention_cycles=%" PRId64
+              " simulated_cycles=%" PRId64 "\n",
+              r.deviceMakespan, r.readbackEnd, r.lastByteToHost, s.arBursts,
+              s.operandArBursts, s.maxOutstanding, s.operandReadBytes,
+              s.readbackBytes, s.sharedCycles, s.rStallCycles, s.contentionCycles,
+              s.simulatedCycles);
+  std::printf("bursts");
+  for (size_t l = 1; l < s.burstLengths.size(); ++l)
+    if (s.burstLengths[l])
+      std::printf(" %zu:%" PRId64, l, s.burstLengths[l]);
+  std::printf("\n");
+  for (size_t c = 0; c < r.contextMakespan.size(); ++c)
+    std::printf("context %zu makespan=%" PRId64 "\n", c, r.contextMakespan[c]);
+  return 0;
+}
+
 [[noreturn]] void usage(int status) {
   std::fprintf(status ? stderr : stdout,
                "usage: systolic-cost invocation --geometry G --k-max KM "
@@ -723,6 +906,11 @@ int runFleet(const std::map<std::string, std::string> &options) {
                "[fleet options] [--span S]\n"
                "       systolic-cost batch [--input FILE] [--verify]\n"
                "       systolic-cost fleet --k8 N --k4 N\n"
+               "       systolic-cost scan-feasible --m M --n N --k K "
+               "[--to T] [fleet options]\n"
+               "       systolic-cost fleet-sim --jobs FILE [--k8 N --k4 N] "
+               "[--port inorder|credit] [--v2-operand-path] [--serialized] "
+               "[--dpti-phase-ps P] [--dpti-period-ps P]\n"
                "       systolic-cost timeline --geometry G --k-max KM "
                "--k k0,k1,... [--accept t0,t1,...] [--feed t0,t1,...] "
                "[--write t0,t1,...] [fleet options]\n"
@@ -730,7 +918,8 @@ int runFleet(const std::map<std::string, std::string> &options) {
                "--compute-only --shared-read-words-per-cycle B "
                "--extra-read-overhead C|C8/C4 --pipelined | "
                "--pipeline-depth D --reduce-cycles R --feed-gap G "
-               "--read-bytes-per-cycle B\n"
+               "--read-bytes-per-cycle B --cost-model v1|v2 (default v2) "
+               "--v2-operand-path\n"
                "%s\n",
                batchUsage);
   std::exit(status);
@@ -756,6 +945,10 @@ int main(int argc, char **argv) {
     return runBatch(options);
   if (command == "fleet")
     return runFleet(options);
+  if (command == "fleet-sim")
+    return runFleetSim(options);
+  if (command == "scan-feasible")
+    return runScanFeasible(options);
   if (command == "timeline")
     return runTimeline(options);
   usage(2);

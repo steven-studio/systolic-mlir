@@ -2,12 +2,16 @@
 #include "Systolic/CostModel.h"
 #include "Systolic/SystolicTiling.h"
 
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Operation.h"
+
 #include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <vector>
 
 namespace mlir {
@@ -85,6 +89,8 @@ struct SearchProblem {
 
   llvm::SmallVector<GeometryInfo> geometries;   // largest first
   double sharedReadBytesPerCycle = 0.0;
+  CostModelVersion costModel = CostModelVersion::V1;
+  std::string v2FallbackReason;
 };
 
 /// True if the two configurations price every tile of every reduction the
@@ -209,7 +215,36 @@ buildSearchProblem(int64_t rows, int64_t columns, int64_t reduction,
   // of a geometry fit the padded domain, so no accelerator runs more.
   // ----------------------------------------------------------
 
-  for (GeometryInfo &g : problem.geometries) {
+  // Cost Model V2: the whole fleet busy at once (CostModelV2.h,
+  // saturatedStreams). Its streams replace the per-accelerator ones below;
+  // the compute-only streams (start_cycle's timeline) stay V1's.
+  std::optional<::systolic::v2::SaturatedStreams> saturated;
+  if (options.costModel == CostModelVersion::V2) {
+    std::string why;
+    FailureOr<::systolic::v2::FleetHardware> hw =
+        v2FleetFor(fleet, options.beatWideOperandPath, &why);
+    if (succeeded(hw)) {
+      std::vector<int64_t> rowsOf, want;
+      for (GeometryInfo &g : problem.geometries) {
+        int64_t tilesPerRow = 0, tilesPerColumn = 0, maxTiles = 0;
+        if (!checkedCeilDiv(problem.rowBlocks, g.blocks, tilesPerRow) ||
+            !checkedCeilDiv(problem.columnBlocks, g.blocks, tilesPerColumn) ||
+            !checkedMultiply(tilesPerRow, tilesPerColumn, maxTiles))
+          return failure();
+        rowsOf.push_back(g.geometry);
+        want.push_back(maxTiles);
+      }
+      saturated = ::systolic::v2::saturatedStreams(*hw, reduction, rowsOf, want);
+      if (!saturated->ok)
+        return failure();
+      problem.costModel = CostModelVersion::V2;
+    } else {
+      problem.v2FallbackReason = why;
+    }
+  }
+
+  for (size_t gi = 0; gi < problem.geometries.size(); ++gi) {
+    GeometryInfo &g = problem.geometries[gi];
     int64_t tilesPerRow = 0, tilesPerColumn = 0, maxTiles = 0;
     if (!checkedCeilDiv(problem.rowBlocks, g.blocks, tilesPerRow) ||
         !checkedCeilDiv(problem.columnBlocks, g.blocks, tilesPerColumn) ||
@@ -237,6 +272,14 @@ buildSearchProblem(int64_t rows, int64_t columns, int64_t reduction,
       g.tileStart.push_back(start);
       g.tileEnd.push_back(end);
       g.computeOnlyEnd.push_back(cEnd);
+    }
+    if (saturated) {
+      g.tileStart = saturated->tileStart[gi];
+      g.tileEnd = saturated->tileEnd[gi];
+      // One tile with the fleet saturated: what the search's upper bound
+      // multiplies (the bound's formula is unchanged).
+      if (!g.tileEnd.empty())
+        g.cost = std::max<int64_t>(1, g.tileEnd[0] - g.tileStart[0]);
     }
   }
 
@@ -421,6 +464,23 @@ static bool binarySearchFeasible(
 
 } // namespace
 
+FailureOr<std::vector<bool>> scanSystolicDeadlineFeasibility(
+    int64_t rows, int64_t columns, int64_t reduction,
+    llvm::ArrayRef<SystolicArrayResource> fleet,
+    const SystolicOptimizerOptions &options, int64_t from, int64_t to) {
+  if (from < 0 || to < from)
+    return failure();
+  SearchProblem problem;
+  if (failed(buildSearchProblem(rows, columns, reduction, fleet, options,
+                                problem)))
+    return failure();
+  std::vector<bool> out;
+  out.reserve(static_cast<size_t>(to - from + 1));
+  for (int64_t t = from; t <= to; ++t)
+    out.push_back(binarySearchFeasible(problem, t, nullptr, nullptr));
+  return out;
+}
+
 FailureOr<bool> isSystolicDeadlineFeasible(
     int64_t rows, int64_t columns, int64_t reduction,
     llvm::ArrayRef<SystolicArrayResource> fleet,
@@ -515,6 +575,8 @@ optimizeSystolicBinarySearch(
   ExactSystolicOptimizationResult result;
   result.makespan = low;
   result.totalReadBytes = readBytes;
+  result.costModel = problem.costModel;
+  result.v2FallbackReason = problem.v2FallbackReason;
   if (problem.sharedReadBytesPerCycle > 0.0)
     result.sharedReadCycles = ::systolic::transferCycles(
         readBytes, problem.sharedReadBytesPerCycle);
@@ -563,7 +625,134 @@ optimizeSystolicBinarySearch(
   }
 
   result.feasibilityChecks = checks;
+
+  // V2: the chosen schedule on the fleet simulator (a prediction; it does
+  // not feed back into the search).
+  if (problem.costModel == CostModelVersion::V2) {
+    FailureOr<::systolic::v2::FleetHardware> hw =
+        v2FleetFor(fleet, options.beatWideOperandPath);
+    if (succeeded(hw)) {
+      std::vector<::systolic::v2::FleetJob> jobs;
+      for (const SystolicExecutionTask &task : result.decomposition) {
+        const ::systolic::v2::ContextConfig &c =
+            hw->contexts[static_cast<size_t>(task.acceleratorId)];
+        for (int64_t k0 = 0; k0 < reduction; k0 += c.kMax) {
+          ::systolic::v2::FleetJob j;
+          j.context = task.acceleratorId;
+          j.k = std::min(c.kMax, reduction - k0);
+          jobs.push_back(j);
+        }
+      }
+      ::systolic::v2::FleetOptions o;
+      o.port = ::systolic::v2::PortPolicy::Credit;
+      const ::systolic::v2::FleetResult r =
+          ::systolic::v2::simulateFleet(*hw, jobs, o);
+      if (!r.ok)
+        return failure();
+      result.predictedDeviceMakespan = r.deviceMakespan;
+      result.predictedReadbackEnd = r.readbackEnd;
+      result.predictedArBursts = r.stats.arBursts;
+      result.predictedOperandBytes = r.stats.operandReadBytes;
+      result.predictedContentionCycles = r.stats.contentionCycles;
+    }
+  }
   return result;
+}
+
+void emitCostModelRemark(Operation *op,
+                         const ExactSystolicOptimizationResult &result) {
+  if (result.costModel == CostModelVersion::V1) {
+    // V1 asked for: nothing beyond V1's own remark. V2 asked for but
+    // impossible for this fleet: say so.
+    if (!result.v2FallbackReason.empty())
+      op->emitRemark() << "cost model v1 (v2 cannot model this fleet: "
+                       << result.v2FallbackReason << ")";
+    return;
+  }
+  InFlightDiagnostic d = op->emitRemark();
+  d << "cost model v2: planning makespan = " << result.makespan
+    << " cycles (saturated fleet)";
+  d << ", predicted device makespan = " << result.predictedDeviceMakespan
+      << ", readback end = " << result.predictedReadbackEnd
+      << ", AXI read requests = " << result.predictedArBursts
+      << ", operand bytes = " << result.predictedOperandBytes
+      << ", contention cycles = " << result.predictedContentionCycles;
+}
+
+bool parseCostModelVersion(llvm::StringRef text, CostModelVersion &version) {
+  if (text == "v1") {
+    version = CostModelVersion::V1;
+    return true;
+  }
+  if (text == "v2") {
+    version = CostModelVersion::V2;
+    return true;
+  }
+  return false;
+}
+
+FailureOr<::systolic::v2::FleetHardware>
+v2FleetFor(llvm::ArrayRef<SystolicArrayResource> fleet, bool beatWide,
+           std::string *why) {
+  auto fail = [&](const std::string &m) -> FailureOr<::systolic::v2::FleetHardware> {
+    if (why)
+      *why = m;
+    return failure();
+  };
+  if (fleet.empty())
+    return fail("an empty fleet");
+  ::systolic::v2::FleetHardware hw = ::systolic::v2::fpgaFleet(1, 1, beatWide);
+  hw.contexts.clear();
+  for (size_t i = 0; i < fleet.size(); ++i) {
+    const SystolicArrayResource &r = fleet[i];
+    const ::systolic::ArrayConfig &a = r.config;
+    if (r.acceleratorId != static_cast<int64_t>(i))
+      return fail("accelerator ids are not the fleet order");
+    if (a.rows != a.cols || a.rows != r.arraySize)
+      return fail("a non-square accelerator");
+    if (a.readBytesPerCycle <= 0.0 || a.writeBytesPerCycle <= 0.0)
+      return fail("an accelerator without the FPGA transport declaration "
+                  "(read_bytes_per_cycle / write_bytes_per_cycle)");
+    if (a.operandLanes != hw.wireLanes || a.kWindow != hw.kWindow ||
+        a.elementBytes != hw.elementBytes)
+      return fail("an accelerator whose operand slab is not the FPGA's "
+                  "(operand_lanes = 8, k_window = 8, 4-byte elements)");
+    if (a.kMax < 1)
+      return fail("an accelerator without k_max");
+    ::systolic::v2::ContextConfig c;
+    c.rows = a.rows;
+    c.kMax = a.kMax;
+    c.tileOverhead = a.tileOverhead;
+    c.reduceCycles = a.reduceCycles;
+    c.feedGap = a.feedGap;
+    c.pipelineDepth = a.pipelineDepth;
+    hw.contexts.push_back(c);
+  }
+  std::string reason;
+  if (!::systolic::v2::isValidFleetHardware(hw, &reason))
+    return fail(reason);
+  return hw;
+}
+
+FailureOr<llvm::SmallVector<GeometryStream>>
+systolicGeometryStreams(int64_t rows, int64_t columns, int64_t reduction,
+                        llvm::ArrayRef<SystolicArrayResource> fleet,
+                        const SystolicOptimizerOptions &options,
+                        CostModelVersion &used) {
+  SearchProblem problem;
+  if (failed(buildSearchProblem(rows, columns, reduction, fleet, options,
+                                problem)))
+    return failure();
+  used = problem.costModel;
+  llvm::SmallVector<GeometryStream> streams;
+  for (const GeometryInfo &g : problem.geometries) {
+    GeometryStream s;
+    s.geometry = g.geometry;
+    s.tileStart = g.tileStart;
+    s.tileEnd = g.tileEnd;
+    streams.push_back(std::move(s));
+  }
+  return streams;
 }
 
 } // namespace systolic

@@ -456,9 +456,13 @@ function must meet these conditions:
 Use `--explain` to see the decision for each function:
 
 ```text
-note: 'gemm' is offloaded: 54 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
+note: 'gemm' is offloaded: 45 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
 note: 'gemm_reference' is outside the supported C subset and is not translated: local variables are not supported (only for-loop counters)
 ```
+
+The invocation count comes from the binary search's cost model: Cost Model
+V2 (the default, `docs/COSTMODEL_V2.md`) gives 45; `systolic-cc --cost-model
+v1` gives the 54 of Cost Model V1.
 
 ## 11. Required C Headers
 
@@ -537,7 +541,8 @@ the CPU.
   with an exact integer reference and classifies it as PASS, MISMATCH,
   TRANSPORT, CONFIG and so on (`test/e2e/e2e_verdict.py`).
 - **Board vs co-simulation**: the example moved exactly the same bytes in
-  both modes (60318 B to the FPGA, 6624 B back, 54 invocations).
+  both modes (60318 B to the FPGA, 6624 B back, 54 invocations; recorded
+  with Cost Model V1's decomposition, before V2 became the default).
 
 ## 14. Troubleshooting
 

@@ -40,6 +40,11 @@ std::unique_ptr<Pass> createSystolicBinarySearchTileMatmulPass();
 /// all accelerators' fills share (0: each fills at its own rate).
 std::unique_ptr<Pass>
 createSystolicBinarySearchTileMatmulPass(double sharedReadBytesPerCycle);
+/// ... and the cost model ("v1" / "v2") and V2's operand path ("v1" / "v2").
+std::unique_ptr<Pass>
+createSystolicBinarySearchTileMatmulPass(double sharedReadBytesPerCycle,
+                                         llvm::StringRef costModel,
+                                         llvm::StringRef operandPath);
 void registerSystolicBinarySearchTileMatmulPass();
 
 std::unique_ptr<Pass> createSystolicMaterializeSchedulePass();
@@ -136,7 +141,9 @@ void buildSystolicRuntimeToLLVMPipeline(OpPassManager &pm);
 void buildSystolicFpgaPipeline(OpPassManager &pm, int64_t physKMax8x8,
                                int64_t physKMax4x4,
                                double sharedReadBytesPerCycle,
-                               bool async = false);
+                               bool async = false,
+                               llvm::StringRef costModel = "v2",
+                               llvm::StringRef operandPath = "v1");
 void registerSystolicPipelines();
 
 /// Dialects and bufferization external models the pipeline needs.

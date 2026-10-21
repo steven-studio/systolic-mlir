@@ -7,10 +7,10 @@
 // RUN: not systolic-opt --systolic-declare-fpga-fleet="pipeline-depth=0" %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=BAD
 // RUN: systolic-opt --systolic-declare-fpga-fleet="pipeline-depth=4" \
-// RUN:   "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" %s 2>&1 \
+// RUN:   "--affine-matmul-to-systolic=report=true cost-model=v1 allow-fp-reassociation=true" %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=SCHED4
 // RUN: systolic-opt --systolic-declare-fpga-fleet \
-// RUN:   "--affine-matmul-to-systolic=report=true allow-fp-reassociation=true" %s 2>&1 \
+// RUN:   "--affine-matmul-to-systolic=report=true cost-model=v1 allow-fp-reassociation=true" %s 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=SCHED1
 
 // The C / affine path declares the fleet from the bitstream's record, so

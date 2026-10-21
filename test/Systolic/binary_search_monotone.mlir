@@ -1,10 +1,10 @@
-// RUN: systolic-cost check-monotone --m 64 --n 64 --k 64 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 64 --n 64 --k 64 --shared-read-words-per-cycle 3.51 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 100 --n 36 --k 147 --k8 24 --k4 12 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 100 --n 36 --k 147 --k8 24 --k4 12 --shared-read-words-per-cycle 1 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 49 --n 512 --k 4608 --k8 17 --k4 7 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 1 --n 1000 --k 512 --k8 64 --k4 8 --shared-read-words-per-cycle 3.627 | FileCheck %s
-// RUN: systolic-cost check-monotone --m 13 --n 7 --k 1 --k8 1 --k4 1 --compute-only | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 64 --n 64 --k 64 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 64 --n 64 --k 64 --shared-read-words-per-cycle 3.51 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 100 --n 36 --k 147 --k8 24 --k4 12 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 100 --n 36 --k 147 --k8 24 --k4 12 --shared-read-words-per-cycle 1 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 49 --n 512 --k 4608 --k8 17 --k4 7 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 1 --n 1000 --k 512 --k8 64 --k4 8 --shared-read-words-per-cycle 3.627 | FileCheck %s
+// RUN: systolic-cost check-monotone --cost-model v1 --m 13 --n 7 --k 1 --k8 1 --k4 1 --compute-only | FileCheck %s
 
 // The schedule the binary search returns must be valid -- every output
 // element covered exactly once, no padding-only tile, each tile on an

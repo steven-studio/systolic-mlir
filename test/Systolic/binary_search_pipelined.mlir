@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true" --split-input-file -verify-diagnostics %s | FileCheck %s
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1" --split-input-file -verify-diagnostics %s | FileCheck %s
 
 // The binary search on the FPGA fleet whose contexts pipeline consecutive
 // invocations (pipeline_depth / reduce_cycles / feed_gap, the 2026-10-18 RTL:

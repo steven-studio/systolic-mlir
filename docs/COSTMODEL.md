@@ -1,5 +1,10 @@
 # Cost model：Read / Compute / Write（variable-K）
 
+> **2026-10-21：** 本文件描述 Cost Model V1（`cost-model=v1` / `--cost-model v1`）。
+> binary search 的預設已改為 Cost Model V2：整個 fleet 一起逐 cycle 模擬（共用 read
+> port、write-back engine、readback 路徑），見 `docs/COSTMODEL_V2.md`。V1 的公式與數字
+> 在下文不變，V1 也仍可選用。
+
 **2026-10-12。** 一次 invocation 的成本由 `lib/Systolic/Transforms/CostModel.cpp` 計算，
 這是唯一的成本公式所在。`--systolic-binary-search-tile-matmul`（經
 `SystolicOptimizer.cpp`）、`--systolic-select-device`、`--systolic-cost-analysis`、

@@ -15,6 +15,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   TileMatmulForFpga.cpp
   Conv2DToFpga.cpp
   CostModel.cpp
+  CostModelV2.cpp
   DeclareFpgaFleet.cpp
   DeviceConfig.cpp
   SystolicCostAnalysisPass.cpp

@@ -106,8 +106,11 @@ void mlir::systolic::buildSystolicFpgaPipeline(OpPassManager &pm,
                                                int64_t physKMax8x8,
                                                int64_t physKMax4x4,
                                                double sharedReadBytesPerCycle,
-                                               bool async) {
-  pm.addPass(createSystolicBinarySearchTileMatmulPass(sharedReadBytesPerCycle));
+                                               bool async,
+                                               llvm::StringRef costModel,
+                                               llvm::StringRef operandPath) {
+  pm.addPass(createSystolicBinarySearchTileMatmulPass(
+      sharedReadBytesPerCycle, costModel, operandPath));
   pm.addPass(createTileMatmulForFpgaPass(physKMax8x8, physKMax4x4, async));
   buildSystolicRuntimeToLLVMPipeline(pm);
 }
@@ -133,6 +136,15 @@ struct SystolicFpgaPipelineOptions
                      "(default: the fleet's reference, 3.51; 0: each array "
                      "fills independently)"),
       llvm::cl::init(::systolic::fpga::kSharedReadWordsPerCycle)};
+  Option<std::string> costModel{
+      *this, "cost-model",
+      llvm::cl::desc("Cost model of the binary search: v2 (default) or v1"),
+      llvm::cl::init("v2")};
+  Option<std::string> operandPath{
+      *this, "operand-path",
+      llvm::cl::desc("Cost model v2: the bitstream's operand path, v1 "
+                     "(default) or v2"),
+      llvm::cl::init("v1")};
   Option<bool> async{
       *this, "async",
       llvm::cl::desc("Lower to the asynchronous runtime (fpga_gemm_begin / "
@@ -158,6 +170,6 @@ void mlir::systolic::registerSystolicPipelines() {
             pm, options.physKMax8x8, options.physKMax4x4,
             ::systolic::fpga::sharedReadBytesPerCycle(
                 options.sharedReadWordsPerCycle),
-            options.async);
+            options.async, options.costModel, options.operandPath);
       });
 }
