@@ -77,12 +77,39 @@ one `arith.mulf` of them and one `affine.store` of the product: the assignment `
 K = 1 GEMM into a zeroed C, accepted only when every element of C is written once (a loop of two
 or more iterations that no subscript of C reads is refused as an overwrite, PROVEN_INVALID; batches
 overlapping in C are refused by the lowering's injectivity proof; the lowering zeroes C's window
-before the tiles); since 2026-10-19 also the dimension-intersection partitioning (docs section 21): a
+before the tiles; since 2026-10-21 the lowering pass first applies **last write wins**, docs
+section 20.5, pass option `last-write-wins`, on by default: in an assignment on a box as written --
+constant bounds, not empty, A and B provably disjoint from C, the body exactly two loads, a mulf and
+the store -- and only when the nest may be lowered at all, i.e. with the permission to reassociate,
+every loop of two or more iterations that C's store does not read is cut to its last iteration,
+and the cut nest is decided by these assignment rules; the discovery pass still sees the nest as
+written); since 2026-10-19 also the dimension-intersection partitioning (docs section 21): a
 loop read by C only, and the extra loops of a row or column role that is not one dense
 coordinate (`C[p][i][j] += A[p][i][k] * B[k][j]`: p), are demoted to batch loops by the rule of
 section 21.3 (the analyses run again with them as batch loops; a demoted loop must be read by C
 alone in a dimension of its own; the factor that does not read it is shared by the partitions; a
-loop read by both factors and not by C is never demoted -- a partial-C reduction, refused);
+loop read by both factors and not by C is never demoted by section 21 -- a partial-C reduction);
+since 2026-10-21 also the reduction-batch partitioning (docs section 23, on by default; systolic-cc
+`--no-reduction-batches`, pass option `reduction-batches=false` turn it off): on a box domain whose
+counters are the program's (not after a domain normalization that rewrote them with U != I -- a
+sheared parallelotope, or an exact parallelotope with a nonzero shift row; a disguised box whose
+shift rows are all zero, U = I, keeps them) and
+for an accumulation (never an assignment), a loop read by one factor only, and the loops both
+factors read beyond the one kept as K (all of them K first, then each in turn, the longest first,
+ties the innermost), are reduction batch loops run around the tiles, every iteration accumulating
+into the same slab of C in order (lowered only with the permission to reassociate);
+since S4 (2026-10-21, docs section 25, ordered output batches) also, for an accumulation whose
+C is not injective on the (I, J) box (`C[10*i + j]` with j < 11, `C[i + j]`, `C[4*i + j]` with
+j < 5), the whole I role (the first factor's loops with C), else the whole J role, demoted to
+batch loops -- only when those loops and the other batch loops are an outermost prefix of the
+nest's loops of two or more iterations (loops that run once and repetition loops the hoist moves
+out are skipped), with constant trip counts, on a box whose counters are the program's (pass
+option `countersAsWritten`: not after a normalization with U != I); the retry re-checks every
+tile injective (G2) and the exact bijection; the output-disjointness check of section 21 is
+relaxed for an accumulation whose batch loops are such a prefix (`C[4*p + i][j]` with p
+outermost: overlapping partitions accumulate in order); the lowering is unchanged (per batch:
+read C, the tiles, write C back; async: begin ... wait inside the batch body); an assignment's
+collision stays refused, as does a nest whose batch loop sits inside a role or reduction loop;
 every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
@@ -279,7 +306,8 @@ multiply-accumulate (no loop of a GEMM to anchor on; basis `no_gemm_loop`, 2026-
 nest of loops that run once is the 1 x 1 x 1 GEMM and is offloaded), and -- since
 ISSUE-008 -- a nest that is a batched GEMM only under a decomposition other than its readers'
 (a loop read by one FACTOR only: a stride-0 role, basis `broadcast`; a loop read by both factors
-and not by C beyond the reduction: basis `partial_reduction`; separate coordinates in one role or a
+and not by C beyond the reduction: basis `partial_reduction` -- both since 2026-10-21 only when
+no reduction-batch decomposition, docs section 23, is valid either; separate coordinates in one role or a
 role that is not one dense coordinate whose partition of section 21 is not valid, C not injective
 per batch: basis `demotion`; `docs/AFFINE_GEMM_MAPPING.md` section 19.2 -- the executable specification
 exhibits the decomposition, the compiler constructs only the canonical one). (Transposed
@@ -322,7 +350,19 @@ the accumulation form's (`dense_gemm`, `batched`, ...) plus `assignment`; the fa
 hold no zeros, `casespec.factor_nonzero`). An assignment that writes an element of C more than once (a reduction loop of two
 or more iterations, `C[i][j] = A[i][k] * B[k][j]`; a loop only the factors read; batches
 overlapping in C, `C[i + b][j] = A[b][i] * B[b][j]`) is not a GEMM of its operands: REJECT, basis
-`not_gemm_overwrite`. Since 2026-10-19 also the **dimension-intersection partitioning** (docs section
+`not_gemm_overwrite` -- unless **last write wins** (since 2026-10-21, docs section 20.5, basis
+`last_write_wins`): on a box with constant bounds, not empty, the factors other arrays than C, the
+loops of two or more iterations that C does not read rewrite the same elements, so the program's
+result is that of the nest cut to their last iteration (`casespec.last_write_cut`, checked by
+enumeration against the last write of every element in program order); when that cut nest is an
+assignment these rules accept (every element written once: `C[i][j] = A[i][k] * B[k][j]` becomes
+`C[i][j] = A[i][7] * B[7][j]`, the 8 x 8 x 1 GEMM into a zeroed C), the nest is ACCEPTED; otherwise
+it is decided as written (`not_gemm_overwrite`, aliasing, ...). The prediction applies the cut only
+under the compiler's conditions (also A and B provably disjoint from C: restrict), and only with
+reassociation, which the showcase and the generator always pass (`--fp-reassociation`,
+`allow-fp-reassociation`); strict floating point keeps such a nest on the host as written. Such an
+assignment's factor data hold no zeros either (`casespec.assignment_written_once`), except where a
+case accepts the signed-zero deviation explicitly (`runtime_check`, section 3: case_097). Since 2026-10-19 also the **dimension-intersection partitioning** (docs section
 21, basis `dimension_partition`): a loop read by C only (`C[b][i][j] += A[i][k] * B[k][j]`) and the
 extra loops of a row or column role (`C[p][i][j] += A[p][i][k] * B[k][j]`, `C[q][i][j] += A[i][k] *
 B[q][k][j]`, several of them, mixed with triple-intersection batch loops, permuted, offset or strided
@@ -330,8 +370,49 @@ batch dimensions, K = 1 outer products, rank-1 factors, skewed and merged factor
 loops partitioning the GEMM into independent slabs of C, the factor that does not read them shared
 (`casespec.partition_decomposition`: the rule of section 21.3, verified by enumeration; the
 partitions' outputs must be disjoint -- `C[p + i][j]` and the merged `C[3p + i][j]` stay OUT_OF_SCOPE
-`demotion`). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
-B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition.
+`demotion` -- unless they are ordered output batches, below). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
+B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition --
+until 2026-10-21. Since 2026-10-21 (docs section 23, the research policy of 2026-10-21, basis
+`reduction_batches`) such loops, and the loops read by one factor only, are **reduction batch
+loops**: an accumulation `C += A * B` on a box is ACCEPTED whenever its loops decompose into
+batch, I, J, K and reduction batch loops (the loops C does not read beyond one K coordinate; with
+no loop read by both factors the virtual K = 1) that keep the iteration domain, every operand
+access and every product's multiplicity (repeated products are kept, not a reason to refuse), the
+reduction batch iterations accumulating into C serially, in order (`casespec.reduction_batch_decomposition`,
+by enumeration; the checks of `partition_decomposition` with the reduction batch loops as batch
+loops C does not read). Not for an assignment `C = A * B` (a loop C does not read overwrites:
+`not_gemm_overwrite`, or, on a box, it is cut to its last iteration -- `last_write_wins` above; assignments only with K = 1, or index association dimension 0 and a
+virtual K = 1: the assignment policy of 2026-10-21, docs section 20), not on a non-box domain, not
+on the box form of a nest whose counters the domain normalization rewrote with U != I (sections
+19.12, 19.13: the compiler makes reduction batch loops only on counters as written, so such a nest
+keeps the decision of sections 19-21 -- OUT_OF_SCOPE `reduction_batches_rewritten` when the
+decomposition exists; U = I, a box as written or a disguised box with zero shift rows, stays
+eligible), not
+when every reduction batch iteration is a 1 x 1 x 1 product (an element-wise product, section
+19.1); strict floating point still refuses
+(`--fp-reassociation`); one-dimensional C is Phase 2. Re-decided ACCEPT: case_090, case_095,
+case_123, case_125 (each with its record `redecided`).
+
+**Ordered output batches (S4, 2026-10-21, docs section 25, basis `ordered_output_batches`):** an
+accumulation `C += A * B` on a box as written whose C is not injective on the (I, J) box of its
+canonical (or partitioned) decomposition (`C[10*i + j]` with j < 11, `C[i + j]`, `C[4*i + j]`
+with j < 5, `C[2*i + 2*j]`), or whose partitions of section 21 overlap in C (`C[4*p + i][j]` with
+`A[p][i][k]`), is ACCEPTED when the whole I role (the first factor's loops with C; with the
+factors written `B * A`, B's), else the whole J role, as batch loops makes every tile one dense
+GEMM with C injective on the tile's (I, J) box (G2 re-checked), and the batch loops -- with the
+demoted role -- are an **outermost prefix** of the nest's loops of two or more iterations that an
+access uses (`casespec.ordered_output_decomposition`; `_spec_outer_prefix`). The lowering runs
+the batches in the program's order, each reading C, adding its tile and writing C back before
+the next batch reads it, so every contribution is kept and every element of C receives the
+batches' contributions in the order written -- checked independently by enumeration
+(`_contributions_in_batch_order`: per element the batch tuples of its updates never decrease).
+Inside one tile only the sum over K is reassociated, as in every GEMM. Not for an assignment
+(collisions overwrite: `not_gemm_overwrite`), not when a role or reduction loop encloses a batch
+loop (`for k: for i: for j: C[10*i + j] += ...`, `for i: for p: ... C[4*p + i][j]`: OUT_OF_SCOPE
+`demotion`), not on a non-box domain, not on the box form of a nest whose counters the domain
+normalization rewrote with U != I (OUT_OF_SCOPE `ordered_output_batches_rewritten`), and the
+guards of every ACCEPT apply (double, mixed types, aliasing, `repeat_in_reduction`: a repetition
+loop inside the batches of colliding outputs cannot be hoisted).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=
@@ -437,7 +518,17 @@ the predicted stage with the predicted reason, the program's check passed: not a
 blocking), **spec_open** (an UNDETERMINED case the compiler offloaded: not a PASS, and the run
 fails on it unless `--allow-spec-open`). Results:
 `reports/`. Nothing is ever marked PASS without having run; a stage that did not run is
-`not_run` with the reason. MLIR-level cases (`mlir_*`, manifest `kind: mlir`) run the discovery
+`not_run` with the reason. A case's result checks are bitwise (`systolic-cc --verify` compares
+the bits, the program compares every element and the checksum) unless its manifest entry says
+`runtime_check: signed_zero` (generator/showcase_cases.py `runtime_check`; only case_097, the
+assignment re-decided by last write wins on 2026-10-21): the user accepted that an offloaded
+assignment returns a -0 product as +0 (the tiles sum from +0, docs sections 6 and 20), so the
+program compares numerically (-0 == +0; any other difference, or a -0 result where the reference
+holds +0, fails), counts and prints the elements that differ in the sign of zero only, and checks
+the reference's negative zeros against the Python oracle; the runners pass `--verify-rtol 1e-300`
+(`scripts/stages.py verify_flags`: systolic-cc treats a tolerance <= 0 as bitwise, and 1e-300 is
+numerical equality on float data, since two different floats differ by at least 2^-149) and the
+verdict notes the count. MLIR-level cases (`mlir_*`, manifest `kind: mlir`) run the discovery
 and lowering passes only — recognition, dense partition, operand views and the lowering's
 remark are compared with the manifest, nothing is compiled by `systolic-cc` or executed, and
 their report rows say so (`not_applicable`). After a run, `python3 scripts/inventory.py` writes

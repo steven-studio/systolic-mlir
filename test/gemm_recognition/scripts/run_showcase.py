@@ -125,7 +125,8 @@ def one(args):
         st = {"cpu": stages.stage_cpu(src, workdir)}
         verdict = "pass" if st["cpu"]["result"] == "pass" else "test_bug"
         return entry["id"], verdict, {"cpu": st["cpu"]["result"]}, [], [], stages.strip_runs(st, keep_output)
-    st = stages.run_case(tools, src, entry["kernel"], workdir, runtime=runtime, env=env, only=only_stages)
+    st = stages.run_case(tools, src, entry["kernel"], workdir, runtime=runtime, env=env, only=only_stages,
+                         extra_cc_flags=stages.verify_flags(entry))
     if only_stages and set(only_stages) < set(stages.ALL_STAGES):
         verdict, actual, mism, notes = classify_partial(entry, st, only_stages)
     else:

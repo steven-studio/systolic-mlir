@@ -8,6 +8,16 @@
 // partial-C reduction, refused); by one factor only -- a broadcast, refused.
 // A demoted (partitioning) loop must be read by C alone in a dimension of its
 // own: the partitions write disjoint slabs of C.
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+// default): a loop not read by C -- a second coordinate read by both factors,
+// or a coordinate read by one factor only -- is a reduction batch (RB) of an
+// accumulation C += A * B: one GEMM per value with offset factor views, all
+// accumulated into the same slab of C in the original order (cases 8 and 10).
+// RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a non-injective C):
+// for an accumulation the demoted loops' slabs of C may overlap when every batch loop is
+// in the outermost prefix of the nest: the batches then run in the order written, each
+// reading C, adding its tile and writing C back before the next reads it (case 9).
+// Assignments keep the disjointness rule (cases 9a and 11).
 //
 // RUN: systolic-opt "--affine-matmul-to-systolic=allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s | FileCheck %s
@@ -233,14 +243,30 @@ func.func @merged_factor(%A: memref<6x4xf32> {llvm.noalias}, %B: memref<4x5xf32>
 
 // -----
 
-// 8. Refused: a second reduction coordinate, C[i][j] += A[r][i][k] * B[r][k][j].
-//    r is read by A and B, not by C: as a batch loop every iteration would
-//    accumulate into the same C -- a partial-C reduction, not a partition.
+// 8. A second reduction coordinate, C[i][j] += A[r][i][k] * B[r][k][j].
+//    RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
+//    default): r is read by A and B, not by C. Section 21 refused it (a
+//    partial-C reduction); it is now a reduction batch: r (loop 0) is RB, k
+//    (loop 3) is K, i/j are I/J. Each r runs the GEMM A[r] * B[r] (both factor
+//    views offset by r) and accumulates into the whole of C (no subview of C)
+//    in the original order r, then k: every product once, the domain and every
+//    access preserved (ground truth: partial.c). Not a partition.
 // CHECK-LABEL: func.func @partial_reduction
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK-NOT:  lowered as
-// DISC:        reason: 2 separate coordinates are read by both factors (the reduction): one GEMM role over several coordinates needs a merged (reshaped) view, not lowered; as a batch the extra reduction coordinate would accumulate every batch into one slab of C (requires a partial-C reduction, docs/AFFINE_GEMM_MAPPING.md section 21)
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         memref.subview %arg0[%{{.*}}, 0, 0] [1, 3, 4] [1, 1, 1]
+// CHECK:         memref.subview %arg1[%{{.*}}, 0, 0] [1, 4, 5] [1, 1, 1]
+// CHECK:         bufferization.to_tensor %arg2 restrict writable : memref<3x5xf32>
+// CHECK:         systolic.matmul_tile {{.*}} m = 3 n = 5 k = 4
+// CHECK:         bufferization.materialize_in_destination %{{.*}} in restrict writable %arg2 : (tensor<3x5xf32>, memref<3x5xf32>)
+// REMARK:      remark: affine GEMM 3x5x4 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 2 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 2 time(s)
+// DISC-NOT:    partition: loop(s)
+// DISC:        layout A: roles in dimensions (1, 2)
+// DISC-NEXT:   layout B: roles in dimensions (1, 2)
+// DISC-NEXT:   batch terms A: dimension 0 = 0 + 1*x0
+// DISC-NEXT:   batch terms B: dimension 0 = 0 + 1*x0
+// DISC-NEXT:   statement: C = C + A * B (accumulation)
+// DISC-NEXT:   reduction batch: loop(s) 0 (not read by C: for each value a GEMM with offset factor views, all accumulated into the same slab of C in order)
+// DISC:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @partial_reduction(%A: memref<2x3x4xf32> {llvm.noalias}, %B: memref<2x4x5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
   affine.for %r = 0 to 2 {
     affine.for %i = 0 to 3 {
@@ -261,14 +287,35 @@ func.func @partial_reduction(%A: memref<2x3x4xf32> {llvm.noalias}, %B: memref<2x
 
 // -----
 
-// 9. Refused: the partitions' outputs overlap, C[p + i][j] += A[p][i][k] *
-//    B[k][j]. p would partition, but C reads it together with the row
-//    coordinate: rows 1 and 2 belong to both partitions. A legal sequential
-//    accumulation, not an independent partition: valid, not constructed.
+// 9. The partitions' outputs overlap, C[p + i][j] += A[p][i][k] * B[k][j]. p
+//    would partition, but C reads it together with the row coordinate: rows 1
+//    and 2 belong to both partitions. A legal sequential accumulation, not an
+//    independent partition: refused until 2026-10-21 (valid, not constructed).
+//    RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a
+//    non-injective C): lowered. p (loop 0) is demoted to a batch loop and is the
+//    outermost loop, so the 2 batches run in the order written: batch p reads
+//    rows p .. p + 2 of C, adds its 3 x 5 x 4 tile (A[p] * B, B shared; rows
+//    distinct within the tile) and writes them back before batch p + 1 reads
+//    them. Numerically (the same kernel, SystolicCC/affine_dimension_partition.c
+//    overlap_c, through systolic-cc --verify, sync and async, soft and mock,
+//    integer data, nonzero initial C): bitwise equal to the loops as written;
+//    the 10 elements of rows 1 and 2 each receive the (nonzero) contributions of
+//    both batches. Its assignment twin is case 9a (next).
 // CHECK-LABEL: func.func @overlapping_partitions
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: loop 0 would partition the GEMM (dimension-intersection partitioning, docs/AFFINE_GEMM_MAPPING.md section 21), but C reads it in dimension 0 together with a role coordinate: the partitions' outputs would not be independent slabs of C (overlapping, or one merged dimension) -- not constructed
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         memref.subview %arg0[%{{.*}}, 0, 0] [1, 3, 4] [1, 1, 1]
+// CHECK:         memref.subview %arg2[%{{.*}}, 0] [3, 5] [1, 1] : memref<5x5xf32> to memref<3x5xf32, strided<[5, 1], offset: ?>>
+// CHECK:         systolic.matmul_tile {{.*}} m = 3 n = 5 k = 4
+// CHECK-NOT:     systolic.matmul_tile
+// CHECK:         bufferization.materialize_in_destination
+// REMARK:      remark: affine GEMM 3x5x4 lowered as 1 exact region(s), partitioned on 1 demoted loop(s), batched: 2 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 2 time(s)
+// DISC:        batch terms A: dimension 0 = 0 + 1*x0
+// DISC-NEXT:   batch terms C: dimension 0 += 1*x0
+// DISC-NEXT:   statement: C = C + A * B (accumulation)
+// DISC-NEXT:   partition: loop(s) 0 demoted to batch loops
+// DISC:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
+// DISC-NEXT:   dense extents: M 3, N 5, K 4
+// DISC-NEXT:   logical bijection: verified
 func.func @overlapping_partitions(%A: memref<2x3x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.noalias}, %C: memref<5x5xf32> {llvm.noalias}) {
   affine.for %p = 0 to 2 {
     affine.for %i = 0 to 3 {
@@ -287,14 +334,55 @@ func.func @overlapping_partitions(%A: memref<2x3x4xf32> {llvm.noalias}, %B: memr
   return
 }
 
+
 // -----
 
-// 10. Refused: a loop read by one factor only, C[i][j] += A[i][s][k] * B[k][j]
-//     (a reduction over s with B constant along it: a broadcast, section 10).
-// CHECK-LABEL: func.func @one_factor_only
+// 9a. The assignment twin of case 9 stays refused: C[p + i][j] = A[p][i] * B[j]
+//     overwrites rows 1 and 2 in the second partition (only the last product
+//     survives); the ordered output batches are made for accumulations only, so
+//     the disjointness rule refuses it as before.
+// CHECK-LABEL: func.func @overlapping_partitions_assign
 // CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: a coordinate is read by the first factor only: the other operands would be broadcast along it (a stride-0 view, not lowered: docs/AFFINE_GEMM_MAPPING.md section 10)
+// DISC:        reason: loop 0 would partition the GEMM (dimension-intersection partitioning, docs/AFFINE_GEMM_MAPPING.md section 21), but C reads it in dimension 0 together with a role coordinate: the partitions' outputs would not be independent slabs of C (overlapping, or one merged dimension) -- not constructed
 // DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+func.func @overlapping_partitions_assign(%A: memref<2x3xf32> {llvm.noalias}, %B: memref<5xf32> {llvm.noalias}, %C: memref<5x5xf32> {llvm.noalias}) {
+  affine.for %p = 0 to 2 {
+    affine.for %i = 0 to 3 {
+      affine.for %j = 0 to 5 {
+        %a = affine.load %A[%p, %i] : memref<2x3xf32>
+        %bb = affine.load %B[%j] : memref<5xf32>
+        %p0 = arith.mulf %a, %bb : f32
+        affine.store %p0, %C[%p + %i, %j] : memref<5x5xf32>
+      }
+    }
+  }
+  return
+}
+// -----
+
+// 10. A loop read by one factor only, C[i][j] += A[i][s][k] * B[k][j].
+//     RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on
+//     by default): section 21 refused it as a broadcast (section 10); s is not
+//     read by C, so it is a reduction batch: s (loop 2) is RB, k (loop 3) is
+//     K, i/j (loops 0/1) are I/J. Each s runs the GEMM A[:, s, :] * B with B
+//     the whole memref (no batch term on B: shared, every product
+//     A[i][s][k] * B[k][j] still formed once) and accumulates into the whole
+//     of C in the original order s, then k (ground truth: an RB with one
+//     factor constant along it, like a_only.c / T5.c).
+// CHECK-LABEL: func.func @one_factor_only
+// CHECK:       affine.for %{{.*}} = 0 to 2 {
+// CHECK:         memref.subview %arg0[0, %{{.*}}, 0] [3, 1, 4] [1, 1, 1]
+// CHECK:         bufferization.to_tensor %arg1 restrict : memref<4x5xf32>
+// CHECK:         bufferization.to_tensor %arg2 restrict writable : memref<3x5xf32>
+// CHECK:         systolic.matmul_tile {{.*}} m = 3 n = 5 k = 4
+// CHECK:         bufferization.materialize_in_destination %{{.*}} in restrict writable %arg2 : (tensor<3x5xf32>, memref<3x5xf32>)
+// REMARK:      remark: affine GEMM 3x5x4 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 2 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 2 time(s)
+// DISC-NOT:    partition: loop(s)
+// DISC:        layout A: roles in dimensions (0, 2)
+// DISC-NEXT:   batch terms A: dimension 1 = 0 + 1*x2
+// DISC-NEXT:   statement: C = C + A * B (accumulation)
+// DISC-NEXT:   reduction batch: loop(s) 2 (not read by C: for each value a GEMM with offset factor views, all accumulated into the same slab of C in order)
+// DISC:        dense logical GEMM: yes, I/J/K on loops 0/1/3, batched over loop(s) 2 (2 batch iteration(s))
 func.func @one_factor_only(%A: memref<3x2x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.noalias}, %C: memref<3x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 3 {
     affine.for %j = 0 to 5 {

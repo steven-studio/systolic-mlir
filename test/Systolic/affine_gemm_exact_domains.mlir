@@ -288,12 +288,39 @@ func.func @symmetric_hexagon(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4x
 
 // -----
 // E. Duplicated logical iterations on a box: K read as k + l by both factors -- (k, l) = (0, 1)
-// and (1, 0) are the same K. Not one dense coordinate; a batched GEMM with l demoted to a batch
-// loop (docs section 19.2), which is not constructed: VALID_BUT_LOWERING_UNSUPPORTED (demotion
-// stays deferred).
+// and (1, 0) read the same pair of elements, so k + l is not one dense coordinate.
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default): this
+// was VALID_BUT_LOWERING_UNSUPPORTED because the demotion of a loop to a batch loop was
+// deferred (sections 19.2 and 21); the 2026-10-21 research policy accepts it. k (loop 2, read by
+// both factors, not by C) is the reduction batch loop and l (loop 3) is K: for each k, a 4x4x4
+// GEMM reads A[i][k + K] and B[k + K][j] through views offset by k and accumulates into the same
+// C, the k iterations in order. Every iteration runs once (the repeated products keep their
+// multiplicity). Ground truth: A[i][k0 + k1] * B[k0 + k1][j] of section 23.5
+// (test/SystolicCC/affine_reduction_batches.c).
 // CHECK-LABEL: func.func @duplicated_k
+// CHECK-NOT:   affine.load
+// CHECK:       affine.for %{{.*}} = 0 to 4 {
+// CHECK-NOT:   affine.load
+// CHECK:       memref.subview %arg0[0, %{{.*}}] [4, 4] [1, 1]
+// CHECK:       memref.subview %arg1[%{{.*}}, 0] [4, 4] [1, 1]
+// CHECK:       bufferization.to_tensor %arg2 restrict writable
+// CHECK:       systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
+// CHECK-NEXT:  bufferization.materialize_in_destination {{.*}} in restrict writable %arg2
+// CHECK-NOT:   affine.load
 // CHECK-NOT:   systolic.matmul_tile
-// REMARK:      logical coordinate K is driven by 2 loops that do not enumerate it densely{{.*}}[VALID_BUT_LOWERING_UNSUPPORTED]
+// REMARK:      affine_gemm_exact_domains.mlir:[[@LINE+14]]:{{[0-9]+}}: remark: affine GEMM 4x4x4 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 4 batch iteration(s) of 1 batch loop(s); the enclosing loops run it 4 time(s)
+// DISC:        reduction map: (d0, d1, d2, d3) -> (d3)
+// DISC:        phiA: (d0, d1, d2, d3) -> (d0, d1, d3)
+// DISC-NEXT:   phiB: (d0, d1, d2, d3) -> (d0, d3, d2)
+// DISC-NEXT:   phiC: (d0, d1, d2, d3) -> (d0, d1, d2)
+// DISC:        batch terms A: dimension 1 += 1*x2
+// DISC-NEXT:   batch terms B: dimension 0 += 1*x2
+// DISC-NEXT:   statement: C = C + A * B (accumulation)
+// DISC-NEXT:   reduction batch: loop(s) 2 (not read by C
+// DISC:        reduction extent: static 4
+// DISC-NEXT:   dense logical GEMM: yes, I/J/K on loops 0/1/3, batched over loop(s) 2 (4 batch iteration(s))
+// DISC-NEXT:   dense extents: M 4, N 4, K 4
+// DISC-NEXT:   logical bijection: verified (the iteration domain maps one to one onto the box of the GEMM)
 func.func @duplicated_k(%A: memref<4x7xf32> {llvm.noalias}, %B: memref<7x4xf32> {llvm.noalias}, %C: memref<4x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 4 {

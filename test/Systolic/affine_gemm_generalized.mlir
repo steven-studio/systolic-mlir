@@ -214,13 +214,34 @@ func.func @hankel(%A: memref<7xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.no
   return
 }
 // -----
-// MUST BE REFUSED (G2): C[i*4 + j] with j in [0,5): (I, J) = (0, 4) and (1, 0) both write
-// C[4]; one tile would lose an update. (With j as a batch loop it would be a valid batched
-// GEMV, which the recognizer does not construct.)
+// Refused until 2026-10-21 (G2): C[i*4 + j] with j in [0,5): (I, J) = (0, 4) and (1, 0)
+// both write C[4]; one tile would lose an update. (With j as a batch loop it would be a
+// valid batched GEMV, which the recognizer did not construct.)
+// RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a non-injective C):
+// lowered. In this accumulation the collision is a reduction to keep, not an update to
+// lose: the output role I (loop 0, the outermost loop) becomes a batch loop, so the 4
+// batches run in the order written, each reading C[4i .. 4i + 4], adding its tile and
+// writing it back before the next batch reads C[4(i + 1)] (= the last element of the
+// previous batch). Per batch the tile is the GEMV C[4i + J] += A[4i + K] * B[5K + J],
+// M x N x K = 1 x 5 x 4 (one tile here, without a fleet), injective on its five outputs.
+// Numerically (the same kernel through systolic-cc --verify, sync and async, soft and
+// mock, integer data, nonzero initial C): bitwise equal to the loops as written; C[4],
+// C[8] and C[12] each receive the (nonzero) contributions of two batches. The assignment
+// twin, C[i*4 + j] = A[i] * B[j] with j in [0,5), stays refused:
+// affine_gemm_assignment.mlir @flat_collision_assign.
 // CHECK-LABEL: func.func @flat_not_injective
-// CHECK-NOT:   systolic.matmul_tile
-// DISC:        reason: C's view is not injective on the (I, J) box: the outputs with ordinals (I, J) and (I + 1, J + -4) write the same element of C
-// DISC-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
+// CHECK:       affine.for %{{.*}} = 0 to 4 {
+// CHECK:         memref.subview %arg2[%{{.*}}] [5] [1] : memref<20xf32> to memref<5xf32, strided<[1], offset: ?>>
+// CHECK:         systolic.matmul_tile {{.*}} m = 1 n = 5 k = 4
+// CHECK-NOT:     systolic.matmul_tile
+// CHECK:         bufferization.materialize_in_destination
+// REMARK:      remark: affine GEMM 1x5x4 lowered as 1 exact region(s), partitioned on 1 demoted loop(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+// DISC:        batch terms C: dimension 0 += 4*x0
+// DISC-NEXT:   statement: C = C + A * B (accumulation)
+// DISC-NEXT:   partition: loop(s) 0 demoted to batch loops
+// DISC:        dense logical GEMM: yes, I/J/K on loops /1/2, batched over loop(s) 0 (4 batch iteration(s))
+// DISC-NEXT:   dense extents: M 1, N 5, K 4
+// DISC-NEXT:   logical bijection: verified
 func.func @flat_not_injective(%A: memref<16xf32> {llvm.noalias}, %B: memref<20xf32> {llvm.noalias}, %C: memref<20xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
     affine.for %j = 0 to 5 {

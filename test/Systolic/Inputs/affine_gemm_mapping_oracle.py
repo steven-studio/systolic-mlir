@@ -122,8 +122,54 @@ meeting those conditions with the load's map, the compiler's (and with no
 stepped loop whose lower bound reads a counter), must be PROVEN_INVALID. The
 classes are counted in the summary.
 
+Reduction-batch partitioning (docs section 23; on by default since
+2026-10-21, --no-reduction-batches runs the pass with reduction-batches=false
+and decides without it): every generated nest accumulates, C = C + A * B (an
+assignment never gets reduction batch loops, section 20.4: none is generated
+here). On the box the nest is decided on, the loops of two or more iterations
+C does not read are, by their readers, read by one factor only or by both.
+The decompositions tried, in order (reduction_batch_choices): the one-factor
+loops as reduction batch (RB) loops; then, with two or more loops read by
+both factors, each of them as K -- the longest first, ties the innermost --
+and the others RB too. The first one that is a GEMM by enumeration (the
+batch iterations, RB values included, each a GEMM of its points with C
+injective per iteration; decide_with) is the verdict; with none, the
+recognition of sections 19-21 alone decides. Repeated products are not a
+reason to refuse: every iteration point stays one update. A lowered RB nest
+is checked like every batched one -- the emitted batch loops run the
+decision's batch loops (RB loops included), so every iteration runs exactly
+once, and every batch value's views hold its points' accesses address by
+address (each RB value's factor views at their offsets, C's view the slab all
+its RB values share) -- and the IR must read C, run the tile and write C back
+inside every batch loop (check_serial_accumulation): the RB iterations
+accumulate into one slab in order, from C's initial value.
+
+Ordered output batches (docs section 25, since 2026-10-21; independent of
+--no-reduction-batches): an accumulation decided on its counters as written
+(the nests reduction batches are made on: no normalization with U != I) whose
+C is not injective on a batch iteration's (I, J) box keeps every
+contribution when an output role becomes batch loops -- the role of the
+product's first factor first, then the other's -- provided those loops and
+the other batch loops are an OUTERMOST PREFIX of the nest's loops of two or
+more iterations (ordered_prefix): the batch iterations then run in the order
+written, each reading C as the previous one left it. The decomposition is
+decided again by enumeration (each tile a GEMM, C injective on it). On such
+a prefix a demoted loop may also share a dimension of C with a row or column
+coordinate (the partitions' outputs overlap or interleave), except where it
+moves the role's coordinate in the role's factor too through a different
+linear form (SQ-1, not lowered). Assignments are not generated; sheared and
+disguised nests with U != I keep the refusal. Every lowered nest -- batched
+or not, ordered or not -- is then checked contribution by contribution
+(check_ordered_contributions): from the compiler's views, per emitted batch
+iteration in the emitted order, no tile writes an element of C twice, every
+element of C receives exactly the program's products (as {A element, B
+element} pairs), and the products of different output batch values arrive in
+the program's order (only one tile's products, and one slab's reduction
+batch iterations, are reassociated).
+
 With --fp-default the nests go through the pass WITHOUT the reassociation
-permission, and nothing may be lowered (section 6).
+permission, and nothing may be lowered (section 6), with reduction batch loops
+or ordered output batches or without.
 
 Prints every mismatch and a summary line.
 """
@@ -893,7 +939,25 @@ def generate(rng):
 # ---------------------------------------------------------------------------
 # The decision, by enumeration.
 
-def classify_loops(nest):
+def ordered_prefix(nest, batch):
+    """Whether the loops `batch` are an outermost prefix of the nest's loops
+    of two or more iterations (docs section 25): every loop of two or more
+    iterations that is not in `batch` comes after all of them. The batch
+    loops are then emitted around the tiles in the order written, and every
+    element of C receives the contributions of different batch iterations in
+    the program's order (only the order inside one tile changes)."""
+    batch, inner = set(batch), False
+    for s, loop in enumerate(nest.loops):
+        if trips(*loop) < 2:
+            continue
+        if s not in batch:
+            inner = True
+        elif inner:
+            return False
+    return True
+
+
+def classify_loops(nest, rb=(), whole=(), ordered=False):
     """The compiler's classification of the loops of two or more iterations,
     with the dimension-intersection partitioning of docs/AFFINE_GEMM_MAPPING.md
     section 21 (2026-10-19): a loop read by all three operands is a batch loop;
@@ -910,17 +974,31 @@ def classify_loops(nest):
     be read by C alone in a dimension of its own (else UNSUPPORTED: the
     partitions' outputs would overlap).  A reduction role that is not one
     coordinate is refused (a partial-C reduction).
+    `rb`: the reduction batch loops of the decomposition tried (docs section
+    23, decide): loops C does not read, made batch loops -- never a role, no
+    broadcast refusal for them --, each value a GEMM accumulating into the
+    same slab of C. Empty: the recognition of sections 19-21 alone.
+    `whole`: the loops of output roles demoted all together (section 25:
+    C not injective on the (I, J) box of an accumulation; decide_with), batch
+    loops and demoted loops like the others. `ordered`: the nest accumulates
+    on a box with its counters as written (section 25) -- then, when the
+    batch loops are an outermost prefix (ordered_prefix), a demoted loop may
+    share a dimension of C with a role coordinate: the partitions' outputs
+    overlap, and each batch iteration reads C as the previous one wrote it.
     Returns (batch_loops, role_loops, directions, demoted, None) or
     (None, None, None, None, (verdict, why))."""
     n = len(nest.loops)
     many = [trips(*loop) >= 2 for loop in nest.loops]
     reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
              for name in "ABC"}
+    rb = set(rb)
+    assert not rb & reads["C"], "a reduction batch loop is read by C"
     triple = reads["A"] & reads["B"] & reads["C"]
     demoted = {s for s in range(n) if many[s] and s in reads["C"]
-               and s not in reads["A"] and s not in reads["B"]}
+               and s not in reads["A"] and s not in reads["B"]} | set(whole)
     for s in range(n):
-        if many[s] and s not in reads["C"] and len([nm for nm in "AB" if s in reads[nm]]) == 1:
+        if many[s] and s not in rb and s not in reads["C"] and \
+                len([nm for nm in "AB" if s in reads[nm]]) == 1:
             return None, None, None, None, ("REJECT", "loop %d is read by one operand only (a broadcast)" % s)
 
     def choose(cand):
@@ -955,12 +1033,37 @@ def classify_loops(nest):
         return {s for s in keep if s != best}
 
     for _ in range(n + 1):
-        batch_loops = sorted(triple | demoted)
+        batch_loops = sorted(triple | demoted | rb)
         role_loops = {"I": sorted((reads["A"] & reads["C"]) - set(batch_loops)),
                       "J": sorted((reads["B"] & reads["C"]) - set(batch_loops)),
                       "K": sorted((reads["A"] & reads["B"]) - set(batch_loops))}
-        # a demoted loop is read by C alone in a dimension of its own
+        # a demoted loop is read by C alone in a dimension of its own -- unless
+        # the batches run in the program's order around the tiles (section 25)
+        if ordered and ordered_prefix(nest, batch_loops):
+            # Then a demoted loop may share a dimension of C with a row or
+            # column coordinate. Not lowered (UNSUPPORTED, as before section
+            # 25): when it shares one with the role's coordinate in the role's
+            # factor too, the two subscripts -- the role's loops and the
+            # demoted ones -- must be multiples of one linear form (else an
+            # operand-specific decomposition of the role's coordinate, the
+            # batch moving it differently in the factor and in C: SQ-1).
+            for role, factor in (("I", "A"), ("J", "B")):
+                loops = role_loops[role]
+                span = sorted(set(loops) | demoted)
+
+                def mixed(f):
+                    return any(f[0][s] for s in loops) and any(f[0][s] for s in demoted)
+                for ff in [f for f in nest.ops[factor][1] if mixed(f)]:
+                    for fc in [f for f in nest.ops["C"][1] if mixed(f)]:
+                        u, v = [ff[0][s] for s in span], [fc[0][s] for s in span]
+                        if any(u[a] * v[b] != u[b] * v[a] for a in range(len(span)) for b in range(len(span))):
+                            return None, None, None, None, (
+                                "UNSUPPORTED", "role %s's coordinate is moved by a demoted loop in %s and in C "
+                                "through subscripts that are not multiples of one linear form (an operand-specific "
+                                "decomposition, SQ-1)" % (role, factor))
         for d, f in enumerate(nest.ops["C"][1]):
+            if ordered and ordered_prefix(nest, batch_loops):
+                break
             dem = [s for s in range(n) if f[0][s] != 0 and s in demoted]
             if dem and any(f[0][s] != 0 and many[s] and s not in batch_loops for s in range(n)):
                 return None, None, None, None, ("UNSUPPORTED", "loop %d would partition the GEMM but C reads it in dimension %d together with a role coordinate (the partitions' outputs would not be independent slabs)" % (dem[0], d))
@@ -1003,7 +1106,57 @@ def classify_loops(nest):
     return None, None, None, None, ("REJECT", "the demotion did not converge")
 
 
-def decide(nest):
+def reduction_loops(nest):
+    """The loops of two or more iterations C does not read, by their readers
+    (docs sections 22-23): (one_factor, shared) -- read by one factor only (a
+    'broadcast' before section 23), and read by both factors (the
+    contraction candidates S)."""
+    n = len(nest.loops)
+    many = [trips(*loop) >= 2 for loop in nest.loops]
+    reads = {name: {s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
+             for name in "ABC"}
+    one = sorted(s for s in range(n) if many[s] and s not in reads["C"]
+                 and (s in reads["A"]) != (s in reads["B"]))
+    shared = sorted((reads["A"] & reads["B"]) - reads["C"])
+    return one, shared
+
+
+def reduction_batch_choices(nest):
+    """The decompositions with reduction batch loops (docs section 23.2), in
+    the documented order: first the loops read by one factor only as RB (the
+    contraction loops all K); then, when two or more loops are read by both
+    factors and not by C, each of them in turn as K -- the longest first (the
+    largest tiles), ties the innermost -- and the others RB as well."""
+    one, shared = reduction_loops(nest)
+    choices = [frozenset(one)]
+    if len(shared) >= 2:
+        for k in sorted(shared, key=lambda s: (-trips(*nest.loops[s]), -s)):
+            choices.append(frozenset(one) | (frozenset(shared) - {k}))
+    return choices
+
+
+def decide(nest, reduction_batches=True, ordered=True):
+    """The verdict on the box nest: ("ACCEPT", (M, N, K), number of batch
+    loops, general, batch loops, reduction batch loops) or (REJECT |
+    UNSUPPORTED | SKIP, why).
+
+    With `reduction_batches` (the default since 2026-10-21; the nest is an
+    accumulation on a box: every generated nest accumulates, C = C + A * B,
+    so the assignment rule -- an assignment never gets reduction batch loops,
+    section 20.4 -- has nothing to exclude here) the decompositions of
+    reduction_batch_choices are tried in order and the first that is a dense
+    GEMM by enumeration (decide_with) is the verdict; when none is, the
+    verdict is the recognition of sections 19-21 alone (no reduction batch
+    loop), its reason included. Not a copy of the compiler's search: each
+    choice is decided by enumerating its points, every reduction batch value
+    a GEMM of its own on its points (gemm_on_points) into the slab of C its
+    points address.
+
+    `ordered` (section 25, independent of `reduction_batches`): the nest is
+    decided on its counters as written (no domain normalization with U != I)
+    -- every generated nest accumulates and is decided on a box -- so a C
+    that is not injective on a tile's (I, J) box may be resolved by ordered
+    output batches (decide_with)."""
     pts = nest.points()
     if not pts:
         return ("SKIP", "empty domain (SQ-2)")
@@ -1022,21 +1175,77 @@ def decide(nest):
             vals = [value(f, x) for x in pts]
             if min(vals) < 0 or max(vals) >= shape[d]:
                 return ("REJECT", "%s is accessed out of bounds along dimension %d" % (name, d))
+    if reduction_batches:
+        for rb in reduction_batch_choices(nest):
+            verdict = decide_with(nest, pts, rb, ordered)
+            if verdict[0] == "ACCEPT":
+                return verdict
+    return decide_with(nest, pts, frozenset(), ordered)
 
-    # The roles by readers with the dimension-intersection partitioning
-    # (classify_loops; docs sections 19.2 and 21). C may read batch loops
-    # anywhere (no C purity since 2026-10-16) except that a demoted loop is
-    # read alone; what C must be is injective per batch (G2).
-    batch_loops, role_loops, directions, demoted, reject = classify_loops(nest)
+
+def decide_with(nest, pts, rb, ordered=False):
+    """One decomposition: the roles by readers with the dimension-intersection
+    partitioning (classify_loops; docs sections 19.2 and 21), the loops `rb`
+    reduction batch loops (section 23). C may read batch loops anywhere (no C
+    purity since 2026-10-16) except that a demoted loop is read alone; what C
+    must be is injective per batch iteration (G2). A reduction batch loop is
+    not read by C, so its iterations with the other batch values fixed all
+    write one slab of C: the lowering accumulates them into it in order
+    (check_serial_accumulation checks that on the IR).
+
+    Ordered output batches (docs section 25, `ordered`: an accumulation on a
+    box, counters as written): when a batch iteration's C is not injective on
+    its (I, J) box -- two outputs of one tile would write one element, one
+    update lost -- the contributions to that element are a reduction the
+    program performs in its order. One output role is made batch loops all
+    together -- the role of the product's first factor first, then the
+    other's (a role with loops) -- when its loops with the batch loops are an
+    outermost prefix of the nest (ordered_prefix): the batch iterations then
+    run in the order written, each accumulating into C as the previous one
+    left it, so every contribution is kept, in order across batch iterations
+    and reassociated only inside one tile. The decomposition is decided again
+    by enumeration (every tile a GEMM with C injective); with no such role the
+    refusal stands. The lowering is checked address by address per batch
+    iteration and by check_ordered_contributions."""
+    whole = set()
+    for _ in range(len(nest.loops) + 1):
+        verdict = decide_parts(nest, pts, rb, whole, ordered)
+        if verdict[0] != "UNSUPPORTED" or not ordered or len(verdict) < 3:
+            return verdict[:2] if verdict[0] != "ACCEPT" else verdict
+        # C not injective on a tile's (I, J) box: an output role demoted
+        role_loops, batch_loops = verdict[2], verdict[3]
+        first = "I" if nest.order[0] == "A" else "J"
+        chosen = None
+        for role in (first, "J" if first == "I" else "I"):
+            loops = role_loops[role]
+            if loops and ordered_prefix(nest, set(batch_loops) | set(loops)):
+                chosen = loops
+                break
+        if chosen is None:
+            return verdict[:2]
+        whole |= set(chosen)
+    return ("REJECT", "the ordered output batches did not converge")
+
+
+def decide_parts(nest, pts, rb, whole, ordered):
+    """decide_with for one set of whole-role demotions `whole`; a refusal for
+    C not injective on a tile's box carries the role and batch loops (the
+    retry's input)."""
+    batch_loops, role_loops, directions, demoted, reject = classify_loops(nest, rb, whole, ordered)
     if reject is not None:
         return reject
     # Per batch iteration: a GEMM of affine views, every iteration the same.
+    # The batch iterations are the batch loops' values: with the points of a
+    # box grouped by them, every point is in exactly one group.
     groups = {}
     for x in pts:
         groups.setdefault(tuple(x[s] for s in batch_loops), []).append(x)
     shape, general = None, False
     for sub in groups.values():
         verdict = gemm_on_points(nest, sub, role_loops, directions)
+        if verdict[0] == "UNSUPPORTED":
+            return (verdict[0], verdict[1] + (" (within a batch iteration)" if batch_loops else ""),
+                    role_loops, batch_loops)
         if verdict[0] != "ACCEPT":
             return (verdict[0], verdict[1] + (" (within a batch iteration)" if batch_loops else ""))
         if shape is None:
@@ -1044,7 +1253,37 @@ def decide(nest):
         elif verdict[1] != shape:
             return ("REJECT", "the batch iterations are not one GEMM shape")
         general = general or verdict[2]
-    return ("ACCEPT", shape, len(batch_loops), general)
+    if rb:
+        # Each slab of C: the reduction batch iterations that share the
+        # other batch values write the same elements (C reads no RB loop), so
+        # every one of them accumulates into the slab the first one does.
+        slabs = {}
+        for key, sub in groups.items():
+            outer = tuple(v for s, v in zip(batch_loops, key) if s not in rb)
+            elements = frozenset(tuple(value(f, x) for f in nest.ops["C"][1]) for x in sub)
+            if slabs.setdefault(outer, elements) != elements:
+                return ("REJECT", "the reduction batch iterations of one slab write different elements of C")
+    # Section 25 on the decision: the batch iterations of an ordered
+    # decomposition may write overlapping elements of C (the whole-role
+    # demotions, a demoted loop sharing C's dimension with a role); `overlap`
+    # records it, and whether the batch loops are an outermost prefix.
+    overlap = False
+    seen = {}
+    for key, sub in groups.items():
+        outer = tuple(v for s, v in zip(batch_loops, key) if s not in rb)
+        for x in sub:
+            element = tuple(value(f, x) for f in nest.ops["C"][1])
+            if seen.setdefault(element, outer) != outer:
+                overlap = True
+    # A demoted loop sharing a dimension of C with a row or column coordinate
+    # (refused before section 25: the partitions' outputs are not
+    # independent slabs).
+    shared_dim = any(any(f[0][s] for s in demoted) and
+                     any(f[0][s] and trips(*nest.loops[s]) >= 2 and s not in batch_loops
+                         for s in range(len(nest.loops)))
+                     for f in nest.ops["C"][1])
+    overlap = (overlap, ordered_prefix(nest, batch_loops), shared_dim)
+    return ("ACCEPT", shape, len(batch_loops), general, list(batch_loops), sorted(rb), sorted(whole), overlap)
 
 
 def gemm_on_points(nest, pts, role_loops, directions):
@@ -1177,6 +1416,8 @@ def emit(nest, name):
 DEF = re.compile(r"^\s*(%[\w.]+) = (?:memref\.subview|memref\.transpose|memref\.expand_shape|memref\.reinterpret_cast) (%[\w.]+)")
 TO_TENSOR = re.compile(r"^\s*(%[\w.]+) = bufferization\.to_tensor (%[\w.]+) .*: (memref<[^>]*(?:<[^>]*>[^>]*)?>) to tensor")
 TILE = re.compile(r"systolic\.matmul_tile (%[\w.]+), (%[\w.]+), (%[\w.]+) m = (\d+) n = (\d+) k = (\d+)")
+TILE_DEF = re.compile(r"^\s*(%[\w.]+) = systolic\.matmul_tile ")
+MATERIALIZE = re.compile(r"^\s*bufferization\.materialize_in_destination (%[\w.]+) in (?:restrict )?(?:writable )?(%[\w.]+)")
 MEMREF = re.compile(r"memref<([\dx]+)xf32(?:, strided<\[([-\d, ]+)\](?:, offset: (-?\d+|\?))?>)?>")
 MAPDEF = re.compile(r"^(#[\w$.]+) = affine_map<\(([^)]*)\) -> \((.*)\)>\s*$")
 APPLY = re.compile(r"^\s*(%[\w.]+) = affine\.apply (#[\w$.]+|affine_map<\(([^)]*)\) -> \((.*?)\)>)\(([^)]*)\)")
@@ -1212,11 +1453,14 @@ REMARK = re.compile(r"^<stdin>:(\d+):\d+: remark: affine GEMM not lowered to sys
                     r"\[(PROVEN_VALID|VALID_BUT_LOWERING_UNSUPPORTED|PROVEN_INVALID|UNKNOWN)\]$", re.M)
 
 
-def compiler_results(opt, text, permit):
+def compiler_results(opt, text, permit, reduction_batches=True):
     """The lowered views of every nest (None when not lowered), and the refusal
     remarks [(line, class, reason)]. classify=true only appends each refused
-    nest's class to its remark; the IR is the same."""
-    option = "--affine-matmul-to-systolic=classify=true" + (" allow-fp-reassociation=true" if permit else "")
+    nest's class to its remark; the IR is the same. Reduction-batch
+    partitioning is the pass's default (docs section 23, since 2026-10-21):
+    the option is passed only to turn it off."""
+    option = "--affine-matmul-to-systolic=classify=true" + (" allow-fp-reassociation=true" if permit else "") + \
+        ("" if reduction_batches else " reduction-batches=false")
     run = subprocess.run([opt, option, "-split-input-file", "-"], input=text,
                          capture_output=True, text=True)
     if run.returncode != 0:
@@ -1232,7 +1476,23 @@ def compiler_results(opt, text, permit):
             results.append(None)
             continue
         source, tensors, subviews, maps, applies, batch_loops = {}, {}, {}, {}, {}, []
-        for line in chunk.splitlines():
+        # Where the C tile is read, computed and written back: per line, its
+        # position and the counters of the affine.for loops around it.
+        stack, placed, materialized = [], {}, []
+        for number, line in enumerate(chunk.splitlines()):
+            around = tuple(label for label in stack if label)
+            loop = FORLOOP.match(line)
+            for ch in line:
+                if ch == "{":
+                    stack.append(loop.group(1) if loop else None)
+                elif ch == "}" and stack:
+                    stack.pop()
+            m = TILE_DEF.match(line)
+            if m:
+                placed["tile"] = (m.group(1), number, around)
+            m = MATERIALIZE.match(line)
+            if m:
+                materialized.append((m.group(1), m.group(2), number, around))
             m = MAPDEF.match(line)
             if m:
                 maps[m.group(1)] = (m.group(2), m.group(3))
@@ -1262,6 +1522,7 @@ def compiler_results(opt, text, permit):
                         hop = root
                     root = source[root]
                 tensors[m.group(1)] = (root, parse_view(m.group(3)), subviews.get(hop))
+                placed[m.group(1)] = (m.group(2), number, around)
         views = []
         for t in tile.groups()[:3]:
             root, view, subview = tensors[t]
@@ -1270,7 +1531,8 @@ def compiler_results(opt, text, permit):
                           view, subview))
         results.append((tuple(int(v) for v in tile.groups()[3:]), views,
                         len(batch_loops), {"loops": batch_loops, "applies": applies,
-                                           "operands": list(tile.groups()[:3])}))
+                                           "operands": list(tile.groups()[:3]),
+                                           "placed": placed, "materialized": materialized}))
     return results, remarks
 
 
@@ -1587,45 +1849,37 @@ def check_views(nest, mnk, views, pts=None):
     return None
 
 
-def batch_loops_of(nest):
-    """The loops the compiler re-emits around the tiles: those read by all
-    three operands and the demoted ones (classify_loops, docs section 21)."""
-    batch, _, _, _, reject = classify_loops(nest)
-    if reject is not None:
-        n = len(nest.loops)
-        many = [trips(*loop) >= 2 for loop in nest.loops]
-        reads = [{s for f in nest.ops[name][1] for s in range(n) if f[0][s] != 0 and many[s]}
-                 for name in "ABC"]
-        return sorted(reads[0] & reads[1] & reads[2])
-    return list(batch)
-
-
-def batch_offset_in_role(nest):
-    """Whether a factor's dimension mixes a batch loop with another loop."""
-    batch = set(batch_loops_of(nest))
+def batch_offset_in_role(nest, batch):
+    """Whether a factor's dimension mixes a batch loop (of the decision's
+    `batch` loops) with another loop."""
+    batch = set(batch)
     many = [trips(*loop) >= 2 for loop in nest.loops]
     return any(any(f[0][s] for s in batch) and
                any(f[0][s] and many[s] and s not in batch for s in range(len(nest.loops)))
                for name in "AB" for f in nest.ops[name][1])
 
 
-def c_has_batch_terms(nest):
+def c_has_batch_terms(nest, batch):
     """Whether a dimension of C mixes a batch loop with another loop (the C
     'purity' the specification dropped on 2026-10-16)."""
-    batch = set(batch_loops_of(nest))
+    batch = set(batch)
     many = [trips(*loop) >= 2 for loop in nest.loops]
     return any(any(f[0][s] for s in batch) and
                any(f[0][s] and many[s] and s not in batch for s in range(len(nest.loops)))
                for f in nest.ops["C"][1])
 
 
-def check_batched(nest, got):
-    """The batched lowering: the emitted batch loops are the nest's batch
-    loops (the same iterations -- origin, step, trip count --, same order),
-    and for every batch value the views -- dynamic offsets evaluated -- pass
-    check_views on that batch iteration's points."""
+def check_batched(nest, got, batch):
+    """The batched lowering: the emitted batch loops are the decision's batch
+    loops `batch` (those read by all three operands, the demoted ones of
+    section 21 and the reduction batch loops of section 23: the same
+    iterations -- origin, step, trip count --, same order), and for every
+    batch value the views -- dynamic offsets evaluated -- pass check_views on
+    that batch iteration's points. The batch values' product is then the
+    nest's box, so every iteration runs exactly once, at its own addresses.
+    The accumulation of the batch iterations into C is checked on the IR
+    by check_serial_accumulation."""
     mnk, views, _, info = got
-    batch = batch_loops_of(nest)
     loops = info["loops"]
     if len(loops) != len(batch):
         return "%d batch loop(s) emitted for %d" % (len(loops), len(batch))
@@ -1649,6 +1903,117 @@ def check_batched(nest, got):
     return None
 
 
+def check_serial_accumulation(got):
+    """The tile's C is read (bufferization.to_tensor of C's view), computed
+    and written back (materialize_in_destination of the tile's result into
+    that same view) inside every emitted batch loop, in that order: each
+    batch iteration starts from C as the previous one left it -- for the
+    reduction batch iterations of section 23, which all accumulate into one
+    slab, the accumulation in order from C's initial value; a C read before
+    the batch loops, or a write-back after them, would lose all but one
+    iteration's products. None when it holds."""
+    info = got[3]
+    loops = tuple(iv for iv, _, _, _ in info["loops"])
+    placed, materialized = info["placed"], info["materialized"]
+    c_tensor = info["operands"][2]
+    if "tile" not in placed or c_tensor not in placed:
+        return "the tile or its C operand is not defined in the function body"
+    result, tile_at, tile_around = placed["tile"]
+    c_view, c_at, c_around = placed[c_tensor]
+    if tile_around != loops or c_around != loops:
+        return ("the tile (in loops %s) or its C read (in loops %s) is not inside every batch loop %s"
+                % (tile_around, c_around, loops))
+    if c_at > tile_at:
+        return "C is read after the tile"
+    back = [(at, around) for src, dst, at, around in materialized if src == result and dst == c_view]
+    if len(back) != 1:
+        return "the tile's result is written back into C's view %d time(s), not once" % len(back)
+    at, around = back[0]
+    if around != loops or at < tile_at:
+        return "the tile's result is written back into C outside the batch loops %s or before the tile" % (loops,)
+    return None
+
+
+def check_ordered_contributions(nest, got, batch, rb):
+    """The lowered program's dataflow into C, simulated from the compiler's
+    own views (docs section 25): the emitted batch loops run in their
+    emitted order (outermost first); every batch iteration reads its C tile,
+    adds its products and writes the tile back before the next one reads C
+    (check_serial_accumulation establishes that structure on the IR), so the
+    contributions an element of C receives are the blocks of the batch
+    iterations that write it, in the emitted order, each block the K
+    products of one output of one tile (their order inside a tile is the
+    reassociation the permission allows). Checked against the program -- the
+    nest's points in lexicographic order, each point one contribution
+    {A element, B element} to its C element (an unordered pair: the factors
+    are named by memref argument and address, the product commutes):
+
+      * no tile writes an element of C twice (a tile's outputs are distinct
+        elements: else both read the same old value and one update is lost);
+      * every element of C receives exactly the program's contributions,
+        each once (nothing lost, nothing added);
+      * across batch iterations of different output batch values (the batch
+        loops other than the reduction batch loops `rb`), in the program's
+        order: the element's blocks, merged per run of one output batch
+        value, are consecutive segments of the program's sequence of its
+        contributions, in order. The reduction batch iterations of one slab
+        (section 23) and the products inside one tile are reassociated.
+
+    `batch`: the decision's batch loops (the emitted loops run them in that
+    order, check_batched). None when it holds."""
+    from collections import Counter
+    mnk, raw, _, info = got
+    M, N, K = mnk
+    loops = info["loops"]
+    if len(loops) != len(batch):
+        return "%d batch loop(s) emitted for %d" % (len(loops), len(batch))
+
+    def address(name, x):
+        return (nest.arg_of[name], linear(nest.ops[name][0], [value(f, x) for f in nest.ops[name][1]]))
+    program = {}
+    for x in nest.points():
+        program.setdefault(address("C", x), []).append(tuple(sorted((address("A", x), address("B", x)))))
+    lowered = {}
+    rb = set(rb)
+    for values in itertools.product(*[[lb + st * z for z in range(trips(lb, ub, st))]
+                                      for _, lb, ub, st in loops]):
+        env = {iv: v for (iv, _, _, _), v in zip(loops, values)}
+        outer = tuple(v for s, v in zip(batch, values) if s not in rb)
+        try:
+            concrete = batch_views([(None, v, sv) for _, v, sv in raw], env, info["applies"])
+        except (KeyError, ValueError, TypeError) as e:
+            return "batch %s: the views' offsets cannot be evaluated (%s)" % (values, e)
+        (_, (_, ast, aof)), (_, (_, bst, bof)), (_, (_, cst, cof)) = concrete
+        aarg, barg, carg = raw[0][0], raw[1][0], raw[2][0]
+        written = {}
+        for r in range(M):
+            for c in range(N):
+                element = (carg, cof + r * cst[0] + c * cst[1])
+                if element in written:
+                    return ("batch %s: the tile's outputs %s and %s are one element of C (one update lost)"
+                            % (values, written[element], (r, c)))
+                written[element] = (r, c)
+                block = Counter(tuple(sorted(((aarg, aof + r * ast[0] + k * ast[1]),
+                                              (barg, bof + k * bst[0] + c * bst[1])))) for k in range(K))
+                runs = lowered.setdefault(element, [])
+                if runs and runs[-1][0] == outer:
+                    runs[-1][1].update(block)
+                else:
+                    runs.append((outer, block))
+    for element in set(program) | set(lowered):
+        sequence, at = program.get(element, []), 0
+        for outer, block in lowered.get(element, []):
+            n = sum(block.values())
+            if Counter(sequence[at:at + n]) != block:
+                return ("element %s of C: the contributions of output batch %s are not the next %d of the "
+                        "program's, in its order (a lost, extra or reordered update)" % (element, outer, n))
+            at += n
+        if at != len(sequence):
+            return ("element %s of C receives %d of the program's %d contributions"
+                    % (element, at, len(sequence)))
+    return None
+
+
 def reduction_once_loop(nest):
     """Whether a loop that runs once is read by both factors (a reduction of
     extent one driven by a loop, as against no reduction loop at all)."""
@@ -1665,6 +2030,9 @@ def main():
     ap.add_argument("--count", type=int, default=300)
     ap.add_argument("--fp-default", action="store_true",
                     help="run the pass without the reassociation permission: nothing may be lowered")
+    ap.add_argument("--no-reduction-batches", action="store_true",
+                    help="run the pass with reduction-batches=false and decide without reduction batch "
+                         "loops (the recognition of docs sections 19-21 alone)")
     ap.add_argument("--keep", help="write the generated MLIR here")
     a = ap.parse_args()
 
@@ -1680,7 +2048,8 @@ def main():
     if a.keep:
         with open(a.keep, "w") as f:
             f.write(text + "\n")
-    results, remarks = compiler_results(a.opt, text, permit=not a.fp_default)
+    rb_on = not a.no_reduction_batches
+    results, remarks = compiler_results(a.opt, text, permit=not a.fp_default, reduction_batches=rb_on)
     if len(results) != len(nests):
         print("systolic-opt returned %d functions for %d nests" % (len(results), len(nests)))
         sys.exit(1)
@@ -1708,7 +2077,13 @@ def main():
                "k1": 0, "k1_noloop": 0,
                "triangle": 0, "alias_c": 0, "shear_oob": 0, "shear_c_not_injective": 0,
                # since the exact domains (section 19.13)
-               "disguised": 0, "degenerate_triangle": 0}
+               "disguised": 0, "degenerate_triangle": 0,
+               # reduction-batch partitioning (section 23, since 2026-10-21)
+               "rb": 0, "rb_one_factor": 0, "rb_shared": 0, "rb_virtual_k1": 0,
+               "rb_with_output_batch": 0, "rb_not_box": 0, "rb_strict": 0,
+               # ordered output batches (section 25)
+               "ob": 0, "ob_whole": 0, "ob_shared_dim": 0, "ob_with_rb": 0, "ob_not_box": 0,
+               "overlap": 0, "overlap_prefix": 0, "ob_strict": 0}
 
     def is_transposed(view):
         shape, strides = view[0], view[1]
@@ -1756,6 +2131,7 @@ def main():
         # points and accesses as the original box, another parametrization.
         degenerate = False
         emitted = nest
+        shift_rows = None
         if nest.domain_mode == "triangle" or nest.disguised:
             rows = find_parallelotope(nest, emitted_points(nest))
             if rows is None and nest.disguised:
@@ -1775,9 +2151,17 @@ def main():
                     mismatches.append((i, nest, bad))
                 continue
             nest = derived_box_nest(nest, rows)
+            shift_rows = rows
             degenerate = emitted.domain_mode == "triangle"
             shown[i] = emitted
-        verdict = decide(nest)
+        # Reduction batches (docs section 23) are made only on the counters as
+        # written: not on a nest whose normalization has U != I -- a sheared
+        # nest, or a disguise whose parallelotope has a nonzero shift row (no
+        # integer basis transformation widens the recognition in Phase 1).
+        rewritten = (emitted.domain_mode == "shear" and
+                     any(any(r) for r in (emitted.shear or []) if r)) or \
+                    (shift_rows is not None and any(any(l) for l, _, _, _ in shift_rows))
+        verdict = decide(nest, reduction_batches=rb_on and not rewritten, ordered=not rewritten)
         if nest.shared == "alias_c":
             feature["alias_c"] += 1
             if got is not None:
@@ -1789,6 +2173,10 @@ def main():
         if a.fp_default:
             if got is not None:
                 mismatches.append((i, nest, "lowered without the reassociation permission"))
+            # a decomposition with reduction batch loops reorders every
+            # element's sum: strict floating point refuses it as any other
+            feature["rb_strict"] += verdict[0] == "ACCEPT" and bool(verdict[5])
+            feature["ob_strict"] += verdict[0] == "ACCEPT" and (bool(verdict[6]) or verdict[7][2])
             continue
         if verdict[0] == "UNSUPPORTED":
             if got is not None:
@@ -1827,9 +2215,17 @@ def main():
                     if got[2] != verdict[2]:
                         bad = "batched over %d loop(s), compiler emitted %d affine.for" % (verdict[2], got[2])
                         break
-                    bad = check_batched(nest, (got[0], named, got[2], got[3]))
+                    bad = check_batched(nest, (got[0], named, got[2], got[3]), verdict[4])
                     if bad:
                         bad = "batched views: " + bad
+                    else:
+                        bad = check_serial_accumulation(got)
+                        if bad:
+                            bad = "batched accumulation into C: " + bad
+                        else:
+                            bad = check_ordered_contributions(nest, got, verdict[4], verdict[5])
+                            if bad:
+                                bad = "dataflow into C: " + bad
                 else:
                     if any(v[1] is None or v[1][2] is None for v in named):
                         bad = "a view of a plain GEMM has a dynamic offset"
@@ -1837,6 +2233,10 @@ def main():
                     bad = check_views(nest, got[0], [(nm, v) for nm, v, _ in named])
                     if bad:
                         bad = "views: " + bad
+                    else:
+                        bad = check_ordered_contributions(nest, got, [], [])
+                        if bad:
+                            bad = "dataflow into C: " + bad
                 if bad is None:
                     break
             if bad:
@@ -1845,14 +2245,31 @@ def main():
             count_new_families(emitted, nest, mnk, got)
             feature["degenerate_triangle"] += degenerate
             feature["disguised"] += emitted.disguised
+            if verdict[5]:
+                one, shared = reduction_loops(nest)
+                feature["rb"] += 1
+                feature["rb_one_factor"] += bool(set(one) & set(verdict[5]))
+                feature["rb_shared"] += bool(set(shared) & set(verdict[5]))
+                feature["rb_virtual_k1"] += not shared
+                feature["rb_with_output_batch"] += len(verdict[4]) > len(verdict[5])
+                feature["rb_not_box"] += emitted.domain_mode != "box" or emitted.disguised
+            if verdict[6] or verdict[7][2]:
+                # section 25: lowered only with the ordered output batches
+                feature["ob"] += 1
+                feature["ob_whole"] += bool(verdict[6])
+                feature["ob_shared_dim"] += not verdict[6]
+                feature["ob_with_rb"] += bool(verdict[5])
+                feature["ob_not_box"] += emitted.domain_mode != "box" or emitted.disguised
+            feature["overlap"] += verdict[7][0]
+            feature["overlap_prefix"] += verdict[7][0] and verdict[7][1]
             if verdict[2]:
                 feature["batched"] += 1
-                feature["c_batch_terms"] += c_has_batch_terms(nest)
+                feature["c_batch_terms"] += c_has_batch_terms(nest, verdict[4])
                 feature["two_unit"] += sum(e == 1 for e in mnk) >= 2
-                feature["batch_offset"] += batch_offset_in_role(nest)
+                feature["batch_offset"] += batch_offset_in_role(nest, verdict[4])
                 feature["both_transposed"] += both_factors_transposed(named)
                 feature["folded"] += has_folded_bound(emitted)
-                feature["batch_folded"] += has_folded_bound(emitted, set(batch_loops_of(nest)))
+                feature["batch_folded"] += has_folded_bound(emitted, set(verdict[4]))
                 feature["role_in_k"] += emitted.mode == "mutated:role_in_k"
                 continue
             views = dict((nm, v) for nm, v, _ in named)
@@ -1905,9 +2322,21 @@ def main():
               "(rejected) %(shear_oob)d, C not injective after a shear (refused) "
               "%(shear_c_not_injective)d" % dict(feature, general_state="lowered" if GENERAL_VIEWS_LOWERED
                                                    else "recognized, not lowered"))
+        print("reduction-batch partitioning%s: lowered %d (with a loop read by one factor only %d, "
+              "K chosen among the loops both factors read %d, virtual K = 1 %d, with an output batch "
+              "too %d, on a sheared or disguised domain %d)"
+              % ("" if rb_on else " (off)", feature["rb"], feature["rb_one_factor"], feature["rb_shared"],
+                 feature["rb_virtual_k1"], feature["rb_with_output_batch"], feature["rb_not_box"]))
+        print("ordered output batches: lowered %d (an output role made batch loops %d, a demoted loop sharing "
+              "a dimension of C with a row or column coordinate %d, with reduction batch loops too %d, on a "
+              "triangle or disguised domain %d); lowered with batch iterations writing overlapping elements of C "
+              "%d (an outermost prefix %d), each checked contribution by contribution"
+              % (feature["ob"], feature["ob_whole"], feature["ob_shared_dim"], feature["ob_with_rb"],
+                 feature["ob_not_box"], feature["overlap"], feature["overlap_prefix"]))
     else:
-        print("not lowered (strict mode): %d outside the normalized family, %d with C the base of a factor"
-              % (feature["triangle"], feature["alias_c"]))
+        print("not lowered (strict mode): %d outside the normalized family, %d with C the base of a factor, "
+              "%d with reduction batch loops, %d with ordered output batches"
+              % (feature["triangle"], feature["alias_c"], feature["rb_strict"], feature["ob_strict"]))
     print("refused triangles by class: PROVEN_INVALID %(PROVEN_INVALID)d (each checked: not centrally "
           "symmetric with the stated witness, the stacked access map of full rank, three memrefs), "
           "UNKNOWN %(UNKNOWN)d, "

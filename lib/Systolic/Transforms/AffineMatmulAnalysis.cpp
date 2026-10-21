@@ -1,4 +1,5 @@
 #include "Systolic/AffineMatmulAnalysis.h"
+#include "Systolic/AffineMatmulPartitioning.h"
 
 #include "mlir/Analysis/Presburger/Matrix.h"
 #include "mlir/Analysis/Presburger/PresburgerRelation.h"
@@ -1541,10 +1542,16 @@ normalizeLogicalCoordinates(const LogicalMatmul &matmul,
   return normalization;
 }
 
-FailureOr<LogicalMatmul>
-mlir::systolic::recognizeLogicalMatmul(
-    AffineMatmulCandidate candidate, std::string *why,
-    GemmMappingClass *mappingClass) {
+// One recognition. With reduction-batch partitioning (docs section 23)
+// `keepK` names the loop, read by both factors and not by C, that stays K
+// while the other such loops become reduction batch loops, and
+// `sharedLoops` receives those loops (the candidates for keepK).
+static FailureOr<LogicalMatmul>
+recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
+              GemmMappingClass *mappingClass,
+              const AffineMatmulRecognitionOptions &options,
+              std::optional<unsigned> keepK,
+              SmallVector<unsigned> *sharedLoops) {
   // Every refusal says why, and classifies the nest
   // (docs/AFFINE_GEMM_MAPPING.md, sections 5 and 9).
   auto refuseAs = [&](GemmMappingClass kind,
@@ -2012,6 +2019,54 @@ mlir::systolic::recognizeLogicalMatmul(
                     "written once: docs/AFFINE_GEMM_MAPPING.md section 20)");
     }
 
+  // The assignment policy (docs section 20.4, 2026-10-21): an assignment is
+  // considered further only when (A) its actual reduction has one iteration
+  // (K = 1), or (B) the index association dimension of its factors -- the
+  // rank of the dot products P Q^T of their reduction index vectors, the
+  // factors' rows on the loops of two or more iterations C does not read
+  // (section 22) -- is 0 and it maps to the GEMM with a virtual K = 1. Any
+  // other assignment is refused; an overwrite is never turned into an
+  // accumulation, and reduction batch loops are never made for it. After the
+  // check above every loop of two or more iterations is a subscript of C, so
+  // this holds (no reduction loop: K = 1, dimension 0); the write semantics
+  // -- every element of C written exactly once -- is proven by
+  // verifyOutputWrittenOnce, and the lowering requires K = 1 again.
+  if (!accumulates) {
+    std::array<lattice::IntMatrix, 3> rows;
+    SmallVector<int64_t> trips(numIterationDims, 2);
+    for (const Subscript &sub : subscripts)
+      rows[sub.operand].push_back(lattice::IntVector(
+          sub.onDomain.coefficients.begin(), sub.onDomain.coefficients.end()));
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (single[d]) {
+        trips[d] = 1;
+        continue;
+      }
+      // A loop of no iteration writes nothing (an empty GEMM, as above).
+      affine::AffineForOp loop =
+          affine::getForInductionVarOwner(iterationIVs[d]);
+      std::optional<int64_t> lower =
+          loop ? constantLoopBound(loop, /*lower=*/true) : std::nullopt;
+      std::optional<int64_t> upper =
+          loop ? constantLoopBound(loop, /*lower=*/false) : std::nullopt;
+      if (lower && upper && *upper <= *lower)
+        trips[d] = 0;
+    }
+    std::optional<AffineR8Structure> association =
+        computeR8Structure(rows, trips);
+    if (!association)
+      return unknown("the assignment C = A * B: the index association of its "
+                     "factors overflows 64-bit arithmetic");
+    if (!association->reductionLoops.empty() || association->coupling != 0)
+      return refuse(llvm::Twine("the assignment C = A * B reduces over ") +
+                    llvm::Twine(association->reductionLoops.size()) +
+                    " loop(s) C does not read (index association dimension " +
+                    llvm::Twine(association->coupling) +
+                    "): an assignment is considered only with K = 1, or with "
+                    "index association dimension 0 and a virtual K = 1 "
+                    "(docs/AFFINE_GEMM_MAPPING.md section 20.4)");
+  }
+
   auto exprText = [](AffineExpr expr) {
     std::string text;
     llvm::raw_string_ostream os(text);
@@ -2118,20 +2173,41 @@ mlir::systolic::recognizeLogicalMatmul(
   // nothing (section 19.7): no demotion.
   // ---------------------------------------------------------------------
   SmallVector<bool> demoted(numIterationDims, false);
-  {
-    SmallVector<unsigned> readersOf(numIterationDims, 0);
-    for (const Subscript &sub : subscripts)
-      for (unsigned d = 0; d < numIterationDims; ++d)
-        if (sub.onDomain.coefficients[d] != 0)
-          readersOf[d] |= 1u << sub.operand;
-    if (boxDomain)
-      for (unsigned d = 0; d < numIterationDims; ++d)
-        if (readersOf[d] == 0b100)
-          demoted[d] = true;
-  }
+  SmallVector<unsigned> readersOf(numIterationDims, 0);
+  for (const Subscript &sub : subscripts)
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (sub.onDomain.coefficients[d] != 0)
+        readersOf[d] |= 1u << sub.operand;
+  if (boxDomain)
+    for (unsigned d = 0; d < numIterationDims; ++d)
+      if (readersOf[d] == 0b100)
+        demoted[d] = true;
+  // Reduction-batch partitioning (section 23, opt-in): a loop read by one
+  // factor only, and not by C, is a reduction batch loop -- for each of its
+  // values the nest is a GEMM with that factor's view offset by it, and the
+  // values accumulate into the same slab of C, in order
+  // (C[i][j] += A[i][k] * B[l][j]: k and l, with K = 1).
+  const bool reductionBatches =
+      options.reductionBatches && boxDomain && accumulates;
+  bool anyReductionBatch = false;
+  if (reductionBatches)
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (readersOf[d] == 0b001 || readersOf[d] == 0b010)
+        demoted[d] = anyReductionBatch = true;
+      if (readersOf[d] != 0b011)
+        continue;
+      if (sharedLoops)
+        sharedLoops->push_back(d);
+      if (keepK && d != *keepK)
+        demoted[d] = anyReductionBatch = true;
+    }
   // The loops of a row or column role an analysis refused as not one dense
   // coordinate: the retry below demotes some of them (nullopt: no retry).
   std::optional<SmallVector<unsigned>> demotionCandidate;
+  // An output role whose loops the retry demotes all together (section 25:
+  // C not injective on the (I, J) box of an accumulation), not through
+  // chooseDemotion, which keeps one component of a role.
+  std::optional<SmallVector<unsigned>> wholeRoleDemotion;
   auto tripCountOf = [&](unsigned d) -> std::optional<int64_t> {
     affine::AffineForOp loop =
         affine::getForInductionVarOwner(iterationIVs[d]);
@@ -2143,6 +2219,12 @@ mlir::systolic::recognizeLogicalMatmul(
       return std::nullopt;
     return checkedTripCount(*lower, *upper, loop.getStep().getSExtValue());
   };
+  if (sharedLoops)
+    llvm::stable_sort(*sharedLoops, [&](unsigned x, unsigned y) {
+      const int64_t tx = tripCountOf(x).value_or(0),
+                    ty = tripCountOf(y).value_or(0);
+      return tx != ty ? tx > ty : x > y;
+    });
   auto innermostCDim = [&](unsigned d) {
     int dim = -1;
     for (const Subscript &sub : subscripts)
@@ -2262,7 +2344,38 @@ mlir::systolic::recognizeLogicalMatmul(
   // merged C[3p + i][j] -- would make the partitions overlap (an
   // accumulation in order, valid but not an independent partition) or a
   // merged output dimension: not constructed.
+  // Whether the batch loops -- read by all three operands, demoted, or
+  // reduction batch loops -- and the loops `extra` are an outermost prefix of
+  // the nest's loops of two or more iterations (section 25): the batch loops
+  // then run around the tiles in the program's order, and every element of C
+  // receives the contributions of different batches in the order written
+  // (only the order inside one tile, over K, changes, under the permission
+  // to reassociate). On a box domain whose counters are the ones as written
+  // only.
+  auto batchesOuterPrefix = [&](ArrayRef<unsigned> extra) -> bool {
+    if (!boxDomain || !options.countersAsWritten)
+      return false;
+    bool inner = false;
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (single[d])
+        continue;
+      const bool batch =
+          isBatchLoop[d] || demoted[d] || llvm::is_contained(extra, d);
+      if (!batch)
+        inner = true;
+      else if (inner)
+        return false;
+    }
+    return true;
+  };
   auto partitionOutputsDisjoint = [&]() -> LogicalResult {
+    // An accumulation whose batches run in the program's order may have
+    // partitions that overlap in C (section 25): each batch reads C, adds its
+    // tile and writes C back before the next one reads it, so every
+    // contribution is kept in the order written. The tiles themselves are
+    // still checked injective (G2) below.
+    if (accumulates && batchesOuterPrefix({}))
+      return success();
     for (const Subscript &sub : subscripts) {
       if (sub.operand != 2)
         continue;
@@ -2734,6 +2847,7 @@ mlir::systolic::recognizeLogicalMatmul(
   // -- a batch coordinate filling several dimensions of C gives several rows,
   // so every batch loop is in some row. The factors' own batch expressions
   // and offsets are in their layouts' batchCoefficients.
+  SmallVector<bool> covered(numIterationDims, false);
   for (const Subscript &sub : subscripts) {
     if (sub.operand != 2)
       continue;
@@ -2741,9 +2855,18 @@ mlir::systolic::recognizeLogicalMatmul(
     for (unsigned d = 0; d < numIterationDims; ++d)
       if (sub.onDomain.coefficients[d] != 0)
         (isBatchLoop[d] ? batch : other) = true;
-    if (batch && !other)
+    if (batch && !other) {
       logicalPartitions.push_back(operandMap[2].getResult(sub.dim));
+      for (unsigned d = 0; d < numIterationDims; ++d)
+        if (sub.onDomain.coefficients[d] != 0)
+          covered[d] = true;
+    }
   }
+  // A batch loop C does not read (a reduction batch loop, section 23) is a
+  // row of its own: its values run in order around the tiles.
+  for (unsigned d = 0; d < numIterationDims; ++d)
+    if (isBatchLoop[d] && !covered[d] && !(readersOf[d] & 0b100))
+      logicalPartitions.push_back(getAffineDimExpr(d, mapContext));
   numPartitionDims = logicalPartitions.size();
   return success();
   };
@@ -3028,6 +3151,22 @@ mlir::systolic::recognizeLogicalMatmul(
                            ": the assignment C = A * B overwrites it, only "
                            "the last product survives -- not the GEMM of A "
                            "and B (docs/AFFINE_GEMM_MAPPING.md section 20)");
+      // An accumulation (section 25): the colliding outputs are a reduction
+      // that must be kept. One output role becomes batch loops -- I first,
+      // then J -- when its loops and the other batch loops are an outermost
+      // prefix of the nest (the batches then run in the order written, each
+      // reading the C the previous one wrote), with constant trip counts;
+      // the retry demotes it and checks every tile injective again. Else the
+      // refusal stands.
+      for (unsigned r : {0u, 1u}) {
+        if (roleLoops[r].empty() ||
+            llvm::any_of(roleLoops[r],
+                         [&](unsigned d) { return !tripCountOf(d); }) ||
+            !batchesOuterPrefix(roleLoops[r]))
+          continue;
+        wholeRoleDemotion = roleLoops[r];
+        break;
+      }
       return unsupportedRoles(
           collision +
           ", so one tile would lose an update "
@@ -3221,9 +3360,13 @@ mlir::systolic::recognizeLogicalMatmul(
   // passes). The positional form cannot succeed once it failed, so the
   // retries use the analyses by groups and readers only.
   {
-    bool positionalForm = positional();
+    // The positional form reads the operands by position and knows no
+    // demoted loop: with reduction batch loops (section 23) the analyses by
+    // groups and readers decide.
+    bool positionalForm = !anyReductionBatch && positional();
     for (unsigned pass = 0;; ++pass) {
       demotionCandidate.reset();
+      wholeRoleDemotion.reset();
       LogicalResult decided = failure();
       if (pass > 0) {
         resetResult();
@@ -3242,9 +3385,12 @@ mlir::systolic::recognizeLogicalMatmul(
       }
       if (succeeded(decided))
         break;
-      if (!demotionCandidate || pass >= numIterationDims)
+      if ((!demotionCandidate && !wholeRoleDemotion) ||
+          pass >= numIterationDims)
         return failure();
-      SmallVector<unsigned> toDemote = chooseDemotion(*demotionCandidate);
+      SmallVector<unsigned> toDemote = wholeRoleDemotion
+                                           ? *wholeRoleDemotion
+                                           : chooseDemotion(*demotionCandidate);
       if (toDemote.empty())
         return failure();
       for (unsigned d : toDemote)
@@ -3515,9 +3661,12 @@ mlir::systolic::recognizeLogicalMatmul(
       accumulates ? add.getFastmath() : mul.getFastmath(),
       arith::FastMathFlags::reassoc);
   result.accumulates = accumulates;
-  for (unsigned d = 0; d < numIterationDims; ++d)
+  for (unsigned d = 0; d < numIterationDims; ++d) {
     if (demoted[d])
       result.demotedLoops.push_back(d);
+    if (demoted[d] && !(readersOf[d] & 0b100))
+      result.reductionBatchLoops.push_back(d);
+  }
 
   MLIRContext *context = candidate.anchor->getContext();
   const unsigned numLogicalDims = numPartitionDims + 3;
@@ -3866,6 +4015,46 @@ mlir::systolic::recognizeLogicalMatmul(
   return result;
 }
 
+FailureOr<LogicalMatmul>
+mlir::systolic::recognizeLogicalMatmul(
+    AffineMatmulCandidate candidate, std::string *why,
+    GemmMappingClass *mappingClass,
+    const AffineMatmulRecognitionOptions &options) {
+  if (!options.reductionBatches)
+    return recognizeOnce(candidate, why, mappingClass, options, std::nullopt,
+                         nullptr);
+  // Reduction-batch partitioning (section 23). First with the loops read by
+  // one factor only as reduction batch loops; then, when the loops both
+  // factors read and C does not are not one dense GEMM coordinate -- the
+  // analyses refuse them (A[i][x0 - x1] * B[x0 + x1][j],
+  // A[i][k0][k1] * B[k0 + k1][j]) or K is not dense
+  // (A[i][k0 + k1] * B[k0 + k1][j]) -- with each of them in turn as K and the
+  // others as reduction batch loops, the longest first (ties: the innermost).
+  // The first dense GEMM is taken.
+  auto dense = [](const FailureOr<LogicalMatmul> &m) {
+    return succeeded(m) && succeeded(getDenseLogicalGemm(*m));
+  };
+  SmallVector<unsigned> shared;
+  std::string ignored;
+  GemmMappingClass ignoredClass = GemmMappingClass::ProvenValid;
+  FailureOr<LogicalMatmul> first = recognizeOnce(
+      candidate, &ignored, &ignoredClass, options, std::nullopt, &shared);
+  if (dense(first))
+    return first;
+  if (shared.size() >= 2)
+    for (unsigned k : shared) {
+      FailureOr<LogicalMatmul> attempt = recognizeOnce(
+          candidate, &ignored, &ignoredClass, options, k, nullptr);
+      if (dense(attempt))
+        return attempt;
+    }
+  // No reduction-batch decomposition is a dense GEMM: the recognition
+  // without the option decides, with its reason and class.
+  return recognizeOnce(candidate, why, mappingClass,
+                       AffineMatmulRecognitionOptions(), std::nullopt,
+                       nullptr);
+}
+
 //===----------------------------------------------------------------------===//
 // The geometric screening (docs/AFFINE_GEMM_MAPPING.md section 19, layer 1).
 //===----------------------------------------------------------------------===//
@@ -3983,6 +4172,8 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
         row.push_back(*c);
       }
       result.ordinal[x].push_back(std::move(row));
+      result.written[x].push_back(lattice::IntVector(
+          form->coefficients.begin(), form->coefficients.begin() + n));
     }
   }
 
@@ -4212,6 +4403,193 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
   return result;
 }
 
+
+//===----------------------------------------------------------------------===//
+// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md
+// section 22): dot products and ranks on the counters as written.
+//===----------------------------------------------------------------------===//
+
+std::optional<AffineR8Structure>
+mlir::systolic::computeR8Structure(const std::array<lattice::IntMatrix, 3> &rows,
+                                   ArrayRef<int64_t> trips) {
+  const unsigned n = trips.size();
+  for (const lattice::IntMatrix &m : rows)
+    for (const lattice::IntVector &row : m)
+      if (row.size() != n)
+        return std::nullopt;
+
+  AffineR8Structure r;
+  r.readers.assign(n, 0);
+  SmallVector<unsigned> live, batch;
+  for (unsigned s = 0; s < n; ++s) {
+    if (trips[s] < 2)
+      continue;
+    live.push_back(s);
+    for (unsigned x = 0; x < 3; ++x)
+      for (const lattice::IntVector &row : rows[x])
+        if (row[s] != 0)
+          r.readers[s] |= 1u << x;
+    if (r.readers[s] == 0b011)
+      r.contractionLoops.push_back(s);
+    else if (r.readers[s] == 0b111)
+      batch.push_back(s);
+    if (r.readers[s] == 0b001 || r.readers[s] == 0b010 ||
+        r.readers[s] == 0b011)
+      r.reductionLoops.push_back(s);
+  }
+
+  // The rows restricted to `columns`, zero rows dropped (they read none of
+  // the columns and add nothing to a rank or a dot product).
+  auto restrictTo = [](const lattice::IntMatrix &m,
+                       ArrayRef<unsigned> columns) {
+    lattice::IntMatrix out;
+    for (const lattice::IntVector &row : m) {
+      lattice::IntVector v;
+      bool nonzero = false;
+      for (unsigned s : columns) {
+        v.push_back(row[s]);
+        nonzero |= row[s] != 0;
+      }
+      if (!nonzero)
+        continue;
+      // A row divided by the gcd of its entries: ranks and the ranks of
+      // products do not change, and large proportional rows do not overflow.
+      std::optional<lattice::IntVector> reduced = lattice::primitive(v);
+      out.push_back(reduced ? std::move(*reduced) : std::move(v));
+    }
+    return out;
+  };
+  auto rankOf = [](const lattice::IntMatrix &m,
+                   unsigned columns) -> std::optional<unsigned> {
+    if (m.empty() || columns == 0)
+      return 0u;
+    std::optional<lattice::ColumnEchelon> e = lattice::columnEchelon(m, columns);
+    return e ? std::optional<unsigned>(e->rank) : std::nullopt;
+  };
+  auto dot = [](ArrayRef<int64_t> u,
+                ArrayRef<int64_t> v) -> std::optional<int64_t> {
+    int64_t sum = 0;
+    for (auto [a, b] : llvm::zip_equal(u, v)) {
+      std::optional<int64_t> p = llvm::checkedMul(a, b);
+      if (!p)
+        return std::nullopt;
+      std::optional<int64_t> t = llvm::checkedAdd(sum, *p);
+      if (!t)
+        return std::nullopt;
+      sum = *t;
+    }
+    return sum;
+  };
+  // rank(P Q^T) of two restricted row sets: R8's coupling.
+  auto couplingOf = [&](const lattice::IntMatrix &p,
+                        const lattice::IntMatrix &q) -> std::optional<unsigned> {
+    if (p.empty() || q.empty())
+      return 0u;
+    lattice::IntMatrix gram;
+    for (const lattice::IntVector &u : p) {
+      lattice::IntVector g;
+      for (const lattice::IntVector &v : q) {
+        std::optional<int64_t> d = dot(u, v);
+        if (!d)
+          return std::nullopt;
+        g.push_back(*d);
+      }
+      gram.push_back(std::move(g));
+    }
+    return rankOf(gram, q.size());
+  };
+
+  std::array<lattice::IntMatrix, 3> onLive;
+  for (unsigned x = 0; x < 3; ++x) {
+    onLive[x] = restrictTo(rows[x], live);
+    std::optional<unsigned> rank = rankOf(onLive[x], live.size());
+    if (!rank)
+      return std::nullopt;
+    r.operandRank[x] = *rank;
+  }
+  std::optional<unsigned> ab = couplingOf(onLive[0], onLive[1]);
+  std::optional<unsigned> ac = couplingOf(onLive[0], onLive[2]);
+  std::optional<unsigned> bc = couplingOf(onLive[1], onLive[2]);
+  if (!ab || !ac || !bc)
+    return std::nullopt;
+  r.literalAB = *ab;
+  r.literalAC = *ac;
+  r.literalBC = *bc;
+  for (const lattice::IntVector &u : onLive[0])
+    for (const lattice::IntVector &v : onLive[1]) {
+      std::optional<int64_t> d = dot(u, v);
+      if (!d)
+        return std::nullopt;
+      r.pairsAB += *d != 0;
+    }
+
+  const lattice::IntMatrix p = restrictTo(rows[0], r.reductionLoops);
+  const lattice::IntMatrix q = restrictTo(rows[1], r.reductionLoops);
+  lattice::IntMatrix stacked = p;
+  stacked.append(q.begin(), q.end());
+  const unsigned width = r.reductionLoops.size();
+  std::optional<unsigned> rp = rankOf(p, width), rq = rankOf(q, width),
+                          rs = rankOf(stacked, width),
+                          kappa = couplingOf(p, q),
+                          beta = couplingOf(restrictTo(rows[0], batch),
+                                            restrictTo(rows[1], batch));
+  if (!rp || !rq || !rs || !kappa || !beta)
+    return std::nullopt;
+  r.rankFirst = *rp;
+  r.rankSecond = *rq;
+  r.rankStacked = *rs;
+  r.coupling = *kappa;
+  r.batchCoupling = *beta;
+  r.intersect = r.coupling > 0;
+  r.sharedLoops = !r.contractionLoops.empty();
+
+  // Groups of S: loops joined by a subscript of a factor that reads both.
+  SmallVector<unsigned> parent(n);
+  std::iota(parent.begin(), parent.end(), 0u);
+  auto find = [&](unsigned s) {
+    while (parent[s] != s)
+      s = parent[s] = parent[parent[s]];
+    return s;
+  };
+  for (unsigned x = 0; x < 2; ++x)
+    for (const lattice::IntVector &row : rows[x]) {
+      std::optional<unsigned> first;
+      for (unsigned s : r.contractionLoops) {
+        if (row[s] == 0)
+          continue;
+        if (!first)
+          first = s;
+        else
+          parent[find(s)] = find(*first);
+      }
+    }
+  for (unsigned s : r.contractionLoops) {
+    auto it = llvm::find_if(r.contractionGroups,
+                            [&](const SmallVector<unsigned> &g) {
+                              return find(g.front()) == find(s);
+                            });
+    if (it == r.contractionGroups.end())
+      r.contractionGroups.push_back({s});
+    else
+      it->push_back(s);
+  }
+  return r;
+}
+
+bool mlir::systolic::countersRewritten(
+    ArrayRef<DomainNormalization> normalized, Operation *anchor) {
+  for (const DomainNormalization &dn : normalized) {
+    bool identity = true;
+    for (auto [r, row] : llvm::enumerate(dn.U))
+      for (auto [c, v] : llvm::enumerate(row))
+        identity &= v == (r == c ? 1 : 0);
+    if (!identity && (dn.outermost == anchor ||
+                      dn.outermost->isProperAncestor(anchor) ||
+                      anchor->isProperAncestor(dn.outermost)))
+      return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Domain normalization (docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12):

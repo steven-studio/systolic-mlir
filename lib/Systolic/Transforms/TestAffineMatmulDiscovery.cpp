@@ -78,6 +78,21 @@ struct TestAffineMatmulDiscoveryPass
                      "conditions only, not a decision)"),
       llvm::cl::init(false)};
 
+  Option<bool> reductionBatches{
+      *this, "reduction-batches",
+      llvm::cl::desc("Recognize with reduction-batch partitioning "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 23; on by default, "
+                     "as in --affine-matmul-to-systolic)"),
+      llvm::cl::init(true)};
+
+  Option<bool> r8{
+      *this, "r8",
+      llvm::cl::desc("Print the R8 structure of every candidate: dot "
+                     "products and ranks on the counters as written, the "
+                     "loop classes and Rule E (docs/AFFINE_GEMM_MAPPING.md "
+                     "section 22: a diagnostic, not a decision)"),
+      llvm::cl::init(false)};
+
   static void printVector(const lattice::IntVector &v) {
     llvm::errs() << "[";
     llvm::interleaveComma(v, llvm::errs());
@@ -192,6 +207,133 @@ struct TestAffineMatmulDiscoveryPass
     printConditions("role space", g->conditionsRoles);
   }
 
+  static void printR8(AffineMatmulCandidate candidate,
+                      ArrayRef<DomainNormalization> normalized) {
+    llvm::errs() << "R8 structure (diagnostic, not a decision):\n";
+    // R8 is defined on the counters as written; a normalized nest's
+    // counters are x' (x = U x'), another basis.
+    if (countersRewritten(normalized, candidate.anchor)) {
+      llvm::errs() << "  not analysed: the domain normalization rewrote "
+                      "the counters of this nest (x = U x'), they are not "
+                      "the counters as written\n";
+      return;
+    }
+    std::string why;
+    FailureOr<AffineGeometryScreening> g =
+        screenAffineMatmulGeometry(candidate, &why);
+    if (failed(g)) {
+      llvm::errs() << "  not analysed: " << why << "\n";
+      return;
+    }
+    SmallVector<int64_t> trips;
+    for (const AffineGeometryScreening::Loop &loop : g->loops)
+      trips.push_back(loop.trip);
+    std::optional<AffineR8Structure> r = computeR8Structure(g->written, trips);
+    if (!r) {
+      llvm::errs() << "  not analysed: overflow\n";
+      return;
+    }
+    // A and B are the product's first and second factor, C the accumulator
+    // (not the memrefs' names).
+    static const char *const kOperand[3] = {"A", "B", "C"};
+    for (unsigned x = 0; x < 3; ++x) {
+      llvm::errs() << "  " << kOperand[x] << " rows: ";
+      printMatrix(g->written[x]);
+      llvm::errs() << "\n";
+    }
+    for (auto [s, readers] : llvm::enumerate(r->readers)) {
+      llvm::errs() << "  loop " << s << ":";
+      if (trips[s] < 2) {
+        llvm::errs() << " one iteration (a constant)\n";
+        continue;
+      }
+      if (readers == 0) {
+        llvm::errs() << " used by no access\n";
+        continue;
+      }
+      llvm::errs() << " readers";
+      for (unsigned x = 0; x < 3; ++x)
+        if (readers & (1u << x))
+          llvm::errs() << " " << kOperand[x];
+      llvm::errs() << " -> ";
+      switch (readers) {
+      case 0b111:
+        llvm::errs() << "OB (batch)";
+        break;
+      case 0b101:
+        llvm::errs() << "M or OB";
+        break;
+      case 0b110:
+        llvm::errs() << "N or OB";
+        break;
+      case 0b100:
+        llvm::errs() << "OB (C only)";
+        break;
+      case 0b011:
+        llvm::errs() << "K or RB (contraction block)";
+        break;
+      case 0b001:
+      case 0b010:
+        llvm::errs() << "RB (one factor only)";
+        break;
+      default:
+        break;
+      }
+      llvm::errs() << "\n";
+    }
+    llvm::errs() << "  reduction loops Z:";
+    if (r->reductionLoops.empty())
+      llvm::errs() << " none";
+    for (unsigned s : r->reductionLoops)
+      llvm::errs() << " " << s;
+    llvm::errs() << "; shared loops S:";
+    if (r->contractionLoops.empty())
+      llvm::errs() << " none";
+    for (unsigned s : r->contractionLoops)
+      llvm::errs() << " " << s;
+    llvm::errs() << "; groups:";
+    for (const SmallVector<unsigned> &group : r->contractionGroups) {
+      llvm::errs() << " {";
+      llvm::interleave(group, llvm::errs(), " ");
+      llvm::errs() << "}";
+    }
+    llvm::errs() << "\n";
+    llvm::errs() << "  on Z: rank A " << r->rankFirst << ", rank B "
+                 << r->rankSecond << ", rank [A; B] " << r->rankStacked
+                 << " (row spaces meet in dimension "
+                 << r->rankFirst + r->rankSecond - r->rankStacked
+                 << "), coupling rank(A B^T) " << r->coupling << "\n";
+    llvm::errs() << "  batch block coupling: " << r->batchCoupling << "\n";
+    llvm::errs() << "  literal, loops of two or more iterations: rank(A B^T) " << r->literalAB
+                 << ", rank(A C^T) " << r->literalAC << ", rank(B C^T) "
+                 << r->literalBC << "; nonzero A.B pairs " << r->pairsAB
+                 << " (not a dimension)\n";
+    if (r->literalAB != r->coupling + r->batchCoupling)
+      llvm::errs() << "  literal and restricted readings differ: dot "
+                      "products of different loop classes cancel or add "
+                      "(section 22.4)\n";
+    llvm::errs() << "  operand ranks: A " << r->operandRank[0] << ", B "
+                 << r->operandRank[1] << ", C " << r->operandRank[2];
+    for (unsigned rank : {1u, 0u}) {
+      bool first = true;
+      for (unsigned x = 0; x < 3; ++x) {
+        if (r->operandRank[x] != rank)
+          continue;
+        if (first)
+          llvm::errs() << (rank == 1 ? "; one-dimensional (Phase 2):"
+                                     : "; constant (rank 0):");
+        llvm::errs() << " " << kOperand[x];
+        first = false;
+      }
+    }
+    llvm::errs() << "\n";
+    auto yn = [](bool b) { return b ? "yes" : "no"; };
+    llvm::errs() << "  intersect(A,B) (some a.b != 0 on Z): "
+                 << yn(r->intersect)
+                 << "; shared loop variables (some sum |a_t||b_t| > 0): "
+                 << yn(r->sharedLoops) << "\n";
+  }
+
   void runOnOperation() override {
     // The domain normalization the lowering pass applies first (docs
     // sections 19.7, 19.12), reported line by line.
@@ -226,10 +368,17 @@ struct TestAffineMatmulDiscoveryPass
     for (AffineMatmulCandidate candidate : candidates) {
       if (geometry)
         printGeometry(candidate);
+      if (r8)
+        printR8(candidate, normalized);
       std::string notRecognized;
       GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
-      auto result =
-          recognizeLogicalMatmul(candidate, &notRecognized, &notRecognizedClass);
+      AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten =
+          !countersRewritten(normalized, candidate.anchor);
+      recognition.reductionBatches =
+          reductionBatches && recognition.countersAsWritten;
+      auto result = recognizeLogicalMatmul(candidate, &notRecognized,
+                                           &notRecognizedClass, recognition);
 
       if (failed(result)) {
         llvm::errs() << "recognition result: failure\n";
@@ -519,12 +668,26 @@ struct TestAffineMatmulDiscoveryPass
                    << "\n";
       // Dimension-intersection partitioning (docs section 21): the loops
       // made batch loops beyond those read by all three operands.
-      if (!result.demotedLoops.empty()) {
+      SmallVector<unsigned> partitionLoops;
+      for (unsigned d : result.demotedLoops)
+        if (!llvm::is_contained(result.reductionBatchLoops, d))
+          partitionLoops.push_back(d);
+      if (!partitionLoops.empty()) {
         llvm::errs() << "  partition: loop(s) ";
-        llvm::interleave(result.demotedLoops, llvm::errs(), "+");
-        llvm::errs() << " demoted to batch loops (each partitions the GEMM "
-                        "into independent slabs of C; the factor that does "
-                        "not read it is shared)\n";
+        llvm::interleave(partitionLoops, llvm::errs(), "+");
+        llvm::errs() << " demoted to batch loops (each value is one GEMM on "
+                        "its slab of C; the factor that does not read it is "
+                        "shared; slabs of an accumulation may overlap, the "
+                        "batches then run in program order, docs section "
+                        "25)\n";
+      }
+      // Reduction-batch partitioning (docs section 23).
+      if (!result.reductionBatchLoops.empty()) {
+        llvm::errs() << "  reduction batch: loop(s) ";
+        llvm::interleave(result.reductionBatchLoops, llvm::errs(), "+");
+        llvm::errs() << " (not read by C: for each value a GEMM with offset "
+                        "factor views, all accumulated into the same slab of "
+                        "C in order)\n";
       }
 
       printLogicalExtent("row", result.rowExtent);

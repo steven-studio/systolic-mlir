@@ -230,6 +230,8 @@ typedef struct {
   long k_max_8x8, k_max_4x4;
   int verify;
   int fp_reassociation;         /* --fp-reassociation */
+  int no_reduction_batches;     /* --no-reduction-batches */
+  int fp_distribute;            /* --fp-distribute */
   double verify_rtol;
   strvec defines, includes;
   const char *self_dir;        /* where this executable is: systolic-cfront */
@@ -1136,7 +1138,12 @@ static int compile(driver *d) {
   if (nfns) {
     strvec c2 = argv_of(opt, fleet,
                         format("--affine-matmul-to-systolic=report=true "
-                               "cost-model=%s", a->cost_model),
+                               "cost-model=%s%s%s",
+                               a->cost_model,
+                               a->no_reduction_batches
+                                   ? " reduction-batches=false"
+                                   : "",
+                               a->fp_distribute ? " fp-distribute=true" : ""),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
@@ -1313,9 +1320,11 @@ static int compile(driver *d) {
       push(&c3, format("--function=%s", offload[i].name));
     if (run(d, &c3, "the C front end (offloaded functions)", NULL, NULL, &r))
       return -1;
-    strvec c4 = argv_of(opt, fleet,
-                        format("--affine-matmul-to-systolic=cost-model=%s",
-                               a->cost_model),
+    strvec c4 = argv_of(
+        opt, fleet,
+        format("--affine-matmul-to-systolic=cost-model=%s%s%s", a->cost_model,
+               a->no_reduction_batches ? " reduction-batches=false" : "",
+               a->fp_distribute ? " fp-distribute=true" : ""),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))
@@ -1424,7 +1433,8 @@ static void usage(void) {
           "[--llvm-build DIR] [--runtime soft|board] [--fpga-config FILE] "
           "[--submission auto|sync|async] [--cost-model v1|v2] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
-          "[--keep-dir DIR] [--explain] [--fp-reassociation] [-DNAME[=VAL]] "
+          "[--keep-dir DIR] [--explain] [--fp-reassociation] "
+          "[--no-reduction-batches] [--fp-distribute] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
           "-o PROGRAM\n");
@@ -1511,6 +1521,12 @@ int main(int argc, char **argv) {
       a.verify = 1;
     } else if (strcmp(s, "--fp-reassociation") == 0) {
       a.fp_reassociation = 1;
+    } else if (strcmp(s, "--reduction-batches") == 0) {
+      /* the default (docs/AFFINE_GEMM_MAPPING.md section 23) */
+    } else if (strcmp(s, "--no-reduction-batches") == 0) {
+      a.no_reduction_batches = 1;
+    } else if (strcmp(s, "--fp-distribute") == 0) {
+      a.fp_distribute = 1;
     } else if ((v = option_value(s, "--keep-dir", &i, argc, argv))) {
       a.keep_dir = v;
     } else if (strcmp(s, "-o") == 0) {

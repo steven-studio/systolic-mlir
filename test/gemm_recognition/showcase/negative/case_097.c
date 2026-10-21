@@ -2,7 +2,7 @@
  * Case ID: case_097
  * Name: no_accumulation
  * Set / category: negative / reduction_mismatch
- * Mathematical class: not_gemm_overwrite
+ * Mathematical class: assignment_last_write
  * C program valid: yes (every subscript in bounds, no undefined behaviour)
  *
  * Mathematical operation:
@@ -15,10 +15,20 @@
  *   C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one
  *   wins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's
  *   last row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).
- *   Expected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,
- *   2026-10-19): the reduction loop k runs eight times and is not a subscript of
- *   C, so the assignment writes every element eight times -- an overwrite, not
- *   the K = 1 GEMM into a zeroed C that an assignment writing each element once is.
+ *   Until 2026-10-21 rejected at recognition (docs/AFFINE_GEMM_MAPPING.md section
+ *   20): k runs eight times and is not a subscript of C, so the assignment writes
+ *   every element eight times.  Since 2026-10-21 (docs section 20.5, last write
+ *   wins, on by default with --fp-reassociation) the lowering pass first cuts k,
+ *   which C does not read, to its last iteration k = 7: on this box only those
+ *   writes survive, so the cut nest C[i][j] = A[i][7] * B[7][j] has the program's
+ *   result, writes every element once and is the K = 1 GEMM into a zeroed C
+ *   (8 x 8 x 1), offloaded.  The data keep their zeros: a product of a zero and a
+ *   negative factor is -0 in the program as written and comes back from the tiles
+ *   as +0 (the tiles sum from +0: the signed-zero deviation of docs section 6,
+ *   accepted for this case).  The checks are numerical (-0 == +0, any other
+ *   difference fails); the elements that differ in the sign of zero only are
+ *   counted and reported, and --verify compares numerically (runtime_check
+ *   'signed_zero').
  *
  * Array dimensions: A: float[8][8]   B: float[8][8]   C: float[8][8]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K]
@@ -26,20 +36,18 @@
  * Statement form: C[..] = A[..] * B[..]
  * Element type: float
  *
- * Mathematical GEMM: NO
- * Expected recognition (specification): REJECT
- *   basis: the assignment C = A * B writes some element of C more than once (a reduction loop of two or more iterations, batches overlapping in C): only the last product survives, not the GEMM of A and B -- an assignment is the K = 1 GEMM into a zeroed C only when every element is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)
+ * Mathematical GEMM: YES
+ * Expected recognition (specification): ACCEPT
+ *   basis: (since 2026-10-21, docs/AFFINE_GEMM_MAPPING.md section 20.5) last write wins: in an assignment C = A * B on a box as written (constant bounds, not empty, A and B other arrays than C), every loop of two or more iterations that C does not read rewrites the same elements of C, so only its last iteration's writes survive; the nest cut to those last iterations has the same result (casespec.last_write_cut, checked against the last write of every element by enumeration) and is accepted when it is an assignment the rules accept -- every element written once, the K = 1 GEMM into a zeroed C (offloaded with --fp-reassociation, as every assignment; strict floating point keeps it on the host as written); the signed zeros of docs section 6 apply (a -0 product comes back as +0); the cut nest: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand; (supported since 2026-10-19) the assignment C = A * B whose every element of C is written exactly once is the K = 1 GEMM into a zeroed C: the lowering zeroes C's logical window and the tiles accumulate into it (docs/AFFINE_GEMM_MAPPING.md section 20)
+ *   re-decided: RE-DECIDED 2026-10-21 (docs section 20.5, last write wins; the signed-zero deviation of section 6 accepted): ACCEPT -- the reduction loop k, which C does not read, is cut to its last iteration and the cut nest C[i][j] = A[i][7] * B[7][j] is the K = 1 GEMM into a zeroed C, offloaded; numerically equal, the -0 products come back as +0. REJECT before (not_gemm_overwrite: the assignment writes every element of C eight times; rejected at recognition)
  * Current implementation (commit 6e25528, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: the statement overwrites C (C = A * B, no accumulation) and a loop of the nest, which runs more than once, is not a subscript of C: only the last product survives
- * Classification: TRUE NEGATIVE
- *   Not a dense GEMM of these operands; the compiler must keep refusing it.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays
@@ -49,7 +57,13 @@
  * The references never call the kernel or any compiler-generated code and share
  * no index code with it.  Data: small integers in [-3, 3], C starts non-zero;
  * every partial sum is an integer far below 2^24, so the float results are
- * exact and compared for exact equality -- no tolerance.
+ * exact and compared numerically (x == y) -- no tolerance; -0 equals +0. This
+ * case keeps its zero factors: the offloaded assignment returns each -0 product
+ * as +0 (tiles sum from +0: the deviation of docs/AFFINE_GEMM_MAPPING.md sections
+ * 6 and 20, accepted for this case), so an element may differ from the reference
+ * in the sign of zero only. Such elements are counted and reported (a -0 result
+ * where the reference holds +0 fails), every other difference fails, and
+ * systolic-cc --verify compares numerically here (scripts/stages.py verify_flags).
  *
  * How to run:
  *   CPU only (the kernel as written vs the references):
@@ -128,11 +142,27 @@ static long first_diff(const float *x, const float *y, long n) {
   return -1;
 }
 
+/* elements numerically equal to the reference but not bitwise: only a zero of
+   the other sign (-0 == +0); *wrong_way counts a -0 result where the reference
+   holds +0 (the tiles sum from +0 and never make that one) */
+static long sign_of_zero_only(const float *x, const float *y, long n, long *wrong_way) {
+  const float pz = 0;
+  long count = 0;
+  *wrong_way = 0;
+  for (long e = 0; e < n; ++e)
+    if (x[e] == y[e] && memcmp(&x[e], &y[e], sizeof x[e]) != 0) {
+      ++count;
+      if (memcmp(&x[e], &pz, sizeof pz) != 0) ++*wrong_way;   /* x is -0 */
+    }
+  return count;
+}
+#define REFERENCE_NEGATIVE_ZEROS 8   /* -0 elements of the final C, from the Python oracle */
+
 int main(void) {
   const long n = 64;
   init();
   memcpy(C_ref, C, sizeof C_ref);
-  printf("[gemm_recognition] case_097 no_accumulation: negative / reduction_mismatch, class not_gemm_overwrite\n");
+  printf("[gemm_recognition] case_097 no_accumulation: negative / reduction_mismatch, class assignment_last_write\n");
   if (checksum(&C[0][0], n) != INITIAL_CHECKSUM) {
     printf("[gemm_recognition] REFERENCE INCONSISTENT: initial data differs from the Python oracle\n");
     printf("RESULT case_097 FAIL (test bug)\n"); return 3;
@@ -144,6 +174,17 @@ int main(void) {
     printf("RESULT case_097 FAIL (test bug)\n"); return 3;
   }
   printf("[gemm_recognition] references: checksum %.0f matches the Python oracle\n", EXPECTED_CHECKSUM);
+  {
+    const float pz = 0;
+    long nz = 0;
+    for (long e = 0; e < n; ++e)
+      if ((&C_ref[0][0])[e] == 0 && memcmp(&(&C_ref[0][0])[e], &pz, sizeof pz) != 0) ++nz;
+    if (nz != REFERENCE_NEGATIVE_ZEROS) {
+      printf("[gemm_recognition] REFERENCE INCONSISTENT: the reference holds %ld negative zeros, the Python oracle %d\n", nz, REFERENCE_NEGATIVE_ZEROS);
+      printf("RESULT case_097 FAIL (test bug)\n"); return 3;
+    }
+    printf("[gemm_recognition] references: %ld negative zero(s), as the Python oracle says\n", nz);
+  }
 
 #ifdef GEMM_RECOGNITION_STATS
   systolic_offload_stats_t before, after;
@@ -160,8 +201,10 @@ int main(void) {
 
   long d = first_diff(&C[0][0], &C_ref[0][0], n);
   double got = checksum(&C[0][0], n);
-  if (d < 0 && got == EXPECTED_CHECKSUM) {
-    printf("[gemm_recognition] kernel: equal to the reference (%ld elements, exact), checksum %.0f\n", n, got);
+  long wrong_way, sz = sign_of_zero_only(&C[0][0], &C_ref[0][0], n, &wrong_way);
+  printf("[gemm_recognition] kernel: %ld element(s) differ from the reference in the sign of zero only (+0 for -0, accepted: docs sections 6 and 20), %ld the other way\n", sz, wrong_way);
+  if (d < 0 && got == EXPECTED_CHECKSUM && wrong_way == 0) {
+    printf("[gemm_recognition] kernel: numerically equal to the reference (%ld elements, exact; %ld signed zero(s) differ), checksum %.0f\n", n, sz, got);
     printf("RESULT case_097 PASS\n");
     return 0;
   }
