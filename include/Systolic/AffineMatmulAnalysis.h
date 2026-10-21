@@ -507,6 +507,9 @@ struct AffineGeometryScreening {
   SmallVector<Loop> loops;
   /// Per operand, per memref dimension, the ordinal coefficients.
   std::array<lattice::IntMatrix, 3> ordinal;
+  /// The same rows on the loop counters as written (not times the step):
+  /// the coefficient vectors of R8 (section 22).
+  std::array<lattice::IntMatrix, 3> written;
 
   /// Ranks over Q of C's subscripts and of all subscripts, on every loop of
   /// two or more iterations ('full') and on the role loops only ('roles':
@@ -556,6 +559,52 @@ struct AffineGeometryScreening {
 FailureOr<AffineGeometryScreening>
 screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
                            std::string *why = nullptr);
+
+/// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md
+/// section 22): two subscripts intersect iff the dot product of their linear
+/// coefficient vectors, on the loop counters as written, is nonzero (the
+/// constants take no part). Every count is a rank over Q, never a number of
+/// nonzero pairs. A loop of two or more iterations is classified by its
+/// readers (the operands with a nonzero coefficient on it); the contraction
+/// block S is the loops both factors read and C does not. A DIAGNOSTIC: the
+/// recognizer does not use it yet.
+struct AffineR8Structure {
+  /// Per loop of the nest, bit X set iff operand X (0 the first factor, 1
+  /// the second, 2 C) has a nonzero coefficient on it; 0 for a loop of fewer
+  /// than two iterations (a constant).
+  SmallVector<unsigned> readers;
+  /// The contraction block S, and S's loops grouped by appearing together
+  /// in one subscript of a factor.
+  SmallVector<unsigned> contractionLoops;
+  SmallVector<SmallVector<unsigned>> contractionGroups;
+  /// On S, with P and Q the factors' rows restricted to S: rank P, rank Q,
+  /// rank [P; Q], and the coupling rank(P Q^T) = R8's dim(intersect(A, B) \ C).
+  unsigned rankFirst = 0, rankSecond = 0, rankStacked = 0, coupling = 0;
+  /// rank(P_b Q_b^T) on the loops all three operands read.
+  unsigned batchCoupling = 0;
+  /// The literal reading on every loop of two or more iterations:
+  /// rank(M_X M_Y^T) for the pairs
+  /// (first, second), (first, C), (second, C), and the number of nonzero
+  /// (first, second) dot products (not a dimension).
+  unsigned literalAB = 0, literalAC = 0, literalBC = 0, pairsAB = 0;
+  /// The rank of each operand's rows on every loop; 1 is a
+  /// one-dimensional operand (Phase 2), 0 a constant one.
+  std::array<unsigned, 3> operandRank{};
+  /// Rule E (section 22.2) is E1: coupling = rank P = rank Q, every shared
+  /// coordinate of each factor coupled by R8 to the other -- recognition
+  /// eligibility. E2, rank [P; Q] = rank P = rank Q (the factors read the
+  /// same coordinates on S), is not part of Rule E: it is reported as a
+  /// lowering-feasibility diagnostic (one tile coordinate must address both
+  /// factors). E2 implies E1.
+  bool e1 = false, e2 = false;
+  bool eligible() const { return e1; }
+};
+
+/// R8 on explicit rows: rows[X] holds operand X's subscripts' coefficients on
+/// the n loops of `trips`. nullopt on a ragged row or on overflow.
+std::optional<AffineR8Structure>
+computeR8Structure(const std::array<lattice::IntMatrix, 3> &rows,
+                   ArrayRef<int64_t> trips);
 
 } // namespace systolic
 } // namespace mlir

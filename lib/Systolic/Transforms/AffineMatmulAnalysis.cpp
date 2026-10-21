@@ -3983,6 +3983,8 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
         row.push_back(*c);
       }
       result.ordinal[x].push_back(std::move(row));
+      result.written[x].push_back(lattice::IntVector(
+          form->coefficients.begin(), form->coefficients.begin() + n));
     }
   }
 
@@ -4212,6 +4214,175 @@ mlir::systolic::screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
   return result;
 }
 
+
+//===----------------------------------------------------------------------===//
+// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md
+// section 22): dot products and ranks on the counters as written.
+//===----------------------------------------------------------------------===//
+
+std::optional<AffineR8Structure>
+mlir::systolic::computeR8Structure(const std::array<lattice::IntMatrix, 3> &rows,
+                                   ArrayRef<int64_t> trips) {
+  const unsigned n = trips.size();
+  for (const lattice::IntMatrix &m : rows)
+    for (const lattice::IntVector &row : m)
+      if (row.size() != n)
+        return std::nullopt;
+
+  AffineR8Structure r;
+  r.readers.assign(n, 0);
+  SmallVector<unsigned> live, batch;
+  for (unsigned s = 0; s < n; ++s) {
+    if (trips[s] < 2)
+      continue;
+    live.push_back(s);
+    for (unsigned x = 0; x < 3; ++x)
+      for (const lattice::IntVector &row : rows[x])
+        if (row[s] != 0)
+          r.readers[s] |= 1u << x;
+    if (r.readers[s] == 0b011)
+      r.contractionLoops.push_back(s);
+    else if (r.readers[s] == 0b111)
+      batch.push_back(s);
+  }
+
+  // The rows restricted to `columns`, zero rows dropped (they read none of
+  // the columns and add nothing to a rank or a dot product).
+  auto restrictTo = [](const lattice::IntMatrix &m,
+                       ArrayRef<unsigned> columns) {
+    lattice::IntMatrix out;
+    for (const lattice::IntVector &row : m) {
+      lattice::IntVector v;
+      bool nonzero = false;
+      for (unsigned s : columns) {
+        v.push_back(row[s]);
+        nonzero |= row[s] != 0;
+      }
+      if (!nonzero)
+        continue;
+      // A row divided by the gcd of its entries: ranks and the ranks of
+      // products do not change, and large proportional rows do not overflow.
+      std::optional<lattice::IntVector> reduced = lattice::primitive(v);
+      out.push_back(reduced ? std::move(*reduced) : std::move(v));
+    }
+    return out;
+  };
+  auto rankOf = [](const lattice::IntMatrix &m,
+                   unsigned columns) -> std::optional<unsigned> {
+    if (m.empty() || columns == 0)
+      return 0u;
+    std::optional<lattice::ColumnEchelon> e = lattice::columnEchelon(m, columns);
+    return e ? std::optional<unsigned>(e->rank) : std::nullopt;
+  };
+  auto dot = [](ArrayRef<int64_t> u,
+                ArrayRef<int64_t> v) -> std::optional<int64_t> {
+    int64_t sum = 0;
+    for (auto [a, b] : llvm::zip_equal(u, v)) {
+      std::optional<int64_t> p = llvm::checkedMul(a, b);
+      if (!p)
+        return std::nullopt;
+      std::optional<int64_t> t = llvm::checkedAdd(sum, *p);
+      if (!t)
+        return std::nullopt;
+      sum = *t;
+    }
+    return sum;
+  };
+  // rank(P Q^T) of two restricted row sets: R8's coupling.
+  auto couplingOf = [&](const lattice::IntMatrix &p,
+                        const lattice::IntMatrix &q) -> std::optional<unsigned> {
+    if (p.empty() || q.empty())
+      return 0u;
+    lattice::IntMatrix gram;
+    for (const lattice::IntVector &u : p) {
+      lattice::IntVector g;
+      for (const lattice::IntVector &v : q) {
+        std::optional<int64_t> d = dot(u, v);
+        if (!d)
+          return std::nullopt;
+        g.push_back(*d);
+      }
+      gram.push_back(std::move(g));
+    }
+    return rankOf(gram, q.size());
+  };
+
+  std::array<lattice::IntMatrix, 3> onLive;
+  for (unsigned x = 0; x < 3; ++x) {
+    onLive[x] = restrictTo(rows[x], live);
+    std::optional<unsigned> rank = rankOf(onLive[x], live.size());
+    if (!rank)
+      return std::nullopt;
+    r.operandRank[x] = *rank;
+  }
+  std::optional<unsigned> ab = couplingOf(onLive[0], onLive[1]);
+  std::optional<unsigned> ac = couplingOf(onLive[0], onLive[2]);
+  std::optional<unsigned> bc = couplingOf(onLive[1], onLive[2]);
+  if (!ab || !ac || !bc)
+    return std::nullopt;
+  r.literalAB = *ab;
+  r.literalAC = *ac;
+  r.literalBC = *bc;
+  for (const lattice::IntVector &u : onLive[0])
+    for (const lattice::IntVector &v : onLive[1]) {
+      std::optional<int64_t> d = dot(u, v);
+      if (!d)
+        return std::nullopt;
+      r.pairsAB += *d != 0;
+    }
+
+  const lattice::IntMatrix p = restrictTo(rows[0], r.contractionLoops);
+  const lattice::IntMatrix q = restrictTo(rows[1], r.contractionLoops);
+  lattice::IntMatrix stacked = p;
+  stacked.append(q.begin(), q.end());
+  const unsigned width = r.contractionLoops.size();
+  std::optional<unsigned> rp = rankOf(p, width), rq = rankOf(q, width),
+                          rs = rankOf(stacked, width),
+                          kappa = couplingOf(p, q),
+                          beta = couplingOf(restrictTo(rows[0], batch),
+                                            restrictTo(rows[1], batch));
+  if (!rp || !rq || !rs || !kappa || !beta)
+    return std::nullopt;
+  r.rankFirst = *rp;
+  r.rankSecond = *rq;
+  r.rankStacked = *rs;
+  r.coupling = *kappa;
+  r.batchCoupling = *beta;
+  r.e1 = r.coupling == r.rankFirst && r.coupling == r.rankSecond;
+  r.e2 = r.rankStacked == r.rankFirst && r.rankStacked == r.rankSecond;
+
+  // Groups of S: loops joined by a subscript of a factor that reads both.
+  SmallVector<unsigned> parent(n);
+  std::iota(parent.begin(), parent.end(), 0u);
+  auto find = [&](unsigned s) {
+    while (parent[s] != s)
+      s = parent[s] = parent[parent[s]];
+    return s;
+  };
+  for (unsigned x = 0; x < 2; ++x)
+    for (const lattice::IntVector &row : rows[x]) {
+      std::optional<unsigned> first;
+      for (unsigned s : r.contractionLoops) {
+        if (row[s] == 0)
+          continue;
+        if (!first)
+          first = s;
+        else
+          parent[find(s)] = find(*first);
+      }
+    }
+  for (unsigned s : r.contractionLoops) {
+    auto it = llvm::find_if(r.contractionGroups,
+                            [&](const SmallVector<unsigned> &g) {
+                              return find(g.front()) == find(s);
+                            });
+    if (it == r.contractionGroups.end())
+      r.contractionGroups.push_back({s});
+    else
+      it->push_back(s);
+  }
+  return r;
+}
 
 // ---------------------------------------------------------------------------
 // Domain normalization (docs/AFFINE_GEMM_MAPPING.md sections 19.7, 19.12):

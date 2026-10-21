@@ -2359,3 +2359,119 @@ aliasing, flat collisions, out-of-bounds and assignment overwrites refused). Sho
 (`C[b][i][j] += A[b][i][k] B[k][j]`) and case_124 (`C[i][j] += A[i][k] B[k][i]`, j read by C only)
 are re-decided ACCEPT (basis `dimension_partition`). The mapping oracle models the rule
 (`classify_loops`) and checks every lowered partition address by address.
+
+## 22. R8: the structural recognition relation and Rule E (2026-10-21, diagnostic)
+
+The research specification of 2026-10-21 (Phase 1, rules R1-R8) defines the intersection of two
+subscripts by their coefficient vectors. This section states the definitions as implemented by
+`computeR8Structure` (AffineMatmulAnalysis.cpp) and printed by
+`--test-affine-matmul-discovery=r8=true`. **It is a diagnostic: the recognizer does not use it yet.**
+Test: test/Systolic/affine_gemm_r8_structure.mlir.
+
+### 22.1 Definitions
+
+- The loops are the counters x_1 .. x_n **as written** (not the ordinals of section 19, not a
+  normalized basis). L is the set of loops of two or more iterations; a loop of one iteration is a
+  constant and takes no part.
+- A subscript s(x) = a . x + c of operand X contributes its row a (the constant c takes no part in
+  any dot product or rank; it stays in the access map, where the view and bounds checks use it).
+  M_X is the matrix of X's rows. Zero rows are dropped wherever a block of columns is taken.
+- **R8 relation.** Rows a and b are related iff a . b != 0. This is a *recognition relation*, not
+  the intersection of subspaces: (x0 - x1) . x0 = 1 relates the two rows although span{x0 - x1} and
+  span{x0} meet only in 0, and (x0 - x1) . (x0 + x1) = 0 does not relate them although both read x0
+  and x1.
+- **Readers.** rd(s) is the set of operands with a nonzero coefficient on loop s in L. The classes:
+  S = {s : rd(s) = {A, B}} (the contraction block), the batch block {A, B, C}, C∩A∖B, C∩B∖A, C only,
+  A only, B only.
+- **Dimensions are ranks, never pair counts.** With P = M_A|S and Q = M_B|S:
+  - dim(intersect(A,B) ∖ C) := kappa = rank(P Q^T) (the coupling);
+  - batch coupling beta := rank(P_b Q_b^T) on the batch block;
+  - the literal reading on every loop of L, rank(M_A M_B^T), rank(M_A M_C^T), rank(M_B M_C^T), and
+    the number of nonzero A.B pairs, are printed for comparison only. T3 has two nonzero pairs
+    (k . k, 2k . k) and kappa = 1.
+- **One-dimensional operand** (handed to Phase 2): rank(M_X|L) = 1 -- a 1-D memref, or subscripts
+  that are all proportional (A[20i+k][20i+k], C[i][i]). Rank 0 (a constant operand) is printed
+  separately.
+- The diagnostic names the product's first factor A, the second B and the accumulator C, whatever
+  the memrefs are called.
+
+### 22.2 Rule E (structural recognition eligibility)
+
+**Rule E is E1** (decided 2026-10-21):
+
+- E1: kappa = rank P = rank Q. Every independent shared coordinate of each factor is coupled by R8
+  (a nonzero dot product) to the other factor. A nest is **recognition-eligible** iff E1 holds.
+
+Recognition eligibility is not lowering feasibility. Passing R8 does not waive the iteration domain,
+the affine access mapping or the reduction semantics: every check of sections 19-21 (one tile
+coordinate per role, density, views, bounds, C's injectivity per batch, the exact bijection, the FP
+policy) still applies after it. The diagnostic therefore also prints
+
+- E2: rank [P; Q] = rank P = rank Q -- on S both factors read the same coordinates. E2 is **not
+  part of Rule E**; it is a lowering-feasibility condition: one GEMM coordinate K, addressed by one
+  tile index, must be a strided view of both factors.
+
+**Lemma.** E2 implies E1. *Proof.* Let r = rank P = rank Q = rank [P; Q] and let the rows of W
+(r x |S|) be a basis of the common row space. Then P = U W and Q = V W with U, V of full column
+rank r, and P Q^T = U (W W^T) V^T. W W^T is an r x r Gram matrix of independent rows, hence positive
+definite, so rank(P Q^T) = r. [] So every nest that could be lowered with shared contraction
+coordinates is recognition-eligible; Rule E never rejects a lowering the rank condition would allow.
+
+E1 does not imply E2: `C[i][j] += A[i][k0 + 2k1] * B[k0 + k1][j]` has dot((1, 2), (1, 1)) = 3, so
+kappa = rank P = rank Q = 1 and it is **eligible**; rank [P; Q] = 2, so it is not lowered as one K
+coordinate (the recognizer refuses it, UNKNOWN, spec question SQ-1). That refusal is a lowering
+decision, not Rule E.
+
+Consequences:
+- S empty: eligible with kappa = 0, the virtual K = 1 of R1 (T5).
+- S nonempty and kappa = 0: never eligible (E1 fails, rank P >= 1). T1 is this case: x0 - x1 and
+  x0 + x1 have dot product 0, so kappa = 0 while each factor reads one coordinate of S.
+- kappa >= 2: R2's case (several contraction coordinates).
+
+### 22.3 Ground truth and the other cases
+
+| Case | S | rank P, Q, [P;Q] | kappa | Rule E (E1) | E2 | Recognizer today (unchanged) |
+|---|---|---|---|---|---|---|
+| T1 `A[i][x0-x1]*B[x0+x1][j]` | x0 x1 | 1 1 2 | 0 | not eligible | no | UNKNOWN (SQ-1) |
+| T2 `A[i][x0-x1]*B[x0][j]` | x0 (x1 A only) | 1 1 1 | 1 | eligible | yes | UNKNOWN (SQ-1) |
+| T3 `A[i][i][k][2k]*B[k][j][2j]` | k | 1 1 1 | 1 | eligible | yes | accepted |
+| T4 `C[10i+j] += A[20i+k][20i+k]*B[50k+j][j]` | k | 1 1 1 | 1 | eligible; A, C one-dimensional | yes | accepted (Phase 2) |
+| T5 `A[i][k]*B[l][j]` | empty (k A only, l B only) | 0 0 0 | 0 | eligible | yes | VALID_BUT_LOWERING_UNSUPPORTED (broadcast) |
+| `A[i][k][l]*B[k][l][j]` | k l | 2 2 2 | 2 | eligible | yes | VALID_BUT_LOWERING_UNSUPPORTED (partial-C) |
+| `A[i][k0+k1]*B[k0+k1][j]` | k0 k1 | 1 1 1 | 1 | eligible | yes | not dense, refused |
+| `A[i][k0+2k1]*B[k0+k1][j]` | k0 k1 | 1 1 2 | 1 | eligible | no | UNKNOWN (SQ-1) |
+| `A[i][x0][x1]*B[x0+x1][j]` | x0 x1 | 2 1 2 | 1 | not eligible | no | VALID_BUT_LOWERING_UNSUPPORTED |
+
+### 22.4 Literal and restricted readings
+
+dot(a, b) is a sum over loops, and A and B share only the loops of S and of the batch block, so a
+literal dot product adds the contributions of different classes. They can cancel:
+`C[b][i][j] += A[b+k][i] * B[b-k+2][j]` has (b + k) . (b - k) = 0, so the literal rank(M_A M_B^T)
+is 0, while kappa = 1 (k) and beta = 1 (b): a batched GEMM, accepted. The literal reading therefore
+cannot be the definition of dim(intersect(A,B) ∖ C). Restricting to the class removes the
+cross-class terms, and the diagnostic prints a note wherever literal != kappa + beta.
+
+### 22.5 Known limitations
+
+- **Computable but not eligible.** `A[i][x0][x1] * B[x0+x1][j]` (kappa = 1 < rank P = 2) is a sum
+  of shifted GEMMs, just as T1 is (K = x0 and a reduction batch over x1); Rule E rejects it by
+  policy, not because it cannot be computed. (`A[i][x0-x1] * B[x0+2x1][j]`, dot product -1, is
+  eligible; it fails E2.)
+- **T1 is computable.** Besides K = x0 with a reduction batch over x1, T1 is a T2-shaped GEMM
+  after a change of basis (m = x0 + x1: A'[i][m] = sum over x1 of A[i][m - 2 x1], then C = A' B), and
+  the sheared nest A[i][2y0 - y1] B[y1][j] on a box is eligible. T1 is rejected by the policy "the
+  counters as written, no basis transformation" (Phase 3), not because it cannot be computed.
+- **Basis dependence.** The verdict depends on the basis through the loop classes (which operands
+  read which loop), and through kappa, and so Rule E: dot products depend on the basis: dot products are invariant only under signed
+  permutations of the loops (interchange, reversal), the only unimodular U with U U^T = I.
+- **Loop steps.** "As written" means the counters, not the ordinals of section 19 (x = lower +
+  step z). A step changes dot products, so kappa and E1 can differ between a step-s loop and its
+  step-1 rewrite (x0 step 2, A[x0 + x1], B[x0 - 4 x1]: written dot product -3, ordinal dot product 0).
+  E2 cannot: scaling a column does not change a rank. Rule E uses the counters as written
+  (decided 2026-10-21).
+- **Not analysed.** Nests whose counters the domain normalization rewrote with U != I (sections
+  19.7, 19.12) are reported "not analysed", and so are nests the geometric screening refuses
+  (assignment nests, non-constant bounds) and arithmetic overflow. Symbolic additive offsets are
+  analysed: they are constants.
+- **Unused loops.** A loop of two or more iterations that no access reads is printed "used by no
+  access"; Rule E does not look at it, and the recognizer handles it as before.

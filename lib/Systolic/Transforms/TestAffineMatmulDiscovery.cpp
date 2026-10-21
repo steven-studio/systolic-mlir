@@ -78,6 +78,14 @@ struct TestAffineMatmulDiscoveryPass
                      "conditions only, not a decision)"),
       llvm::cl::init(false)};
 
+  Option<bool> r8{
+      *this, "r8",
+      llvm::cl::desc("Print the R8 structure of every candidate: dot "
+                     "products and ranks on the counters as written, the "
+                     "loop classes and Rule E (docs/AFFINE_GEMM_MAPPING.md "
+                     "section 22: a diagnostic, not a decision)"),
+      llvm::cl::init(false)};
+
   static void printVector(const lattice::IntVector &v) {
     llvm::errs() << "[";
     llvm::interleaveComma(v, llvm::errs());
@@ -192,6 +200,136 @@ struct TestAffineMatmulDiscoveryPass
     printConditions("role space", g->conditionsRoles);
   }
 
+  static void printR8(AffineMatmulCandidate candidate,
+                      ArrayRef<DomainNormalization> normalized) {
+    llvm::errs() << "R8 structure (diagnostic, not a decision):\n";
+    // R8 is defined on the counters as written; a normalized nest's
+    // counters are x' (x = U x'), another basis.
+    for (const DomainNormalization &dn : normalized) {
+      bool identity = true;
+      for (auto [r, row] : llvm::enumerate(dn.U))
+        for (auto [c, v] : llvm::enumerate(row))
+          identity &= v == (r == c ? 1 : 0);
+      if (!identity && (dn.outermost == candidate.anchor ||
+                        dn.outermost->isProperAncestor(candidate.anchor) ||
+                        candidate.anchor->isProperAncestor(dn.outermost))) {
+        llvm::errs() << "  not analysed: the domain normalization rewrote "
+                        "the counters of this nest (x = U x'), they are not "
+                        "the counters as written\n";
+        return;
+      }
+    }
+    std::string why;
+    FailureOr<AffineGeometryScreening> g =
+        screenAffineMatmulGeometry(candidate, &why);
+    if (failed(g)) {
+      llvm::errs() << "  not analysed: " << why << "\n";
+      return;
+    }
+    SmallVector<int64_t> trips;
+    for (const AffineGeometryScreening::Loop &loop : g->loops)
+      trips.push_back(loop.trip);
+    std::optional<AffineR8Structure> r = computeR8Structure(g->written, trips);
+    if (!r) {
+      llvm::errs() << "  not analysed: overflow\n";
+      return;
+    }
+    // A and B are the product's first and second factor, C the accumulator
+    // (not the memrefs' names).
+    static const char *const kOperand[3] = {"A", "B", "C"};
+    for (unsigned x = 0; x < 3; ++x) {
+      llvm::errs() << "  " << kOperand[x] << " rows: ";
+      printMatrix(g->written[x]);
+      llvm::errs() << "\n";
+    }
+    for (auto [s, readers] : llvm::enumerate(r->readers)) {
+      llvm::errs() << "  loop " << s << ":";
+      if (trips[s] < 2) {
+        llvm::errs() << " one iteration (a constant)\n";
+        continue;
+      }
+      if (readers == 0) {
+        llvm::errs() << " used by no access\n";
+        continue;
+      }
+      llvm::errs() << " readers";
+      for (unsigned x = 0; x < 3; ++x)
+        if (readers & (1u << x))
+          llvm::errs() << " " << kOperand[x];
+      llvm::errs() << " -> ";
+      switch (readers) {
+      case 0b111:
+        llvm::errs() << "OB (batch)";
+        break;
+      case 0b101:
+        llvm::errs() << "M or OB";
+        break;
+      case 0b110:
+        llvm::errs() << "N or OB";
+        break;
+      case 0b100:
+        llvm::errs() << "OB (C only)";
+        break;
+      case 0b011:
+        llvm::errs() << "K or RB (contraction block)";
+        break;
+      case 0b001:
+      case 0b010:
+        llvm::errs() << "RB (one factor only)";
+        break;
+      default:
+        break;
+      }
+      llvm::errs() << "\n";
+    }
+    llvm::errs() << "  contraction block S:";
+    if (r->contractionLoops.empty())
+      llvm::errs() << " empty";
+    for (unsigned s : r->contractionLoops)
+      llvm::errs() << " " << s;
+    llvm::errs() << "; groups:";
+    for (const SmallVector<unsigned> &group : r->contractionGroups) {
+      llvm::errs() << " {";
+      llvm::interleave(group, llvm::errs(), " ");
+      llvm::errs() << "}";
+    }
+    llvm::errs() << "\n";
+    llvm::errs() << "  on S: rank A " << r->rankFirst << ", rank B "
+                 << r->rankSecond << ", rank [A; B] " << r->rankStacked
+                 << ", coupling rank(A B^T) " << r->coupling
+                 << " = dim(intersect(A,B) \\ C)\n";
+    llvm::errs() << "  batch block coupling: " << r->batchCoupling << "\n";
+    llvm::errs() << "  literal, loops of two or more iterations: rank(A B^T) " << r->literalAB
+                 << ", rank(A C^T) " << r->literalAC << ", rank(B C^T) "
+                 << r->literalBC << "; nonzero A.B pairs " << r->pairsAB
+                 << " (not a dimension)\n";
+    if (r->literalAB != r->coupling + r->batchCoupling)
+      llvm::errs() << "  literal and restricted readings differ: dot "
+                      "products of different loop classes cancel or add "
+                      "(section 22.4)\n";
+    llvm::errs() << "  operand ranks: A " << r->operandRank[0] << ", B "
+                 << r->operandRank[1] << ", C " << r->operandRank[2];
+    for (unsigned rank : {1u, 0u}) {
+      bool first = true;
+      for (unsigned x = 0; x < 3; ++x) {
+        if (r->operandRank[x] != rank)
+          continue;
+        if (first)
+          llvm::errs() << (rank == 1 ? "; one-dimensional (Phase 2):"
+                                     : "; constant (rank 0):");
+        llvm::errs() << " " << kOperand[x];
+        first = false;
+      }
+    }
+    llvm::errs() << "\n";
+    auto yn = [](bool b) { return b ? "yes" : "no"; };
+    llvm::errs() << "  rule E (E1, coupling = rank A = rank B): "
+                 << (r->eligible() ? "eligible" : "not eligible")
+                 << "; row spaces on S equal (E2, lowering feasibility, not "
+                    "rule E): "
+                 << yn(r->e2) << "\n";
+  }
+
   void runOnOperation() override {
     // The domain normalization the lowering pass applies first (docs
     // sections 19.7, 19.12), reported line by line.
@@ -226,6 +364,8 @@ struct TestAffineMatmulDiscoveryPass
     for (AffineMatmulCandidate candidate : candidates) {
       if (geometry)
         printGeometry(candidate);
+      if (r8)
+        printR8(candidate, normalized);
       std::string notRecognized;
       GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
       auto result =
