@@ -1,15 +1,16 @@
-// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md section 22): dot products
-// and ranks of the subscripts' coefficient vectors on the loop counters as written, the loop classes
-// by readers, the contraction block S, the coupling rank(A B^T) on S (R8's dim(intersect(A,B) \ C)),
-// the literal reading on every loop, the one-dimensional operands (Phase 2) and Rule E. A DIAGNOSTIC:
-// every case also pins the recognizer's verdict, which this patch does not change.
+// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md section 22): the
+// subscripts' coefficient vectors on the loop counters as written, the loop classes by readers,
+// the reduction loops Z (read by a factor, not by C) and the shared loops S (read by both
+// factors), the ranks of the factors' reduction index vectors on Z (linear independence only),
+// intersect(A,B) (some a.b != 0), shared loop variables (some sum |a_t||b_t| > 0), the literal
+// reading, and the one-dimensional operands (Phase 2). A DIAGNOSTIC: every case also pins the
+// recognizer's verdict without reduction-batch partitioning (section 23), unchanged.
 //
 // RUN: systolic-opt "--test-affine-matmul-discovery=r8=true" -split-input-file %s \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s --check-prefix=R8
 // RUN: systolic-opt --test-affine-matmul-discovery -split-input-file %s -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=OFF
 // OFF-NOT: R8 structure
-
 
 // T1 (ground truth REJECT): C[i][j] += A[i][x0-x1] * B[x0+x1][j]
 // R8:        A rows: {{\[\[}}1, 0, 0, 0], [0, 0, 1, -1]]
@@ -19,12 +20,12 @@
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2 3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 2, coupling rank(A B^T) 0 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2 3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 2 (row spaces meet in dimension 0), coupling rank(A B^T) 0
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 0, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 0 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): not eligible; row spaces on S equal (E2, lowering feasibility, not rule E): no
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): no; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: logical coordinate K (the first factor's dimension 1 d2 - d3, the second factor's dimensio
 // R8-NEXT:   class: UNKNOWN
@@ -54,12 +55,12 @@ func.func @t1(%A: memref<4x6xf32> {llvm.noalias}, %B: memref<8x5xf32> {llvm.noal
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A -> RB (one factor only)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 2 (row spaces meet in dimension 0), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: logical coordinate K (the first factor's dimension 1 d2 - d3, the second factor's dimensio
 // R8-NEXT:   class: UNKNOWN
@@ -88,12 +89,12 @@ func.func @t2(%A: memref<4x6xf32> {llvm.noalias}, %B: memref<6x5xf32> {llvm.noal
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @t3(%A: memref<3x3x5x10xf32> {llvm.noalias}, %B: memref<5x4x8xf32> {llvm.noalias}, %C: memref<3x4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 3 {
@@ -118,12 +119,12 @@ func.func @t3(%A: memref<3x3x5x10xf32> {llvm.noalias}, %B: memref<5x4x8xf32> {ll
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 1, B 2, C 1; one-dimensional (Phase 2): A C
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @t4(%A: memref<24x24xf32> {llvm.noalias}, %B: memref<160x10xf32> {llvm.noalias}, %C: memref<20xf32> {llvm.noalias}) {
   affine.for %i = 0 to 2 {
@@ -149,12 +150,12 @@ func.func @t4(%A: memref<24x24xf32> {llvm.noalias}, %B: memref<160x10xf32> {llvm
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A -> RB (one factor only)
 // R8-NEXT:   loop 3: readers B -> RB (one factor only)
-// R8-NEXT:   contraction block S: empty; groups:
-// R8-NEXT:   on S: rank A 0, rank B 0, rank [A; B] 0, coupling rank(A B^T) 0 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: none; groups:
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 2 (row spaces meet in dimension 0), coupling rank(A B^T) 0
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 0, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 0 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): no; shared loop variables (some sum |a_t||b_t| > 0): no
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: a coordinate is read by the first factor only: the other operands would be broadcast along
 // R8-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
@@ -183,12 +184,12 @@ func.func @t5(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<2x5xf32> {llvm.noal
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @gemm(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -214,12 +215,12 @@ func.func @gemm(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.no
 // R8-NEXT:   loop 1: readers A C -> M or OB
 // R8-NEXT:   loop 2: readers B C -> N or OB
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 3; groups: {3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 3; shared loops S: 3; groups: {3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 1
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 2, rank(A C^T) 2, rank(B C^T) 2; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 3, B 3, C 3
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @batched(%A: memref<2x4x3xf32> {llvm.noalias}, %B: memref<2x3x5xf32> {llvm.noalias}, %C: memref<2x4x5xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {
@@ -247,12 +248,12 @@ func.func @batched(%A: memref<2x4x3xf32> {llvm.noalias}, %B: memref<2x3x5xf32> {
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2} {3}
-// R8-NEXT:   on S: rank A 2, rank B 2, rank [A; B] 2, coupling rank(A B^T) 2 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2} {3}
+// R8-NEXT:   on Z: rank A 2, rank B 2, rank [A; B] 2 (row spaces meet in dimension 2), coupling rank(A B^T) 2
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 2, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 3, B 3, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: 2 separate coordinates are read by both factors (the reduction): one GEMM role over severa
 // R8-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
@@ -282,12 +283,12 @@ func.func @two_k(%A: memref<4x3x2xf32> {llvm.noalias}, %B: memref<3x2x5xf32> {ll
 // R8-NEXT:   loop 1: readers A C -> M or OB
 // R8-NEXT:   loop 2: readers B C -> N or OB
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 3; groups: {3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 3; shared loops S: 3; groups: {3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 2, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 3, B 2, C 3
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/2/3, batched over loop(s) 1 (2 batch iteration(s))
 func.func @two_m(%A: memref<4x2x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.noalias}, %C: memref<4x2x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -315,12 +316,12 @@ func.func @two_m(%A: memref<4x2x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers B C -> N or OB
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 3; groups: {3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 3; shared loops S: 3; groups: {3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 2; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 3, C 3
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/3, batched over loop(s) 2 (2 batch iteration(s))
 func.func @two_n(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5x2xf32> {llvm.noalias}, %C: memref<4x5x2xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -347,12 +348,12 @@ func.func @two_n(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5x2xf32> {llvm
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @neg_coef(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<5x7xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -377,12 +378,12 @@ func.func @neg_coef(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<5x7xf32> {llv
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @stride(%A: memref<4x16xf32> {llvm.noalias}, %B: memref<8x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -408,12 +409,12 @@ func.func @stride(%A: memref<4x16xf32> {llvm.noalias}, %B: memref<8x5xf32> {llvm
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2 3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2 3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2+3
 func.func @merged_k(%A: memref<4x12xf32> {llvm.noalias}, %B: memref<12x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -441,12 +442,12 @@ func.func @merged_k(%A: memref<4x12xf32> {llvm.noalias}, %B: memref<12x5xf32> {l
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2 3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2 3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: no (logical coordinate K is driven by 2 loops that do not enumerate it densely (scales must grow by the finer loops' extents; with all but one of them as batch loops it would be a batched GEMM, which is not constructed))
 func.func @noninjective(%A: memref<4x5xf32> {llvm.noalias}, %B: memref<5x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -474,12 +475,12 @@ func.func @noninjective(%A: memref<4x5xf32> {llvm.noalias}, %B: memref<5x5xf32> 
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2 3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 2, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2 3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 2 (row spaces meet in dimension 0), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): no
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: logical coordinate K (the first factor's dimension 1 d2 + d3 * 2, the second factor's dime
 // R8-NEXT:   class: UNKNOWN
@@ -509,12 +510,12 @@ func.func @coupled_k(%A: memref<4x6xf32> {llvm.noalias}, %B: memref<4x5xf32> {ll
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2 3; groups: {2 3}
-// R8-NEXT:   on S: rank A 2, rank B 1, rank [A; B] 2, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2 3; shared loops S: 2 3; groups: {2 3}
+// R8-NEXT:   on Z: rank A 2, rank B 1, rank [A; B] 2 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 3, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): not eligible; row spaces on S equal (E2, lowering feasibility, not rule E): no
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: the first factor reads logical coordinate K through two different combinations of its loop
 // R8-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
@@ -544,13 +545,13 @@ func.func @conv(%A: memref<4x3x3xf32> {llvm.noalias}, %B: memref<5x5xf32> {llvm.
 // R8-NEXT:   loop 1: readers A C -> M or OB
 // R8-NEXT:   loop 2: readers B C -> N or OB
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 3; groups: {3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 3; shared loops S: 3; groups: {3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 1
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 0, rank(A C^T) 2, rank(B C^T) 2; nonzero A.B pairs 0 (not a dimension)
 // R8-NEXT:   literal and restricted readings differ: dot products of different loop classes cancel or add (section 22.4)
 // R8-NEXT:   operand ranks: A 2, B 2, C 3
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @cancel(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.noalias}, %C: memref<2x4x5xf32> {llvm.noalias}) {
   affine.for %b = 0 to 2 {
@@ -577,12 +578,12 @@ func.func @cancel(%A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {llvm.
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B -> RB (one factor only)
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 1 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 2, rank [A; B] 2 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 0; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 1; one-dimensional (Phase 2): C
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: a coordinate is read by the second factor only: the other operands would be broadcast alon
 // R8-NEXT:   class: VALID_BUT_LOWERING_UNSUPPORTED
@@ -608,12 +609,12 @@ func.func @diag_c(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.
 // R8-NEXT:   C rows: {{\[\[}}1, 0]]
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 1; groups: {1}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 1; shared loops S: 1; groups: {1}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 0; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 1, C 1; one-dimensional (Phase 2): B C
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0//1
 func.func @gemv(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3xf32> {llvm.noalias}, %C: memref<4xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -637,12 +638,12 @@ func.func @gemv(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3xf32> {llvm.noal
 // R8-NEXT:   loop 1: readers A C -> M or OB
 // R8-NEXT:   loop 2: readers B C -> N or OB
 // R8-NEXT:   loop 3: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 3; groups: {3}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 3; shared loops S: 3; groups: {3}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 1
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 2, rank(A C^T) 1, rank(B C^T) 2; nonzero A.B pairs 2 (not a dimension)
 // R8-NEXT:   operand ranks: A 3, B 3, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 1/2/3, batched over loop(s) 0 (2 batch iteration(s))
 func.func @overlap_c(%A: memref<2x4x3xf32> {llvm.noalias}, %B: memref<2x3x5xf32> {llvm.noalias}, %C: memref<5x5xf32> {llvm.noalias}) {
   affine.for %p = 0 to 2 {
@@ -670,12 +671,12 @@ func.func @overlap_c(%A: memref<2x4x3xf32> {llvm.noalias}, %B: memref<2x3x5xf32>
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: one iteration (a constant)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @once(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -723,12 +724,12 @@ func.func @normalized(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x5xf32> {l
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
 // R8-NEXT:   loop 3: used by no access
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8-NEXT: recognition result: failure
 // R8-NEXT:   reason: loop 3 of the nest is used by no access (it repeats the accumulation; moved outward by the
 // R8-NEXT:   class: UNKNOWN
@@ -758,12 +759,12 @@ func.func @unused(%A: memref<4x3xf32> {llvm.noalias}, %B: memref<3x5xf32> {llvm.
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @identity_normalized(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {
@@ -789,12 +790,12 @@ func.func @identity_normalized(%A: memref<4x8xf32> {llvm.noalias}, %B: memref<8x
 // R8-NEXT:   loop 0: readers A C -> M or OB
 // R8-NEXT:   loop 1: readers B C -> N or OB
 // R8-NEXT:   loop 2: readers A B -> K or RB (contraction block)
-// R8-NEXT:   contraction block S: 2; groups: {2}
-// R8-NEXT:   on S: rank A 1, rank B 1, rank [A; B] 1, coupling rank(A B^T) 1 = dim(intersect(A,B) \ C)
+// R8-NEXT:   reduction loops Z: 2; shared loops S: 2; groups: {2}
+// R8-NEXT:   on Z: rank A 1, rank B 1, rank [A; B] 1 (row spaces meet in dimension 1), coupling rank(A B^T) 1
 // R8-NEXT:   batch block coupling: 0
 // R8-NEXT:   literal, loops of two or more iterations: rank(A B^T) 1, rank(A C^T) 1, rank(B C^T) 1; nonzero A.B pairs 1 (not a dimension)
 // R8-NEXT:   operand ranks: A 2, B 2, C 2
-// R8-NEXT:   rule E (E1, coupling = rank A = rank B): eligible; row spaces on S equal (E2, lowering feasibility, not rule E): yes
+// R8-NEXT:   intersect(A,B) (some a.b != 0 on Z): yes; shared loop variables (some sum |a_t||b_t| > 0): yes
 // R8:        dense logical GEMM: yes, I/J/K on loops 0/1/2
 func.func @large_coefficients(%A: memref<4x17179869184xf32> {llvm.noalias}, %B: memref<17179869184x5xf32> {llvm.noalias}, %C: memref<4x5xf32> {llvm.noalias}) {
   affine.for %i = 0 to 4 {

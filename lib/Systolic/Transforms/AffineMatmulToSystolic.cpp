@@ -1513,6 +1513,15 @@ struct AffineMatmulToSystolicPass
                      "predicted makespan"),
       llvm::cl::init(false)};
 
+  Option<bool> reductionBatches{
+      *this, "reduction-batches",
+      llvm::cl::desc("Reduction-batch partitioning "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 23): loops C does "
+                     "not read may become reduction batch loops, run around "
+                     "the tiles and accumulated into the same slab of C in "
+                     "order"),
+      llvm::cl::init(false)};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<affine::AffineDialect, bufferization::BufferizationDialect,
                     tensor::TensorDialect, memref::MemRefDialect,
@@ -1813,9 +1822,17 @@ struct AffineMatmulToSystolicPass
                     << " exact region(s)";
       if (!matmul.accumulates)
         remark << " (an assignment C = A B: C zeroed before the tiles)";
-      if (!matmul.demotedLoops.empty())
-        remark << ", partitioned on " << matmul.demotedLoops.size()
+      // Reduction batch loops (section 23) are demoted loops too, but they
+      // accumulate into one slab of C instead of partitioning it.
+      const size_t partitionLoops =
+          matmul.demotedLoops.size() - matmul.reductionBatchLoops.size();
+      if (partitionLoops)
+        remark << ", partitioned on " << partitionLoops
                << " demoted loop(s)";
+      if (!matmul.reductionBatchLoops.empty())
+        remark << ", " << matmul.reductionBatchLoops.size()
+               << " reduction batch loop(s) (not read by C, accumulated "
+                  "into C in order)";
       if (plan)
         remark << " on " << fleet.resources.size()
                << " accelerator(s): makespan = "
@@ -1878,7 +1895,10 @@ struct AffineMatmulToSystolicPass
 
     SmallVector<LogicalMatmul, 1> matmuls;
     for (AffineMatmulCandidate candidate : candidates) {
-      auto result = recognizeLogicalMatmul(candidate);
+      AffineMatmulRecognitionOptions recognition;
+      recognition.reductionBatches = reductionBatches;
+      auto result =
+          recognizeLogicalMatmul(candidate, nullptr, nullptr, recognition);
       if (failed(result))
         continue;
 

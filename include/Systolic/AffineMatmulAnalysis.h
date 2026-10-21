@@ -350,6 +350,12 @@ struct LogicalMatmul {
   // canonically batched GEMM. Diagnostics only: the batch machinery treats
   // them as any other batch loop.
   SmallVector<unsigned> demotedLoops;
+  // The demoted loops C does not read (reduction-batch partitioning, docs
+  // section 23): reduction batch loops. For each of their values the nest is
+  // a GEMM whose factor views are offset by them; all their values
+  // accumulate into the same slab of C, in order. A subset of demotedLoops;
+  // empty unless the recognition ran with reductionBatches.
+  SmallVector<unsigned> reductionBatchLoops;
 
   // The task's exact mapping (reported by the discovery pass, not decided).
   ExactMapping exactMapping;
@@ -378,6 +384,21 @@ void collectAffineMatmulCandidates(
     Operation *root,
     SmallVectorImpl<AffineMatmulCandidate> &candidates);
 
+/// Options of recognizeLogicalMatmul.
+struct AffineMatmulRecognitionOptions {
+  /// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23,
+  /// opt-in). On a box domain, the loops of a multiply-accumulate nest that C
+  /// does not read become reduction batch loops when that makes the nest a
+  /// dense GEMM: a loop read by one factor only (C[i][j] += A[i][k] * B[l][j]:
+  /// k and l, with K = 1), and -- when the loops both factors read are not one
+  /// dense GEMM coordinate -- all of those but the one that stays K (tried the
+  /// longest first, ties innermost). Every iteration still runs exactly once:
+  /// a reduction batch loop runs around the tiles, and its values accumulate
+  /// into the same slab of C in order. When no such decomposition is a dense
+  /// GEMM, the result, reason and class are those without the option.
+  bool reductionBatches = false;
+};
+
 /// Recover logical GEMM coordinates and access factorization.
 ///
 /// Failure means "not recognized"; it is not a compiler error. On failure,
@@ -387,7 +408,8 @@ void collectAffineMatmulCandidates(
 FailureOr<LogicalMatmul>
 recognizeLogicalMatmul(AffineMatmulCandidate candidate,
                        std::string *why = nullptr,
-                       GemmMappingClass *mappingClass = nullptr);
+                       GemmMappingClass *mappingClass = nullptr,
+                       const AffineMatmulRecognitionOptions &options = {});
 
 /// The domain normalization of docs/AFFINE_GEMM_MAPPING.md section 19.7 /
 /// 19.12 (2026-10-18), applied to one perfect multiply-accumulate band whose
@@ -573,12 +595,15 @@ struct AffineR8Structure {
   /// the second, 2 C) has a nonzero coefficient on it; 0 for a loop of fewer
   /// than two iterations (a constant).
   SmallVector<unsigned> readers;
-  /// The contraction block S, and S's loops grouped by appearing together
-  /// in one subscript of a factor.
+  /// The reduction loops Z (read by a factor, not by C), the shared loops S
+  /// of Z (read by both factors), and S's loops grouped by appearing
+  /// together in one subscript of a factor.
+  SmallVector<unsigned> reductionLoops;
   SmallVector<unsigned> contractionLoops;
   SmallVector<SmallVector<unsigned>> contractionGroups;
-  /// On S, with P and Q the factors' rows restricted to S: rank P, rank Q,
-  /// rank [P; Q], and the coupling rank(P Q^T) = R8's dim(intersect(A, B) \ C).
+  /// On Z, with P and Q the factors' rows restricted to Z (the reduction
+  /// index vectors): rank P, rank Q, rank [P; Q], and rank(P Q^T), the
+  /// number of independent directions coupled by nonzero dot products.
   unsigned rankFirst = 0, rankSecond = 0, rankStacked = 0, coupling = 0;
   /// rank(P_b Q_b^T) on the loops all three operands read.
   unsigned batchCoupling = 0;
@@ -590,14 +615,13 @@ struct AffineR8Structure {
   /// The rank of each operand's rows on every loop; 1 is a
   /// one-dimensional operand (Phase 2), 0 a constant one.
   std::array<unsigned, 3> operandRank{};
-  /// Rule E (section 22.2) is E1: coupling = rank P = rank Q, every shared
-  /// coordinate of each factor coupled by R8 to the other -- recognition
-  /// eligibility. E2, rank [P; Q] = rank P = rank Q (the factors read the
-  /// same coordinates on S), is not part of Rule E: it is reported as a
-  /// lowering-feasibility diagnostic (one tile coordinate must address both
-  /// factors). E2 implies E1.
-  bool e1 = false, e2 = false;
-  bool eligible() const { return e1; }
+  /// intersect(A, B): some reduction index vector a of A and b of B have
+  /// a . b != 0 (equivalently P Q^T != 0). sharedLoops: some pair has
+  /// sum_t |a_t| |b_t| > 0, i.e. a loop variable drives both (S is not
+  /// empty) -- possible with a . b = 0 (x0 - x1 and x0 + x1). Neither is a
+  /// row-space intersection, whose dimension is rank P + rank Q -
+  /// rank [P; Q] (linear independence only).
+  bool intersect = false, sharedLoops = false;
 };
 
 /// R8 on explicit rows: rows[X] holds operand X's subscripts' coefficients on

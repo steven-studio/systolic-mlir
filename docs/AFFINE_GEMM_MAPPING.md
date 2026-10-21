@@ -2360,118 +2360,141 @@ aliasing, flat collisions, out-of-bounds and assignment overwrites refused). Sho
 are re-decided ACCEPT (basis `dimension_partition`). The mapping oracle models the rule
 (`classify_loops`) and checks every lowered partition address by address.
 
-## 22. R8: the structural recognition relation and Rule E (2026-10-21, diagnostic)
+## 22. R8: the structural recognition relation (2026-10-21, diagnostic)
 
-The research specification of 2026-10-21 (Phase 1, rules R1-R8) defines the intersection of two
-subscripts by their coefficient vectors. This section states the definitions as implemented by
-`computeR8Structure` (AffineMatmulAnalysis.cpp) and printed by
-`--test-affine-matmul-discovery=r8=true`. **It is a diagnostic: the recognizer does not use it yet.**
-Test: test/Systolic/affine_gemm_r8_structure.mlir.
+The research specification of 2026-10-21 (Phase 1) relates the operands' subscripts through their
+coefficient vectors. `computeR8Structure` (AffineMatmulAnalysis.cpp) computes the quantities below
+and `--test-affine-matmul-discovery=r8=true` prints them. **They are a diagnostic**: the
+recognition itself is the analysis of sections 19-21, with the reduction-batch partitioning of
+section 23. Test: test/Systolic/affine_gemm_r8_structure.mlir.
 
 ### 22.1 Definitions
 
-- The loops are the counters x_1 .. x_n **as written** (not the ordinals of section 19, not a
-  normalized basis). L is the set of loops of two or more iterations; a loop of one iteration is a
-  constant and takes no part.
-- A subscript s(x) = a . x + c of operand X contributes its row a (the constant c takes no part in
-  any dot product or rank; it stays in the access map, where the view and bounds checks use it).
-  M_X is the matrix of X's rows. Zero rows are dropped wherever a block of columns is taken.
-- **R8 relation.** Rows a and b are related iff a . b != 0. This is a *recognition relation*, not
-  the intersection of subspaces: (x0 - x1) . x0 = 1 relates the two rows although span{x0 - x1} and
-  span{x0} meet only in 0, and (x0 - x1) . (x0 + x1) = 0 does not relate them although both read x0
-  and x1.
-- **Readers.** rd(s) is the set of operands with a nonzero coefficient on loop s in L. The classes:
-  S = {s : rd(s) = {A, B}} (the contraction block), the batch block {A, B, C}, C∩A∖B, C∩B∖A, C only,
-  A only, B only.
-- **Dimensions are ranks, never pair counts.** With P = M_A|S and Q = M_B|S:
-  - dim(intersect(A,B) ∖ C) := kappa = rank(P Q^T) (the coupling);
-  - batch coupling beta := rank(P_b Q_b^T) on the batch block;
-  - the literal reading on every loop of L, rank(M_A M_B^T), rank(M_A M_C^T), rank(M_B M_C^T), and
-    the number of nonzero A.B pairs, are printed for comparison only. T3 has two nonzero pairs
-    (k . k, 2k . k) and kappa = 1.
-- **One-dimensional operand** (handed to Phase 2): rank(M_X|L) = 1 -- a 1-D memref, or subscripts
-  that are all proportional (A[20i+k][20i+k], C[i][i]). Rank 0 (a constant operand) is printed
-  separately.
-- The diagnostic names the product's first factor A, the second B and the accumulator C, whatever
-  the memrefs are called.
+- The loops are the counters x_1 .. x_n **as written**: not the ordinals of section 19, and not a
+  normalized basis. Nests whose counters the domain normalization rewrote with U != I are reported
+  "not analysed". Only loops of two or more iterations take part; a loop of one iteration is a
+  constant.
+- A subscript s(x) = a . x + c contributes its row a. The constant c takes no part in a dot
+  product or a rank, but it stays in the access map: the views and the bounds use it.
+- The readers of a loop are the operands with a nonzero coefficient on it. This gives two sets:
+  - **Z**, the reduction loops: read by a factor and not by C.
+  - **S**, the shared loops: the loops of Z that both factors read.
+- **P** and **Q** are the factors' rows restricted to Z, zero rows dropped: the reduction index
+  vectors.
+- **intersect(A, B)**: some a in P and b in Q have a . b != 0. Equivalently, P Q^T != 0.
+  - This is **not** a row-space intersection.
+  - In T2, A[i][x0 - x1] * B[x0][j], (1, -1) . (1, 0) = 1, so intersect holds, although the row
+    spaces span{(1, -1)} and span{(1, 0)} meet only in 0.
+- **Shared loop variables**: some a in P and b in Q have sum_t |a_t| |b_t| > 0. Equivalently,
+  S is not empty.
+  - This can hold when every dot product is 0. In T1, A[i][x0 - x1] * B[x0 + x1][j],
+    (1, -1) . (1, 1) = 0 but (1, 1) . (1, 1) = 2.
+- **Ranks** describe linear independence and nothing else:
+  - rank P, rank Q, rank [P; Q];
+  - the row spaces meet in dimension rank P + rank Q - rank [P; Q];
+  - rank(P Q^T) counts the independent directions coupled by nonzero dot products.
 
-### 22.2 Rule E (structural recognition eligibility)
+  Nonzero pairs are not counted as dimensions: T3, A[i][i][k][2k] * B[k][j][2j], has two nonzero
+  pairs (k . k and 2k . k), and rank(P Q^T) = 1.
+- **The literal reading**, printed for comparison: rank(M_X M_Y^T) on every loop, with the
+  subscripts unrestricted. Contributions of different loop classes can cancel in it.
+  `C[b][i][j] += A[b+k][i] * B[b-k+2][j]` has (b + k) . (b - k) = 0, yet k is a genuine
+  contraction loop. The diagnostic notes every such case.
+- **A one-dimensional operand** (Phase 2) has rows of rank 1 on L: a 1-D memref, or subscripts
+  that are all proportional (A[20i+k][20i+k], C[i][i]). Rank 0 is printed separately.
 
-**Rule E is E1** (decided 2026-10-21):
+### 22.2 The ground truth in these terms
 
-- E1: kappa = rank P = rank Q. Every independent shared coordinate of each factor is coupled by R8
-  (a nonzero dot product) to the other factor. A nest is **recognition-eligible** iff E1 holds.
+| Case | Z | S | intersect | shared loops | rank P, Q, [P;Q] |
+|---|---|---|---|---|---|
+| T1 `A[i][x0-x1]*B[x0+x1][j]` | x0 x1 | x0 x1 | no | yes | 1 1 2 |
+| T2 `A[i][x0-x1]*B[x0][j]` | x0 x1 | x0 | yes | yes | 1 1 2 |
+| T3 `A[i][i][k][2k]*B[k][j][2j]` | k | k | yes | yes | 1 1 1 |
+| T5 `A[i][k]*B[l][j]` | k l | none | no | no | 1 1 2 |
+| Case 2 `A[i][k0][k1]*B[k0+k1][j]` | k0 k1 | k0 k1 | yes | yes | 2 1 2 |
+| `A[i][k0+2k1]*B[k0+k1][j]` | k0 k1 | k0 k1 | yes (3) | yes | 1 1 2 |
 
-Recognition eligibility is not lowering feasibility. Passing R8 does not waive the iteration domain,
-the affine access mapping or the reduction semantics: every check of sections 19-21 (one tile
-coordinate per role, density, views, bounds, C's injectivity per batch, the exact bijection, the FP
-policy) still applies after it. The diagnostic therefore also prints
+Whether a nest is a GEMM does not follow from these numbers alone. Section 23 builds the
+decomposition and lets the existing checks decide.
 
-- E2: rank [P; Q] = rank P = rank Q -- on S both factors read the same coordinates. E2 is **not
-  part of Rule E**; it is a lowering-feasibility condition: one GEMM coordinate K, addressed by one
-  tile index, must be a strided view of both factors.
+## 23. Reduction-batch partitioning (2026-10-21, opt-in)
 
-**Lemma.** E2 implies E1. *Proof.* Let r = rank P = rank Q = rank [P; Q] and let the rows of W
-(r x |S|) be a basis of the common row space. Then P = U W and Q = V W with U, V of full column
-rank r, and P Q^T = U (W W^T) V^T. W W^T is an r x r Gram matrix of independent rows, hence positive
-definite, so rank(P Q^T) = r. [] So every nest that could be lowered with shared contraction
-coordinates is recognition-eligible; Rule E never rejects a lowering the rank condition would allow.
+### 23.1 The problem
 
-E1 does not imply E2: `C[i][j] += A[i][k0 + 2k1] * B[k0 + k1][j]` has dot((1, 2), (1, 1)) = 3, so
-kappa = rank P = rank Q = 1 and it is **eligible**; rank [P; Q] = 2, so it is not lowered as one K
-coordinate (the recognizer refuses it, UNKNOWN, spec question SQ-1). That refusal is a lowering
-decision, not Rule E.
+Section 21 refused every loop that C does not read, beyond the one K coordinate:
+- a loop read by one factor only (a "broadcast", T5's k and l);
+- a second loop read by both factors (a "partial-C reduction", `A[r][i][k] * B[r][k][j]`);
+- loops both factors read but not as one coordinate (T1, T2, Case 2, `A[i][k0+2k1]*B[k0+k1][j]`,
+  refused UNKNOWN, spec question SQ-1).
 
-Consequences:
-- S empty: eligible with kappa = 0, the virtual K = 1 of R1 (T5).
-- S nonempty and kappa = 0: never eligible (E1 fails, rank P >= 1). T1 is this case: x0 - x1 and
-  x0 + x1 have dot product 0, so kappa = 0 while each factor reads one coordinate of S.
-- kappa >= 2: R2's case (several contraction coordinates).
+Each of these is a sum over the loops C does not read, so a GEMM over one of them, repeated for
+the others, computes it exactly.
 
-### 22.3 Ground truth and the other cases
+### 23.2 The method
 
-| Case | S | rank P, Q, [P;Q] | kappa | Rule E (E1) | E2 | Recognizer today (unchanged) |
-|---|---|---|---|---|---|---|
-| T1 `A[i][x0-x1]*B[x0+x1][j]` | x0 x1 | 1 1 2 | 0 | not eligible | no | UNKNOWN (SQ-1) |
-| T2 `A[i][x0-x1]*B[x0][j]` | x0 (x1 A only) | 1 1 1 | 1 | eligible | yes | UNKNOWN (SQ-1) |
-| T3 `A[i][i][k][2k]*B[k][j][2j]` | k | 1 1 1 | 1 | eligible | yes | accepted |
-| T4 `C[10i+j] += A[20i+k][20i+k]*B[50k+j][j]` | k | 1 1 1 | 1 | eligible; A, C one-dimensional | yes | accepted (Phase 2) |
-| T5 `A[i][k]*B[l][j]` | empty (k A only, l B only) | 0 0 0 | 0 | eligible | yes | VALID_BUT_LOWERING_UNSUPPORTED (broadcast) |
-| `A[i][k][l]*B[k][l][j]` | k l | 2 2 2 | 2 | eligible | yes | VALID_BUT_LOWERING_UNSUPPORTED (partial-C) |
-| `A[i][k0+k1]*B[k0+k1][j]` | k0 k1 | 1 1 1 | 1 | eligible | yes | not dense, refused |
-| `A[i][k0+2k1]*B[k0+k1][j]` | k0 k1 | 1 1 2 | 1 | eligible | no | UNKNOWN (SQ-1) |
-| `A[i][x0][x1]*B[x0+x1][j]` | x0 x1 | 2 1 2 | 1 | not eligible | no | VALID_BUT_LOWERING_UNSUPPORTED |
+With `--affine-matmul-to-systolic=reduction-batches=true` (systolic-cc `--reduction-batches`;
+discovery `reduction-batches=true`), on a box domain and for a multiply-accumulate nest:
 
-### 22.4 Literal and restricted readings
+1. A loop of Z read by one factor only becomes a **reduction batch loop** (RB). With S empty, this
+   gives the virtual K = 1 of T5: RB = {k, l}.
+2. The analyses of sections 19-21 run unchanged. When they refuse the nest, or K is not dense, and
+   S has two or more loops, every choice "one loop of S stays K, the others become RB" is tried,
+   the longest loop first (the largest tiles), ties the innermost. The first choice the analyses
+   accept with a dense GEMM is taken (an example follows this list). When no choice gives a dense
+   GEMM, the recognition without the option decides, with its result, reason and class.
+3. A reduction batch loop is a batch loop that C does not read. It is a row of its own of the
+   partition prefix of the logical mapping. For each of its values:
+   - the factors' views are offset by it (their batch terms, ISSUE-007);
+   - every other coefficient, stride and constant of the subscripts is kept;
+   - the GEMM accumulates into the same slab of C.
+4. The lowering is unchanged. The batch loops run around the tiles, and in each iteration C is read
+   (`to_tensor`), the tile plan runs, and C is written back (`materialize_in_destination`). So the
+   reduction batch iterations accumulate in order, starting from C's actual initial value. With
+   the asynchronous runtime, each iteration's `fpga_gemm_wait` comes before that write-back.
 
-dot(a, b) is a sum over loops, and A and B share only the loops of S and of the batch block, so a
-literal dot product adds the contributions of different classes. They can cancel:
-`C[b][i][j] += A[b+k][i] * B[b-k+2][j]` has (b + k) . (b - k) = 0, so the literal rank(M_A M_B^T)
-is 0, while kappa = 1 (k) and beta = 1 (b): a batched GEMM, accepted. The literal reading therefore
-cannot be the definition of dim(intersect(A,B) ∖ C). Restricting to the class removes the
-cross-class terms, and the diagnostic prints a note wherever literal != kappa + beta.
+Example: `C[i][j] += A[i][k0 + 2k1] * B[k0 + k1][j]` takes K = k1 and RB = k0. For each k0, the
+GEMM reads A[i][k0 + 2K] (stride 2) and B[k0 + K][j] (stride 1).
 
-### 22.5 Known limitations
+### 23.3 Why it is exact
 
-- **Computable but not eligible.** `A[i][x0][x1] * B[x0+x1][j]` (kappa = 1 < rank P = 2) is a sum
-  of shifted GEMMs, just as T1 is (K = x0 and a reduction batch over x1); Rule E rejects it by
-  policy, not because it cannot be computed. (`A[i][x0-x1] * B[x0+2x1][j]`, dot product -1, is
-  eligible; it fails E2.)
-- **T1 is computable.** Besides K = x0 with a reduction batch over x1, T1 is a T2-shaped GEMM
-  after a change of basis (m = x0 + x1: A'[i][m] = sum over x1 of A[i][m - 2 x1], then C = A' B), and
-  the sheared nest A[i][2y0 - y1] B[y1][j] on a box is eligible. T1 is rejected by the policy "the
-  counters as written, no basis transformation" (Phase 3), not because it cannot be computed.
-- **Basis dependence.** The verdict depends on the basis through the loop classes (which operands
-  read which loop), and through kappa, and so Rule E: dot products depend on the basis: dot products are invariant only under signed
-  permutations of the loops (interchange, reversal), the only unimodular U with U U^T = I.
-- **Loop steps.** "As written" means the counters, not the ordinals of section 19 (x = lower +
-  step z). A step changes dot products, so kappa and E1 can differ between a step-s loop and its
-  step-1 rewrite (x0 step 2, A[x0 + x1], B[x0 - 4 x1]: written dot product -3, ordinal dot product 0).
-  E2 cannot: scaling a column does not change a rank. Rule E uses the counters as written
-  (decided 2026-10-21).
-- **Not analysed.** Nests whose counters the domain normalization rewrote with U != I (sections
-  19.7, 19.12) are reported "not analysed", and so are nests the geometric screening refuses
-  (assignment nests, non-constant bounds) and arithmetic overflow. Symbolic additive offsets are
-  analysed: they are constants.
-- **Unused loops.** A loop of two or more iterations that no access reads is printed "used by no
-  access"; Rule E does not look at it, and the recognizer handles it as before.
+- **No iteration is lost and none is repeated.** The box is a product, so (RB loops, the rest) is
+  a bijection of the iterations. The exact bijection of section 19.13 is checked on the
+  constructed mapping.
+- **Every access reads the element the program reads.** Each view reads the same index values as
+  the original access, so it is in bounds whenever the program is (the bounds checks of section 19
+  apply).
+- **Repeated products keep their multiplicity.** Repeated products are not refused. In Case 1,
+  `A[i][k0 - k2] * B[k0 + k1][j]`, the iterations (k0, k1, k2) and (k0 + 1, k1 - 1, k2 + 1) read
+  the same pair of elements. Both still run, once each: K = k0 and RB = {k1, k2}.
+- **Assignments are excluded.** The assignment twins (C = A * B with a loop C does not read) stay
+  PROVEN_INVALID: only the last product would survive (section 20).
+
+### 23.4 Floating point
+
+A reduction batch reorders each element's sum. It is therefore lowered only with the permission to
+reassociate (`allow-fp-reassociation`, `--fp-reassociation`, or the `reassoc` flag on the
+accumulation), like every accumulation (section 6). Under strict floating point nothing changes:
+the nest is refused, class PROVEN_VALID. With the permission, integer-valued data give bitwise
+equal results; other data may differ in rounding. test/SystolicCC/affine_reduction_batches.c
+checks them with a relative tolerance, and does not call that bitwise equality.
+
+### 23.5 What changes, what does not
+
+- **Without the option nothing changes.** The recognizer gives the same verdicts and the lowering
+  emits the same IR and remarks; this was checked byte for byte on every test/Systolic file.
+- **With the option**, these are lowered and verified bitwise against the program as written, with
+  the synchronous and the asynchronous runtime (test/SystolicCC/affine_reduction_batches.c):
+  - T1, T2, T5;
+  - Case 1, Case 2;
+  - `A[i][k0+2k1]*B[k0+k1][j]` and `A[i][k0+k1]*B[k0+k1][j]`;
+  - two contraction loops, `A[r][i][k]*B[r][k][j]`;
+  - A-only and B-only loops;
+  - an output batch with reduction batches;
+  - negative coefficients and affine constants on reduction batch loops.
+
+  The MLIR level is test/Systolic/affine_gemm_reduction_batches.mlir.
+- **Limits:**
+  - one-dimensional C (`C[i + j]`, T4-like flat outputs) is Phase 2;
+  - non-box domains get no reduction batches (the readers decide nothing there, section 19.7);
+  - every reduction batch iteration is a GEMM of its own with a wait, so device utilization is low
+    when K is 1 (T5: one 3x5x1 tile per (k, l)).
