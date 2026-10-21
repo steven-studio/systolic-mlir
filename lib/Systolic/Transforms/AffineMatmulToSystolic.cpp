@@ -67,6 +67,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
@@ -1246,6 +1247,381 @@ static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
   return false;
 }
 
+//===----------------------------------------------------------------------===//
+// Rewrites of the nests as written, before the box pipeline: the last write
+// of an assignment (docs/AFFINE_GEMM_MAPPING.md section 20.5) and the
+// pre-reduction of the factors of an accumulation (section 24).
+//===----------------------------------------------------------------------===//
+
+/// The perfect bands of `module`, outermost loop first: one for each loop
+/// that is not the only operation of its parent loop.
+static SmallVector<SmallVector<affine::AffineForOp>>
+perfectBandsOf(ModuleOp module) {
+  SmallVector<SmallVector<affine::AffineForOp>> bands;
+  module.walk([&](affine::AffineForOp loop) {
+    auto parent = dyn_cast<affine::AffineForOp>(loop->getParentOp());
+    if (parent && &parent.getBody()->front() == loop.getOperation() &&
+        std::next(parent.getBody()->begin(), 2) == parent.getBody()->end())
+      return;
+    SmallVector<affine::AffineForOp> band;
+    affine::getPerfectlyNestedLoops(band, loop);
+    bands.push_back(std::move(band));
+  });
+  return bands;
+}
+
+/// A loop of a band with constant bounds: x = lower + step * z, z in
+/// [0, trips).
+struct ConstantLoop {
+  int64_t lower = 0, trips = 0, step = 1;
+};
+
+/// The band's loops when every bound is a constant (a box as written) and
+/// no loop has results; nullopt otherwise.
+static std::optional<SmallVector<ConstantLoop>>
+constantLoopsOf(ArrayRef<affine::AffineForOp> band) {
+  SmallVector<ConstantLoop> loops;
+  for (affine::AffineForOp loop : band) {
+    std::optional<int64_t> lower = constantAffineForBound(loop, /*lower=*/true);
+    std::optional<int64_t> upper =
+        constantAffineForBound(loop, /*lower=*/false);
+    if (loop.getNumResults() != 0 || !lower || !upper)
+      return std::nullopt;
+    ConstantLoop c{*lower, 0, loop.getStepAsInt()};
+    if (*upper > *lower) {
+      std::optional<int64_t> span = llvm::checkedSub(*upper, *lower);
+      if (!span)
+        return std::nullopt;
+      c.trips = (*span - 1) / c.step + 1;
+    }
+    loops.push_back(c);
+  }
+  return loops;
+}
+
+/// Whether an access with `map` over `operands` reads the counter `iv`.
+static bool readsCounter(AffineMap map, ValueRange operands, Value iv) {
+  for (auto [position, operand] : llvm::enumerate(operands))
+    if (operand == iv &&
+        (position < map.getNumDims()
+             ? map.isFunctionOfDim(position)
+             : map.isFunctionOfSymbol(position - map.getNumDims())))
+      return true;
+  return false;
+}
+
+/// Last-write-wins (section 20.5): in an assignment C = A * B on a box as
+/// written, a loop of two or more iterations that C does not read writes the
+/// same elements of C at every iteration, and in the order written only its
+/// last iteration's product survives: for one element of C, the iterations
+/// that write it form a product with that loop's whole range (the box), so
+/// the last of them in the lexicographic order of execution has that loop at
+/// its last value -- whatever the other loops, whether or not C is injective
+/// on them. Such loops are cut to that last iteration, [last, last + 1): the
+/// nest then writes every element it wrote, in the same order, with the same
+/// final value. Only when nothing else can see the removed writes: A and B
+/// provably do not overlap C, the body is the one product stored, the domain
+/// is not empty; and only where the nest may be lowered (the permission to
+/// reassociate), so that strict floating point keeps the nest as written.
+/// The assignment is not made an accumulation; whether the nest is then a
+/// GEMM is decided as for any assignment (section 20).
+static void applyLastWriteWins(ModuleOp module, bool assumeNoAlias,
+                               bool allowFpReassociation, bool report) {
+  for (SmallVector<affine::AffineForOp> &band : perfectBandsOf(module)) {
+    SmallVector<affine::AffineLoadOp> loads;
+    affine::AffineStoreOp store;
+    arith::MulFOp mul;
+    bool other = false;
+    for (Operation &op : *band.back().getBody()) {
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+        loads.push_back(load);
+      else if (auto s = dyn_cast<affine::AffineStoreOp>(op))
+        other |= static_cast<bool>(std::exchange(store, s));
+      else if (auto m = dyn_cast<arith::MulFOp>(op))
+        other |= static_cast<bool>(std::exchange(mul, m));
+      else if (!isa<affine::AffineYieldOp>(op))
+        other = true;
+    }
+    if (other || loads.size() != 2 || !store || !mul ||
+        store.getValueToStore() != mul.getResult())
+      continue;
+    // Only where the nest may be lowered: an assignment is lowered only with
+    // the permission to reassociate (section 20); under strict floating
+    // point the nest stays exactly as written.
+    if (!allowFpReassociation &&
+        !arith::bitEnumContainsAll(mul.getFastmath(),
+                                   arith::FastMathFlags::reassoc))
+      continue;
+    // The product of the two loads, each read once.
+    if (!((mul.getLhs() == loads[0].getResult() &&
+           mul.getRhs() == loads[1].getResult()) ||
+          (mul.getLhs() == loads[1].getResult() &&
+           mul.getRhs() == loads[0].getResult())))
+      continue;
+    if (!llvm::all_of(loads, [&](affine::AffineLoadOp load) {
+          return provablyDisjointFromOutput(load.getMemRef(),
+                                            store.getMemRef(), assumeNoAlias);
+        }))
+      continue;
+    std::optional<SmallVector<ConstantLoop>> loops = constantLoopsOf(band);
+    if (!loops || llvm::any_of(*loops, [](const ConstantLoop &l) {
+          return l.trips == 0;
+        }))
+      continue;
+    SmallVector<unsigned> cut;
+    for (auto [d, loop] : llvm::enumerate(band))
+      if ((*loops)[d].trips >= 2 &&
+          !readsCounter(store.getMap(), store.getMapOperands(),
+                        loop.getInductionVar()))
+        cut.push_back(d);
+    if (cut.empty())
+      continue;
+    for (unsigned d : cut) {
+      const ConstantLoop &l = (*loops)[d];
+      const int64_t last = l.lower + (l.trips - 1) * l.step;
+      band[d].setConstantLowerBound(last);
+      band[d].setConstantUpperBound(last + 1);
+    }
+    if (report) {
+      auto remark = band.front()->emitRemark()
+                    << "affine assignment nest C = A * B: last write wins "
+                       "(docs/AFFINE_GEMM_MAPPING.md section 20.5): loop(s) ";
+      llvm::interleave(cut, remark, "+");
+      remark << " of the nest, which C does not read, run their last "
+                "iteration only (the earlier ones write values overwritten "
+                "later)";
+    }
+  }
+}
+
+/// Pre-reduction of the factors (section 24, with --fp-distribute only): in
+/// an accumulation C += A * B on a box as written whose factors share no loop
+/// that C does not read (L_AB empty), the loops read by one factor only are
+/// summed into that factor first --
+///   sum_{z_A, z_B} A(o, z_A) B(o, z_B) = (sum_{z_A} A(o, z_A)) (sum_{z_B} B(o, z_B))
+/// (Lemma 7.6 as formalized in section 24: the box makes the reduction domain
+/// of every output point the product of the A-only and the B-only ranges,
+/// independent of it, and distributivity factors the sum). The derived
+/// operands A' (indexed by the loops A and C read) and B' are fresh buffers,
+/// computed on the host; the nest becomes C += A' * B' over the loops C reads.
+/// A and B are the product's first and second factor.
+/// The premises: the multiply-accumulate body; constant bounds, a nonempty
+/// domain; every loop of two or more iterations read by some operand; no
+/// loop read by both factors and not by C; at least one loop read by one
+/// factor only; A and B provably disjoint from C; unit steps on the loops
+/// that index A' and B'. Floating point is then taken as commutative,
+/// associative and distributive (the permission --fp-distribute): the
+/// result differs in rounding from the loops as written.
+static void preReduceFactors(ModuleOp module, bool assumeNoAlias,
+                             bool report) {
+  for (SmallVector<affine::AffineForOp> &band : perfectBandsOf(module)) {
+    SmallVector<affine::AffineLoadOp> loads;
+    affine::AffineStoreOp store;
+    arith::MulFOp mul;
+    arith::AddFOp add;
+    bool other = false;
+    for (Operation &op : *band.back().getBody()) {
+      if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+        loads.push_back(load);
+      else if (auto s = dyn_cast<affine::AffineStoreOp>(op))
+        other |= static_cast<bool>(std::exchange(store, s));
+      else if (auto m = dyn_cast<arith::MulFOp>(op))
+        other |= static_cast<bool>(std::exchange(mul, m));
+      else if (auto a = dyn_cast<arith::AddFOp>(op))
+        other |= static_cast<bool>(std::exchange(add, a));
+      else if (!isa<affine::AffineYieldOp>(op))
+        other = true;
+    }
+    if (other || loads.size() != 3 || !store || !mul || !add ||
+        store.getValueToStore() != add.getResult())
+      continue;
+    const bool productFirst = add.getLhs() == mul.getResult();
+    Value accValue = productFirst                         ? add.getRhs()
+                     : add.getRhs() == mul.getResult() ? add.getLhs()
+                                                          : Value();
+    auto acc = accValue ? accValue.getDefiningOp<affine::AffineLoadOp>()
+                        : affine::AffineLoadOp();
+    auto aLoad = mul.getLhs().getDefiningOp<affine::AffineLoadOp>();
+    auto bLoad = mul.getRhs().getDefiningOp<affine::AffineLoadOp>();
+    if (!acc || !aLoad || !bLoad || acc == aLoad || acc == bLoad ||
+        aLoad == bLoad || acc.getMemRef() != store.getMemRef() ||
+        acc.getMap() != store.getMap() ||
+        !llvm::equal(acc.getMapOperands(), store.getMapOperands()))
+      continue;
+    Value c = store.getMemRef();
+    if (!provablyDisjointFromOutput(aLoad.getMemRef(), c, assumeNoAlias) ||
+        !provablyDisjointFromOutput(bLoad.getMemRef(), c, assumeNoAlias))
+      continue;
+    std::optional<SmallVector<ConstantLoop>> loops = constantLoopsOf(band);
+    if (!loops || llvm::any_of(*loops, [](const ConstantLoop &l) {
+          return l.trips == 0;
+        }))
+      continue;
+
+    // The loops by readers: A-only, B-only (summed), A and C, B and C (the
+    // derived operands' indices); none may be read by both factors without C.
+    const unsigned n = band.size();
+    SmallVector<unsigned> onlyA, onlyB, keepA, keepB;
+    bool shared = false, unread = false, stepped = false;
+    for (unsigned d = 0; d < n; ++d) {
+      if ((*loops)[d].trips < 2)
+        continue;
+      Value iv = band[d].getInductionVar();
+      const bool ra = readsCounter(aLoad.getMap(), aLoad.getMapOperands(), iv);
+      const bool rb = readsCounter(bLoad.getMap(), bLoad.getMapOperands(), iv);
+      const bool rc = readsCounter(store.getMap(), store.getMapOperands(), iv);
+      unread |= !ra && !rb && !rc;
+      shared |= ra && rb && !rc;
+      if (ra && !rb && !rc)
+        onlyA.push_back(d);
+      if (rb && !ra && !rc)
+        onlyB.push_back(d);
+      if (ra && rc)
+        keepA.push_back(d);
+      if (rb && rc)
+        keepB.push_back(d);
+      stepped |= (rc && (ra || rb)) && (*loops)[d].step != 1;
+    }
+    if (shared || unread || stepped || (onlyA.empty() && onlyB.empty()))
+      continue;
+
+    affine::AffineForOp root = band.front();
+    Location loc = root.getLoc();
+    MLIRContext *context = root.getContext();
+    // A nest of the band's loops `included` (and every loop of one
+    // iteration), the builder left in its innermost body.
+    auto emitNest = [&](OpBuilder &builder, ArrayRef<bool> included,
+                        IRMapping &mapping) {
+      for (unsigned d = 0; d < n; ++d) {
+        const ConstantLoop &l = (*loops)[d];
+        if (!included[d] && l.trips >= 2)
+          continue;
+        auto loop = affine::AffineForOp::create(
+            builder, loc, l.lower, l.lower + (l.trips - 1) * l.step + 1,
+            l.step);
+        mapping.map(band[d].getInductionVar(), loop.getInductionVar());
+        builder.setInsertionPointToStart(loop.getBody());
+      }
+    };
+    // The index of a derived operand: its loops' ordinals (unit steps).
+    auto indexMap = [&](ArrayRef<unsigned> keep) {
+      SmallVector<AffineExpr> results;
+      for (auto [t, d] : llvm::enumerate(keep))
+        results.push_back(getAffineDimExpr(t, context) - (*loops)[d].lower);
+      if (keep.empty())
+        results.push_back(getAffineConstantExpr(0, context));
+      return AffineMap::get(keep.size(), 0, results, context);
+    };
+    auto indexOperands = [&](ArrayRef<unsigned> keep, IRMapping &mapping) {
+      SmallVector<Value> operands;
+      for (unsigned d : keep)
+        operands.push_back(mapping.lookup(band[d].getInductionVar()));
+      return operands;
+    };
+
+    OpBuilder builder(root);
+    // A' = sum over the loops only this factor reads, zeroed first.
+    auto derive = [&](affine::AffineLoadOp load, ArrayRef<unsigned> keep,
+                      ArrayRef<unsigned> summed) -> Value {
+      if (summed.empty())
+        return Value();
+      Type element = cast<MemRefType>(load.getMemRef().getType())
+                         .getElementType();
+      SmallVector<int64_t> shape;
+      for (unsigned d : keep)
+        shape.push_back((*loops)[d].trips);
+      if (shape.empty())
+        shape.push_back(1);
+      Value buffer = memref::AllocOp::create(
+          builder, loc, MemRefType::get(shape, element));
+      Value zero = arith::ConstantOp::create(builder, loc,
+                                             builder.getZeroAttr(element));
+      {
+        OpBuilder zb(builder.getInsertionBlock(), builder.getInsertionPoint());
+        SmallVector<Value> ivs;
+        for (int64_t extent : shape) {
+          auto loop = affine::AffineForOp::create(zb, loc, 0, extent, 1);
+          ivs.push_back(loop.getInductionVar());
+          zb.setInsertionPointToStart(loop.getBody());
+        }
+        affine::AffineStoreOp::create(zb, loc, zero, buffer, ivs);
+      }
+      {
+        OpBuilder sb(builder.getInsertionBlock(), builder.getInsertionPoint());
+        IRMapping mapping;
+        SmallVector<bool> included(n, false);
+        for (unsigned d : keep)
+          included[d] = true;
+        for (unsigned d : summed)
+          included[d] = true;
+        emitNest(sb, included, mapping);
+        Value term = sb.clone(*load, mapping)->getResult(0);
+        AffineMap map = indexMap(keep);
+        SmallVector<Value> operands = indexOperands(keep, mapping);
+        Value partial =
+            affine::AffineLoadOp::create(sb, loc, buffer, map, operands);
+        Value sum = arith::AddFOp::create(sb, loc, partial, term);
+        affine::AffineStoreOp::create(sb, loc, sum, buffer, map, operands);
+      }
+      return buffer;
+    };
+    Value aBuffer = derive(aLoad, keepA, onlyA);
+    Value bBuffer = derive(bLoad, keepB, onlyB);
+
+    // C += A' * B' over the loops C reads, the accumulation's flags plus
+    // reassoc: the permission covers the reordered sums.
+    {
+      OpBuilder mb(builder.getInsertionBlock(), builder.getInsertionPoint());
+      IRMapping mapping;
+      SmallVector<bool> included(n, true);
+      for (unsigned d : onlyA)
+        included[d] = false;
+      for (unsigned d : onlyB)
+        included[d] = false;
+      emitNest(mb, included, mapping);
+      Value cValue = mb.clone(*acc, mapping)->getResult(0);
+      auto factor = [&](affine::AffineLoadOp load, Value buffer,
+                        ArrayRef<unsigned> keep) -> Value {
+        if (!buffer)
+          return mb.clone(*load, mapping)->getResult(0);
+        return affine::AffineLoadOp::create(mb, loc, buffer, indexMap(keep),
+                                            indexOperands(keep, mapping));
+      };
+      Value aValue = factor(aLoad, aBuffer, keepA);
+      Value bValue = factor(bLoad, bBuffer, keepB);
+      Value product =
+          arith::MulFOp::create(mb, loc, aValue, bValue, mul.getFastmathAttr());
+      auto flags = arith::FastMathFlagsAttr::get(
+          context, add.getFastmath() | arith::FastMathFlags::reassoc);
+      Value sum = productFirst
+                      ? arith::AddFOp::create(mb, loc, product, cValue, flags)
+                      : arith::AddFOp::create(mb, loc, cValue, product, flags);
+      mapping.map(add.getResult(), sum);
+      mb.clone(*store, mapping);
+    }
+    // The buffers are freed by the pipeline's buffer deallocation (an explicit
+    // memref.dealloc is refused by the lowering to the LLVM dialect).
+    if (report) {
+      auto remark = root->emitRemark()
+                    << "affine multiply-accumulate nest pre-reduced "
+                       "(--fp-distribute, docs/AFFINE_GEMM_MAPPING.md section "
+                       "24): ";
+      auto list = [&](StringRef name, ArrayRef<unsigned> summed) {
+        remark << name << " summed over loop(s) ";
+        if (summed.empty())
+          remark << "none";
+        llvm::interleave(summed, remark, "+");
+      };
+      list("the first factor", onlyA);
+      remark << ", ";
+      list("the second factor", onlyB);
+      remark << " before the GEMM (no loop is read by both factors and not "
+                "by C)";
+    }
+    root->erase();
+  }
+}
+
 static void hoistRepetitionLoops(ModuleOp module, bool assumeNoAlias,
                                  bool classify) {
   SmallVector<affine::AffineForOp> roots;
@@ -1511,6 +1887,35 @@ struct AffineMatmulToSystolicPass
       *this, "report",
       llvm::cl::desc("Emit a remark per lowered GEMM with its partition and "
                      "predicted makespan"),
+      llvm::cl::init(false)};
+
+  Option<bool> reductionBatches{
+      *this, "reduction-batches",
+      llvm::cl::desc("Reduction-batch partitioning "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 23): loops C does "
+                     "not read may become reduction batch loops, run around "
+                     "the tiles and accumulated into the same slab of C in "
+                     "order (on by default; false: the recognition of "
+                     "sections 19-21 alone)"),
+      llvm::cl::init(true)};
+
+  Option<bool> lastWriteWins{
+      *this, "last-write-wins",
+      llvm::cl::desc("In an assignment C = A * B on a box, cut the loops C "
+                     "does not read to their last iteration, whose product "
+                     "is the one that survives (docs/AFFINE_GEMM_MAPPING.md "
+                     "section 20.5; on by default)"),
+      llvm::cl::init(true)};
+
+  Option<bool> fpDistribute{
+      *this, "fp-distribute",
+      llvm::cl::desc("Permit taking floating point as commutative, "
+                     "associative and distributive to pre-reduce the "
+                     "factors of an accumulation whose factors share no "
+                     "loop C does not read (docs/AFFINE_GEMM_MAPPING.md "
+                     "section 24): the result differs in rounding from the "
+                     "loops as written. Not implied by "
+                     "allow-fp-reassociation"),
       llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -1813,9 +2218,17 @@ struct AffineMatmulToSystolicPass
                     << " exact region(s)";
       if (!matmul.accumulates)
         remark << " (an assignment C = A B: C zeroed before the tiles)";
-      if (!matmul.demotedLoops.empty())
-        remark << ", partitioned on " << matmul.demotedLoops.size()
+      // Reduction batch loops (section 23) are demoted loops too, but they
+      // accumulate into one slab of C instead of partitioning it.
+      const size_t partitionLoops =
+          matmul.demotedLoops.size() - matmul.reductionBatchLoops.size();
+      if (partitionLoops)
+        remark << ", partitioned on " << partitionLoops
                << " demoted loop(s)";
+      if (!matmul.reductionBatchLoops.empty())
+        remark << ", " << matmul.reductionBatchLoops.size()
+               << " reduction batch loop(s) (not read by C, accumulated "
+                  "into C in order)";
       if (plan)
         remark << " on " << fleet.resources.size()
                << " accelerator(s): makespan = "
@@ -1869,7 +2282,17 @@ struct AffineMatmulToSystolicPass
                 << llvm::StringRef(lines).rtrim();
           }
         };
-    reportNormalizations(normalizeParallelotopeDomains(module.getOperation()));
+    // On the nests as written: the last write of an assignment (section
+    // 20.5), the pre-reduction of the factors with --fp-distribute (24).
+    if (lastWriteWins)
+      applyLastWriteWins(module, assumeNoAlias, allowFpReassociation, report);
+    if (fpDistribute)
+      preReduceFactors(module, assumeNoAlias, report);
+    // Reduction batches (section 23) are made only on nests whose counters
+    // are the ones as written: not after a normalization with U != I.
+    const SmallVector<DomainNormalization, 1> normalizations =
+        normalizeParallelotopeDomains(module.getOperation());
+    reportNormalizations(normalizations);
     hoistRepetitionLoops(module, assumeNoAlias, classify);
     nextGemmIndex = nextSystolicGemmIndex(module);
 
@@ -1878,7 +2301,13 @@ struct AffineMatmulToSystolicPass
 
     SmallVector<LogicalMatmul, 1> matmuls;
     for (AffineMatmulCandidate candidate : candidates) {
-      auto result = recognizeLogicalMatmul(candidate);
+      AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten =
+          !countersRewritten(normalizations, candidate.anchor);
+      recognition.reductionBatches =
+          reductionBatches && recognition.countersAsWritten;
+      auto result =
+          recognizeLogicalMatmul(candidate, nullptr, nullptr, recognition);
       if (failed(result))
         continue;
 

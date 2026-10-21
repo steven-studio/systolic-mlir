@@ -20,10 +20,16 @@
  *   canonical decomposition fails.  With i and p demoted to batch loops it is a
  *   batched GEMM: per (i, j, p) the 1 x 1 x 4 dot product C[i][j] +=
  *   sum_K A[2j+K][p] B[K][j], the p batches accumulating into one element in
- *   program order.  Mathematically valid; the compiler constructs only the
- *   canonical decomposition (the demotion is not implemented): a documented
- *   limitation.  Expected refusal at recognition: 'a coordinate is read by the
- *   first factor only' (p).  Re-decided 2026-10-16 (ISSUE-008; REJECT before).
+ *   program order.  Mathematically valid.  Until 2026-10-21 the compiler
+ *   constructed only the canonical decomposition and refused it at recognition
+ *   ('a coordinate is read by the first factor only', p): a documented
+ *   limitation.  Since 2026-10-21 (docs/AFFINE_GEMM_MAPPING.md section 23,
+ *   reduction-batch partitioning on by default) p, read by A only, is a
+ *   reduction batch loop and k stays K; i (C only, section 21) and j (all three)
+ *   are batch loops: offloaded as 4 x 4 x 4 iterations of a 1 x 1 x 4 dot
+ *   product, the p iterations accumulating into C[i][j] in order -- the domain,
+ *   every access and every product kept.  Re-decided 2026-10-16 (ISSUE-008;
+ *   REJECT before) and 2026-10-21 (ACCEPT).
  *
  * Array dimensions: A: float[10][4]   B: float[4][4]   C: float[4][4]
  * Loop order (outer to inner): i [row I], j [column J], k [reduction K], p [other]
@@ -32,21 +38,17 @@
  * Element type: float
  *
  * Mathematical GEMM: YES
- * Expected recognition (specification): OUT_OF_SCOPE
- *   basis: (docs/AFFINE_GEMM_MAPPING.md sections 19.1, 19.2, 10) a loop read by one operand only: a GEMM of affine views in which that loop is a role the other operand's view is constant along (a stride-0 view, C[i][j] += A[i][k] * B[k][i]: j as J with A and B constant along it is excluded by G2 unless N = 1, so j is K with A constant along it, or a batch loop), found by casespec.generalized_gemm_on_domain's search; the compiler refuses the broadcast (section 10: a stride-0 view is not lowered): a documented limitation
- *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop, which the compiler does not construct
- * Current implementation (commit 6e25528, predicted from its sources; measured by
+ * Expected recognition (specification): ACCEPT
+ *   basis: (supported and on by default since 2026-10-21, docs/AFFINE_GEMM_MAPPING.md section 23; the research policy of 2026-10-21) reduction-batch partitioning: in an accumulation C += A * B on a box, the loops C does not read beyond one K coordinate -- read by one factor only (virtual K = 1 when no loop is read by both), or further loops read by both factors -- are reduction batch loops: for each of their values a GEMM of offset views, all of them accumulating into the same slab of C in order; the iteration domain, every access and every product's multiplicity are kept (casespec.reduction_batch_decomposition, by enumeration); lowered with --fp-reassociation (strict floating point refuses, section 23.4)
+ *   re-decided: 2026-10-16 (failures/issues/ISSUE-008, docs/AFFINE_GEMM_MAPPING.md section 19.2): REJECT (not a GEMM) before; OUT_OF_SCOPE since -- a batched GEMM once the broadcast loop is demoted to a batch loop; RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default; the research policy of 2026-10-21): ACCEPT -- p (read by A only) is a reduction batch loop, k is K; i (C only) and j (all three) are batch loops: per (i, j, p) a 1 x 1 x 4 dot product accumulated into C[i][j] in order
+ * Current implementation (commit 6e25528 with the changes of ISSUE-008, predicted from its sources; measured by
  * scripts/run_showcase.py, never assumed):
  *   front end (systolic-cfront):             translated
- *   recognition (recognizeLogicalMatmul):    REJECT
- *   dense partition (getDenseLogicalGemm):   not_reached
- *   lowering (--affine-matmul-to-systolic):  not_reached
- *   driver (systolic-cc):                    stays_on_host
- *   rejection at: recognition
- *   reason: a coordinate is read by the first factor only: the other operands would be broadcast along it
- * Classification: DOCUMENTED LIMITATION
- *   A mathematically valid GEMM that the specification excludes explicitly;
- *   'refused' must never be read as 'not a GEMM'.
+ *   recognition (recognizeLogicalMatmul):    ACCEPT
+ *   dense partition (getDenseLogicalGemm):   supported
+ *   lowering (--affine-matmul-to-systolic):  supported
+ *   driver (systolic-cc):                    offloaded
+ * Classification: TRUE POSITIVE -- see failures/issues/ISSUE-008 (a specification change)
  *
  * Independent CPU reference: yes --
  *   (1) direct evaluation of the statement over the loop domain on flat arrays

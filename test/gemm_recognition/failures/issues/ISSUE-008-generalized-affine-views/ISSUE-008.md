@@ -179,3 +179,22 @@ independent slabs of C with the factor that does not read it shared. Re-decided 
 factors and not by C beyond the reduction (basis `partial_reduction`), a loop read by one factor
 only (basis `broadcast`), partitions whose outputs overlap or share a merged dimension (basis
 `demotion`), and SQ-1.
+
+**2026-10-21 -- the broadcast and partial-C limitations closed for accumulations
+(docs/AFFINE_GEMM_MAPPING.md section 23, reduction-batch partitioning, on by default; the research
+policy of 2026-10-21).** On a box domain and for an accumulation `C += A * B`, a loop read by one
+factor only, and the loops both factors read beyond the one kept as K, are reduction batch loops:
+for each of their values a GEMM of offset views, every iteration accumulating into the same slab
+of C in order (`casespec.reduction_batch_decomposition`, basis `reduction_batches`; the predictor
+mirrors recognizeLogicalMatmul's attempts in `casespec.predict`). Re-decided ACCEPT: case_090
+(p read by A only is RB, k is K), case_095 (j read by B only is RB, virtual K = 1), case_123
+(j RB, k K), case_125 (k RB, virtual K = 1); each lowered and verified bitwise against the CPU
+reference (the showcase on the software model; sync and async with SOFT_RUNTIME_MOCK_HARDWARE=1).
+Still a documented limitation or refusal: an assignment `C = A * B` with a loop C does not read
+(`not_gemm_overwrite`), a non-box domain, the box form of a nest whose counters the domain
+normalization rewrote with U != I (a sheared or exact parallelotope with a nonzero shift row: basis
+`reduction_batches_rewritten`, the decision of sections 19-21 kept; a disguised box with zero shift
+rows stays eligible), a decomposition whose every reduction batch iteration is
+a 1 x 1 x 1 product (element-wise, section 19.1; e.g. `C[2i][k] += B[k][j] A[2i][k]` with i running
+once: basis `broadcast`), partitions whose outputs overlap (basis `demotion`), and SQ-1 on a row
+or column role. The FPGA board: NOT RUN.

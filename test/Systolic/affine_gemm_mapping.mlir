@@ -52,14 +52,22 @@
 // DISC:       reason: logical coordinate I (the first factor's dimension 0 d0 * 4 + d1, C's dimension 0 d0 * 8 + d1): the two subscripts are not multiples
 // DISC-NEXT:  class: UNKNOWN
 // DISC:       unique logical matmul count: 0
-// DISC:       reason: a coordinate is read by the second factor only: the other operands would be broadcast along it
-// DISC-NEXT:  class: VALID_BUT_LOWERING_UNSUPPORTED
-// DISC:       unique logical matmul count: 0
+// DISC:       unique logical matmul count: 1
+// DISC:       statement: C = C + A * B (accumulation)
+// DISC-NEXT:  reduction batch: loop(s) 1 (not read by C
+// DISC:       dense logical GEMM: yes, I/J/K on loops 0//, batched over loop(s) 1+2 (64 batch iteration(s))
+// DISC-NEXT:  dense extents: M 8, N 1, K 1
+// DISC-NEXT:  logical bijection: verified
 // DISC:       unique logical matmul count: 1
 // DISC:       partition: loop(s) 1 demoted to batch loops
 // DISC:       dense logical GEMM: yes, I/J/K on loops //2, batched over loop(s) 0+1 (64 batch iteration(s))
 // DISC:       unique logical matmul count: 1
-// DISC:       dense logical GEMM: no (logical coordinate K is driven by 2 loops that do not enumerate it densely
+// DISC:       reduction map: (d0, d1, d2, d3) -> (d2)
+// DISC:       statement: C = C + A * B (accumulation)
+// DISC-NEXT:  reduction batch: loop(s) 3 (not read by C
+// DISC:       dense logical GEMM: yes, I/J/K on loops 0/1/2, batched over loop(s) 3 (2 batch iteration(s))
+// DISC-NEXT:  dense extents: M 8, N 8, K 4
+// DISC-NEXT:  logical bijection: verified
 // DISC:       unique logical matmul count: 1
 // DISC:       dense logical GEMM: yes, I/J/K on loops 0//2, batched over loop(s) 1 (8 batch iteration(s))
 // DISC:       reason: {{.*}}the accumulator is loaded and stored at different elements of C
@@ -163,14 +171,26 @@
 // CHECK:       affine.for
 // CHECK-NOT:   systolic.matmul_tile
 // CHECK-LABEL: func.func @reduction_in_output
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:       affine.for %[[J:arg[0-9]+]] = 0 to 8 {
+// CHECK-NEXT:    affine.for %[[K:arg[0-9]+]] = 0 to 8 {
+// CHECK-NEXT:      %[[KOFF:[0-9]+]] = affine.apply #{{[a-z0-9]+}}(%[[J]], %[[K]])
+// CHECK-NEXT:      memref.subview %arg0[0, %[[KOFF]]] [8, 1] [1, 1]
+// CHECK:           %[[JOFF:[0-9]+]] = affine.apply #{{[a-z0-9]+}}(%[[J]], %[[K]])
+// CHECK-NEXT:      memref.subview %arg1[%[[KOFF]], %[[JOFF]]] [1, 1] [1, 1]
+// CHECK:           memref.subview %arg2[0, %[[KOFF]]] [8, 1] [1, 1]
+// CHECK:           systolic.matmul_tile {{.*}} m = 8 n = 1 k = 1
+// CHECK-NOT:   affine.load
 // CHECK-LABEL: func.func @wrong_coordinate
 // CHECK:       affine.for
 // CHECK:       systolic.matmul_tile {{.*}} m = 1 n = 1 k = 8
 // CHECK-LABEL: func.func @reduction_multiplicity
-// CHECK:       affine.for
-// CHECK-NOT:   systolic.matmul_tile
+// CHECK:       affine.for %[[U:arg[0-9]+]] = 0 to 2 {
+// CHECK-NEXT:    %[[UOFF:[0-9]+]] = affine.apply #{{[a-z0-9]+}}(%[[U]])
+// CHECK-NEXT:    memref.subview %arg0[0, %[[UOFF]]] [8, 4] [1, 1]
+// CHECK:         memref.subview %arg1[%[[UOFF]], 0] [4, 8] [1, 1]
+// CHECK-NOT:     memref.subview %arg2
+// CHECK:         systolic.matmul_tile {{.*}} m = 8 n = 8 k = 4
+// CHECK-NOT:   affine.load
 // CHECK-LABEL: func.func @coupled
 // CHECK:       affine.for
 // CHECK:         systolic.matmul_tile {{.*}} m = 8 n = 1 k = 8
@@ -218,7 +238,8 @@
 // REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
 // REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
 // REMARK:      remark: affine GEMM 8x8x8 lowered as 1 exact region(s)
-// REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: logical coordinate K is driven by 2 loops that do not enumerate it densely
+// REMARK:      remark: affine GEMM 8x1x1 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 64 batch iteration(s) of 2 batch loop(s)
+// REMARK:      remark: affine GEMM 8x8x4 lowered as 1 exact region(s), 1 reduction batch loop(s) (not read by C, accumulated into C in order), batched: 2 batch iteration(s) of 1 batch loop(s)
 // REMARK:      remark: affine GEMM 8x1x8 lowered as 1 exact region(s), batched: 8 batch iteration(s) of 1 batch loop(s)
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: C is accessed out of bounds along dimension 0
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: A is accessed out of bounds along dimension 0
@@ -601,8 +622,14 @@ func.func @different_radix_sq1(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x
 
 // -----
 
-// reduction_in_output: C[i][k]: k is read by A, B and C (a batch coordinate) and j by B only: C[i][k] += A[i][k] * (sum over j of B[k][j]), a valid contraction that needs B broadcast (stride 0) -- not a GEMM of views; VALID_BUT_LOWERING_UNSUPPORTED
-// expected: REJECT
+// reduction_in_output: C[i][k]: k is read by A, B and C (a batch coordinate) and j by B only: C[i][k] += A[i][k] * (sum over j of B[k][j]).
+// Was REJECT (class VALID_BUT_LOWERING_UNSUPPORTED -- a coordinate read by B only, a stride-0 broadcast, not a GEMM of views).
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default): j (loop 1), read by B only and
+// not by C, is a reduction batch loop and k (loop 2), read by all three operands, a batch loop; per (j, k) the GEMM is
+// 8 x 1 x 1 (I = i on loop 0, J and K of extent 1): C[0:8][k] += A[0:8][k] * B[k][j], each j accumulated into the same
+// column of C in order. Every point is one GEMM point (bijection verified), every C element receives its 8 products in
+// the original j order, nothing is broadcast; numerically verified bitwise (sync and async, soft runtime).
+// expected: ACCEPT (batched 8 x 1 x 1, 64 batch iterations: RB j outer, batch k inner)
 func.func @reduction_in_output(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %x0 = 0 to 8 {
     affine.for %x1 = 0 to 8 {
@@ -643,8 +670,15 @@ func.func @wrong_coordinate(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf
 
 // -----
 
-// reduction_multiplicity: K = k + u, k in [0, 4), u in [0, 2): K = 1, 2, 3 are each visited twice (a weighted sum, Theorem 3 S2)
-// expected: REJECT
+// reduction_multiplicity: K = k + u, k in [0, 4), u in [0, 2): K = 1, 2, 3 are each visited twice (a weighted sum, Theorem 3 S2).
+// Was REJECT (logical coordinate K driven by 2 loops that do not enumerate it densely).
+// RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by default): u (loop 3), read by A and B but
+// not by C, is a reduction batch loop and k (loop 2) is K; per u the 8 x 8 x 4 GEMM
+// C += A[0:8][u:u+4] * B[u:u+4][0:8], the two GEMMs accumulated into C in order. The repeated products (K = 1, 2, 3
+// twice) are kept, each exactly once per point (bijection verified), so the weighted sum is preserved -- the
+// non-injective ground truth case noninj (A[i][k0 + k1] * B[k0 + k1][j]); the reordering of the sum needs FP
+// reassociation (strict FP still stays on the host). Numerically verified bitwise (sync and async, soft runtime).
+// expected: ACCEPT (batched 8 x 8 x 4, 2 reduction batch iterations)
 func.func @reduction_multiplicity(%A: memref<8x8xf32> {llvm.noalias}, %B: memref<8x8xf32> {llvm.noalias}, %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %x0 = 0 to 8 {
     affine.for %x1 = 0 to 8 {

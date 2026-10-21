@@ -350,6 +350,12 @@ struct LogicalMatmul {
   // canonically batched GEMM. Diagnostics only: the batch machinery treats
   // them as any other batch loop.
   SmallVector<unsigned> demotedLoops;
+  // The demoted loops C does not read (reduction-batch partitioning, docs
+  // section 23): reduction batch loops. For each of their values the nest is
+  // a GEMM whose factor views are offset by them; all their values
+  // accumulate into the same slab of C, in order. A subset of demotedLoops;
+  // empty when the recognition ran without reductionBatches.
+  SmallVector<unsigned> reductionBatchLoops;
 
   // The task's exact mapping (reported by the discovery pass, not decided).
   ExactMapping exactMapping;
@@ -378,6 +384,28 @@ void collectAffineMatmulCandidates(
     Operation *root,
     SmallVectorImpl<AffineMatmulCandidate> &candidates);
 
+/// Options of recognizeLogicalMatmul.
+struct AffineMatmulRecognitionOptions {
+  /// Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23,
+  /// on by default). On a box domain, the loops of a multiply-accumulate nest
+  /// that C
+  /// does not read become reduction batch loops when that makes the nest a
+  /// dense GEMM: a loop read by one factor only (C[i][j] += A[i][k] * B[l][j]:
+  /// k and l, with K = 1), and -- when the loops both factors read are not one
+  /// dense GEMM coordinate -- all of those but the one that stays K (tried the
+  /// longest first, ties innermost). Every iteration still runs exactly once:
+  /// a reduction batch loop runs around the tiles, and its values accumulate
+  /// into the same slab of C in order. When no such decomposition is a dense
+  /// GEMM, the result, reason and class are those without the option.
+  /// Assignments (C = A * B) never get reduction batch loops (section 20.4).
+  bool reductionBatches = true;
+  /// Whether the nest's counters are the ones as written (no domain
+  /// normalization with U != I rewrote them). The ordered output batches of
+  /// an accumulation whose C is not injective (section 25) are made only
+  /// then.
+  bool countersAsWritten = true;
+};
+
 /// Recover logical GEMM coordinates and access factorization.
 ///
 /// Failure means "not recognized"; it is not a compiler error. On failure,
@@ -387,7 +415,8 @@ void collectAffineMatmulCandidates(
 FailureOr<LogicalMatmul>
 recognizeLogicalMatmul(AffineMatmulCandidate candidate,
                        std::string *why = nullptr,
-                       GemmMappingClass *mappingClass = nullptr);
+                       GemmMappingClass *mappingClass = nullptr,
+                       const AffineMatmulRecognitionOptions &options = {});
 
 /// The domain normalization of docs/AFFINE_GEMM_MAPPING.md section 19.7 /
 /// 19.12 (2026-10-18), applied to one perfect multiply-accumulate band whose
@@ -445,6 +474,13 @@ struct DomainNormalization {
 /// the band untouched. Returns the normalizations applied, for the
 /// diagnostics.
 SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *root);
+
+/// Whether one of `normalized` rewrote the counters (U != I) of the band that
+/// holds `anchor`: the nest's counters are then not the ones as written, so
+/// R8 (section 22) is not analysed and no reduction batch loop is made
+/// (section 23: no integer basis transformation widens the recognition).
+bool countersRewritten(ArrayRef<DomainNormalization> normalized,
+                       Operation *anchor);
 
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient
@@ -507,6 +543,9 @@ struct AffineGeometryScreening {
   SmallVector<Loop> loops;
   /// Per operand, per memref dimension, the ordinal coefficients.
   std::array<lattice::IntMatrix, 3> ordinal;
+  /// The same rows on the loop counters as written (not times the step):
+  /// the coefficient vectors of R8 (section 22).
+  std::array<lattice::IntMatrix, 3> written;
 
   /// Ranks over Q of C's subscripts and of all subscripts, on every loop of
   /// two or more iterations ('full') and on the role loops only ('roles':
@@ -556,6 +595,54 @@ struct AffineGeometryScreening {
 FailureOr<AffineGeometryScreening>
 screenAffineMatmulGeometry(AffineMatmulCandidate candidate,
                            std::string *why = nullptr);
+
+/// R8, the structural recognition relation (docs/AFFINE_GEMM_MAPPING.md
+/// section 22): two subscripts intersect iff the dot product of their linear
+/// coefficient vectors, on the loop counters as written, is nonzero (the
+/// constants take no part). Every count is a rank over Q, never a number of
+/// nonzero pairs. A loop of two or more iterations is classified by its
+/// readers (the operands with a nonzero coefficient on it); the contraction
+/// block S is the loops both factors read and C does not. A DIAGNOSTIC: the
+/// recognizer does not use it yet.
+struct AffineR8Structure {
+  /// Per loop of the nest, bit X set iff operand X (0 the first factor, 1
+  /// the second, 2 C) has a nonzero coefficient on it; 0 for a loop of fewer
+  /// than two iterations (a constant).
+  SmallVector<unsigned> readers;
+  /// The reduction loops Z (read by a factor, not by C), the shared loops S
+  /// of Z (read by both factors), and S's loops grouped by appearing
+  /// together in one subscript of a factor.
+  SmallVector<unsigned> reductionLoops;
+  SmallVector<unsigned> contractionLoops;
+  SmallVector<SmallVector<unsigned>> contractionGroups;
+  /// On Z, with P and Q the factors' rows restricted to Z (the reduction
+  /// index vectors): rank P, rank Q, rank [P; Q], and rank(P Q^T), the
+  /// number of independent directions coupled by nonzero dot products.
+  unsigned rankFirst = 0, rankSecond = 0, rankStacked = 0, coupling = 0;
+  /// rank(P_b Q_b^T) on the loops all three operands read.
+  unsigned batchCoupling = 0;
+  /// The literal reading on every loop of two or more iterations:
+  /// rank(M_X M_Y^T) for the pairs
+  /// (first, second), (first, C), (second, C), and the number of nonzero
+  /// (first, second) dot products (not a dimension).
+  unsigned literalAB = 0, literalAC = 0, literalBC = 0, pairsAB = 0;
+  /// The rank of each operand's rows on every loop; 1 is a
+  /// one-dimensional operand (Phase 2), 0 a constant one.
+  std::array<unsigned, 3> operandRank{};
+  /// intersect(A, B): some reduction index vector a of A and b of B have
+  /// a . b != 0 (equivalently P Q^T != 0). sharedLoops: some pair has
+  /// sum_t |a_t| |b_t| > 0, i.e. a loop variable drives both (S is not
+  /// empty) -- possible with a . b = 0 (x0 - x1 and x0 + x1). Neither is a
+  /// row-space intersection, whose dimension is rank P + rank Q -
+  /// rank [P; Q] (linear independence only).
+  bool intersect = false, sharedLoops = false;
+};
+
+/// R8 on explicit rows: rows[X] holds operand X's subscripts' coefficients on
+/// the n loops of `trips`. nullopt on a ragged row or on overflow.
+std::optional<AffineR8Structure>
+computeR8Structure(const std::array<lattice::IntMatrix, 3> &rows,
+                   ArrayRef<int64_t> trips);
 
 } // namespace systolic
 } // namespace mlir
