@@ -1,5 +1,5 @@
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true shared-read-bytes-per-cycle=4.0" -verify-diagnostics %s | FileCheck %s
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true shared-read-bytes-per-cycle=16.0" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=WIDE
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1 shared-read-bytes-per-cycle=4.0" -verify-diagnostics %s | FileCheck %s
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1 shared-read-bytes-per-cycle=16.0" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=WIDE
 
 // The FPGA fills every array's operand buffer through ONE AXI read port
 // (dma_engine_multi): the fills of all four arrays together cannot move more

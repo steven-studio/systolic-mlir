@@ -1488,6 +1488,21 @@ struct AffineMatmulToSystolicPass
                      "takes it (0: every accelerator fills independently)"),
       llvm::cl::init(0.0)};
 
+  Option<std::string> costModel{
+      *this, "cost-model",
+      llvm::cl::desc("Cost model of the search: v2 (default) the fleet as one "
+                     "machine -- shared read port, write-back engine and "
+                     "readback path (docs/COSTMODEL_V2.md); v1 every "
+                     "accelerator on its own (docs/COSTMODEL.md)"),
+      llvm::cl::init("v2")};
+
+  Option<std::string> operandPath{
+      *this, "operand-path",
+      llvm::cl::desc("Cost model v2: the bitstream's operand path, v1 "
+                     "(default, the production bitstream: a beat in four "
+                     "cycles) or v2 (beat-wide)"),
+      llvm::cl::init("v1")};
+
   Option<bool> allowFpReassociation{
       *this, "allow-fp-reassociation",
       llvm::cl::desc("Permit reassociating the floating-point accumulation: "
@@ -1612,6 +1627,13 @@ struct AffineMatmulToSystolicPass
     if (!fleet.resources.empty()) {
       SystolicOptimizerOptions options;
       options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+      if (!parseCostModelVersion(costModel, options.costModel) ||
+          (operandPath != "v1" && operandPath != "v2")) {
+        why = "cost-model and operand-path must each be v1 or v2";
+        hardError = true;
+        return failure();
+      }
+      options.beatWideOperandPath = operandPath == "v2";
       FailureOr<SystolicTilePlan> planned =
           planSystolicMatmul(anchor, M, N, K, fleet, options);
       if (failed(planned)) {

@@ -31,9 +31,14 @@
 // that the example compiles, is offloaded and computes the right result.
 //
 // REQUIRES: cfront-clang
-// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: %systolic-cc --cost-model v1 --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN: note: 'gemm' is offloaded: 54 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
 // RUN: %t | FileCheck %s
+// Cost Model V2 (the default) decomposes the same GEMM into 5 8x8 and 10
+// 4x4 tiles, K folded three times each: 45 invocations, the same result.
+// RUN: %systolic-cc --fp-reassociation --explain %s -o %t.v2 2>&1 | FileCheck %s --check-prefix=PLANV2
+// PLANV2: note: 'gemm' is offloaded: 45 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
+// RUN: %t.v2 | FileCheck %s
 // CHECK: [systolic-cc] CPU Executed: GEMM #1
 // CHECK-NEXT: [systolic-cc] CPU Executed: GEMM #2
 // CHECK-NEXT: gemm 24x20x40: 0 of 480 elements wrong, max |error| 0,

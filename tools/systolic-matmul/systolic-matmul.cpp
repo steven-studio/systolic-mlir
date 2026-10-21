@@ -151,6 +151,8 @@ struct Options {
   // Operand words per cycle the four arrays' fills share (the one AXI read
   // port), for the binary search; 0: every array fills independently.
   double sharedReadWordsPerCycle = ::systolic::fpga::kSharedReadWordsPerCycle;
+  // The binary search's cost model: v2 (the fleet simulator, default) or v1.
+  std::string costModel = "v2";
 };
 
 struct Problem {
@@ -171,6 +173,7 @@ struct TileInfo {
   std::fprintf(status ? stderr : stdout,
                "usage: systolic-matmul [--dump-ir=DIR] [--quiet] [--sync | --async]\n"
                "                       [--shared-read-words-per-cycle=X]\n"
+               "                       [--cost-model=v1|v2]\n"
                "\n"
                "Reads from stdin:\n"
                "  M N K\n"
@@ -204,6 +207,11 @@ struct TileInfo {
                "                 fills share, for the binary search (default\n"
                "                 3.51, a reference DDR3 supply, not measured\n"
                "                 on this bitstream; 0: independent fills)\n"
+               "  --cost-model=v1|v2\n"
+               "                 the binary search's cost model: v2 (default)\n"
+               "                 simulates the fleet's shared read port,\n"
+               "                 write-back engine and readback path;\n"
+               "                 v1 prices every array on its own\n"
                "\n"
                "Environment (runtime): SYSTOLIC_FPGA_CONFIG the bitstream's\n"
                "fpga_config.txt (K_MAX_8X8, K_MAX_4X4; default 16 and 16),\n"
@@ -244,6 +252,15 @@ Options parseArgs(int argc, char **argv) {
         usage(2);
       }
       opts.sharedReadWordsPerCycle = v;
+    } else if (arg.rfind("--cost-model=", 0) == 0) {
+      opts.costModel = arg.substr(std::strlen("--cost-model="));
+      if (opts.costModel != "v1" && opts.costModel != "v2") {
+        std::fprintf(stderr,
+                     "systolic-matmul: --cost-model must be v1 or v2, got "
+                     "'%s'\n\n",
+                     opts.costModel.c_str());
+        usage(2);
+      }
     } else {
       std::fprintf(stderr, "systolic-matmul: unknown argument '%s'\n\n",
                    arg.c_str());
@@ -714,7 +731,8 @@ int main(int argc, char **argv) {
                       [&](OpPassManager &pm) {
                         pm.addPass(mlir::systolic::
                                        createSystolicBinarySearchTileMatmulPass(
-                                           sharedReadBytesPerCycle));
+                                           sharedReadBytesPerCycle,
+                                           opts.costModel, "v1"));
                       })))
     return 3;
   dumpStage(opts, "10-systolic.mlir", module->getOperation());

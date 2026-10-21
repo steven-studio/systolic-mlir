@@ -1,4 +1,4 @@
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true" --split-input-file -verify-diagnostics %s | FileCheck %s
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1" --split-input-file -verify-diagnostics %s | FileCheck %s
 // RUN: systolic-opt %s --split-input-file | systolic-opt --split-input-file | FileCheck %s --check-prefix=ROUND
 
 // The binary search on the FPGA fleet as systolic-matmul declares it

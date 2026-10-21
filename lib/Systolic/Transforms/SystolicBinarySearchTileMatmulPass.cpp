@@ -49,6 +49,13 @@ struct SystolicBinarySearchTileMatmulPass
       double sharedReadBytesPerCycleValue) {
     sharedReadBytesPerCycle = sharedReadBytesPerCycleValue;
   }
+  SystolicBinarySearchTileMatmulPass(double sharedReadBytesPerCycleValue,
+                                     StringRef costModelValue,
+                                     StringRef operandPathValue) {
+    sharedReadBytesPerCycle = sharedReadBytesPerCycleValue;
+    costModel = costModelValue.str();
+    operandPath = operandPathValue.str();
+  }
 
   Option<double> sharedReadBytesPerCycle{
       *this, "shared-read-bytes-per-cycle",
@@ -57,6 +64,21 @@ struct SystolicBinarySearchTileMatmulPass
           "(the FPGA fleet's single AXI read port). 0: every accelerator "
           "fills at its own read_bytes_per_cycle, independently"),
       llvm::cl::init(0.0)};
+
+  Option<std::string> costModel{
+      *this, "cost-model",
+      llvm::cl::desc("Cost model of the search: v2 (default) the fleet as one "
+                     "machine -- shared read port, write-back engine and "
+                     "readback path (docs/COSTMODEL_V2.md); v1 every "
+                     "accelerator on its own (docs/COSTMODEL.md)"),
+      llvm::cl::init("v2")};
+
+  Option<std::string> operandPath{
+      *this, "operand-path",
+      llvm::cl::desc("Cost model v2: the bitstream's operand path, v1 "
+                     "(default, the production bitstream: a beat in four "
+                     "cycles) or v2 (beat-wide)"),
+      llvm::cl::init("v1")};
 
   Option<bool> report{
       *this, "report",
@@ -196,6 +218,19 @@ struct SystolicBinarySearchTileMatmulPass
       // accordingly.
       SystolicOptimizerOptions optimizerOptions;
       optimizerOptions.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+      if (!parseCostModelVersion(costModel, optimizerOptions.costModel)) {
+        matmul.emitError() << "cost-model must be v1 or v2, got '"
+                           << costModel << "'";
+        signalPassFailure();
+        return;
+      }
+      if (operandPath != "v1" && operandPath != "v2") {
+        matmul.emitError() << "operand-path must be v1 or v2, got '"
+                           << operandPath << "'";
+        signalPassFailure();
+        return;
+      }
+      optimizerOptions.beatWideOperandPath = operandPath == "v2";
 
       FailureOr<SystolicTilePlan> plan =
           planSystolicMatmul(matmul, M, N, K, *fleet, optimizerOptions);
@@ -216,6 +251,7 @@ struct SystolicBinarySearchTileMatmulPass
             << optimization.totalReadBytes << ", shared-read cycles = "
             << optimization.sharedReadCycles << ", tiles = "
             << optimization.decomposition.size();
+        emitCostModelRemark(matmul, optimization);
       }
 
       OpBuilder builder(matmul);
@@ -243,6 +279,14 @@ mlir::systolic::createSystolicBinarySearchTileMatmulPass(
     double sharedReadBytesPerCycle) {
   return std::make_unique<
       SystolicBinarySearchTileMatmulPass>(sharedReadBytesPerCycle);
+}
+
+std::unique_ptr<Pass>
+mlir::systolic::createSystolicBinarySearchTileMatmulPass(
+    double sharedReadBytesPerCycle, StringRef costModel,
+    StringRef operandPath) {
+  return std::make_unique<SystolicBinarySearchTileMatmulPass>(
+      sharedReadBytesPerCycle, costModel, operandPath);
 }
 
 void mlir::systolic::registerSystolicBinarySearchTileMatmulPass() {

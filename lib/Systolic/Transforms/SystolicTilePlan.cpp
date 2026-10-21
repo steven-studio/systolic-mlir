@@ -154,6 +154,23 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
   plan.N = N;
   plan.K = K;
 
+  // Cost Model V2 prices a tile from the saturated fleet's stream of its
+  // geometry (SystolicOptimizer.h, systolicGeometryStreams), not from one
+  // accelerator's own timeline: the n-th tile an accelerator runs holds it
+  // over that stream's interval n. The check below holds the optimizer to
+  // exactly those intervals.
+  SmallVector<GeometryStream> v2Streams;
+  if (optimization->costModel == CostModelVersion::V2) {
+    CostModelVersion used = CostModelVersion::V1;
+    auto streams =
+        systolicGeometryStreams(M, N, K, resources, options, used);
+    if (failed(streams) || used != CostModelVersion::V2)
+      return diagOp->emitError()
+             << "cost model v2 cannot rebuild the tile streams the "
+                "optimizer used";
+    v2Streams = std::move(*streams);
+  }
+
   // --------------------------------------------------------------------
   // The compute clock of every accelerator.
   //
@@ -194,6 +211,7 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
       return x.startCycle < y.startCycle;
     });
     int64_t accelerator = -1;
+    int64_t round = 0;   // the accelerator's tiles so far (V2 streams)
     std::optional<::systolic::AcceleratorTimeline> full;
     std::optional<::systolic::AcceleratorTimeline> computeOnly;
     for (size_t idx : order) {
@@ -207,6 +225,7 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
           resources[task.acceleratorId].config;
       if (task.acceleratorId != accelerator) {
         accelerator = task.acceleratorId;
+        round = 0;
         full.emplace(config);
         computeOnly.emplace(config, /*transfersFree=*/true);
       }
@@ -229,6 +248,20 @@ mlir::systolic::planSystolicMatmul(Operation *diagOp, int64_t M, int64_t N,
         return diagOp->emitError()
                << "cost model cannot price a " << task.size << "x"
                << task.size << " tile of reduction " << K;
+      if (!v2Streams.empty()) {
+        const GeometryStream *stream = nullptr;
+        for (const GeometryStream &s : v2Streams)
+          if (s.geometry == task.size)
+            stream = &s;
+        if (!stream || round >= static_cast<int64_t>(stream->tileEnd.size()))
+          return diagOp->emitError()
+                 << "cost model v2 has no stream interval for tile " << round
+                 << " of a " << task.size << "x" << task.size
+                 << " accelerator";
+        t.fullStart = stream->tileStart[static_cast<size_t>(round)];
+        t.fullEnd = stream->tileEnd[static_cast<size_t>(round)];
+      }
+      ++round;
     }
   }
 

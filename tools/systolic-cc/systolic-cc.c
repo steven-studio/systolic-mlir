@@ -226,6 +226,7 @@ typedef struct {
   const char *source, *output, *clang, *build_dir, *llvm_build, *runtime;
   const char *fpga_config, *keep_dir, *std, *opt_level;
   const char *submission;      /* auto | sync | async (see fleet_config) */
+  const char *cost_model;      /* v1 | v2: the binary search's cost model */
   long k_max_8x8, k_max_4x4;
   int verify;
   int fp_reassociation;         /* --fp-reassociation */
@@ -1133,7 +1134,9 @@ static int compile(driver *d) {
   size_t noffload = 0;
   strvec not_offloaded = {0};
   if (nfns) {
-    strvec c2 = argv_of(opt, fleet, "--affine-matmul-to-systolic=report=true",
+    strvec c2 = argv_of(opt, fleet,
+                        format("--affine-matmul-to-systolic=report=true "
+                               "cost-model=%s", a->cost_model),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
@@ -1310,7 +1313,9 @@ static int compile(driver *d) {
       push(&c3, format("--function=%s", offload[i].name));
     if (run(d, &c3, "the C front end (offloaded functions)", NULL, NULL, &r))
       return -1;
-    strvec c4 = argv_of(opt, fleet, "--affine-matmul-to-systolic",
+    strvec c4 = argv_of(opt, fleet,
+                        format("--affine-matmul-to-systolic=cost-model=%s",
+                               a->cost_model),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))
@@ -1417,7 +1422,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: systolic-cc [--clang CLANG] [--build-dir DIR] "
           "[--llvm-build DIR] [--runtime soft|board] [--fpga-config FILE] "
-          "[--submission auto|sync|async] "
+          "[--submission auto|sync|async] [--cost-model v1|v2] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
           "[--keep-dir DIR] [--explain] [--fp-reassociation] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
@@ -1457,6 +1462,7 @@ int main(int argc, char **argv) {
     a.llvm_build = format("%s/work/llvm-project/build", getenv("HOME") ? getenv("HOME") : "");
   a.runtime = "board";
   a.submission = "auto";
+  a.cost_model = "v2";
   a.k_max_8x8 = 16;
   a.k_max_4x4 = 16;
   a.std = "c11";
@@ -1487,6 +1493,12 @@ int main(int argc, char **argv) {
         return 2;
       }
       a.submission = v;
+    } else if ((v = option_value(s, "--cost-model", &i, argc, argv))) {
+      if (strcmp(v, "v1") != 0 && strcmp(v, "v2") != 0) {
+        fprintf(stderr, "systolic-cc: --cost-model must be v1 or v2\n");
+        return 2;
+      }
+      a.cost_model = v;
     } else if ((v = option_value(s, "--k-max-8x8", &i, argc, argv))) {
       a.k_max_8x8 = strtol(v, NULL, 10);
     } else if ((v = option_value(s, "--k-max-4x4", &i, argc, argv))) {

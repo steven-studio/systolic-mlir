@@ -1,7 +1,7 @@
-// RUN: systolic-opt --systolic-fpga-pipeline="phys-k-max-8x8=256 phys-k-max-4x4=256" --mlir-disable-threading --mlir-print-ir-after=systolic-binary-search-tile-matmul %s 2>&1 >/dev/null | FileCheck %s --check-prefix=SHARED
-// RUN: systolic-opt --systolic-fpga-pipeline="phys-k-max-8x8=256 phys-k-max-4x4=256 shared-read-words-per-cycle=0" --mlir-disable-threading --mlir-print-ir-after=systolic-binary-search-tile-matmul %s 2>&1 >/dev/null | FileCheck %s --check-prefix=INDEP
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true shared-read-bytes-per-cycle=14.04" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=REPORT-SHARED
-// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=REPORT-INDEP
+// RUN: systolic-opt --systolic-fpga-pipeline="phys-k-max-8x8=256 phys-k-max-4x4=256 cost-model=v1" --mlir-disable-threading --mlir-print-ir-after=systolic-binary-search-tile-matmul %s 2>&1 >/dev/null | FileCheck %s --check-prefix=SHARED
+// RUN: systolic-opt --systolic-fpga-pipeline="phys-k-max-8x8=256 phys-k-max-4x4=256 shared-read-words-per-cycle=0 cost-model=v1" --mlir-disable-threading --mlir-print-ir-after=systolic-binary-search-tile-matmul %s 2>&1 >/dev/null | FileCheck %s --check-prefix=INDEP
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1 shared-read-bytes-per-cycle=14.04" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=REPORT-SHARED
+// RUN: systolic-opt --systolic-binary-search-tile-matmul="report=true cost-model=v1" %s 2>&1 >/dev/null | FileCheck %s --check-prefix=REPORT-INDEP
 
 // The four arrays run at the same time and fill their operand buffers
 // through one AXI read port (dma_engine_multi). --systolic-fpga-pipeline,

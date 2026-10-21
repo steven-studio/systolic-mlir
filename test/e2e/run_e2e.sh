@@ -691,7 +691,8 @@ echo | tee -a "$OUT/summary.txt"
 # header and the slab): write #7 is the fourth slab's header, so three slabs
 # reach the RTL and the runtime's -4 is reported; that order holds while
 # the arrays have room for four slabs each (PIPELINE_DEPTH >= 3), else the
-# check is skipped. 16x8x4 is five invocations as long as every K_MAX >= 4;
+# check is skipped. 16x8x4 is five invocations under Cost Model V1 (this
+# step runs systolic-matmul --cost-model=v1) as long as every K_MAX >= 4;
 # with a shallower bitstream the count differs and the check is skipped.
 df_ok=1
 if [ "$RTMODE" = async ]; then
@@ -713,7 +714,9 @@ elif [ "$BACKEND" = cosim ] && [ "$K8" -ge 4 ] && [ "$K4" -ge 4 ]; then
     python3 "$HERE/gen_cases.py" "$d/gen" > /dev/null
     cp "$d/gen/16x8x4_mixed.txt" "$d/input.txt"
     before=$(sessions_opened)
-    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} < "$d/input.txt" > "$d/output.txt" 2>&1
+    # --cost-model=v1: the write order above is Cost Model V1's decomposition
+    # of 16x8x4 (five invocations); V2 runs it as two 8x8 invocations.
+    SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7 "$MATMUL" ${MATMUL_FLAGS[@]+"${MATMUL_FLAGS[@]}"} --cost-model=v1 < "$d/input.txt" > "$d/output.txt" 2>&1
     frc=$?
     settle_sessions
     read -r frecv fcons fsent < <(cosim_bytes "$((before + 1))")

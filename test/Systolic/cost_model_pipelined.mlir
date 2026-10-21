@@ -7,9 +7,9 @@
 // RUN: systolic-cost timeline --geometry 8 --k-max 16 --k 16,16 --pipeline-depth 1 --reduce-cycles 0 --feed-gap 0 | FileCheck %s --check-prefix=D1
 // RUN: not systolic-cost timeline --geometry 8 --k-max 16 --k 16 --pipelined --pipeline-depth 2 --reduce-cycles 69 --feed-gap 26 2>&1 | FileCheck %s --check-prefix=BOTH
 // RUN: not systolic-cost timeline --geometry 8 --k-max 16 --k 16 --pipeline-depth 4 --reduce-cycles 96 --feed-gap 26 2>&1 | FileCheck %s --check-prefix=BADR
-// RUN: systolic-cost check-monotone --m 64 --n 64 --k 64 --pipelined | FileCheck %s --check-prefix=MONO
-// RUN: systolic-cost check-monotone --m 100 --n 36 --k 147 --k8 24 --k4 12 --pipelined --shared-read-words-per-cycle 1 | FileCheck %s --check-prefix=MONO
-// RUN: systolic-cost check-monotone --m 49 --n 512 --k 4608 --k8 17 --k4 7 --pipelined | FileCheck %s --check-prefix=MONO
+// RUN: systolic-cost check-monotone --cost-model v1 --m 64 --n 64 --k 64 --pipelined | FileCheck %s --check-prefix=MONO
+// RUN: systolic-cost check-monotone --cost-model v1 --m 100 --n 36 --k 147 --k8 24 --k4 12 --pipelined --shared-read-words-per-cycle 1 | FileCheck %s --check-prefix=MONO
+// RUN: systolic-cost check-monotone --cost-model v1 --m 49 --n 512 --k 4608 --k8 17 --k4 7 --pipelined | FileCheck %s --check-prefix=MONO
 
 // The per-accelerator timeline of consecutive invocations (CostModel.h,
 // AcceleratorTimeline) on the pipelined RTL's constants (Systolic/FpgaFleet.h:
