@@ -2452,8 +2452,11 @@ section 23. Test: test/Systolic/affine_gemm_r8_structure.mlir.
   subscripts unrestricted. Contributions of different loop classes can cancel in it.
   `C[b][i][j] += A[b+k][i] * B[b-k+2][j]` has (b + k) . (b - k) = 0, yet k is a genuine
   contraction loop. The diagnostic notes every such case.
-- **A one-dimensional operand** (Phase 2) has rows of rank 1 on L: a 1-D memref, or subscripts
-  that are all proportional (A[20i+k][20i+k], C[i][i]). Rank 0 is printed separately.
+- **A rank-1 (one-dimensional) operand** has rows of rank 1 on L: a 1-D memref, or subscripts
+  that are all proportional (A[20i+k][20i+k], C[i][i]). Rank 0 is printed separately. Rank 1
+  is a property of the coefficient matrix, not of the memref, and decides nothing by itself:
+  rank-1 factors and injective rank-1 outputs are GEMMs of the previous sections; a rank-1 C that
+  collides is section 25; the rest (assignment collisions, non-box domains) is Phase 2.
 
 ### 22.2 The ground truth in these terms
 
@@ -2551,7 +2554,8 @@ checks them with a relative tolerance, and does not call that bitwise equality.
 
   The MLIR level is test/Systolic/affine_gemm_reduction_batches.mlir.
 - **Limits:**
-  - one-dimensional C (`C[i + j]`, T4-like flat outputs) is Phase 2;
+  - a C that is not injective on the (I, J) box is section 25 (accumulations) or Phase 2
+    (assignments);
   - reduction batches only on a box as written: not on non-box domains (the readers decide nothing
     there, section 19.7), nor on a nest whose normalization rewrote its counters (U != I);
   - every reduction batch iteration is a GEMM of its own with a wait, so device utilization is low
@@ -2638,3 +2642,61 @@ derived operands, with output batches where C has them). The discovery pass is u
 recognition of the program as written does not depend on the permission.
 
 Tests: test/Systolic/affine_gemm_pre_reduction.mlir, test/SystolicCC/affine_pre_reduction.c.
+
+## 25. Ordered output batches of a non-injective C (2026-10-21)
+
+### 25.1 The case
+
+`for i < 2, j < 11: C[10i + j] += A[i] * B[j]`: C's subscript has rank 1, and the outputs
+(i, j) = (0, 10) and (1, 0) both update C[10]. That is a reduction -- both products must reach
+C[10] -- but not one a single tile can perform: a tile writes each output of its (I, J) box once
+(G2, section 19.3), so a tile holding both would lose an update. Until now such nests were refused
+("a decomposition with the J (or I) loops as batch loops would be valid, and is not constructed").
+
+### 25.2 The decomposition
+
+For an accumulation only, when G2 finds a collision, one output role -- I first, then J -- becomes
+batch loops (all its loops at once: `wholeRoleDemotion`, not `chooseDemotion`), and the analyses
+run again; every tile is then checked injective again (G2), and the exact bijection of the
+iterations (section 19.13) still holds. In the example, i becomes a batch loop: batch i = 0
+writes C[0..10], batch i = 1 writes C[10..20], two 1 x 11 x 1 tiles, and C[10] receives the
+product of (0, 10) and then that of (1, 0).
+
+The premises (otherwise the refusal stands):
+
+1. the statement accumulates (C = C + A * B); an assignment collision is refused as before;
+2. the domain is a box whose counters are the ones as written (no normalization with U != I:
+   `countersAsWritten`), and the role's trip counts are constants;
+3. the batch loops -- the loops all three operands read, the demoted loops, the reduction batch
+   loops -- and the role's loops are an **outermost prefix** of the nest's loops of two or more
+   iterations (`batchesOuterPrefix`). The batches then run around the tiles in the order written,
+   and every element of C receives the contributions of different batches in the order the
+   program adds them; only the order inside one tile (over K) changes, under the permission to
+   reassociate (strict floating point refuses the nest, as every accumulation). With a K loop
+   outside I and J (`for k: for i: for j: C[10i + j] += ...`) no output role is such a prefix: the
+   nest stays refused.
+
+The same premise lets the output-disjointness check of section 21 (P1) accept partitions whose
+slabs of C overlap (`C[p + i][j]`, `C[4p + i][j]` with a non-dense i) in an accumulation: their
+batches also run in the order written.
+
+### 25.3 Why it is exact
+
+- Every iteration is in exactly one batch and one tile point (the exact bijection).
+- Inside a tile no two outputs share an element of C (G2 per batch), so no tile loses an update.
+- The lowering runs the batches in program order, and each one reads C, adds its tiles and writes
+  C back before the next one reads C: with the synchronous runtime by construction; with the
+  asynchronous runtime because every batch is one GEMM whose `fpga_gemm_wait` (returning after
+  the last tile was added into C) precedes the next batch's `fpga_gemm_begin`. This was checked in
+  C-to-RTL co-simulation with pipeline depth 1 and 4, burst submission on and off: from the
+  runtime trace, every descriptor of a batch whose C window overlaps an earlier one is sent after
+  the earlier batch's wait returned, and all results equal the loops as written bitwise. The
+  lowering, the runtime and the RTL are unchanged.
+
+### 25.4 What stays refused
+
+Assignment collisions (C[10i + j] = A[i] * B[j] with j < 11: only the last write may survive);
+a K or other non-batch loop outside the output roles; non-box domains; nests whose counters a
+normalization rewrote (U != I); loops with non-constant trip counts.
+
+Tests: test/Systolic/affine_gemm_rank1.mlir, test/SystolicCC/affine_rank1.c.

@@ -373,8 +373,10 @@ struct TestAffineMatmulDiscoveryPass
       std::string notRecognized;
       GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
       AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten =
+          !countersRewritten(normalized, candidate.anchor);
       recognition.reductionBatches =
-          reductionBatches && !countersRewritten(normalized, candidate.anchor);
+          reductionBatches && recognition.countersAsWritten;
       auto result = recognizeLogicalMatmul(candidate, &notRecognized,
                                            &notRecognizedClass, recognition);
 
@@ -673,9 +675,11 @@ struct TestAffineMatmulDiscoveryPass
       if (!partitionLoops.empty()) {
         llvm::errs() << "  partition: loop(s) ";
         llvm::interleave(partitionLoops, llvm::errs(), "+");
-        llvm::errs() << " demoted to batch loops (each partitions the GEMM "
-                        "into independent slabs of C; the factor that does "
-                        "not read it is shared)\n";
+        llvm::errs() << " demoted to batch loops (each value is one GEMM on "
+                        "its slab of C; the factor that does not read it is "
+                        "shared; slabs of an accumulation may overlap, the "
+                        "batches then run in program order, docs section "
+                        "25)\n";
       }
       // Reduction-batch partitioning (docs section 23).
       if (!result.reductionBatchLoops.empty()) {

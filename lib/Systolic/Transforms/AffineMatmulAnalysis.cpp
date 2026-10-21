@@ -2204,6 +2204,10 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
   // The loops of a row or column role an analysis refused as not one dense
   // coordinate: the retry below demotes some of them (nullopt: no retry).
   std::optional<SmallVector<unsigned>> demotionCandidate;
+  // An output role whose loops the retry demotes all together (section 25:
+  // C not injective on the (I, J) box of an accumulation), not through
+  // chooseDemotion, which keeps one component of a role.
+  std::optional<SmallVector<unsigned>> wholeRoleDemotion;
   auto tripCountOf = [&](unsigned d) -> std::optional<int64_t> {
     affine::AffineForOp loop =
         affine::getForInductionVarOwner(iterationIVs[d]);
@@ -2340,7 +2344,38 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
   // merged C[3p + i][j] -- would make the partitions overlap (an
   // accumulation in order, valid but not an independent partition) or a
   // merged output dimension: not constructed.
+  // Whether the batch loops -- read by all three operands, demoted, or
+  // reduction batch loops -- and the loops `extra` are an outermost prefix of
+  // the nest's loops of two or more iterations (section 25): the batch loops
+  // then run around the tiles in the program's order, and every element of C
+  // receives the contributions of different batches in the order written
+  // (only the order inside one tile, over K, changes, under the permission
+  // to reassociate). On a box domain whose counters are the ones as written
+  // only.
+  auto batchesOuterPrefix = [&](ArrayRef<unsigned> extra) -> bool {
+    if (!boxDomain || !options.countersAsWritten)
+      return false;
+    bool inner = false;
+    for (unsigned d = 0; d < numIterationDims; ++d) {
+      if (single[d])
+        continue;
+      const bool batch =
+          isBatchLoop[d] || demoted[d] || llvm::is_contained(extra, d);
+      if (!batch)
+        inner = true;
+      else if (inner)
+        return false;
+    }
+    return true;
+  };
   auto partitionOutputsDisjoint = [&]() -> LogicalResult {
+    // An accumulation whose batches run in the program's order may have
+    // partitions that overlap in C (section 25): each batch reads C, adds its
+    // tile and writes C back before the next one reads it, so every
+    // contribution is kept in the order written. The tiles themselves are
+    // still checked injective (G2) below.
+    if (accumulates && batchesOuterPrefix({}))
+      return success();
     for (const Subscript &sub : subscripts) {
       if (sub.operand != 2)
         continue;
@@ -3116,6 +3151,22 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
                            ": the assignment C = A * B overwrites it, only "
                            "the last product survives -- not the GEMM of A "
                            "and B (docs/AFFINE_GEMM_MAPPING.md section 20)");
+      // An accumulation (section 25): the colliding outputs are a reduction
+      // that must be kept. One output role becomes batch loops -- I first,
+      // then J -- when its loops and the other batch loops are an outermost
+      // prefix of the nest (the batches then run in the order written, each
+      // reading the C the previous one wrote), with constant trip counts;
+      // the retry demotes it and checks every tile injective again. Else the
+      // refusal stands.
+      for (unsigned r : {0u, 1u}) {
+        if (roleLoops[r].empty() ||
+            llvm::any_of(roleLoops[r],
+                         [&](unsigned d) { return !tripCountOf(d); }) ||
+            !batchesOuterPrefix(roleLoops[r]))
+          continue;
+        wholeRoleDemotion = roleLoops[r];
+        break;
+      }
       return unsupportedRoles(
           collision +
           ", so one tile would lose an update "
@@ -3315,6 +3366,7 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
     bool positionalForm = !anyReductionBatch && positional();
     for (unsigned pass = 0;; ++pass) {
       demotionCandidate.reset();
+      wholeRoleDemotion.reset();
       LogicalResult decided = failure();
       if (pass > 0) {
         resetResult();
@@ -3333,9 +3385,12 @@ recognizeOnce(AffineMatmulCandidate candidate, std::string *why,
       }
       if (succeeded(decided))
         break;
-      if (!demotionCandidate || pass >= numIterationDims)
+      if ((!demotionCandidate && !wholeRoleDemotion) ||
+          pass >= numIterationDims)
         return failure();
-      SmallVector<unsigned> toDemote = chooseDemotion(*demotionCandidate);
+      SmallVector<unsigned> toDemote = wholeRoleDemotion
+                                           ? *wholeRoleDemotion
+                                           : chooseDemotion(*demotionCandidate);
       if (toDemote.empty())
         return failure();
       for (unsigned d : toDemote)

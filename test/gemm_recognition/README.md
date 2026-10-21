@@ -98,6 +98,18 @@ for an accumulation (never an assignment), a loop read by one factor only, and t
 factors read beyond the one kept as K (all of them K first, then each in turn, the longest first,
 ties the innermost), are reduction batch loops run around the tiles, every iteration accumulating
 into the same slab of C in order (lowered only with the permission to reassociate);
+since S4 (2026-10-21, docs section 25, ordered output batches) also, for an accumulation whose
+C is not injective on the (I, J) box (`C[10*i + j]` with j < 11, `C[i + j]`, `C[4*i + j]` with
+j < 5), the whole I role (the first factor's loops with C), else the whole J role, demoted to
+batch loops -- only when those loops and the other batch loops are an outermost prefix of the
+nest's loops of two or more iterations (loops that run once and repetition loops the hoist moves
+out are skipped), with constant trip counts, on a box whose counters are the program's (pass
+option `countersAsWritten`: not after a normalization with U != I); the retry re-checks every
+tile injective (G2) and the exact bijection; the output-disjointness check of section 21 is
+relaxed for an accumulation whose batch loops are such a prefix (`C[4*p + i][j]` with p
+outermost: overlapping partitions accumulate in order); the lowering is unchanged (per batch:
+read C, the tiles, write C back; async: begin ... wait inside the batch body); an assignment's
+collision stays refused, as does a nest whose batch loop sits inside a role or reduction loop;
 every loop of the chain is used by an access, and no access
 uses a loop outside the chain; all index operands are loop IVs (no symbols); the three access
 maps have the same number of results r ≥ 2, with a partition prefix of r − 2 results identical in
@@ -358,7 +370,7 @@ batch dimensions, K = 1 outer products, rank-1 factors, skewed and merged factor
 loops partitioning the GEMM into independent slabs of C, the factor that does not read them shared
 (`casespec.partition_decomposition`: the rule of section 21.3, verified by enumeration; the
 partitions' outputs must be disjoint -- `C[p + i][j]` and the merged `C[3p + i][j]` stay OUT_OF_SCOPE
-`demotion`). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
+`demotion` -- unless they are ordered output batches, below). A loop read by both factors and not by C beyond the reduction (`C[i][j] += A[r][i][k] *
 B[r][k][j]`) is a partial-C reduction: OUT_OF_SCOPE `partial_reduction`, never a partition --
 until 2026-10-21. Since 2026-10-21 (docs section 23, the research policy of 2026-10-21, basis
 `reduction_batches`) such loops, and the loops read by one factor only, are **reduction batch
@@ -380,6 +392,27 @@ when every reduction batch iteration is a 1 x 1 x 1 product (an element-wise pro
 19.1); strict floating point still refuses
 (`--fp-reassociation`); one-dimensional C is Phase 2. Re-decided ACCEPT: case_090, case_095,
 case_123, case_125 (each with its record `redecided`).
+
+**Ordered output batches (S4, 2026-10-21, docs section 25, basis `ordered_output_batches`):** an
+accumulation `C += A * B` on a box as written whose C is not injective on the (I, J) box of its
+canonical (or partitioned) decomposition (`C[10*i + j]` with j < 11, `C[i + j]`, `C[4*i + j]`
+with j < 5, `C[2*i + 2*j]`), or whose partitions of section 21 overlap in C (`C[4*p + i][j]` with
+`A[p][i][k]`), is ACCEPTED when the whole I role (the first factor's loops with C; with the
+factors written `B * A`, B's), else the whole J role, as batch loops makes every tile one dense
+GEMM with C injective on the tile's (I, J) box (G2 re-checked), and the batch loops -- with the
+demoted role -- are an **outermost prefix** of the nest's loops of two or more iterations that an
+access uses (`casespec.ordered_output_decomposition`; `_spec_outer_prefix`). The lowering runs
+the batches in the program's order, each reading C, adding its tile and writing C back before
+the next batch reads it, so every contribution is kept and every element of C receives the
+batches' contributions in the order written -- checked independently by enumeration
+(`_contributions_in_batch_order`: per element the batch tuples of its updates never decrease).
+Inside one tile only the sum over K is reassociated, as in every GEMM. Not for an assignment
+(collisions overwrite: `not_gemm_overwrite`), not when a role or reduction loop encloses a batch
+loop (`for k: for i: for j: C[10*i + j] += ...`, `for i: for p: ... C[4*p + i][j]`: OUT_OF_SCOPE
+`demotion`), not on a non-box domain, not on the box form of a nest whose counters the domain
+normalization rewrote with U != I (OUT_OF_SCOPE `ordered_output_batches_rewritten`), and the
+guards of every ACCEPT apply (double, mixed types, aliasing, `repeat_in_reduction`: a repetition
+loop inside the batches of colliding outputs cannot be hoisted).
 
 **Must be REJECTED (TRUE_NEGATIVE):** element-wise products -- every loop read by all three
 operands, in every decomposition a batch loop, no row, column or reduction loop (`C[i][j] +=

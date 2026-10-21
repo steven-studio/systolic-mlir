@@ -2302,9 +2302,10 @@ struct AffineMatmulToSystolicPass
     SmallVector<LogicalMatmul, 1> matmuls;
     for (AffineMatmulCandidate candidate : candidates) {
       AffineMatmulRecognitionOptions recognition;
-      recognition.reductionBatches =
-          reductionBatches &&
+      recognition.countersAsWritten =
           !countersRewritten(normalizations, candidate.anchor);
+      recognition.reductionBatches =
+          reductionBatches && recognition.countersAsWritten;
       auto result =
           recognizeLogicalMatmul(candidate, nullptr, nullptr, recognition);
       if (failed(result))

@@ -1627,6 +1627,41 @@ def _choose_demotion(forms, loops, candidate):
     return {v for v in keep if v != best}
 
 
+def _batches_outer_prefix(case, loops, batch, extra=()):
+    """The compiler's batchesOuterPrefix (AffineMatmulAnalysis.cpp, docs/
+    AFFINE_GEMM_MAPPING.md section 25, S4): whether the batch loops `batch`
+    (read by all three operands, demoted, or reduction batch loops) and the
+    loops `extra` are an outermost prefix of the nest's loops of two or more
+    iterations -- the batches then run around the tiles in the program's
+    order, and every element of C receives the contributions of different
+    batches in the order written.  Only on a box domain whose counters are
+    the program's (not the box form of a nest the domain normalization
+    rewrote with U != I, nor the surrogate of a nest left as written:
+    Case.rb_blocked).  A loop that runs once is skipped; a loop no access
+    uses (a repetition loop) is skipped too: the lowering hoists it out of
+    the candidate band first, or refuses the nest (_hoist_blocked)."""
+    if not is_box_case(case) or case.rb_blocked:
+        return False
+    used = set()
+    for fl in forms_of(case).values():
+        for f in fl:
+            used |= f.vars()
+    inner = False
+    for lp in loops:
+        if lp.trip() == 1 or (lp.var not in used and lp.trip() != 0):
+            continue
+        if lp.var in batch or lp.var in extra:
+            if inner:
+                return False
+        else:
+            inner = True
+    return True
+
+
+def forms_of(case):
+    return {r: a.forms() for r, a in case.arrays.items()}
+
+
 def predict_by_groups(case, forms, loops, demoted=frozenset(), out=None):
     """The compiler's analysis by groups and roles (AffineMatmulAnalysis.cpp,
     recognizeLogicalMatmul, docs/AFFINE_GEMM_MAPPING.md section 2), used when
@@ -1665,10 +1700,14 @@ def predict_by_groups(case, forms, loops, demoted=frozenset(), out=None):
     index = {lp.var: i for i, lp in enumerate(loops)}
     # A demoted loop (section 21) is read by C alone in a dimension of its
     # own: the partitions' outputs are independent slabs of C.
+    # (S4, docs section 25: an accumulation whose batches are an outermost
+    # prefix of the nest may have partitions that overlap in C -- each batch
+    # reads C, adds its tile and writes C back before the next one reads it)
+    p1_relaxed = case.stmt in MAC_STMTS and _batches_outer_prefix(case, loops, batch_loops)
     for d, f in enumerate(dom["c"]):
         sup = support(f)
         dem = [v for v in sup if v in demoted]
-        if dem and any(v not in batch_loops for v in sup):
+        if dem and not p1_relaxed and any(v not in batch_loops for v in sup):
             return None, ("loop %d would partition the GEMM (dimension-intersection partitioning, "
                           "docs/AFFINE_GEMM_MAPPING.md section 21), but C reads it in dimension %d "
                           "together with a role coordinate: the partitions' outputs would not be "
@@ -1919,9 +1958,12 @@ def predict_by_readers(case, forms, loops, demoted=frozenset(), out=None):
     # A demoted loop (section 21) is read by C alone in a dimension of its
     # own: the partitions' outputs are independent slabs of C.
     index = {lp.var: i for i, lp in enumerate(loops)}
+    # (relaxed for an accumulation whose batches are an outermost prefix:
+    # S4, docs section 25, as in predict_by_groups)
+    p1_relaxed = case.stmt in MAC_STMTS and _batches_outer_prefix(case, loops, batch)
     for d, f in enumerate(dom["c"]):
         dem = [v for v, c in f.coef.items() if c != 0 and v in demoted]
-        if dem and any(c != 0 and v not in batch for v, c in f.coef.items()):
+        if dem and not p1_relaxed and any(c != 0 and v not in batch for v, c in f.coef.items()):
             return None, ("loop %d would partition the GEMM (dimension-intersection partitioning, "
                           "docs/AFFINE_GEMM_MAPPING.md section 21), but C reads it in dimension %d "
                           "together with a role coordinate: the partitions' outputs would not be "
@@ -2016,6 +2058,18 @@ def predict_by_readers(case, forms, loops, demoted=frozenset(), out=None):
         lam_i = [cs[0] * ordinal["I"][0] for cs in layout["c"]]
         lam_j = [cs[1] * ordinal["J"][0] for cs in layout["c"]]
         collision = _injective_on_box(lam_i, lam_j, ordinal["I"][1], ordinal["J"][1])
+        if collision is not None and case.stmt in MAC_STMTS and out is not None:
+            # S4 (docs section 25): in an accumulation the colliding outputs
+            # are a reduction that must be kept; the whole I role (the first
+            # factor's), else the whole J role, becomes batch loops when its
+            # loops and the batch loops are an outermost prefix of the nest
+            # (constant trip counts: a box); the retry demotes it and checks
+            # every tile injective again (an assignment keeps the refusal)
+            for role in ("I", "J"):
+                lps = role_loops[role]
+                if lps and _batches_outer_prefix(case, loops, batch, {lp.var for lp in lps}):
+                    out["whole_role"] = {lp.var for lp in lps}
+                    break
         if collision is not None:
             return None, ("C's view is not injective on the (I, J) box: the outputs with ordinals "
                           "(I, J) and (I + %d, J + %d) write the same element of C, so one tile would "
@@ -2049,6 +2103,10 @@ def groups_or_readers(case, forms, loops, reduction_batch=frozenset()):
             grouped, why = predict_by_readers(case, forms, loops, demoted, out)
         if grouped is not None:
             return grouped, None
+        if out.get("whole_role"):
+            # S4: the whole output role, not chooseDemotion's choice
+            demoted |= out["whole_role"]
+            continue
         candidate = out.get("candidate")
         if not candidate or not is_box_case(case):
             return None, why
@@ -2720,6 +2778,28 @@ SPEC_BASIS = {
                                    "row; sections 19.12, 19.13): the compiler makes reduction batch loops "
                                    "only on counters as written (countersRewritten), so such a nest keeps "
                                    "the decision of sections 19-21 -- a documented limitation",
+    "ordered_output_batches": "(S4, 2026-10-21, docs/AFFINE_GEMM_MAPPING.md section 25) ordered output "
+                              "batches: in an accumulation C += A * B on a box as written whose C is "
+                              "not injective on the (I, J) box (C[10 i + j] with j < 11, C[i + j]), "
+                              "the whole I role (the first factor's loops with C), else the whole J "
+                              "role, becomes batch loops when those loops and the other batch loops "
+                              "are an outermost prefix of the nest's loops of two or more iterations "
+                              "(constant trip counts); every tile is then re-checked injective (G2) "
+                              "and one dense GEMM; likewise partitions of section 21 may overlap in C "
+                              "when the batch loops are such a prefix.  The lowering runs the batches "
+                              "in the program's order, each reading C, adding its tile and writing C "
+                              "back before the next one reads it: every contribution is kept, and "
+                              "every element of C receives the batches' contributions in the order "
+                              "written (casespec.ordered_output_decomposition, checked by enumeration: "
+                              "_contributions_in_batch_order); assignments keep their refusal "
+                              "(not_gemm_overwrite), a batch loop inside a role or reduction loop "
+                              "keeps the decision of sections 19-21 (demotion, OUT_OF_SCOPE)",
+    "ordered_output_batches_rewritten": "ordered output batches (S4, docs/AFFINE_GEMM_MAPPING.md "
+                                        "section 25, casespec.ordered_output_decomposition) on the box "
+                                        "form of a nest whose counters the domain normalization rewrote "
+                                        "with U != I: the compiler makes them on counters as written only "
+                                        "(countersAsWritten), so such a nest keeps the decision of "
+                                        "sections 19-21 -- a documented limitation",
     "partial_reduction": "(docs/AFFINE_GEMM_MAPPING.md section 21) a loop read by both factors and "
                          "not by C beyond the reduction coordinate (C[i][j] += A[r][i][k] * "
                          "B[r][k][j]): the only valid decomposition makes it a batch loop whose "
@@ -3198,7 +3278,8 @@ def _demoted_in(g):
     return [v.strip() for v in m.group(1).split(",")] if m else []
 
 
-def partition_decomposition(case: Case, max_points: int = 200000, reduction_batch=frozenset()):
+def partition_decomposition(case: Case, max_points: int = 200000, reduction_batch=frozenset(),
+                            ordered=False):
     """The dimension-intersection partitioning of docs/AFFINE_GEMM_MAPPING.md
     section 21, as the specification defines it, by enumeration on the box:
     the loops read by C only are batch loops; a row or column role (the loops
@@ -3214,7 +3295,15 @@ def partition_decomposition(case: Case, max_points: int = 200000, reduction_batc
     reduction_batch_decomposition): loops C does not read that are batch
     loops whose iterations accumulate into the same slab of C, in order --
     excluded from the disjointness check (they are not output partitions).
-    Returns {"demoted": [...], "ext": {...}, "batched": bool} or None."""
+    `ordered` (S4, docs section 25, ordered_output_decomposition): for an
+    accumulation, C not injective on the (I, J) box makes the whole I role
+    (the first factor's loops with C), else the whole J role, batch loops
+    when they and the other batch loops are an outermost prefix of the nest
+    (_spec_outer_prefix), and the partitions' outputs need not be disjoint
+    when the batch loops are such a prefix (overlapping partitions
+    accumulate in the order written; the tiles are still checked injective).
+    Returns {"demoted": [...], "ext": {...}, "batched": bool, "ordered":
+    bool, "whole_role": [...]} or None."""
     import itertools
     if not is_box_case(case):
         return None
@@ -3237,6 +3326,7 @@ def partition_decomposition(case: Case, max_points: int = 200000, reduction_batc
         rs = {r for r in "abc" if lp.var in readers[r]}
         if len(rs) == 1 and rs != {"c"} and lp.var not in reduction_batch:
             return None             # a broadcast (one factor only)
+    whole_role = []
     for _ in range(len(loops) + 1):
         assignment = {}
         for lp in many:
@@ -3253,6 +3343,23 @@ def partition_decomposition(case: Case, max_points: int = 200000, reduction_batc
         res = _check_decomposition(many + once, forms, assignment)
         if res["why"] is None:
             break
+        if ordered and res["why"] == "C's view is not injective on the (I, J) box":
+            # S4: the whole output role of the first factor (I; J with the
+            # factors written B * A), else the other one, as batch loops
+            # when they make the batch loops an outermost prefix
+            first = ("J", "I") if case.stmt == "+=BA" else ("I", "J")
+            pick = None
+            batch_now = {v for v, r in assignment.items() if r == "P"}
+            for role in first:
+                lps = [lp.var for lp in many if assignment[lp.var] == role]
+                if lps and _spec_outer_prefix(case, batch_now | set(lps)):
+                    pick = lps
+                    break
+            if pick is None:
+                return None
+            whole_role += pick
+            demoted |= set(pick)
+            continue
         m = re.match(r"role ([IJ]) ", res["why"]) if res["why"] != "sq1" else None
         role = m.group(1) if m else None
         if role is None and res["why"] == "sq1":
@@ -3295,11 +3402,111 @@ def partition_decomposition(case: Case, max_points: int = 200000, reduction_batc
     count = 1
     for lp in vary:
         count *= lp.trip()
-    if len(elements) != count:
+    overlap = len(elements) != count
+    batch_all = {v for v, r in assignment.items() if r == "P"}
+    if (overlap or whole_role) and not (ordered and _spec_outer_prefix(case, batch_all)
+                                        and _contributions_in_batch_order(case, batch_all)):
         return None
     order = {lp.var: i for i, lp in enumerate(case.loops)}
     return {"demoted": sorted(demoted, key=order.get), "ext": res["ext"],
-            "batched": bool(triple) or bool(demoted)}
+            "batched": bool(triple) or bool(demoted), "ordered": overlap or bool(whole_role),
+            "whole_role": sorted(whole_role, key=order.get), "overlap": overlap}
+
+
+def _spec_outer_prefix(case: Case, batch) -> bool:
+    """Whether the loops `batch` are an outermost prefix of the nest's loops
+    of two or more iterations that an access uses (a repetition loop, used
+    by no access, repeats the whole GEMM and is decided by
+    repeat_in_reduction): the batch iterations then run in the program's
+    order (docs section 25, S4)."""
+    used = _used_vars(case)
+    inner = False
+    for lp in case.loops:
+        if lp.trip() < 2 or lp.var not in used:
+            continue
+        if lp.var in batch:
+            if inner:
+                return False
+        else:
+            inner = True
+    return True
+
+
+def _contributions_in_batch_order(case: Case, batch, max_points: int = 200000) -> bool:
+    """The independent check of an ordered decomposition (S4), by
+    enumeration in program order: every element of C receives the
+    contributions of different batch iterations in the order of the batches
+    (the lexicographic order of the batch loops' values, outermost first, as
+    the lowering runs them: per batch read C, the tile, write C back), i.e.
+    for each element the batch tuples of its updates never decrease.  (Within
+    one batch the tile sums over K -- the reassociation every GEMM needs.)"""
+    import itertools
+    used = _used_vars(case)
+    loops = [lp for lp in case.loops if lp.var in used]
+    total = 1
+    for lp in loops:
+        total *= len(lp.values())
+    if total == 0 or total > max_points:
+        return False
+    names = [lp.var for lp in loops]
+    border = [lp.var for lp in loops if lp.var in batch]
+    # the batch loops' order of values: as they run (a loop counting down
+    # runs its values downwards)
+    rank = {lp.var: {x: i for i, x in enumerate(lp.values())} for lp in loops if lp.var in batch}
+    cforms = case.c.forms()
+    last = {}
+    for x in itertools.product(*[lp.values() for lp in loops]):
+        env = dict(zip(names, x))
+        key = tuple(f.eval(env) for f in cforms)
+        bt = tuple(rank[v][env[v]] for v in border)
+        if key in last and bt < last[key]:
+            return False
+        last[key] = bt
+    return True
+
+
+def ordered_output_decomposition(case: Case, max_points: int = 200000):
+    """Ordered output batches (S4, docs/AFFINE_GEMM_MAPPING.md section 25),
+    as the specification defines them, by enumeration on the box: in an
+    accumulation C += A * B whose C is not injective on the (I, J) box of the
+    canonical (or partitioned) decomposition, the whole I role (the first
+    factor's), else the whole J role, becomes batch loops -- provided those
+    loops and the other batch loops are an outermost prefix of the nest's
+    loops of two or more iterations; then every tile (fixed batch values) is
+    re-checked: every role one dense coordinate, C injective on the tile's
+    (I, J) box (G2), no stride-0 view.  Likewise the partitions of section 21
+    (and the reduction batch loops of section 23) may overlap in C when the
+    batch loops are such a prefix.  Each batch reads C, adds its tile and
+    writes C back before the next batch reads it, so every contribution is
+    kept and every element of C receives the batches' contributions in the
+    order written (checked by enumeration: _contributions_in_batch_order).
+    The reduction-batch choices are those of reduction_batch_decomposition
+    (none first).  Accumulations only (an assignment's collisions overwrite:
+    not_gemm_overwrite); a plain multiply-accumulate on a box.  Returns
+    {"demoted", "reduction_batch", "whole_role", "overlap", "ext"} or None.
+    (Valid on the box form of a nest whose counters the normalization
+    rewrote with U != I too -- that form runs in the same order --; the
+    compiler makes ordered batches only on counters as written, which
+    spec_expect calls a limitation.)"""
+    if not is_box_case(case) or case.stmt not in MAC_STMTS or case.kernel_style in ("init_inside", "scalar_acc"):
+        return None
+    one, shared = _rb_loops(case)
+    choices = [frozenset()]
+    if case.kernel_style == "plain" and (one or len(shared) >= 2):
+        choices.append(frozenset(one))
+        if len(shared) >= 2:
+            choices += [frozenset(one) | frozenset(v for v in shared if v != k) for k in shared]
+    order = {lp.var: i for i, lp in enumerate(case.loops)}
+    for rb in choices:
+        part = partition_decomposition(case, max_points, reduction_batch=rb, ordered=True)
+        if part and all(part["ext"][r] == 1 for r in "IJK"):
+            part = None     # an element-wise product (non-degeneracy, section 19.1)
+        if part and part["ordered"]:
+            return {"demoted": [v for v in part["demoted"] if v not in rb],
+                    "reduction_batch": sorted(rb, key=order.get),
+                    "whole_role": part["whole_role"], "overlap": part["overlap"],
+                    "ext": part["ext"]}
+    return None
 
 
 def reduction_batch_decomposition(case: Case, max_points: int = 200000):
@@ -3371,6 +3578,30 @@ def repeat_in_reduction(case: Case) -> bool:
         for f in arr.forms():
             used |= f.vars()
     return _hoist_blocked(case, case.loops, used) is not None
+
+
+def _ordered_verdict(case: Case, out: dict, od: dict):
+    """The verdict on an ordered output decomposition (S4): the guards every
+    ACCEPT applies, then ACCEPT -- or OUT_OF_SCOPE on the box form of a nest
+    whose counters the normalization rewrote with U != I (the compiler makes
+    ordered batches on counters as written only)."""
+    out["legal_gemm"] = True
+    out["ordered_batches"] = {"whole_role": od["whole_role"], "overlap": od["overlap"]}
+    if od["demoted"]:
+        out["partition"] = od["demoted"]
+    if od["reduction_batch"]:
+        out["reduction_batch"] = od["reduction_batch"]
+    if case.elem != "float":
+        return ("OUT_OF_SCOPE", "double")
+    if len({a.elem for a in case.arrays.values()}) > 1:
+        return ("OUT_OF_SCOPE", "mixed_types")
+    if _aliases_output(case):
+        return _alias_verdict(case)
+    if repeat_in_reduction(case):
+        return ("OUT_OF_SCOPE", "repeat_in_reduction")
+    if case.rb_blocked:
+        return ("OUT_OF_SCOPE", "ordered_output_batches_rewritten")
+    return ("ACCEPT", "ordered_output_batches")
 
 
 def spec_expect(case: Case) -> dict:
@@ -3553,6 +3784,15 @@ def spec_expect(case: Case) -> dict:
                 # the compiler makes no reduction batch loop there
                 return done("OUT_OF_SCOPE", "reduction_batches_rewritten")
             return done("ACCEPT", "reduction_batches")
+        # Ordered output batches (S4, docs section 25): an accumulation whose
+        # C is not injective on the (I, J) box (or whose partitions overlap
+        # in C), decomposed into batches that run in the order written.
+        od = (ordered_output_decomposition(case)
+              if g and g["verdict"] in ("DEMOTION", "SQ1") else None)
+        if od:
+            r = _ordered_verdict(case, out, od)
+            if r:
+                return done(*r)
         if g and g["verdict"] == "SQ1":
             return done("UNDETERMINED", "SQ-1")
         if g and g["verdict"] == "DEMOTION":
@@ -3599,6 +3839,14 @@ def spec_expect(case: Case) -> dict:
             part = partition_decomposition(case)
             g = None if part else generalized_gemm_on_domain(case)
             if not part and not (g and g["verdict"] == "ACCEPT"):
+                # ordered output batches (S4, docs section 25): overlapping
+                # partitions of an accumulation, in the order written
+                od = ordered_output_decomposition(case)
+                if od:
+                    r = _ordered_verdict(case, out, od)
+                    if r:
+                        out["logical_extents"] = dict(od["ext"])
+                        return done(*r)
                 return done("OUT_OF_SCOPE", "batched_shared")
             if part:
                 out["partition"] = part["demoted"]

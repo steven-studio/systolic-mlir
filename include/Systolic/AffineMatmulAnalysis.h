@@ -399,6 +399,11 @@ struct AffineMatmulRecognitionOptions {
   /// GEMM, the result, reason and class are those without the option.
   /// Assignments (C = A * B) never get reduction batch loops (section 20.4).
   bool reductionBatches = true;
+  /// Whether the nest's counters are the ones as written (no domain
+  /// normalization with U != I rewrote them). The ordered output batches of
+  /// an accumulation whose C is not injective (section 25) are made only
+  /// then.
+  bool countersAsWritten = true;
 };
 
 /// Recover logical GEMM coordinates and access factorization.

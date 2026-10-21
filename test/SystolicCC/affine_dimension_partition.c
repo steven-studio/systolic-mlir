@@ -22,6 +22,20 @@
 // compared bitwise with a CPU reference that runs the loops as written on
 // integer-valued data (the factors without zeros) with a NONZERO initial C.
 //
+// RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a non-injective C):
+// overlap_c, flat_collision and merged_c are offloaded. Each is an accumulation whose
+// partition loop p (loop 0, demoted to a batch loop) is the outermost loop of the nest,
+// so the batches run in the order written: batch p reads its slab of C, adds its tile
+// (3 x 5 x 4, two tile invocations on the fleet) and writes it back before batch p + 1
+// reads it. overlap_c (C[p + i][j]) and flat_collision (C[4p + 5i + j]) write elements
+// of C in both batches (rows 1 and 2; C[4] .. C[14]), each receiving both batches'
+// nonzero contributions in program order; merged_c (C[3p + i][j]) was refused as a
+// merged output dimension and its slabs are in fact disjoint. Within one tile the
+// outputs are distinct (G2). The assignment twins overlap_c_assign,
+// flat_collision_assign and merged_c_assign stay on the host (the ordered output
+// batches are made for accumulations only; merged_c_assign writes every element once
+// and is refused by the disjointness rule as before -- valid, not constructed).
+//
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
@@ -49,15 +63,18 @@
 // PLAN-DAG: note: 'ab_extra' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'assign_overwrite' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: two iterations of the assignment C = A * B write the same element of C
 // PLAN-DAG: note: 'cross_alias' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: A may overlap C
-// PLAN-DAG: note: 'overlap_c' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'overlap_c' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'coupled_k' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'c_as_factor' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: B may overlap C
-// PLAN-DAG: note: 'flat_collision' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'flat_collision' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'a_only' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'oob_c' stays on the host: no GEMM the systolic arrays can run was recognized in it (line {{[0-9]+}}: C is accessed out of bounds along dimension 2)
-// PLAN-DAG: note: 'merged_c' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'merged_c' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'partial_with_triple' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
-// PLAN: wrote {{.*}} (24 function(s) offloaded
+// PLAN-DAG: note: 'overlap_c_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'flat_collision_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 'merged_c_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN: wrote {{.*}} (27 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -86,19 +103,22 @@
 // ALL: [case] ab_extra: equal, offloaded (4)
 // ALL: [case] assign_overwrite: equal, NOT OFFLOADED (0)
 // ALL: [case] cross_alias: equal, NOT OFFLOADED (0)
-// ALL: [case] overlap_c: equal, NOT OFFLOADED (0)
+// ALL: [case] overlap_c: equal, offloaded (4)
 // ALL: [case] coupled_k: equal, offloaded (4)
 // ALL: [case] c_as_factor: equal, NOT OFFLOADED (0)
-// ALL: [case] flat_collision: equal, NOT OFFLOADED (0)
+// ALL: [case] flat_collision: equal, offloaded (4)
 // ALL: [case] a_only: equal, offloaded (4)
-// ALL: [case] merged_c: equal, NOT OFFLOADED (0)
+// ALL: [case] merged_c: equal, offloaded (4)
 // ALL: [case] partial_with_triple: equal, offloaded (8)
+// ALL: [case] overlap_c_assign: equal, NOT OFFLOADED (0)
+// ALL: [case] flat_collision_assign: equal, NOT OFFLOADED (0)
+// ALL: [case] merged_c_assign: equal, NOT OFFLOADED (0)
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU:
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-24: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-27: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 
 #include <stdio.h>
@@ -180,8 +200,9 @@ void ca_assign(float A[restrict 2][3][4], float B[restrict 4][5], float C[restri
 void inner_partition(float A[restrict 3][2][4], float B[restrict 4][5], float C[restrict 3][2][5]) {
   for (int i = 0; i < 3; ++i) for (int p = 0; p < 2; ++p) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[i][p][j] += A[i][p][k] * B[k][j];
 }
-/* must stay on the host (except ab_extra, partial_with_triple, coupled_k and
-   a_only: RE-DECIDED 2026-10-21, see each) */
+/* must stay on the host (except ab_extra, partial_with_triple, coupled_k,
+   a_only, overlap_c, flat_collision and merged_c: RE-DECIDED 2026-10-21, see
+   each) */
 /* N1, N14: a shared reduction dimension missing in C (a partial-C reduction).
    RE-DECIDED 2026-10-21 (docs section 23, reduction-batch partitioning on by
    default): both are offloaded. Refusing a partial-C reduction was a policy of
@@ -204,7 +225,12 @@ void assign_overwrite(float A[restrict 2][3], float B[restrict 2][5], float C[re
 void cross_alias(float A[3][3][5], float B[restrict 5][5], float C[restrict 1]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 5; ++k) A[p + 1][i][j] += A[p][i][k] * B[k][j];
 }
-/* N4: the partitions' outputs overlap */
+/* N4: the partitions' outputs overlap.
+   RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a
+   non-injective C): offloaded. p (loop 0) is a demoted batch loop and the
+   outermost loop: batch 0 accumulates rows 0 .. 2, then batch 1 reads rows
+   1 .. 3 (rows 1 and 2 as batch 0 wrote them) and accumulates into them; the
+   tile is 3 x 5 x 4. Assignment twin: overlap_c_assign (stays on the host). */
 void overlap_c(float A[restrict 2][3][4], float B[restrict 4][5], float C[restrict 5][5]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[p + i][j] += A[p][i][k] * B[k][j];
 }
@@ -223,7 +249,13 @@ void coupled_k(float A[restrict 3][4], float B[restrict 3][5], float C[restrict 
 void c_as_factor(float A[restrict 2][3][4], float B[restrict 1], float C[3][4][5]) {
   for (int b = 0; b < 2; ++b) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[b + 1][i][j] += A[b][i][k] * C[b][k][j];
 }
-/* N7: an unsafe flattened output */
+/* N7: an unsafe flattened output.
+   RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a
+   non-injective C): offloaded. Within one p, 5i + j is injective (j < 5); the
+   two p overlap in C[4] .. C[14]. p (loop 0) is a demoted batch loop and the
+   outermost loop, so batch 1 reads what batch 0 wrote and adds to it in the
+   order written; the tile is 3 x 5 x 4. Assignment twin: flat_collision_assign
+   (stays on the host). */
 void flat_collision(float A[restrict 2][3][4], float B[restrict 4][5], float C[restrict 20]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[4 * p + 5 * i + j] += A[p][i][k] * B[k][j];
 }
@@ -242,9 +274,30 @@ void a_only(float A[restrict 3][2][4], float B[restrict 4][5], float C[restrict 
 void oob_c(float A[restrict 2][3][4], float B[restrict 4][5], float C[restrict 2][3][4]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[p][i][j] += A[p][i][k] * B[k][j];
 }
-/* N11: an ambiguous output mapping (C merges the partition and the row coordinate in one dimension) */
+/* N11: an ambiguous output mapping (C merges the partition and the row coordinate in one dimension).
+   RE-DECIDED 2026-10-21 (docs section 25, ordered output batches of a
+   non-injective C): offloaded. The disjointness rule no longer applies to an
+   accumulation whose batch loops are the outermost loops: p (loop 0) is a
+   demoted batch loop, batch p accumulates rows 3p .. 3p + 2 (disjoint from the
+   other batch's), tile 3 x 5 x 4. Assignment twin: merged_c_assign (stays on the
+   host). */
 void merged_c(float A[restrict 2][3][4], float B[restrict 4][5], float C[restrict 6][5]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[3 * p + i][j] += A[p][i][k] * B[k][j];
+}
+/* The assignment twins of N4, N7 and N11 (must stay on the host, docs
+   sections 20 and 25: an assignment keeps only the last product, and the
+   ordered output batches are made for accumulations only). overlap_c_assign
+   and flat_collision_assign overwrite elements of C in the second batch;
+   merged_c_assign writes each element once and stays on the host by the
+   disjointness rule (a merged output dimension: valid, not constructed). */
+void overlap_c_assign(float A[restrict 2][3], float B[restrict 5], float C[restrict 5][5]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[p + i][j] = A[p][i] * B[j];
+}
+void flat_collision_assign(float A[restrict 2][3], float B[restrict 5], float C[restrict 20]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[4 * p + 5 * i + j] = A[p][i] * B[j];
+}
+void merged_c_assign(float A[restrict 2][3], float B[restrict 5], float C[restrict 6][5]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[3 * p + i][j] = A[p][i] * B[j];
 }
 
 static float mul(float a, float b) { return a * b; }
@@ -308,6 +361,12 @@ static void a_only_ref(float A[3][2][4], float B[4][5], float C[3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int s = 0; s < 2; ++s) for (int k = 0; k < 4; ++k) C[i][j] = C[i][j] + mul(A[i][s][k], B[k][j]); }
 static void merged_c_ref(float A[2][3][4], float B[4][5], float C[6][5]) {
   for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) C[3 * p + i][j] = C[3 * p + i][j] + mul(A[p][i][k], B[k][j]); }
+static void overlap_c_assign_ref(float A[2][3], float B[5], float C[5][5]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[p + i][j] = mul(A[p][i], B[j]); }
+static void flat_collision_assign_ref(float A[2][3], float B[5], float C[20]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[4 * p + 5 * i + j] = mul(A[p][i], B[j]); }
+static void merged_c_assign_ref(float A[2][3], float B[5], float C[6][5]) {
+  for (int p = 0; p < 2; ++p) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[3 * p + i][j] = mul(A[p][i], B[j]); }
 
 static void fill(float *p, int n, int s) { for (int e = 0; e < n; ++e) p[e] = (float)((e * 7 + s) % 9 - 4); }
 static void fill_nz(float *p, int n, int s) { for (int e = 0; e < n; ++e) { int v = (e * 7 + s) % 9 - 4; p[e] = (float)(v ? v : 5 - 2 * (e & 1)); } }
@@ -354,5 +413,8 @@ int main(void) {
   RUN(a_only, 3*2*4, 4*5, 3*5, 1);
   RUN(merged_c, 2*3*4, 4*5, 6*5, 1);
   RUN(partial_with_triple, 2*2*3*4, 2*2*4*5, 2*3*5, 1);
+  RUN(overlap_c_assign, 2*3, 5, 5*5, 1);
+  RUN(flat_collision_assign, 2*3, 5, 20, 1);
+  RUN(merged_c_assign, 2*3, 5, 6*5, 1);
   printf("%s: %d differ\n", differ ? "FAIL" : "PASS", differ); return differ;
 }
