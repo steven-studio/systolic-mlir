@@ -15,6 +15,13 @@
 // Assignments (C = A * B) are considered only with an actual K = 1 or with no
 // reduction loop (virtual K = 1, index association dimension 0), and never get
 // reduction batch loops (section 20.4).
+// RE-DECIDED 2026-10-21 (docs section 20.5, last write wins): an assignment's
+// loops of two or more iterations that C does not read are cut to their last
+// iteration, whose product is the one that survives in the loops as written;
+// t2_assign and assign_t5 (were refused) are then the 3 x 5 x 1 assignment
+// C = A[:, 3] B[3, :] into a zeroed C, offloaded -- still assignments, with
+// no reduction batch loop, compared bitwise with the loops as written. This
+// does not depend on reduction batches (OFF offloads them too).
 //
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
@@ -34,11 +41,11 @@
 // PLAN-DAG: note: 'ob_rb' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 64 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'rb_negative' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'rb_constants' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 32 invocation(s) per call (the loops around them repeat them)
-// PLAN-DAG: note: 't2_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// PLAN-DAG: note: 't2_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'assign_k1' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet
 // PLAN-DAG: note: 'assign_outer_batched' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 4 invocation(s) per call (the loops around them repeat them)
-// PLAN-DAG: note: 'assign_t5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// PLAN: wrote {{.*}} (16 function(s) offloaded
+// PLAN-DAG: note: 'assign_t5' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
+// PLAN: wrote {{.*}} (18 function(s) offloaded
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -58,10 +65,10 @@
 // ALL: [case] ob_rb: equal, offloaded (64)
 // ALL: [case] rb_negative: equal, offloaded (8)
 // ALL: [case] rb_constants: equal, offloaded (32)
-// ALL: [case] t2_assign: equal, NOT OFFLOADED (0)
+// ALL: [case] t2_assign: equal, offloaded (2)
 // ALL: [case] assign_k1: equal, offloaded (2)
 // ALL: [case] assign_outer_batched: equal, offloaded (4)
-// ALL: [case] assign_t5: equal, NOT OFFLOADED (0)
+// ALL: [case] assign_t5: equal, offloaded (2)
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU, with
@@ -71,30 +78,40 @@
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // RUN: %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.va 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// VERIFY-COUNT-16: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY-COUNT-18: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Non-integer data (-DFRACTIONAL): the reduction batches reorder each sum, so
 // these results are checked within a relative tolerance -- not bitwise:
 // RUN: %systolic-cc --fp-reassociation -DFRACTIONAL --verify --verify-rtol 1e-4 %s -o %t.f > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.f 2>&1 >/dev/null | FileCheck %s --check-prefix=RTOL
-// RTOL-COUNT-16: verified: {{[0-9]+}} elements equal the CPU reference (relative tolerance 0.0001)
+// RTOL-COUNT-18: verified: {{[0-9]+}} elements equal the CPU reference (relative tolerance 0.0001)
 // RTOL-NOT: MISMATCH
 //
-// Strict floating point (no --fp-reassociation): nothing is offloaded.
+// Strict floating point (no --fp-reassociation): nothing is offloaded, and
+// nothing is cut (last write wins runs only on a nest that may be lowered):
+// t2_assign and assign_t5 are refused at recognition as written, as before.
 // RUN: %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
 // STRICT-DAG: note: 't1' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't2' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't5' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
+// STRICT-DAG: note: 't2_assign' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
+// STRICT-DAG: note: 'assign_t5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // STRICT: wrote {{.*}} (0 function(s) offloaded
+// RUN: FileCheck %s --allow-empty --check-prefix=STRICTREM --input-file=%t.strict.systolic/20-remarks.txt
+// STRICTREM-NOT: last write wins
 //
 // With --no-reduction-batches the recognition is that of sections 19-21: every
-// kernel here except the assignments with K = 1 stays on the host.
+// kernel here except the assignments stays on the host (RE-DECIDED 2026-10-21,
+// docs section 20.5, last write wins: was "except the assignments with K = 1";
+// t2_assign and assign_t5 are cut to K = 1 first, 2 -> 4 offloaded).
 // RUN: %systolic-cc --no-reduction-batches --fp-reassociation --explain %s -o %t.off 2>&1 | FileCheck %s --check-prefix=OFF
 // OFF-DAG: note: 't1' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't2' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
-// OFF: wrote {{.*}} (2 function(s) offloaded
+// OFF-DAG: note: 't2_assign' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
+// OFF-DAG: note: 'assign_t5' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
+// OFF: wrote {{.*}} (4 function(s) offloaded
 
 #include <stdio.h>
 #include <string.h>
@@ -171,7 +188,7 @@ void rb_constants(float A[restrict 4][6], float B[restrict 5][6], float C[restri
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) for (int l = 0; l < 4; ++l) C[i + 1][j] += A[i + 1][k + 2] * B[l + 1][j + 1];
 }
 
-/* the assignment twin of T2 (C = A * B): x1 not read by C, only the last product survives -- stays on the host */
+/* the assignment twin of T2 (C = A * B): x0, x1 not read by C, only the last product survives -- cut to it, offloaded (section 20.5) */
 void t2_assign(float A[restrict 3][7], float B[restrict 4][5], float C[restrict 3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int x0 = 0; x0 < 4; ++x0) for (int x1 = 0; x1 < 4; ++x1) C[i][j] = A[i][x0 - x1 + 3] * B[x0][j];
 }
@@ -186,7 +203,7 @@ void assign_outer_batched(float A[restrict 2][3], float B[restrict 2][5], float 
   for (int b = 0; b < 2; ++b) for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) C[b][i][j] = A[b][i] * B[b][j];
 }
 
-/* the assignment twin of T5 (C = A * B with k, l not read by C): overwrites, refused */
+/* the assignment twin of T5 (C = A * B with k, l not read by C): overwrites -- cut to the last k, l, offloaded (section 20.5) */
 void assign_t5(float A[restrict 3][4], float B[restrict 4][5], float C[restrict 3][5]) {
   for (int i = 0; i < 3; ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 4; ++k) for (int l = 0; l < 4; ++l) C[i][j] = A[i][k] * B[l][j];
 }

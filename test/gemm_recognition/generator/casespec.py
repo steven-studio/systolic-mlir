@@ -367,6 +367,13 @@ class Case:
     issue: str = ""                 # e.g. 'ISSUE-001' when the case reproduces a recorded compiler issue
     redecided: str = ""             # a specification change that moved the expectation: when, where
                                     # (docs / issue) and what the expectation was before
+    # What the run's result checks must allow (manifest 'runtime_check'): '' -- every element
+    # bitwise equal to the references (the default); 'signed_zero' -- numerically equal, an
+    # element may differ from the reference in the sign of zero only (a -0 product of an
+    # offloaded assignment comes back from the tiles as +0: docs/AFFINE_GEMM_MAPPING.md
+    # sections 6 and 20, accepted for this case); the program counts those elements and
+    # systolic-cc --verify compares numerically (scripts/stages.py verify_flags)
+    runtime_check: str = ""
     # filled in
     analysis: dict = field(default_factory=dict)
     expect: dict = field(default_factory=dict)      # predict(): the current implementation's behaviour
@@ -429,9 +436,14 @@ def factor_nonzero(case: "Case", name: str) -> bool:
     -- the documented deviation of docs/AFFINE_GEMM_MAPPING.md sections 6
     and 20, which a bitwise check would report -- so the data avoids it.
     Accumulations keep the plain data (C starts non-zero, so a -0 product
-    cannot change C's sign)."""
+    cannot change C's sign). An assignment whose last writes (last_write_cut,
+    docs section 20.5) write every element once is offloaded too: the same
+    data rule."""
+    if case.runtime_check == "signed_zero":
+        # the case keeps its zeros: its checks allow the sign of zero to differ
+        return False
     return (case.stmt == "=AB" and case.role_of_name(name) in ("a", "b")
-            and c_written_once(case))
+            and assignment_written_once(case))
 
 
 def array_seed(case: Case, name: str) -> int:
@@ -1104,6 +1116,108 @@ def c_written_once(case: Case) -> bool:
     except IndexError:
         return True
     return not dup[0]
+
+
+def last_write_loops(case: Case) -> List[str]:
+    """The loops of an assignment C = A * B whose every iteration rewrites
+    the same elements of C: the loops of two or more iterations that no
+    subscript of C reads (docs/AFFINE_GEMM_MAPPING.md section 20.5). Empty
+    when a subscript is not affine."""
+    try:
+        cvars = set()
+        for f in case.c.forms():
+            cvars |= f.vars()
+    except NotAffine:
+        return []
+    return [lp.var for lp in case.loops if lp.trip() >= 2 and lp.var not in cvars]
+
+
+def last_write_cut(case: Case, provable: bool = True) -> Optional[Case]:
+    """Last write wins (docs/AFFINE_GEMM_MAPPING.md section 20.5, 2026-10-21):
+    in an assignment C = A * B on a box, a loop C does not read writes the
+    same elements of C at every iteration, so only the writes of its last
+    iteration survive. Returns the nest with every such loop cut to its last
+    iteration -- the same program result -- or None when the cut does not
+    apply: not an assignment, a domain that is not a box with constant
+    bounds (no normalization: the nest as written), an empty domain, a
+    subscript that is not affine, a body that is not two loads, a product
+    and a store (a scalar accumulator, an initialisation, mixed element
+    types: conversions), a factor that is the output array (a product could
+    read an earlier write), or no loop to cut.
+
+    `provable` adds the compiler's condition that A and B are provably
+    disjoint from C (one side of each pair restrict, provablyDisjointFromOutput)
+    -- predict() (the implementation) uses it; the specification
+    (provable=False) needs only three different arrays, which is what makes
+    the cut the program's own result here, and decides the aliasing of the
+    cut nest by its own rules.
+
+    The cut is checked against the definition by enumeration: the cut nest's
+    points must be exactly the last iteration (in program order) writing each
+    element of C."""
+    if case.stmt != "=AB" or not is_box_case(case) or not case.loops:
+        return None
+    if case.kernel_style not in ("plain", "braces", "ptr_param"):
+        return None
+    if len({a.elem for a in case.arrays.values()}) > 1 or any(lp.trip() == 0 for lp in case.loops):
+        return None
+    if case.c.name in (case.a.name, case.b.name):
+        return None
+    if provable and any(not (arr.restrict or case.c.restrict) for arr in (case.a, case.b)):
+        return None
+    cut_vars = last_write_loops(case)
+    if not cut_vars:
+        return None
+    import copy
+    cut = copy.deepcopy(case)
+    cut.analysis, cut.expect, cut.spec, cut.classification = {}, {}, {}, ""
+    loops = []
+    for lp in case.loops:
+        if lp.var in cut_vars:
+            last = lp.values()[-1]
+            lp = Loop(var=lp.var, lb=last, ub=last + lp.step, step=lp.step,
+                      cmp="<" if lp.step > 0 else ">", role=lp.role, ctype=lp.ctype, inc=lp.inc)
+        else:
+            lp = copy.deepcopy(lp)
+        loops.append(lp)
+    cut.loops = loops
+    # the definition: per element of C, its last write in program order
+    cforms = case.c.forms()
+    last_of = {}
+    for env in domain_points(case.loops):
+        last_of[tuple(f.eval(env) for f in cforms)] = tuple(env[lp.var] for lp in case.loops)
+    kept = {tuple(env[lp.var] for lp in loops) for env in domain_points(loops)}
+    if kept != set(last_of.values()):
+        raise ValueError("%s: the cut nest is not the set of last writes (docs section 20.5)" % case.id)
+    return cut
+
+
+def assignment_written_once(case: Case) -> bool:
+    """An assignment that writes every element of C once as written, or once
+    its overwritten writes are removed (last_write_cut, the implementation's
+    conditions): the assignments that are offloaded as the K = 1 GEMM."""
+    if c_written_once(case):
+        return True
+    cut = last_write_cut(case) if case.stmt == "=AB" else None
+    return cut is not None and c_written_once(cut)
+
+
+def negative_zero_count(case: Case) -> int:
+    """The elements of C that end as -0 in the program as written: an
+    assignment's last product of a zero and a negative factor (the data are
+    integers converted to float, so a zero factor is +0). The tiles of an
+    offloaded assignment return them as +0 (docs section 6)."""
+    if case.stmt != "=AB":
+        return 0
+    data = evaluate(case)
+    forms = {r: case.arrays[r].forms() for r in ("a", "b", "c")}
+    sign = {}
+    for env in domain_points(case.loops):
+        x = data[case.a.name][flat_index(case.a.dims, [f.eval(env) for f in forms["a"]])]
+        y = data[case.b.name][flat_index(case.b.dims, [f.eval(env) for f in forms["b"]])]
+        e = flat_index(case.c.dims, [f.eval(env) for f in forms["c"]])
+        sign[e] = (x * y == 0) and ((x < 0) != (y < 0))
+    return sum(1 for v in sign.values() if v)
 
 
 def mac_like(case: Case) -> bool:
@@ -2040,7 +2154,18 @@ def predict(case: Case) -> dict:
     and driver stages as predicted for it.  Otherwise the recognition without
     the option decides (its stages and reason).  Assignments (C = A * B)
     never get reduction batch loops (section 20, the assignment policy of
-    2026-10-21)."""
+    2026-10-21); an assignment with loops C does not read is first cut to
+    their last iteration (last-write-wins, section 20.5, on by default with
+    the reassociation permission every assignment needs, which the showcase
+    and the generator pass: --fp-reassociation) and predicted as the cut
+    nest, for which the existing assignment rules decide."""
+    if case.stmt == "=AB" and case.loops and an_affine(case):
+        cut = last_write_cut(case, provable=True)
+        if cut is not None:
+            ex = dict(predict(cut))
+            ex["last_write_wins"] = [lp.var for lp in case.loops if lp.var in last_write_loops(case)]
+            case.expect = ex
+            return ex
     if _rb_eligible(case):
         one, shared = _rb_loops(case)
         attempts = [frozenset(one)]
@@ -2056,6 +2181,16 @@ def predict(case: Case) -> dict:
                 case.expect = ex
                 return ex
     return _predict_once(case)
+
+
+def an_affine(case: Case) -> bool:
+    """Every subscript affine (the front end translates the accesses)."""
+    try:
+        for arr in case.arrays.values():
+            arr.forms()
+    except NotAffine:
+        return False
+    return True
 
 
 def _predict_once(case: Case, reduction_batch=frozenset()) -> dict:
@@ -2641,6 +2776,17 @@ SPEC_BASIS = {
                           "only the last product survives, not the GEMM of A and B -- an "
                           "assignment is the K = 1 GEMM into a zeroed C only when every element "
                           "is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)",
+    "last_write_wins": "(since 2026-10-21, docs/AFFINE_GEMM_MAPPING.md section 20.5) last write "
+                       "wins: in an assignment C = A * B on a box as written (constant bounds, not "
+                       "empty, A and B other arrays than C), every loop of two or more iterations "
+                       "that C does not read rewrites the same elements of C, so only its last "
+                       "iteration's writes survive; the nest cut to those last iterations has the "
+                       "same result (casespec.last_write_cut, checked against the last write of "
+                       "every element by enumeration) and is accepted when it is an assignment "
+                       "the rules accept -- every element written once, the K = 1 GEMM into a "
+                       "zeroed C (offloaded with --fp-reassociation, as every assignment; strict "
+                       "floating point keeps it on the host as written); the signed zeros of "
+                       "docs section 6 apply (a -0 product comes back as +0)",
     "assignment": "(supported since 2026-10-19) the assignment C = A * B whose every element of C "
                   "is written exactly once is the K = 1 GEMM into a zeroed C: the lowering zeroes "
                   "C's logical window and the tiles accumulate into it "
@@ -3230,6 +3376,26 @@ def repeat_in_reduction(case: Case) -> bool:
 def spec_expect(case: Case) -> dict:
     if not is_box_case(case):
         return _spec_domain(case)
+    # Last write wins (docs/AFFINE_GEMM_MAPPING.md section 20.5, 2026-10-21):
+    # an assignment's loops that C does not read rewrite the same elements, so
+    # the program's result is that of the nest cut to their last iteration
+    # (last_write_cut, checked against the last writes by enumeration). The
+    # nest is accepted when that cut nest is an assignment the rules accept
+    # (every element written once: the K = 1 GEMM into a zeroed C); else it
+    # is decided as written (not_gemm_overwrite and the other rules).
+    cut = last_write_cut(case, provable=False) if case.stmt == "=AB" and an_affine(case) else None
+    if cut is not None:
+        cs = spec_expect(cut)
+        if cs["recognition"] == "ACCEPT":
+            out = dict(cs)
+            out["basis_key"] = "last_write_wins"
+            out["basis"] = "%s; the cut nest: %s" % (SPEC_BASIS["last_write_wins"], cs["basis"])
+            out["legal_gemm"] = True
+            out["last_write_cut"] = [lp.var for lp in case.loops if lp.var in last_write_loops(case)]
+            # the GEMM the compiler builds is the cut nest's (K = 1)
+            out["logical_extents"] = cs.get("logical_extents") or (cut.analysis or {}).get("extents")
+            case.spec = out
+            return out
     an = case.analysis or analyse(case)
     tags = set(an.get("gemm_tags", []))
     out = {"recognition": None, "basis_key": None, "basis": None, "legal_gemm": bool(an.get("is_gemm"))}
@@ -4405,7 +4571,16 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
         h.append("the factors of this assignment hold no zeros (a -0 product would come back from")
         h.append("the tiles as +0: docs/AFFINE_GEMM_MAPPING.md sections 6 and 20);")
     h.append("every partial sum is an integer far below 2^24, so the float results are")
-    h.append("exact and compared for exact equality -- no tolerance.")
+    if case.runtime_check == "signed_zero":
+        h.append("exact and compared numerically (x == y) -- no tolerance; -0 equals +0. This")
+        h.append("case keeps its zero factors: the offloaded assignment returns each -0 product")
+        h.append("as +0 (tiles sum from +0: the deviation of docs/AFFINE_GEMM_MAPPING.md sections")
+        h.append("6 and 20, accepted for this case), so an element may differ from the reference")
+        h.append("in the sign of zero only. Such elements are counted and reported (a -0 result")
+        h.append("where the reference holds +0 fails), every other difference fails, and")
+        h.append("systolic-cc --verify compares numerically here (scripts/stages.py verify_flags).")
+    else:
+        h.append("exact and compared for exact equality -- no tolerance.")
     h.append("")
     h.append("How to run:")
     h.append("  CPU only (the kernel as written vs the references):")
@@ -4501,6 +4676,25 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("  return -1;")
     out.append("}")
     out.append("")
+    signed_zero = case.runtime_check == "signed_zero"
+    if signed_zero:
+        out.append("/* elements numerically equal to the reference but not bitwise: only a zero of")
+        out.append("   the other sign (-0 == +0); *wrong_way counts a -0 result where the reference")
+        out.append("   holds +0 (the tiles sum from +0 and never make that one) */")
+        out.append("static long sign_of_zero_only(const %s *x, const %s *y, long n, long *wrong_way) {" % (E, E))
+        out.append("  const %s pz = 0;" % E)
+        out.append("  long count = 0;")
+        out.append("  *wrong_way = 0;")
+        out.append("  for (long e = 0; e < n; ++e)")
+        out.append("    if (x[e] == y[e] && memcmp(&x[e], &y[e], sizeof x[e]) != 0) {")
+        out.append("      ++count;")
+        out.append("      if (memcmp(&x[e], &pz, sizeof pz) != 0) ++*wrong_way;   /* x is -0 */")
+        out.append("    }")
+        out.append("  return count;")
+        out.append("}")
+        out.append("#define REFERENCE_NEGATIVE_ZEROS %d   /* -0 elements of the final C, from the Python oracle */"
+                   % negative_zero_count(case))
+        out.append("")
     out.append("int main(void) {")
     out.append("  const long n = %d;" % volume(C.dims))
     out.append("  init();")
@@ -4537,6 +4731,18 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("    printf(\"RESULT %s FAIL (test bug)\\n\"); return 3;" % case.id)
     out.append("  }")
     out.append("  printf(\"[gemm_recognition] references: checksum %.0f matches the Python oracle\\n\", EXPECTED_CHECKSUM);")
+    if signed_zero:
+        out.append("  {")
+        out.append("    const %s pz = 0;" % E)
+        out.append("    long nz = 0;")
+        out.append("    for (long e = 0; e < n; ++e)")
+        out.append("      if ((&C_ref%s)[e] == 0 && memcmp(&(&C_ref%s)[e], &pz, sizeof pz) != 0) ++nz;" % (cz, cz))
+        out.append("    if (nz != REFERENCE_NEGATIVE_ZEROS) {")
+        out.append("      printf(\"[gemm_recognition] REFERENCE INCONSISTENT: the reference holds %ld negative zeros, the Python oracle %d\\n\", nz, REFERENCE_NEGATIVE_ZEROS);")
+        out.append("      printf(\"RESULT %s FAIL (test bug)\\n\"); return 3;" % case.id)
+        out.append("    }")
+        out.append("    printf(\"[gemm_recognition] references: %ld negative zero(s), as the Python oracle says\\n\", nz);")
+        out.append("  }")
     out.append("")
     out.append("#ifdef GEMM_RECOGNITION_STATS")
     out.append("  systolic_offload_stats_t before, after;")
@@ -4556,8 +4762,14 @@ def c_file_text(case: Case, compiler_commit: str = "6e25528") -> str:
     out.append("")
     out.append("  long d = first_diff(&%s%s, &C_ref%s, n);" % (C.name, cz, cz))
     out.append("  double got = checksum(&%s%s, n);" % (C.name, cz))
-    out.append("  if (d < 0 && got == EXPECTED_CHECKSUM) {")
-    out.append("    printf(\"[gemm_recognition] kernel: equal to the reference (%ld elements, exact), checksum %.0f\\n\", n, got);")
+    if signed_zero:
+        out.append("  long wrong_way, sz = sign_of_zero_only(&%s%s, &C_ref%s, n, &wrong_way);" % (C.name, cz, cz))
+        out.append("  printf(\"[gemm_recognition] kernel: %ld element(s) differ from the reference in the sign of zero only (+0 for -0, accepted: docs sections 6 and 20), %ld the other way\\n\", sz, wrong_way);")
+        out.append("  if (d < 0 && got == EXPECTED_CHECKSUM && wrong_way == 0) {")
+        out.append("    printf(\"[gemm_recognition] kernel: numerically equal to the reference (%ld elements, exact; %ld signed zero(s) differ), checksum %.0f\\n\", n, sz, got);")
+    else:
+        out.append("  if (d < 0 && got == EXPECTED_CHECKSUM) {")
+        out.append("    printf(\"[gemm_recognition] kernel: equal to the reference (%ld elements, exact), checksum %.0f\\n\", n, got);")
     out.append("    printf(\"RESULT %s PASS\\n\");" % case.id)
     out.append("    return 0;")
     out.append("  }")
@@ -4904,7 +5116,11 @@ def manifest_entry(case: Case, subdir: str) -> dict:
             "offload": spec["offload"],
             "basis": spec["basis"],
             "spec_question": spec.get("spec_question"),
-            "runtime": "the program's own check must pass on every backend (kernel == references)",
+            "runtime": ("the program's own check must pass on every backend (kernel == references "
+                        "numerically; an element may differ in the sign of zero only, -0 returned as "
+                        "+0 by the tiles: docs sections 6 and 20, counted and reported)"
+                        if case.runtime_check == "signed_zero" else
+                        "the program's own check must pass on every backend (kernel == references)"),
         },
         "current_implementation": {
             "_meaning": "the behaviour predicted from reading commit %s; what scripts/run_showcase.py "
@@ -4936,4 +5152,7 @@ def manifest_entry(case: Case, subdir: str) -> dict:
     }
     if "not_dense_reasons" in an:
         entry["why_not_a_dense_gemm"] = an["not_dense_reasons"]
+    if case.runtime_check:
+        # how the runners check the run (scripts/stages.py verify_flags): absent = bitwise
+        entry["runtime_check"] = case.runtime_check
     return entry

@@ -399,6 +399,17 @@ def mutate(case: Case, mutation: str, rng) -> Case:
             c.math_class = ""
             c.math_note = ("C = A * B writes every element of C exactly once: the K = 1 GEMM into a "
                            "zeroed C, C = 0 + A B (docs/AFFINE_GEMM_MAPPING.md section 20).")
+        elif (casespec.last_write_cut(c, provable=False) is not None
+              and casespec.c_written_once(casespec.last_write_cut(c, provable=False))):
+            # the loops C does not read rewrite the same elements: only their
+            # last iteration's writes survive, and that cut nest writes every
+            # element once -- the K = 1 GEMM into a zeroed C (last write wins,
+            # docs/AFFINE_GEMM_MAPPING.md section 20.5, 2026-10-21)
+            c.math_class = "assignment_last_write"
+            c.math_note = ("The loops C does not read rewrite the same elements of C: only their last "
+                           "iteration survives (last write wins, docs/AFFINE_GEMM_MAPPING.md section "
+                           "20.5), and the nest cut to it writes every element once -- the K = 1 GEMM "
+                           "of the last column/row into a zeroed C.")
         else:
             c.math_class = "not_gemm_overwrite"
             c.math_note = "The last reduction iteration overwrites C: an outer product of the last column/row."

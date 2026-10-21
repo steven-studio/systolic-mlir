@@ -77,7 +77,13 @@ one `arith.mulf` of them and one `affine.store` of the product: the assignment `
 K = 1 GEMM into a zeroed C, accepted only when every element of C is written once (a loop of two
 or more iterations that no subscript of C reads is refused as an overwrite, PROVEN_INVALID; batches
 overlapping in C are refused by the lowering's injectivity proof; the lowering zeroes C's window
-before the tiles); since 2026-10-19 also the dimension-intersection partitioning (docs section 21): a
+before the tiles; since 2026-10-21 the lowering pass first applies **last write wins**, docs
+section 20.5, pass option `last-write-wins`, on by default: in an assignment on a box as written --
+constant bounds, not empty, A and B provably disjoint from C, the body exactly two loads, a mulf and
+the store -- and only when the nest may be lowered at all, i.e. with the permission to reassociate,
+every loop of two or more iterations that C's store does not read is cut to its last iteration,
+and the cut nest is decided by these assignment rules; the discovery pass still sees the nest as
+written); since 2026-10-19 also the dimension-intersection partitioning (docs section 21): a
 loop read by C only, and the extra loops of a row or column role that is not one dense
 coordinate (`C[p][i][j] += A[p][i][k] * B[k][j]`: p), are demoted to batch loops by the rule of
 section 21.3 (the analyses run again with them as batch loops; a demoted loop must be read by C
@@ -332,7 +338,19 @@ the accumulation form's (`dense_gemm`, `batched`, ...) plus `assignment`; the fa
 hold no zeros, `casespec.factor_nonzero`). An assignment that writes an element of C more than once (a reduction loop of two
 or more iterations, `C[i][j] = A[i][k] * B[k][j]`; a loop only the factors read; batches
 overlapping in C, `C[i + b][j] = A[b][i] * B[b][j]`) is not a GEMM of its operands: REJECT, basis
-`not_gemm_overwrite`. Since 2026-10-19 also the **dimension-intersection partitioning** (docs section
+`not_gemm_overwrite` -- unless **last write wins** (since 2026-10-21, docs section 20.5, basis
+`last_write_wins`): on a box with constant bounds, not empty, the factors other arrays than C, the
+loops of two or more iterations that C does not read rewrite the same elements, so the program's
+result is that of the nest cut to their last iteration (`casespec.last_write_cut`, checked by
+enumeration against the last write of every element in program order); when that cut nest is an
+assignment these rules accept (every element written once: `C[i][j] = A[i][k] * B[k][j]` becomes
+`C[i][j] = A[i][7] * B[7][j]`, the 8 x 8 x 1 GEMM into a zeroed C), the nest is ACCEPTED; otherwise
+it is decided as written (`not_gemm_overwrite`, aliasing, ...). The prediction applies the cut only
+under the compiler's conditions (also A and B provably disjoint from C: restrict), and only with
+reassociation, which the showcase and the generator always pass (`--fp-reassociation`,
+`allow-fp-reassociation`); strict floating point keeps such a nest on the host as written. Such an
+assignment's factor data hold no zeros either (`casespec.assignment_written_once`), except where a
+case accepts the signed-zero deviation explicitly (`runtime_check`, section 3: case_097). Since 2026-10-19 also the **dimension-intersection partitioning** (docs section
 21, basis `dimension_partition`): a loop read by C only (`C[b][i][j] += A[i][k] * B[k][j]`) and the
 extra loops of a row or column role (`C[p][i][j] += A[p][i][k] * B[k][j]`, `C[q][i][j] += A[i][k] *
 B[q][k][j]`, several of them, mixed with triple-intersection batch loops, permuted, offset or strided
@@ -351,7 +369,7 @@ access and every product's multiplicity (repeated products are kept, not a reaso
 reduction batch iterations accumulating into C serially, in order (`casespec.reduction_batch_decomposition`,
 by enumeration; the checks of `partition_decomposition` with the reduction batch loops as batch
 loops C does not read). Not for an assignment `C = A * B` (a loop C does not read overwrites:
-`not_gemm_overwrite`; assignments only with K = 1, or index association dimension 0 and a
+`not_gemm_overwrite`, or, on a box, it is cut to its last iteration -- `last_write_wins` above; assignments only with K = 1, or index association dimension 0 and a
 virtual K = 1: the assignment policy of 2026-10-21, docs section 20), not on a non-box domain, not
 on the box form of a nest whose counters the domain normalization rewrote with U != I (sections
 19.12, 19.13: the compiler makes reduction batch loops only on counters as written, so such a nest
@@ -467,7 +485,17 @@ the predicted stage with the predicted reason, the program's check passed: not a
 blocking), **spec_open** (an UNDETERMINED case the compiler offloaded: not a PASS, and the run
 fails on it unless `--allow-spec-open`). Results:
 `reports/`. Nothing is ever marked PASS without having run; a stage that did not run is
-`not_run` with the reason. MLIR-level cases (`mlir_*`, manifest `kind: mlir`) run the discovery
+`not_run` with the reason. A case's result checks are bitwise (`systolic-cc --verify` compares
+the bits, the program compares every element and the checksum) unless its manifest entry says
+`runtime_check: signed_zero` (generator/showcase_cases.py `runtime_check`; only case_097, the
+assignment re-decided by last write wins on 2026-10-21): the user accepted that an offloaded
+assignment returns a -0 product as +0 (the tiles sum from +0, docs sections 6 and 20), so the
+program compares numerically (-0 == +0; any other difference, or a -0 result where the reference
+holds +0, fails), counts and prints the elements that differ in the sign of zero only, and checks
+the reference's negative zeros against the Python oracle; the runners pass `--verify-rtol 1e-300`
+(`scripts/stages.py verify_flags`: systolic-cc treats a tolerance <= 0 as bitwise, and 1e-300 is
+numerical equality on float data, since two different floats differ by at least 2^-149) and the
+verdict notes the count. MLIR-level cases (`mlir_*`, manifest `kind: mlir`) run the discovery
 and lowering passes only — recognition, dense partition, operand views and the lowering's
 remark are compared with the manifest, nothing is compiled by `systolic-cc` or executed, and
 their report rows say so (`not_applicable`). After a run, `python3 scripts/inventory.py` writes

@@ -66,7 +66,8 @@ FAILING = ("fail_runtime", "unexpected_stage", "false_positive", "test_bug", "to
 
 
 def run_one(tools, entry, src, workdir, runtime, env):
-    st = stages.run_case(tools, src, entry["kernel"], workdir, runtime=runtime, env=env)
+    st = stages.run_case(tools, src, entry["kernel"], workdir, runtime=runtime, env=env,
+                         extra_cc_flags=stages.verify_flags(entry))
     v, actual, mism, notes = verdict.classify(entry, st)
     return v, actual, mism, notes, st
 

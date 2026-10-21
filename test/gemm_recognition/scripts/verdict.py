@@ -280,6 +280,16 @@ def classify(entry, st):
         runtime_bad.append("systolic-cc --verify: " + "; ".join(exe["mismatch_lines"])[:300])
     if exe.get("failed_invocations"):
         runtime_bad.append("%d failed invocation(s) reported by the runtime" % exe["failed_invocations"])
+    if entry.get("runtime_check") == "signed_zero" and exe:
+        # numerically equal, the sign of zero may differ (docs sections 6, 20):
+        # the program counts those elements; --verify compared numerically
+        actual["sign_of_zero_only"] = exe.get("sign_of_zero_only")
+        if exe.get("sign_of_zero_only") is None:
+            runtime_bad.append("runtime_check signed_zero: the program reported no sign-of-zero count")
+        else:
+            notes.append("runtime_check signed_zero: numerically equal to the references; %d element(s) "
+                         "differ in the sign of zero only (+0 for -0, accepted); --verify: %s" % (
+                             exe["sign_of_zero_only"], "; ".join(exe.get("verified_lines", []))[:160]))
     if dr.get("result") == "offloaded":
         if not exe.get("verified_lines") and not exe.get("mismatch_lines"):
             runtime_bad.append("offloaded but systolic-cc --verify printed no 'verified' line")

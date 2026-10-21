@@ -17124,8 +17124,8 @@
    "set": "negative",
    "category": "reduction_mismatch",
    "kernel": "case_097_kernel",
-   "mathematical_class": "not_gemm_overwrite",
-   "is_valid_gemm": false,
+   "mathematical_class": "assignment_last_write",
+   "is_valid_gemm": true,
    "gemm_tags": [],
    "c_program_valid": true,
    "in_affine_c_subset": true,
@@ -17203,7 +17203,11 @@
     }
    },
    "repetitions": 1,
-   "logical_extents": null,
+   "logical_extents": {
+    "I": 8,
+    "J": 8,
+    "K": 1
+   },
    "index_forms": {
     "operands": {
      "A": [
@@ -17228,34 +17232,34 @@
    ],
    "expected": {
     "_meaning": "the specification: set by the mathematics and the support specification (README.md), never by the current compiler's output",
-    "mathematical_gemm": false,
-    "recognition": "REJECT",
-    "offload": "stays_on_host",
-    "basis": "the assignment C = A * B writes some element of C more than once (a reduction loop of two or more iterations, batches overlapping in C): only the last product survives, not the GEMM of A and B -- an assignment is the K = 1 GEMM into a zeroed C only when every element is written once (docs/AFFINE_GEMM_MAPPING.md section 20, 2026-10-19)",
+    "mathematical_gemm": true,
+    "recognition": "ACCEPT",
+    "offload": "offloaded",
+    "basis": "(since 2026-10-21, docs/AFFINE_GEMM_MAPPING.md section 20.5) last write wins: in an assignment C = A * B on a box as written (constant bounds, not empty, A and B other arrays than C), every loop of two or more iterations that C does not read rewrites the same elements of C, so only its last iteration's writes survive; the nest cut to those last iterations has the same result (casespec.last_write_cut, checked against the last write of every element by enumeration) and is accepted when it is an assignment the rules accept -- every element written once, the K = 1 GEMM into a zeroed C (offloaded with --fp-reassociation, as every assignment; strict floating point keeps it on the host as written); the signed zeros of docs section 6 apply (a -0 product comes back as +0); the cut nest: a dense GEMM with affine operand views: include/Systolic/AffineMatmulPartitioning.h ('loops in any order, steps, nonzero origins, access offsets and strides, and coordinates split over several loops ... are all of this form'); include/Systolic/AffineMatmulAnalysis.h (F_A = phiA o (P,I,K), F_B = phiB o (P,K,J), F_C = phiC o (P,I,J): one factor map per operand); the task statement's index family c_i*i + c_j*j + c_k*k + c_0 per operand; (supported since 2026-10-19) the assignment C = A * B whose every element of C is written exactly once is the K = 1 GEMM into a zeroed C: the lowering zeroes C's logical window and the tiles accumulate into it (docs/AFFINE_GEMM_MAPPING.md section 20)",
     "spec_question": null,
-    "runtime": "the program's own check must pass on every backend (kernel == references)"
+    "runtime": "the program's own check must pass on every backend (kernel == references numerically; an element may differ in the sign of zero only, -0 returned as +0 by the tiles: docs sections 6 and 20, counted and reported)"
    },
    "current_implementation": {
     "_meaning": "the behaviour predicted from reading commit 6e25528; what scripts/run_showcase.py measures is compared with both layers",
     "frontend": "translated",
-    "recognition": "reject",
+    "recognition": "accept",
     "hoisting_required": false,
-    "dense_partition": "not_reached",
-    "lowering": "not_reached",
-    "driver": "stays_on_host",
-    "reject_stage": "recognition",
-    "reject_reason": "the statement overwrites C (C = A * B, no accumulation) and a loop of the nest, which runs more than once, is not a subscript of C: only the last product survives"
+    "dense_partition": "supported",
+    "lowering": "supported",
+    "driver": "offloaded",
+    "reject_stage": null,
+    "reject_reason": ""
    },
-   "classification": "TRUE_NEGATIVE",
+   "classification": "TRUE_POSITIVE",
    "issue": null,
-   "redecided": null,
+   "redecided": "RE-DECIDED 2026-10-21 (docs section 20.5, last write wins; the signed-zero deviation of section 6 accepted): ACCEPT -- the reduction loop k, which C does not read, is cut to its last iteration and the cut nest C[i][j] = A[i][7] * B[7][j] is the K = 1 GEMM into a zeroed C, offloaded; numerically equal, the -0 products come back as +0. REJECT before (not_gemm_overwrite: the assignment writes every element of C eight times; rejected at recognition)",
    "has_independent_reference": true,
    "reference_kinds": [
     "direct",
     "python_oracle_checksum"
    ],
    "expected_checksum": -4,
-   "math_note": "C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\nwins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\nlast row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\nExpected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,\n2026-10-19): the reduction loop k runs eight times and is not a subscript of\nC, so the assignment writes every element eight times -- an overwrite, not\nthe K = 1 GEMM into a zeroed C that an assignment writing each element once is.",
+   "math_note": "C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\nwins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\nlast row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\nUntil 2026-10-21 rejected at recognition (docs/AFFINE_GEMM_MAPPING.md section\n20): k runs eight times and is not a subscript of C, so the assignment writes\nevery element eight times.  Since 2026-10-21 (docs section 20.5, last write\nwins, on by default with --fp-reassociation) the lowering pass first cuts k,\nwhich C does not read, to its last iteration k = 7: on this box only those\nwrites survive, so the cut nest C[i][j] = A[i][7] * B[7][j] has the program's\nresult, writes every element once and is the K = 1 GEMM into a zeroed C\n(8 x 8 x 1), offloaded.  The data keep their zeros: a product of a zero and a\nnegative factor is -0 in the program as written and comes back from the tiles\nas +0 (the tiles sum from +0: the signed-zero deviation of docs section 6,\naccepted for this case).  The checks are numerical (-0 == +0, any other\ndifference fails); the elements that differ in the sign of zero only are\ncounted and reported, and --verify compares numerically (runtime_check\n'signed_zero').",
    "tested": false,
    "how_to_run": {
     "cpu": "cc -std=c11 -O1 showcase/negative/case_097.c -o case_097 && ./case_097",
@@ -17264,7 +17268,8 @@
    },
    "why_not_a_dense_gemm": [
     "the statement overwrites C (C = A * B, no accumulation) and some element of C is written more than once: only the last product survives, not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20)"
-   ]
+   ],
+   "runtime_check": "signed_zero"
   },
   {
    "id": "case_098",

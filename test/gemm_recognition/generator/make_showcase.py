@@ -53,7 +53,9 @@ def validate(case):
                  implementation at the time the set was fixed (a FALSE_NEGATIVE
                  recorded as an issue).  Files are never moved: a negative-set
                  case whose issue was fixed since stays where it is, predicted
-                 offloaded, with the issue tag saying why (case_094, ISSUE-001).
+                 offloaded, with the issue tag saying why (case_094, ISSUE-001), or
+                 with the recorded re-decision of the specification (case_097,
+                 last write wins, 2026-10-21).
     extended/  : any classification, including SPEC_OPEN (the specification
                  does not decide the case: a recorded spec question).
     A FALSE_POSITIVE (spec REJECT, implementation offloads) is never allowed,
@@ -82,7 +84,9 @@ def validate(case):
             raise ValueError("%s is a predicted FALSE_NEGATIVE in the positive set: record it as an "
                              "issue (failures/issues/) and set case.issue" % case.id)
     if case.set == "negative" and case.expect["driver"] == "offloaded":
-        if not (case.issue and case.spec["recognition"] == "ACCEPT"):
+        # a fixed issue (case.issue) or a recorded re-decision of the
+        # specification (case.redecided: case_097, last write wins)
+        if not ((case.issue or case.redecided) and case.spec["recognition"] == "ACCEPT"):
             raise ValueError("%s is in the negative set but the current implementation is predicted "
                              "to offload it" % case.id)
 

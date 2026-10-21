@@ -202,6 +202,25 @@ def stage_lowering(tools, mlir, workdir, k8=16, k4=16):
     return res
 
 
+# A manifest entry's 'runtime_check' (generator/casespec.py Case.runtime_check):
+# absent -- systolic-cc --verify compares bitwise (its default); 'signed_zero'
+# -- the case accepts an element that differs from the CPU reference in the
+# sign of zero only (an offloaded assignment's -0 product comes back as +0,
+# docs/AFFINE_GEMM_MAPPING.md sections 6 and 20), so --verify compares
+# numerically. systolic-cc's --verify-rtol R accepts |got - want| <= R *
+# max(|got|, |want|), and R <= 0 means bitwise; with R = 1e-300 that is
+# numerical equality for float data: -0 == +0, while any two different floats
+# differ by at least 2^-149 > 1e-300 * FLT_MAX (and a NaN fails).
+NUMERICAL_VERIFY_RTOL = "1e-300"
+
+
+def verify_flags(entry):
+    """The systolic-cc flags the entry's runtime check needs (none: bitwise)."""
+    if (entry or {}).get("runtime_check") == "signed_zero":
+        return ("--verify-rtol", NUMERICAL_VERIFY_RTOL)
+    return ()
+
+
 def stage_driver(tools, src, kernel, workdir, runtime="soft", extra_flags=(), env=None):
     exe = os.path.join(workdir, "prog")
     keep = os.path.join(workdir, "prog.systolic")
@@ -266,6 +285,11 @@ def stage_execute(exe, workdir, env=None, timeout=1800):
     res["verified_lines"] = re.findall(r"verified: .*", out)
     res["mismatch_lines"] = re.findall(r".*MISMATCH.*", out)
     res["gemm_labels"] = re.findall(r"\[systolic-cc\] (\w+) Executed: GEMM #\d+", r["stdout"])
+    m = re.search(r"kernel: (\d+) element\(s\) differ from the reference in the sign of zero only.*?, (\d+) the other way",
+                  r["stdout"])
+    if m:
+        res["sign_of_zero_only"] = int(m.group(1))
+        res["sign_of_zero_wrong_way"] = int(m.group(2))
     m = re.search(r"first mismatch at flat element (\d+): got (\S+), reference (\S+)", r["stdout"])
     if m:
         res["first_mismatch"] = {"element": int(m.group(1)), "got": m.group(2), "reference": m.group(3)}

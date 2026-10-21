@@ -527,14 +527,26 @@ Ng(96, "alpha_scaled", "scaled_product",
              "needs mulf(load, load).  Legal, unsupported.")
 Ng(97, "no_accumulation", "reduction_mismatch",
    ijk(8, 8, 8), *std_arrays(8, 8, 8), stmt="=AB",
-   math_class="not_gemm_overwrite",
+   math_class="assignment_last_write",
+   runtime_check="signed_zero",
    math_note="C[i][j] = A[i][k] * B[k][j] overwrites C in every k iteration; the last one\n"
              "wins: C[i][j] = A[i][7] B[7][j], the outer product of A's last column and B's\n"
              "last row (a K = 1 GEMM of those two vectors, not the GEMM of A and B).\n"
-             "Expected rejection at recognition (docs/AFFINE_GEMM_MAPPING.md section 20,\n"
-             "2026-10-19): the reduction loop k runs eight times and is not a subscript of\n"
-             "C, so the assignment writes every element eight times -- an overwrite, not\n"
-             "the K = 1 GEMM into a zeroed C that an assignment writing each element once is.")
+             "Until 2026-10-21 rejected at recognition (docs/AFFINE_GEMM_MAPPING.md section\n"
+             "20): k runs eight times and is not a subscript of C, so the assignment writes\n"
+             "every element eight times.  Since 2026-10-21 (docs section 20.5, last write\n"
+             "wins, on by default with --fp-reassociation) the lowering pass first cuts k,\n"
+             "which C does not read, to its last iteration k = 7: on this box only those\n"
+             "writes survive, so the cut nest C[i][j] = A[i][7] * B[7][j] has the program's\n"
+             "result, writes every element once and is the K = 1 GEMM into a zeroed C\n"
+             "(8 x 8 x 1), offloaded.  The data keep their zeros: a product of a zero and a\n"
+             "negative factor is -0 in the program as written and comes back from the tiles\n"
+             "as +0 (the tiles sum from +0: the signed-zero deviation of docs section 6,\n"
+             "accepted for this case).  The checks are numerical (-0 == +0, any other\n"
+             "difference fails); the elements that differ in the sign of zero only are\n"
+             "counted and reported, and --verify compares numerically (runtime_check\n"
+             "'signed_zero').",
+   redecided="RE-DECIDED 2026-10-21 (docs section 20.5, last write wins; the signed-zero deviation of section 6 accepted): ACCEPT -- the reduction loop k, which C does not read, is cut to its last iteration and the cut nest C[i][j] = A[i][7] * B[7][j] is the K = 1 GEMM into a zeroed C, offloaded; numerically equal, the -0 products come back as +0. REJECT before (not_gemm_overwrite: the assignment writes every element of C eight times; rejected at recognition)")
 Ng(98, "subtract_product", "scaled_product",
    ijk(8, 8, 8), *std_arrays(8, 8, 8), stmt="-=",
    math_note="C -= A B: the GEMM with alpha = -1, valid.  The front end emits arith.subf;\n"

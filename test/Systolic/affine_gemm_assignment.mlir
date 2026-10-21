@@ -7,6 +7,18 @@
 // (verifyOutputWrittenOnce: batches may not overlap in C) and zeroes C's
 // logical window before the tiles accumulate into it. The rank-1 outer
 // products C[i][j] = A[i] * B[j] and C[i][j] = A[j] * B[i] are such nests.
+// RE-DECIDED 2026-10-21 (docs section 20.5, last write wins): before that
+// recognition, --affine-matmul-to-systolic cuts every loop of two or more
+// iterations that C's subscripts do not read to its last iteration (on a box
+// as written, A and B disjoint from C, the body the one product stored):
+// only that iteration's product survives in the loops as written. The nest
+// stays an assignment (never an accumulation); the rules above then decide
+// whether it is lowered (case 6 now is; case 7 is still refused). The cut
+// runs only on a nest that may be lowered: with allow-fp-reassociation or a
+// product marked reassoc; under strict floating point the nest stays exactly
+// as written (STRICT below).
+// --test-affine-matmul-discovery does not rewrite: its DISC results are those
+// of the nests as written.
 //
 // RUN: systolic-opt "--affine-matmul-to-systolic=allow-fp-reassociation=true" \
 // RUN:   -split-input-file %s | FileCheck %s
@@ -20,9 +32,14 @@
 // becomes +0); the permission is the product's `reassoc` flag.
 // RUN: systolic-opt "--affine-matmul-to-systolic=report=true classify=true" \
 // RUN:   -split-input-file %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=STRICT
+// STRICT-NOT:  last write wins
 // STRICT:      remark: affine GEMM not lowered to systolic.matmul_tile: floating-point reassociation is not permitted: the systolic execution sums each tile from zero (+0) and writes the sum to C, so a -0 product of the assignment C = A * B becomes +0 (mark the product reassoc -- systolic-cc --fp-reassociation -- or pass allow-fp-reassociation) [PROVEN_VALID]
 // STRICT:      remark: affine GEMM 3x5x1 lowered as 1 exact region(s) (an assignment C = A B: C zeroed before the tiles)
 // STRICT-NOT:  lowered as
+// Without the permission nothing is cut (last write wins runs only on a nest
+// that may be lowered, docs section 20.5): case 6 is the nest as written,
+// refused at recognition as before.
+// STRICT-NOT:  last write wins
 
 // 1. The rank-1 outer product C[i][j] = A[i] * B[j], 3 x 5: A is the 3 x 1
 //    column (memref.expand_shape), B the 1 x 5 row, C zeroed then the K = 1
@@ -155,12 +172,28 @@ func.func @strided_assign(%A: memref<4xf32> {llvm.noalias}, %B: memref<10xf32> {
 
 // -----
 
-// 6. Not a GEMM: C[i][j] = A[i][k] * B[k][j] with k of 4 iterations. Each
-//    element of C is written four times; only the last product survives.
-//    PROVEN_INVALID at recognition, nothing lowered.
+// 6. C[i][j] = A[i][k] * B[k][j] with k of 4 iterations. Each element of C
+//    is written four times; only the last product survives.
+//    RE-DECIDED 2026-10-21 (docs section 20.5, last write wins): was
+//    PROVEN_INVALID at recognition, nothing lowered. k is not read by C, so
+//    it is cut to its last iteration [3, 4) first: the nest then writes every
+//    element of C once with the k = 3 product, the 3 x 5 x 1 assignment
+//    C = A[:, 3] B[3, :] into a zeroed C (still an assignment, no
+//    accumulation). Only with the permission to reassociate: under strict
+//    floating point nothing is cut and the nest is refused as written. The recognition of the nest as written (DISC) is
+//    unchanged: PROVEN_INVALID.
 // CHECK-LABEL: func.func @overwrite_k
-// CHECK-NOT:   systolic.matmul_tile
-// REMARK-NOT:  lowered as
+// CHECK:       memref.subview %arg0[0, 3] [3, 1] [1, 1] : memref<3x4xf32> to memref<3x1xf32, strided<[4, 1], offset: 3>>
+// CHECK:       memref.subview %arg1[3, 0] [1, 5] [1, 1] : memref<4x5xf32> to memref<1x5xf32, strided<[5, 1], offset: 15>>
+// CHECK:       %[[ZERO:.*]] = arith.constant 0.000000e+00 : f32
+// CHECK:       affine.store %[[ZERO]], %arg2[%{{.*}}, %{{.*}}] : memref<3x5xf32>
+// CHECK:       bufferization.to_tensor %arg2 restrict writable
+// CHECK-NEXT:  systolic.matmul_tile {{.*}} m = 3 n = 5 k = 1
+// CHECK-NEXT:  bufferization.materialize_in_destination {{.*}} in restrict writable %arg2
+// CHECK-NOT:   arith.mulf
+// CHECK:       return
+// REMARK:      remark: affine assignment nest C = A * B: last write wins (docs/AFFINE_GEMM_MAPPING.md section 20.5): loop(s) 2 of the nest, which C does not read, run their last iteration only (the earlier ones write values overwritten later)
+// REMARK:      remark: affine GEMM 3x5x1 lowered as 1 exact region(s) (an assignment C = A B: C zeroed before the tiles){{$}}
 // DISC:        recognition result: failure
 // DISC-NEXT:   reason: the statement overwrites C (C = A * B, no accumulation) and loop 2 of the nest, which runs more than once, is not a subscript of C: every iteration of it writes the same elements of C again and only the last product survives -- not the GEMM of A and B (an assignment is the K = 1 GEMM into a zeroed C only when every element of C is written once: docs/AFFINE_GEMM_MAPPING.md section 20)
 // DISC-NEXT:   class: PROVEN_INVALID
@@ -184,7 +217,9 @@ func.func @overwrite_k(%A: memref<3x4xf32> {llvm.noalias}, %B: memref<4x5xf32> {
 //    Per batch C is injective (the recognizer accepts it, as it does the
 //    accumulation C[i + b][j] += ..., a batched GEMM of views); over the whole
 //    domain rows 1 and 2 are written twice: the lowering's injectivity proof
-//    refuses it, PROVEN_INVALID.
+//    refuses it, PROVEN_INVALID. (Last write wins, docs section 20.5, cuts
+//    nothing here: C reads every loop -- still refused.)
+// REMARK-NOT:  last write wins
 // CHECK-LABEL: func.func @batch_overlap_assign
 // CHECK-NOT:   systolic.matmul_tile
 // REMARK:      remark: affine GEMM not lowered to systolic.matmul_tile: two iterations of the assignment C = A * B write the same element of C (its subscripts are not injective on the iteration domain): the later product overwrites the earlier one -- not the GEMM of A and B (docs/AFFINE_GEMM_MAPPING.md section 20) [PROVEN_INVALID]

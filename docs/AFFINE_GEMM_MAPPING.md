@@ -2271,8 +2271,39 @@ recognizer states the policy as an explicit check after it. Even then, the write
 proven before lowering: every element of C written exactly once (verifyOutputWrittenOnce), K = 1
 in the lowering, C zeroed before the tiles, the operand views and the iteration domain checked as
 for any GEMM. Lowered examples: `C[i][j] = A[i][k] * B[k][j]` with k running once,
-`C[b][i][j] = A[b][i] * B[b][j]`. Refused: `C[i][j] = A[i][k] * B[l][j]`,
-`C[i][j] = A[i][x0 - x1] * B[x0][j]` (test/SystolicCC/affine_reduction_batches.c).
+`C[b][i][j] = A[b][i] * B[b][j]`. As written (with last-write-wins=false):
+`C[i][j] = A[i][k] * B[l][j]` and `C[i][j] = A[i][x0 - x1] * B[x0][j]` are refused; the lowering
+pass first keeps only their last writes (section 20.5), and the nests that remain are the K = 1
+assignments `C[i][j] = A[i][k_last] * B[l_last][j]` and
+`C[i][j] = A[i][x0_last - x1_last] * B[x0_last][j]`.
+
+### 20.5 Last write wins (2026-10-21)
+
+In an assignment C = A * B, a loop that C does not read writes the same elements of C at every
+iteration: only the last write of each element survives. The lowering pass (option
+`last-write-wins`, on by default) keeps exactly those writes before anything else runs, on the nest
+as written (`applyLastWriteWins`, AffineMatmulToSystolic.cpp):
+
+- **When:** the body is the product of two loads stored to C, nothing else; every bound is a
+  constant (a box as written) and the domain is not empty; A and B provably do not overlap C
+  (otherwise an earlier write could be read by a later product); a loop of two or more iterations
+  that C's store does not read exists; and the nest may be lowered at all -- the permission to
+  reassociate (`allow-fp-reassociation`, `--fp-reassociation`, or `reassoc` on the product), which
+  every assignment needs (section 20). Under strict floating point the nest stays as written.
+- **What:** every such loop is cut to its last iteration, `[last, last + 1)` with
+  `last = lower + (trips - 1) * step` -- not "the largest value of one counter" in isolation: for
+  one element e of C, the iterations writing e are `{x : F_C(x) = e}`, and since F_C does not read
+  the cut loops and the domain is a box, this set is a product of the cut loops' full ranges with
+  the set of the other loops' values writing e. Its last point in the lexicographic order of
+  execution therefore has every cut loop at its last value, whatever the nesting order and whether
+  or not C is injective on the other loops. The cut nest runs the remaining iterations in the same
+  order, so every element of C gets the same final value; only overwritten writes are removed.
+- **What not:** the assignment is not made an accumulation, gets no reduction batch loop and no
+  pre-reduction. Whether the cut nest is a GEMM is decided by section 20 as before (every element
+  written once, K = 1); when it is not, it runs on the host, cut (still the program's result).
+- `last-write-wins=false` keeps the nest as written (the refusals of section 20.4).
+
+Tests: test/Systolic/affine_gemm_last_write_wins.mlir, test/SystolicCC/affine_last_write_wins.c.
 
 ---
 
@@ -2550,3 +2581,60 @@ section 21; the tests now say why they are accepted, and the old behaviour stays
 (Inputs/affine_gemm_mapping_oracle.py) models the reduction batches independently and checks every
 lowered one address by address and its serial write-back; casespec.py predicts them for the
 gemm_recognition generator and showcase.
+
+## 24. Pre-reduction of the factors (2026-10-21, `--fp-distribute`)
+
+### 24.1 The identity (Lemma 7.6, as formalized here)
+
+Let C += A * B be an accumulation whose loops of two or more iterations split, by the operands
+that read them, into O (loops C reads), Z_A (read by A only), Z_B (read by B only) and
+L_AB (read by both factors and not by C). If L_AB is empty and the domain is a box as written,
+then for every point o of O the iterations that update C(o) are exactly {o} x D(Z_A) x D(Z_B) --
+the box makes them a product, independent of o -- and A reads only (o, z_A), B only (o, z_B), so
+
+    sum_{z_A, z_B} A(o, z_A) B(o, z_B)  =  ( sum_{z_A} A(o, z_A) ) ( sum_{z_B} B(o, z_B) )
+
+by distributivity (and commutativity and associativity of +). The derived operands
+A'(o_A) = sum_{z_A} A(o_A, z_A) and B'(o_B) = sum_{z_B} B(o_B, z_B), where o_A (o_B) are the loops
+of O that A (B) reads, turn the nest into C(o) += A'(o_A) B'(o_B): every product of the original
+sum is accounted for exactly once (|D(Z_A)| |D(Z_B)| terms become one product of two sums).
+
+The source text of Lemma 7.6 was not available in this tree; the premises below are the ones the
+identity needs, each checked by `preReduceFactors` (AffineMatmulToSystolic.cpp):
+
+1. the statement is the accumulation C = C + A * B (three loads, a mulf, an addf, the store to the
+   element loaded) -- never an assignment C = A * B (section 20.5 applies there);
+2. every bound is a constant and the domain is not empty (a box as written; no normalization, no
+   basis transformation);
+3. every loop of two or more iterations is read by some operand, and none is read by both factors
+   and not by C (L_AB empty);
+4. at least one loop is read by one factor only (otherwise there is nothing to pre-reduce);
+5. A and B provably do not overlap C (the sums are taken before C is written);
+6. the loops that index A' or B' have unit steps (A' is indexed by the ordinals x - lower).
+
+### 24.2 Floating point
+
+The identity is exact over the integers; over floating point it is not, even with reassociation:
+for A[0][k] = (0.1, 1.5) and B[l][0] = (-0.0009765625, 10000) every order of the four f32
+products sums to 15999.998046875, while (0.1 + 1.5)(-0.0009765625 + 10000) = 15999.9990234375.
+Pre-reduction therefore runs only with the explicit permission `--fp-distribute` (pass option
+`fp-distribute`; systolic-cc `--fp-distribute`), which treats float as commutative, associative and
+distributive. `--fp-reassociation` does not imply it. With the permission the derived nest's
+accumulation carries `reassoc`; the results are checked by numerical differential tests that
+report the maximum absolute and relative error against the loops as written -- not bitwise. On
+integer-valued data the sums are exact and the results are bitwise equal. Without the permission
+nothing changes: the nest is lowered by the reduction batches of section 23 (or refused, as
+before), and strict floating point keeps its behaviour.
+
+### 24.3 What is built
+
+Before the nest, for each factor with loops of its own: a fresh buffer (shape: the trip counts of
+the loops it shares with C, or [1]), zeroed, then a host loop nest over those loops and the
+factor's own loops adding the factor into it. The nest becomes C += A' * B' over the loops C
+reads (and the loops of one iteration); the buffers are freed by the pipeline's buffer
+deallocation after it. The recognition and the
+lowering of sections 19-23 then run on it as on any nest (typically K = 1, an outer product of
+derived operands, with output batches where C has them). The discovery pass is unchanged: the
+recognition of the program as written does not depend on the permission.
+
+Tests: test/Systolic/affine_gemm_pre_reduction.mlir, test/SystolicCC/affine_pre_reduction.c.

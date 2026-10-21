@@ -78,7 +78,8 @@ def run(a, tools, env):
     results = {}
     for origin, e, src in cases:
         wd = os.path.join(work, e["id"])
-        st = stages.run_case(tools, src, e["kernel"], wd, runtime=a.runtime, env=env)
+        st = stages.run_case(tools, src, e["kernel"], wd, runtime=a.runtime, env=env,
+                             extra_cc_flags=stages.verify_flags(e))
         v, actual, mism, notes = verdict.classify(e, st)
         results[e["id"]] = {"origin": origin, "verdict": v, "classification": e.get("classification"),
                             "issue": e.get("issue"), "mismatches": mism, "notes": notes,
