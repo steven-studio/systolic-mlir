@@ -1,5 +1,5 @@
 # env.common.sh -- the compiler / runtime environment shared by the board and
-# the co-simulation (REPRODUCIBILITY.md section 4).
+# the co-simulation (REPRODUCE.md section 4).
 #
 # Sourced by env.board.sh and env.cosim.sh, which the run_*.sh scripts source
 # in their own process; nothing here touches ~/.bashrc, ~/.profile or the

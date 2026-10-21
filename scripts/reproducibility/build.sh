@@ -45,7 +45,7 @@ done
 . "$HERE/env.common.sh"
 
 for tool in cmake ninja gcc g++ pkg-config; do
-    command -v "$tool" >/dev/null 2>&1 || { echo "missing system tool: $tool (see REPRODUCIBILITY.md section 2)" >&2; exit 127; }
+    command -v "$tool" >/dev/null 2>&1 || { echo "missing system tool: $tool (see REPRODUCE.md section 2)" >&2; exit 127; }
 done
 pkg-config --exists libftdi1 || { echo "missing system library: libftdi1 (pkg-config libftdi1; Debian/Ubuntu: libftdi1-dev)" >&2; exit 127; }
 

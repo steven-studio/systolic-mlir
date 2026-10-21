@@ -10,11 +10,11 @@
 #
 #   check                 check_env.sh board: tools, build, configuration,
 #                         artifact hashes, FT2232H on USB
-#   verify-program        which .bit 'program' would load, and whether it is
-#                         the artifact's (sha256); programs nothing
-#   program               program the FPGA with dma_top_build.tcl's 'program'
-#                         mode -- only after verify-program found the
-#                         artifact's hash; needs Vivado (PATH or XILINX_VIVADO)
+#   verify-program        the artifact's .bit is there and its sha256 is the
+#                         one above; programs nothing
+#   program               program the FPGA with exactly that file
+#                         (program_bit.tcl) -- only after verify-program
+#                         found the hash; needs Vivado (PATH or XILINX_VIVADO)
 #   e2e [ARGS...]         test/e2e/run_e2e.sh --backend board (default ARGS:
 #                         --quick) with the artifact's fpga_config.txt
 #   c FILE.c [OUTDIR]     compile FILE.c with systolic-cc for the board, run
@@ -29,39 +29,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/env.board.sh"
 . "$HERE/c_program.sh"
 
-TCL="rtl/multi_200t/tile_pipelined/dma/dma_top_build.tcl"
-PROGRAM_ARGS=(program v1 16 16 1 1 3)
-
-# The .bit dma_top_build.tcl's 'program v1 16 16 1 1 3' opens: the first
-# *.bit of the impl_1 run of the project directory it computes from
-# HOME, the geometry and SYSTOLIC_PROJ_TAG (dma_top_build.tcl, PROJ_DIR and
-# proc program).
-program_source() {
-    local proj="${HOME:?HOME is needed to find the Vivado project}/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4"
-    [ -n "${SYSTOLIC_PROJ_TAG:-}" ] && proj="${proj}_${SYSTOLIC_PROJ_TAG}"
-    echo "$proj"
-}
+# 'program' programs the artifact's .bit itself (program_bit.tcl), not the
+# .bit of a Vivado project, so it needs no project and no project tag.
+PROGRAM_TCL="scripts/reproducibility/program_bit.tcl"
 
 verify_program() {
-    local proj bit got
-    proj="$(program_source)"
-    echo "dma_top_build.tcl ${PROGRAM_ARGS[*]}${SYSTOLIC_PROJ_TAG:+  (SYSTOLIC_PROJ_TAG=$SYSTOLIC_PROJ_TAG)}"
-    echo "  project: $proj"
-    bit="$(ls "$proj"/systolic_dma.runs/impl_1/*.bit 2>/dev/null | head -1)"
-    if [ -z "$bit" ]; then
-        echo "  NOT VERIFIED: no Vivado project with a bitstream there; the Tcl script can only program"
-        echo "  a .bit from its own project, not the artifact file (REPRODUCIBILITY.md section 7)"
+    local bit="$REPRO_ROOT/$REPRO_BOARD_BIT" got
+    echo "program_bit.tcl $REPRO_BOARD_BIT"
+    if [ ! -f "$bit" ]; then
+        echo "  NOT VERIFIED: $REPRO_BOARD_BIT is not there (*.bit is not in git;"
+        echo "  obtain the file and put it there, REPRODUCE.md section 6)"
         return 2
     fi
     got="$(sha256sum "$bit" | cut -d' ' -f1)"
-    echo "  loads:   $bit"
     echo "  sha256:  $got"
-    echo "  wanted:  $REPRO_BOARD_SHA256 ($REPRO_BOARD_BIT)"
+    echo "  wanted:  $REPRO_BOARD_SHA256"
     if [ "$got" = "$REPRO_BOARD_SHA256" ]; then
         echo "  MATCH"
         return 0
     fi
-    echo "  MISMATCH: this command would program a different bitstream"
+    echo "  MISMATCH: that file is not the artifact's bitstream"
     return 1
 }
 
@@ -75,7 +62,8 @@ case "$cmd" in
     program)
         verify_program || { echo "refusing to program: the bitstream is not the artifact's" >&2; exit 1; }
         command -v vivado >/dev/null 2>&1 || { echo "vivado not found: put it on PATH or set XILINX_VIVADO" >&2; exit 127; }
-        cd "$REPRO_ROOT" && vivado -mode batch -source "$TCL" -tclargs "${PROGRAM_ARGS[@]}" ;;
+        cd "$REPRO_ROOT" && vivado -mode batch -nojournal -log "${TMPDIR:-/tmp}/systolic_program_bit.log" \
+            -source "$PROGRAM_TCL" -tclargs "$REPRO_ROOT/$REPRO_BOARD_BIT" ;;
     e2e)
         repro_need_build || exit 2
         [ $# -gt 0 ] || set -- --quick
