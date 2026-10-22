@@ -1852,7 +1852,17 @@ moved out of the reduction loop, reordering the accumulation (under strict float
 nest was then refused, and its CPU code ran permuted). So a bound or subscript of the loops
 around the accesses that flattens to a coefficient or constant of 2^48 or more leaves the nest
 as written, UNKNOWN ("whether moving it outward reorders dependent iterations is not decided",
-`@min_folded`; round 4 of the review of 2026-10-19). Both tests matter only
+`@min_folded`; round 4 of the review of 2026-10-19). The check covers every input the analysis
+builds its constraints from, as the analysis composes it: the bounds of the affine.for and
+affine.parallel ops around the accesses, the conditions of the affine.if ops around them and the
+access maps, with the values of constant operands and the expressions of affine.apply operands
+substituted (round 5, R4H-2: the same 2^63 bound reached through a constant symbol, an
+affine.apply, an affine.parallel bound or an affine.if condition was unchecked and the
+accumulation was reordered). An analysis that fails on a pair of accesses -- a semi-affine
+subscript or bound such as C[i * symbol(n) + j] -- is no proof of independence either: the nest
+stays as written, UNKNOWN ("the dependence analysis fails on an access or bound of the nest";
+round 5, R4H-1: a failure was read as "no dependence"). Test:
+test/Systolic/affine_hoist_dependence_guard.mlir. Both tests matter only
 when the interchange reorders iterations: two iterations change their order only if they differ
 in a dimension of two or more iterations and in a repetition loop inside it that may run twice
 (the first repetition loop inside that dimension in which they differ reads only counters on
@@ -2141,9 +2151,10 @@ parametrization of the domain would recognize; demotion stays deferred (§19.12.
 loop whose bounds read the counter of a one-iteration loop is hoisted with it since the fourth
 round of the review of 2026-10-19 (it was a limitation before). A repetition loop whose constant
 bound map lists an unread operand naming a dimension is not hoisted (conservative: dropping the
-operand first would let it move). A hoist that needs the dependence test is not made when a bound
-or subscript around the accesses flattens to a constant or coefficient of 2^48 or more (UNKNOWN;
-the analysis' 64-bit arithmetic). A band whose C store alone has full stacked rank is UNKNOWN, not
+operand first would let it move). A hoist that needs the dependence test is not made when a bound,
+condition or subscript around the accesses flattens -- with its constant and affine.apply operands
+substituted -- to a constant or coefficient of 2^48 or more, or when the analysis fails on the
+nest (UNKNOWN; the analysis' 64-bit arithmetic, semi-affine accesses). A band whose C store alone has full stacked rank is UNKNOWN, not
 PROVEN_INVALID (§19.13.4). The specification's batch test is sufficient only: batch values that
 are an affine image of a box sheared otherwise than along the loop order are undecided
 (UNDETERMINED), never called a GEMM or refused. Transposed operand views are correct but costly downstream:
