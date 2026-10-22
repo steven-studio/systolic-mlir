@@ -611,6 +611,58 @@ void resolveLoopTiling(std::optional<LoopTilingStructure> &tiling,
 /// tiling's partial tiles. Recognition, mapping and lowering are unchanged.
 void verifyLoopTilingCoverage(LoopTilingStructure &tiling);
 
+/// The legality of untiling a band's written loop tiling (docs section 26.4,
+/// S5.4): each claim the untiling of section 26.3 rests on, classified as in
+/// section 9 (GemmMappingClass), and the untiling itself. These classify the
+/// untiling -- a transformation -- not the nest's GEMM mapping: a nest whose
+/// untiling is PROVEN_INVALID may still have another valid mapping (its
+/// "not untiled" remark keeps the nest's class, UNKNOWN). nullopt: the layer
+/// was not evaluated (an earlier one refused).
+struct TilingLegality {
+  /// Pattern: every tile-shaped loop is a tiling of the form 26.1 records.
+  bool supportedForm = false;
+  /// Coverage: the tiles run every point of the logical box exactly once
+  /// (26.2) -- PROVEN_VALID; a counterexample -- PROVEN_INVALID; not decided
+  /// -- UNKNOWN.
+  std::optional<GemmMappingClass> coverage;
+  /// Dependence: the untiled order reorders no dependent iterations; also the
+  /// execution order (each element of C accumulates in the program's order).
+  std::optional<GemmMappingClass> dependence;
+  /// The dependence needed the exact test (a loop between a tile loop and its
+  /// point loop); otherwise the order is kept by construction.
+  bool orderTested = false;
+  /// The untiling: PROVEN_VALID (the lowering pass performs it),
+  /// PROVEN_INVALID (a layer is), VALID_BUT_LOWERING_UNSUPPORTED (legal, but
+  /// of a form S5.3 does not untile), UNKNOWN.
+  GemmMappingClass untiling = GemmMappingClass::Unknown;
+  /// Why the untiling is not performed (the remark of section 26.3).
+  std::string why;
+  /// When performed: each tiling's point loop range, in tiling order.
+  SmallVector<std::pair<int64_t, int64_t>> ranges;
+};
+
+/// One band's decision: its outermost loop (a sub-band's, below a prefix of
+/// loops whose counters nothing below them reads), its written tiling with
+/// the coverage decided, and the legality.
+struct WrittenTilingDecision {
+  Operation *band = nullptr;
+  LoopTilingStructure tiling;
+  TilingLegality legality;
+};
+
+/// The untiling decisions of section 26.3 for every perfect
+/// multiply-accumulate band under `root` that writes a tiling S5.3 is about
+/// (a min that clips a last tile or cuts a tile), decided without changing
+/// the IR -- by --affine-matmul-to-systolic before it untiles, and by
+/// --test-affine-matmul-discovery, which reports them. `assumeNoAlias` is the
+/// lowering pass's option of the same name (the alias rule of the dependence
+/// test).
+SmallVector<WrittenTilingDecision, 1>
+decideWrittenTilings(Operation *root, bool assumeNoAlias);
+
+/// The layers of `legality`, one line, as both passes print them.
+std::string describeTilingLegality(const TilingLegality &legality);
+
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient
 /// per stepped loop), when it is the set the program runs: every bound

@@ -8,7 +8,8 @@
 //     |  untileWrittenTilings           a loop tiling the program writes with
 //     |                                 a min-clipped last tile: untiled once
 //     |                                 its tiles are proven to run the box
-//     |                                 exactly once (docs section 26.3)
+//     |                                 exactly once (docs section 26.3);
+//     |                                 each claim classified (26.4)
 //     |  hoistRepetitionLoops           loops no access uses repeat the GEMM:
 //     |                                 moved outward when the dependences
 //     |                                 allow (affine::permuteLoops)
@@ -2011,34 +2012,110 @@ untilingReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
   return false;
 }
 
-/// Untiles `band` when its written loop tiling (S5.1) is proven to be one:
-/// returns false, with the reason in `why`, and leaves the band as written
-/// otherwise. The obligations, each decided exactly:
+/// The dependence legality of untiling `band`, its tile loops `isTile` and
+/// pairings `pairs` (tile loop, point loop) -- section 26.4, the layer the
+/// order of section 26.3 decides: PROVEN_VALID when no two dependent
+/// iterations change order, by construction when the next loop after each
+/// tile loop that is no tile loop is its point loop (two iterations that first
+/// differ in the tile loop differ in that point loop the same way: the tiles
+/// are disjoint and their starts increase; `tested` false), else by the alias
+/// rule of hoistRepetitionLoops, the 2^48 guard and the exact test above
+/// (`tested` true); PROVEN_INVALID when a dependent pair is reversed; UNKNOWN
+/// when that is not decided. `why` receives the reason of a refusal.
+static GemmMappingClass
+untilingDependence(ArrayRef<affine::AffineForOp> band, ArrayRef<bool> isTile,
+                   ArrayRef<std::pair<unsigned, unsigned>> pairs,
+                   bool assumeNoAlias, bool &tested, std::string &why) {
+  // The tile loops whose untiling may reorder iterations.
+  SmallVector<unsigned> check;
+  for (auto [tileLoop, pointLoop] : pairs) {
+    if (!mayRunTwice(band[tileLoop]))
+      continue;
+    for (unsigned v = tileLoop + 1; v < pointLoop; ++v)
+      if (!isTile[v] && mayRunTwice(band[v])) {
+        check.push_back(tileLoop);
+        break;
+      }
+  }
+  tested = !check.empty();
+  if (check.empty())
+    return GemmMappingClass::ProvenValid;
+  // The dependence test sees one memref at a time: every other memref of
+  // the body must be provably disjoint from each one it stores to (the
+  // alias rule of hoistRepetitionLoops).
+  affine::AffineForOp innermost = band.back();
+  for (Operation &op : *innermost.getBody()) {
+    auto store = dyn_cast<affine::AffineStoreOp>(op);
+    if (!store)
+      continue;
+    for (Operation &other : *innermost.getBody()) {
+      Value memref;
+      if (auto load = dyn_cast<affine::AffineLoadOp>(other))
+        memref = load.getMemRef();
+      else if (auto st = dyn_cast<affine::AffineStoreOp>(other))
+        memref = st.getMemRef();
+      if (memref && memref != store.getMemRef() &&
+          !provablyDisjointFromOutput(memref, store.getMemRef(),
+                                      assumeNoAlias)) {
+        why = "untiling it reorders its iterations (a loop between tile "
+              "loop " + std::to_string(check.front()) + " and its point "
+              "loop), which is legal only if the memrefs the nest reads do "
+              "not overlap the one it writes; declare the arguments "
+              "llvm.noalias (C restrict)";
+        return GemmMappingClass::Unknown;
+      }
+    }
+  }
+  if (!dependenceAnalysisFits(band)) {
+    why = "whether untiling it reorders dependent iterations is not "
+          "decided (a bound or subscript has a constant of 2^48 or more, "
+          "beyond the dependence analysis' 64-bit arithmetic)";
+    return GemmMappingClass::Unknown;
+  }
+  std::optional<bool> reorders =
+      untilingReordersDependentIterations(band, isTile, check);
+  if (!reorders) {
+    why = "whether untiling it reorders dependent iterations is not "
+          "decided (the dependence analysis fails on an access or bound "
+          "of the nest)";
+    return GemmMappingClass::Unknown;
+  }
+  if (*reorders) {
+    why = "untiling it would reorder dependent iterations (a loop between "
+          "tile loop " + std::to_string(check.front()) + " and its point "
+          "loop)";
+    return GemmMappingClass::ProvenInvalid;
+  }
+  return GemmMappingClass::ProvenValid;
+}
+
+/// Decides, without changing the IR, whether `band`'s written loop tiling
+/// (S5.1) is untiled (section 26.3) and classifies each claim the untiling
+/// rests on (section 26.4). The obligations, each decided exactly:
 ///
-///  * every loop shaped like a tile loop is one (no rejected pairing: a point
-///    loop running another width than the tile step, a min outside the last
-///    tile, a tile counter read by anything but its point loop's bounds);
+///  * pattern: every loop shaped like a tile loop is a tiling of the form
+///    26.1 records (no other width than the tile step, no min outside the
+///    last tile, no tile counter read by anything but its point loop's
+///    bounds, constant tile bounds);
 ///  * coverage (S5.2, verifyLoopTilingCoverage, on the band's exact iteration
-///    set D as written): the map y dropping the tile counters takes D onto the
-///    logical box B one to one -- no point of B missing, none outside it, no
-///    two iterations on one point -- and each tiling's partial tiles are the
-///    clipped last one alone, as recorded;
-///  * order: untiled, the nest runs B in the lexicographic order of the
-///    counters without the tile loops. A tile loop whose next loop that is no
-///    tile loop is its own point loop keeps every order (two iterations that
-///    first differ in it differ in that point loop the same way: the tiles
-///    are disjoint and run in increasing order); otherwise, when the tile
-///    loop and a loop between it and its point loop may run twice, the alias
-///    rule of the hoist and the exact dependence test above must show that no
-///    dependent iterations change order (under strict floating point too: the
-///    accumulation into each element of C keeps its order).
+///    set D as written): the map y dropping the tile counters takes D onto
+///    the logical box B one to one -- no point of B missing, none outside it,
+///    no two iterations on one point -- and each tiling's partial tiles are
+///    the clipped last one alone, as recorded;
+///  * dependence and execution order: untilingDependence (under strict
+///    floating point too: the accumulation into each element of C keeps its
+///    order).
 ///
 /// The untiled band runs y(D) = B: the same iterations, each once, with the
 /// same body (nothing but the point loop's bounds reads a tile counter).
-static bool untileBand(ArrayRef<affine::AffineForOp> band,
-                       LoopTilingStructure &tiling, bool assumeNoAlias,
-                       bool report, std::string &why) {
-  using Boundary = LoopTilingStructure::Boundary;
+/// When the pattern is not one 26.1 records but every refused loop is a
+/// recorded pairing whose coverage is exact, the dependence is decided on the
+/// pairings as well, and a legal untiling is classified
+/// VALID_BUT_LOWERING_UNSUPPORTED: S5.3 does not perform it.
+static TilingLegality decideUntiling(ArrayRef<affine::AffineForOp> band,
+                                     LoopTilingStructure &tiling,
+                                     bool assumeNoAlias) {
+  TilingLegality legality;
   const LoopTilingStructure::Coverage &coverage = tiling.coverage;
   verifyLoopTilingCoverage(tiling);
   auto counterexample = [&]() -> std::string {
@@ -2048,202 +2125,156 @@ static bool untileBand(ArrayRef<affine::AffineForOp> band,
                    : coverage.missing ? *coverage.missing
                                       : *coverage.outside);
   };
-  if (!tiling.rejected.empty()) {
-    why = "a loop shaped like a tile loop is not one (" +
-          tiling.rejected.front() + ")" + counterexample();
-    return false;
-  }
-  if (!coverage.decided) {
-    why = "whether its tiles run every point of the logical box exactly once "
-          "is not decided (" + coverage.note + ")";
-    return false;
-  }
-  if (!coverage.exact) {
-    why = "its tiles do not run every point of the logical box exactly "
-          "once" + counterexample();
-    return false;
-  }
+  legality.supportedForm = tiling.rejected.empty();
+  legality.coverage = !coverage.decided ? GemmMappingClass::Unknown
+                      : coverage.exact  ? GemmMappingClass::ProvenValid
+                                        : GemmMappingClass::ProvenInvalid;
+
+  // The pairings an untiling would drop: the tile loops, and each point
+  // loop's range (step 1, with points) from the coverage; false, with the
+  // reason, otherwise.
   SmallVector<bool> isTile(band.size(), false);
-  for (const LoopTilingStructure::Tiling &one : tiling.tilings)
-    isTile[one.tileLoop] = true;
-  SmallVector<std::pair<int64_t, int64_t>> ranges;
-  for (const LoopTilingStructure::Tiling &one : tiling.tilings) {
-    if (!one.boundaryProven) {
-      why = "the partial tiles of loop " + std::to_string(one.tileLoop) +
-            " are not as recorded";
-      return false;
-    }
-    const LoopTilingStructure::Coverage::Dim *dim = nullptr;
-    for (const LoopTilingStructure::Coverage::Dim &d : coverage.dims)
-      if (d.loop == one.pointLoop)
-        dim = &d;
-    if (!dim || dim->step != 1 || dim->lower >= dim->upper) {
-      why = "point loop " + std::to_string(one.pointLoop) +
-            " has no range of step 1 with points in it";
-      return false;
-    }
-    affine::AffineForOp point = band[one.pointLoop], tile = band[one.tileLoop];
-    for (Operation *user : tile.getInductionVar().getUsers())
-      if (user != point.getOperation()) {
-        why = "the counter of tile loop " + std::to_string(one.tileLoop) +
-              " is read by more than its point loop's bounds";
+  SmallVector<std::pair<unsigned, unsigned>> pairs;
+  auto collect = [&](ArrayRef<LoopTilingStructure::Tiling> ones,
+                     std::string &why) {
+    for (const LoopTilingStructure::Tiling &one : ones)
+      isTile[one.tileLoop] = true;
+    for (const LoopTilingStructure::Tiling &one : ones) {
+      const LoopTilingStructure::Coverage::Dim *dim = nullptr;
+      for (const LoopTilingStructure::Coverage::Dim &d : coverage.dims)
+        if (d.loop == one.pointLoop)
+          dim = &d;
+      if (!dim || dim->step != 1 || dim->lower >= dim->upper) {
+        why = "point loop " + std::to_string(one.pointLoop) +
+              " has no range of step 1 with points in it";
         return false;
       }
-    ranges.push_back({dim->lower, dim->upper});
-  }
-
-  // The tile loops whose untiling may reorder iterations.
-  SmallVector<unsigned> check;
-  for (const LoopTilingStructure::Tiling &one : tiling.tilings) {
-    if (!mayRunTwice(band[one.tileLoop]))
-      continue;
-    for (unsigned v = one.tileLoop + 1; v < one.pointLoop; ++v)
-      if (!isTile[v] && mayRunTwice(band[v])) {
-        check.push_back(one.tileLoop);
-        break;
-      }
-  }
-  if (!check.empty()) {
-    // The dependence test sees one memref at a time: every other memref of
-    // the body must be provably disjoint from each one it stores to (the
-    // alias rule of hoistRepetitionLoops).
-    affine::AffineForOp innermost = band.back();
-    for (Operation &op : *innermost.getBody()) {
-      auto store = dyn_cast<affine::AffineStoreOp>(op);
-      if (!store)
-        continue;
-      for (Operation &other : *innermost.getBody()) {
-        Value memref;
-        if (auto load = dyn_cast<affine::AffineLoadOp>(other))
-          memref = load.getMemRef();
-        else if (auto st = dyn_cast<affine::AffineStoreOp>(other))
-          memref = st.getMemRef();
-        if (memref && memref != store.getMemRef() &&
-            !provablyDisjointFromOutput(memref, store.getMemRef(),
-                                        assumeNoAlias)) {
-          why = "untiling it reorders its iterations (a loop between tile "
-                "loop " + std::to_string(check.front()) + " and its point "
-                "loop), which is legal only if the memrefs the nest reads do "
-                "not overlap the one it writes; declare the arguments "
-                "llvm.noalias (C restrict)";
+      affine::AffineForOp point = band[one.pointLoop],
+                          tile = band[one.tileLoop];
+      for (Operation *user : tile.getInductionVar().getUsers())
+        if (user != point.getOperation()) {
+          why = "the counter of tile loop " + std::to_string(one.tileLoop) +
+                " is read by more than its point loop's bounds";
           return false;
         }
-      }
+      pairs.push_back({one.tileLoop, one.pointLoop});
+      legality.ranges.push_back({dim->lower, dim->upper});
     }
-    if (!dependenceAnalysisFits(band)) {
-      why = "whether untiling it reorders dependent iterations is not "
-            "decided (a bound or subscript has a constant of 2^48 or more, "
-            "beyond the dependence analysis' 64-bit arithmetic)";
-      return false;
-    }
-    std::optional<bool> reorders =
-        untilingReordersDependentIterations(band, isTile, check);
-    if (!reorders) {
-      why = "whether untiling it reorders dependent iterations is not "
-            "decided (the dependence analysis fails on an access or bound "
-            "of the nest)";
-      return false;
-    }
-    if (*reorders) {
-      why = "untiling it would reorder dependent iterations (a loop between "
-            "tile loop " + std::to_string(check.front()) + " and its point "
-            "loop)";
-      return false;
-    }
-  }
+    return true;
+  };
 
-  if (report) {
-    std::string lines;
-    for (auto [one, range] : llvm::zip_equal(tiling.tilings, ranges)) {
-      if (!lines.empty())
-        lines += "; ";
-      lines += "tile loop " + std::to_string(one.tileLoop) + " (T = " +
-               std::to_string(one.tileSize) + ") dropped, point loop " +
-               std::to_string(one.pointLoop) + " runs [" +
-               std::to_string(range.first) + ", " +
-               std::to_string(range.second) + ")";
-      if (one.boundary == Boundary::MinClipped)
-        lines += " (last tile " + std::to_string(one.lastTile) + " of " +
-                 std::to_string(one.tileSize) + ")";
+  if (!legality.supportedForm) {
+    legality.why = "a loop shaped like a tile loop is not one (" +
+                   tiling.rejected.front() + ")" + counterexample();
+    // Classified only: a counterexample, or an undecided coverage, decides;
+    // an exact one leaves the dependence of the recorded pairings -- unless
+    // a refused loop is no recorded pairing (its role is not decided).
+    if (*legality.coverage != GemmMappingClass::ProvenValid) {
+      legality.untiling = *legality.coverage;
+      return legality;
     }
-    affine::AffineForOp outermost = band.front();
-    outermost.emitRemark()
-        << "affine multiply-accumulate nest: loop tiling as written untiled "
-           "(docs/AFFINE_GEMM_MAPPING.md section 26.3): "
-        << lines
-        << "; every point of the logical box is run by exactly one iteration "
-           "(exact, Presburger); "
-        << (check.empty() ? "the order of the iterations is kept"
-                          : "no dependent iterations change order (exact "
-                            "dependence test)");
+    if (tiling.rejected.size() != tiling.candidates.size()) {
+      legality.untiling = GemmMappingClass::Unknown;
+      return legality;
+    }
+    SmallVector<LoopTilingStructure::Tiling> all(tiling.tilings);
+    all.append(tiling.candidates.begin(), tiling.candidates.end());
+    std::string ignored;
+    if (!collect(all, ignored)) {
+      legality.untiling = GemmMappingClass::Unknown;
+      return legality;
+    }
+    legality.dependence = untilingDependence(band, isTile, pairs, assumeNoAlias,
+                                             legality.orderTested, ignored);
+    legality.untiling = *legality.dependence == GemmMappingClass::ProvenValid
+                            ? GemmMappingClass::ValidButLoweringUnsupported
+                            : *legality.dependence;
+    legality.ranges.clear();
+    return legality;
   }
-
-  for (auto [one, range] : llvm::zip_equal(tiling.tilings, ranges)) {
-    affine::AffineForOp point = band[one.pointLoop];
-    point.setConstantLowerBound(range.first);
-    point.setConstantUpperBound(range.second);
+  if (!coverage.decided) {
+    legality.why = "whether its tiles run every point of the logical box "
+                   "exactly once is not decided (" + coverage.note + ")";
+    legality.untiling = GemmMappingClass::Unknown;
+    return legality;
   }
-  for (const LoopTilingStructure::Tiling &one : tiling.tilings) {
-    affine::AffineForOp tile = band[one.tileLoop];
-    Block *body = tile.getBody();
-    tile->getBlock()->getOperations().splice(
-        Block::iterator(tile.getOperation()), body->getOperations(),
-        body->begin(), std::prev(body->end()));
-    tile.erase();
+  if (!coverage.exact) {
+    legality.why = "its tiles do not run every point of the logical box "
+                   "exactly once" + counterexample();
+    legality.untiling = GemmMappingClass::ProvenInvalid;
+    return legality;
   }
-  return true;
+  for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+    if (!one.boundaryProven) {
+      legality.why = "the partial tiles of loop " +
+                     std::to_string(one.tileLoop) + " are not as recorded";
+      legality.untiling = GemmMappingClass::Unknown;
+      return legality;
+    }
+  if (!collect(tiling.tilings, legality.why)) {
+    legality.untiling = GemmMappingClass::Unknown;
+    legality.ranges.clear();
+    return legality;
+  }
+  legality.dependence = untilingDependence(
+      band, isTile, pairs, assumeNoAlias, legality.orderTested, legality.why);
+  legality.untiling = *legality.dependence;
+  if (legality.untiling != GemmMappingClass::ProvenValid)
+    legality.ranges.clear();
+  return legality;
 }
 
-/// S5.3: every perfect multiply-accumulate band whose written loop tiling
-/// (section 26.1) clips a last tile with a min -- the bands the domain
-/// normalization does not make a box -- or has a tile-shaped pairing whose
-/// min cuts a tile, or a tile-shaped loop refused outright with a min over a
-/// stepped counter in a bound, is untiled when untileBand proves it a tiling;
-/// or, as the normalization does, its sub-band below a prefix of loops whose
-/// counters nothing below them reads. Otherwise the band stays as written,
-/// with a remark saying why, and the box pipeline decides it as before S5.3
-/// (a point loop's bounds read a tile counter: refused, unless the
-/// normalization proves its iteration set a parallelotope). A tiling without
-/// such a min is left to the normalization (sections 19.12, 19.13), which
-/// already makes it a box.
-static void untileWrittenTilings(ModuleOp module, bool assumeNoAlias,
-                                 bool classify, bool report) {
-  using Boundary = LoopTilingStructure::Boundary;
+/// The perfect multiply-accumulate band from `root` -- the bodies the
+/// recognizer takes (collectAffineMatmulCandidates): loads, one store of an
+/// arith.addf (C = C + A * B) or an arith.mulf (C = A * B), and the
+/// arithmetic -- or an empty band.
+static SmallVector<affine::AffineForOp>
+multiplyAccumulateBand(affine::AffineForOp root) {
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, root);
+  unsigned stores = 0, storesOfSum = 0;
+  bool body = true;
+  for (Operation &op : *band.back().getBody()) {
+    if (auto store = dyn_cast<affine::AffineStoreOp>(op)) {
+      ++stores;
+      storesOfSum +=
+          store.getValue().getDefiningOp<arith::AddFOp>() != nullptr ||
+          store.getValue().getDefiningOp<arith::MulFOp>() != nullptr;
+    } else if (!isa<affine::AffineLoadOp, arith::MulFOp, arith::AddFOp,
+                    affine::AffineYieldOp>(op)) {
+      body = false;
+    }
+  }
+  if (!body || stores != 1 || storesOfSum != 1)
+    band.clear();
+  return band;
+}
+
+/// The tops of the perfect bands under `root`: every affine.for that is not
+/// the only operation of a parent loop.
+static SmallVector<affine::AffineForOp> bandRootsOf(Operation *root) {
   SmallVector<affine::AffineForOp> roots;
-  module.walk([&](affine::AffineForOp loop) {
+  root->walk([&](affine::AffineForOp loop) {
     auto parent = dyn_cast<affine::AffineForOp>(loop->getParentOp());
-    // The top of a perfect band: not the only operation of a parent loop.
     if (parent && &parent.getBody()->front() == loop.getOperation() &&
         std::next(parent.getBody()->begin(), 2) == parent.getBody()->end())
       return;
     roots.push_back(loop);
   });
+  return roots;
+}
 
-  for (affine::AffineForOp root : roots) {
-    SmallVector<affine::AffineForOp> band;
-    affine::getPerfectlyNestedLoops(band, root);
+} // namespace
+
+SmallVector<WrittenTilingDecision, 1>
+mlir::systolic::decideWrittenTilings(Operation *root, bool assumeNoAlias) {
+  using Boundary = LoopTilingStructure::Boundary;
+  SmallVector<WrittenTilingDecision, 1> decisions;
+  for (affine::AffineForOp top : bandRootsOf(root)) {
+    SmallVector<affine::AffineForOp> band = multiplyAccumulateBand(top);
     if (band.size() < 2)
       continue;
-    // The bodies the recognizer takes (collectAffineMatmulCandidates): loads,
-    // one store of an arith.addf (C = C + A * B) or an arith.mulf (C = A * B),
-    // and the arithmetic.
-    unsigned stores = 0, storesOfSum = 0;
-    bool body = true;
-    for (Operation &op : *band.back().getBody()) {
-      if (auto store = dyn_cast<affine::AffineStoreOp>(op)) {
-        ++stores;
-        storesOfSum +=
-            store.getValue().getDefiningOp<arith::AddFOp>() != nullptr ||
-            store.getValue().getDefiningOp<arith::MulFOp>() != nullptr;
-      } else if (!isa<affine::AffineLoadOp, arith::MulFOp, arith::AddFOp,
-                      affine::AffineYieldOp>(op)) {
-        body = false;
-      }
-    }
-    if (!body || stores != 1 || storesOfSum != 1)
-      continue;
-    std::optional<std::string> refusal;
-    Operation *refused = nullptr;
+    std::optional<WrittenTilingDecision> untiled, refused;
     for (unsigned start = 0; start + 1 < band.size(); ++start) {
       if (start > 0) {
         affine::AffineForOp below = band[start];
@@ -2293,28 +2324,175 @@ static void untileWrittenTilings(ModuleOp module, bool assumeNoAlias,
           });
       if (!clipped && !minOverTile)
         continue;
-      std::string why;
-      if (untileBand(sub, *tiling, assumeNoAlias, report, why)) {
-        refusal.reset();
+      affine::AffineForOp first = sub.front();
+      TilingLegality legality = decideUntiling(sub, *tiling, assumeNoAlias);
+      if (legality.untiling == GemmMappingClass::ProvenValid) {
+        untiled = WrittenTilingDecision{first.getOperation(),
+                                        std::move(*tiling),
+                                        std::move(legality)};
         break;
       }
-      if (!refusal) {
-        refusal = why;
-        affine::AffineForOp top = sub.front();
-        refused = top.getOperation();
-      }
+      if (!refused)
+        refused = WrittenTilingDecision{first.getOperation(),
+                                        std::move(*tiling),
+                                        std::move(legality)};
     }
-    if (refusal) {
-      auto remark = refused->emitRemark()
+    if (untiled)
+      decisions.push_back(std::move(*untiled));
+    else if (refused)
+      decisions.push_back(std::move(*refused));
+  }
+  return decisions;
+}
+
+std::string
+mlir::systolic::describeTilingLegality(const TilingLegality &legality) {
+  auto layer = [](std::optional<GemmMappingClass> c) -> std::string {
+    return c ? stringifyGemmMappingClass(*c) : "not evaluated";
+  };
+  std::string text =
+      std::string("pattern: ") +
+      (legality.supportedForm
+           ? "every tile-shaped loop is a tiling of the form section 26.1 "
+             "records"
+           : "a tile-shaped loop is outside the form section 26.1 records");
+  text += "; coverage: " + layer(legality.coverage);
+  text += "; dependence: " + layer(legality.dependence);
+  if (legality.dependence == GemmMappingClass::ProvenValid)
+    text += legality.orderTested ? " (exact dependence test)"
+                                 : " (the order of the iterations is kept)";
+  text += "; execution order: " + layer(legality.dependence);
+  if (legality.dependence == GemmMappingClass::ProvenValid)
+    text += " (every element of C accumulates in the program's order)";
+  text += "; untiling: " + std::string(stringifyGemmMappingClass(
+                               legality.untiling));
+  text += legality.untiling == GemmMappingClass::ProvenValid
+              ? " (performed); lowering: decided by the box pipeline on the "
+                "untiled nest"
+              : " (not performed); lowering: not through an untiling, the "
+                "box pipeline decides the nest as written";
+  return text;
+}
+
+namespace {
+
+/// Untiles the band of `decision` (section 26.3): drops its tile loops and
+/// runs each point loop over its range in place.
+static void applyUntiling(const WrittenTilingDecision &decision) {
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(
+      band, cast<affine::AffineForOp>(decision.band));
+  for (auto [one, range] :
+       llvm::zip_equal(decision.tiling.tilings, decision.legality.ranges)) {
+    affine::AffineForOp point = band[one.pointLoop];
+    point.setConstantLowerBound(range.first);
+    point.setConstantUpperBound(range.second);
+  }
+  for (const LoopTilingStructure::Tiling &one : decision.tiling.tilings) {
+    affine::AffineForOp tile = band[one.tileLoop];
+    Block *body = tile.getBody();
+    tile->getBlock()->getOperations().splice(
+        Block::iterator(tile.getOperation()), body->getOperations(),
+        body->begin(), std::prev(body->end()));
+    tile.erase();
+  }
+}
+
+/// S5.3: every perfect multiply-accumulate band whose written loop tiling
+/// (section 26.1) clips a last tile with a min -- the bands the domain
+/// normalization does not make a box -- or has a tile-shaped pairing whose
+/// min cuts a tile, or a tile-shaped loop refused outright with a min over a
+/// stepped counter in a bound, is untiled when decideWrittenTilings proves it
+/// a tiling (or, as the normalization does, its sub-band below a prefix of
+/// loops whose counters nothing below them reads). Otherwise the band stays
+/// as written, with a remark saying why, and the box pipeline decides it as
+/// before S5.3 (a point loop's bounds read a tile counter: refused, unless
+/// the normalization proves its iteration set a parallelotope); `refused`
+/// receives its outermost loop. Each decision is also reported layer by layer
+/// (section 26.4). A tiling without such a min is left to the normalization
+/// (sections 19.12, 19.13), which already makes it a box.
+static void untileWrittenTilings(ModuleOp module, bool assumeNoAlias,
+                                 bool classify, bool report,
+                                 llvm::SmallPtrSetImpl<Operation *> &refused) {
+  using Boundary = LoopTilingStructure::Boundary;
+  for (const WrittenTilingDecision &decision :
+       decideWrittenTilings(module.getOperation(), assumeNoAlias)) {
+    affine::AffineForOp top = cast<affine::AffineForOp>(decision.band);
+    const TilingLegality &legality = decision.legality;
+    auto reportLegality = [&]() {
+      top.emitRemark() << "affine multiply-accumulate nest: tiling legality "
+                          "(docs/AFFINE_GEMM_MAPPING.md section 26.4): "
+                       << describeTilingLegality(legality);
+    };
+    if (legality.untiling == GemmMappingClass::ProvenValid) {
+      if (report) {
+        std::string lines;
+        for (auto [one, range] :
+             llvm::zip_equal(decision.tiling.tilings, legality.ranges)) {
+          if (!lines.empty())
+            lines += "; ";
+          lines += "tile loop " + std::to_string(one.tileLoop) + " (T = " +
+                   std::to_string(one.tileSize) + ") dropped, point loop " +
+                   std::to_string(one.pointLoop) + " runs [" +
+                   std::to_string(range.first) + ", " +
+                   std::to_string(range.second) + ")";
+          if (one.boundary == Boundary::MinClipped)
+            lines += " (last tile " + std::to_string(one.lastTile) + " of " +
+                     std::to_string(one.tileSize) + ")";
+        }
+        top.emitRemark()
+            << "affine multiply-accumulate nest: loop tiling as written "
+               "untiled (docs/AFFINE_GEMM_MAPPING.md section 26.3): "
+            << lines
+            << "; every point of the logical box is run by exactly one "
+               "iteration (exact, Presburger); "
+            << (legality.orderTested
+                    ? "no dependent iterations change order (exact "
+                      "dependence test)"
+                    : "the order of the iterations is kept");
+        reportLegality();
+      }
+      applyUntiling(decision);
+      continue;
+    }
+    refused.insert(decision.band);
+    {
+      auto remark = top.emitRemark()
                     << "affine multiply-accumulate nest: loop tiling as "
                        "written not untiled (docs/AFFINE_GEMM_MAPPING.md "
                        "section 26.3): "
-                    << *refusal;
+                    << legality.why;
       if (classify)
         remark << " ["
-               << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
-    }
+               << stringifyGemmMappingClass(GemmMappingClass::Unknown)
+               << "]";
+    } // emitted here, before the layers
+    reportLegality();
   }
+}
+
+/// The tiled nests the box pipeline is left with (section 26.4): the tops of
+/// the perfect multiply-accumulate bands that write a loop tiling (26.1: a
+/// tiling or a recorded pairing; loops shaped like tile loops but refused
+/// before any pairing do not make a nest tiled) and hold no band
+/// untileWrittenTilings refused -- that one has its remark.
+static SmallVector<Operation *>
+tiledNestsOf(ModuleOp module,
+             const llvm::SmallPtrSetImpl<Operation *> &refused) {
+  SmallVector<Operation *> nests;
+  for (affine::AffineForOp top : bandRootsOf(module.getOperation())) {
+    if (multiplyAccumulateBand(top).size() < 2)
+      continue;
+    std::optional<LoopTilingStructure> tiling = analyzeWrittenLoopTiling(top);
+    if (!tiling || (tiling->tilings.empty() && tiling->candidates.empty()))
+      continue;
+    if (llvm::any_of(refused, [&](Operation *op) {
+          return top->isAncestor(op);
+        }))
+      continue;
+    nests.push_back(top.getOperation());
+  }
+  return nests;
 }
 
 struct AffineMatmulToSystolicPass
@@ -2799,7 +2977,12 @@ struct AffineMatmulToSystolicPass
       preReduceFactors(module, assumeNoAlias, report);
     // A loop tiling the program writes with a min-clipped last tile (section
     // 26.3): untiled once its tiles and its order are proven.
-    untileWrittenTilings(module, assumeNoAlias, classify, report);
+    llvm::SmallPtrSet<Operation *, 4> refusedTilings;
+    untileWrittenTilings(module, assumeNoAlias, classify, report,
+                         refusedTilings);
+    // The tiled nests left to the box pipeline (section 26.4): one in which
+    // no GEMM gets a decision is reported after the lowering.
+    SmallVector<Operation *> tiledNests = tiledNestsOf(module, refusedTilings);
     // Reduction batches (section 23) are made only on nests whose counters
     // are the ones as written: not after a normalization with U != I.
     const SmallVector<DomainNormalization, 1> normalizations =
@@ -2812,22 +2995,63 @@ struct AffineMatmulToSystolicPass
     collectAffineMatmulCandidates(module.getOperation(), candidates);
 
     SmallVector<LogicalMatmul, 1> matmuls;
+    struct NotRecognized {
+      Operation *anchor;
+      std::string why;
+      GemmMappingClass mappingClass;
+    };
+    SmallVector<NotRecognized> failures;
     for (AffineMatmulCandidate candidate : candidates) {
       AffineMatmulRecognitionOptions recognition;
       recognition.countersAsWritten =
           !countersRewritten(normalizations, candidate.anchor);
       recognition.reductionBatches =
           reductionBatches && recognition.countersAsWritten;
-      auto result =
-          recognizeLogicalMatmul(candidate, nullptr, nullptr, recognition);
-      if (failed(result))
+      std::string notRecognized;
+      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
+      auto result = recognizeLogicalMatmul(candidate, &notRecognized,
+                                           &notRecognizedClass, recognition);
+      if (failed(result)) {
+        failures.push_back(
+            {candidate.anchor, notRecognized, notRecognizedClass});
         continue;
+      }
 
       bool duplicate = llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
         return m.outputStore == result->outputStore;
       });
       if (!duplicate)
         matmuls.push_back(*result);
+    }
+
+    // A tiled nest in which a GEMM is recognized gets its decision below
+    // (lowered, or a remark). For the others, the reason of the outermost
+    // candidate, as the recognizer gives it -- chosen now, while every
+    // candidate's loops exist -- is reported after the lowering.
+    auto nested = [](Operation *a, Operation *b) {
+      return a == b || a->isAncestor(b) || b->isAncestor(a);
+    };
+    struct Unexplained {
+      Operation *nest;
+      const NotRecognized *outermost;
+      bool rewritten;
+    };
+    SmallVector<Unexplained> unexplained;
+    for (Operation *nest : tiledNests) {
+      if (llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
+            return nested(nest, m.anchor);
+          }))
+        continue;
+      const NotRecognized *outermost = nullptr;
+      for (const NotRecognized &failure : failures)
+        if (nested(nest, failure.anchor) &&
+            (!outermost || affine::getNestingDepth(failure.anchor) <
+                               affine::getNestingDepth(outermost->anchor)))
+          outermost = &failure;
+      if (outermost)
+        unexplained.push_back(
+            {nest, outermost,
+             countersRewritten(normalizations, outermost->anchor)});
     }
 
     for (const LogicalMatmul &matmul : matmuls) {
@@ -2845,6 +3069,26 @@ struct AffineMatmulToSystolicPass
                     << why;
       if (classify)
         remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
+    }
+
+    // A tiled nest in which no GEMM is recognized: before section 26.4 it
+    // was refused without a remark.
+    for (const Unexplained &u : unexplained) {
+      auto remark = u.nest->emitRemark()
+                    << "affine GEMM not lowered to systolic.matmul_tile: no "
+                       "GEMM is recognized in the tiled nest "
+                       "(docs/AFFINE_GEMM_MAPPING.md section 26.4); its "
+                       "outermost candidate: "
+                    << u.outermost->why;
+      if (u.rewritten)
+        remark << "; the domain normalization rewrote the nest's counters "
+                  "(x = U x', section 19.12), so the analyses that need the "
+                  "counters as written are not made (reduction batches, "
+                  "section 23; ordered output batches, section 25.2, "
+                  "premise 2)";
+      if (classify)
+        remark << " ["
+               << stringifyGemmMappingClass(u.outermost->mappingClass) << "]";
     }
   }
 };
