@@ -624,6 +624,33 @@ void verifyLoopTilingCoverage(LoopTilingStructure &tiling);
 std::optional<presburger::IntegerPolyhedron>
 exactIterationSet(ArrayRef<affine::AffineForOp> loops);
 
+/// Integer-exact a ⊆ b for two conjunctive integer sets of one space (no
+/// symbols), without the Presburger library's set difference -- unsound in
+/// the LLVM 24 build of this project when the sets carry two or more locals
+/// pinned by equalities, the stepped loops' quotients
+/// (docs/AFFINE_GEMM_MAPPING.md section 19.14). b's locals are removed
+/// exactly: a local that an equality pins (c q + L = 0, no other remaining
+/// local in L or |c| = 1) is eliminated -- q = -L / c, an integer iff |c|
+/// divides L,
+/// substituted into every other row with the positive scale |c| -- and every
+/// remaining local must be a floor division of the variables
+/// (d q <= L <= d q + d - 1, L over the variables), kept with its
+/// definition. b is then a system P over the variables and those divisions
+/// plus divisibility conditions, and a ⊆ b iff a meets no negated constraint
+/// of P and no negated divisibility (L = d u + r, 1 <= r < d): each one
+/// conjunctive set, decided by integer emptiness. nullopt when b has a local
+/// that is neither (undecided: the callers refuse). When false and `witness`
+/// is given, it receives a point of a that is not in b.
+std::optional<bool>
+exactIsSubset(const presburger::IntegerRelation &a,
+              const presburger::IntegerRelation &b,
+              SmallVectorImpl<llvm::DynamicAPInt> *witness = nullptr);
+
+/// a = b by both inclusions (exactIsSubset): false as soon as one is
+/// decided false, nullopt when neither is false and one is undecided.
+std::optional<bool> exactIsEqual(const presburger::IntegerRelation &a,
+                                 const presburger::IntegerRelation &b);
+
 /// A bound of `loop` that is a constant as the recognizer reads it: one
 /// constant result, or the max (a lower bound) / min (an upper bound) of
 /// results that are all constants -- `min(1, 4)` is 1. nullopt when a result

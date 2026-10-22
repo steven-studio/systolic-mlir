@@ -2156,6 +2156,44 @@ this section's results.
 
 ---
 
+### 19.14 Exact set inclusion without the library's set difference (2026-10-22)
+
+In the LLVM 24 build of this project (commit 7615da1), `PresburgerSet::subtract`, and with it
+`isSubsetOf` and `isEqual`, answer wrongly when the sets carry two or more locals pinned by
+equalities -- the quotients of stepped loops: for B = [0, 7] x [0, 14] and
+Y = {(y0, y1) : y1 = 3 q1 in [0, 13], b = 4 q2 in [0, 7], b <= y0 <= b + 3}, `B.isSubsetOf(Y)`
+is true although (0, 1) is in B and not in Y (one stepped dimension: right). Conjunctive
+emptiness and lexmin (`isIntegerEmpty`, `findIntegerLexMin`) are not affected. Four decisions
+used the difference: the exact parallelotope of 19.13 (`candidate.isEqual(target)`), the
+disproof of central symmetry (`mirror.isEqual(set)`, a subtract for the witness), the bijection
+certificate's box image (`image.isEqual(domain)`) and the regions' source cover (two subtracts).
+
+`exactIsSubset(a, b)` decides a ⊆ b exactly with emptiness only. b's locals are removed: a local
+an equality pins (c q + L = 0, with no other remaining local in L, or |c| = 1) is eliminated -- q = -L / c, an integer
+iff |c| divides L, substituted into the other rows with the positive scale |c| -- and every
+remaining local must be a floor division of the variables (d q <= L <= d q + d - 1), kept with
+its definition, as it is a function of x. Then b = P ∩ {divisibilities}, and a ⊆ b iff a meets
+none of: a negated inequality of P (g <= -1), a negated equality (h >= 1, h <= -1), a negated
+divisibility (L = d u + r, 1 <= r <= d - 1) -- one conjunctive set each, with the divisions
+re-added for fresh locals. Any other local (a true existential) leaves the inclusion undecided,
+and every caller then refuses.
+
+- 19.13's parallelotope: the per-level search still uses the library's equality to choose; the
+  whole band is decided by `exactIsEqual(prefix, domain)` (both sets: the stepped loops'
+  pinned quotients); unequal or undecided, the band is not normalized.
+- The disproof: set ⊆ mirror decided exactly (the mirror has as many points, so inclusion is
+  equality); a failing piece's least point is the witness; undecided: no disproof (UNKNOWN).
+- The bijection certificate: `exactIsEqual(image, domain)`; undecided: refused.
+- The source cover: each region is the source domain cut by bounds on its logical coordinates,
+  so it lies in the source domain by construction, and the union is the source domain cut by
+  the boxes' ranges, which `checkExactCover` proved to tile the dense ordinal box exactly; the
+  source is covered iff its logical coordinates never leave the full ranges -- six conjunctive
+  sets. The pairwise disjointness test (intersections) is unchanged.
+
+Test: test/Systolic/exact_set_inclusion.mlir (`--test-affine-matmul-discovery=exact-sets=true`:
+the counterexample, one and two stepped dimensions, a floor division, an undecided existential,
+and random pairs, every answer checked point by point).
+
 ## 20. Assignment nests: C = A · B as the K = 1 GEMM into a zeroed C (2026-10-19)
 
 The task of 2026-10-19 (the rank screening): accept the mathematically legal, safely lowerable

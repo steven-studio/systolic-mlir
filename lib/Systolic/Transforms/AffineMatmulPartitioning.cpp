@@ -146,13 +146,21 @@ disproveAffineImageOfBox(const LogicalMatmul &matmul) {
   for (unsigned s = 0; s < n; ++s)
     centre[s] = (*lexmin)[s] - (*negatedMin)[s];
   presburger::IntegerPolyhedron mirror = reflected(centre);
-  if (mirror.isEqual(set))
-    return std::nullopt;
-  presburger::PresburgerSet missing =
-      presburger::PresburgerSet(set).subtract(presburger::PresburgerSet(mirror));
+  // set ⊆ mirror, decided exactly (docs section 19.14: not the library's
+  // set difference). The mirror is the reflection of the set, so it has as
+  // many points, and set ⊆ mirror means the two are equal: centrally
+  // symmetric, nothing disproven -- as when the inclusion is undecided.
   SmallVector<BigInt> witness;
-  if (!missing.findIntegerSample(witness))
-    return std::nullopt; // (cannot happen: the sets differ)
+  std::optional<bool> symmetric = exactIsSubset(set, mirror, &witness);
+  if (!symmetric || *symmetric || witness.size() != n)
+    return std::nullopt;
+  // The claim is checked on the points themselves: the witness is in the
+  // set and its mirror is not (exact membership); otherwise no disproof.
+  SmallVector<BigInt> mirrored(n, BigInt(0));
+  for (unsigned t = 0; t < n; ++t)
+    mirrored[t] = centre[t] - witness[t];
+  if (!set.containsPointNoLocal(witness) || set.containsPointNoLocal(mirrored))
+    return std::nullopt;
   // In the source domain's coordinates.
   SmallVector<BigInt> point(n, BigInt(0)), image(n, BigInt(0));
   for (unsigned t = 0; t < n; ++t) {
@@ -661,22 +669,48 @@ static LogicalResult checkExactCover(const DenseLogicalGemm &dense,
 static constexpr size_t kMaxPresburgerRegions = 64;
 
 static LogicalResult
-checkSourceCover(const LogicalMatmul &matmul,
+checkSourceCover(const LogicalMatmul &matmul, const DenseLogicalGemm &dense,
                  ArrayRef<LogicalPartition> partitions, std::string *why) {
   if (partitions.size() > kMaxPresburgerRegions)
     return success();
 
-  presburger::PresburgerSet covered = presburger::PresburgerSet::getEmpty(
-      matmul.sourceDomain->getSpace());
-  for (const LogicalPartition &partition : partitions)
-    covered = covered.unionSet(
-        presburger::PresburgerSet(partition.iterationDomain));
-
-  presburger::PresburgerSet source(*matmul.sourceDomain);
-  if (!source.subtract(covered).isIntegerEmpty())
-    return fail(why, "the regions do not cover the source iteration domain");
-  if (!covered.subtract(source).isIntegerEmpty())
-    return fail(why, "a region extends outside the source iteration domain");
+  // Each region is the source domain cut by bounds on its logical
+  // coordinates (restrictToBox), so it lies inside the source domain by
+  // construction; their union is the source domain cut by the union of the
+  // boxes' coordinate ranges, which checkExactCover has proven to tile the
+  // dense ordinal box exactly -- the product of the full ranges
+  // [offset_d, offset_d + scale_d * extent_d). The regions cover the source
+  // domain iff its logical coordinates stay inside those ranges: one
+  // conjunctive set per bound, decided by integer emptiness (no set
+  // difference: docs section 19.14).
+  const affine::FlatAffineValueConstraints &source = *matmul.sourceDomain;
+  const auto &T = matmul.logicalMapping.transformation;
+  const auto &c = matmul.logicalMapping.offset;
+  const unsigned numP = dense.numBatchDims;
+  const unsigned n = source.getNumDimVars();
+  if (T.size() != numP + 3 || c.size() != T.size())
+    return fail(why, "the logical mapping does not match the iteration domain");
+  for (unsigned d = 0; d < 3; ++d) {
+    std::optional<int64_t> span = llvm::checkedMul(dense.scale[d], dense.extent[d]);
+    std::optional<int64_t> past =
+        span ? llvm::checkedAdd(dense.offset[d], *span) : std::nullopt;
+    if (!past)
+      return fail(why, "the logical ranges overflow 64-bit arithmetic");
+    for (bool below : {true, false}) {
+      // below: y_d <= offset_d - 1; above: y_d >= past; y_d = T_d x + c_d.
+      presburger::IntegerPolyhedron outside(source);
+      SmallVector<BigInt> row(outside.getNumCols(), BigInt(0));
+      for (unsigned s = 0; s < n; ++s)
+        row[s] = below ? -BigInt(T[numP + d][s]) : BigInt(T[numP + d][s]);
+      row.back() = below ? BigInt(dense.offset[d]) - BigInt(1) -
+                               BigInt(c[numP + d])
+                         : BigInt(c[numP + d]) - BigInt(*past);
+      outside.addInequality(row);
+      if (!outside.isIntegerEmpty())
+        return fail(why,
+                    "the regions do not cover the source iteration domain");
+    }
+  }
 
   for (size_t a = 0; a < partitions.size(); ++a)
     for (size_t b = 0; b < a; ++b) {
@@ -750,7 +784,14 @@ mlir::systolic::verifyLogicalBijection(const LogicalMatmul &matmul,
     image.addInequality(lower);
     image.addInequality(upper);
   }
-  if (!image.isEqual(presburger::IntegerPolyhedron(domain)))
+  // Decided exactly (docs section 19.14: not the library's set difference).
+  std::optional<bool> boxImage =
+      exactIsEqual(image, presburger::IntegerPolyhedron(domain));
+  if (!boxImage)
+    return fail(why, "the iteration domain could not be compared exactly with "
+                     "the box of its loops' ordinals (a local variable that is "
+                     "no floor division and that no equality pins)");
+  if (!*boxImage)
     return fail(why, "the iteration domain is not the box of its loops' "
                      "ordinals");
 
@@ -1039,7 +1080,7 @@ mlir::systolic::partitionLogicalMatmul(const LogicalMatmul &matmul,
     partitions.push_back(LogicalPartition{std::move(*region), box});
   }
 
-  if (failed(checkSourceCover(matmul, partitions, why)))
+  if (failed(checkSourceCover(matmul, *dense, partitions, why)))
     return failure();
 
   return partitions;

@@ -5110,6 +5110,15 @@ findExactParallelotope(ArrayRef<affine::AffineForOp> band) {
     if (!accepted)
       return std::nullopt;
   }
+  // Each level's choice above is confirmed by the Presburger library's
+  // equality, which is not trusted with the decision: in the LLVM 24 build
+  // its set difference is unsound with two or more equality-pinned locals --
+  // the stepped loops' quotients (docs section 19.14). The whole band is
+  // decided here, exactly, both inclusions: undecided or unequal, the band
+  // is not normalized.
+  std::optional<bool> same = exactIsEqual(prefix, domain);
+  if (!same || !*same)
+    return std::nullopt;
   return found;
 }
 
@@ -6340,4 +6349,209 @@ void mlir::systolic::verifyLoopTilingCoverage(LoopTilingStructure &tiling) {
                           std::to_string(fullTiles) + " x " +
                           std::to_string(one.tileSize);
   }
+}
+
+//===----------------------------------------------------------------------===//
+// Exact inclusion of conjunctive integer sets (docs section 19.14)
+//===----------------------------------------------------------------------===//
+
+std::optional<bool>
+mlir::systolic::exactIsSubset(const presburger::IntegerRelation &a,
+                              const presburger::IntegerRelation &b,
+                              SmallVectorImpl<llvm::DynamicAPInt> *witness) {
+  using llvm::DynamicAPInt;
+  using Row = SmallVector<DynamicAPInt>;
+  const unsigned v = b.getNumDimAndSymbolVars();
+  if (a.getNumDomainVars() != b.getNumDomainVars() ||
+      a.getNumRangeVars() != b.getNumRangeVars() ||
+      a.getNumSymbolVars() != 0 || b.getNumSymbolVars() != 0)
+    return std::nullopt;
+  const unsigned l = b.getNumLocalVars();
+
+  // b's rows over [variables | locals | constant].
+  SmallVector<Row> equalities, inequalities;
+  for (unsigned r = 0, e = b.getNumEqualities(); r < e; ++r)
+    equalities.emplace_back(b.getEquality(r).begin(), b.getEquality(r).end());
+  for (unsigned r = 0, e = b.getNumInequalities(); r < e; ++r)
+    inequalities.emplace_back(b.getInequality(r).begin(),
+                              b.getInequality(r).end());
+  SmallVector<bool> eliminated(l, false);
+  auto otherLocal = [&](const Row &row, unsigned j) {
+    for (unsigned k = 0; k < l; ++k)
+      if (k != j && !eliminated[k] && row[v + k] != 0)
+        return true;
+    return false;
+  };
+
+  // Pinned locals: c q_j + L = 0 with no other remaining local in L, or with
+  // |c| = 1 (then q_j = -sgn(c) L is an integer whatever L holds). q_j = -L / c
+  // is an integer iff |c| divides L; every other row r becomes
+  // |c| r - sgn(c) r_j e (q_j's coefficient 0, inequalities scaled by |c| >
+  // 0), the same set over the other variables. Repeated until no equality
+  // pins a remaining local so.
+  SmallVector<std::pair<Row, DynamicAPInt>> divisible; // d | row . (x, 1)
+  for (bool progress = true; progress;) {
+    progress = false;
+    for (unsigned j = 0; j < l; ++j) {
+      if (eliminated[j])
+        continue;
+      auto pin = llvm::find_if(equalities, [&](const Row &row) {
+        return row[v + j] != 0 &&
+               (!otherLocal(row, j) || llvm::abs(row[v + j]) == 1);
+      });
+      if (pin == equalities.end())
+        continue;
+      const Row e = *pin;
+      equalities.erase(pin);
+      const DynamicAPInt c = e[v + j];
+      const DynamicAPInt magnitude = llvm::abs(c);
+      auto substitute = [&](Row &row) {
+        if (row[v + j] == 0)
+          return;
+        const DynamicAPInt factor = c > 0 ? row[v + j] : -row[v + j];
+        for (unsigned col = 0; col < row.size(); ++col)
+          row[col] = magnitude * row[col] - factor * e[col];
+      };
+      for (Row &row : equalities)
+        substitute(row);
+      for (Row &row : inequalities)
+        substitute(row);
+      Row rest = e;
+      rest[v + j] = DynamicAPInt(0);
+      if (magnitude > 1)
+        divisible.emplace_back(std::move(rest), magnitude);
+      eliminated[j] = true;
+      progress = true;
+    }
+  }
+
+  // Every remaining local must be a floor division of the variables:
+  // L - d q >= 0 and d q + d - 1 - L >= 0, L over the variables only. Its
+  // two defining rows are set aside (each piece below re-adds them for a
+  // fresh local): q is a function of x, so the negation of a constraint on
+  // (x, q) is that negation with q's definition.
+  struct Division {
+    unsigned local;
+    Row lower, upper; // the two defining rows, in b's columns
+  };
+  SmallVector<Division> divisions;
+  for (unsigned j = 0; j < l; ++j) {
+    if (eliminated[j])
+      continue;
+    std::optional<Division> found;
+    for (unsigned r1 = 0; r1 < inequalities.size() && !found; ++r1) {
+      const Row &lo = inequalities[r1];
+      if (lo[v + j] >= 0 || otherLocal(lo, j))
+        continue;
+      const DynamicAPInt d = -lo[v + j];
+      for (unsigned r2 = 0; r2 < inequalities.size() && !found; ++r2) {
+        const Row &hi = inequalities[r2];
+        if (r2 == r1 || hi[v + j] != d || otherLocal(hi, j))
+          continue;
+        bool opposite = true;
+        for (unsigned col = 0; col < v && opposite; ++col)
+          opposite = hi[col] == -lo[col];
+        if (opposite && lo.back() + hi.back() == d - 1)
+          found = Division{j, lo, hi};
+      }
+    }
+    if (!found)
+      return std::nullopt; // an existential local: not decided here
+    for (const Row *row : {&found->lower, &found->upper})
+      inequalities.erase(llvm::find(inequalities, *row));
+    divisions.push_back(std::move(*found));
+  }
+
+  // One piece: a, the divisions as fresh locals, `extra` new locals, and one
+  // constraint in b's columns (row; the extra locals' columns appended).
+  auto failing = [&](const Row &row, bool isEquality, unsigned extra,
+                     ArrayRef<std::pair<Row, bool>> extraRows) -> bool {
+    presburger::IntegerRelation piece = a;
+    const unsigned first = piece.getNumCols() - 1; // where new locals go
+    piece.appendVar(presburger::VarKind::Local, divisions.size() + extra);
+    auto place = [&](const Row &src, unsigned extraCols) {
+      Row out(piece.getNumCols(), DynamicAPInt(0));
+      for (unsigned col = 0; col < v; ++col)
+        out[col] = src[col];
+      for (auto [index, division] : llvm::enumerate(divisions))
+        out[first + index] = src[v + division.local];
+      for (unsigned e = 0; e < extraCols; ++e)
+        out[first + divisions.size() + e] = src[v + l + e];
+      out.back() = src[v + l + extraCols];
+      return out;
+    };
+    for (const Division &division : divisions) {
+      piece.addInequality(place(division.lower, 0));
+      piece.addInequality(place(division.upper, 0));
+    }
+    if (isEquality)
+      piece.addEquality(place(row, extra));
+    else
+      piece.addInequality(place(row, extra));
+    for (const auto &[extraRow, eq] : extraRows) {
+      if (eq)
+        piece.addEquality(place(extraRow, extra));
+      else
+        piece.addInequality(place(extraRow, extra));
+    }
+    if (piece.isIntegerEmpty())
+      return false;
+    if (witness) {
+      witness->clear();
+      auto lexMin = piece.findIntegerLexMin();
+      if (lexMin.isBounded())
+        witness->assign(lexMin->begin(), lexMin->begin() + v);
+      else if (std::optional<SmallVector<DynamicAPInt, 8>> sample =
+                   piece.findIntegerSample())
+        witness->assign(sample->begin(), sample->begin() + v);
+    }
+    return true;
+  };
+  auto negated = [&](const Row &row) {
+    Row out(row.size());
+    for (unsigned col = 0; col < row.size(); ++col)
+      out[col] = -row[col];
+    out.back() -= 1; // -g - 1 >= 0: g <= -1
+    return out;
+  };
+  for (const Row &row : inequalities)
+    if (failing(negated(row), false, 0, {}))
+      return false;
+  for (const Row &row : equalities) {
+    Row above = row; // h - 1 >= 0
+    above.back() -= 1;
+    if (failing(above, false, 0, {}) || failing(negated(row), false, 0, {}))
+      return false;
+  }
+  // d does not divide L: L - d u - r = 0 with 1 <= r <= d - 1 (u, r new).
+  for (const auto &[row, d] : divisible) {
+    Row eq(v + l + 3, DynamicAPInt(0)), ge(v + l + 3, DynamicAPInt(0)),
+        le(v + l + 3, DynamicAPInt(0));
+    for (unsigned col = 0; col < v + l; ++col)
+      eq[col] = row[col];
+    eq[v + l] = -d;                     // u
+    eq[v + l + 1] = DynamicAPInt(-1);   // r
+    eq.back() = row.back();
+    ge[v + l + 1] = DynamicAPInt(1);    // r - 1 >= 0
+    ge.back() = DynamicAPInt(-1);
+    le[v + l + 1] = DynamicAPInt(-1);   // d - 1 - r >= 0
+    le.back() = d - 1;
+    if (failing(eq, true, 2, {{ge, false}, {le, false}}))
+      return false;
+  }
+  return true;
+}
+
+std::optional<bool>
+mlir::systolic::exactIsEqual(const presburger::IntegerRelation &a,
+                             const presburger::IntegerRelation &b) {
+  std::optional<bool> ab = exactIsSubset(a, b);
+  if (ab && !*ab)
+    return false;
+  std::optional<bool> ba = exactIsSubset(b, a);
+  if (ba && !*ba)
+    return false;
+  if (!ab || !ba)
+    return std::nullopt;
+  return true;
 }
