@@ -5516,3 +5516,351 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
   }
   return applied;
 }
+
+//===----------------------------------------------------------------------===//
+// Loop tiling as written (docs/AFFINE_GEMM_MAPPING.md section 26, S5.1)
+//===----------------------------------------------------------------------===//
+
+std::optional<LoopTilingStructure>
+mlir::systolic::analyzeWrittenLoopTiling(affine::AffineForOp outer) {
+  using Role = LoopTilingStructure::LoopRole;
+  using Boundary = LoopTilingStructure::Boundary;
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, outer);
+  const unsigned n = band.size();
+  LoopTilingStructure tiling;
+  tiling.outermost = outer.getOperation();
+  tiling.roles.assign(n, Role::Plain);
+  tiling.loopCoordinate.assign(n, -1);
+
+  // Where each counter is used: by the lower or upper bound of a loop of the
+  // band, or by anything else (an access, an affine.apply, ...).
+  struct Uses {
+    bool other = false;
+    SmallVector<unsigned, 1> lowerOf, upperOf;
+  };
+  SmallVector<Uses> uses(n);
+  for (unsigned s = 0; s < n; ++s) {
+    for (OpOperand &use : band[s].getInductionVar().getUses()) {
+      std::optional<unsigned> q;
+      for (unsigned t = 0; t < n; ++t)
+        if (band[t].getOperation() == use.getOwner())
+          q = t;
+      if (!q) {
+        uses[s].other = true;
+        continue;
+      }
+      // An affine.for's operands: its lower bound's, its upper bound's, then
+      // its iteration arguments.
+      const unsigned index = use.getOperandNumber();
+      const unsigned numLower = band[*q].getLowerBoundOperands().size();
+      const unsigned numUpper = band[*q].getUpperBoundOperands().size();
+      SmallVector<unsigned, 1> *of = index < numLower ? &uses[s].lowerOf
+                                     : index < numLower + numUpper
+                                         ? &uses[s].upperOf
+                                         : nullptr;
+      if (!of)
+        uses[s].other = true;
+      else if (!llvm::is_contained(*of, *q))
+        of->push_back(*q);
+    }
+  }
+
+  auto reject = [&](unsigned s, const llvm::Twine &why) {
+    tiling.rejected.push_back(("loop " + llvm::Twine(s) + ": " + why).str());
+  };
+  // The tile counter alone, plus a constant (the point loop's bounds).
+  auto onlyTile = [&](const BandForm &form, unsigned t) {
+    for (unsigned s = 0; s < n; ++s)
+      if (form.coefficients[s] != (s == t ? 1 : 0))
+        return false;
+    return true;
+  };
+  auto constantForm = [](const BandForm &form) {
+    return llvm::all_of(form.coefficients, [](int64_t c) { return c == 0; });
+  };
+
+  //   for (t = lt; t < ut; t += S)
+  //     for (p = t + c; p < t + c + S [or min(t + c + S, E)]; ++p)
+  // The tiles are [lt + q S + c, lt + (q + 1) S + c), q = 0 .. Q - 1, with
+  // Q = ceil((ut - lt) / S); E must clip the last one and no other.
+  for (unsigned t = 0; t < n; ++t) {
+    affine::AffineForOp tile = band[t];
+    const int64_t step = tile.getStepAsInt();
+    const Uses &u = uses[t];
+    if (step < 2 || (u.lowerOf.empty() && u.upperOf.empty()))
+      continue; // not shaped like a tile loop
+    if (u.other) {
+      reject(t, "its counter is read by an access or another operation as "
+                "well as by a loop bound");
+      continue;
+    }
+    if (u.lowerOf.size() != 1 || u.upperOf != u.lowerOf) {
+      reject(t, "its counter bounds more than one loop, or one end of a loop "
+                "only");
+      continue;
+    }
+    const unsigned p = u.lowerOf.front();
+    affine::AffineForOp point = band[p];
+    if (!tile.hasConstantLowerBound() || !tile.hasConstantUpperBound()) {
+      reject(t, "its bounds are not constants");
+      continue;
+    }
+    const int64_t lt = tile.getConstantLowerBound();
+    const int64_t ut = tile.getConstantUpperBound();
+    if (ut <= lt) {
+      reject(t, "it runs no iteration");
+      continue;
+    }
+    if (point.getStepAsInt() != 1) {
+      reject(t, "its point loop " + llvm::Twine(p) +
+                    " has a step other than 1");
+      continue;
+    }
+    if (!uses[p].lowerOf.empty() || !uses[p].upperOf.empty() ||
+        tiling.roles[p] != Role::Plain) {
+      reject(t, "the counter of its point loop " + llvm::Twine(p) +
+                    " bounds another loop, or that loop is tiled already");
+      continue;
+    }
+    std::optional<SmallVector<BandForm>> lower =
+        bandBoundResults(point, /*lower=*/true, band, p);
+    std::optional<SmallVector<BandForm>> upper =
+        bandBoundResults(point, /*lower=*/false, band, p);
+    if (!lower || lower->size() != 1 || !onlyTile(lower->front(), t)) {
+      reject(t, "the lower bound of its point loop " + llvm::Twine(p) +
+                    " is not the tile counter plus a constant");
+      continue;
+    }
+    const int64_t c = lower->front().constant;
+    std::optional<int64_t> width, clip;
+    bool unexpected = !upper || upper->empty() || upper->size() > 2;
+    if (!unexpected)
+      for (const BandForm &form : *upper) {
+        if (onlyTile(form, t) && !width)
+          width = llvm::checkedSub(form.constant, c);
+        else if (constantForm(form) && !clip)
+          clip = form.constant;
+        else
+          unexpected = true;
+      }
+    if (unexpected || !width) {
+      reject(t, "the upper bound of its point loop " + llvm::Twine(p) +
+                    " is not the tile counter plus a constant, or the min of "
+                    "that and one constant");
+      continue;
+    }
+    if (*width != step) {
+      reject(t, "its point loop " + llvm::Twine(p) + " runs " +
+                    llvm::Twine(*width) + " values per tile, not the tile "
+                    "step " + llvm::Twine(step));
+      continue;
+    }
+    std::optional<int64_t> span = llvm::checkedSub(ut, lt);
+    std::optional<int64_t> first = llvm::checkedAdd(lt, c);
+    std::optional<int64_t> lastStart, end;
+    if (span) {
+      const int64_t count = (*span - 1) / step + 1;
+      if (std::optional<int64_t> offset = llvm::checkedMul(count - 1, step))
+        if (first)
+          lastStart = llvm::checkedAdd(*first, *offset);
+    }
+    if (lastStart)
+      end = llvm::checkedAdd(*lastStart, step);
+    if (!first || !end) {
+      reject(t, "its tiles do not fit in 64 bits");
+      continue;
+    }
+    LoopTilingStructure::Tiling one;
+    one.tileLoop = t;
+    one.pointLoop = p;
+    one.tileSize = step;
+    one.lower = *first;
+    if (!clip) {
+      one.upper = *end;
+      one.lastTile = step;
+      one.boundary = *span % step == 0 ? Boundary::Divisible
+                                       : Boundary::Unaligned;
+    } else {
+      if (*clip <= *lastStart || *clip > *end) {
+        reject(t, "the min of its point loop " + llvm::Twine(p) +
+                      " clips at " + llvm::Twine(*clip) +
+                      ", outside the last tile [" + llvm::Twine(*lastStart) +
+                      ", " + llvm::Twine(*end) + ")");
+        continue;
+      }
+      one.upper = *clip;
+      one.lastTile = *clip - *lastStart;
+      one.boundary =
+          *clip == *end ? Boundary::Divisible : Boundary::MinClipped;
+    }
+    tiling.roles[t] = Role::Tile;
+    tiling.roles[p] = Role::Point;
+    tiling.tilings.push_back(one);
+  }
+  if (tiling.tilings.empty() && tiling.rejected.empty())
+    return std::nullopt;
+  return tiling;
+}
+
+void mlir::systolic::resolveLoopTiling(
+    std::optional<LoopTilingStructure> &tiling, const LogicalMatmul &matmul) {
+  using Role = LoopTilingStructure::LoopRole;
+  auto outer = dyn_cast_or_null<affine::AffineForOp>(
+      tiling ? tiling->outermost : matmul.anchor);
+  if (!outer || !matmul.outputStore)
+    return;
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, outer);
+  const unsigned n = band.size();
+  // The record must be of a band around the GEMM's store.
+  if (tiling && (tiling->roles.size() != n ||
+                 !band.back()->isAncestor(matmul.outputStore))) {
+    tiling.reset();
+    return;
+  }
+
+  // The maps' dims: the loops around the GEMM's store, outermost first, whose
+  // counters an access of its body reads (the recognizer's iteration
+  // counters; a tile loop of the Bounds form, read by bounds only, is none).
+  SmallVector<Value> dimIVs;
+  if (Operation *store = matmul.outputStore) {
+    SmallVector<affine::AffineForOp> enclosing;
+    for (Operation *op = store->getParentOp(); op; op = op->getParentOp())
+      if (auto loop = dyn_cast<affine::AffineForOp>(op))
+        enclosing.push_back(loop);
+    std::reverse(enclosing.begin(), enclosing.end());
+    for (affine::AffineForOp loop : enclosing) {
+      Value iv = loop.getInductionVar();
+      if (llvm::any_of(iv.getUsers(), [&](Operation *user) {
+            return user->getBlock() == store->getBlock() &&
+                   isa<affine::AffineLoadOp, affine::AffineStoreOp>(user);
+          }))
+        dimIVs.push_back(iv);
+    }
+  }
+  SmallVector<int> dimOfLoop(n, -1);
+  for (unsigned s = 0; s < n; ++s)
+    if (auto it = llvm::find(dimIVs, band[s].getInductionVar());
+        it != dimIVs.end())
+      dimOfLoop[s] = std::distance(dimIVs.begin(), it);
+
+  // The coordinate maps I, J, K over those dims, as linear forms.
+  const AffineMap maps[3] = {matmul.rowMap, matmul.columnMap,
+                             matmul.reductionMap};
+  SmallVector<std::optional<LinearForm>, 3> forms;
+  for (AffineMap map : maps) {
+    std::optional<LinearForm> form;
+    if (map && map.getNumDims() == dimIVs.size() &&
+        map.getNumSymbols() == 0 && map.getNumResults() == 1)
+      if (FailureOr<LinearForm> f =
+              extractLinearForm(map.getResult(0), dimIVs.size());
+          succeeded(f))
+        form = *f;
+    forms.push_back(form);
+  }
+  // The coefficient of loop s in coordinate d's map (0: not read).
+  auto coefficient = [&](int d, unsigned s) -> int64_t {
+    return forms[d] && dimOfLoop[s] >= 0
+               ? forms[d]->coefficients[dimOfLoop[s]]
+               : 0;
+  };
+  // The single coordinate whose map reads loop s, or -1.
+  auto coordinateOf = [&](unsigned s) {
+    int found = -1;
+    for (int d = 0; d < 3; ++d) {
+      if (coefficient(d, s) == 0)
+        continue;
+      if (found >= 0)
+        return -1;
+      found = d;
+    }
+    return found;
+  };
+
+  if (tiling)
+    for (LoopTilingStructure::Tiling &one : tiling->tilings) {
+      // The point loop drives the coordinate; the tile loop -- whose counter
+      // the normalization may have moved into the access -- drives no other.
+      const int d = coordinateOf(one.pointLoop);
+      const int byTile = coordinateOf(one.tileLoop);
+      bool tileElsewhere = false;
+      for (int e = 0; e < 3; ++e)
+        if (e != d && coefficient(e, one.tileLoop) != 0)
+          tileElsewhere = true;
+      one.coordinate = (byTile == -1 || byTile == d) && !tileElsewhere ? d : -1;
+    }
+
+  // Counter form: a coordinate map S * t + p + c0 over two box loops of step
+  // 1, p in [0, S), S >= 2 -- the dense mixed-radix numbering the
+  // recognizer merges (docs section 3): t numbers the tiles, p the points.
+  for (int d = 0; d < 3; ++d) {
+    if (!forms[d])
+      continue;
+    if (tiling && llvm::any_of(tiling->tilings,
+                               [&](const LoopTilingStructure::Tiling &one) {
+                                 return one.coordinate == d;
+                               }))
+      continue;
+    // Exactly two loops of the band read the coordinate, and nothing else
+    // (no loop outside the band) does.
+    SmallVector<unsigned, 2> loops;
+    for (unsigned s = 0; s < n; ++s)
+      if (coefficient(d, s) != 0)
+        loops.push_back(s);
+    unsigned readers = 0;
+    for (int64_t c : forms[d]->coefficients)
+      readers += c != 0;
+    if (loops.size() != 2 || readers != 2)
+      continue;
+    const unsigned p = coefficient(d, loops[0]) == 1 ? loops[0] : loops[1];
+    const unsigned t = p == loops[0] ? loops[1] : loops[0];
+    const int64_t size = coefficient(d, t);
+    if (coefficient(d, p) != 1 || size < 2)
+      continue;
+    auto box = [&](unsigned s, int64_t &lb, int64_t &ub) {
+      affine::AffineForOp loop = band[s];
+      if (!loop.hasConstantLowerBound() || !loop.hasConstantUpperBound() ||
+          loop.getStepAsInt() != 1)
+        return false;
+      lb = loop.getConstantLowerBound();
+      ub = loop.getConstantUpperBound();
+      return ub > lb;
+    };
+    int64_t lp = 0, up = 0, lt = 0, ut = 0;
+    if (!box(p, lp, up) || !box(t, lt, ut) || lp != 0 || up != size)
+      continue;
+    if (tiling && (tiling->roles[p] != Role::Plain ||
+                   tiling->roles[t] != Role::Plain))
+      continue;
+    std::optional<int64_t> low = llvm::checkedMul(size, lt);
+    std::optional<int64_t> high = llvm::checkedMul(size, ut);
+    if (low)
+      low = llvm::checkedAdd(*low, forms[d]->constant);
+    if (high)
+      high = llvm::checkedAdd(*high, forms[d]->constant);
+    if (!low || !high)
+      continue;
+    if (!tiling) {
+      tiling.emplace();
+      tiling->outermost = outer.getOperation();
+      tiling->roles.assign(n, Role::Plain);
+      tiling->loopCoordinate.assign(n, -1);
+    }
+    LoopTilingStructure::Tiling one;
+    one.tileLoop = t;
+    one.pointLoop = p;
+    one.tileSize = size;
+    one.form = LoopTilingStructure::Form::Counter;
+    one.lower = *low;
+    one.upper = *high;
+    one.lastTile = size;
+    one.coordinate = d;
+    tiling->roles[t] = Role::Tile;
+    tiling->roles[p] = Role::Point;
+    tiling->tilings.push_back(one);
+  }
+  if (tiling)
+    for (unsigned s = 0; s < n; ++s)
+      tiling->loopCoordinate[s] = coordinateOf(s);
+}

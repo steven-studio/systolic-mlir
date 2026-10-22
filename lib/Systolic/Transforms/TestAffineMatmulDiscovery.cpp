@@ -6,6 +6,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
@@ -207,6 +209,72 @@ struct TestAffineMatmulDiscoveryPass
     printConditions("role space", g->conditionsRoles);
   }
 
+  // The loop tiling the nest writes (docs section 26, S5.1): recorded, not a
+  // decision.
+  static void printLoopTiling(const LoopTilingStructure &tiling) {
+    using Role = LoopTilingStructure::LoopRole;
+    using Boundary = LoopTilingStructure::Boundary;
+    static const char *const kCoordinate[] = {"I", "J", "K"};
+    static const char *const kSize[] = {"TM", "TN", "TK"};
+    static const char *const kDimension[] = {"M", "N", "K"};
+    auto name = [](int d) -> StringRef { return d >= 0 ? kCoordinate[d] : "?"; };
+    llvm::errs() << "  loop tiling (as written; recorded, not a decision): "
+                 << tiling.tilings.size() << " tiled coordinate(s)\n";
+    llvm::errs() << "    loop order:";
+    for (auto [s, role] : llvm::enumerate(tiling.roles)) {
+      const LoopTilingStructure::Tiling *of = nullptr;
+      for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+        if (one.tileLoop == s || one.pointLoop == s)
+          of = &one;
+      const int coordinate = s < tiling.loopCoordinate.size()
+                                 ? tiling.loopCoordinate[s]
+                                 : -1;
+      llvm::errs() << " " << s << "=";
+      if (role == Role::Tile)
+        llvm::errs() << "tile(" << name(of->coordinate) << ")";
+      else if (role == Role::Point)
+        llvm::errs() << "point(" << name(of->coordinate) << ")";
+      else
+        llvm::errs() << "untiled(" << name(coordinate) << ")";
+    }
+    llvm::errs() << "\n";
+    SmallVector<StringRef, 3> tiled;
+    bool reduction = false;
+    for (const LoopTilingStructure::Tiling &one : tiling.tilings) {
+      const int d = one.coordinate;
+      llvm::errs() << "    " << name(d) << ": tile loop " << one.tileLoop
+                   << ", point loop " << one.pointLoop << ", "
+                   << (d >= 0 ? kSize[d] : "T?") << " = " << one.tileSize;
+      if (one.form == LoopTilingStructure::Form::Counter)
+        llvm::errs() << ", counter form (" << name(d) << " = "
+                     << one.tileSize << " * loop " << one.tileLoop
+                     << " + loop " << one.pointLoop << ")";
+      else
+        llvm::errs() << ", bounds form";
+      llvm::errs() << ", boundary "
+                   << (one.boundary == Boundary::Divisible   ? "divisible"
+                       : one.boundary == Boundary::MinClipped ? "min-clipped"
+                                                              : "unaligned")
+                   << " (last tile " << one.lastTile << "), " << name(d)
+                   << " in [" << one.lower << ", " << one.upper << ")\n";
+      if (d == 0 || d == 1)
+        tiled.push_back(kDimension[d]);
+      if (d == 2)
+        reduction = true;
+    }
+    llvm::sort(tiled);
+    llvm::errs() << "    tiled dimensions: ";
+    if (tiled.empty())
+      llvm::errs() << "none";
+    llvm::interleave(tiled, llvm::errs(), " ");
+    llvm::errs() << "; reduction tiling: " << (reduction ? "K" : "none")
+                 << "\n";
+    for (const std::string &why : tiling.rejected)
+      llvm::errs() << "    not a tiling: " << why << "\n";
+    llvm::errs() << "    coverage of the iteration space: not proven at "
+                    "this stage\n";
+  }
+
   static void printR8(AffineMatmulCandidate candidate,
                       ArrayRef<DomainNormalization> normalized) {
     llvm::errs() << "R8 structure (diagnostic, not a decision):\n";
@@ -337,6 +405,14 @@ struct TestAffineMatmulDiscoveryPass
   void runOnOperation() override {
     // The domain normalization the lowering pass applies first (docs
     // sections 19.7, 19.12), reported line by line.
+    // The loop tiling each nest writes, read before the normalization
+    // below rewrites a band's bounds (docs section 26, S5.1).
+    llvm::DenseMap<Operation *, LoopTilingStructure> writtenTiling;
+    getOperation()->walk([&](affine::AffineForOp loop) {
+      if (std::optional<LoopTilingStructure> tiling =
+              analyzeWrittenLoopTiling(loop))
+        writtenTiling.try_emplace(loop.getOperation(), std::move(*tiling));
+    });
     SmallVector<DomainNormalization, 1> normalized =
         normalizeParallelotopeDomains(getOperation().getOperation());
     if (!normalized.empty()) {
@@ -364,6 +440,8 @@ struct TestAffineMatmulDiscoveryPass
                  << "\n";
 
     SmallVector<LogicalMatmul, 1> logicalMatmuls;
+    SmallVector<Operation *> failedOutermost;
+    llvm::SmallPtrSet<Operation *, 4> claimed;
 
     for (AffineMatmulCandidate candidate : candidates) {
       if (geometry)
@@ -385,6 +463,11 @@ struct TestAffineMatmulDiscoveryPass
         llvm::errs() << "  reason: " << notRecognized << "\n";
         llvm::errs() << "  class: "
                      << stringifyGemmMappingClass(notRecognizedClass) << "\n";
+        // A nest's outermost loop: its tiling is reported at the end unless
+        // a GEMM recognized inside it claims it.
+        if (!isa_and_nonnull<affine::AffineForOp>(
+                candidate.anchor->getParentOp()))
+          failedOutermost.push_back(candidate.anchor);
         continue;
       }
 
@@ -396,8 +479,21 @@ struct TestAffineMatmulDiscoveryPass
         }
       }
 
-      if (!duplicate)
+      if (!duplicate) {
+        // The tiling of the outermost band around the anchor that has one
+        // (a Bounds tiling's GEMM may be recognized on its point band).
+        Operation *owner = nullptr;
+        for (Operation *op = candidate.anchor;
+             isa_and_nonnull<affine::AffineForOp>(op); op = op->getParentOp())
+          if (writtenTiling.count(op))
+            owner = op;
+        if (owner)
+          result->tiling = writtenTiling.find(owner)->second;
+        resolveLoopTiling(result->tiling, *result);
+        if (result->tiling)
+          claimed.insert(result->tiling->outermost);
         logicalMatmuls.push_back(*result);
+      }
     }
 
     llvm::errs() << "unique logical matmul count: "
@@ -693,6 +789,8 @@ struct TestAffineMatmulDiscoveryPass
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);
+      if (result.tiling)
+        printLoopTiling(*result.tiling);
 
       std::string notDense;
       GemmMappingClass notDenseClass = GemmMappingClass::ProvenValid;
@@ -848,6 +946,17 @@ struct TestAffineMatmulDiscoveryPass
                      << ") K[" << box.lower[2] << ", "
                      << box.lower[2] + box.extent[2] << ") on "
                      << fleet.symbols[boxDevice[i]] << "\n";
+    }
+
+    // The tilings of nests in which no GEMM was recognized (section 26).
+    for (Operation *outermost : failedOutermost) {
+      if (claimed.contains(outermost))
+        continue;
+      auto it = writtenTiling.find(outermost);
+      if (it == writtenTiling.end())
+        continue;
+      llvm::errs() << "loop tiling of a nest with no recognized GEMM:\n";
+      printLoopTiling(it->second);
     }
   }
 };

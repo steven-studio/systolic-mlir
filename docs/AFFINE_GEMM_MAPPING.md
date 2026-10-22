@@ -2700,3 +2700,41 @@ a K or other non-batch loop outside the output roles; non-box domains; nests who
 normalization rewrote (U != I); loops with non-constant trip counts.
 
 Tests: test/Systolic/affine_gemm_rank1.mlir, test/SystolicCC/affine_rank1.c.
+
+## 26. Loop tiling written by the program (2026-10-21, S5)
+
+S5 recognizes a loop tiling the program has ALREADY written; it does not tile. This section
+grows by stage; 26.1 is S5.1, which records and reports only: recognition, the mapping and the
+lowering are those of the nest without the record (sections 1-25), and the record is not used
+by the lowering pass.
+
+### 26.1 The tiling metadata (S5.1)
+
+`LoopTilingStructure` (AffineMatmulAnalysis.h), read from the bounds as written -- before the
+domain normalization of sections 19.12 and 19.13 rewrites a band -- by
+`analyzeWrittenLoopTiling`, completed against the recognized GEMM by `resolveLoopTiling`, and
+printed by `--test-affine-matmul-discovery` as "loop tiling (as written; recorded, not a
+decision)": per loop of the band its role (tile, point, untiled) and coordinate in the written
+order, and per tiled coordinate the tile loop, the point loop, the tile size (TM, TN, TK), the
+form, the boundary, the last tile and the values the point counter takes.
+
+Two forms:
+
+- Bounds form: `for (t = lt; t < ut; t += S) ... for (p = t + c; p < t + c + S; ++p)`, or with
+  `p < min(t + c + S, E)`. Required, each one checked: S >= 2; constant bounds of t; t's counter
+  read by nothing but both bounds of exactly one inner loop p; p of step 1, its counter bounding
+  no loop; p's lower bound the tile counter plus a constant c, its upper bound that plus exactly
+  S (a width other than the step is "not a tiling", with the reason), or the min of that and one
+  constant E inside the last tile (lastStart < E <= lastStart + S, lastStart = lt + (Q - 1) S + c,
+  Q = ceil((ut - lt) / S)). A step alone (`ii += 8`) proves nothing: the bounds relation decides.
+  Boundary: divisible (E = lastStart + S, or no min and S divides ut - lt), min-clipped
+  (E < lastStart + S: 17 = 8 + 8 + 1), unaligned (no min, the last tile runs past ut).
+- Counter form: two box loops of step 1 that one coordinate map combines as `S * t + p + c0`,
+  p in [0, S) (the dense numbering of section 3: `A[8 * i0 + i1]`).
+
+The coordinate a point loop drives is the one whose recognized map reads it (I, J or K); a nest
+without a recognized GEMM is reported with "?" -- its outermost loop's record is printed after
+the failure. Not proven here: that the tiles cover the iteration space exactly once, and
+anything about order or dependence (later stages).
+
+Test: test/Systolic/affine_gemm_tiling_recognition.mlir.

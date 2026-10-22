@@ -234,6 +234,51 @@ struct ExactMapping {
   bool rowsSwapped = false;
 };
 
+/// Loop tiling as written (docs/AFFINE_GEMM_MAPPING.md section 26, S5.1): the
+/// tile loops of a nest the program has already tiled, their point loops, the
+/// tile sizes and the loop order -- RECORDED from the bounds as the program
+/// writes them (before normalizeParallelotopeDomains rewrites a band), and
+/// reported by the discovery pass. Nothing is decided from it: recognition,
+/// the mapping and the lowering are those of the nest without this record,
+/// and that the tiles cover the iteration space exactly once is not proven
+/// here.
+struct LoopTilingStructure {
+  /// A loop's part in the tiling.
+  enum class LoopRole { Plain, Tile, Point };
+  /// How the program spells a tiling: a stepped tile loop whose counter only
+  /// bounds its point loop (for t += S: for p in [t + c, t + c + S), or in
+  /// [t + c, min(t + c + S, E))), or two box loops an access combines into one
+  /// coordinate (y = S * t + p + c0, p in [0, S)).
+  enum class Form { Bounds, Counter };
+  /// The last tile: the extent is a multiple of the tile size (Divisible),
+  /// the point loop's min clips the last tile (MinClipped), or, with no min,
+  /// the last tile runs past the tile loop's upper bound (Unaligned).
+  enum class Boundary { Divisible, MinClipped, Unaligned };
+  struct Tiling {
+    /// Band positions, outermost 0.
+    unsigned tileLoop = 0;
+    unsigned pointLoop = 0;
+    int64_t tileSize = 0;
+    Form form = Form::Bounds;
+    Boundary boundary = Boundary::Divisible;
+    /// The values the point counter (Bounds) or the coordinate (Counter)
+    /// takes as written, [lower, upper), and the size of the last tile.
+    int64_t lower = 0, upper = 0, lastTile = 0;
+    /// The logical coordinate the point loop drives (0 = I, 1 = J, 2 = K),
+    /// or -1: no recognized GEMM, or no single coordinate.
+    int coordinate = -1;
+  };
+  /// The band's outermost loop (the same op after the normalization).
+  Operation *outermost = nullptr;
+  /// One per loop of the band, outermost first: the written loop order.
+  SmallVector<LoopRole> roles;
+  /// Per loop, the logical coordinate its counter drives (-1: none known).
+  SmallVector<int> loopCoordinate;
+  SmallVector<Tiling> tilings;
+  /// Loops shaped like a tile loop that are not one, and why.
+  SmallVector<std::string> rejected;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
   Operation *outputStore = nullptr;
@@ -375,6 +420,10 @@ struct LogicalMatmul {
   SmallVector<Value> symbolsA;
   SmallVector<Value> symbolsB;
   SmallVector<Value> symbolsC;
+
+  // The loop tiling the program writes (section 26, S5.1), when the nest is
+  // tiled: recorded and reported, nothing is decided from it.
+  std::optional<LoopTilingStructure> tiling;
 };
 
 /// Find Affine loop nests worth attempting to recognize.
@@ -481,6 +530,25 @@ SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *roo
 /// (section 23: no integer basis transformation widens the recognition).
 bool countersRewritten(ArrayRef<DomainNormalization> normalized,
                        Operation *anchor);
+
+/// The Bounds-form loop tiling the perfect chain of loops from `outer` writes
+/// (section 26, S5.1): a tile loop of step S >= 2 and constant bounds whose
+/// counter nothing reads but both bounds of one inner loop of step 1, whose
+/// lower bound is the tile counter plus a constant c and whose upper bound is
+/// that plus S, or the min of that and one constant E falling in the last
+/// tile. nullopt when the chain writes no tiling and no loop shaped like one.
+/// Reads the bounds as written: call it before normalizeParallelotopeDomains.
+std::optional<LoopTilingStructure>
+analyzeWrittenLoopTiling(affine::AffineForOp outer);
+
+/// Completes `tiling` (possibly empty) against `matmul`, recognized in the
+/// band `tiling` records (or, with no record, the chain from its anchor --
+/// for a Bounds tiling the recognized chain may be the point band inside the
+/// record's band): the coordinate each loop drives, and the
+/// Counter-form tilings its coordinate maps state (I = S * i0 + i1 with
+/// i1 in [0, S)). `tiling` stays empty when the nest writes no tiling.
+void resolveLoopTiling(std::optional<LoopTilingStructure> &tiling,
+                       const LogicalMatmul &matmul);
 
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient
