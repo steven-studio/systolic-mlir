@@ -68,6 +68,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/IntegerSet.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Pass/Pass.h"
@@ -1110,13 +1112,52 @@ static bool mayRunTwice(affine::AffineForOp loop) {
   return !trips || *trips >= 2;
 }
 
+static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr,
+                                                  ValueRange operands = {},
+                                                  unsigned numDims = 0);
+
+/// The magnitude an operand of a map contributes once MLIR's dependence
+/// analysis composes it into the map: the value of an integer constant, the
+/// bound of an affine.apply's expression over its own operands, and 1 for
+/// any other value (a variable of the analysis). nullopt past 64 bits.
+static std::optional<uint64_t> operandMagnitude(Value value) {
+  APInt constant;
+  if (matchPattern(value, m_ConstantInt(&constant))) {
+    if (constant.getBitWidth() > 64)
+      return std::nullopt;
+    const int64_t v = constant.getSExtValue();
+    if (v == std::numeric_limits<int64_t>::min())
+      return std::nullopt;
+    return uint64_t(v < 0 ? -v : v);
+  }
+  if (auto apply = value.getDefiningOp<affine::AffineApplyOp>())
+    return flattenedMagnitude(apply.getAffineMap().getResult(0),
+                              apply.getMapOperands(),
+                              apply.getAffineMap().getNumDims());
+  return 1;
+}
+
 /// An upper bound on the magnitude of every coefficient and constant that
 /// flattening `expr` gives (sums add, a constant factor multiplies, a
 /// floordiv / ceildiv / mod adds a local with its divisor); nullopt past 64
-/// bits, and for INT64_MIN, whose negation does not fit.
-static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr) {
-  if (isa<AffineDimExpr, AffineSymbolExpr>(expr))
-    return 1;
+/// bits, and for INT64_MIN, whose negation does not fit. Without `operands`
+/// a dim or a symbol counts 1; with the map's operands (dims, then symbols)
+/// it counts what the dependence analysis substitutes for it
+/// (operandMagnitude).
+static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr,
+                                                  ValueRange operands,
+                                                  unsigned numDims) {
+  if (isa<AffineDimExpr, AffineSymbolExpr>(expr)) {
+    if (operands.empty())
+      return 1;
+    const unsigned position =
+        isa<AffineDimExpr>(expr)
+            ? cast<AffineDimExpr>(expr).getPosition()
+            : numDims + cast<AffineSymbolExpr>(expr).getPosition();
+    if (position >= operands.size())
+      return std::nullopt;
+    return operandMagnitude(operands[position]);
+  }
   if (auto constant = dyn_cast<AffineConstantExpr>(expr)) {
     const int64_t value = constant.getValue();
     if (value == std::numeric_limits<int64_t>::min())
@@ -1124,8 +1165,10 @@ static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr) {
     return uint64_t(value < 0 ? -value : value);
   }
   auto binary = cast<AffineBinaryOpExpr>(expr);
-  std::optional<uint64_t> lhs = flattenedMagnitude(binary.getLHS());
-  std::optional<uint64_t> rhs = flattenedMagnitude(binary.getRHS());
+  std::optional<uint64_t> lhs =
+      flattenedMagnitude(binary.getLHS(), operands, numDims);
+  std::optional<uint64_t> rhs =
+      flattenedMagnitude(binary.getRHS(), operands, numDims);
   if (!lhs || !rhs)
     return std::nullopt;
   if (expr.getKind() == AffineExprKind::Add)
@@ -1136,33 +1179,58 @@ static std::optional<uint64_t> flattenedMagnitude(AffineExpr expr) {
 }
 
 /// Whether MLIR's dependence analysis can decide the hoist of `band`: every
-/// bound map of the loops around the accesses (the band's and the enclosing
-/// ones') and every access map of the body flattens to coefficients and
-/// constants below 2^48 in magnitude. The analysis computes them, their
-/// negations and their sums in 64-bit integers, which wrap beyond that
-/// (review of 2026-10-19, round 4: with the lower bound max(-2^63, 0) it
-/// found no dependence between the iterations of i, j, k, t, so the hoist
-/// moved t out of the reduction loop; under strict floating point the nest
-/// was then refused, and its CPU code ran the accumulation permuted).
+/// input it builds its constraints from flattens to coefficients and
+/// constants below 2^48 in magnitude -- the bound maps of the affine.for and
+/// affine.parallel ops around the accesses (the band's and the enclosing
+/// ones), the conditions of the affine.if ops around them, and the access
+/// maps of the body, each with what the analysis composes into it: the
+/// values of constant operands and the expressions of affine.apply operands
+/// (operandMagnitude). The analysis computes them, their negations and their
+/// sums in 64-bit integers, which wrap beyond that (review of 2026-10-19,
+/// round 4: with the lower bound max(-2^63, 0) it found no dependence between
+/// the iterations of i, j, k, t, so the hoist moved t out of the reduction
+/// loop; under strict floating point the nest was then refused, and its CPU
+/// code ran the accumulation permuted; round 5: the same bound reached
+/// through a constant or affine.apply operand, an affine.parallel bound or an
+/// affine.if condition was not checked).
 static bool dependenceAnalysisFits(ArrayRef<affine::AffineForOp> band) {
   constexpr uint64_t kLimit = uint64_t(1) << 48;
-  auto fits = [&](AffineMap map) {
-    return llvm::all_of(map.getResults(), [&](AffineExpr result) {
-      std::optional<uint64_t> magnitude = flattenedMagnitude(result);
+  auto fits = [&](ArrayRef<AffineExpr> results, ValueRange operands,
+                  unsigned numDims) {
+    return llvm::all_of(results, [&](AffineExpr result) {
+      std::optional<uint64_t> magnitude =
+          flattenedMagnitude(result, operands, numDims);
       return magnitude && *magnitude < kLimit;
     });
   };
+  auto mapFits = [&](AffineMap map, ValueRange operands) {
+    return fits(map.getResults(), operands, map.getNumDims());
+  };
   affine::AffineForOp innermost = band.back();
-  for (Operation *op = innermost; op; op = op->getParentOp())
-    if (auto loop = dyn_cast<affine::AffineForOp>(op))
-      if (!fits(loop.getLowerBoundMap()) || !fits(loop.getUpperBoundMap()))
+  for (Operation *op = innermost; op; op = op->getParentOp()) {
+    if (auto loop = dyn_cast<affine::AffineForOp>(op)) {
+      if (!mapFits(loop.getLowerBoundMap(), loop.getLowerBoundOperands()) ||
+          !mapFits(loop.getUpperBoundMap(), loop.getUpperBoundOperands()))
         return false;
+    } else if (auto parallel = dyn_cast<affine::AffineParallelOp>(op)) {
+      if (!mapFits(parallel.getLowerBoundsMap(),
+                   parallel.getLowerBoundsOperands()) ||
+          !mapFits(parallel.getUpperBoundsMap(),
+                   parallel.getUpperBoundsOperands()))
+        return false;
+    } else if (auto branch = dyn_cast<affine::AffineIfOp>(op)) {
+      IntegerSet set = branch.getIntegerSet();
+      if (!fits(set.getConstraints(), branch.getOperands(),
+                set.getNumDims()))
+        return false;
+    }
+  }
   for (Operation &op : *innermost.getBody()) {
     if (auto load = dyn_cast<affine::AffineLoadOp>(op))
-      if (!fits(load.getAffineMap()))
+      if (!mapFits(load.getAffineMap(), load.getMapOperands()))
         return false;
     if (auto store = dyn_cast<affine::AffineStoreOp>(op))
-      if (!fits(store.getAffineMap()))
+      if (!mapFits(store.getAffineMap(), store.getMapOperands()))
         return false;
   }
   return true;
@@ -1205,10 +1273,15 @@ static bool dependenceAnalysisFits(ArrayRef<affine::AffineForOp> band) {
 /// affine::isValidLoopInterchangePermutation tests the same polyhedra for
 /// rational feasibility only, and refused legal hoists (a loop of step 2
 /// against a stride-3 placement: i - i' = 3 (l' - l) has rational but no
-/// integer solutions in the box).
-static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
-                                             ArrayRef<unsigned> repeating,
-                                             ArrayRef<unsigned> dimensions) {
+/// integer solutions in the box). nullopt when the analysis fails on a pair
+/// of accesses (a semi-affine subscript or bound, C[i * symbol(n) + j]): that
+/// is no proof of independence, so the hoist is not decided (review of
+/// 2026-10-19, round 5: a failure was read as "no dependence", and the
+/// accumulation into C was reordered).
+static std::optional<bool>
+hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
+                                 ArrayRef<unsigned> repeating,
+                                 ArrayRef<unsigned> dimensions) {
   SmallVector<Operation *> memOps;
   affine::AffineForOp innermost = band.back(), outermost = band.front();
   for (Operation &op : *innermost.getBody())
@@ -1234,6 +1307,8 @@ static bool hoistReordersDependentIterations(ArrayRef<affine::AffineForOp> band,
           affine::DependenceResult result = affine::checkMemrefAccessDependence(
               srcAccess, dstAccess, /*loopDepth=*/outer + s + 1, &dependence,
               /*dependenceComponents=*/nullptr, /*allowRAR=*/false);
+          if (result.value == affine::DependenceResult::Failure)
+            return std::nullopt;
           if (!affine::hasDependence(result))
             continue;
           // Rationally feasible: the exact question is whether an integer
@@ -1814,7 +1889,22 @@ static void hoistRepetitionLoops(ModuleOp module, bool assumeNoAlias,
                << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
       continue;
     }
-    if (hoistReordersDependentIterations(band, repeating, dimensions)) {
+    std::optional<bool> reordersDependent =
+        hoistReordersDependentIterations(band, repeating, dimensions);
+    if (!reordersDependent) {
+      auto remark =
+          root->emitRemark()
+          << "affine GEMM not lowered to systolic.matmul_tile: loop "
+          << repeating.back() << " of the nest repeats the accumulation "
+          << "inside it, and whether moving it outward reorders dependent "
+          << "iterations is not decided (the dependence analysis fails on "
+          << "an access or bound of the nest, e.g. a semi-affine subscript)";
+      if (classify)
+        remark << " ["
+               << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
+      continue;
+    }
+    if (*reordersDependent) {
       auto remark =
           root->emitRemark()
           << "affine GEMM not lowered to systolic.matmul_tile: loop "

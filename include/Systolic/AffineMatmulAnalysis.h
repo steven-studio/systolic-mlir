@@ -234,6 +234,97 @@ struct ExactMapping {
   bool rowsSwapped = false;
 };
 
+/// Loop tiling as written (docs/AFFINE_GEMM_MAPPING.md section 26, S5.1): the
+/// tile loops of a nest the program has already tiled, their point loops, the
+/// tile sizes and the loop order -- RECORDED from the bounds as the program
+/// writes them (before normalizeParallelotopeDomains rewrites a band), and
+/// reported by the discovery pass. Nothing is decided from it: recognition,
+/// the mapping and the lowering are those of the nest without this record,
+/// and that the tiles cover the iteration space exactly once is not proven
+/// here.
+struct LoopTilingStructure {
+  /// A loop's part in the tiling.
+  enum class LoopRole { Plain, Tile, Point };
+  /// How the program spells a tiling: a stepped tile loop whose counter only
+  /// bounds its point loop (for t += S: for p in [t + c, t + c + S), or in
+  /// [t + c, min(t + c + S, E))), or two box loops an access combines into one
+  /// coordinate (y = S * t + p + c0, p in [0, S)).
+  enum class Form { Bounds, Counter };
+  /// The last tile: the extent is a multiple of the tile size (Divisible),
+  /// the point loop's min clips the last tile (MinClipped), or, with no min,
+  /// the last tile runs past the tile loop's upper bound (Unaligned).
+  enum class Boundary { Divisible, MinClipped, Unaligned };
+  struct Tiling {
+    /// Band positions, outermost 0.
+    unsigned tileLoop = 0;
+    unsigned pointLoop = 0;
+    int64_t tileSize = 0;
+    Form form = Form::Bounds;
+    Boundary boundary = Boundary::Divisible;
+    /// The values the point counter (Bounds) or the coordinate (Counter)
+    /// takes as written, [lower, upper), and the size of the last tile.
+    int64_t lower = 0, upper = 0, lastTile = 0;
+    /// The logical coordinate the point loop drives (0 = I, 1 = J, 2 = K),
+    /// or -1: no recognized GEMM, or no single coordinate.
+    int coordinate = -1;
+    /// Bounds form: the point loop's lower bound is the tile counter plus
+    /// this constant; the tile counter's value at the last tile.
+    int64_t pointOffset = 0;
+    int64_t lastTileCounter = 0;
+    /// Bounds form: the values the point loop runs per tile as written, and
+    /// the constant of its min, if any.
+    int64_t width = 0;
+    std::optional<int64_t> clip;
+    /// The boundary tiles as proven by verifyLoopTilingCoverage (Bounds form):
+    /// which tile counter values run fewer than tileSize points.
+    std::string boundaryProof;
+    bool boundaryProven = false;
+  };
+  /// The exact coverage of the iteration space (section 26.2): proven with
+  /// the Presburger library on the band's exact iteration set as written --
+  /// every point of the logical box run by exactly one iteration, none
+  /// outside it -- or the counterexamples (lexicographically least points).
+  struct Coverage {
+    /// One logical dimension: the loop that runs it (a point loop, or an
+    /// untiled loop) and the values it takes, [lower, upper) in steps of step.
+    struct Dim {
+      unsigned loop = 0;
+      int coordinate = -1;
+      int64_t lower = 0, upper = 0, step = 1;
+    };
+    bool decided = false;
+    bool exact = false;
+    /// Why the proof did not run (decided false).
+    std::string note;
+    /// Counterexamples, when not exact.
+    std::optional<std::string> overlap, missing, outside;
+    /// The logical iteration space, in the written order of its loops.
+    SmallVector<Dim> dims;
+  };
+  /// The band's outermost loop (the same op after the normalization).
+  Operation *outermost = nullptr;
+  /// One per loop of the band, outermost first: the written loop order.
+  SmallVector<LoopRole> roles;
+  /// Per loop, the logical coordinate its counter drives (-1: none known).
+  SmallVector<int> loopCoordinate;
+  SmallVector<Tiling> tilings;
+  /// Loops shaped like a tile loop that are not one, and why.
+  SmallVector<std::string> rejected;
+  /// Of those, the pairings whose bounds have the tiling's shape but whose
+  /// numbers are not a tiling's (a point width other than the step, a min
+  /// outside the last tile): their intended range is [lower, upper) with the
+  /// tile step, and their coverage is decided with the tilings' (section
+  /// 26.2), so that an overlap or a hole is shown by a counterexample.
+  SmallVector<Tiling> candidates;
+  /// The band's exact iteration set over its counters as written (one local
+  /// per stepped loop), taken before any normalization; nullopt when it is
+  /// not available (exactIterationSet).
+  std::optional<presburger::IntegerPolyhedron> writtenDomain;
+  /// Each loop's constant bounds as written, when they are constants.
+  SmallVector<std::optional<std::pair<int64_t, int64_t>>> writtenRange;
+  Coverage coverage;
+};
+
 struct LogicalMatmul {
   Operation *anchor = nullptr;
   Operation *outputStore = nullptr;
@@ -375,6 +466,10 @@ struct LogicalMatmul {
   SmallVector<Value> symbolsA;
   SmallVector<Value> symbolsB;
   SmallVector<Value> symbolsC;
+
+  // The loop tiling the program writes (section 26, S5.1), when the nest is
+  // tiled: recorded and reported, nothing is decided from it.
+  std::optional<LoopTilingStructure> tiling;
 };
 
 /// Find Affine loop nests worth attempting to recognize.
@@ -482,6 +577,40 @@ SmallVector<DomainNormalization, 1> normalizeParallelotopeDomains(Operation *roo
 bool countersRewritten(ArrayRef<DomainNormalization> normalized,
                        Operation *anchor);
 
+/// The Bounds-form loop tiling the perfect chain of loops from `outer` writes
+/// (section 26, S5.1): a tile loop of step S >= 2 and constant bounds whose
+/// counter nothing reads but both bounds of one inner loop of step 1, whose
+/// lower bound is the tile counter plus a constant c and whose upper bound is
+/// that plus S, or the min of that and one constant E falling in the last
+/// tile. nullopt when the chain writes no tiling and no loop shaped like one.
+/// Reads the bounds as written: call it before normalizeParallelotopeDomains.
+std::optional<LoopTilingStructure>
+analyzeWrittenLoopTiling(affine::AffineForOp outer);
+
+/// Completes `tiling` (possibly empty) against `matmul`, recognized in the
+/// band `tiling` records (or, with no record, the chain from its anchor --
+/// for a Bounds tiling the recognized chain may be the point band inside the
+/// record's band): the coordinate each loop drives, and the
+/// Counter-form tilings its coordinate maps state (I = S * i0 + i1 with
+/// i1 in [0, S)). `tiling` stays empty when the nest writes no tiling.
+void resolveLoopTiling(std::optional<LoopTilingStructure> &tiling,
+                       const LogicalMatmul &matmul);
+
+/// Decides `tiling.coverage` exactly (section 26.2): on the band's exact
+/// iteration set D as written, with y(x) the logical point of iteration x
+/// (a Bounds tile counter dropped, a Counter pair combined as S * t + p, every
+/// other counter kept) and B the logical box (the pairings' ranges, the
+/// untiled loops' constant ranges and steps): no point of B run by no
+/// iteration (missing), no iteration outside B, and no two distinct
+/// iterations of D with one y (overlap). Integer-exact and without set
+/// differences: every claim is the emptiness (and the lexmin, for the least
+/// counterexample) of one conjunctive integer set -- overlap and outside over
+/// D itself, missing over each pairing's tiles on its line (D is the product
+/// of its pairings' sets and its untiled ranges). No sampling, no bound on the
+/// sizes but the 64-bit one of exactIterationSet. Also proves each Bounds
+/// tiling's partial tiles. Recognition, mapping and lowering are unchanged.
+void verifyLoopTilingCoverage(LoopTilingStructure &tiling);
+
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient
 /// per stepped loop), when it is the set the program runs: every bound
@@ -494,6 +623,33 @@ bool countersRewritten(ArrayRef<DomainNormalization> normalized,
 /// set is returned as such.
 std::optional<presburger::IntegerPolyhedron>
 exactIterationSet(ArrayRef<affine::AffineForOp> loops);
+
+/// Integer-exact a ⊆ b for two conjunctive integer sets of one space (no
+/// symbols), without the Presburger library's set difference -- unsound in
+/// the LLVM 24 build of this project when the sets carry two or more locals
+/// pinned by equalities, the stepped loops' quotients
+/// (docs/AFFINE_GEMM_MAPPING.md section 19.14). b's locals are removed
+/// exactly: a local that an equality pins (c q + L = 0, no other remaining
+/// local in L or |c| = 1) is eliminated -- q = -L / c, an integer iff |c|
+/// divides L,
+/// substituted into every other row with the positive scale |c| -- and every
+/// remaining local must be a floor division of the variables
+/// (d q <= L <= d q + d - 1, L over the variables), kept with its
+/// definition. b is then a system P over the variables and those divisions
+/// plus divisibility conditions, and a ⊆ b iff a meets no negated constraint
+/// of P and no negated divisibility (L = d u + r, 1 <= r < d): each one
+/// conjunctive set, decided by integer emptiness. nullopt when b has a local
+/// that is neither (undecided: the callers refuse). When false and `witness`
+/// is given, it receives a point of a that is not in b.
+std::optional<bool>
+exactIsSubset(const presburger::IntegerRelation &a,
+              const presburger::IntegerRelation &b,
+              SmallVectorImpl<llvm::DynamicAPInt> *witness = nullptr);
+
+/// a = b by both inclusions (exactIsSubset): false as soon as one is
+/// decided false, nullopt when neither is false and one is undecided.
+std::optional<bool> exactIsEqual(const presburger::IntegerRelation &a,
+                                 const presburger::IntegerRelation &b);
 
 /// A bound of `loop` that is a constant as the recognizer reads it: one
 /// constant result, or the max (a lower bound) / min (an upper bound) of

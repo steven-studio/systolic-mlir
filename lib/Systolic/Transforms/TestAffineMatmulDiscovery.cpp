@@ -6,7 +6,13 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
+#include "mlir/Analysis/Presburger/PresburgerRelation.h"
+
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <random>
 
 using namespace mlir;
 using namespace mlir::systolic;
@@ -92,6 +98,23 @@ struct TestAffineMatmulDiscoveryPass
                      "loop classes and Rule E (docs/AFFINE_GEMM_MAPPING.md "
                      "section 22: a diagnostic, not a decision)"),
       llvm::cl::init(false)};
+
+  // The exact set inclusion of docs section 19.14 on built-in sets -- the
+  // LLVM 24 counterexample among them -- and on random sets, each answer
+  // checked point by point (containsPoint) over a box that holds both sets.
+  Option<bool> exactSets{
+      *this, "exact-sets",
+      llvm::cl::desc("Run the exact set-inclusion self test (docs section "
+                     "19.14) instead of the discovery"),
+      llvm::cl::init(false)};
+  Option<unsigned> exactSetsRandom{
+      *this, "exact-sets-random",
+      llvm::cl::desc("With exact-sets: also this many random pairs of sets"),
+      llvm::cl::init(0)};
+  Option<unsigned> exactSetsSeed{
+      *this, "exact-sets-seed",
+      llvm::cl::desc("With exact-sets-random: the generator's seed"),
+      llvm::cl::init(1)};
 
   static void printVector(const lattice::IntVector &v) {
     llvm::errs() << "[";
@@ -205,6 +228,124 @@ struct TestAffineMatmulDiscoveryPass
         };
     printConditions("full space", g->conditionsFull);
     printConditions("role space", g->conditionsRoles);
+  }
+
+  // The loop tiling the nest writes (docs section 26, S5.1): recorded, not a
+  // decision.
+  static void printLoopTiling(const LoopTilingStructure &tiling) {
+    using Role = LoopTilingStructure::LoopRole;
+    using Boundary = LoopTilingStructure::Boundary;
+    static const char *const kCoordinate[] = {"I", "J", "K"};
+    static const char *const kSize[] = {"TM", "TN", "TK"};
+    static const char *const kDimension[] = {"M", "N", "K"};
+    auto name = [](int d) -> StringRef { return d >= 0 ? kCoordinate[d] : "?"; };
+    llvm::errs() << "  loop tiling (as written; recorded, not a decision): "
+                 << tiling.tilings.size() << " tiled coordinate(s)\n";
+    llvm::errs() << "    loop order:";
+    for (auto [s, role] : llvm::enumerate(tiling.roles)) {
+      const LoopTilingStructure::Tiling *of = nullptr;
+      for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+        if (one.tileLoop == s || one.pointLoop == s)
+          of = &one;
+      const int coordinate = s < tiling.loopCoordinate.size()
+                                 ? tiling.loopCoordinate[s]
+                                 : -1;
+      llvm::errs() << " " << s << "=";
+      if (role == Role::Tile)
+        llvm::errs() << "tile(" << name(of->coordinate) << ")";
+      else if (role == Role::Point)
+        llvm::errs() << "point(" << name(of->coordinate) << ")";
+      else
+        llvm::errs() << "untiled(" << name(coordinate) << ")";
+    }
+    llvm::errs() << "\n";
+    SmallVector<StringRef, 3> tiled;
+    bool reduction = false;
+    for (const LoopTilingStructure::Tiling &one : tiling.tilings) {
+      const int d = one.coordinate;
+      llvm::errs() << "    " << name(d) << ": tile loop " << one.tileLoop
+                   << ", point loop " << one.pointLoop << ", "
+                   << (d >= 0 ? kSize[d] : "T?") << " = " << one.tileSize;
+      if (one.form == LoopTilingStructure::Form::Counter)
+        llvm::errs() << ", counter form (" << name(d) << " = "
+                     << one.tileSize << " * loop " << one.tileLoop
+                     << " + loop " << one.pointLoop << ")";
+      else
+        llvm::errs() << ", bounds form";
+      llvm::errs() << ", boundary "
+                   << (one.boundary == Boundary::Divisible   ? "divisible"
+                       : one.boundary == Boundary::MinClipped ? "min-clipped"
+                                                              : "unaligned")
+                   << " (last tile " << one.lastTile << "), " << name(d)
+                   << " in [" << one.lower << ", " << one.upper << ")\n";
+      if (d == 0 || d == 1)
+        tiled.push_back(kDimension[d]);
+      if (d == 2)
+        reduction = true;
+    }
+    llvm::sort(tiled);
+    llvm::errs() << "    tiled dimensions: ";
+    if (tiled.empty())
+      llvm::errs() << "none";
+    llvm::interleave(tiled, llvm::errs(), " ");
+    llvm::errs() << "; reduction tiling: " << (reduction ? "K" : "none")
+                 << "\n";
+    for (const std::string &why : tiling.rejected)
+      llvm::errs() << "    not a tiling: " << why << "\n";
+    // The exact coverage (section 26.2).
+    const LoopTilingStructure::Coverage &coverage = tiling.coverage;
+    if (!coverage.decided) {
+      llvm::errs() << "    coverage: not decided (" << coverage.note << ")\n";
+      return;
+    }
+    auto space = [&](llvm::raw_ostream &os) {
+      for (auto [j, dim] : llvm::enumerate(coverage.dims)) {
+        os << (j ? " x " : "");
+        if (dim.coordinate >= 0)
+          os << kCoordinate[dim.coordinate];
+        else
+          os << "loop " << dim.loop;
+        os << " [" << dim.lower << ", " << dim.upper << ")";
+        if (dim.step != 1)
+          os << " step " << dim.step;
+      }
+    };
+    if (coverage.exact) {
+      llvm::errs() << "    coverage (exact, Presburger): every point of ";
+      space(llvm::errs());
+      llvm::errs() << " is run by exactly one iteration, none outside it\n";
+      // M x N x K when each coordinate is one dimension of step 1.
+      int64_t extent[3] = {0, 0, 0};
+      unsigned count[3] = {0, 0, 0};
+      bool dense = true;
+      for (const LoopTilingStructure::Coverage::Dim &dim : coverage.dims) {
+        if (dim.coordinate < 0 || dim.step != 1) {
+          dense = false;
+          continue;
+        }
+        extent[dim.coordinate] = dim.upper - dim.lower;
+        ++count[dim.coordinate];
+      }
+      if (dense && count[0] == 1 && count[1] == 1 && count[2] == 1)
+        llvm::errs() << "    logical iteration space: M x N x K = "
+                     << extent[0] << " x " << extent[1] << " x " << extent[2]
+                     << "\n";
+    } else {
+      llvm::errs() << "    coverage (exact, Presburger): NOT an exact cover "
+                      "of ";
+      space(llvm::errs());
+      llvm::errs() << "\n";
+      if (coverage.overlap)
+        llvm::errs() << "      overlap: " << *coverage.overlap << "\n";
+      if (coverage.missing)
+        llvm::errs() << "      missing: " << *coverage.missing << "\n";
+      if (coverage.outside)
+        llvm::errs() << "      outside: " << *coverage.outside << "\n";
+    }
+    for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+      if (!one.boundaryProof.empty())
+        llvm::errs() << "    boundary " << name(one.coordinate) << ": "
+                     << one.boundaryProof << "\n";
   }
 
   static void printR8(AffineMatmulCandidate candidate,
@@ -334,9 +475,253 @@ struct TestAffineMatmulDiscoveryPass
                  << yn(r->sharedLoops) << "\n";
   }
 
+  // Membership of a point of the variables, the locals searched exactly
+  // (containsPointNoLocal: an integer feasibility test, conjunctive).
+  static bool member(const presburger::IntegerRelation &set,
+                     ArrayRef<llvm::DynamicAPInt> point) {
+    return set.containsPointNoLocal(point).has_value();
+  }
+
+  // Brute force over the box [-R, R]^v: a ⊆ b iff every point of a in the
+  // box is in b. The sets used here lie inside the box.
+  static bool pointwiseSubset(const presburger::IntegerRelation &a,
+                              const presburger::IntegerRelation &b,
+                              unsigned vars, int64_t radius) {
+    SmallVector<int64_t> point(vars, -radius);
+    while (true) {
+      SmallVector<llvm::DynamicAPInt> p;
+      for (int64_t x : point)
+        p.push_back(llvm::DynamicAPInt(x));
+      if (member(a, p) && !member(b, p))
+        return false;
+      unsigned i = 0;
+      while (i < vars && point[i] == radius)
+        point[i++] = -radius;
+      if (i == vars)
+        return true;
+      ++point[i];
+    }
+  }
+
+  static const char *answer(std::optional<bool> r) {
+    return !r ? "undecided" : *r ? "yes" : "no";
+  }
+
+  void runExactSetSelfTest() {
+    using presburger::IntegerPolyhedron;
+    using presburger::PresburgerSet;
+    using presburger::PresburgerSpace;
+    unsigned failures = 0;
+    auto report = [&](StringRef name, const IntegerPolyhedron &a,
+                      const IntegerPolyhedron &b, int64_t radius) {
+      SmallVector<llvm::DynamicAPInt> witness;
+      std::optional<bool> exact = exactIsSubset(a, b, &witness);
+      const bool library = PresburgerSet(a).isSubsetOf(PresburgerSet(b));
+      const unsigned vars = a.getNumDimVars();
+      const bool truth = pointwiseSubset(a, b, vars, radius);
+      llvm::errs() << "exact-sets " << name << ": exact " << answer(exact)
+                   << ", by points " << (truth ? "yes" : "no")
+                   << ", library " << (library ? "yes" : "no");
+      if (exact && !*exact) {
+        const bool inA = member(a, witness);
+        const bool inB = member(b, witness);
+        llvm::errs() << ", witness (";
+        llvm::interleaveComma(witness, llvm::errs(),
+                              [](const llvm::DynamicAPInt &x) {
+                                llvm::errs() << int64_t(x);
+                              });
+        llvm::errs() << ") in a: " << (inA ? "yes" : "no")
+                     << ", in b: " << (inB ? "yes" : "no");
+        if (!inA || inB)
+          ++failures;
+      }
+      if (exact && *exact != truth)
+        ++failures;
+      llvm::errs() << "\n";
+    };
+
+    // The LLVM 24 counterexample (docs section 19.14): Y = { (y0, y1) :
+    // exists a, b, q1, q2 : a = 3 q1, 0 <= a <= 13, y1 = a, b = 4 q2,
+    // 0 <= b <= 7, b <= y0 <= b + 3 } -- two equality-pinned locals -- and
+    // B = [0, 7] x [0, 14]. (0, 1) is in B and not in Y.
+    IntegerPolyhedron y(PresburgerSpace::getSetSpace(2, 0, 4));
+    y.addEquality(SmallVector<int64_t>{0, 0, 1, 0, -3, 0, 0});
+    y.addEquality(SmallVector<int64_t>{0, 0, 0, 1, 0, -4, 0});
+    y.addInequality(SmallVector<int64_t>{0, 0, 1, 0, 0, 0, 0});
+    y.addInequality(SmallVector<int64_t>{0, 0, -1, 0, 0, 0, 13});
+    y.addInequality(SmallVector<int64_t>{0, 0, 0, 1, 0, 0, 0});
+    y.addInequality(SmallVector<int64_t>{0, 0, 0, -1, 0, 0, 7});
+    y.addEquality(SmallVector<int64_t>{0, 1, -1, 0, 0, 0, 0});
+    y.addInequality(SmallVector<int64_t>{1, 0, 0, -1, 0, 0, 0});
+    y.addInequality(SmallVector<int64_t>{-1, 0, 0, 1, 0, 0, 3});
+    IntegerPolyhedron box(PresburgerSpace::getSetSpace(2, 0, 0));
+    box.addInequality(SmallVector<int64_t>{1, 0, 0});
+    box.addInequality(SmallVector<int64_t>{-1, 0, 7});
+    box.addInequality(SmallVector<int64_t>{0, 1, 0});
+    box.addInequality(SmallVector<int64_t>{0, -1, 14});
+    report("box in two-stepped", box, y, 16);
+    report("two-stepped in box", y, box, 16);
+    // One stepped dimension (the library is right here).
+    IntegerPolyhedron one(PresburgerSpace::getSetSpace(2, 0, 2));
+    one.addEquality(SmallVector<int64_t>{0, 0, 1, -3, 0});
+    one.addInequality(SmallVector<int64_t>{0, 0, 1, 0, 0});
+    one.addInequality(SmallVector<int64_t>{0, 0, -1, 0, 13});
+    one.addEquality(SmallVector<int64_t>{0, 1, -1, 0, 0});
+    one.addInequality(SmallVector<int64_t>{1, 0, 0, 0, 0});
+    one.addInequality(SmallVector<int64_t>{-1, 0, 0, 0, 7});
+    report("box in one-stepped", box, one, 16);
+    // Y written without the hidden window: y1 = 3 q, 0 <= y1 <= 13,
+    // 0 <= y0 <= 7 -- the same set (both inclusions yes).
+    IntegerPolyhedron same(PresburgerSpace::getSetSpace(2, 0, 1));
+    same.addEquality(SmallVector<int64_t>{0, 1, -3, 0});
+    same.addInequality(SmallVector<int64_t>{0, 1, 0, 0});
+    same.addInequality(SmallVector<int64_t>{0, -1, 0, 13});
+    same.addInequality(SmallVector<int64_t>{1, 0, 0, 0});
+    same.addInequality(SmallVector<int64_t>{-1, 0, 0, 7});
+    report("two-stepped in its plain form", y, same, 16);
+    report("plain form in two-stepped", same, y, 16);
+    // A floor division kept as a local: { x in [0, 9] : x floordiv 2 <= 2 }
+    // = [0, 5].
+    IntegerPolyhedron division(PresburgerSpace::getSetSpace(1, 0, 1));
+    division.addInequality(SmallVector<int64_t>{1, -2, 0});      // x - 2q >= 0
+    division.addInequality(SmallVector<int64_t>{-1, 2, 1});      // 2q + 1 - x >= 0
+    division.addInequality(SmallVector<int64_t>{1, 0, 0});
+    division.addInequality(SmallVector<int64_t>{-1, 0, 9});
+    division.addInequality(SmallVector<int64_t>{0, -1, 2});      // q <= 2
+    IntegerPolyhedron upTo5(PresburgerSpace::getSetSpace(1, 0, 0));
+    upTo5.addInequality(SmallVector<int64_t>{1, 0});
+    upTo5.addInequality(SmallVector<int64_t>{-1, 5});
+    report("interval in floor-division set", upTo5, division, 12);
+    report("floor-division set in interval", division, upTo5, 12);
+    // An existential local that is neither pinned nor a division:
+    // { x : exists t : 2t <= x <= 2t + 5, 0 <= t <= 3 }: undecided.
+    IntegerPolyhedron window(PresburgerSpace::getSetSpace(1, 0, 1));
+    window.addInequality(SmallVector<int64_t>{1, -2, 0});
+    window.addInequality(SmallVector<int64_t>{-1, 2, 5});
+    window.addInequality(SmallVector<int64_t>{0, 1, 0});
+    window.addInequality(SmallVector<int64_t>{0, -1, 3});
+    report("interval in existential window", upTo5, window, 12);
+
+    // Random pairs: two dims in [-6, 6]; per set, up to three stepped
+    // constraints (x_i = c + s q, or a pinned combination of both dims) and
+    // random bounds, with locals pinned or floor divisions.
+    std::mt19937 rng(exactSetsSeed);
+    auto pick = [&](int lo, int hi) {
+      return std::uniform_int_distribution<int>(lo, hi)(rng);
+    };
+    unsigned agree = 0, undecided = 0, libraryWrong = 0;
+    for (unsigned n = 0; n < exactSetsRandom; ++n) {
+      IntegerPolyhedron sets[2] = {
+          IntegerPolyhedron(PresburgerSpace::getSetSpace(2, 0, 0)),
+          IntegerPolyhedron(PresburgerSpace::getSetSpace(2, 0, 0))};
+      for (IntegerPolyhedron &s : sets) {
+        for (unsigned d = 0; d < 2; ++d) { // a box inside [-6, 6]
+          int lo = pick(-6, 3), hi = pick(lo, 6);
+          SmallVector<int64_t> ge(3 + s.getNumLocalVars(), 0),
+              le(3 + s.getNumLocalVars(), 0);
+          ge[d] = 1;
+          ge.back() = -lo;
+          le[d] = -1;
+          le.back() = hi;
+          s.addInequality(ge);
+          s.addInequality(le);
+        }
+        const int locals = pick(0, 3);
+        for (int k = 0; k < locals; ++k) {
+          const unsigned q = s.appendVar(presburger::VarKind::Local);
+          SmallVector<int64_t> row(s.getNumCols(), 0);
+          row[0] = pick(-1, 1);
+          row[1] = pick(-1, 1);
+          if (row[0] == 0 && row[1] == 0)
+            row[0] = 1;
+          const int step = pick(2, 4);
+          row.back() = -pick(0, step - 1);
+          if (pick(0, 2) != 0) { // pinned: L - step q = 0
+            row[q] = -step;
+            s.addEquality(row);
+          } else if (pick(0, 1) == 0) {
+            // a hidden window (the counterexample's shape): w = step q,
+            // w in [lo, hi], w <= x_d <= w + width -- w a second local.
+            const unsigned w = s.appendVar(presburger::VarKind::Local);
+            SmallVector<int64_t> pinW(s.getNumCols(), 0);
+            pinW[w] = 1;
+            pinW[q] = -step; // w - step q = 0
+            s.addEquality(pinW);
+            const unsigned d = pick(0, 1);
+            const int width = pick(0, step);
+            SmallVector<int64_t> atLeast(s.getNumCols(), 0),
+                atMost(s.getNumCols(), 0), wLow(s.getNumCols(), 0),
+                wHigh(s.getNumCols(), 0);
+            atLeast[d] = 1; // x_d - w >= 0
+            atLeast[w] = -1;
+            atMost[d] = -1; // w + width - x_d >= 0
+            atMost[w] = 1;
+            atMost.back() = width;
+            wLow[w] = 1; // w >= lo
+            wLow.back() = -pick(-6, 0);
+            wHigh[w] = -1; // w <= hi
+            wHigh.back() = pick(0, 6);
+            s.addInequality(atLeast);
+            s.addInequality(atMost);
+            s.addInequality(wLow);
+            s.addInequality(wHigh);
+          } else { // a floor division q = L floordiv step, bounded
+            SmallVector<int64_t> lo = row, hi(s.getNumCols(), 0);
+            lo[q] = -step;
+            for (unsigned col = 0; col < s.getNumCols(); ++col)
+              hi[col] = -lo[col];
+            hi.back() += step - 1;
+            s.addInequality(lo);
+            s.addInequality(hi);
+            SmallVector<int64_t> cap(s.getNumCols(), 0);
+            cap[q] = pick(0, 1) ? 1 : -1;
+            cap.back() = pick(-1, 2);
+            s.addInequality(cap);
+          }
+        }
+      }
+      SmallVector<llvm::DynamicAPInt> witness;
+      std::optional<bool> exact = exactIsSubset(sets[0], sets[1], &witness);
+      const bool truth = pointwiseSubset(sets[0], sets[1], 2, 6);
+      libraryWrong +=
+          PresburgerSet(sets[0]).isSubsetOf(PresburgerSet(sets[1])) != truth;
+      if (!exact) {
+        ++undecided;
+        continue;
+      }
+      bool good = *exact == truth;
+      if (good && !*exact)
+        good = member(sets[0], witness) && !member(sets[1], witness);
+      if (good)
+        ++agree;
+      else
+        ++failures;
+    }
+    if (exactSetsRandom)
+      llvm::errs() << "exact-sets random: " << agree << " agree with the "
+                   << "points, " << undecided << " undecided, "
+                   << (exactSetsRandom - agree - undecided)
+                   << " wrong, of " << exactSetsRandom
+                   << " (the library's isSubsetOf wrong on " << libraryWrong
+                   << ")\n";
+    llvm::errs() << "exact-sets failures: " << failures << "\n";
+  }
+
   void runOnOperation() override {
+    if (exactSets) {
+      runExactSetSelfTest();
+      return;
+    }
     // The domain normalization the lowering pass applies first (docs
     // sections 19.7, 19.12), reported line by line.
+    // The loop tiling each nest writes, read before the normalization
+    // below rewrites a band's bounds (docs section 26, S5.1).
+    llvm::DenseMap<Operation *, LoopTilingStructure> writtenTiling;
+    getOperation()->walk([&](affine::AffineForOp loop) {
+      if (std::optional<LoopTilingStructure> tiling =
+              analyzeWrittenLoopTiling(loop))
+        writtenTiling.try_emplace(loop.getOperation(), std::move(*tiling));
+    });
     SmallVector<DomainNormalization, 1> normalized =
         normalizeParallelotopeDomains(getOperation().getOperation());
     if (!normalized.empty()) {
@@ -364,6 +749,8 @@ struct TestAffineMatmulDiscoveryPass
                  << "\n";
 
     SmallVector<LogicalMatmul, 1> logicalMatmuls;
+    SmallVector<Operation *> failedOutermost;
+    llvm::SmallPtrSet<Operation *, 4> claimed;
 
     for (AffineMatmulCandidate candidate : candidates) {
       if (geometry)
@@ -385,6 +772,11 @@ struct TestAffineMatmulDiscoveryPass
         llvm::errs() << "  reason: " << notRecognized << "\n";
         llvm::errs() << "  class: "
                      << stringifyGemmMappingClass(notRecognizedClass) << "\n";
+        // A nest's outermost loop: its tiling is reported at the end unless
+        // a GEMM recognized inside it claims it.
+        if (!isa_and_nonnull<affine::AffineForOp>(
+                candidate.anchor->getParentOp()))
+          failedOutermost.push_back(candidate.anchor);
         continue;
       }
 
@@ -396,8 +788,23 @@ struct TestAffineMatmulDiscoveryPass
         }
       }
 
-      if (!duplicate)
+      if (!duplicate) {
+        // The tiling of the outermost band around the anchor that has one
+        // (a Bounds tiling's GEMM may be recognized on its point band).
+        Operation *owner = nullptr;
+        for (Operation *op = candidate.anchor;
+             isa_and_nonnull<affine::AffineForOp>(op); op = op->getParentOp())
+          if (writtenTiling.count(op))
+            owner = op;
+        if (owner)
+          result->tiling = writtenTiling.find(owner)->second;
+        resolveLoopTiling(result->tiling, *result);
+        if (result->tiling) {
+          verifyLoopTilingCoverage(*result->tiling);
+          claimed.insert(result->tiling->outermost);
+        }
         logicalMatmuls.push_back(*result);
+      }
     }
 
     llvm::errs() << "unique logical matmul count: "
@@ -693,6 +1100,8 @@ struct TestAffineMatmulDiscoveryPass
       printLogicalExtent("row", result.rowExtent);
       printLogicalExtent("column", result.columnExtent);
       printLogicalExtent("reduction", result.reductionExtent);
+      if (result.tiling)
+        printLoopTiling(*result.tiling);
 
       std::string notDense;
       GemmMappingClass notDenseClass = GemmMappingClass::ProvenValid;
@@ -848,6 +1257,18 @@ struct TestAffineMatmulDiscoveryPass
                      << ") K[" << box.lower[2] << ", "
                      << box.lower[2] + box.extent[2] << ") on "
                      << fleet.symbols[boxDevice[i]] << "\n";
+    }
+
+    // The tilings of nests in which no GEMM was recognized (section 26).
+    for (Operation *outermost : failedOutermost) {
+      if (claimed.contains(outermost))
+        continue;
+      auto it = writtenTiling.find(outermost);
+      if (it == writtenTiling.end())
+        continue;
+      llvm::errs() << "loop tiling of a nest with no recognized GEMM:\n";
+      verifyLoopTilingCoverage(it->second);
+      printLoopTiling(it->second);
     }
   }
 };

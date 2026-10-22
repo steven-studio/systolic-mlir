@@ -5110,6 +5110,15 @@ findExactParallelotope(ArrayRef<affine::AffineForOp> band) {
     if (!accepted)
       return std::nullopt;
   }
+  // Each level's choice above is confirmed by the Presburger library's
+  // equality, which is not trusted with the decision: in the LLVM 24 build
+  // its set difference is unsound with two or more equality-pinned locals --
+  // the stepped loops' quotients (docs section 19.14). The whole band is
+  // decided here, exactly, both inclusions: undecided or unequal, the band
+  // is not normalized.
+  std::optional<bool> same = exactIsEqual(prefix, domain);
+  if (!same || !*same)
+    return std::nullopt;
   return found;
 }
 
@@ -5515,4 +5524,1034 @@ mlir::systolic::normalizeParallelotopeDomains(Operation *root) {
     }
   }
   return applied;
+}
+
+//===----------------------------------------------------------------------===//
+// Loop tiling as written (docs/AFFINE_GEMM_MAPPING.md section 26, S5.1)
+//===----------------------------------------------------------------------===//
+
+std::optional<LoopTilingStructure>
+mlir::systolic::analyzeWrittenLoopTiling(affine::AffineForOp outer) {
+  using Role = LoopTilingStructure::LoopRole;
+  using Boundary = LoopTilingStructure::Boundary;
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, outer);
+  const unsigned n = band.size();
+  LoopTilingStructure tiling;
+  tiling.outermost = outer.getOperation();
+  tiling.roles.assign(n, Role::Plain);
+  tiling.loopCoordinate.assign(n, -1);
+  for (affine::AffineForOp loop : band)
+    tiling.writtenRange.push_back(
+        loop.hasConstantLowerBound() && loop.hasConstantUpperBound()
+            ? std::optional<std::pair<int64_t, int64_t>>(
+                  {loop.getConstantLowerBound(), loop.getConstantUpperBound()})
+            : std::nullopt);
+
+  // Where each counter is used: by the lower or upper bound of a loop of the
+  // band, or by anything else (an access, an affine.apply, ...).
+  struct Uses {
+    bool other = false;
+    SmallVector<unsigned, 1> lowerOf, upperOf;
+  };
+  SmallVector<Uses> uses(n);
+  for (unsigned s = 0; s < n; ++s) {
+    for (OpOperand &use : band[s].getInductionVar().getUses()) {
+      std::optional<unsigned> q;
+      for (unsigned t = 0; t < n; ++t)
+        if (band[t].getOperation() == use.getOwner())
+          q = t;
+      if (!q) {
+        uses[s].other = true;
+        continue;
+      }
+      // An affine.for's operands: its lower bound's, its upper bound's, then
+      // its iteration arguments.
+      const unsigned index = use.getOperandNumber();
+      const unsigned numLower = band[*q].getLowerBoundOperands().size();
+      const unsigned numUpper = band[*q].getUpperBoundOperands().size();
+      SmallVector<unsigned, 1> *of = index < numLower ? &uses[s].lowerOf
+                                     : index < numLower + numUpper
+                                         ? &uses[s].upperOf
+                                         : nullptr;
+      if (!of)
+        uses[s].other = true;
+      else if (!llvm::is_contained(*of, *q))
+        of->push_back(*q);
+    }
+  }
+
+  auto reject = [&](unsigned s, const llvm::Twine &why) {
+    tiling.rejected.push_back(("loop " + llvm::Twine(s) + ": " + why).str());
+  };
+  // The tile counter alone, plus a constant (the point loop's bounds).
+  auto onlyTile = [&](const BandForm &form, unsigned t) {
+    for (unsigned s = 0; s < n; ++s)
+      if (form.coefficients[s] != (s == t ? 1 : 0))
+        return false;
+    return true;
+  };
+  auto constantForm = [](const BandForm &form) {
+    return llvm::all_of(form.coefficients, [](int64_t c) { return c == 0; });
+  };
+
+  //   for (t = lt; t < ut; t += S)
+  //     for (p = t + c; p < t + c + S [or min(t + c + S, E)]; ++p)
+  // The tiles are [lt + q S + c, lt + (q + 1) S + c), q = 0 .. Q - 1, with
+  // Q = ceil((ut - lt) / S); E must clip the last one and no other.
+  for (unsigned t = 0; t < n; ++t) {
+    affine::AffineForOp tile = band[t];
+    const int64_t step = tile.getStepAsInt();
+    const Uses &u = uses[t];
+    if (step < 2 || (u.lowerOf.empty() && u.upperOf.empty()))
+      continue; // not shaped like a tile loop
+    if (u.other) {
+      reject(t, "its counter is read by an access or another operation as "
+                "well as by a loop bound");
+      continue;
+    }
+    if (u.lowerOf.size() != 1 || u.upperOf != u.lowerOf) {
+      reject(t, "its counter bounds more than one loop, or one end of a loop "
+                "only");
+      continue;
+    }
+    const unsigned p = u.lowerOf.front();
+    affine::AffineForOp point = band[p];
+    if (!tile.hasConstantLowerBound() || !tile.hasConstantUpperBound()) {
+      reject(t, "its bounds are not constants");
+      continue;
+    }
+    const int64_t lt = tile.getConstantLowerBound();
+    const int64_t ut = tile.getConstantUpperBound();
+    if (ut <= lt) {
+      reject(t, "it runs no iteration");
+      continue;
+    }
+    if (point.getStepAsInt() != 1) {
+      reject(t, "its point loop " + llvm::Twine(p) +
+                    " has a step other than 1");
+      continue;
+    }
+    if (!uses[p].lowerOf.empty() || !uses[p].upperOf.empty() ||
+        tiling.roles[p] != Role::Plain) {
+      reject(t, "the counter of its point loop " + llvm::Twine(p) +
+                    " bounds another loop, or that loop is tiled already");
+      continue;
+    }
+    std::optional<SmallVector<BandForm>> lower =
+        bandBoundResults(point, /*lower=*/true, band, p);
+    std::optional<SmallVector<BandForm>> upper =
+        bandBoundResults(point, /*lower=*/false, band, p);
+    if (!lower || lower->size() != 1 || !onlyTile(lower->front(), t)) {
+      reject(t, "the lower bound of its point loop " + llvm::Twine(p) +
+                    " is not the tile counter plus a constant");
+      continue;
+    }
+    const int64_t c = lower->front().constant;
+    std::optional<int64_t> width, clip;
+    bool unexpected = !upper || upper->empty() || upper->size() > 2;
+    if (!unexpected)
+      for (const BandForm &form : *upper) {
+        if (onlyTile(form, t) && !width)
+          width = llvm::checkedSub(form.constant, c);
+        else if (constantForm(form) && !clip)
+          clip = form.constant;
+        else
+          unexpected = true;
+      }
+    if (unexpected || !width) {
+      reject(t, "the upper bound of its point loop " + llvm::Twine(p) +
+                    " is not the tile counter plus a constant, or the min of "
+                    "that and one constant");
+      continue;
+    }
+    std::optional<int64_t> span = llvm::checkedSub(ut, lt);
+    std::optional<int64_t> first = llvm::checkedAdd(lt, c);
+    std::optional<int64_t> lastStart, end;
+    if (span) {
+      const int64_t count = (*span - 1) / step + 1;
+      if (std::optional<int64_t> offset = llvm::checkedMul(count - 1, step))
+        if (first)
+          lastStart = llvm::checkedAdd(*first, *offset);
+    }
+    if (lastStart)
+      end = llvm::checkedAdd(*lastStart, step);
+    if (!first || !end) {
+      reject(t, "its tiles do not fit in 64 bits");
+      continue;
+    }
+    LoopTilingStructure::Tiling one;
+    one.tileLoop = t;
+    one.pointLoop = p;
+    one.tileSize = step;
+    one.lower = *first;
+    one.pointOffset = c;
+    one.lastTileCounter = *lastStart - c;
+    one.width = *width;
+    one.clip = clip;
+    // Shaped like a tiling, numbers not a tiling's: a candidate pairing, its
+    // intended range [first, E) with the min's bound E, else [first, end)
+    // with the tiles at the tile step (section 26.2).
+    auto candidate = [&]() {
+      one.upper = clip ? *clip : *end;
+      one.lastTile = 0;
+      tiling.candidates.push_back(one);
+    };
+    if (*width != step) {
+      reject(t, "its point loop " + llvm::Twine(p) + " runs " +
+                    llvm::Twine(*width) + " values per tile, not the tile "
+                    "step " + llvm::Twine(step));
+      candidate();
+      continue;
+    }
+    if (!clip) {
+      one.upper = *end;
+      one.lastTile = step;
+      one.boundary = *span % step == 0 ? Boundary::Divisible
+                                       : Boundary::Unaligned;
+    } else {
+      if (*clip <= *lastStart || *clip > *end) {
+        reject(t, "the min of its point loop " + llvm::Twine(p) +
+                      " clips at " + llvm::Twine(*clip) +
+                      ", outside the last tile [" + llvm::Twine(*lastStart) +
+                      ", " + llvm::Twine(*end) + ")");
+        candidate();
+        continue;
+      }
+      one.upper = *clip;
+      one.lastTile = *clip - *lastStart;
+      one.boundary =
+          *clip == *end ? Boundary::Divisible : Boundary::MinClipped;
+    }
+    tiling.roles[t] = Role::Tile;
+    tiling.roles[p] = Role::Point;
+    tiling.tilings.push_back(one);
+  }
+  if (tiling.tilings.empty() && tiling.rejected.empty())
+    return std::nullopt;
+  tiling.writtenDomain = exactIterationSet(band);
+  return tiling;
+}
+
+void mlir::systolic::resolveLoopTiling(
+    std::optional<LoopTilingStructure> &tiling, const LogicalMatmul &matmul) {
+  using Role = LoopTilingStructure::LoopRole;
+  auto outer = dyn_cast_or_null<affine::AffineForOp>(
+      tiling ? tiling->outermost : matmul.anchor);
+  if (!outer || !matmul.outputStore)
+    return;
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, outer);
+  const unsigned n = band.size();
+  // The record must be of a band around the GEMM's store.
+  if (tiling && (tiling->roles.size() != n ||
+                 !band.back()->isAncestor(matmul.outputStore))) {
+    tiling.reset();
+    return;
+  }
+
+  // The maps' dims: the loops around the GEMM's store, outermost first, whose
+  // counters an access of its body reads (the recognizer's iteration
+  // counters; a tile loop of the Bounds form, read by bounds only, is none).
+  SmallVector<Value> dimIVs;
+  if (Operation *store = matmul.outputStore) {
+    SmallVector<affine::AffineForOp> enclosing;
+    for (Operation *op = store->getParentOp(); op; op = op->getParentOp())
+      if (auto loop = dyn_cast<affine::AffineForOp>(op))
+        enclosing.push_back(loop);
+    std::reverse(enclosing.begin(), enclosing.end());
+    for (affine::AffineForOp loop : enclosing) {
+      Value iv = loop.getInductionVar();
+      if (llvm::any_of(iv.getUsers(), [&](Operation *user) {
+            return user->getBlock() == store->getBlock() &&
+                   isa<affine::AffineLoadOp, affine::AffineStoreOp>(user);
+          }))
+        dimIVs.push_back(iv);
+    }
+  }
+  SmallVector<int> dimOfLoop(n, -1);
+  for (unsigned s = 0; s < n; ++s)
+    if (auto it = llvm::find(dimIVs, band[s].getInductionVar());
+        it != dimIVs.end())
+      dimOfLoop[s] = std::distance(dimIVs.begin(), it);
+
+  // The coordinate maps I, J, K over those dims, as linear forms.
+  const AffineMap maps[3] = {matmul.rowMap, matmul.columnMap,
+                             matmul.reductionMap};
+  SmallVector<std::optional<LinearForm>, 3> forms;
+  for (AffineMap map : maps) {
+    std::optional<LinearForm> form;
+    if (map && map.getNumDims() == dimIVs.size() &&
+        map.getNumSymbols() == 0 && map.getNumResults() == 1)
+      if (FailureOr<LinearForm> f =
+              extractLinearForm(map.getResult(0), dimIVs.size());
+          succeeded(f))
+        form = *f;
+    forms.push_back(form);
+  }
+  // The coefficient of loop s in coordinate d's map (0: not read).
+  auto coefficient = [&](int d, unsigned s) -> int64_t {
+    return forms[d] && dimOfLoop[s] >= 0
+               ? forms[d]->coefficients[dimOfLoop[s]]
+               : 0;
+  };
+  // The single coordinate whose map reads loop s, or -1.
+  auto coordinateOf = [&](unsigned s) {
+    int found = -1;
+    for (int d = 0; d < 3; ++d) {
+      if (coefficient(d, s) == 0)
+        continue;
+      if (found >= 0)
+        return -1;
+      found = d;
+    }
+    return found;
+  };
+
+  if (tiling)
+    for (LoopTilingStructure::Tiling &one : tiling->tilings) {
+      // The point loop drives the coordinate; the tile loop -- whose counter
+      // the normalization may have moved into the access -- drives no other.
+      const int d = coordinateOf(one.pointLoop);
+      const int byTile = coordinateOf(one.tileLoop);
+      bool tileElsewhere = false;
+      for (int e = 0; e < 3; ++e)
+        if (e != d && coefficient(e, one.tileLoop) != 0)
+          tileElsewhere = true;
+      one.coordinate = (byTile == -1 || byTile == d) && !tileElsewhere ? d : -1;
+    }
+
+  // Counter form: a coordinate map S * t + p + c0 over two box loops of step
+  // 1, p in [0, S), S >= 2 -- the dense mixed-radix numbering the
+  // recognizer merges (docs section 3): t numbers the tiles, p the points.
+  for (int d = 0; d < 3; ++d) {
+    if (!forms[d])
+      continue;
+    if (tiling && llvm::any_of(tiling->tilings,
+                               [&](const LoopTilingStructure::Tiling &one) {
+                                 return one.coordinate == d;
+                               }))
+      continue;
+    // Exactly two loops of the band read the coordinate, and nothing else
+    // (no loop outside the band) does.
+    SmallVector<unsigned, 2> loops;
+    for (unsigned s = 0; s < n; ++s)
+      if (coefficient(d, s) != 0)
+        loops.push_back(s);
+    unsigned readers = 0;
+    for (int64_t c : forms[d]->coefficients)
+      readers += c != 0;
+    if (loops.size() != 2 || readers != 2)
+      continue;
+    const unsigned p = coefficient(d, loops[0]) == 1 ? loops[0] : loops[1];
+    const unsigned t = p == loops[0] ? loops[1] : loops[0];
+    const int64_t size = coefficient(d, t);
+    if (coefficient(d, p) != 1 || size < 2)
+      continue;
+    auto box = [&](unsigned s, int64_t &lb, int64_t &ub) {
+      affine::AffineForOp loop = band[s];
+      if (!loop.hasConstantLowerBound() || !loop.hasConstantUpperBound() ||
+          loop.getStepAsInt() != 1)
+        return false;
+      lb = loop.getConstantLowerBound();
+      ub = loop.getConstantUpperBound();
+      return ub > lb;
+    };
+    int64_t lp = 0, up = 0, lt = 0, ut = 0;
+    if (!box(p, lp, up) || !box(t, lt, ut) || lp != 0 || up != size)
+      continue;
+    if (tiling && (tiling->roles[p] != Role::Plain ||
+                   tiling->roles[t] != Role::Plain))
+      continue;
+    std::optional<int64_t> low = llvm::checkedMul(size, lt);
+    std::optional<int64_t> high = llvm::checkedMul(size, ut);
+    if (low)
+      low = llvm::checkedAdd(*low, forms[d]->constant);
+    if (high)
+      high = llvm::checkedAdd(*high, forms[d]->constant);
+    if (!low || !high)
+      continue;
+    if (!tiling) {
+      tiling.emplace();
+      tiling->outermost = outer.getOperation();
+      tiling->roles.assign(n, Role::Plain);
+      tiling->loopCoordinate.assign(n, -1);
+      for (affine::AffineForOp loop : band)
+        tiling->writtenRange.push_back(
+            loop.hasConstantLowerBound() && loop.hasConstantUpperBound()
+                ? std::optional<std::pair<int64_t, int64_t>>(
+                      {loop.getConstantLowerBound(),
+                       loop.getConstantUpperBound()})
+                : std::nullopt);
+      tiling->writtenDomain = exactIterationSet(band);
+    }
+    LoopTilingStructure::Tiling one;
+    one.tileLoop = t;
+    one.pointLoop = p;
+    one.tileSize = size;
+    one.form = LoopTilingStructure::Form::Counter;
+    one.lower = *low;
+    one.upper = *high;
+    one.lastTile = size;
+    one.coordinate = d;
+    tiling->roles[t] = Role::Tile;
+    tiling->roles[p] = Role::Point;
+    tiling->tilings.push_back(one);
+  }
+  if (tiling)
+    for (unsigned s = 0; s < n; ++s)
+      tiling->loopCoordinate[s] = coordinateOf(s);
+}
+
+namespace {
+
+/// Copies the constraints of `d` (dims, then locals) into `into`, with d's
+/// dims at column `dimAt` and d's locals at column `localAt` of `into`.
+void copyConstraints(const presburger::IntegerPolyhedron &d,
+                     presburger::IntegerPolyhedron &into, unsigned dimAt,
+                     unsigned localAt) {
+  const unsigned n = d.getNumDimVars(), l = d.getNumLocalVars();
+  const unsigned width = into.getNumVars() + 1;
+  auto place = [&](ArrayRef<llvm::DynamicAPInt> row) {
+    SmallVector<llvm::DynamicAPInt> out(width, llvm::DynamicAPInt(0));
+    for (unsigned i = 0; i < n; ++i)
+      out[dimAt + i] = row[i];
+    for (unsigned i = 0; i < l; ++i)
+      out[localAt + i] = row[n + i];
+    out.back() = row[n + l];
+    return out;
+  };
+  for (unsigned r = 0, e = d.getNumInequalities(); r < e; ++r)
+    into.addInequality(place(d.getInequality(r)));
+  for (unsigned r = 0, e = d.getNumEqualities(); r < e; ++r)
+    into.addEquality(place(d.getEquality(r)));
+}
+
+/// The lexicographically least integer point of one conjunctive set (its
+/// dims; locals last, not returned), or nullopt when it is empty. Exact.
+std::optional<SmallVector<int64_t>>
+lexMinOf(const presburger::IntegerPolyhedron &set) {
+  auto lexMin = set.findIntegerLexMin();
+  if (!lexMin.isBounded())
+    return std::nullopt;
+  SmallVector<int64_t> point;
+  for (const llvm::DynamicAPInt &v : *lexMin)
+    point.push_back(static_cast<int64_t>(v));
+  return point;
+}
+
+/// One pairing's tiles on its logical line: [s_q, e_q) with
+/// s_q = first + q * step, e_q = min(s_q + width, clip), q = 0 .. count - 1.
+struct LineTiles {
+  int64_t first = 0, step = 1, width = 1, count = 0;
+  std::optional<int64_t> clip;
+  int64_t lower = 0, upper = 0; // the intended range
+};
+
+/// The least point of [lower, upper) that no tile runs, or nullopt. The
+/// starts increase and the ends do not decrease, so p is run by none iff
+/// p < s_0, or p >= e_{count-1}, or e_q <= p < s_{q+1} for some
+/// q < count - 1 (p >= min(a, b) is p >= a or p >= b): conjunctive sets over
+/// (p, q), decided by integer emptiness -- no set difference.
+std::optional<int64_t> leastUnrunPoint(const LineTiles &line) {
+  std::optional<int64_t> least;
+  auto consider = [&](presburger::IntegerPolyhedron &set) {
+    if (set.isIntegerEmpty())
+      return;
+    std::optional<SmallVector<int64_t>> at = lexMinOf(set);
+    if (at && (!least || (*at)[0] < *least))
+      least = (*at)[0];
+  };
+  // Over (p, q): p in [lower, upper), q in [0, count - 1].
+  auto base = [&]() {
+    presburger::IntegerPolyhedron set(
+        presburger::PresburgerSpace::getSetSpace(2, 0, 0));
+    set.addInequality(SmallVector<int64_t>{1, 0, -line.lower});
+    set.addInequality(SmallVector<int64_t>{-1, 0, line.upper - 1});
+    set.addInequality(SmallVector<int64_t>{0, 1, 0});
+    set.addInequality(SmallVector<int64_t>{0, -1, line.count - 1});
+    return set;
+  };
+  if (line.count <= 0) { // no tile: every point is unrun
+    presburger::IntegerPolyhedron set = base();
+    set.removeInequalityRange(2, 4);
+    set.addEquality(SmallVector<int64_t>{0, 1, 0});
+    consider(set);
+    return least;
+  }
+  // Before the first tile: p < first.
+  {
+    presburger::IntegerPolyhedron set = base();
+    set.addInequality(SmallVector<int64_t>{-1, 0, line.first - 1});
+    consider(set);
+  }
+  // After the end of the last tile, and in the gap after tile q < count - 1:
+  // p >= s_q + width (or p >= clip), and, for a gap, p < s_{q+1}.
+  for (bool last : {true, false}) {
+    for (bool byClip : {false, true}) {
+      if (byClip && !line.clip)
+        continue;
+      if (!last && line.count < 2)
+        continue;
+      presburger::IntegerPolyhedron set = base();
+      if (last)
+        set.addEquality(SmallVector<int64_t>{0, 1, -(line.count - 1)});
+      else {
+        set.addInequality(SmallVector<int64_t>{0, -1, line.count - 2});
+        // p <= first + (q + 1) step - 1
+        set.addInequality(SmallVector<int64_t>{-1, line.step,
+                                               line.first + line.step - 1});
+      }
+      if (byClip)
+        set.addInequality(SmallVector<int64_t>{1, 0, -*line.clip});
+      else // p >= first + q step + width
+        set.addInequality(
+            SmallVector<int64_t>{1, -line.step, -(line.first + line.width)});
+      consider(set);
+    }
+  }
+  return least;
+}
+
+} // namespace
+
+void mlir::systolic::verifyLoopTilingCoverage(LoopTilingStructure &tiling) {
+  using Coverage = LoopTilingStructure::Coverage;
+  using Form = LoopTilingStructure::Form;
+  using Boundary = LoopTilingStructure::Boundary;
+  Coverage &coverage = tiling.coverage;
+  coverage = Coverage();
+  if (!tiling.writtenDomain) {
+    coverage.note = "the band's exact iteration set is not available (a "
+                    "bound that is not a linear form of the band's counters, "
+                    "a symbol, or a value beyond 64 bits)";
+    return;
+  }
+  const presburger::IntegerPolyhedron &domain = *tiling.writtenDomain;
+  const unsigned n = tiling.roles.size();
+  if (domain.getNumDimVars() != n || domain.getNumSymbolVars() != 0 ||
+      tiling.writtenRange.size() != n) {
+    coverage.note = "the band's exact iteration set is not over its counters";
+    return;
+  }
+  auto outer = dyn_cast_or_null<affine::AffineForOp>(tiling.outermost);
+  if (!outer)
+    return;
+  SmallVector<affine::AffineForOp> band;
+  affine::getPerfectlyNestedLoops(band, outer);
+  if (band.size() != n)
+    return;
+
+  // The pairings: the tilings, then the candidates.
+  SmallVector<const LoopTilingStructure::Tiling *> pairings;
+  for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+    pairings.push_back(&one);
+  for (const LoopTilingStructure::Tiling &one : tiling.candidates)
+    pairings.push_back(&one);
+  if (pairings.empty()) {
+    coverage.note = "no tiling and no candidate pairing to check";
+    return;
+  }
+  auto tileOf = [&](unsigned s) -> const LoopTilingStructure::Tiling * {
+    for (const LoopTilingStructure::Tiling *one : pairings)
+      if (one->tileLoop == s)
+        return one;
+    return nullptr;
+  };
+  auto pointOf = [&](unsigned s) -> const LoopTilingStructure::Tiling * {
+    for (const LoopTilingStructure::Tiling *one : pairings)
+      if (one->pointLoop == s)
+        return one;
+    return nullptr;
+  };
+
+  // y(x) and the box B, one logical dimension per loop that is no tile loop;
+  // per dimension, the tiles of its pairing on the logical line.
+  SmallVector<SmallVector<int64_t>> rows;
+  SmallVector<std::optional<LineTiles>> lines;
+  for (unsigned s = 0; s < n; ++s) {
+    if (tileOf(s))
+      continue;
+    SmallVector<int64_t> row(n, 0);
+    row[s] = 1;
+    Coverage::Dim dim;
+    dim.loop = s;
+    dim.coordinate = tiling.loopCoordinate[s];
+    std::optional<LineTiles> line;
+    if (const LoopTilingStructure::Tiling *one = pointOf(s)) {
+      dim.coordinate = one->coordinate >= 0 ? one->coordinate : dim.coordinate;
+      const auto &range = tiling.writtenRange[one->tileLoop];
+      if (!range) {
+        coverage.note = "a tile loop has bounds that are not constants";
+        return;
+      }
+      const int64_t lt = range->first, ut = range->second;
+      line.emplace();
+      if (one->form == Form::Counter) {
+        // y = S * t + p over t in [lt, ut), p in [0, S): tiles [S t, S t + S).
+        row[one->tileLoop] = one->tileSize;
+        std::optional<int64_t> low = llvm::checkedMul(one->tileSize, lt);
+        std::optional<int64_t> high = llvm::checkedMul(one->tileSize, ut);
+        if (!low || !high) {
+          coverage.note = "a tiled range does not fit in 64 bits";
+          return;
+        }
+        dim.lower = *low;
+        dim.upper = *high;
+        line->first = *low;
+        line->width = one->tileSize;
+        line->count = ut - lt;
+      } else {
+        dim.lower = one->lower;
+        dim.upper = one->upper;
+        line->first = one->lower;
+        line->width = one->width;
+        line->clip = one->clip;
+        line->count = ut > lt ? (ut - lt - 1) / one->tileSize + 1 : 0;
+      }
+      line->step = one->tileSize;
+      line->lower = dim.lower;
+      line->upper = dim.upper;
+    } else {
+      // An untiled loop: its constant bounds and step as written.
+      if (!tiling.writtenRange[s]) {
+        coverage.note = "untiled loop " + std::to_string(s) +
+                        " has bounds that are not constants (no logical box)";
+        return;
+      }
+      dim.lower = tiling.writtenRange[s]->first;
+      dim.upper = tiling.writtenRange[s]->second;
+      dim.step = band[s].getStepAsInt();
+    }
+    rows.push_back(row);
+    lines.push_back(line);
+    coverage.dims.push_back(dim);
+  }
+  const unsigned m = rows.size();
+  const unsigned l = domain.getNumLocalVars();
+
+  // Names for the counterexamples: the logical point by coordinate, an
+  // iteration by loop.
+  static const char *const kCoordinate[] = {"I", "J", "K"};
+  auto logicalPoint = [&](ArrayRef<int64_t> y) {
+    std::string text;
+    for (unsigned j = 0; j < m; ++j) {
+      const int d = coverage.dims[j].coordinate;
+      text += (j ? ", " : "") +
+              (d >= 0 ? std::string(kCoordinate[d])
+                      : "loop " + std::to_string(coverage.dims[j].loop)) +
+              " = " + std::to_string(y[j]);
+    }
+    return "(" + text + ")";
+  };
+  auto iteration = [&](ArrayRef<int64_t> x) {
+    std::string text;
+    for (unsigned s = 0; s < n; ++s)
+      text += (s ? ", " : "") + std::string("loop ") + std::to_string(s) +
+              " = " + std::to_string(x[s]);
+    return "(" + text + ")";
+  };
+  auto yOf = [&](ArrayRef<int64_t> x) {
+    SmallVector<int64_t> y;
+    for (const SmallVector<int64_t> &row : rows) {
+      int64_t v = 0;
+      for (unsigned s = 0; s < n; ++s)
+        v += row[s] * x[s];
+      y.push_back(v);
+    }
+    return y;
+  };
+
+  // Missing. Every bound of the band is a constant or its own tile counter
+  // plus a constant (section 26.1's checks; an untiled loop's bounds are
+  // constants, required above), so D is the product of its pairings' sets
+  // and its untiled loops' ranges, y(D) the product of the pairings' images
+  // and the untiled ranges, and the unrun points of B the union over the
+  // tiled dimensions k of B_1 x .. x M_k x .. x B_m, M_k the unrun points of
+  // k's line; its least point is the least over k of (lower_1, .., min M_k,
+  // .., lower_m). A dimension without points (lower >= upper) leaves B empty.
+  bool boxEmpty = false;
+  for (const Coverage::Dim &dim : coverage.dims)
+    boxEmpty |= dim.lower >= dim.upper;
+  if (!boxEmpty) {
+    std::optional<SmallVector<int64_t>> least;
+    for (unsigned j = 0; j < m; ++j) {
+      if (!lines[j])
+        continue;
+      std::optional<int64_t> unrun = leastUnrunPoint(*lines[j]);
+      if (!unrun)
+        continue;
+      SmallVector<int64_t> y;
+      for (const Coverage::Dim &dim : coverage.dims)
+        y.push_back(dim.lower);
+      y[j] = *unrun;
+      if (!least || y < *least)
+        least = y;
+    }
+    if (least)
+      coverage.missing =
+          "logical point " + logicalPoint(*least) + " is run by no iteration";
+  }
+
+  // Outside: x in D with y(x) not in B -- one conjunctive set per violated
+  // bound (y_j < lower_j, y_j >= upper_j, or y_j - lower_j not a multiple of a
+  // step: y_j - lower_j = step q + r, 1 <= r < step), over (y, then x, D's
+  // locals and q, r as locals): its lexmin is the least such y.
+  {
+    std::optional<SmallVector<int64_t>> least;
+    for (unsigned j = 0; j < m; ++j) {
+      const Coverage::Dim &dim = coverage.dims[j];
+      for (unsigned kind = 0; kind < 3; ++kind) {
+        if (kind == 2 && dim.step == 1)
+          continue;
+        const unsigned extra = kind == 2 ? 2 : 0;
+        const unsigned width = m + n + l + extra + 1;
+        presburger::IntegerPolyhedron set(
+            presburger::PresburgerSpace::getSetSpace(m, 0, n + l + extra));
+        copyConstraints(domain, set, m, m + n);
+        for (unsigned i = 0; i < m; ++i) {
+          SmallVector<int64_t> eq(width, 0);
+          eq[i] = 1;
+          for (unsigned s = 0; s < n; ++s)
+            eq[m + s] = -rows[i][s];
+          set.addEquality(eq);
+        }
+        SmallVector<int64_t> c(width, 0);
+        if (kind == 0) { // y_j <= lower_j - 1
+          c[j] = -1;
+          c.back() = dim.lower - 1;
+          set.addInequality(c);
+        } else if (kind == 1) { // y_j >= upper_j
+          c[j] = 1;
+          c.back() = -dim.upper;
+          set.addInequality(c);
+        } else { // y_j - lower_j - step q - r = 0, 1 <= r <= step - 1
+          const unsigned q = m + n + l, r = q + 1;
+          c[j] = 1;
+          c[q] = -dim.step;
+          c[r] = -1;
+          c.back() = -dim.lower;
+          set.addEquality(c);
+          SmallVector<int64_t> ge(width, 0), le(width, 0);
+          ge[r] = 1;
+          ge.back() = -1;
+          le[r] = -1;
+          le.back() = dim.step - 1;
+          set.addInequality(ge);
+          set.addInequality(le);
+        }
+        if (set.isIntegerEmpty())
+          continue;
+        std::optional<SmallVector<int64_t>> y = lexMinOf(set);
+        if (y && (!least || *y < *least))
+          least = y;
+        if (!y && !least)
+          least = SmallVector<int64_t>();
+      }
+    }
+    if (least)
+      coverage.outside = least->empty()
+                             ? std::string("an iteration lies outside the "
+                                           "logical box")
+                             : "logical point " + logicalPoint(*least) +
+                                   " lies outside the logical box";
+  }
+
+  // Overlap: x != x' in D with y(x) = y(x'). Two copies of D, one per side;
+  // x != x' is the union over s of x_s < x'_s (the pair set is symmetric):
+  // one conjunctive set per s, the least pair over them.
+  std::optional<SmallVector<int64_t>> pair;
+  for (unsigned s = 0; s < n; ++s) {
+    presburger::IntegerPolyhedron both(
+        presburger::PresburgerSpace::getSetSpace(2 * n, 0, 2 * l));
+    copyConstraints(domain, both, 0, 2 * n);
+    copyConstraints(domain, both, n, 2 * n + l);
+    for (const SmallVector<int64_t> &row : rows) {
+      SmallVector<int64_t> eq(2 * n + 2 * l + 1, 0);
+      for (unsigned u = 0; u < n; ++u) {
+        eq[u] = row[u];
+        eq[n + u] = -row[u];
+      }
+      both.addEquality(eq);
+    }
+    SmallVector<int64_t> before(2 * n + 2 * l + 1, 0);
+    before[n + s] = 1;
+    before[s] = -1;
+    before.back() = -1;
+    both.addInequality(before);
+    if (both.isIntegerEmpty())
+      continue;
+    std::optional<SmallVector<int64_t>> found = lexMinOf(both);
+    if (!found) {
+      if (!pair)
+        pair = SmallVector<int64_t>();
+      continue;
+    }
+    if (!pair || pair->empty() || *found < *pair)
+      pair = found;
+  }
+  if (pair)
+    coverage.overlap =
+        pair->empty()
+            ? std::string("two iterations run the same logical point")
+            : "iterations " + iteration(ArrayRef<int64_t>(*pair).take_front(n)) +
+                  " and " + iteration(ArrayRef<int64_t>(*pair).drop_front(n)) +
+                  " both run logical point " +
+                  logicalPoint(yOf(ArrayRef<int64_t>(*pair).take_front(n)));
+  coverage.decided = true;
+  coverage.exact = !coverage.missing && !coverage.outside && !coverage.overlap;
+
+  // The boundary tiles of each Bounds tiling (width = step): tile q runs its
+  // last point s_q + S - 1 unless the min clips it (s_q + S - 1 >= E). The
+  // clipped tiles {q in [0, count) : s_q + S - 1 >= E}, decided by
+  // emptiness, are the last tile alone when the min clips it, none otherwise.
+  for (LoopTilingStructure::Tiling &one : tiling.tilings) {
+    if (one.form != Form::Bounds)
+      continue;
+    const auto &range = tiling.writtenRange[one.tileLoop];
+    if (!range)
+      continue;
+    const int64_t count = (range->second - range->first - 1) / one.tileSize + 1;
+    // Over q: 0 <= q <= count - 1, first + q S + S - 1 >= E.
+    auto clipped = [&](int64_t qLow, int64_t qHigh) {
+      presburger::IntegerPolyhedron set(
+          presburger::PresburgerSpace::getSetSpace(1, 0, 0));
+      set.addInequality(SmallVector<int64_t>{1, -qLow});
+      set.addInequality(SmallVector<int64_t>{-1, qHigh});
+      if (!one.clip)
+        set.addEquality(SmallVector<int64_t>{0, 1}); // no min: nothing clipped
+      else
+        set.addInequality(SmallVector<int64_t>{
+            one.tileSize, one.lower + one.tileSize - 1 - *one.clip});
+      return !set.isIntegerEmpty();
+    };
+    const bool earlier = count >= 2 && clipped(0, count - 2);
+    const bool lastClipped = clipped(count - 1, count - 1);
+    one.boundaryProven =
+        !earlier && lastClipped == (one.boundary == Boundary::MinClipped);
+    const std::string loop = "loop " + std::to_string(one.tileLoop);
+    const int64_t fullTiles = (one.upper - one.lower) / one.tileSize;
+    if (!one.boundaryProven)
+      one.boundaryProof = "NOT as recorded (a tile other than the last is "
+                          "clipped, or the last one is not as recorded)";
+    else if (one.boundary == Boundary::MinClipped)
+      one.boundaryProof =
+          "proven: one partial tile, " + loop + " = " +
+          std::to_string(one.lastTileCounter) + " (" +
+          std::to_string(one.lastTile) + " of " +
+          std::to_string(one.tileSize) + "); " +
+          std::to_string(one.upper - one.lower) + " = " +
+          std::to_string(fullTiles) + " x " + std::to_string(one.tileSize) +
+          " + " + std::to_string(one.lastTile);
+    else
+      one.boundaryProof = "proven: no partial tile; " +
+                          std::to_string(one.upper - one.lower) + " = " +
+                          std::to_string(fullTiles) + " x " +
+                          std::to_string(one.tileSize);
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Exact inclusion of conjunctive integer sets (docs section 19.14)
+//===----------------------------------------------------------------------===//
+
+std::optional<bool>
+mlir::systolic::exactIsSubset(const presburger::IntegerRelation &a,
+                              const presburger::IntegerRelation &b,
+                              SmallVectorImpl<llvm::DynamicAPInt> *witness) {
+  using llvm::DynamicAPInt;
+  using Row = SmallVector<DynamicAPInt>;
+  const unsigned v = b.getNumDimAndSymbolVars();
+  if (a.getNumDomainVars() != b.getNumDomainVars() ||
+      a.getNumRangeVars() != b.getNumRangeVars() ||
+      a.getNumSymbolVars() != 0 || b.getNumSymbolVars() != 0)
+    return std::nullopt;
+  const unsigned l = b.getNumLocalVars();
+
+  // b's rows over [variables | locals | constant].
+  SmallVector<Row> equalities, inequalities;
+  for (unsigned r = 0, e = b.getNumEqualities(); r < e; ++r)
+    equalities.emplace_back(b.getEquality(r).begin(), b.getEquality(r).end());
+  for (unsigned r = 0, e = b.getNumInequalities(); r < e; ++r)
+    inequalities.emplace_back(b.getInequality(r).begin(),
+                              b.getInequality(r).end());
+  SmallVector<bool> eliminated(l, false);
+  auto otherLocal = [&](const Row &row, unsigned j) {
+    for (unsigned k = 0; k < l; ++k)
+      if (k != j && !eliminated[k] && row[v + k] != 0)
+        return true;
+    return false;
+  };
+
+  // Pinned locals: c q_j + L = 0 with no other remaining local in L, or with
+  // |c| = 1 (then q_j = -sgn(c) L is an integer whatever L holds). q_j = -L / c
+  // is an integer iff |c| divides L; every other row r becomes
+  // |c| r - sgn(c) r_j e (q_j's coefficient 0, inequalities scaled by |c| >
+  // 0), the same set over the other variables. Repeated until no equality
+  // pins a remaining local so.
+  SmallVector<std::pair<Row, DynamicAPInt>> divisible; // d | row . (x, 1)
+  for (bool progress = true; progress;) {
+    progress = false;
+    for (unsigned j = 0; j < l; ++j) {
+      if (eliminated[j])
+        continue;
+      auto pin = llvm::find_if(equalities, [&](const Row &row) {
+        return row[v + j] != 0 &&
+               (!otherLocal(row, j) || llvm::abs(row[v + j]) == 1);
+      });
+      if (pin == equalities.end())
+        continue;
+      const Row e = *pin;
+      equalities.erase(pin);
+      const DynamicAPInt c = e[v + j];
+      const DynamicAPInt magnitude = llvm::abs(c);
+      auto substitute = [&](Row &row) {
+        if (row[v + j] == 0)
+          return;
+        const DynamicAPInt factor = c > 0 ? row[v + j] : -row[v + j];
+        for (unsigned col = 0; col < row.size(); ++col)
+          row[col] = magnitude * row[col] - factor * e[col];
+      };
+      for (Row &row : equalities)
+        substitute(row);
+      for (Row &row : inequalities)
+        substitute(row);
+      Row rest = e;
+      rest[v + j] = DynamicAPInt(0);
+      if (magnitude > 1)
+        divisible.emplace_back(std::move(rest), magnitude);
+      eliminated[j] = true;
+      progress = true;
+    }
+  }
+
+  // Every remaining local must be a floor division of the variables:
+  // L - d q >= 0 and d q + d - 1 - L >= 0, L over the variables only. Its
+  // two defining rows are set aside (each piece below re-adds them for a
+  // fresh local): q is a function of x, so the negation of a constraint on
+  // (x, q) is that negation with q's definition.
+  struct Division {
+    unsigned local;
+    Row lower, upper; // the two defining rows, in b's columns
+  };
+  SmallVector<Division> divisions;
+  for (unsigned j = 0; j < l; ++j) {
+    if (eliminated[j])
+      continue;
+    std::optional<Division> found;
+    for (unsigned r1 = 0; r1 < inequalities.size() && !found; ++r1) {
+      const Row &lo = inequalities[r1];
+      if (lo[v + j] >= 0 || otherLocal(lo, j))
+        continue;
+      const DynamicAPInt d = -lo[v + j];
+      for (unsigned r2 = 0; r2 < inequalities.size() && !found; ++r2) {
+        const Row &hi = inequalities[r2];
+        if (r2 == r1 || hi[v + j] != d || otherLocal(hi, j))
+          continue;
+        bool opposite = true;
+        for (unsigned col = 0; col < v && opposite; ++col)
+          opposite = hi[col] == -lo[col];
+        if (opposite && lo.back() + hi.back() == d - 1)
+          found = Division{j, lo, hi};
+      }
+    }
+    if (!found)
+      return std::nullopt; // an existential local: not decided here
+    for (const Row *row : {&found->lower, &found->upper})
+      inequalities.erase(llvm::find(inequalities, *row));
+    divisions.push_back(std::move(*found));
+  }
+
+  // One piece: a, the divisions as fresh locals, `extra` new locals, and one
+  // constraint in b's columns (row; the extra locals' columns appended).
+  auto failing = [&](const Row &row, bool isEquality, unsigned extra,
+                     ArrayRef<std::pair<Row, bool>> extraRows) -> bool {
+    presburger::IntegerRelation piece = a;
+    const unsigned first = piece.getNumCols() - 1; // where new locals go
+    piece.appendVar(presburger::VarKind::Local, divisions.size() + extra);
+    auto place = [&](const Row &src, unsigned extraCols) {
+      Row out(piece.getNumCols(), DynamicAPInt(0));
+      for (unsigned col = 0; col < v; ++col)
+        out[col] = src[col];
+      for (auto [index, division] : llvm::enumerate(divisions))
+        out[first + index] = src[v + division.local];
+      for (unsigned e = 0; e < extraCols; ++e)
+        out[first + divisions.size() + e] = src[v + l + e];
+      out.back() = src[v + l + extraCols];
+      return out;
+    };
+    for (const Division &division : divisions) {
+      piece.addInequality(place(division.lower, 0));
+      piece.addInequality(place(division.upper, 0));
+    }
+    if (isEquality)
+      piece.addEquality(place(row, extra));
+    else
+      piece.addInequality(place(row, extra));
+    for (const auto &[extraRow, eq] : extraRows) {
+      if (eq)
+        piece.addEquality(place(extraRow, extra));
+      else
+        piece.addInequality(place(extraRow, extra));
+    }
+    if (piece.isIntegerEmpty())
+      return false;
+    if (witness) {
+      witness->clear();
+      auto lexMin = piece.findIntegerLexMin();
+      if (lexMin.isBounded())
+        witness->assign(lexMin->begin(), lexMin->begin() + v);
+      else if (std::optional<SmallVector<DynamicAPInt, 8>> sample =
+                   piece.findIntegerSample())
+        witness->assign(sample->begin(), sample->begin() + v);
+    }
+    return true;
+  };
+  auto negated = [&](const Row &row) {
+    Row out(row.size());
+    for (unsigned col = 0; col < row.size(); ++col)
+      out[col] = -row[col];
+    out.back() -= 1; // -g - 1 >= 0: g <= -1
+    return out;
+  };
+  for (const Row &row : inequalities)
+    if (failing(negated(row), false, 0, {}))
+      return false;
+  for (const Row &row : equalities) {
+    Row above = row; // h - 1 >= 0
+    above.back() -= 1;
+    if (failing(above, false, 0, {}) || failing(negated(row), false, 0, {}))
+      return false;
+  }
+  // d does not divide L: L - d u - r = 0 with 1 <= r <= d - 1 (u, r new).
+  for (const auto &[row, d] : divisible) {
+    Row eq(v + l + 3, DynamicAPInt(0)), ge(v + l + 3, DynamicAPInt(0)),
+        le(v + l + 3, DynamicAPInt(0));
+    for (unsigned col = 0; col < v + l; ++col)
+      eq[col] = row[col];
+    eq[v + l] = -d;                     // u
+    eq[v + l + 1] = DynamicAPInt(-1);   // r
+    eq.back() = row.back();
+    ge[v + l + 1] = DynamicAPInt(1);    // r - 1 >= 0
+    ge.back() = DynamicAPInt(-1);
+    le[v + l + 1] = DynamicAPInt(-1);   // d - 1 - r >= 0
+    le.back() = d - 1;
+    if (failing(eq, true, 2, {{ge, false}, {le, false}}))
+      return false;
+  }
+  return true;
+}
+
+std::optional<bool>
+mlir::systolic::exactIsEqual(const presburger::IntegerRelation &a,
+                             const presburger::IntegerRelation &b) {
+  std::optional<bool> ab = exactIsSubset(a, b);
+  if (ab && !*ab)
+    return false;
+  std::optional<bool> ba = exactIsSubset(b, a);
+  if (ba && !*ba)
+    return false;
+  if (!ab || !ba)
+    return std::nullopt;
+  return true;
 }

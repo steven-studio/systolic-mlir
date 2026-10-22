@@ -1852,7 +1852,17 @@ moved out of the reduction loop, reordering the accumulation (under strict float
 nest was then refused, and its CPU code ran permuted). So a bound or subscript of the loops
 around the accesses that flattens to a coefficient or constant of 2^48 or more leaves the nest
 as written, UNKNOWN ("whether moving it outward reorders dependent iterations is not decided",
-`@min_folded`; round 4 of the review of 2026-10-19). Both tests matter only
+`@min_folded`; round 4 of the review of 2026-10-19). The check covers every input the analysis
+builds its constraints from, as the analysis composes it: the bounds of the affine.for and
+affine.parallel ops around the accesses, the conditions of the affine.if ops around them and the
+access maps, with the values of constant operands and the expressions of affine.apply operands
+substituted (round 5, R4H-2: the same 2^63 bound reached through a constant symbol, an
+affine.apply, an affine.parallel bound or an affine.if condition was unchecked and the
+accumulation was reordered). An analysis that fails on a pair of accesses -- a semi-affine
+subscript or bound such as C[i * symbol(n) + j] -- is no proof of independence either: the nest
+stays as written, UNKNOWN ("the dependence analysis fails on an access or bound of the nest";
+round 5, R4H-1: a failure was read as "no dependence"). Test:
+test/Systolic/affine_hoist_dependence_guard.mlir. Both tests matter only
 when the interchange reorders iterations: two iterations change their order only if they differ
 in a dimension of two or more iterations and in a repetition loop inside it that may run twice
 (the first repetition loop inside that dimension in which they differ reads only counters on
@@ -2141,9 +2151,10 @@ parametrization of the domain would recognize; demotion stays deferred (§19.12.
 loop whose bounds read the counter of a one-iteration loop is hoisted with it since the fourth
 round of the review of 2026-10-19 (it was a limitation before). A repetition loop whose constant
 bound map lists an unread operand naming a dimension is not hoisted (conservative: dropping the
-operand first would let it move). A hoist that needs the dependence test is not made when a bound
-or subscript around the accesses flattens to a constant or coefficient of 2^48 or more (UNKNOWN;
-the analysis' 64-bit arithmetic). A band whose C store alone has full stacked rank is UNKNOWN, not
+operand first would let it move). A hoist that needs the dependence test is not made when a bound,
+condition or subscript around the accesses flattens -- with its constant and affine.apply operands
+substituted -- to a constant or coefficient of 2^48 or more, or when the analysis fails on the
+nest (UNKNOWN; the analysis' 64-bit arithmetic, semi-affine accesses). A band whose C store alone has full stacked rank is UNKNOWN, not
 PROVEN_INVALID (§19.13.4). The specification's batch test is sufficient only: batch values that
 are an affine image of a box sheared otherwise than along the loop order are undecided
 (UNDETERMINED), never called a GEMM or refused. Transposed operand views are correct but costly downstream:
@@ -2155,6 +2166,44 @@ this change. The front end's gaps are listed in §19.13.1, the executable specif
 this section's results.
 
 ---
+
+### 19.14 Exact set inclusion without the library's set difference (2026-10-22)
+
+In the LLVM 24 build of this project (commit 7615da1), `PresburgerSet::subtract`, and with it
+`isSubsetOf` and `isEqual`, answer wrongly when the sets carry two or more locals pinned by
+equalities -- the quotients of stepped loops: for B = [0, 7] x [0, 14] and
+Y = {(y0, y1) : y1 = 3 q1 in [0, 13], b = 4 q2 in [0, 7], b <= y0 <= b + 3}, `B.isSubsetOf(Y)`
+is true although (0, 1) is in B and not in Y (one stepped dimension: right). Conjunctive
+emptiness and lexmin (`isIntegerEmpty`, `findIntegerLexMin`) are not affected. Four decisions
+used the difference: the exact parallelotope of 19.13 (`candidate.isEqual(target)`), the
+disproof of central symmetry (`mirror.isEqual(set)`, a subtract for the witness), the bijection
+certificate's box image (`image.isEqual(domain)`) and the regions' source cover (two subtracts).
+
+`exactIsSubset(a, b)` decides a ⊆ b exactly with emptiness only. b's locals are removed: a local
+an equality pins (c q + L = 0, with no other remaining local in L, or |c| = 1) is eliminated -- q = -L / c, an integer
+iff |c| divides L, substituted into the other rows with the positive scale |c| -- and every
+remaining local must be a floor division of the variables (d q <= L <= d q + d - 1), kept with
+its definition, as it is a function of x. Then b = P ∩ {divisibilities}, and a ⊆ b iff a meets
+none of: a negated inequality of P (g <= -1), a negated equality (h >= 1, h <= -1), a negated
+divisibility (L = d u + r, 1 <= r <= d - 1) -- one conjunctive set each, with the divisions
+re-added for fresh locals. Any other local (a true existential) leaves the inclusion undecided,
+and every caller then refuses.
+
+- 19.13's parallelotope: the per-level search still uses the library's equality to choose; the
+  whole band is decided by `exactIsEqual(prefix, domain)` (both sets: the stepped loops'
+  pinned quotients); unequal or undecided, the band is not normalized.
+- The disproof: set ⊆ mirror decided exactly (the mirror has as many points, so inclusion is
+  equality); a failing piece's least point is the witness; undecided: no disproof (UNKNOWN).
+- The bijection certificate: `exactIsEqual(image, domain)`; undecided: refused.
+- The source cover: each region is the source domain cut by bounds on its logical coordinates,
+  so it lies in the source domain by construction, and the union is the source domain cut by
+  the boxes' ranges, which `checkExactCover` proved to tile the dense ordinal box exactly; the
+  source is covered iff its logical coordinates never leave the full ranges -- six conjunctive
+  sets. The pairwise disjointness test (intersections) is unchanged.
+
+Test: test/Systolic/exact_set_inclusion.mlir (`--test-affine-matmul-discovery=exact-sets=true`:
+the counterexample, one and two stepped dimensions, a floor division, an undecided existential,
+and random pairs, every answer checked point by point).
 
 ## 20. Assignment nests: C = A · B as the K = 1 GEMM into a zeroed C (2026-10-19)
 
@@ -2700,3 +2749,82 @@ a K or other non-batch loop outside the output roles; non-box domains; nests who
 normalization rewrote (U != I); loops with non-constant trip counts.
 
 Tests: test/Systolic/affine_gemm_rank1.mlir, test/SystolicCC/affine_rank1.c.
+
+## 26. Loop tiling written by the program (2026-10-21, S5)
+
+S5 recognizes a loop tiling the program has ALREADY written; it does not tile. This section
+grows by stage; 26.1 is S5.1, which records and reports only: recognition, the mapping and the
+lowering are those of the nest without the record (sections 1-25), and the record is not used
+by the lowering pass.
+
+### 26.1 The tiling metadata (S5.1)
+
+`LoopTilingStructure` (AffineMatmulAnalysis.h), read from the bounds as written -- before the
+domain normalization of sections 19.12 and 19.13 rewrites a band -- by
+`analyzeWrittenLoopTiling`, completed against the recognized GEMM by `resolveLoopTiling`, and
+printed by `--test-affine-matmul-discovery` as "loop tiling (as written; recorded, not a
+decision)": per loop of the band its role (tile, point, untiled) and coordinate in the written
+order, and per tiled coordinate the tile loop, the point loop, the tile size (TM, TN, TK), the
+form, the boundary, the last tile and the values the point counter takes.
+
+Two forms:
+
+- Bounds form: `for (t = lt; t < ut; t += S) ... for (p = t + c; p < t + c + S; ++p)`, or with
+  `p < min(t + c + S, E)`. Required, each one checked: S >= 2; constant bounds of t; t's counter
+  read by nothing but both bounds of exactly one inner loop p; p of step 1, its counter bounding
+  no loop; p's lower bound the tile counter plus a constant c, its upper bound that plus exactly
+  S (a width other than the step is "not a tiling", with the reason), or the min of that and one
+  constant E inside the last tile (lastStart < E <= lastStart + S, lastStart = lt + (Q - 1) S + c,
+  Q = ceil((ut - lt) / S)). A step alone (`ii += 8`) proves nothing: the bounds relation decides.
+  Boundary: divisible (E = lastStart + S, or no min and S divides ut - lt), min-clipped
+  (E < lastStart + S: 17 = 8 + 8 + 1), unaligned (no min, the last tile runs past ut).
+- Counter form: two box loops of step 1 that one coordinate map combines as `S * t + p + c0`,
+  p in [0, S) (the dense numbering of section 3: `A[8 * i0 + i1]`).
+
+The coordinate a point loop drives is the one whose recognized map reads it (I, J or K); a nest
+without a recognized GEMM is reported with "?" -- its outermost loop's record is printed after
+the failure. Not proven here: that the tiles cover the iteration space exactly once, and
+anything about order or dependence (later stages) -- the coverage is section 26.2.
+
+### 26.2 Exact coverage, boundary tiles, the logical space (S5.2)
+
+`verifyLoopTilingCoverage` decides, for every recorded band, whether its loops run each point of
+the logical box exactly once -- integer-exact, on the band's exact iteration set D as written
+(`exactIterationSet`, taken before the normalization; one local per stepped loop). No sampling,
+no bound on the sizes beyond that set's 64-bit guard, and the tile size is not taken as
+evidence: every claim is decided on sets.
+
+- The logical point of an iteration x: y(x) keeps every counter but the tile counters of the
+  Bounds form, and combines a Counter pair into S * t + p. The logical box B: per kept loop, a
+  pairing's range [lower, upper) (section 26.1), or an untiled loop's constant bounds and step.
+- Overlap: no x != x' in D with y(x) = y(x') -- two copies of D, x != x' as the union over loops s
+  of x_s < x'_s (the pair set is symmetric), one conjunctive set per s. Outside: no x in D with
+  y(x) outside B -- one conjunctive set per violated bound of B.
+- Missing: every bound of the band is a constant or its own tile counter plus a constant (26.1's
+  checks; an untiled loop must have constant bounds), so D is the product of its pairings' sets
+  and its untiled ranges, and the unrun points of B are the union over the tiled dimensions k of
+  B_1 x .. x M_k x .. x B_m, M_k the unrun points of k's line. A pairing's tiles [s_q, e_q),
+  s_q = first + q S, e_q = min(s_q + W, E), have increasing starts and non-decreasing ends, so p
+  is unrun iff p < s_0, or p >= e_{Q-1}, or e_q <= p < s_{q+1} for some q < Q - 1 (with
+  p >= min(a, b) as p >= a or p >= b): conjunctive sets over (p, q).
+- Each failure is shown by its lexicographically least counterexample (the integer lexmin of the
+  conjunctive sets): a width of 9 on step 8 gives iterations (loop 0 = 0, loop 1 = 8, ...) and
+  (loop 0 = 8, loop 1 = 8, ...), the point I = 8 twice; width 7, the point I = 7 run by none.
+- No Presburger set difference is used: in the LLVM 24 build of this project (commit 7615da1),
+  `PresburgerSet::subtract` / `isSubsetOf` / `isEqual` answer wrongly when the sets carry two or
+  more locals pinned by equalities (two stepped loops: `B.isSubsetOf(Y)` true with a point of B
+  outside Y). Conjunctive emptiness and lexmin are not affected.
+- A pairing shaped like a tiling but with other numbers (a width other than the step, a min
+  outside the last tile -- "not a tiling" in 26.1) is checked as well, over its intended range
+  [first, E) with its min's bound E, else its tiles at the tile step, so that its overlap or
+  hole is shown: `min(ii + 8, 40)` under `ii < 32` leaves I = 32 .. 39 unrun.
+- Boundary tiles, per Bounds tiling: tile q lacks its last point s_q + S - 1 iff the min clips it
+  (s_q + S - 1 >= E); the clipped tiles, decided by emptiness over q, are proven to be the last
+  tile alone when the min clips it (17 = 2 x 8 + 1) and none otherwise.
+- The logical iteration space: when the cover is exact and the GEMM recognized, y(D) = B is the
+  logical I x J x K, printed with M x N x K.
+
+Reported by `--test-affine-matmul-discovery`; recognition, the mapping and the lowering are
+unchanged, and nothing is re-tiled.
+
+Test: test/Systolic/affine_gemm_tiling_recognition.mlir.
