@@ -267,6 +267,39 @@ struct LoopTilingStructure {
     /// The logical coordinate the point loop drives (0 = I, 1 = J, 2 = K),
     /// or -1: no recognized GEMM, or no single coordinate.
     int coordinate = -1;
+    /// Bounds form: the point loop's lower bound is the tile counter plus
+    /// this constant; the tile counter's value at the last tile.
+    int64_t pointOffset = 0;
+    int64_t lastTileCounter = 0;
+    /// Bounds form: the values the point loop runs per tile as written, and
+    /// the constant of its min, if any.
+    int64_t width = 0;
+    std::optional<int64_t> clip;
+    /// The boundary tiles as proven by verifyLoopTilingCoverage (Bounds form):
+    /// which tile counter values run fewer than tileSize points.
+    std::string boundaryProof;
+    bool boundaryProven = false;
+  };
+  /// The exact coverage of the iteration space (section 26.2): proven with
+  /// the Presburger library on the band's exact iteration set as written --
+  /// every point of the logical box run by exactly one iteration, none
+  /// outside it -- or the counterexamples (lexicographically least points).
+  struct Coverage {
+    /// One logical dimension: the loop that runs it (a point loop, or an
+    /// untiled loop) and the values it takes, [lower, upper) in steps of step.
+    struct Dim {
+      unsigned loop = 0;
+      int coordinate = -1;
+      int64_t lower = 0, upper = 0, step = 1;
+    };
+    bool decided = false;
+    bool exact = false;
+    /// Why the proof did not run (decided false).
+    std::string note;
+    /// Counterexamples, when not exact.
+    std::optional<std::string> overlap, missing, outside;
+    /// The logical iteration space, in the written order of its loops.
+    SmallVector<Dim> dims;
   };
   /// The band's outermost loop (the same op after the normalization).
   Operation *outermost = nullptr;
@@ -277,6 +310,19 @@ struct LoopTilingStructure {
   SmallVector<Tiling> tilings;
   /// Loops shaped like a tile loop that are not one, and why.
   SmallVector<std::string> rejected;
+  /// Of those, the pairings whose bounds have the tiling's shape but whose
+  /// numbers are not a tiling's (a point width other than the step, a min
+  /// outside the last tile): their intended range is [lower, upper) with the
+  /// tile step, and their coverage is decided with the tilings' (section
+  /// 26.2), so that an overlap or a hole is shown by a counterexample.
+  SmallVector<Tiling> candidates;
+  /// The band's exact iteration set over its counters as written (one local
+  /// per stepped loop), taken before any normalization; nullopt when it is
+  /// not available (exactIterationSet).
+  std::optional<presburger::IntegerPolyhedron> writtenDomain;
+  /// Each loop's constant bounds as written, when they are constants.
+  SmallVector<std::optional<std::pair<int64_t, int64_t>>> writtenRange;
+  Coverage coverage;
 };
 
 struct LogicalMatmul {
@@ -549,6 +595,21 @@ analyzeWrittenLoopTiling(affine::AffineForOp outer);
 /// i1 in [0, S)). `tiling` stays empty when the nest writes no tiling.
 void resolveLoopTiling(std::optional<LoopTilingStructure> &tiling,
                        const LogicalMatmul &matmul);
+
+/// Decides `tiling.coverage` exactly (section 26.2): on the band's exact
+/// iteration set D as written, with y(x) the logical point of iteration x
+/// (a Bounds tile counter dropped, a Counter pair combined as S * t + p, every
+/// other counter kept) and B the logical box (the pairings' ranges, the
+/// untiled loops' constant ranges and steps): no point of B run by no
+/// iteration (missing), no iteration outside B, and no two distinct
+/// iterations of D with one y (overlap). Integer-exact and without set
+/// differences: every claim is the emptiness (and the lexmin, for the least
+/// counterexample) of one conjunctive integer set -- overlap and outside over
+/// D itself, missing over each pairing's tiles on its line (D is the product
+/// of its pairings' sets and its untiled ranges). No sampling, no bound on the
+/// sizes but the 64-bit one of exactIterationSet. Also proves each Bounds
+/// tiling's partial tiles. Recognition, mapping and lowering are unchanged.
+void verifyLoopTilingCoverage(LoopTilingStructure &tiling);
 
 /// The exact integer iteration set of `loops` -- a chain of affine.for loops,
 /// outermost first -- over their counters in that order (one local quotient

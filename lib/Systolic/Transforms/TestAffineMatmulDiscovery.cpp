@@ -271,8 +271,60 @@ struct TestAffineMatmulDiscoveryPass
                  << "\n";
     for (const std::string &why : tiling.rejected)
       llvm::errs() << "    not a tiling: " << why << "\n";
-    llvm::errs() << "    coverage of the iteration space: not proven at "
-                    "this stage\n";
+    // The exact coverage (section 26.2).
+    const LoopTilingStructure::Coverage &coverage = tiling.coverage;
+    if (!coverage.decided) {
+      llvm::errs() << "    coverage: not decided (" << coverage.note << ")\n";
+      return;
+    }
+    auto space = [&](llvm::raw_ostream &os) {
+      for (auto [j, dim] : llvm::enumerate(coverage.dims)) {
+        os << (j ? " x " : "");
+        if (dim.coordinate >= 0)
+          os << kCoordinate[dim.coordinate];
+        else
+          os << "loop " << dim.loop;
+        os << " [" << dim.lower << ", " << dim.upper << ")";
+        if (dim.step != 1)
+          os << " step " << dim.step;
+      }
+    };
+    if (coverage.exact) {
+      llvm::errs() << "    coverage (exact, Presburger): every point of ";
+      space(llvm::errs());
+      llvm::errs() << " is run by exactly one iteration, none outside it\n";
+      // M x N x K when each coordinate is one dimension of step 1.
+      int64_t extent[3] = {0, 0, 0};
+      unsigned count[3] = {0, 0, 0};
+      bool dense = true;
+      for (const LoopTilingStructure::Coverage::Dim &dim : coverage.dims) {
+        if (dim.coordinate < 0 || dim.step != 1) {
+          dense = false;
+          continue;
+        }
+        extent[dim.coordinate] = dim.upper - dim.lower;
+        ++count[dim.coordinate];
+      }
+      if (dense && count[0] == 1 && count[1] == 1 && count[2] == 1)
+        llvm::errs() << "    logical iteration space: M x N x K = "
+                     << extent[0] << " x " << extent[1] << " x " << extent[2]
+                     << "\n";
+    } else {
+      llvm::errs() << "    coverage (exact, Presburger): NOT an exact cover "
+                      "of ";
+      space(llvm::errs());
+      llvm::errs() << "\n";
+      if (coverage.overlap)
+        llvm::errs() << "      overlap: " << *coverage.overlap << "\n";
+      if (coverage.missing)
+        llvm::errs() << "      missing: " << *coverage.missing << "\n";
+      if (coverage.outside)
+        llvm::errs() << "      outside: " << *coverage.outside << "\n";
+    }
+    for (const LoopTilingStructure::Tiling &one : tiling.tilings)
+      if (!one.boundaryProof.empty())
+        llvm::errs() << "    boundary " << name(one.coordinate) << ": "
+                     << one.boundaryProof << "\n";
   }
 
   static void printR8(AffineMatmulCandidate candidate,
@@ -490,8 +542,10 @@ struct TestAffineMatmulDiscoveryPass
         if (owner)
           result->tiling = writtenTiling.find(owner)->second;
         resolveLoopTiling(result->tiling, *result);
-        if (result->tiling)
+        if (result->tiling) {
+          verifyLoopTilingCoverage(*result->tiling);
           claimed.insert(result->tiling->outermost);
+        }
         logicalMatmuls.push_back(*result);
       }
     }
@@ -956,6 +1010,7 @@ struct TestAffineMatmulDiscoveryPass
       if (it == writtenTiling.end())
         continue;
       llvm::errs() << "loop tiling of a nest with no recognized GEMM:\n";
+      verifyLoopTilingCoverage(it->second);
       printLoopTiling(it->second);
     }
   }

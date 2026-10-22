@@ -2735,6 +2735,47 @@ Two forms:
 The coordinate a point loop drives is the one whose recognized map reads it (I, J or K); a nest
 without a recognized GEMM is reported with "?" -- its outermost loop's record is printed after
 the failure. Not proven here: that the tiles cover the iteration space exactly once, and
-anything about order or dependence (later stages).
+anything about order or dependence (later stages) -- the coverage is section 26.2.
+
+### 26.2 Exact coverage, boundary tiles, the logical space (S5.2)
+
+`verifyLoopTilingCoverage` decides, for every recorded band, whether its loops run each point of
+the logical box exactly once -- integer-exact, on the band's exact iteration set D as written
+(`exactIterationSet`, taken before the normalization; one local per stepped loop). No sampling,
+no bound on the sizes beyond that set's 64-bit guard, and the tile size is not taken as
+evidence: every claim is decided on sets.
+
+- The logical point of an iteration x: y(x) keeps every counter but the tile counters of the
+  Bounds form, and combines a Counter pair into S * t + p. The logical box B: per kept loop, a
+  pairing's range [lower, upper) (section 26.1), or an untiled loop's constant bounds and step.
+- Overlap: no x != x' in D with y(x) = y(x') -- two copies of D, x != x' as the union over loops s
+  of x_s < x'_s (the pair set is symmetric), one conjunctive set per s. Outside: no x in D with
+  y(x) outside B -- one conjunctive set per violated bound of B.
+- Missing: every bound of the band is a constant or its own tile counter plus a constant (26.1's
+  checks; an untiled loop must have constant bounds), so D is the product of its pairings' sets
+  and its untiled ranges, and the unrun points of B are the union over the tiled dimensions k of
+  B_1 x .. x M_k x .. x B_m, M_k the unrun points of k's line. A pairing's tiles [s_q, e_q),
+  s_q = first + q S, e_q = min(s_q + W, E), have increasing starts and non-decreasing ends, so p
+  is unrun iff p < s_0, or p >= e_{Q-1}, or e_q <= p < s_{q+1} for some q < Q - 1 (with
+  p >= min(a, b) as p >= a or p >= b): conjunctive sets over (p, q).
+- Each failure is shown by its lexicographically least counterexample (the integer lexmin of the
+  conjunctive sets): a width of 9 on step 8 gives iterations (loop 0 = 0, loop 1 = 8, ...) and
+  (loop 0 = 8, loop 1 = 8, ...), the point I = 8 twice; width 7, the point I = 7 run by none.
+- No Presburger set difference is used: in the LLVM 24 build of this project (commit 7615da1),
+  `PresburgerSet::subtract` / `isSubsetOf` / `isEqual` answer wrongly when the sets carry two or
+  more locals pinned by equalities (two stepped loops: `B.isSubsetOf(Y)` true with a point of B
+  outside Y). Conjunctive emptiness and lexmin are not affected.
+- A pairing shaped like a tiling but with other numbers (a width other than the step, a min
+  outside the last tile -- "not a tiling" in 26.1) is checked as well, over its intended range
+  [first, E) with its min's bound E, else its tiles at the tile step, so that its overlap or
+  hole is shown: `min(ii + 8, 40)` under `ii < 32` leaves I = 32 .. 39 unrun.
+- Boundary tiles, per Bounds tiling: tile q lacks its last point s_q + S - 1 iff the min clips it
+  (s_q + S - 1 >= E); the clipped tiles, decided by emptiness over q, are proven to be the last
+  tile alone when the min clips it (17 = 2 x 8 + 1) and none otherwise.
+- The logical iteration space: when the cover is exact and the GEMM recognized, y(D) = B is the
+  logical I x J x K, printed with M x N x K.
+
+Reported by `--test-affine-matmul-discovery`; recognition, the mapping and the lowering are
+unchanged, and nothing is re-tiled.
 
 Test: test/Systolic/affine_gemm_tiling_recognition.mlir.
