@@ -2755,7 +2755,9 @@ Tests: test/Systolic/affine_gemm_rank1.mlir, test/SystolicCC/affine_rank1.c.
 S5 recognizes a loop tiling the program has ALREADY written; it does not tile. This section
 grows by stage; 26.1 is S5.1, which records and reports only: recognition, the mapping and the
 lowering are those of the nest without the record (sections 1-25), and the record is not used
-by the lowering pass.
+by the lowering pass. 26.2 (S5.2) proves the coverage, for the report too. 26.3 (S5.3) is the
+first stage the lowering pass acts on: a tiling whose last tile a min clips is untiled once
+proven, and is then decided as the nest written untiled.
 
 ### 26.1 The tiling metadata (S5.1)
 
@@ -2828,3 +2830,103 @@ Reported by `--test-affine-matmul-discovery`; recognition, the mapping and the l
 unchanged, and nothing is re-tiled.
 
 Test: test/Systolic/affine_gemm_tiling_recognition.mlir.
+
+### 26.3 Untiling a tiling with a clipped last tile (S5.3, 2026-10-22)
+
+Before S5.3 every nest whose tiles a min clips (`for (i = ii; i < min(ii + 8, 17); ++i)`)
+stayed on the host. A divisible tiling becomes a box through the domain normalization (19.12,
+19.13): its iteration set is a parallelotope, x = U x'. A clipped one is not, so the band stays
+as written, and every GEMM candidate is refused:
+
+- a candidate holding the tile loop: no access reads its counter, so it is taken for a
+  repetition loop ("loop t of the nest is used by no access", UNKNOWN; section 19.9). The hoist
+  cannot move it out either, because a dimension's bounds (the point loop's) read it;
+- when the tile loop is outermost, the candidate inside it (the point band) is recognized with
+  the tile counter as a parameter, then refused by the lowering: "no static normalized
+  extent". That recognition proves nothing about the tiles' coverage;
+- when an untiled loop the accesses read lies outside the tile loop (`j, ii, i, k`, or
+  `i, j, kk, k`), every candidate that holds all the counters the accesses read also holds the
+  tile loop. Nothing is recognized, and the lowering pass printed no remark at all.
+
+S5.3 (AffineMatmulToSystolic.cpp, untileWrittenTilings, before the normalization) acts on each
+perfect multiply-accumulate band whose written tiling (26.1) has a Bounds tiling with a
+min-clipped last tile, or a tile-shaped pairing that is not a tiling and whose min cuts a tile
+(below the end of its last tile; a min at or past it changes nothing, and the normalization
+decides the band, as before), or a tile-shaped loop refused before any pairing is recorded
+(run-time tile bounds, a tile counter an access reads, ...) while a loop's upper bound is a min
+over a stepped counter of the band. Only multiply-accumulate bodies are considered: the ones the
+recognizer takes, with one store of an arith.addf or an arith.mulf. Such a band is
+untiled -- its tile loops dropped, each point loop running its whole range [lower, upper) with
+step 1 in place -- only when each of these is proven:
+
+1. Every loop shaped like a tile loop is a tiling (26.1: no other width than the step, no min
+   outside the last tile, no tile counter read by anything but its point loop's bounds, constant
+   tile bounds).
+2. Coverage (26.2, verifyLoopTilingCoverage, decided exactly on the exact iteration set D as
+   written): y, which drops the tile counters, takes D onto the box B one to one. No point of B
+   is missing, none is outside it, no two iterations share a point, and each tiling's partial
+   tiles are as recorded (the clipped last one alone). The untiled band runs exactly B, so it
+   runs y(D): the same iterations, each once. Its body is unchanged, since only the point loop's
+   bounds read a tile counter.
+3. Order. The untiled band runs B in the lexicographic order of the non-tile counters.
+   - Two iterations that first differ, as written, in a loop that is not a tile loop keep their
+     order. Only a pair that first differs in a tile loop t can swap.
+   - When the next non-tile loop after t is t's own point loop, such a pair also differs in that
+     point loop, the same way: the tiles are disjoint and their starts increase. Every order is
+     then kept, and the remark says "the order of the iterations is kept".
+   - Otherwise, when t and a non-tile loop between t and its point loop may both run twice, a
+     dependence test decides. It uses the alias rule of the hoist: every other memref of the body
+     must be provably disjoint from each memref it stores to. It also uses the 2^48 guard of
+     19.13, and treats an analysis failure as undecided (R4H). For every two accesses of one
+     memref, one of them a store, MLIR's dependence polyhedron at t's depth (equal outside t,
+     source's t < destination's t) is intersected with "the untiled order runs them the other way
+     round": equal on the non-tile loops between t and some later non-tile loop u, and the
+     destination's u below the source's. Each such set must be integer-empty. This is exact and
+     uses no set difference (19.14). The remark says "no dependent iterations change order (exact
+     dependence test)".
+   - Under strict floating point the accumulation into each element of C keeps its order, so the
+     host code computes the same values bit for bit. The lowering still needs the reassociation
+     permission of section 6.
+
+Then the box pipeline (normalization, hoist, recognition, exact partition, lowering) decides
+the untiled nest exactly as one written untiled. The 17 x 19 x 23 GEMM tiled 8 x 8 x 16 in any
+order lowers to the same IR as the GEMM written untiled. With `report`:
+
+    affine multiply-accumulate nest: loop tiling as written untiled (docs/AFFINE_GEMM_MAPPING.md
+    section 26.3): tile loop 0 (T = 8) dropped, point loop 1 runs [0, 17) (last tile 1 of 8);
+    every point of the logical box is run by exactly one iteration (exact, Presburger); the order
+    of the iterations is kept
+
+A refused band stays as written, with a remark on its outermost loop (also without `report`).
+The box pipeline then decides it as before S5.3: a point loop's bounds read a tile counter, so
+it is refused, unless 19.13 proves its iteration set a parallelotope (for example a single
+tile). Every refused case of the test stays on the host. The remark has the form
+"loop tiling as written not untiled (...): REASON [UNKNOWN]", where REASON is one of:
+
+- a pairing that is not a tiling, with the coverage counterexample: overlapping tiles ("iterations
+  (...) and (...) both run logical point (...)"), tiles with gaps ("logical point (...) is run by
+  no iteration"), a min clipping an earlier tile;
+- the coverage is not decided: a symbol or a value from outside the band in a bound, or a bound
+  beyond 64 bits;
+- untiling would reorder dependent iterations: a repetition loop between a K tile loop and its
+  point loop accumulates (r, k) in another order;
+- the reorder needs llvm.noalias, the dependence analysis fails, or the 2^48 guard applies.
+
+As in 19.13, the sub-band below a prefix of loops whose counters nothing below them reads is
+tried as well.
+
+Not covered:
+- a tiling the normalization already makes a box (divisible, with or without a min: 19.12,
+  19.13), which is left to it;
+- Counter-form tilings (26.1), which are already boxes;
+- tiles of a run-time size or with run-time bounds;
+- a point loop with a max lower bound or a step;
+- an imperfect band (an operation between the tile and point loops);
+- non-rectangular tiles;
+- nests the box pipeline refuses once untiled (rank-1 C and the other refusals of sections 19-25).
+
+systolic-cfront does not translate `min`, so S5.3 reaches MLIR input only.
+
+Test: test/Systolic/affine_gemm_tiling_untile.mlir. It has 22 cases, and the generator decides
+every expectation by enumeration: tilings, coverage and its counterexamples, the order of each
+C element's updates, and M x N x K.
