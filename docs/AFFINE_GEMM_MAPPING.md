@@ -3009,3 +3009,77 @@ Tests:
   checked against the same expected line.
 - test/Systolic/affine_gemm_tiling_legality_alias.mlir: the decision under `assume-no-alias` in
   both passes.
+
+### 26.5 min loop bounds in C (S5.5, 2026-10-23)
+
+Standard C has no min. A C program writes a clipped tile as a macro or as two comparisons:
+
+    #define MIN(a, b) ((a) < (b) ? (a) : (b))
+    for (int ii = 0; ii < 10; ii += 4)
+      for (int i = ii; i < MIN(ii + 4, 10); ++i)        /* or: i < ii + 4 && i < 10 */
+
+systolic-cfront refused both. After preprocessing, the macro is a conditional expression, and a
+loop bound had to be one affine expression. A condition had to be one comparison. S5.5 translates
+them, exactly, as the affine.for upper bound min (P, Q):
+
+    affine.for %i = affine_map<(d0) -> (0 + d0 * 1)>(%ii)
+        to min affine_map<(d0) -> (4 + d0 * 1, 10)>(%ii) {
+
+For ii = 0, 4, 8 the loop runs i = 0..3, 4..7, 8..9; the last tile is not widened.
+
+What is accepted (`min_bound_of`, tools/systolic-cfront):
+
+- `counter < C` or `counter <= C`, where C is a conditional expression that is exactly
+  min(P, Q). Its condition compares P and Q, and its branches are those expressions as written
+  (the same AST up to parentheses and loads), selecting the smaller. That covers
+  `(P) < (Q) ? (P) : (Q)` with `<` or `<=`, and `(P) > (Q) ? (Q) : (P)` with `>` or `>=`.
+- `counter < P && counter < Q`, with `<` or `<=` each.
+- P and Q are integer constants or affine expressions of the enclosing counters (the rules of
+  every loop bound). With `<=`, the exclusive bound is P + 1.
+- The counter, P, Q, the conditional and both sides of its comparison have the counter's type
+  as written: no value is converted.
+
+How it is translated:
+
+- With the same counter terms, min(L + a, L + b) = L + min(a, b): one bound, possibly a
+  parallelotope (19.12). Two constants fold to one constant.
+- Otherwise the loop has two upper bounds and is non-box, like a triangle (19.13). Its values at
+  each outer point run below the smaller one. The interface's subscript ranges, the checks of its
+  header and the GEMM sites' executions are computed by running the nest.
+- Every node of P and Q is checked in its C type at every outer point where the condition is
+  tested. C evaluates both operands there: the conditional compares them, and && evaluates the
+  second only when the first holds, so checking it everywhere only refuses more.
+
+What is refused, with the reason:
+
+- a function call in the bound, including one named min: its body, side effects and conversions
+  are not analysed;
+- a max;
+- a conditional that is not the smaller of its operands;
+- a min of three operands (a nested conditional);
+- a conversion: signed with unsigned, an int bound with a long counter;
+- an operand that overflows its type at some outer point;
+- an && that does not compare the counter on both sides, and `||`.
+
+A run-time bound (a parameter M) stays outside the subset, as for every loop bound.
+
+The front end only represents the program. Whether the nest is untiled and lowered is decided
+afterwards, as for MLIR input: by S5.3 and S5.4 (26.3, 26.4), then the box pipeline. Overlapping
+or gapped tiles, an untiling that would change the reduction order, and the rank-1 interleaved
+tiling stay on the host as written.
+
+The GEMM sites count a tiled nest's executions per tile: its point band is the site, and the tile
+loop is a loop around it. When S5.3 untiles the nest and the lowering offloads it as one GEMM,
+systolic-cc prints one "Executed: GEMM #N" line per tile. That is a report only: the planned and
+the actual tile invocations agree, and the results are checked.
+
+Tests:
+- test/CFront/min_bound.c: the spellings, the folds, M = 0, an enclosing loop that counts down,
+  interface ranges and site executions.
+- test/CFront/min_bound_unsupported.c: each refusal.
+- test/SystolicCC/affine_tiled_min.c: C to execution for M = 10, 12, 3, 1, 0 with T = 4, M = 16
+  with T = 1, M = 17 with T = 8, the three spellings, N-only, K-only (also outermost), M/N, M/N/K,
+  overlap, gap, a reorder and rank-1 adjacent or interleaved. The legality lines (computed by
+  enumeration) are checked in the compile's remarks. Every function is compared bitwise with the
+  loops as written on the CPU, and every offloaded call through --verify; strict FP offloads
+  nothing.

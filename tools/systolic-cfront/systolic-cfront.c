@@ -57,6 +57,19 @@
  *                (a != 0; a = 1 or -1 when g has counter terms): k - i < 4
  *                and i + 4 > k are k < i + 4, 2 * i - 3 > 0 is i > 1 (exact
  *                rounding), 8 > k is k < 8.
+ *                An upper bound may also be the min of two such bounds
+ *                (docs/AFFINE_GEMM_MAPPING.md section 26.5): i < MIN(P, Q)
+ *                with the macro ((a) < (b) ? (a) : (b)) -- the conditional
+ *                expression that is exactly min(P, Q), also with <= or with
+ *                > / >= and its branches exchanged -- or i < P && i < Q
+ *                (< or <= each), P and Q affine in the enclosing counters
+ *                and of the counter's type. It becomes the affine.for upper
+ *                bound min (P, Q), the values running the nest are computed
+ *                at every outer point (as for a triangle), and every node
+ *                of P and Q is checked in its C type. A function call
+ *                (even one named min), a max, a conditional that is not the
+ *                smaller of its operands, a nested one or a conversion is
+ *                refused.
  *                Counting down: for (int i = LB; i > B; --i) -- also >=,
  *                i--, i -= S (S > 0), i = i - S. affine.for only counts up,
  *                so it becomes the ordinal loop affine.for %i = 0 to N (N the
@@ -433,6 +446,11 @@ typedef struct {
      by running the nest's counters (enumerate_points). */
   int nonbox;
   linear_form lb_form, ub_form;
+  /* S5.5: a second exclusive upper bound -- the loop runs below
+     min(ub_form, ub2_form) (docs/AFFINE_GEMM_MAPPING.md section 26.5). Such
+     a loop is always non-box. */
+  int has_ub2;
+  linear_form ub2_form;
   /* ENV_IV: the signed step of the counter's values, and its value at the
      current point of an enumeration. */
   long long step;
@@ -902,6 +920,13 @@ static void enumerate_points(translator *tr, size_t from, point_fn fn,
     long long lo, hi;
     if (!form_value(tr, &e->lb_form, &lo) || !form_value(tr, &e->ub_form, &hi))
       unsupported(node, "integer constant expression overflows");
+    if (e->has_ub2) {
+      long long hi2;
+      if (!form_value(tr, &e->ub2_form, &hi2))
+        unsupported(node, "integer constant expression overflows");
+      if (hi2 < hi)
+        hi = hi2;
+    }
     first = lo;
     count = hi > lo ? ((__int128)hi - 1 - lo) / step + 1 : 0;
   } else {
@@ -1887,6 +1912,245 @@ static const char *flipped_comparison(const char *cop) {
   return "<=";
 }
 
+/* Whether two integer expressions are the same as written (S5.5): one AST up
+   to parentheses, loads and no-op casts -- a macro argument that expands
+   twice. Exact and syntactic: `ii + 4` and `4 + ii` are not the same. */
+static int same_expr(const json_value *a, const json_value *b) {
+  a = strip_parens_and_casts(a, kLoadNoOp);
+  b = strip_parens_and_casts(b, kLoadNoOp);
+  const char *kind = kind_of(a);
+  if (strcmp(kind, kind_of(b)) != 0 ||
+      strcmp(opcode_of(a), opcode_of(b)) != 0 ||
+      strcmp(qual_type(a), qual_type(b)) != 0 ||
+      child_count(a) != child_count(b))
+    return 0;
+  if (strcmp(kind, "IntegerLiteral") == 0)
+    return strcmp(json_string(json_get(a, "value"), ""),
+                  json_string(json_get(b, "value"), "")) == 0;
+  if (strcmp(kind, "DeclRefExpr") == 0) {
+    const char *ia = referenced_id(a), *ib = referenced_id(b);
+    return ia && ib && strcmp(ia, ib) == 0;
+  }
+  if (strcmp(kind, "ImplicitCastExpr") == 0 ||
+      strcmp(kind, "CStyleCastExpr") == 0) {
+    if (strcmp(json_string(json_get(a, "castKind"), ""),
+               json_string(json_get(b, "castKind"), "")) != 0)
+      return 0;
+  } else if (strcmp(kind, "BinaryOperator") != 0 &&
+             strcmp(kind, "UnaryOperator") != 0) {
+    return 0;
+  }
+  for (size_t i = 0; i < child_count(a); ++i)
+    if (!same_expr(child(a, i), child(b, i)))
+      return 0;
+  return 1;
+}
+
+/* The first function call in an expression, or NULL. */
+static const json_value *call_in(const json_value *n) {
+  if (!n || n->kind != JSON_OBJECT)
+    return NULL;
+  if (strcmp(kind_of(n), "CallExpr") == 0)
+    return n;
+  for (size_t i = 0; i < child_count(n); ++i) {
+    const json_value *c = call_in(child(n, i));
+    if (c)
+      return c;
+  }
+  return NULL;
+}
+
+/* Refuses a loop bound that calls a function: its body, side effects and
+   conversions are not analysed -- also one named min (standard C has none;
+   whatever is called is not known to be the minimum). */
+static _Noreturn void refuse_call(const json_value *call) {
+  const json_value *callee = strip_parens_and_casts(
+      child(call, 0), (const char *const[]){"FunctionToPointerDecay", NULL});
+  const char *name = referenced_name(callee);
+  unsupported(call, "the loop bound calls '%s': a function call is not "
+                    "translated (its body, side effects and conversions are "
+                    "not analysed); write the minimum as the macro "
+                    "((a) < (b) ? (a) : (b)) or as 'i < a && i < b' "
+                    "(docs/AFFINE_GEMM_MAPPING.md section 26.5)",
+              name && *name ? name : "a function");
+}
+
+/* An operand of a min bound, P or Q: no call, no conditional (a min of more
+   than two operands), its value of the counter's type as written. */
+static void min_operand_check(const json_value *x, const char *vtype,
+                              const json_value *where) {
+  const json_value *call = call_in(x);
+  if (call)
+    refuse_call(call);
+  const json_value *v = strip_parens_and_casts(x, kLoadNoOp);
+  if (strcmp(kind_of(v), "ConditionalOperator") == 0)
+    unsupported(v, "the loop bound is a min of more than two operands (a "
+                   "nested conditional): not translated");
+  char *t = strip_qualifiers(qual_type(v));
+  if (strcmp(t, vtype) != 0)
+    unsupported(where, "an operand of the min loop bound has type '%s', not "
+                       "the counter's type '%s': the conversion is not "
+                       "translated (signed and unsigned are not mixed)",
+                t, vtype);
+}
+
+/* S5.5 (docs/AFFINE_GEMM_MAPPING.md section 26.5). Whether the condition
+   `cond` of a loop with counter `decl`, of type `vtype`, bounds the counter
+   above by min(P, Q):
+     counter OP C   (OP < or <=) with C the conditional expression that is
+                    exactly min(P, Q): a comparison of P and Q selecting the
+                    smaller one -- (P) < (Q) ? (P) : (Q), as the usual MIN
+                    macro expands, also with <=, or with > / >= and the
+                    branches exchanged (the same expressions as written);
+     counter OP P && counter OP' Q   (OP, OP' < or <=).
+   On 1: *p, *q are P and Q, and *p_le, *q_le whether the comparison of the
+   counter with them is <= (the exclusive bound is then P + 1). The counter,
+   P, Q, the conditional and both sides of its comparison must have the
+   counter's type as written: no value is converted. 0 when the condition has
+   neither shape (the other forms are the caller's); a condition with one of
+   them that is not exactly a min is refused here, with the reason: a max, a
+   conditional that is not the smaller of its operands, a function call (even
+   one named min), a conversion. */
+static int min_bound_of(const json_value *cond, const char *decl,
+                        const char *vtype, const json_value **p, int *p_le,
+                        const json_value **q, int *q_le) {
+  if (strcmp(kind_of(cond), "BinaryOperator") != 0)
+    return 0;
+  const char *cop = opcode_of(cond);
+  if (strcmp(cop, "&&") == 0) {
+    const json_value *sides[2] = {
+        strip_parens_and_casts(child(cond, 0), kNoOp),
+        strip_parens_and_casts(child(cond, 1), kNoOp)};
+    const json_value *bounds[2];
+    int le[2];
+    for (int s = 0; s < 2; ++s) {
+      const json_value *c = sides[s];
+      const char *op = opcode_of(c);
+      const json_value *lhs = strip_parens_and_casts(child(c, 0), kLoadNoOp);
+      if (strcmp(kind_of(c), "BinaryOperator") != 0 ||
+          (strcmp(op, "<") != 0 && strcmp(op, "<=") != 0) ||
+          strcmp(kind_of(lhs), "DeclRefExpr") != 0 || !referenced_id(lhs) ||
+          strcmp(referenced_id(lhs), decl) != 0)
+        unsupported(cond, "a loop condition joined by && must be 'counter < "
+                          "a && counter < b' (< or <= each, the counter "
+                          "itself on the left): the minimum of two upper "
+                          "bounds (docs/AFFINE_GEMM_MAPPING.md section 26.5)");
+      bounds[s] = child(c, 1);
+      le[s] = strcmp(op, "<=") == 0;
+      min_operand_check(bounds[s], vtype, c);
+    }
+    *p = bounds[0];
+    *p_le = le[0];
+    *q = bounds[1];
+    *q_le = le[1];
+    return 1;
+  }
+  if (strcmp(cop, "<") != 0 && strcmp(cop, "<=") != 0)
+    return 0;
+  const json_value *rhs = strip_parens_and_casts(child(cond, 1), kLoadNoOp);
+  const json_value *converted = strip_parens_and_casts(child(cond, 1),
+                                                       kIndexCasts);
+  if (strcmp(kind_of(rhs), "CallExpr") == 0)
+    refuse_call(rhs);
+  if (strcmp(kind_of(converted), "ConditionalOperator") != 0)
+    return 0;
+  const json_value *lhs = strip_parens_and_casts(child(cond, 0), kLoadNoOp);
+  if (rhs != converted || strcmp(kind_of(lhs), "DeclRefExpr") != 0 ||
+      !referenced_id(lhs) || strcmp(referenced_id(lhs), decl) != 0 ||
+      strcmp(strip_qualifiers(qual_type(rhs)), vtype) != 0)
+    unsupported(cond, "the loop condition compares the counter with a "
+                      "conditional expression of another type, or not the "
+                      "counter itself: the conversion is not translated "
+                      "(docs/AFFINE_GEMM_MAPPING.md section 26.5)");
+  const json_value *call = call_in(rhs);
+  if (call)
+    refuse_call(call);
+  const json_value *test = strip_parens_and_casts(child(rhs, 0), kNoOp);
+  const char *top = opcode_of(test);
+  if (strcmp(kind_of(test), "BinaryOperator") != 0 ||
+      !(strcmp(top, "<") == 0 || strcmp(top, "<=") == 0 ||
+        strcmp(top, ">") == 0 || strcmp(top, ">=") == 0))
+    unsupported(rhs, "the loop bound is a conditional expression whose "
+                     "condition is not a comparison of its two branches: not "
+                     "a min (docs/AFFINE_GEMM_MAPPING.md section 26.5)");
+  const json_value *x = child(test, 0), *y = child(test, 1);
+  const json_value *t = child(rhs, 1), *f = child(rhs, 2);
+  min_operand_check(x, vtype, test);
+  min_operand_check(y, vtype, test);
+  const int less = top[0] == '<';
+  /* min: x < y ? x : y (or <=), x > y ? y : x (or >=) */
+  const int is_min = less ? same_expr(t, x) && same_expr(f, y)
+                          : same_expr(t, y) && same_expr(f, x);
+  const int is_max = less ? same_expr(t, y) && same_expr(f, x)
+                          : same_expr(t, x) && same_expr(f, y);
+  if (is_max)
+    unsupported(rhs, "the loop bound is the maximum of its two operands, not "
+                     "the minimum: an upper bound max is not translated "
+                     "(docs/AFFINE_GEMM_MAPPING.md section 26.5)");
+  if (!is_min)
+    unsupported(rhs, "the loop bound is a conditional expression whose "
+                     "branches are not the two sides of its comparison: not "
+                     "a min (docs/AFFINE_GEMM_MAPPING.md section 26.5)");
+  *p = x;
+  *q = y;
+  *p_le = *q_le = strcmp(cop, "<=") == 0;
+  return 1;
+}
+
+/* The text of the affine.for upper bound min(f1, f2) (S5.5): `min
+   affine_map<(d0, ...) -> (e1, e2)>(%a, ...)` over the counters either form
+   reads, each expression as bound_text writes one (a counting-down counter's
+   value substituted). */
+static char *min_bound_text(translator *tr, const linear_form *f1,
+                            const linear_form *f2, const json_value *node) {
+  const linear_form *forms[2] = {f1, f2};
+  const char *names[2 * MAX_FORM];
+  long long coef[2][2 * MAX_FORM];
+  long long constant[2];
+  size_t n = 0;
+  memset(coef, 0, sizeof coef);
+  for (int k = 0; k < 2; ++k) {
+    constant[k] = forms[k]->constant;
+    for (size_t i = 0; i < forms[k]->n; ++i) {
+      env_entry *e = env_find(tr, forms[k]->ids[i]);
+      long long c = forms[k]->coef[i];
+      if (e->descending) {
+        constant[k] = checked(constant[k], checked(c, e->origin, '*', node),
+                              '+', node);
+        c = checked(0, checked(c, e->stride, '*', node), '-', node);
+      }
+      if (c == 0)
+        continue;
+      size_t d = 0;
+      while (d < n && strcmp(names[d], e->name) != 0)
+        ++d;
+      if (d == n)
+        names[n++] = e->name;
+      coef[k][d] = checked(coef[k][d], c, '+', node);
+    }
+  }
+  char *dims = xstrdup(""), *args = xstrdup("");
+  for (size_t d = 0; d < n; ++d) {
+    dims = format("%s%sd%zu", dims, d ? ", " : "", d);
+    args = format("%s%s%s", args, d ? ", " : "", names[d]);
+  }
+  char *exprs[2];
+  for (int k = 0; k < 2; ++k) {
+    exprs[k] = format("%lld", constant[k]);
+    for (size_t d = 0; d < n; ++d) {
+      if (coef[k][d] == 0)
+        continue;
+      unsigned long long magnitude =
+          coef[k][d] < 0 ? 0ULL - (unsigned long long)coef[k][d]
+                         : (unsigned long long)coef[k][d];
+      exprs[k] = format("%s %c d%zu * %llu", exprs[k],
+                        coef[k][d] < 0 ? '-' : '+', d, magnitude);
+    }
+  }
+  return format("min affine_map<(%s) -> (%s, %s)>(%s)", dims, exprs[0],
+                exprs[1], args);
+}
+
 /* One side of a loop condition as a * counter + f, f a linear form over the
    enclosing loop counters: integer constants, references to the counter or
    to enclosing counters, unary + / -, + - and constant *, parentheses and
@@ -1952,6 +2216,8 @@ typedef struct {
   const json_value *loop, *cond;
   linear_form lb;         /* the initial value over the enclosing counters */
   linear_form bound;      /* the bound, before <='s + 1 */
+  int has_bound2;         /* S5.5: the loop runs below min(bound, bound2) */
+  linear_form bound2;     /* (both exclusive) */
   int le;                 /* the canonical comparison is <= */
   long long step;
   __int128 type_min, type_max;
@@ -1968,6 +2234,16 @@ static void loop_check_point(translator *tr, void *p) {
   c->evaluated = 1;
   if (!form_value(tr, &c->lb, &lbv) || !form_value(tr, &c->bound, &bw))
     unsupported(c->loop, "the loop counter could overflow '%s'", c->vtype);
+  if (c->has_bound2) {
+    /* The loop runs below the smaller bound; each operand's value is
+       checked in its C type by its header nodes (an operand that overflows
+       at this point is refused there, with its value). */
+    long long bw2;
+    if (!form_value(tr, &c->bound2, &bw2))
+      unsupported(c->loop, "the loop counter could overflow '%s'", c->vtype);
+    if (bw2 < bw)
+      bw = bw2;
+  }
   const __int128 ubx = (__int128)bw + c->le;
   if (lbv < c->type_min || lbv > c->type_max || lbv < -2147483648LL ||
       (c->check_written && (bw < c->type_min || bw > c->type_max)))
@@ -2068,11 +2344,23 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   int up = strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0;
   int down = strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0;
   long long bound;
+  /* S5.5 (docs/AFFINE_GEMM_MAPPING.md section 26.5): an upper bound
+     min(P, Q) -- a point loop whose tile a min clips, i < MIN(ii + 4, 10)
+     with the macro ((a) < (b) ? (a) : (b)), or i < ii + 4 && i < 10 -- is
+     the affine.for upper bound min (P, Q), exactly; anything that only looks
+     like one is refused by min_bound_of. */
+  const json_value *min_p = NULL, *min_q = NULL;
+  int min_p_le = 0, min_q_le = 0;
+  const int has_min = has_cond && min_bound_of(cond, decl, vtype, &min_p,
+                                               &min_p_le, &min_q, &min_q_le);
+  linear_form ub2_form = {0};
+  int has_ub2 = 0;
   /* An affine condition E OP C (2 * i - 3 > 0): the equivalent comparison of
      the counter with a constant; both sides are checked below, node by node
      in their C types, once the values they are evaluated at are known. */
   int affine_cond = 0;
-  if (strcmp(kind_of(cond), "BinaryOperator") == 0 && (up || down) &&
+  if (!has_min && strcmp(kind_of(cond), "BinaryOperator") == 0 &&
+      (up || down) &&
       !is_ref_to(child(cond, 0), decl) &&
       affine_condition(cond, decl, &cop, &bound)) {
     affine_cond = 1;
@@ -2089,8 +2377,9 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
      i + 4 > k likewise). Both sides of such a condition are checked, node by
      node in their C types, where C evaluates them. */
   int cond_outer = 0;
-  if (!affine_cond && strcmp(kind_of(cond), "BinaryOperator") == 0 &&
-      (up || down) && !is_ref_to(child(cond, 0), decl)) {
+  if (!has_min && !affine_cond &&
+      strcmp(kind_of(cond), "BinaryOperator") == 0 && (up || down) &&
+      !is_ref_to(child(cond, 0), decl)) {
     linear_form fl, fr;
     long long al, ar;
     if (cond_side_form(tr, child(cond, 0), decl, &fl, &al) &&
@@ -2138,7 +2427,33 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
       }
     }
   }
-  if (!affine_cond && !cond_outer) {
+  if (has_min) {
+    /* Each operand an integer constant or an affine expression of the
+       enclosing counters, as any bound (its nodes are checked below in their
+       C types); <= is the exclusive bound + 1. Operands with the same
+       counter terms differ by a constant: min(L + a, L + b) = L + min(a, b),
+       one bound. */
+    linear_form fp = {0}, fq = {0};
+    if (!try_bound_form(tr, min_p, &fp) || !try_bound_form(tr, min_q, &fq))
+      unsupported(cond, "an operand of the min loop bound must be an integer "
+                        "constant or an affine expression of the enclosing "
+                        "loop counters");
+    fp.constant = checked(fp.constant, min_p_le, '+', cond);
+    fq.constant = checked(fq.constant, min_q_le, '+', cond);
+    linear_form d = form_add(fp, form_scale(fq, -1, cond), cond);
+    cop = "<";
+    up = 1;
+    down = 0;
+    if (d.n == 0) {
+      ub_form = d.constant <= 0 ? fp : fq;
+    } else {
+      ub_form = fp;
+      ub2_form = fq;
+      has_ub2 = 1;
+    }
+    bound = ub_form.constant;
+    ub_affine = ub_form.n != 0 || has_ub2;
+  } else if (!affine_cond && !cond_outer) {
     if (strcmp(kind_of(cond), "BinaryOperator") != 0 || !(up || down) ||
         !is_ref_to(child(cond, 0), decl))
       unsupported(has_cond ? cond : s, "the loop condition must be 'counter < "
@@ -2221,9 +2536,16 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
       unsupported(child(var, 0), "the loop counter's initial value must be an "
                                  "integer constant or an affine expression of "
                                  "the enclosing loop counters");
+    /* A min bound: the nodes of both operands, which C evaluates at every
+       test of the condition (the conditional compares them; && may skip the
+       second -- checking it everywhere only refuses more). */
     if (cond_counter ? !header_expr(tr, child(cond, 0), decl, &cond_nodes,
                                     &a_unused, &f_unused, &r_unused) ||
                            !header_expr(tr, child(cond, 1), decl, &cond_nodes,
+                                        &a_unused, &f_unused, &r_unused)
+        : has_min    ? !header_expr(tr, min_p, NULL, &bound_nodes, &a_unused,
+                                    &f_unused, &r_unused) ||
+                           !header_expr(tr, min_q, NULL, &bound_nodes,
                                         &a_unused, &f_unused, &r_unused)
                      : !header_expr(tr, child(cond, 1), NULL, &bound_nodes,
                                     &a_unused, &f_unused, &r_unused))
@@ -2246,6 +2568,8 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
   check.lb = lb_form;
   check.bound = ub_form;
   check.bound.constant = bound;
+  check.has_bound2 = has_ub2;
+  check.bound2 = ub2_form;
   check.le = strcmp(cop, "<=") == 0;
   check.step = step;
   check.type_min = type_min;
@@ -2272,7 +2596,8 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     lb_terms.constant = 0;
     ub_terms.constant = 0;
     linear_form extent = form_add(ub_terms, form_scale(lb_terms, -1, s), s);
-    nonbox = extent.n != 0;
+    /* a min bound: the extent varies with the outer counters (non-box) */
+    nonbox = extent.n != 0 || has_ub2;
   }
   if (nonbox) {
     /* Exactly, at every point of the enclosing nest: the initial value and
@@ -2365,6 +2690,8 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
     e->lb_form = lb_form;
     e->ub_form = ub_form;
     e->ub_form.constant = ub;
+    e->has_ub2 = has_ub2;
+    e->ub2_form = ub2_form;
   } else if (trips > 0) {
     e->has_values = 1;
     e->first = lb;
@@ -2387,7 +2714,8 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
        counters are affine_map<(d0, ...) -> (...)>(%counters). */
     ub_form.constant = ub;
     char *lb_text = bound_text(tr, &lb_form, s);
-    char *ub_text = bound_text(tr, &ub_form, s);
+    char *ub_text = has_ub2 ? min_bound_text(tr, &ub_form, &ub2_form, s)
+                            : bound_text(tr, &ub_form, s);
     if (step == 1)
       emit(tr, indent, "affine.for %s = %s to %s {", name, lb_text, ub_text);
     else
@@ -2857,7 +3185,8 @@ static int site_loop_of(const json_value *n, site_loop *out) {
   if (!out->init_expr || !out->counter ||
       strcmp(kind_of(cond), "BinaryOperator") != 0 ||
       !(strcmp(cop, "<") == 0 || strcmp(cop, "<=") == 0 ||
-        strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0))
+        strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0 ||
+        strcmp(cop, "&&") == 0))
     return 0;
   out->cond = cond;
   const char *iop = opcode_of(inc);
@@ -2889,9 +3218,13 @@ static int site_loop_of(const json_value *n, site_loop *out) {
   return 1;
 }
 
+static int site_holds(const json_value *n, const char *const *ids,
+                      const long long *values, size_t count);
+
 /* The value of an integer expression of the counters ids[0 .. count) at
    their values: literals, integer constant expressions, references to those
-   counters, unary + / -, + - *, parentheses and integer casts. 0 when it is
+   counters, unary + / -, + - *, parentheses and integer casts, and a
+   conditional expression of a comparison (the MIN macro, S5.5). 0 when it is
    not one, or a value leaves 2^100. */
 static int site_eval(const json_value *n, const char *const *ids,
                      const long long *values, size_t count, __int128 *out) {
@@ -2914,6 +3247,11 @@ static int site_eval(const json_value *n, const char *const *ids,
     return 1;
   }
   __int128 x, y;
+  if (strcmp(kind, "ConditionalOperator") == 0) {
+    const int holds = site_holds(child(n, 0), ids, values, count);
+    return holds >= 0 &&
+           site_eval(child(n, holds ? 1 : 2), ids, values, count, out);
+  }
   if (strcmp(kind, "UnaryOperator") == 0 &&
       (strcmp(op, "-") == 0 || strcmp(op, "+") == 0)) {
     if (!site_eval(child(n, 0), ids, values, count, &x))
@@ -2936,6 +3274,31 @@ static int site_eval(const json_value *n, const char *const *ids,
     *out = op[0] == '+' ? x + y : x - y;
   }
   return *out < kLimit && *out > -kLimit;
+}
+
+/* Whether a comparison of integer expressions of the counters ids[0 ..
+   count) holds at their values -- or two joined by && (S5.5: counter < a &&
+   counter < b): 1 or 0; -1 when it is not one or not evaluable. */
+static int site_holds(const json_value *n, const char *const *ids,
+                      const long long *values, size_t count) {
+  n = strip_parens_and_casts(n, kIntConstantCasts);
+  const char *op = opcode_of(n);
+  if (strcmp(kind_of(n), "BinaryOperator") != 0)
+    return -1;
+  if (strcmp(op, "&&") == 0) {
+    const int first = site_holds(child(n, 0), ids, values, count);
+    return first <= 0 ? first : site_holds(child(n, 1), ids, values, count);
+  }
+  __int128 lhs, rhs;
+  if (!(strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 ||
+        strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) ||
+      !site_eval(child(n, 0), ids, values, count, &lhs) ||
+      !site_eval(child(n, 1), ids, values, count, &rhs))
+    return -1;
+  return strcmp(op, "<") == 0    ? lhs < rhs
+         : strcmp(op, "<=") == 0 ? lhs <= rhs
+         : strcmp(op, ">") == 0  ? lhs > rhs
+                                 : lhs >= rhs;
 }
 
 typedef struct {
@@ -2962,23 +3325,17 @@ static void site_run_loop(site_run *r, size_t d) {
     return;
   }
   r->ids[d] = l->counter;
-  const char *op = opcode_of(l->cond);
   for (;;) {
     if (v > LLONG_MAX || v < LLONG_MIN) {
       r->ok = 0;
       return;
     }
     r->values[d] = (long long)v;
-    __int128 lhs, rhs;
-    if (!site_eval(child(l->cond, 0), r->ids, r->values, d + 1, &lhs) ||
-        !site_eval(child(l->cond, 1), r->ids, r->values, d + 1, &rhs)) {
+    const int holds = site_holds(l->cond, r->ids, r->values, d + 1);
+    if (holds < 0) {
       r->ok = 0;
       return;
     }
-    int holds = strcmp(op, "<") == 0    ? lhs < rhs
-                : strcmp(op, "<=") == 0 ? lhs <= rhs
-                : strcmp(op, ">") == 0  ? lhs > rhs
-                                        : lhs >= rhs;
     if (!holds)
       return;
     if (++r->visited > kEnumerationLimit) {
