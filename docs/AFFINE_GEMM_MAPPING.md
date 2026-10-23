@@ -2930,3 +2930,82 @@ systolic-cfront does not translate `min`, so S5.3 reaches MLIR input only.
 Test: test/Systolic/affine_gemm_tiling_untile.mlir. It has 22 cases, and the generator decides
 every expectation by enumeration: tilings, coverage and its counterexamples, the order of each
 C element's updates, and M x N x K.
+
+### 26.4 Legality classification and diagnostics (S5.4, 2026-10-23)
+
+Recognizing a GEMM is not proving that a transformation of the nest is legal, and neither is
+proving that the existing lowering can run it. S5.4 keeps these apart for the untiling of 26.3.
+It classifies each claim the untiling rests on with the classes of section 9:
+
+| Layer | Claim | PROVEN_VALID | PROVEN_INVALID | UNKNOWN |
+|---|---|---|---|---|
+| pattern | every tile-shaped loop is a tiling of the form 26.1 records | (stated as yes or no) | | |
+| coverage | the tiles run every point of the logical box B exactly once (26.2) | exact | a counterexample | not decided |
+| dependence | the untiled order reorders no dependent iterations | kept by construction, or the exact test | a reversed dependent pair | alias, 2^48, analysis failure |
+| execution order | each element of C accumulates in the program's order | as dependence | as dependence | as dependence |
+| untiling | the transformation itself | performed | a layer is PROVEN_INVALID | otherwise |
+
+"not evaluated" marks a layer an earlier one made moot.
+
+The untiling is VALID_BUT_LOWERING_UNSUPPORTED when it is legal but S5.3 does not perform it.
+That is the case when the pattern is outside the form 26.1 records, every refused loop is a
+recorded pairing, the coverage is exact and the dependence is PROVEN_VALID. An example is a min
+clipping an earlier tile (`min(ii + 8, 20)` under `ii < 32`), whose tiles run [0, 20) exactly
+once.
+
+These classes describe the untiling, a transformation, and not the nest's GEMM mapping. An
+untiling can be PROVEN_INVALID while another mapping of the nest exists: overlapping tiles are
+still a sequence of GEMMs whose C windows overlap. The "not untiled" remark of 26.3 therefore
+keeps the nest's class, UNKNOWN. Lowering capability is the box pipeline's decision, taken on the
+untiled nest, or on the nest as written when no untiling happens. Only the lowering pass knows
+it: by the remark "lowered as", or by a "not lowered" remark with the class of section 9. The
+discovery pass does not claim it.
+
+One function decides, without changing the IR: `decideWrittenTilings` (AffineMatmulToSystolic.cpp,
+declared in AffineMatmulAnalysis.h). The lowering pass calls it before untiling, and
+`--test-affine-matmul-discovery` calls it on the same IR, the nests as written. The rewrites that
+run before it (20.5, 24) act on bands whose bounds are all constants, which a tiled band is not.
+Both take the option the decision depends on, `assume-no-alias` (the alias rule of the dependence
+test). The FP options do not enter: an untiling never changes the order in which an element of C
+accumulates. Both print the same text (`describeTilingLegality`):
+
+    affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4):
+    pattern: ...; coverage: PROVEN_VALID; dependence: PROVEN_VALID (exact dependence test);
+    execution order: PROVEN_VALID (every element of C accumulates in the program's order);
+    untiling: PROVEN_VALID (performed); lowering: decided by the box pipeline on the untiled nest
+
+The lowering pass prints it as a remark: always for a refused untiling, and with `report` for a
+performed one, as 26.3 does. Discovery prints "tiling legality (section 26.4; as
+--affine-matmul-to-systolic decides it, assume-no-alias=...): ..." with the reason of a refusal.
+The S5.3 decisions and remarks are unchanged; their IR and remarks are identical on every input of
+test/Systolic and the recognition corpus.
+
+Two more diagnostics:
+
+- Discovery prints "scope: ..." under a GEMM recognized on a band whose bounds read the counter
+  of an enclosing loop. That is the point band of a tiling: a GEMM at each value of the tile
+  counter, not the GEMM of the whole nest. No mapping of the nest follows from it.
+- A tiled nest left to the box pipeline (not refused by 26.3) in which no GEMM is recognized was
+  refused without a remark. The lowering pass now prints "no GEMM is recognized in the tiled
+  nest", with the reason and class of its outermost candidate as the recognizer gives them. When
+  the normalization rewrote the counters, it adds that the analyses needing the counters as
+  written (sections 23, 25.2 premise 2) are not made. An example is the divisible rank-1
+  `ii, jj, i, j, k` with `C[i + j]`: VALID_BUT_LOWERING_UNSUPPORTED (a batch decomposition would
+  be valid and is not constructed), not PROVEN_INVALID.
+
+Rank-1 C (`C[i + j]`, section 25), unchanged in S5.4:
+
+| Form | Treatment | Lowered? |
+|---|---|---|
+| `ii, i, jj, j, k`, tiles next to their points | the order is kept, so the nest is untiled; the ordered output batches of 25 then apply | yes |
+| `ii, jj, i, j, k` with min, interleaved | dependence PROVEN_INVALID: two (i, j) of one element of C change order, and section 25 keeps the order of different batches even under reassociation | no |
+| `ii, jj, i, j, k`, divisible | the normalization rewrites the counters, so 25 does not apply | no (now with a remark) |
+
+Section 25's policy is not changed.
+
+Tests:
+- test/Systolic/affine_gemm_tiling_legality.mlir: discovery and lowering in strict and
+  reassociating modes. Every class and range is computed by enumeration, and both passes are
+  checked against the same expected line.
+- test/Systolic/affine_gemm_tiling_legality_alias.mlir: the decision under `assume-no-alias` in
+  both passes.

@@ -3,6 +3,8 @@
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicTilePlan.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
@@ -115,6 +117,34 @@ struct TestAffineMatmulDiscoveryPass
       *this, "exact-sets-seed",
       llvm::cl::desc("With exact-sets-random: the generator's seed"),
       llvm::cl::init(1)};
+
+  // The tiling legality (docs section 26.4) is decided as
+  // --affine-matmul-to-systolic decides it with the same option.
+  Option<bool> assumeNoAlias{
+      *this, "assume-no-alias",
+      llvm::cl::desc("Decide the tiling legality (docs section 26.4) as "
+                     "--affine-matmul-to-systolic does with this option"),
+      llvm::cl::init(false)};
+
+  /// Whether a bound of the perfect band from `anchor` reads the counter of a
+  /// loop around it: the band is then a GEMM at each value of that loop (the
+  /// point band of a tiling), not the GEMM of the whole nest.
+  static bool readsEnclosingCounter(Operation *anchor) {
+    auto top = dyn_cast<affine::AffineForOp>(anchor);
+    if (!top)
+      return false;
+    SmallVector<affine::AffineForOp> band;
+    affine::getPerfectlyNestedLoops(band, top);
+    for (affine::AffineForOp loop : band)
+      for (ValueRange operands : {ValueRange(loop.getLowerBoundOperands()),
+                                  ValueRange(loop.getUpperBoundOperands())})
+        for (Value operand : operands)
+          if (affine::AffineForOp owner =
+                  affine::getForInductionVarOwner(operand))
+            if (owner->isProperAncestor(anchor))
+              return true;
+    return false;
+  }
 
   static void printVector(const lattice::IntVector &v) {
     llvm::errs() << "[";
@@ -722,6 +752,11 @@ struct TestAffineMatmulDiscoveryPass
               analyzeWrittenLoopTiling(loop))
         writtenTiling.try_emplace(loop.getOperation(), std::move(*tiling));
     });
+    // The untiling decisions of the lowering pass (sections 26.3, 26.4), on
+    // the nests as written -- the IR it decides them on: the rewrites before
+    // it act on bands with constant bounds only, which a tiled band is not.
+    SmallVector<WrittenTilingDecision, 1> tilingDecisions =
+        decideWrittenTilings(getOperation().getOperation(), assumeNoAlias);
     SmallVector<DomainNormalization, 1> normalized =
         normalizeParallelotopeDomains(getOperation().getOperation());
     if (!normalized.empty()) {
@@ -813,6 +848,13 @@ struct TestAffineMatmulDiscoveryPass
 
     for (const LogicalMatmul &result : logicalMatmuls) {
       llvm::errs() << "recognition result: success\n";
+      // Recognition is not legality (section 26.4).
+      if (readsEnclosingCounter(result.anchor))
+        llvm::errs() << "  scope: the bounds of this band read the counter "
+                        "of an enclosing loop: a GEMM at each value of it "
+                        "(the point band of a tiling), not the GEMM of the "
+                        "whole nest -- no mapping of the nest follows from "
+                        "it (see its tiling legality, section 26.4)\n";
 
       llvm::errs() << "  row map: ";
       result.rowMap.print(llvm::errs());
@@ -1269,6 +1311,19 @@ struct TestAffineMatmulDiscoveryPass
       llvm::errs() << "loop tiling of a nest with no recognized GEMM:\n";
       verifyLoopTilingCoverage(it->second);
       printLoopTiling(it->second);
+    }
+
+    // The tiling legality of each nest S5.3 decides (section 26.4), as the
+    // lowering pass decides it: the same function, the same option.
+    for (const WrittenTilingDecision &decision : tilingDecisions) {
+      llvm::errs() << "tiling legality (section 26.4; as "
+                      "--affine-matmul-to-systolic decides it, "
+                      "assume-no-alias="
+                   << (assumeNoAlias ? "true" : "false")
+                   << "): " << describeTilingLegality(decision.legality)
+                   << "\n";
+      if (decision.legality.untiling != GemmMappingClass::ProvenValid)
+        llvm::errs() << "  reason: " << decision.legality.why << "\n";
     }
   }
 };
