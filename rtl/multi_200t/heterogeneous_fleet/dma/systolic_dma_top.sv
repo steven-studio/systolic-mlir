@@ -2504,7 +2504,7 @@ module systolic_dma_top #(
   // =========================================================================
   // Write-back engine: one AXI write master, one owner at a time.
   //
-  // The lowest-numbered context with a descriptor up is granted when the
+  // The next round-robin context with a committed tile is granted when the
   // engine is idle and nothing is in flight; it owns the engine -- the
   // descriptor, the result stream and the completion -- until its last write
   // response.  Another context's tile waits its turn here (bytes are moved
@@ -2512,14 +2512,19 @@ module systolic_dma_top #(
   // =========================================================================
   logic                wb_inflight;
   logic [ACC_ID_W-1:0] wb_owner;
+  logic [ACC_ID_W-1:0] wb_last;
+  // No external per-job DDR failure status exists. A failed context is
+  // quarantined until reset, without job_done/readback, while others proceed.
+  logic [NUM_ACCEL-1:0] wb_fault;
   logic                wb_any_req;
   logic [ACC_ID_W-1:0] wb_grant_idx;
 
   always_comb begin
     wb_any_req   = 1'b0;
     wb_grant_idx = '0;
-    for (int k = NUM_ACCEL-1; k >= 0; k--) begin
-      if (ctx_wb_desc_valid[k]) begin
+    for (int n = NUM_ACCEL; n >= 1; n--) begin
+      automatic int k = (int'(wb_last) + n) % NUM_ACCEL;
+      if (ctx_wb_desc_valid[k] && !wb_fault[k]) begin
         wb_any_req   = 1'b1;
         wb_grant_idx = ACC_ID_W'(k);
       end
@@ -2528,6 +2533,7 @@ module systolic_dma_top #(
 
   wire                  wb_eng_desc_ready;
   wire                  wb_eng_done;
+  wire                  wb_eng_failed;
   wire                  wb_eng_desc_valid = wb_any_req && !wb_inflight;
   wire                  wb_eng_accept     = wb_eng_desc_valid && wb_eng_desc_ready;
   wire [AXI_ADDR_W-1:0] wb_tile_addr      = ctx_wb_desc_addr[wb_grant_idx];
@@ -2554,14 +2560,18 @@ module systolic_dma_top #(
     if (!ui_rst_n) begin
       wb_inflight <= 1'b0;
       wb_owner    <= '0;
+      wb_last     <= ACC_ID_W'(NUM_ACCEL - 1);
+      wb_fault    <= '0;
     end
     else begin
       if (wb_eng_accept) begin
         wb_inflight <= 1'b1;
         wb_owner    <= wb_grant_idx;
+        wb_last     <= wb_grant_idx;
       end
-      else if (wb_eng_done) begin
+      else if (wb_eng_done || wb_eng_failed) begin
         wb_inflight <= 1'b0;
+        if (wb_eng_failed) wb_fault[wb_owner] <= 1'b1;
       end
     end
   end
@@ -2575,7 +2585,7 @@ module systolic_dma_top #(
     .desc_addr (wb_tile_addr),
     .desc_beats (wb_tile_beats),
     .desc_tag (8'h40 + 8'(wb_grant_idx)),
-    .done_valid (wb_eng_done), .done_tag (),
+    .done_valid (wb_eng_done), .done_tag (), .failed_valid (wb_eng_failed),
     .m_axi_awid (wb_awid), .m_axi_awaddr (wb_awaddr), .m_axi_awlen (wb_awlen),
     .m_axi_awsize (wb_awsize), .m_axi_awburst (wb_awburst),
     .m_axi_awlock (wb_awlock), .m_axi_awcache (wb_awcache),

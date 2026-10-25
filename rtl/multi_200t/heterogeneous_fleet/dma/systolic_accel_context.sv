@@ -39,18 +39,20 @@
 //     compute  one scheduler request per job; the release is taken when the
 //              job's operands have landed, the array input has been idle for
 //              the PE quiet gap after the previous job's k steps, and the
-//              result bank it will publish into (n_fed % 2) has been written
-//              back (job n_fed - 2 done).  The feed of job n_fed+1 therefore
-//              starts while job n_fed is still being reduced.
+//              result bank it will publish into (n_fed % 2) has been enqueued
+//              with committed metadata (job n_fed - 2 captured). The next
+//              feed can overlap the previous tile's reduction.
 //     write    the array publishes in order; c_valid_out of result n_cv lands
-//              in bank n_cv % 2; the stage scans and writes back result n_wb
-//              to that job's own c_base and completes the job (job_done).
+//              in bank n_cv % 2. The scan/reader commits result n_enqueued
+//              into the FIFO and metadata queue, releasing its bank. Shared
+//              writeback issues metadata in order; only DDR completion
+//              advances n_wb and completes the job (job_done).
 //
 //   Nothing about the datapath changes: the same feeder, buffers, array and
 //   result banks; the legacy bring-up (USE_EXTERNAL_SCHEDULER = 0, n_inv tiles
 //   of one slab) keeps its phase FSM verbatim.  What a job may NOT do is
 //   unchanged too: run past its k, read a buffer being written, publish into
-//   a bank being written back, or start before the PE has seen the boundary.
+//   a bank still being scanned/enqueued, or start before the PE boundary.
 //
 //   Status that still describes ONE transaction, not a pipelined run:
 //   cyc_latched / cyc_total (first ST_FEED beat to the publish of the same
@@ -293,7 +295,19 @@ module systolic_accel_context #(
   logic [7:0] n_req;        // jobs whose scheduler request was acknowledged
   logic [7:0] n_fed;        // jobs whose fold has started
   logic [7:0] n_cv;         // results published by the array (in order)
-  logic [7:0] n_wb;         // results written back (= jobs completed)
+  logic [7:0] n_wb;         // DDR-completed jobs; never advanced on enqueue
+  logic [7:0] n_enqueued;   // complete payloads and metadata committed
+  wire [QIDX_W-1:0] qi_enqueue = n_enqueued[QIDX_W-1:0];
+  logic [AXI_ADDR_W-1:0] wb_meta_addr [0:1];
+  logic [BEAT_W-1:0] wb_meta_beats [0:1];
+  logic [31:0] wb_meta_job [0:1];
+  logic [7:0] wb_meta_seq [0:1];
+  logic wb_meta_wr, wb_meta_rd;
+  logic [1:0] wb_meta_count;
+  logic wb_meta_issued;
+  wire enqueue_pending = (n_cv != n_enqueued);
+  wire enqueue_commit = USE_EXTERNAL_SCHEDULER && (wb_phase == W_WB) && rdr_done;
+  wire meta_retire = USE_EXTERNAL_SCHEDULER && wb_done;
 
   wire [QIDX_W-1:0] qi_fill = n_filled[QIDX_W-1:0];
   wire [QIDX_W-1:0] qi_req  = n_req[QIDX_W-1:0];
@@ -313,8 +327,9 @@ module systolic_accel_context #(
   wire       wb_pending   = (n_cv != n_wb);             // a published result waits for write-back
 
   // Job n_fed publishes into result bank n_fed % 2, last used by job
-  // n_fed - 2: free once that job is written back (n_fed - n_wb < 2).
-  wire result_bank_free = ((n_fed - n_wb) < 8'd2);
+  // n_fed - 2: free after its payload and metadata have been committed.
+  wire result_bank_free = USE_EXTERNAL_SCHEDULER
+      ? ((n_fed - n_enqueued) < 8'd2) : ((n_fed - n_wb) < 8'd2);
 
   // The array holds at most two tiles: every PE has two accumulator sets, and
   // the PE has no back-pressure -- if tile j+1's operands arrive while tile
@@ -323,9 +338,8 @@ module systolic_accel_context #(
   // tile j's set, silently.  So fold n_fed is released only once tile
   // n_fed - 2 has been published (every PE's reduction of it done): n_cv >=
   // n_fed - 1.  The quiet gap below covers the other half of the boundary,
-  // the drain of tile n_fed - 1's own products.  (result_bank_free implies
-  // this today, because a tile is written back only after it is published;
-  // the guard stands on its own so that neither rule depends on the other.)
+  // the drain of tile n_fed - 1's own products.  Keep this guard independent
+  // of FIFO space and snapshot-bank release.
   wire array_slot_free = ((n_fed - n_cv) < 8'd2);
 
   // ---- invocation bookkeeping ----------------------------------------------
@@ -644,9 +658,10 @@ module systolic_accel_context #(
   // Result tile stride is this array's own tile size.  External: one tile per
   // job, at that job's own c_base.
   assign wb_desc_addr  = USE_EXTERNAL_SCHEDULER
-                             ? wb_region_base
+                             ? wb_meta_addr[wb_meta_rd]
                              : wb_region_base + (AXI_ADDR_W'(wb_fi) << WBT_SHIFT);
-  assign wb_desc_beats = BEAT_W'(WB_BEATS);
+  assign wb_desc_beats = USE_EXTERNAL_SCHEDULER
+      ? wb_meta_beats[wb_meta_rd] : BEAT_W'(WB_BEATS);
 
   // =========================================================================
   // Operand fill
@@ -853,50 +868,83 @@ module systolic_accel_context #(
   end
 
   // ---- write-back stage ------------------------------------------------------
-  // External: result n_wb (bank n_wb % 2) as soon as the array has published
-  // it, in order; wb_done completes job n_wb.  Legacy: the tile handed off
+  // External: drain result n_enqueued in publish order; retain its metadata
+  // until wb_done completes job n_wb. Bank ownership ends at enqueue_commit.  Legacy: the tile handed off
   // from P_FOLD, as before.
   logic wb_pending_d;
   generate
   if (USE_EXTERNAL_SCHEDULER) begin : WB_PIPE
+    // Metadata remains owned until DDR completion, including while issued.
+    // Reserve a free entry before scanning: only this producer can fill it.
+    assign wb_desc_valid = (wb_meta_count != 0) && !wb_meta_issued;
     always_ff @(posedge clk or negedge ui_rst_n) begin
       if (!ui_rst_n) begin
-        wb_phase      <= W_IDLE;
-        wb_bank       <= 1'b0;
-        wb_fi         <= 4'd0;
-        scan_c        <= '0;
-        wb_desc_valid <= 1'b0;
-        wb_pending_d  <= 1'b0;
-        n_wb          <= 8'd0;
+        wb_phase <= W_IDLE;
+        wb_bank <= 1'b0;
+        wb_fi <= '0;
+        scan_c <= '0;
+        wb_pending_d <= 1'b0;
+        n_enqueued <= '0;
+        n_wb <= '0;
+        wb_meta_wr <= 1'b0;
+        wb_meta_rd <= 1'b0;
+        wb_meta_count <= '0;
+        wb_meta_issued <= 1'b0;
+        for (int m = 0; m < 2; m++) begin
+          wb_meta_addr[m] <= '0;
+          wb_meta_beats[m] <= '0;
+          wb_meta_job[m] <= '0;
+          wb_meta_seq[m] <= '0;
+        end
       end else begin
-        wb_desc_valid <= 1'b0;
-        wb_pending_d  <= wb_pending && (wb_phase == W_IDLE);
+        wb_pending_d <= enqueue_pending && (wb_phase == W_IDLE);
+        if (wb_desc_valid && wb_desc_ready) wb_meta_issued <= 1'b1;
+        if (meta_retire) begin
+          n_wb <= n_wb + 8'd1;
+          wb_meta_rd <= ~wb_meta_rd;
+          wb_meta_issued <= 1'b0;
+        end
+        case ({enqueue_commit, meta_retire})
+          2'b10: wb_meta_count <= wb_meta_count + 2'd1;
+          2'b01: wb_meta_count <= wb_meta_count - 2'd1;
+          default: ;
+        endcase
+        if (enqueue_commit) begin
+          wb_meta_addr[wb_meta_wr] <= q_c_base[qi_enqueue];
+          wb_meta_beats[wb_meta_wr] <= BEAT_W'(WB_BEATS);
+          wb_meta_job[wb_meta_wr] <= q_id[qi_enqueue];
+          wb_meta_seq[wb_meta_wr] <= n_enqueued;
+          wb_meta_wr <= ~wb_meta_wr;
+          n_enqueued <= n_enqueued + 8'd1;
+        end
         case (wb_phase)
-          // One registered cycle after the result is published, where the
-          // legacy hand-off (c_done -> c_done_fold -> tile_handoff) started
-          // the scan, so the write term stays the calibrated c_write; and the
-          // same registered cycle after a previous write-back's wb_done, so
-          // back-to-back write-backs are spaced exactly one write term apart
-          // (the cost model's writeEnd_j = max(computeEnd_j, writeEnd_j-1) +
-          // T_write).
-          W_IDLE: if (wb_pending && wb_pending_d) begin
-                    wb_bank  <= n_wb[0];
-                    scan_c   <= '0;
-                    wb_phase <= W_SCAN;
-                  end
+          W_IDLE: if (enqueue_pending && wb_pending_d && wb_meta_count < 2) begin
+            wb_bank <= n_enqueued[0];
+            scan_c <= '0;
+            wb_phase <= W_SCAN;
+          end
           W_SCAN: if (scan_c_last) wb_phase <= W_WB;
-                  else             scan_c   <= scan_c + 1'b1;
-          W_WB:   begin
-                    if (!wb_desc_started) wb_desc_valid <= 1'b1;
-                    if (wb_done) begin
-                      n_wb     <= n_wb + 8'd1;
-                      wb_phase <= W_IDLE;
-                    end
-                  end
+                  else scan_c <= scan_c + 1'b1;
+          // Reader done follows the last accepted FIFO write. The scan and
+          // its registered checksum read have already retired before W_WB.
+          W_WB: if (rdr_done) wb_phase <= W_IDLE;
           default: wb_phase <= W_IDLE;
         endcase
       end
     end
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) if (ui_rst_n) begin
+      if (enqueue_commit && wb_meta_count == 2)
+        $fatal(1, "context %0d: metadata overflow", DEVICE_ID);
+      if (meta_retire && (wb_meta_count == 0 || !wb_meta_issued))
+        $fatal(1, "context %0d: completion without issued metadata", DEVICE_ID);
+      if (wb_desc_valid && wb_desc_ready &&
+          (wb_meta_seq[wb_meta_rd] != n_wb || wb_meta_job[wb_meta_rd] != q_id[qi_wb]))
+        $fatal(1, "context %0d: metadata/job order mismatch", DEVICE_ID);
+      if ((n_enqueued - n_wb) != 8'(wb_meta_count))
+        $fatal(1, "context %0d: metadata conservation failure", DEVICE_ID);
+    end
+`endif
   end else begin : WB_LEGACY
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n || run_clear) begin
@@ -916,7 +964,7 @@ module systolic_accel_context #(
         W_SCAN: if (scan_c_last) wb_phase <= W_WB;
                 else             scan_c   <= scan_c + 1'b1;
         W_WB:   begin
-                  if (!wb_desc_started) wb_desc_valid <= 1'b1;
+                  if (!wb_desc_started && rdr_committed) wb_desc_valid <= 1'b1;
                   if (wb_done) begin
                     if (!wb_fi_last) wb_fi <= wb_fi + 4'd1;
                     wb_phase <= W_IDLE;
@@ -928,12 +976,21 @@ module systolic_accel_context #(
   end
   always_comb begin
     n_wb         = 8'd0;
+    n_enqueued   = 8'd0;
+    wb_meta_count = '0;
+    wb_meta_rd = 1'b0;
+    wb_meta_wr = 1'b0;
+    wb_meta_issued = 1'b0;
+    for (int m = 0; m < 2; m++) begin
+      wb_meta_addr[m] = '0; wb_meta_beats[m] = '0;
+      wb_meta_job[m] = '0; wb_meta_seq[m] = '0;
+    end
     wb_pending_d = 1'b0;
   end
   end
   endgenerate
 
-  assign wb_active = (wb_phase == W_WB);
+  assign wb_active = (wb_phase == W_WB) || (USE_EXTERNAL_SCHEDULER && wb_meta_count != 0);
 
   always_ff @(posedge clk or negedge ui_rst_n) begin
     if (!ui_rst_n)                           wb_desc_started <= 1'b0;
@@ -1289,7 +1346,7 @@ module systolic_accel_context #(
   // External: the array publishes in fold order, so result n_cv goes to bank
   // n_cv % 2 whatever fold is in flight by then; the fold of job j is only
   // released once job j-2 -- the previous user of bank j % 2 -- has been
-  // written back (result_bank_free), so the bank is never overwritten under
+  // enqueued with committed metadata, so the bank is never overwritten under
   // the write-back stage.
   logic [31:0] result_bank [0:1][0:N_ARRAY-1][0:N_ARRAY-1];
   wire result_bank_sel = USE_EXTERNAL_SCHEDULER ? n_cv[0] : compute_fi[0];
@@ -1321,7 +1378,7 @@ module systolic_accel_context #(
     always_ff @(posedge clk) begin
       if (ui_rst_n && c_valid_out && (n_cv == n_fed))
         $fatal(1, "context %0d: the array published a result with no fold outstanding", DEVICE_ID);
-      if (ui_rst_n && c_valid_out && ((n_cv - n_wb) >= 8'd2))
+      if (ui_rst_n && c_valid_out && ((n_cv - n_enqueued) >= 8'd2))
         $fatal(1, "context %0d: result %0d published into a bank still owned by write-back",
                DEVICE_ID, n_cv);
     end
@@ -1457,6 +1514,12 @@ module systolic_accel_context #(
   wire [AXI_DATA_W-1:0] rdr_wr_data;
   wire                  rdr_wfull;
   wire                  rdr_done;
+  logic                 rdr_committed;
+  always_ff @(posedge clk or negedge ui_rst_n) begin
+    if (!ui_rst_n) rdr_committed <= 1'b0;
+    else if (wb_phase != W_WB) rdr_committed <= 1'b0;
+    else if (rdr_done) rdr_committed <= 1'b1;
+  end
   wire                  fifo_rempty;
 
   dma_result_reader #(.N (N_ARRAY), .AXI_DATA_W (AXI_DATA_W)) u_rdr (

@@ -69,6 +69,10 @@ module dma_writeback_engine #(
   // beat leaves.  A descriptor is not done until the memory says it is.
   output logic                   done_valid,        // one-cycle pulse
   output logic [7:0]             done_tag,
+  // Failed descriptors retire separately: never advertise a successful write.
+  // Invalid descriptors consume no source data. Caller must quarantine that
+  // stream (until reset) or explicitly discard its complete tile.
+  output logic                   failed_valid,
 
   // ---- AXI4 write address channel ----------------------------------------
   output wire  [AXI_ID_W-1:0]    m_axi_awid,
@@ -106,7 +110,7 @@ module dma_writeback_engine #(
   output logic [31:0]            aw_stall_cycles,   // awvalid && !awready
   output logic [31:0]            w_stall_cycles,    // wvalid  && !wready
   output logic [31:0]            src_starve_cycles, // in S_W with no source beat
-  output logic                   err_align,         // descriptor not beat aligned
+  output logic                   err_align,         // invalid descriptor (alignment, zero length, or address wrap)
   output logic                   err_resp,          // a burst returned != OKAY
   input  wire                    stat_clear
 );
@@ -130,6 +134,7 @@ module dma_writeback_engine #(
 
   logic [1:0]            state;
   logic [7:0]            tag;
+  logic                  desc_failed;
   logic [AXI_ADDR_W-1:0] addr_r;      // NEXT burst's address (advanced on aw_fire)
   logic [BEAT_W-1:0]     issue_left;  // beats not yet announced by an AW
   logic [LEN_W-1:0]      cur_len;     // beats in the burst awlen_r describes
@@ -179,6 +184,9 @@ module dma_writeback_engine #(
     end
   endfunction
 
+  // Reject address-space wrap before any destructive write is issued.
+  wire [AXI_ADDR_W:0] desc_last_byte = {1'b0, desc_addr}
+      + ((AXI_ADDR_W+1)'(desc_beats) << LSB) - (AXI_ADDR_W+1)'(1);
   wire [31:0] first_len = next_len(desc_addr, {{(32-BEAT_W){1'b0}}, desc_beats});
 
 
@@ -212,10 +220,13 @@ module dma_writeback_engine #(
       awlen_r    <= 8'd0;
       done_valid <= 1'b0;
       done_tag   <= '0;
+      failed_valid <= 1'b0;
+      desc_failed <= 1'b0;
       err_align  <= 1'b0;
       err_resp   <= 1'b0;
     end else begin
       done_valid <= 1'b0;
+      failed_valid <= 1'b0;
 
       // Credit: one per burst, spent on an accepted AW, returned by that
       // burst's write response.  Both in the same cycle cancel out -- the
@@ -223,20 +234,25 @@ module dma_writeback_engine #(
       if (aw_fire && !b_fire)      credit <= credit - 1'b1;
       else if (!aw_fire && b_fire) credit <= credit + 1'b1;
 
-      if (b_fire && !((m_axi_bresp == RESP_OKAY) || (m_axi_bresp == RESP_EXOK)))
+      if (b_fire && !((m_axi_bresp == RESP_OKAY) || (m_axi_bresp == RESP_EXOK))) begin
         err_resp <= 1'b1;
+        desc_failed <= 1'b1;
+      end
 
       case (state)
         S_IDLE: begin
-          if (desc_valid && desc_ready && (desc_beats != 0)) begin
+          if (desc_valid && desc_ready) begin
             // A misaligned descriptor makes every burst-length clamp wrong and
             // MIG's response undefined.  Refuse the work rather than writing
             // plausible-looking garbage into DRAM -- worse than a read, since
             // this one destroys whatever was there.
-            if (desc_addr[LSB-1:0] != '0) begin
+            if (desc_addr[LSB-1:0] != '0 || desc_beats == 0 || desc_last_byte[AXI_ADDR_W]) begin
               err_align <= 1'b1;
+              done_tag <= desc_tag;
+              failed_valid <= 1'b1;
             end else begin
               tag        <= desc_tag;
+              desc_failed <= 1'b0;
               addr_r     <= desc_addr;
               issue_left <= desc_beats;
               cur_len    <= LEN_W'(first_len);
@@ -277,7 +293,8 @@ module dma_writeback_engine #(
         S_DRAIN: begin
           // Full credit again == every burst has been answered.
           if (credit == CRED_W'(MAX_OUTSTANDING)) begin
-            done_valid <= 1'b1;
+            done_valid <= !desc_failed;
+            failed_valid <= desc_failed;
             done_tag   <= tag;
             state      <= S_IDLE;
           end
