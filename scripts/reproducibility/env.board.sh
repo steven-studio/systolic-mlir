@@ -17,9 +17,9 @@
 
 . "$(dirname "${BASH_SOURCE[0]}")/env.common.sh"
 
-REPRO_BOARD_ARTIFACT="artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16"
+REPRO_BOARD_ARTIFACT="artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16"
 REPRO_BOARD_BIT="$REPRO_BOARD_ARTIFACT/systolic_dma_top_1x8x8_3x4x4.bit"
-REPRO_BOARD_SHA256="18329505a3c4c7961094c44c2b104d289dca30d95fb92bf511c98e4cedab705e"
+REPRO_BOARD_SHA256="bd8aba7212a24347eba1dc497204dd6eb5117e8a8ff77094fd94c496a41f3db5"
 
 export SYSTOLIC_FPGA_CONFIG="$REPRO_ROOT/$REPRO_BOARD_ARTIFACT/fpga_config.txt"
 

@@ -154,7 +154,7 @@ and `libmlir_c_runner_utils.so` is linked with an rpath.
 
 | Variable | Value |
 |---|---|
-| `SYSTOLIC_FPGA_CONFIG` | `<repo>/artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16/fpga_config.txt` |
+| `SYSTOLIC_FPGA_CONFIG` | `<repo>/artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16/fpga_config.txt` |
 | `PATH` (only if `vivado` is not found) | `+ $XILINX_VIVADO/bin`. `XILINX_VIVADO` is the variable Vivado's `settings64.sh` sets. |
 
 `env.cosim.sh` adds:
@@ -222,8 +222,8 @@ built from LLVM 24 (the LLVM 24 build tree does not have them):
 The one bitstream this reproduction uses:
 
 ```text
-artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit
-SHA256 18329505a3c4c7961094c44c2b104d289dca30d95fb92bf511c98e4cedab705e
+artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit
+SHA256 bd8aba7212a24347eba1dc497204dd6eb5117e8a8ff77094fd94c496a41f3db5
 ```
 
 | Key (`fpga_config.txt`) | Value |
@@ -232,9 +232,9 @@ SHA256 18329505a3c4c7961094c44c2b104d289dca30d95fb92bf511c98e4cedab705e
 | K_MAX | `K_MAX_8X8=16`, `K_MAX_4X4=16`, `K_DIM=16` |
 | Operand path | `VARIANT=v1`, `USE_V2=0` |
 | Host protocol | `HOST_SLAB_BYTES=1024`, `COMPLETION_HEADER=1`, `PIPELINE_DEPTH=4`, `DDR_BYTES=536870912` |
-| RTL | `RTL_GIT_REV=26762ada252e1c8ef6eb6ae8f1022f5a2b7c1fbe`, `RTL_TREE_DIRTY=0`. That commit is an ancestor of `main`, and `git diff 26762ad HEAD -- rtl/` is empty. |
-| Implementation | `IMPL_PLACE_DIRECTIVE=ExtraTimingOpt`, `IMPL_ROUTE_DIRECTIVE=Explore`, `DPTI_CLKOUT0_PHASE=0.0`, built `2026-10-19T22:34:14+0800`, Vivado v2026.1 |
-| Timing (routed report) | WNS **+0.045 ns**, TNS 0, WHS **+0.016 ns**, THS 0, 0 failing endpoints; "All user specified timing constraints are met." `TIMING_MET=1` |
+| RTL | `RTL_GIT_REV=229fe2431c0c72d25e6654a88e8e5d47c697301b`, `RTL_TREE_DIRTY=1`. The archived configuration records `RTL_TREE_DIRTY=1`, so the recorded Git revision alone does not identify the complete RTL source state used for this build. |
+| Implementation | `IMPL_PLACE_DIRECTIVE=ExtraTimingOpt`, `IMPL_ROUTE_DIRECTIVE=Explore`, `DPTI_CLKOUT0_PHASE=0.0`, built `2026-10-25T13:08:22+0800`, Vivado v2026.1 |
+| Timing (routed report) | WNS **+0.099 ns**, TNS 0, WHS **+0.016 ns**, THS 0, 0 failing endpoints; "All user specified timing constraints are met." `TIMING_MET=1` |
 | DPTI I/O gate (`dpti_io_summary.txt`) | **PASS**: no unconstrained FT2232H ports, every DPTI pin's setup/hold positive, I/O registers in ILOGIC/OLOGIC |
 | Utilization (placed report) | Slice LUTs 117110 / 133800 (87.53 %), Slice Registers 157059 / 267600 (58.69 %), Slices 33268 / 33450 (99.46 %), Block RAM tiles 40 / 365 (10.96 %), DSPs 672 / 740 (90.81 %) |
 
@@ -246,18 +246,15 @@ has every file except the bitstream. Obtain the `.bit` separately and verify
 it:
 
 ```bash
-cd artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16 && sha256sum -c SHA256SUMS
+cd artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16 && sha256sum -c SHA256SUMS
 ```
 
-`fpga_config.txt` contains a `BITSTREAM=` line with the absolute path on the
-build machine where Vivado wrote the `.bit`. That line is recorded metadata.
-The file is covered by `SHA256SUMS` and is left unchanged. The runtime and
-`run_e2e.sh` use that line only to cross-check `BITSTREAM_SHA256` when the
-file exists at that path; otherwise they skip the check. The runtime was
-checked to accept this `fpga_config.txt` as is:
+`fpga_config.txt` records `BITSTREAM=systolic_dma_top_1x8x8_3x4x4.bit`, the archived bitstream filename, together with its SHA256.
+The configuration is covered by `SHA256SUMS` and is left unchanged.
+The runtime was checked to accept this `fpga_config.txt` as is:
 
 ```text
-$ SYSTOLIC_FPGA_CONFIG=$PWD/artifacts/.../2026-10-19-k8_16-k4_16/fpga_config.txt build/bin/runtime-dispatch-test --print-config
+$ SYSTOLIC_FPGA_CONFIG=$PWD/artifacts/.../2026-10-25-k8_16-k4_16/fpga_config.txt build/bin/runtime-dispatch-test --print-config
 K_MAX_8X8=16  K_MAX_4X4=16  SLAB_BYTES=1024  PIPELINE_DEPTH=4  COMPLETION_HEADER=1
 ```
 
@@ -275,8 +272,8 @@ XILINX_VIVADO=<Vivado dir> bash scripts/reproducibility/run_board.sh program
 ```
 
 `verify-program` checks that
-`artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit`
-exists and that its SHA256 is `18329505…ab705e` (section 6). It reports MATCH,
+`artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit`
+exists and that its SHA256 is `bd8aba72…41f3db5` (section 6). It reports MATCH,
 MISMATCH (another file is there) or NOT VERIFIED (no file: `*.bit` is not in
 git, section 6). `program` runs only after MATCH, and then runs Vivado's
 hardware manager on exactly that file:
@@ -284,7 +281,7 @@ hardware manager on exactly that file:
 ```bash
 vivado -mode batch -nojournal \
   -source scripts/reproducibility/program_bit.tcl \
-  -tclargs artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-19-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit
+  -tclargs artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-25-k8_16-k4_16/systolic_dma_top_1x8x8_3x4x4.bit
 ```
 
 `program_bit.tcl` takes the JTAG target whose chain holds the xc7a200t (the
