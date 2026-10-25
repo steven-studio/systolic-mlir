@@ -4,6 +4,7 @@
 #   vivado -mode batch -source dma_top_build.tcl -tclargs build   [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
 #   vivado -mode batch -source dma_top_build.tcl -tclargs program [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
 #   vivado -mode batch -source dma_top_build.tcl -tclargs all     [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]   (both)
+#
 #   vivado -mode batch -source dma_top_build.tcl -tclargs read    [v1|v2] [K8] [K4] [n_inv] [NUM_8X8] [NUM_4X4]
 #
 #   v1 (default) is the four-cycle operand writer into the single-port buffer;
@@ -43,12 +44,9 @@
 #   it.  It is not decoration; it is the fix for the 2026-08-19 placement
 #   lottery, and this design instantiates the same array.
 #
-# READ THE UART PATH AS WELL AS THE PROBES
-#   This bitstream has both.  'read' reports what the DMA-fed fold produced;
-#   tools/uart_check.py then feeds the SAME operands over UART to the SAME
-#   array and checks the answer independently.  Two ways in, one array, and the
-#   golden that both are compared against was confirmed on hardware before any
-#   of this was built.
+# This build has no UART. The legacy VIO seed-pattern helpers below describe
+# older bring-up images, not validation of external-scheduler jobs. Current
+# numerical validation uses DPTI Runtime/E2E and its CPU reference.
 # -----------------------------------------------------------------------------
 
 set PART       xc7a200tsbg484-1
@@ -404,6 +402,8 @@ proc acquire_build_lock {lock} {
 
 proc build {} {
     global PROJ_DIR
+    # A fresh checkout may not have this flow's Vivado output parent yet.
+    file mkdir [file dirname $PROJ_DIR]
     set lock $PROJ_DIR.lock
     acquire_build_lock $lock
     catch {build_locked} msg opts
@@ -496,7 +496,7 @@ proc build_body {} {
         set p [file join $FP_DIR $ip ${ip}.xci]
         if {![file exists $p]} { set p [file join $FP_DIR ${ip}.xci] }
         if {![file exists $p]} { error "missing floating-point IP: $ip under $FP_DIR" }
-        if {[catch {import_ip -files $p} m]} {
+        if {[catch {import_ip -files [list $p]} m]} {
             puts "\nimport_ip failed ($ip): $m"
             error "import_ip failed"
         }
@@ -531,9 +531,9 @@ proc build_body {} {
     lappend vio_cfg CONFIG.C_PROBE_OUT1_WIDTH {1} CONFIG.C_PROBE_OUT1_INIT_VAL {0x0}
     set_property -dict $vio_cfg [get_ips vio_0]
 
-    foreach f $SRC { add_files -norecurse $f }
-    add_files -fileset constrs_1 -norecurse $XDC
-    add_files -fileset constrs_1 -norecurse $XDC_DPTI
+    foreach f $SRC { add_files -norecurse [list $f] }
+    add_files -fileset constrs_1 -norecurse [list $XDC]
+    add_files -fileset constrs_1 -norecurse [list $XDC_DPTI]
     set_property top $TOP [current_fileset]
 
     # Geometry and the golden constants come from this script.  K_MAX_8X8 reaches
@@ -566,13 +566,13 @@ proc build_body {} {
     # project archived without it would place with no hold margin and give no
     # sign of it.
     if {![file exists $HOLD_TCL]} { error "missing: $HOLD_TCL" }
-    add_files -fileset utils_1 -norecurse $HOLD_TCL
+    add_files -fileset utils_1 -norecurse [list $HOLD_TCL]
     set_property STEPS.PLACE_DESIGN.TCL.PRE $HOLD_TCL [get_runs impl_1]
 
     # Scheduler/debug handshake outputs are intentionally not physical board pins.
     set DRC_TCL $SCRIPT_DIR/allow_internal_scheduler_ports.tcl
     if {![file exists $DRC_TCL]} { error "missing: $DRC_TCL" }
-    add_files -fileset utils_1 -norecurse $DRC_TCL
+    add_files -fileset utils_1 -norecurse [list $DRC_TCL]
     set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
 
     # Routability.  At K8 = K4 = 512 with the 1x8x8 + 3x4x4 fleet the placed
@@ -662,8 +662,9 @@ proc build_body {} {
 # -----------------------------------------------------------------------------
 # fpga_config.txt: the record of what this bitstream was built with, in the
 # KEY=VALUE form the runtime reads (runtime/fpga_matmul_tiled.h,
-# fpga_runtime_get_config).  The runtime reads K_MAX_8X8, K_MAX_4X4, N,
-# NUM_8X8 and NUM_4X4; every other line is for people.
+# fpga_runtime_get_config). The runtime reads K_MAX_8X8, K_MAX_4X4, N,
+# NUM_8X8, NUM_4X4, COMPLETION_HEADER, DDR_BYTES and PIPELINE_DEPTH. It
+# derives slab size from K_MAX; HOST_SLAB_BYTES and provenance are metadata.
 # JOB_QUEUE_DEPTH as systolic_accel_context.sv declares it (this build does
 # not override the parameter).
 proc get_job_queue_depth {} {
@@ -719,8 +720,8 @@ proc write_fpga_config {path bit wns whs dpti_io_ok} {
     puts $f "DDR_BYTES=536870912"
     # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH, the
     # default this build takes): invocations one accelerator holds at a time.
-    # The compiler declares the fleet's pipelining from it; the archived
-    # bitstream's record has no such line and is modelled serialized.
+    # The compiler declares the fleet's pipelining from it. Older records
+    # without this line are modelled serialized; the 10/25 archive has depth 4.
     puts $f "PIPELINE_DEPTH=[get_job_queue_depth]"
     puts $f "BITSTREAM=$bit"
     puts $f "BITSTREAM_SHA256=$sha"
@@ -818,8 +819,9 @@ proc pick_device {} {
         set devs [get_hw_devices -quiet]
         if {[llength $devs] == 0} { puts "  $n -> chain empty" ; catch {close_hw_target} ; continue }
         puts "  $n -> [llength $devs] device(s): $devs"
-        set dev [lindex $devs 0]
-        foreach d $devs { if {[string match -nocase *xc7a200t* $d]} { set dev $d } }
+        set dev ""
+        foreach d $devs { if {[string match -nocase *xc7a200t* $d]} { set dev $d; break } }
+        if {$dev eq ""} { puts "  $n -> no xc7a200t on this chain"; catch {close_hw_target}; continue }
         puts "  using: $n  device $dev"
         current_hw_device $dev
         return $dev
@@ -828,6 +830,8 @@ proc pick_device {} {
 }
 
 # -----------------------------------------------------------------------------
+# Legacy seed-pattern helpers below are retained for historical reference.
+# read/sweep are rejected during argument parsing for the current build.
 # Put the board on a given invocation count and start a fresh run.  The design
 # latches n_inv on the way out of P_CALIB and clears every counter there, so the
 # order matters: write n_inv first, then edge the re-run probe.  The request is
