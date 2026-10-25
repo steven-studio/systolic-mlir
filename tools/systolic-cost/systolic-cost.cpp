@@ -156,7 +156,7 @@ std::map<std::string, std::string> parseOptions(int argc, char **argv,
   static const char *const flags[] = {"--compute-only", "--tiles",
                                       "--verify", "--pipelined",
                                       "--v2-operand-path", "--serialized",
-                                      "--no-skip"};
+                                      "--no-skip", "--legacy-writeback", "--trace-results"};
   std::map<std::string, std::string> options;
   for (int i = first; i < argc; ++i) {
     std::string arg = argv[i];
@@ -840,6 +840,7 @@ int runFleetSim(const std::map<std::string, std::string> &options) {
   const bool beatWide = options.count("--v2-operand-path") != 0;
   ::systolic::v2::FleetHardware hw = ::systolic::v2::fpgaFleet(
       f.k8, f.k4, beatWide, f.pipelineDepth > 1 || !options.count("--serialized"));
+  hw.sharedWritebackR2 = !options.count("--legacy-writeback");
   hw.dptiPhasePs = intOption(options, "--dpti-phase-ps", hw.dptiPhasePs, false);
   hw.dptiPeriodPs = intOption(options, "--dpti-period-ps", hw.dptiPeriodPs, false);
   std::vector<::systolic::v2::FleetJob> jobs;
@@ -855,6 +856,33 @@ int runFleetSim(const std::map<std::string, std::string> &options) {
   }
   ::systolic::v2::FleetOptions o;
   o.skipIdle = !options.count("--no-skip");
+  o.traceResults = options.count("--trace-results");
+  const int64_t hostBlock = intOption(options, "--host-block-until-ps", 0, false);
+  const int64_t pauseStart = intOption(options, "--host-pause-start-ps", 0, false);
+  const int64_t pauseEnd = intOption(options, "--host-pause-end-ps", 0, false);
+  if (pauseEnd < pauseStart) die("host pause end precedes start");
+  o.hostReady = [hostBlock, pauseStart, pauseEnd](int64_t ps) {
+    return ps >= hostBlock && !(ps >= pauseStart && ps < pauseEnd);
+  };
+  std::map<int64_t, ::systolic::v2::WritebackBusInputs> busInputs;
+  auto busFile = options.find("--writeback-inputs");
+  if (busFile != options.end()) {
+    std::ifstream bus(busFile->second);
+    if (!bus) die("cannot read " + busFile->second);
+    std::string inputLine;
+    while (std::getline(bus, inputLine)) {
+      std::istringstream row(inputLine);
+      int64_t t; int a, w, b, response = 0;
+      if (!(row >> t >> a >> w >> b)) die("invalid writeback input row");
+      row >> response;
+      busInputs[t] = {bool(a), bool(w), bool(b), response};
+    }
+    o.writebackBus = [&busInputs](int64_t t) {
+      auto it = busInputs.find(t);
+      if (it == busInputs.end()) die("missing writeback input cycle " + std::to_string(t));
+      return it->second;
+    };
+  }
   auto port = options.find("--port");
   if (port != options.end()) {
     if (port->second == "credit")
@@ -875,7 +903,19 @@ int runFleetSim(const std::map<std::string, std::string> &options) {
                 e.lastBeat, e.land, e.fold, e.cv, e.wbReq, e.wbAcc, e.done, e.rbTake,
                 e.rbDesc, e.rbDone);
   }
+  if (hw.sharedWritebackR2) {
+    for (size_t i = 0; i < r.jobs.size(); ++i)
+      std::printf("enqueue %zu cycle=%" PRId64 "\n", i, r.jobs[i].enqueue);
+  }
+  for (const auto &v : r.resultTrace)
+    std::printf("RT %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64
+                " %d %d %d %d %d %d %d %d %d %" PRId64 " %d %d %d\n",
+                v.cycle, v.context, v.fifo, v.metadata, v.banks,
+                v.full, v.empty, v.reserved, v.push, v.pop, v.reserve, v.commit,
+                v.retire, v.eligible, v.owner, v.aw, v.w, v.b);
   const ::systolic::v2::FleetStats &s = r.stats;
+  std::printf("output expected=%" PRId64 " emitted=%" PRId64 " last_byte_ps=%" PRId64 "\n",
+              s.expectedOutputBytes, s.outputBytes, r.lastByteToHostPs);
   std::printf("fleet device_makespan=%" PRId64 " readback_end=%" PRId64
               " last_byte_to_host=%" PRId64 " ar=%" PRId64 " operand_ar=%" PRId64
               " max_outstanding=%" PRId64 " operand_bytes=%" PRId64
@@ -910,7 +950,8 @@ int runFleetSim(const std::map<std::string, std::string> &options) {
                "[--to T] [fleet options]\n"
                "       systolic-cost fleet-sim --jobs FILE [--k8 N --k4 N] "
                "[--port inorder|credit] [--v2-operand-path] [--serialized] "
-               "[--dpti-phase-ps P] [--dpti-period-ps P]\n"
+               "[--dpti-phase-ps P] [--dpti-period-ps P] [--legacy-writeback] "
+               "[--trace-results] [--writeback-inputs FILE] [--host-block-until-ps P]\n"
                "       systolic-cost timeline --geometry G --k-max KM "
                "--k k0,k1,... [--accept t0,t1,...] [--feed t0,t1,...] "
                "[--write t0,t1,...] [fleet options]\n"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # build_bench.sh -- build tb_fleet_jobs (Verilator) for one bitstream
-# configuration.  The RTL is the working tree's rtl/multi_200t/tile_pipelined,
+# configuration.  The RTL is the working tree's rtl/multi_200t/heterogeneous_fleet,
 # with the source list and stand-ins of dma/tb/run_cost_phases.sh.
 #
 #   eval/cost_model_v2/build_bench.sh K_MAX_8X8 K_MAX_4X4 v1|v2 OUT_DIR
@@ -13,7 +13,7 @@ K8="$1"; K4="$2"; VARIANT="$3"; OUT="$4"
 case "$VARIANT" in v1) USE_V2=0 ;; v2) USE_V2=1 ;; *) echo "variant must be v1 or v2"; exit 2 ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-RTL="$ROOT/rtl/multi_200t/tile_pipelined"
+RTL="$ROOT/rtl/multi_200t/heterogeneous_fleet"
 DMA="$RTL/dma"
 COSIM="$ROOT/test/e2e/cosim"
 command -v verilator >/dev/null 2>&1 || { echo "verilator not found"; exit 127; }
@@ -23,7 +23,7 @@ verilator --binary -Wno-fatal -Werror-USERERROR --timing --public-flat-rw -O2 \
     -GK_MAX_8X8="$K8" -GK_MAX_4X4="$K4" -GUSE_V2="$USE_V2" \
     -I"$DMA/tb" \
     --top-module tb_fleet_jobs -o tbrun --Mdir "$OUT/obj" \
-    "$HERE/tb_fleet_jobs.sv" \
+    "$HERE/tb_fleet_jobs_r2.sv" \
     "$DMA/tb/xil_stubs.sv" \
     "$DMA/tb/mig_axi_model.sv" \
     "$COSIM/fp_ieee.sv" \

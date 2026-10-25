@@ -9,6 +9,8 @@
 // stays selectable with cost-model=v1 and prices exactly as before
 // (binary_search_rcw.mlir, binary_search_pipelined.mlir).
 //
+// Revision 2 timings; the pipelined schedule is replayed in the RTL
+// differential validation (run_validation.py credit).
 // The numbers of the V2 remarks are the C++ fleet simulator's
 // (CostModelV2.cpp). The simulator reproduces the RTL bench to the cycle on
 // every validated job list (cost_model_v2_rtl.mlir, eval/cost_model_v2);
@@ -19,16 +21,15 @@
 // stream measured with the whole fleet busy (saturated). "predicted device
 // makespan" is the chosen schedule itself on the fleet simulator, the tiles
 // offered as the asynchronous runtime offers them. The two are different
-// scenarios; neither bounds the other (the second case below: 2458 vs 2954,
-// the 4x4s' results queueing for the readback path in front of the 8x8's
-// last fills).
+// scenarios; neither is a general bound on the other. The second case
+// below is 2489 planned vs 2473 predicted on Revision 2.
 
 // 16x16x16, K_MAX 16/16, the serialized fleet. The same decomposition as
-// V1 (two 8x8 tiles, eight 4x4 tiles), priced 1894 instead of 1245: the
+// V1 (two 8x8 tiles, eight 4x4 tiles), priced 1915 instead of 1245: the
 // fills contend for the one read port and every result is read back through
 // the DPTI output path.
-// V2: remark: binary-search schedule 16x16x16: makespan = 1894 cycles (read + compute + write), compute-only = 351, schedule end = 1894, operand bytes read = 10240, shared-read cycles = 0, tiles = 10
-// V2: remark: cost model v2: planning makespan = 1894 cycles (saturated fleet), predicted device makespan = 1881, readback end = 3953, AXI read requests = 626, operand bytes = 10240, contention cycles = 2144
+// V2: remark: binary-search schedule 16x16x16: makespan = 1915 cycles (read + compute + write), compute-only = 351, schedule end = 1915, operand bytes read = 10240, shared-read cycles = 0, tiles = 10
+// V2: remark: cost model v2: planning makespan = 1915 cycles (saturated fleet), predicted device makespan = 1902, readback end = 3970, AXI read requests = 626, operand bytes = 10240, contention cycles = 2168
 // V1: remark: binary-search schedule 16x16x16: makespan = 1245 cycles (read + compute + write), compute-only = 351, schedule end = 1245, operand bytes read = 10240, shared-read cycles = 0, tiles = 10
 // V1-NOT: cost model
 // IR-LABEL: func.func @mm_16x16x16
@@ -63,8 +64,8 @@ module {
 // 16 + 16 + 1. V2 runs three 8x8 tiles and four 4x4 tiles; start_cycle is
 // still the compute-only timeline (the hardware scheduler holds folds on it,
 // so its meaning does not change with the cost model).
-// V2: remark: binary-search schedule 16x16x33: makespan = 2458 cycles (read + compute + write), compute-only = 677, schedule end = 2458, operand bytes read = 17920, shared-read cycles = 0, tiles = 7
-// V2: remark: cost model v2: planning makespan = 2458 cycles (saturated fleet), predicted device makespan = 2954, readback end = 11367, AXI read requests = 1019, operand bytes = 17920, contention cycles = 1671
+// V2: remark: binary-search schedule 16x16x33: makespan = 2489 cycles (read + compute + write), compute-only = 677, schedule end = 2489, operand bytes read = 17920, shared-read cycles = 0, tiles = 7
+// V2: remark: cost model v2: planning makespan = 2489 cycles (saturated fleet), predicted device makespan = 2473, readback end = 11383, AXI read requests = 1049, operand bytes = 17920, contention cycles = 1229
 // V1: remark: binary-search schedule 16x16x33:
 // V1-NOT: cost model
 // IR-LABEL: func.func @mm_16x16x33

@@ -14,7 +14,7 @@
 //     while two or more are, at most 8 bursts in flight, one ID, so the data
 //     returns in request order and the destination of the beat at the head
 //     stalls every beat behind it (head-of-line blocking);
-//   - one write-back engine, granted to the lowest-numbered waiting context,
+//   - one round-robin write-back engine (Revision 2),
 //     one result tile at a time;
 //   - one readback path: a round-robin FSM over the contexts' completion
 //     queues, a 16-byte completion record and the tile's beats through the
@@ -26,9 +26,9 @@
 // clock for the contexts and engines, the DPTI clock for the output path --
 // with every rule taken from the RTL (the sources are cited at each rule in
 // CostModelV2.cpp). The per-context events (acceptance, fill, fold, publish,
-// write-back) keep V1's recurrences, which the RTL bench reproduces to the
-// cycle; what V2 adds is everything the contexts share. Shared means shared
-// hardware: two contexts that read the same matrix region still fetch it
+// write-back) include the Revision 2 enqueue stages and early bank release;
+// the legacy profile retains V1's older write-completion dependencies.
+// Shared means shared hardware: two contexts that read the same matrix region still fetch it
 // twice, as the runtime and the RTL do (every invocation has its own operand
 // slab); nothing here deduplicates reads.
 //
@@ -42,6 +42,7 @@
 #include "Systolic/CostModel.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -49,7 +50,7 @@ namespace systolic {
 namespace v2 {
 
 /// One context (accelerator) of the fleet: context i is the read engine's
-/// operand slot i and the write-back arbiter's priority i.
+/// operand slot i and write-back round-robin position i.
 struct ContextConfig {
   int64_t rows = 0;            // the array is rows x rows
   int64_t kMax = 0;            // operand buffer depth (job.k <= kMax)
@@ -60,7 +61,7 @@ struct ContextConfig {
 };
 
 /// The shared hardware, as the RTL builds it. Every default is the
-/// bitstream's (rtl/multi_200t/tile_pipelined/dma, USE_V2 = 0).
+/// Revision 2 RTL's (rtl/multi_200t/heterogeneous_fleet/dma, USE_V2 = 0).
 struct FleetHardware {
   std::vector<ContextConfig> contexts;
 
@@ -81,6 +82,9 @@ struct FleetHardware {
   int64_t pageBytes = 4096;         // a burst never crosses a page
 
   // ---- write-back (systolic_accel_context.sv W_SCAN, dma_writeback_engine) -
+  // Revision 2 has fixed 32-beat FIFOs and two metadata entries per context.
+  // The constants below are used ONLY by the explicit legacy profile.
+  bool sharedWritebackR2 = true;   // false: explicit historical tile_pipelined profile
   int64_t scanExtra = 5;            // publish -> write-back request = rows^2 + 5
   int64_t wbEngineExtra = 6;        // request granted -> done = rows^2 / 4 + 6
 
@@ -143,6 +147,7 @@ struct FleetJobEvents {
   int64_t fillStart = -1, desc = -1;      // the context's fill, its read descriptor
   int64_t lastBeat = -1, land = -1;       // last operand beat, last word landed
   int64_t fold = -1, cv = -1;             // fold start, result published
+  int64_t enqueue = -1;          // payload + metadata commit; bank released here
   int64_t wbReq = -1, wbAcc = -1, done = -1;
   int64_t rbTake = -1, rbDesc = -1, rbDone = -1;
   int64_t readCycles() const { return land - desc; }  // descriptor -> landed
@@ -159,7 +164,26 @@ struct FleetStats {
   int64_t sharedCycles = 0;               // cycles with >= 2 slots active
   int64_t rStallCycles = 0;               // R beat held by its destination
   int64_t contentionCycles = 0;           // sum over jobs of readCycles - alone
+  int64_t expectedOutputBytes = 0, outputBytes = 0;
   int64_t simulatedCycles = 0;
+};
+
+// Pre-edge resource state and handshakes. Trace collection is opt-in.
+struct ResultCycle {
+  int64_t cycle = 0, context = 0;
+  int64_t fifo = 0, metadata = 0, banks = 0;
+  bool full = false, empty = true, reserved = false;
+  bool push = false, pop = false, reserve = false, commit = false;
+  bool retire = false, eligible = false;
+  int64_t owner = -1;
+  bool aw = false, w = false, b = false;
+};
+
+// External AXI inputs, sampled before an array edge. Optional differential
+// replay input; these are environment signals, never model-produced events.
+struct WritebackBusInputs {
+  bool awReady = true, wReady = true, bValid = false;
+  int response = 0; // AXI BRESP; errors terminate prediction, never succeed
 };
 
 struct FleetResult {
@@ -167,6 +191,7 @@ struct FleetResult {
   std::string error;
   std::vector<FleetJobEvents> jobs;
   FleetStats stats;
+  std::vector<ResultCycle> resultTrace;
   /// First acceptance -> last result in DDR (what V1's makespan measures).
   int64_t deviceMakespan = 0;
   /// The same per context (0 for a context with no job).
@@ -175,12 +200,18 @@ struct FleetResult {
   /// reaches the host lastByteToHost).
   int64_t readbackEnd = 0;
   int64_t lastByteToHost = 0;
+  int64_t lastByteToHostPs = 0; // same endpoint before rounding to array cycles
 };
 
 struct FleetOptions {
+  bool traceResults = false;
+  std::function<WritebackBusInputs(int64_t)> writebackBus;
+  // Absolute ps relative to the array edge at cycle zero; no RX traffic.
+  std::function<bool(int64_t)> hostReady;
   PortPolicy port = PortPolicy::InOrder;
   /// Jump over cycles in which provably nothing changes: every engine,
   /// queue and FIFO empty, and the next cycle anything can happen known.
+  /// R2 currently steps every edge: its internal pipeline is not skipped.
   /// The result is identical either way (eval/cost_model_v2 checks both).
   bool skipIdle = true;
 };
