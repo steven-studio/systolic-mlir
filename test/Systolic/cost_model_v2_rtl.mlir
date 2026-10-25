@@ -1,3 +1,4 @@
+// Historical tile_pipelined profile; Revision 2 differential tests live in eval/cost_model_v2/validate_r2.py.
 // Cost Model V2 fleet simulator against the RTL (docs/COSTMODEL_V2.md).
 //
 // Every number checked below was MEASURED in RTL simulation by the bench
@@ -11,14 +12,14 @@
 // Regenerate: eval/cost_model_v2/README.md.
 
 // 16/16 K_MAX, v1 operand path: combo_3x4x4_K16_gap0
-// RUN: systolic-cost fleet-sim --jobs %S/Inputs/cost_model_v2/case1_3x4x4_k16.jobs --k8 16 --k4 16 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=CASE1_3X4X4_K16
+// RUN: systolic-cost fleet-sim --legacy-writeback --jobs %S/Inputs/cost_model_v2/case1_3x4x4_k16.jobs --k8 16 --k4 16 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=CASE1_3X4X4_K16
 // CASE1_3X4X4_K16: job 0 dev=1 k=16 offer={{[0-9-]+}} fire=2 fill={{[0-9]+}} desc=5 last=260 land=265 fold=269 cv=386 wbreq={{[0-9]+}} wbacc=407 done=417 take=418 rbdesc={{[0-9]+}} rbdone=427
 // CASE1_3X4X4_K16: job 1 dev=2 k=16 offer={{[0-9-]+}} fire=4 fill={{[0-9]+}} desc=7 last=385 land=390 fold=394 cv=511 wbreq={{[0-9]+}} wbacc=532 done=542 take=543 rbdesc={{[0-9]+}} rbdone=552
 // CASE1_3X4X4_K16: job 2 dev=3 k=16 offer={{[0-9-]+}} fire=6 fill={{[0-9]+}} desc=9 last=390 land=395 fold=399 cv=516 wbreq={{[0-9]+}} wbacc=543 done=552 take=553 rbdesc={{[0-9]+}} rbdone=740
 // CASE1_3X4X4_K16: fleet device_makespan=550 {{.*}} ar=165 
 
 // 16/16 K_MAX, v1 operand path: combo_8x8+3x4x4_K17_gap3
-// RUN: systolic-cost fleet-sim --jobs %S/Inputs/cost_model_v2/fleet_k17_gap3.jobs --k8 16 --k4 16 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K17_GAP3
+// RUN: systolic-cost fleet-sim --legacy-writeback --jobs %S/Inputs/cost_model_v2/fleet_k17_gap3.jobs --k8 16 --k4 16 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K17_GAP3
 // FLEET_K17_GAP3: job 0 dev=0 k=16 offer={{[0-9-]+}} fire=2 fill={{[0-9]+}} desc=5 last=260 land=265 fold=269 cv=394 wbreq={{[0-9]+}} wbacc=463 done=485 take=486 rbdesc={{[0-9]+}} rbdone=915
 // FLEET_K17_GAP3: job 1 dev=1 k=16 offer={{[0-9-]+}} fire=4 fill={{[0-9]+}} desc=7 last=385 land=390 fold=394 cv=511 wbreq={{[0-9]+}} wbacc=532 done=542 take=916 rbdesc={{[0-9]+}} rbdone=1182
 // FLEET_K17_GAP3: job 2 dev=2 k=16 offer={{[0-9-]+}} fire=7 fill={{[0-9]+}} desc=10 last=390 land=395 fold=399 cv=516 wbreq={{[0-9]+}} wbacc=543 done=552 take=1183 rbdesc={{[0-9]+}} rbdone=1449
@@ -30,7 +31,7 @@
 // FLEET_K17_GAP3: fleet device_makespan=700 {{.*}} ar=368 
 
 // 32/32 K_MAX, v1 operand path: combo_8x8+3x4x4_K65_gap0
-// RUN: systolic-cost fleet-sim --jobs %S/Inputs/cost_model_v2/fleet_k65_kmax32.jobs --k8 32 --k4 32 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K65_KMAX32
+// RUN: systolic-cost fleet-sim --legacy-writeback --jobs %S/Inputs/cost_model_v2/fleet_k65_kmax32.jobs --k8 32 --k4 32 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K65_KMAX32
 // FLEET_K65_KMAX32: job 0 dev=0 k=32 offer={{[0-9-]+}} fire=2 fill={{[0-9]+}} desc=5 last=516 land=521 fold=525 cv=666 wbreq={{[0-9]+}} wbacc=735 done=757 take=758 rbdesc={{[0-9]+}} rbdone=1196
 // FLEET_K65_KMAX32: job 1 dev=1 k=32 offer={{[0-9-]+}} fire=4 fill={{[0-9]+}} desc=7 last=641 land=646 fold=650 cv=783 wbreq={{[0-9]+}} wbacc=804 done=814 take=1197 rbdesc={{[0-9]+}} rbdone=1464
 // FLEET_K65_KMAX32: job 2 dev=2 k=32 offer={{[0-9-]+}} fire=6 fill={{[0-9]+}} desc=9 last=646 land=651 fold=655 cv=788 wbreq={{[0-9]+}} wbacc=815 done=824 take=1465 rbdesc={{[0-9]+}} rbdone=1720
@@ -46,7 +47,7 @@
 // FLEET_K65_KMAX32: fleet device_makespan=1631 {{.*}} ar=1122 
 
 // 32/32 K_MAX, v1 operand path: serial_8x8+3x4x4_K17_gap40
-// RUN: systolic-cost fleet-sim --jobs %S/Inputs/cost_model_v2/serial_k17_gap40.jobs --k8 32 --k4 32 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=SERIAL_K17_GAP40
+// RUN: systolic-cost fleet-sim --legacy-writeback --jobs %S/Inputs/cost_model_v2/serial_k17_gap40.jobs --k8 32 --k4 32 --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=SERIAL_K17_GAP40
 // SERIAL_K17_GAP40: job 0 dev=0 k=17 offer={{[0-9-]+}} fire=2 fill={{[0-9]+}} desc=5 last=388 land=393 fold=397 cv=523 wbreq={{[0-9]+}} wbacc=592 done=614 take=615 rbdesc={{[0-9]+}} rbdone=1044
 // SERIAL_K17_GAP40: job 1 dev=1 k=17 offer={{[0-9-]+}} fire=4 fill={{[0-9]+}} desc=7 last=513 land=518 fold=522 cv=640 wbreq={{[0-9]+}} wbacc=661 done=671 take=1045 rbdesc={{[0-9]+}} rbdone=1320
 // SERIAL_K17_GAP40: job 2 dev=2 k=17 offer={{[0-9-]+}} fire=6 fill={{[0-9]+}} desc=9 last=518 land=523 fold=527 cv=645 wbreq={{[0-9]+}} wbacc=672 done=681 take=1321 rbdesc={{[0-9]+}} rbdone=1577
@@ -62,7 +63,7 @@
 // SERIAL_K17_GAP40: fleet device_makespan=2454 {{.*}} ar=1144 
 
 // 16/16 K_MAX, v2 operand path: combo_8x8+3x4x4_K17_gap3
-// RUN: systolic-cost fleet-sim --jobs %S/Inputs/cost_model_v2/fleet_k17_gap3.jobs --k8 16 --k4 16 --v2-operand-path --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K17_GAP3_V2PATH
+// RUN: systolic-cost fleet-sim --legacy-writeback --jobs %S/Inputs/cost_model_v2/fleet_k17_gap3.jobs --k8 16 --k4 16 --v2-operand-path --dpti-phase-ps 3245 --dpti-period-ps 16666 | FileCheck %s --check-prefix=FLEET_K17_GAP3_V2PATH
 // FLEET_K17_GAP3_V2PATH: job 0 dev=0 k=16 offer={{[0-9-]+}} fire=2 fill={{[0-9]+}} desc=5 last=119 land=121 fold=125 cv=250 wbreq={{[0-9]+}} wbacc=319 done=341 take=342 rbdesc={{[0-9]+}} rbdone=770
 // FLEET_K17_GAP3_V2PATH: job 1 dev=1 k=16 offer={{[0-9-]+}} fire=4 fill={{[0-9]+}} desc=7 last=183 land=185 fold=189 cv=306 wbreq={{[0-9]+}} wbacc=342 done=351 take=771 rbdesc={{[0-9]+}} rbdone=1037
 // FLEET_K17_GAP3_V2PATH: job 2 dev=2 k=16 offer={{[0-9-]+}} fire=7 fill={{[0-9]+}} desc=10 last=231 land=233 fold=237 cv=354 wbreq={{[0-9]+}} wbacc=375 done=385 take=1038 rbdesc={{[0-9]+}} rbdone=1304

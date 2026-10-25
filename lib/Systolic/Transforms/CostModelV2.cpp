@@ -53,9 +53,9 @@ public:
   }
 
   // DPTI edge at time `now` (ps).
-  void dptiEdge(int64_t now) {
+  void dptiEdge(int64_t now, bool hostReady) {
     const bool rdValid = rd != wrR2;
-    const bool txAcc = wrLowPrev;                 // TXE# low: every strobe lands
+    const bool txAcc = wrLowPrev && !txe; // confirmed by registered TXE#
     const bool txLeftGe1 = txAcc ? txCount >= 2 : txCount >= 1;
     const bool txReady = txCount < txDepth;
     const bool pushByte = bBusy && txReady;
@@ -74,7 +74,7 @@ public:
       const bool turnDone = turnCnt >= turn;
       if (!turnDone)
         ++turnCnt;
-      if (turnDone && txLeftGe1) {
+      if (turnDone && txLeftGe1 && !txe) {
         mode = Mode::Tx;
         wrN = false;
       }
@@ -86,10 +86,11 @@ public:
       else if (!txLeftGe1) {
         mode = Mode::Idle;
         turnCnt = 0;
-      } else
+      } else if (!txe)
         wrN = false;
       break;
     }
+    txe = !hostReady;
     wrLowPrev = nextWrLowPrev;
     txCount += (pushByte ? 1 : 0) - (txAcc ? 1 : 0);
     if (pushByte) {
@@ -120,7 +121,7 @@ private:
   int64_t txCount = 0;
   Mode mode = Mode::Idle;
   int64_t turnCnt = 2;   // reset value is 0; the path has long been idle at T0
-  bool wrN = true, wrLowPrev = false;
+  bool wrN = true, wrLowPrev = false, txe = false;
 };
 
 struct Job {
@@ -128,6 +129,182 @@ struct Job {
   int64_t nth = 0;       // its index among its context's jobs
   FleetJobEvents e;
   int64_t wbStart = kNone;
+};
+
+// Revision 2 result pipeline. All decisions use pre-edge state, just as the
+// nonblocking assignments in heterogeneous_fleet/dma do. In particular a
+// simultaneous retirement does not make a full metadata queue reservable on
+// this edge, and a FIFO read does not immediately clear the writer's full flag.
+class ResultWriteback {
+  struct Context {
+    enum Phase { Idle, Scan, Pack } phase = Idle;
+    enum Reader { RIdle, Run, Drain } reader = RIdle;
+    bool pendingD = false, started = false, readerDone = false;
+    int64_t scan = 0, beat = 0, enqueued = 0, retired = 0;
+    int64_t metadata = 0;
+    bool issued = false;
+    // dma_cdc_fifo: both clocks are the array clock, but the two-flop
+    // synchronizers and registered full/empty flags still apply.
+    int64_t wr = 0, rd = 0, rd1 = 0, rd2 = 0, wr1 = 0, wr2 = 0;
+    bool full = false, empty = true;
+  };
+  enum Engine { EIdle, AW, W, BDrain } engine = EIdle;
+  const FleetHardware &hw;
+  std::vector<Context> contexts;
+  int last, owner = -1;
+  bool inflight = false, done = false;
+  int64_t job = -1, address = 0, left = 0, burst = 0, wleft = 0, credit = 4;
+  // Ideal bench memory and the top's write-bus ownership, when no external
+  // AXI inputs are supplied. No host staging or seeder competes in this model.
+  bool busOwned = false, response = false;
+  int64_t open = 0;
+
+public:
+  explicit ResultWriteback(const FleetHardware &hw)
+      : hw(hw), contexts(hw.contexts.size()), last(hw.contexts.size() - 1) {}
+  bool idle() const {
+    if (inflight || engine != EIdle || done) return false;
+    for (const auto &c : contexts)
+      if (c.phase != Context::Idle || c.metadata || c.wr != c.rd) return false;
+    return true;
+  }
+  bool edge(int64_t t, std::vector<Job> &jobs,
+            const std::vector<std::vector<int64_t>> &perDev,
+            const FleetOptions &opt, std::vector<ResultCycle> &trace) {
+    const int na = contexts.size();
+    int grant = -1;
+    if (!inflight && engine == EIdle) {
+      for (int n = 1; n <= na; ++n) {
+        const int d = (last + n) % na;
+        if (contexts[d].metadata && !contexts[d].issued) { grant = d; break; }
+      }
+    }
+    const auto bus = opt.writebackBus ? opt.writebackBus(t)
+        : WritebackBusInputs{busOwned, busOwned, busOwned && response};
+    const bool aw = engine == AW && credit > 0 && bus.awReady;
+    const bool w = engine == W && !contexts[owner].empty && bus.wReady;
+    const bool b = bus.bValid; // engine's bready is always 1
+    if (b && bus.response != 0 && bus.response != 1) return false;
+    const bool wants = (engine == AW && credit > 0) ||
+                       (engine == W && !contexts[owner].empty);
+    const bool finish = done && inflight;
+    if (finish) jobs[job].e.done = t;
+
+    for (int d = 0; d < na; ++d) {
+      auto &c = contexts[d];
+      const int64_t rows = hw.contexts[d].rows;
+      const int64_t beats = rows * rows * hw.elementBytes / hw.beatBytes;
+      const auto &lst = perDev[d];
+      const bool pending = c.enqueued < int64_t(lst.size()) &&
+          jobs[lst[c.enqueued]].e.cv >= 0 && jobs[lst[c.enqueued]].e.cv < t;
+      if (c.metadata && !c.issued && jobs[lst[c.retired]].e.wbReq < 0)
+        jobs[lst[c.retired]].e.wbReq = t;
+      const bool reserve = c.phase == Context::Idle && pending && c.pendingD && c.metadata < 2;
+      const bool commit = c.phase == Context::Pack && c.readerDone;
+      const bool retire = finish && owner == d;
+      const bool push = c.reader == Context::Run && !c.full;
+      const bool pop = w && owner == d;
+      if (opt.traceResults) {
+        int64_t fed = 0;
+        for (const int64_t i : lst)
+          if (jobs[i].e.fold >= 0 && jobs[i].e.fold < t) ++fed;
+        trace.push_back({t, d, c.wr-c.rd, c.metadata, fed-c.enqueued,
+            c.full, c.empty, c.phase != Context::Idle, push, pop, reserve,
+            commit, retire, c.metadata > 0 && !c.issued,
+            inflight ? owner : -1, aw, w, b});
+      }
+      // FIFO next state: synchronize OLD pointers, flags compare next local
+      // pointer with OLD second synchronizer (dma_cdc_fifo.sv).
+      const int64_t nw = c.wr + push, nr = c.rd + pop;
+      c.full = nw - c.rd2 == 32;
+      c.empty = nr == c.wr2;
+      c.rd2 = c.rd1; c.rd1 = c.rd;
+      c.wr2 = c.wr1; c.wr1 = c.wr;
+      c.wr = nw; c.rd = nr;
+
+      const bool start = c.phase == Context::Pack;
+      const bool oldStarted = c.started;
+      c.readerDone = false;
+      switch (c.reader) {
+      case Context::RIdle:
+        if (start && !oldStarted) { c.started = true; c.beat = 0; c.reader = Context::Run; }
+        if (!start) c.started = false;
+        break;
+      case Context::Run:
+        if (push && ++c.beat == beats) c.reader = Context::Drain;
+        break;
+      case Context::Drain: c.readerDone = true; c.reader = Context::RIdle; break;
+      }
+      c.pendingD = pending && c.phase == Context::Idle;
+      switch (c.phase) {
+      case Context::Idle:
+        if (reserve) { c.phase = Context::Scan; c.scan = 0; }
+        break;
+      case Context::Scan:
+        if (c.scan == rows * rows) c.phase = Context::Pack;
+        else ++c.scan;
+        break;
+      case Context::Pack:
+        if (commit) c.phase = Context::Idle;
+        break;
+      }
+      // Metadata entry is reserved before scanning, committed only after the
+      // last accepted payload beat. Count retains issued entries through B.
+      if (commit) {
+        auto &e = jobs[lst[c.enqueued++]].e;
+        e.enqueue = t;
+      }
+      if (retire) { ++c.retired; c.issued = false; }
+      if (grant == d) c.issued = true;
+      c.metadata += int(commit) - int(retire);
+    }
+
+    const bool oldDone = done;
+    done = false;
+    const int64_t oldCredit = credit;
+    credit += int(b) - int(aw);
+    switch (engine) {
+    case EIdle:
+      if (grant >= 0) {
+        job = perDev[grant][contexts[grant].retired];
+        jobs[job].e.wbAcc = t;
+        const int64_t rows = hw.contexts[grant].rows;
+        left = rows * rows * hw.elementBytes / hw.beatBytes;
+        address = hw.resultBase + (grant * hw.resultSlots + jobs[job].nth % hw.resultSlots) * hw.resultSlotBytes;
+        burst = std::min({int64_t{16}, left, (4096-address%4096)/hw.beatBytes});
+        credit = 4;
+        engine = AW;
+      }
+      break;
+    case AW:
+      if (aw) { address += burst*hw.beatBytes; left -= burst; wleft = burst; engine = W; }
+      break;
+    case W:
+      if (w && --wleft == 0) {
+        if (left == 0) engine = BDrain;
+        else {
+          burst = std::min({int64_t{16}, left, (4096-address%4096)/hw.beatBytes});
+          engine = AW;
+        }
+      }
+      break;
+    case BDrain:
+      if (oldCredit == 4) { done = true; engine = EIdle; }
+      break;
+    }
+    if (!opt.writebackBus) {
+      const bool boundary = open == 0 && !b && !aw;
+      if (!busOwned && wants) busOwned = true;
+      else if (busOwned && boundary && !wants) busOwned = false;
+      open += int(aw) - int(b);
+      // Ideal memory produces B the cycle after the final accepted W beat.
+      response = w && wleft == 0;
+    }
+    // top wb_inflight owns descriptor, stream AND completion until response.
+    if (grant >= 0) { inflight = true; owner = grant; last = grant; }
+    else if (oldDone) inflight = false;
+    return true;
+  }
 };
 
 enum class RbState { Idle, IdleNext, IdleNext2, HdrNext, Hdr, DataNext, Data };
@@ -260,6 +437,7 @@ FleetResult simulateFleet(const FleetHardware &hw,
   // ---- write-back engine (systolic_dma_top.sv, dma_writeback_engine.sv) ------
   bool wbInflight = false;
   int64_t wbFreeAt = 0;
+  ResultWriteback r2(hw);
 
   // ---- readback (systolic_dma_top.sv RB_IDLE / RB_HDR / RB_DATA) -------------
   RbState rbState = RbState::Idle;
@@ -312,10 +490,21 @@ FleetResult simulateFleet(const FleetHardware &hw,
   int64_t progress = 0, lastProgressCount = -1, lastProgressCycle = 0;
   int64_t bytesOutSeen = 0;
 
+  for (const Job &j : J) {
+    const int64_t r = hw.contexts[j.in.context].rows;
+    const int64_t bytes = hw.beatBytes + r * r * hw.elementBytes;
+    if (st.expectedOutputBytes > std::numeric_limits<int64_t>::max() - bytes) {
+      result.error = "output byte count overflow";
+      return result;
+    }
+    if (hw.readback) st.expectedOutputBytes += bytes;
+  }
+
   while (true) {
     const int64_t E = t * hw.uiPeriodPs;
     while (hw.dptiPhasePs + m * hw.dptiPeriodPs < E) {
-      out.dptiEdge(hw.dptiPhasePs + m * hw.dptiPeriodPs);
+      const int64_t now = hw.dptiPhasePs + m * hw.dptiPeriodPs;
+      out.dptiEdge(now, !options.hostReady || options.hostReady(now));
       ++m;
     }
 
@@ -405,10 +594,11 @@ FleetResult simulateFleet(const FleetHardware &hw,
               f = std::max(f, prv->e.fold + prv->in.k + c.feedGap);
           }
           if (pp) {
-            if (!known(pp->e.cv) || !known(pp->e.done))
+            const int64_t bank = hw.sharedWritebackR2 ? pp->e.enqueue : pp->e.done;
+            if (!known(pp->e.cv) || !known(bank))
               ok = false;
             else
-              f = std::max({f, pp->e.cv + 3, pp->e.done + 3});
+              f = std::max({f, pp->e.cv + 3, bank + 3});
           }
           if (ok)
             j.e.fold = f;
@@ -422,7 +612,7 @@ FleetResult simulateFleet(const FleetHardware &hw,
           }
           j.e.cv = cv;
         }
-        if (!known(j.e.wbReq) && known(j.e.cv) && (!prv || known(prv->e.done))) {
+        if (!hw.sharedWritebackR2 && !known(j.e.wbReq) && known(j.e.cv) && (!prv || known(prv->e.done))) {
           j.wbStart = prv ? std::max(j.e.cv, prv->e.done) : j.e.cv;
           j.e.wbReq = j.wbStart + c.rows * c.rows + hw.scanExtra;
         }
@@ -430,7 +620,13 @@ FleetResult simulateFleet(const FleetHardware &hw,
     }
 
     // ---- write-back engine: lowest-numbered request, one tile at a time ------
-    if (!wbInflight || t >= wbFreeAt) {
+    if (hw.sharedWritebackR2) {
+      if (!r2.edge(t, J, perDev, options, result.resultTrace)) {
+        result.error = "AXI write response failed; RTL quarantines the owner until reset";
+        return result;
+      }
+      wbInflight = !r2.idle();
+    } else if (!wbInflight || t >= wbFreeAt) {
       wbInflight = false;
       for (int dv = 0; dv < NA && !wbInflight; ++dv) {
         // a context's write-backs are granted in its job order: the next
@@ -652,7 +848,11 @@ FleetResult simulateFleet(const FleetHardware &hw,
         }
         all = c == (int64_t)lst.size();
       }
-      if (all)
+      if (out.bytesOut > st.expectedOutputBytes) {
+        result.error = "output emitted more bytes than expected";
+        return result;
+      }
+      if (all && out.bytesOut == st.expectedOutputBytes)
         break;
     }
 
@@ -674,7 +874,9 @@ FleetResult simulateFleet(const FleetHardware &hw,
                      std::to_string(t) + " with work in flight";
       return result;
     }
-    if (idle) {
+    // R2 has registered scan/reader/FIFO transitions between job events.
+    // Until those are included in the skip proof, step every array edge.
+    if (idle && !hw.sharedWritebackR2) {
       int64_t next = std::numeric_limits<int64_t>::max();
       if (!descAt.empty())
         next = std::min(next, descAt.begin()->first);
@@ -723,6 +925,7 @@ FleetResult simulateFleet(const FleetHardware &hw,
     }
   }
 
+  st.outputBytes = out.bytesOut;
   st.simulatedCycles = t;
   st.operandReadBytes = st.operandBeats * hw.beatBytes;
   st.readbackBytes = st.readbackBeats * hw.beatBytes + 0;
@@ -750,6 +953,7 @@ FleetResult simulateFleet(const FleetHardware &hw,
   if (nj > 0) {
     result.deviceMakespan = last - first;
     result.readbackEnd = hw.readback ? rbEnd - first : 0;
+    result.lastByteToHostPs = hw.readback ? out.lastBytePs - first * hw.uiPeriodPs : 0;
     result.lastByteToHost =
         hw.readback ? (out.lastBytePs + hw.uiPeriodPs - 1) / hw.uiPeriodPs - first : 0;
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cost Model V2 against the RTL: the whole validation, reproducible.
+"""Cost Model V2 against Shared Writeback Revision 2 RTL: the whole validation, reproducible.
 
     python3 eval/cost_model_v2/run_validation.py [--out DIR] [--jobs N] [STEP ...]
 
@@ -36,7 +36,7 @@ V2_CONFIGS = [(16, 16), (32, 32)]
 BRUTE = {(32, 32), (64, 64)}
 GAPS = [0, 3, 40, 300]
 COMBOS = {'8x8': [0], '4x4': [1], '8x8+4x4': [0, 1], '8x8+3x4x4': [0, 1, 2, 3], '3x4x4': [1, 2, 3]}
-KEYS = ('fire', 'desc', 'last', 'land', 'fold', 'cv', 'wbacc', 'done')
+KEYS = ('fire', 'desc', 'last', 'land', 'fold', 'cv', 'enqueue', 'wbreq', 'wbacc', 'done')
 UI_PS, BENCH_DPTI_PS = 10000, 16666
 
 
@@ -199,6 +199,8 @@ def fleet_sim(jobfile, k8, k4, variant='v1', port='inorder', phase=0, period=166
         f = line.split()
         if f[0] == 'job':
             jobs.append({k: int(v) for k, v in (x.split('=') for x in f[2:])})
+        elif f[0] == 'enqueue':
+            jobs[int(f[1])]['enqueue'] = int(f[2].split('=')[1])
         elif f[0] == 'fleet':
             fleet = {k: int(v) for k, v in (x.split('=') for x in f[1:])}
         elif f[0] == 'bursts':
@@ -278,9 +280,19 @@ def exact_one(mv):
     jobs = read_jobs(m['jobs'])
     log = m['jobs'][:-5] + f'.{variant}.log'
     meas, ars, phase = read_log(log, jobs)
-    pred, fleet, _, _ = fleet_sim(m['jobs'], m['k8'], m['k4'], variant, phase=phase, period=BENCH_DPTI_PS)
+    pred, fleet, _, output = fleet_sim(m['jobs'], m['k8'], m['k4'], variant, phase=phase, period=BENCH_DPTI_PS)
     bad = [(i, k, meas[i].get(k), pred[i].get(k)) for i in range(len(jobs))
            for k in KEYS + ('take', 'rbdone') if meas[i].get(k) != pred[i].get(k)]
+    lines = open(log).read().splitlines()
+    push = next(l.split() for l in lines if l.startswith('VO push '))
+    origin = int(push[3]) - int(push[2]) * UI_PS
+    host = dict(x.split('=') for x in next(l for l in lines if l.startswith('VH ')).split()[1:])
+    model_output = dict(x.split('=') for x in next(l for l in output.splitlines() if l.startswith('output ')).split()[1:])
+    expected_ps = int(host['last_abs_ps']) - origin - min(x['fire'] for x in meas)*UI_PS
+    if int(model_output['last_byte_ps']) != expected_ps:
+        bad.append(('host', 'last_byte_ps', expected_ps, int(model_output['last_byte_ps'])))
+    if int(model_output['emitted']) != int(host['bytes']):
+        bad.append(('host', 'bytes', int(host['bytes']), int(model_output['emitted'])))
     return dict(config=m['config'], name=m['name'], variant=variant,
                 ok=not bad and len(ars) == fleet['ar'], first_bad=bad[:1],
                 ar_rtl=len(ars), ar_model=fleet['ar'])

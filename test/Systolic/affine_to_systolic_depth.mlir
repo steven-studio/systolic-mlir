@@ -147,7 +147,7 @@ func.func @seven(%A: memref<8x16xf32> {llvm.noalias},
                  %B: memref<16x8xf32> {llvm.noalias},
                  %C: memref<8x8xf32> {llvm.noalias}) {
   affine.for %r0 = 0 to 2 {
-    // expected-remark @+1 {{affine GEMM 8x8x16 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 483 cycles (read + compute + write), 1 output block(s); the enclosing loops run it 6 time(s)}}
+    // expected-remark @+1 {{affine GEMM 8x8x16 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 500 cycles (read + compute + write), 1 output block(s); the enclosing loops run it 6 time(s)}}
     affine.for %i0 = 0 to 2 {
       affine.for %j = 0 to 8 {
         affine.for %r1 = 0 to 3 {
