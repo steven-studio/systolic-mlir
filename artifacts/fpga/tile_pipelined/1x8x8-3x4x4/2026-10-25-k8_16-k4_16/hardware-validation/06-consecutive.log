@@ -1,0 +1,16 @@
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab, completion record (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_etopt/systolic_dma.runs/impl_1/fpga_config.txt)
+backend: board (--backend)
+GEMM 16x16x32; devices 0 1 2 3
+
+mode D (two GEMMs interleaved, staging on): PASS
+    tiles=40 completed=40 failed=0 wall_ms=50.3 tiles_per_s=795.4 reads=6 empty=3 overlap2=6 overlap4=5 staged_behind=5 bytes_to=44680 bytes_from=4736 per_device=8/12/12/8 depth=4 depth2_passes=6 max_inflight=4/4/4/4 last_descriptor_us=34941 first_completion_us=15476 before_first_completion=16 behind_inflight=30 credit_waits=6 submits_blocked=0 blocked_us=0 submit_us=87 link_write_us=27659 link_read_us=10214 collect_us=1 wait_us=38383 polls=0
+mode Q (backpressure: SYSTOLIC_ASYNC_QUEUE_LIMIT=1 on a 4x larger GEMM, submits wait for room, never for the previous job): PASS
+    tiles=80 completed=80 failed=0 wall_ms=80.7 tiles_per_s=991.9 reads=11 empty=5 overlap2=11 overlap4=10 staged_behind=10 bytes_to=89360 bytes_from=9472 per_device=16/22/22/20 depth=4 depth2_passes=11 max_inflight=4/4/4/4 last_descriptor_us=73674 first_completion_us=14699 before_first_completion=16 behind_inflight=58 credit_waits=5 submits_blocked=80 blocked_us=71014 submit_us=183 link_write_us=54165 link_read_us=21388 collect_us=3 wait_us=5438 polls=0
+    GEMM 32x32x32, tiles=80 per_device=16/22/22/20; submits blocked for room: 80 (71014 us); descriptors sent on a freed credit: 5; most in flight per device 4/4/4/4 of depth 4
+mode M (three GEMMs of different shapes interleaved, waited for out of order, each checked while the others are outstanding): PASS
+    tiles=62 completed=62 failed=0 wall_ms=67.7 tiles_per_s=915.9 reads=9 empty=4 overlap2=9 overlap4=6 staged_behind=8 bytes_to=69254 bytes_from=7648 per_device=14/18/18/12 depth=4 depth2_passes=9 max_inflight=4/4/4/4 last_descriptor_us=60773 first_completion_us=14925 before_first_completion=16 behind_inflight=45 credit_waits=13 submits_blocked=0 blocked_us=0 submit_us=45 link_write_us=44112 link_read_us=18901 collect_us=8 wait_us=63802 polls=0
+    gemm 2 (8x8x32, 2 tiles): wait rc=0, every element right checked right after its wait with 32 of 62 tiles of the session completed
+    gemm 0 (16x16x32, 20 tiles): wait rc=0, every element right checked right after its wait with 48 of 62 tiles of the session completed
+    gemm 1 (16x16x64, 40 tiles): wait rc=0, every element right checked right after its wait with 62 of 62 tiles of the session completed
+
+RUNTIME ASYNC: PASS

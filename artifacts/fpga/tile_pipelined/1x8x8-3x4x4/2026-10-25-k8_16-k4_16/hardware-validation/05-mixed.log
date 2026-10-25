@@ -1,0 +1,13 @@
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab, completion record (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_etopt/systolic_dma.runs/impl_1/fpga_config.txt)
+backend: board (--backend)
+GEMM 16x16x32; devices 0 1 2 3
+
+mode B (every device, no staging): PASS
+    tiles=20 completed=20 failed=0 wall_ms=48.3 tiles_per_s=414.1 reads=7 empty=1 overlap2=7 overlap4=5 staged_behind=0 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=0 max_inflight=1/1/1/1 last_descriptor_us=30522 first_completion_us=7036 before_first_completion=4 behind_inflight=0 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=46 link_write_us=14057 link_read_us=18600 collect_us=3 wait_us=33055 polls=0
+mode C (every device, slab staged behind the running job): PASS
+    tiles=20 completed=20 failed=0 wall_ms=31.4 tiles_per_s=636.1 reads=3 empty=1 overlap2=3 overlap4=2 staged_behind=2 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=3 max_inflight=4/4/4/4 last_descriptor_us=17696 first_completion_us=15012 before_first_completion=16 behind_inflight=14 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=39 link_write_us=13625 link_read_us=7105 collect_us=2 wait_us=21051 polls=0
+mode S (submission semantics: every submit returns before the first completion, descriptors queued behind in-flight ones): PASS
+    tiles=20 completed=20 failed=0 wall_ms=31.5 tiles_per_s=634.4 reads=3 empty=1 overlap2=3 overlap4=2 staged_behind=2 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=3 max_inflight=4/4/4/4 last_descriptor_us=17559 first_completion_us=14903 before_first_completion=16 behind_inflight=14 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=39 link_write_us=13365 link_read_us=7200 collect_us=2 wait_us=20925 polls=0
+    tiles=20 per_device=4/6/6/4; submits returned before the first completion: 20 (first completion at 14903 us after the first submit, last submit returned at 52 us); descriptors before the first completion: 16 (sum of min(tiles_d, depth) = 16); sent behind an in-flight descriptor: 14; waited for a credit: 2; submits blocked: 0
+
+RUNTIME ASYNC: PASS

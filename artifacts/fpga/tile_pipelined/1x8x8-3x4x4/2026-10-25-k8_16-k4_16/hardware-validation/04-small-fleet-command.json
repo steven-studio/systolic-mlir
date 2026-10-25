@@ -1,0 +1,1 @@
+["/tmp/shared-wb-r2-hw-20261025-run1/bin/runtime-async-test", "--backend", "board", "--mode", "B,C", "--devices", "1,2,3", "--gemm", "16x16x32"]

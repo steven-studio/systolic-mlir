@@ -1,0 +1,10 @@
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab, completion record (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_etopt/systolic_dma.runs/impl_1/fpga_config.txt)
+backend: board (--backend)
+GEMM 16x16x32; devices 1 2 3
+
+mode B (every device, no staging): PASS
+    tiles=32 completed=32 failed=0 wall_ms=72.0 tiles_per_s=444.6 reads=12 empty=0 overlap2=10 overlap4=0 staged_behind=0 bytes_to=35744 bytes_from=2560 per_device=0/12/10/10 depth=4 depth2_passes=0 max_inflight=0/1/1/1 last_descriptor_us=65309 first_completion_us=5574 before_first_completion=3 behind_inflight=0 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=21 link_write_us=26261 link_read_us=40924 collect_us=4 wait_us=67616 polls=0
+mode C (every device, slab staged behind the running job): PASS
+    tiles=32 completed=32 failed=0 wall_ms=52.4 tiles_per_s=610.6 reads=7 empty=4 overlap2=7 overlap4=0 staged_behind=5 bytes_to=35744 bytes_from=2560 per_device=0/12/10/10 depth=4 depth2_passes=7 max_inflight=0/4/4/4 last_descriptor_us=32781 first_completion_us=13911 before_first_completion=12 behind_inflight=23 credit_waits=6 submits_blocked=0 blocked_us=0 submit_us=119 link_write_us=23925 link_read_us=12060 collect_us=5 wait_us=36852 polls=0
+
+RUNTIME ASYNC: PASS

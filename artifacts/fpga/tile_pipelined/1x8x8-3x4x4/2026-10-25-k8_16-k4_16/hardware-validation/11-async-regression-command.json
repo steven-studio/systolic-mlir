@@ -1,0 +1,1 @@
+["bash", "test/e2e/run_e2e.sh", "--backend", "board", "--build-dir", "/tmp/shared-wb-r2-hw-20261025-run1", "--mode", "async", "--regression", "--out", "/tmp/shared-wb-r2-hw-20261025-run1/async-regression"]

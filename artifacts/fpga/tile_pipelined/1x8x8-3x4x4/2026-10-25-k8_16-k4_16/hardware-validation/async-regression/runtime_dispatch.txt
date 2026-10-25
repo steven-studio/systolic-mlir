@@ -1,0 +1,24 @@
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_etopt/systolic_dma.runs/impl_1/fpga_config.txt)
+  (the host's configuration: the FPGA does not report its K_MAX, so it is not independently verified)
+
+8x16x8 full tile, k = K_MAX, device 0 (8x8)                    rc=0  mismatches=0/64  PASS
+4x16x4 full tile, k = K_MAX, device 1 (4x4)                    rc=0  mismatches=0/16  PASS
+2x5x3 edge tile, device 2 (4x4)                                rc=0  mismatches=0/6  PASS
+4x16x4 with C_in != 0, device 3 (4x4)                          rc=0  mismatches=0/16  PASS
+5x7x6 edge tile with C_in != 0, device 0 (8x8)                 rc=0  mismatches=0/30  PASS
+8x1x8 k = 1, device 0 (8x8)                                    rc=0  mismatches=0/64  PASS
+7x15x8 k = K_MAX - 1, device 0 (8x8)                           rc=0  mismatches=0/56  PASS
+8x16x7 k = K_MAX, device 0 (8x8)                               rc=0  mismatches=0/56  PASS
+4x1x4 k = 1, device 1 (4x4)                                    rc=0  mismatches=0/16  PASS
+3x15x4 k = K_MAX - 1, device 1 (4x4)                           rc=0  mismatches=0/12  PASS
+4x16x3 k = K_MAX, device 1 (4x4)                               rc=0  mismatches=0/12  PASS
+4x1x4 k = 1, device 3 (4x4)                                    rc=0  mismatches=0/16  PASS
+3x15x4 k = K_MAX - 1, device 3 (4x4)                           rc=0  mismatches=0/12  PASS
+4x16x3 k = K_MAX, device 3 (4x4)                               rc=0  mismatches=0/12  PASS
+[fpga-runtime] invocation on device 1 (tile 4x4, k=17) failed: rc=-10
+4x17x4 k = K_MAX + 1, device 1 (4x4): refused                  rc=-10  0 B sent  PASS
+[fpga-runtime] invocation on device 0 (tile 8x8, k=17) failed: rc=-10
+8x17x8 k = K_MAX + 1, device 0 (8x8): refused                  rc=-10  0 B sent  PASS
+
+runtime: 14 invocation(s) [dev0 5, dev1 4, dev2 1, dev3 4], 15638 B to the FPGA, 2080 B back
+RUNTIME DISPATCH: PASS
