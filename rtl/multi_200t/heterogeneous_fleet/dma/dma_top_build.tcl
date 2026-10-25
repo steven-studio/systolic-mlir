@@ -14,8 +14,15 @@
 #   paper's.  Each (variant, K8, K4, fleet) tuple gets its own project
 #   directory, so bitstreams of different geometries coexist and 'read' opens
 #   the one you name.  The golden constants are tabulated below per K8 (the
-#   payload depth the 8x8 context runs); add a row from seed_ref.py before
-#   building a new K8.
+#   payload depth the 8x8 context runs); a K8 without a row still builds (see
+#   GOLDEN below) -- the row only feeds the bring-up 'read' self-check.
+#
+#   Every successful build writes fpga_config.txt next to its .bit: the exact
+#   K_MAX_8X8 / K_MAX_4X4 / fleet / variant it was built with, the bitstream's
+#   sha256 and the git revision.  The host side reads that file:
+#     SYSTOLIC_FPGA_CONFIG=<impl dir>/fpga_config.txt build/bin/systolic-matmul
+#   so the compiler's k_max, the FPGA lowering's physical K_MAX and the
+#   runtime's slab all come from the bitstream that is on the board.
 #
 # This is bringup_build.tcl (3a) with the array added: the MIG and the DMA read
 # path from that script, plus the floating-point IP and the thirteen RTL files
@@ -100,17 +107,30 @@ set USE_V2 [expr {$VARIANT eq "v2" ? 1 : 0}]
 # legacy run and every counter 'read' reports belong to context 0, the 8x8;
 # systolic_dma_top clamps K_DIM to K4 for the 4x4 contexts itself).
 #
-# The RTL's own limits on either value -- a power of two, at least 16 -- are
-# checked by the simulation benches, not here; this script passes the numbers
-# through unchanged.
+# Either value is any positive integer up to K_MAX_LIMIT; neither has to be a
+# power of two, and they need not be equal.  The limit is the protocol's: a
+# slab is ceil(K / 8) windows of 32 beats and the DMA descriptor counts beats
+# in 16 bits, so ceil(K / 8) * 32 <= 65535.  The RTL refuses the same values
+# at elaboration (systolic_accel_context), so this check only fails earlier.
+# The practical bound is lower and is Vivado's to report: each context holds
+# 4 * N_ARRAY * K_MAX operand words in BRAM.  v2's beat-wide operand path
+# additionally needs K a multiple of 8 and at least 16 (its writer decodes the
+# window index from $clog2(K) - 3 bits); the v1 path takes any K.  Values are
+# plain decimal: Tcl's expr would read a leading 0 as octal.
 set NARR   8
-set K8     [expr {$K8ARG eq "" ? 16 : $K8ARG}]
-set K4     [expr {$K4ARG eq "" ? 16 : $K4ARG}]
-if {![string is integer -strict $K8] || $K8 < 1} {
-    error "K8 (K_MAX_8X8) must be a positive integer, got '$K8'"
+set K_MAX_LIMIT 16376
+# Taken as written and validated before any expr sees them: expr would turn
+# 016 into 14 without a word.
+if {$K8ARG eq ""} { set K8 16 } else { set K8 $K8ARG }
+if {$K4ARG eq ""} { set K4 16 } else { set K4 $K4ARG }
+if {![regexp {^[1-9][0-9]*$} $K8] || $K8 > $K_MAX_LIMIT} {
+    error "K8 (K_MAX_8X8) must be a decimal integer in 1..$K_MAX_LIMIT without leading zeros, got '$K8'"
 }
-if {![string is integer -strict $K4] || $K4 < 1} {
-    error "K4 (K_MAX_4X4) must be a positive integer, got '$K4'"
+if {![regexp {^[1-9][0-9]*$} $K4] || $K4 > $K_MAX_LIMIT} {
+    error "K4 (K_MAX_4X4) must be a decimal integer in 1..$K_MAX_LIMIT without leading zeros, got '$K4'"
+}
+if {$USE_V2 && (($K8 % 8) != 0 || ($K4 % 8) != 0 || $K8 < 16 || $K4 < 16)} {
+    error "v2 needs K_MAX_8X8 and K_MAX_4X4 to be multiples of 8, at least 16 (got $K8, $K4); build v1 for any other K"
 }
 set KDIM   $K8
 
@@ -153,10 +173,52 @@ array set GOLDEN {
 # invocations, mod 2^32.  seed_ref.py's own mode-0 self-check only reproduces
 # the board's 0x387fdc00 at --kmax 16, where that constant was measured; a
 # "self-check FAILED" line from any other geometry says nothing about this row.
-if {![info exists GOLDEN($K8)]} {
-    error "no golden constants tabulated for K8 = K_MAX_8X8 = $K8 -- run\n  python3 tools/seed_ref.py --mode 1 --kmax $K8\nand add a GOLDEN row"
+#
+# A K8 without a row is NOT refused: the row is the bring-up 'read' self-check
+# of context 0 on the seed pattern, nothing in the datapath.  Such a build gets
+# EXPECT_CYC from the calibrated model (K8 + 2(N-1) + 95) and zero checksum
+# constants, so led[4] / led[5] stay dark and 'read' says there is no golden
+# for this K8 -- the external-scheduler path the host uses is unaffected.
+set HAVE_GOLDEN [info exists GOLDEN($K8)]
+if {$HAVE_GOLDEN} {
+    lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+} else {
+    set EXPECT_WR_CHK 00000000
+    set EXPECT_C_CHK  00000000
+    set EXPECT_CYC    [expr {$K8 + 2 * ($NARR - 1) + 95}]
+    puts "NOTE: no golden row for K8 = K_MAX_8X8 = $K8: the bring-up 'read' self-check"
+    puts "      (led\[4\], led\[5\]) has no checksum constants for this build; add one with"
+    puts "      python3 tools/seed_ref.py --mode 1 --kmax $K8   (K8 a multiple of 8)"
 }
-lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
+
+# DPTI_CLK_PHASE=<degrees> overrides dpti_clk_gen's CLKOUT0 phase
+# (systolic_dma_top DPTI_CLKOUT0_PHASE, default 0).  Only for the phase sweep
+# that dpti_clk_gen.sv's header describes; pair it with SYSTOLIC_PROJ_TAG so a
+# swept build never replaces the default one.  It is recorded in
+# fpga_config.txt.
+set DPTI_CLK_PHASE 0.0
+if {[info exists ::env(DPTI_CLK_PHASE)]} {
+    set DPTI_CLK_PHASE $::env(DPTI_CLK_PHASE)
+    if {![regexp {^-?[0-9]+(\.[0-9]+)?$} $DPTI_CLK_PHASE] || abs($DPTI_CLK_PHASE) > 180.0} {
+        error "DPTI_CLK_PHASE must be a decimal number of degrees in -180..180, got '$DPTI_CLK_PHASE'"
+    }
+}
+
+# Implementation directives; see the routability note in build_body.
+set PLACE_DIRECTIVE AltSpreadLogic_high
+set ROUTE_DIRECTIVE Explore
+foreach {var envname} {PLACE_DIRECTIVE SYSTOLIC_PLACE_DIRECTIVE ROUTE_DIRECTIVE SYSTOLIC_ROUTE_DIRECTIVE} {
+    if {[info exists ::env($envname)]} {
+        if {![regexp {^[A-Za-z0-9_]{1,40}$} $::env($envname)]} {
+            error "$envname must be a Vivado directive name, got '$::env($envname)'"
+        }
+        set $var $::env($envname)
+    }
+}
+set INCR_REF ""
+if {[info exists ::env(SYSTOLIC_INCR_REF)]} {
+    set INCR_REF [file normalize $::env(SYSTOLIC_INCR_REF)]
+}
 
 # One project per (variant, K8, K4, NUM_8X8, NUM_4X4) so bitstreams of
 # different geometries coexist and 'read' cannot open the wrong one; K8 and K4
@@ -165,6 +227,29 @@ lassign $GOLDEN($K8) EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
 # single-K_MAX projects of the earlier syntax (systolic_dma_v1_k16_...) are
 # left alone as well.
 set PROJ_DIR   $::env(HOME)/work/vivado/heterogeneous_fleet/systolic_dma_${VARIANT}_k8_${K8}_k4_${K4}_${NUM_8X8}x8x8_${NUM_4X4}x4x4
+
+# SYSTOLIC_PROJ_TAG=<tag> builds into PROJ_DIR_<tag> instead.  'build' moves an
+# existing PROJ_DIR aside to .prev and deletes the previous .prev, so an
+# untagged rebuild of a geometry replaces the project -- bitstream, DCPs, .ltx
+# -- that a board result or an archive was taken from.  A tagged build never
+# touches the untagged directory.
+#
+# With a tag set, mode 'all' is refused, including when it is the default
+# because no mode was given: it builds and then programs the board in one
+# step.  Name the mode (build | program | read | sweep).  An empty or malformed
+# tag is an error rather than a silent fallback to the untagged directory.
+if {[info exists ::env(SYSTOLIC_PROJ_TAG)]} {
+    set PROJ_TAG $::env(SYSTOLIC_PROJ_TAG)
+    if {![regexp {^[A-Za-z0-9_-]{1,40}$} $PROJ_TAG]} {
+        error "SYSTOLIC_PROJ_TAG must be 1..40 characters from \[A-Za-z0-9_-\], got '$PROJ_TAG'"
+    }
+    if {$MODE eq "all"} {
+        error "SYSTOLIC_PROJ_TAG=$PROJ_TAG: mode 'all' (also the default when no mode is given) is disabled; name the mode: build | program | read | sweep"
+    }
+    set PROJ_DIR ${PROJ_DIR}_${PROJ_TAG}
+    puts "SYSTOLIC_PROJ_TAG=$PROJ_TAG  PROJ_DIR = $PROJ_DIR"
+}
+
 
 # Where the result tile is written back.  One page clear of the operand image,
 # which is K_MAX_8X8*8*N bytes long (1 KiB at K8 = 16, 16 KiB at 256; the top's
@@ -183,13 +268,40 @@ proc wb_base {n} {
 }
 set WB_BASE       [expr {$K8 * 8 * $NARR + 4096}]
 
+proc prepare_mig_xci {xci output_dir} {
+    # MIG resolves XML_INPUT_FILE during import, after changing directories.
+    # Keep the checked-in XCI portable; only this build-local copy contains
+    # the absolute path of the PRJ in the current checkout.
+    set prj [file normalize [file join [file dirname $xci] nexys_video_mig_axi128.prj]]
+    if {![file isfile $prj] || ![file readable $prj]} { error "missing MIG project: $prj" }
+    set fd [open $xci r]
+    set text [read $fd]
+    close $fd
+    set marker {"value": "nexys_video_mig_axi128.prj"}
+    if {[string first $marker $text] < 0 ||
+        [string first $marker $text] != [string last $marker $text]} {
+        error "expected one portable MIG project reference in $xci"
+    }
+    # Escape JSON strings independently of Tcl quoting (spaces need no escape).
+    set prj_json [string map [list "\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"] $prj]
+    file mkdir $output_dir
+    set output [file join $output_dir [file tail $xci]]
+    set fd [open $output w]
+    puts -nonewline $fd [string map [list $marker "\"value\": \"$prj_json\""] $text]
+    close $fd
+    return $output
+}
+
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../tile_pipelined
 
-set XCI     $ROOT/ip/ddr3/mig_7series_0.xci
+set XCI     $SCRIPT_DIR/ip/ddr3/mig_7series_0.xci
 set FP_DIR  $ROOT/ip/fp32
 set FP_IPS  [list floating_point_add_0 floating_point_mul_0]
 set XDC     $SCRIPT_DIR/nexys_video_dma_top.xdc
+# FT2232H I/O timing (input/output delays, IOB, pull-ups, the lock
+# controller's crossings).  Read after XDC: it uses dpti_clkout and clk_dpti.
+set XDC_DPTI $SCRIPT_DIR/nexys_video_dpti_timing.xdc
 set HOLD_TCL $SCRIPT_DIR/hold_margin.tcl
 
 # The DMA side, then the compute core.
@@ -209,6 +321,7 @@ set SRC [list \
     $SCRIPT_DIR/systolic_accel_context.sv \
     $SCRIPT_DIR/dma_engine_multi.sv \
     $SCRIPT_DIR/dpti_host_rx.sv \
+    $SCRIPT_DIR/dpti_bus_arbiter.sv \
     $SCRIPT_DIR/dpti_byte_rx.sv \
     $SCRIPT_DIR/dpti_write32_decoder.sv \
     $SCRIPT_DIR/dpti_mem_write_decoder.sv \
@@ -217,6 +330,10 @@ set SRC [list \
     $SCRIPT_DIR/dpti_output_cdc.sv \
     $SCRIPT_DIR/dpti_beat_to_byte.sv \
     $SCRIPT_DIR/dpti_byte_tx.sv \
+    $SCRIPT_DIR/dpti_sync245_phy.sv \
+    $SCRIPT_DIR/dpti_sync245_fifo.sv \
+    $SCRIPT_DIR/dpti_clk_gen.sv \
+    $SCRIPT_DIR/dpti_link_ctrl.sv \
     $SCRIPT_DIR/dpti_mem_write_cdc.sv \
     $SCRIPT_DIR/dpti_mem_write_engine.sv \
     $SCRIPT_DIR/dpti_mem_write_cdc_engine.sv \
@@ -246,34 +363,58 @@ set SRC [list \
     $ROOT/scheduler/systolic_hw_scheduler_adapter.sv ]
 
 # -----------------------------------------------------------------------------
-proc prepare_mig_xci {xci output_dir} {
-    # MIG resolves XML_INPUT_FILE during import, after changing directories.
-    # Keep the checked-in XCI portable; only this build-local copy contains
-    # the absolute path of the PRJ in the current checkout.
-    set prj [file normalize [file join [file dirname $xci] nexys_video_mig_axi128.prj]]
-    if {![file isfile $prj] || ![file readable $prj]} { error "missing MIG project: $prj" }
-    set fd [open $xci r]
-    set text [read $fd]
-    close $fd
-    set marker {"value": "nexys_video_mig_axi128.prj"}
-    if {[string first $marker $text] < 0 ||
-        [string first $marker $text] != [string last $marker $text]} {
-        error "expected one portable MIG project reference in $xci"
+# ONE BUILD PER PROJ_DIR AT A TIME.  On 2026-10-15 two 'build v1 512 512 1 1 3'
+# sessions were started 110 s apart on the same PROJ_DIR.  The second one's
+# 'file delete -force $prev' deleted the first one's backup -- the previous
+# project -- and moved the first one's live project aside; both then launched
+# impl_1 into the same run directory, both opt_design processes failed writing
+# the same systolic_dma_top_opt.dcp (Common 17-99), and the two restores
+# deleted each other's directory: PROJ_DIR and .prev were both gone.
+#
+# The lock is $PROJ_DIR.lock, created with O_EXCL so exactly one session wins.
+# A lock whose pid is no longer running is left by a killed session and is
+# reclaimed; one whose pid is alive, or which names no pid, is never touched.
+proc acquire_build_lock {lock} {
+    for {set try 0} {$try < 2} {incr try} {
+        if {![catch {open $lock {WRONLY CREAT EXCL}} f]} {
+            puts $f "pid=[pid]"
+            puts $f "started=[clock format [clock seconds] -format {%Y-%m-%dT%H:%M:%S%z}]"
+            puts $f "argv=$::argv"
+            close $f
+            return
+        }
+        if {![file exists $lock]} { error "cannot create build lock $lock: $f" }
+        set holder ""
+        catch {
+            set h [open $lock r]
+            regexp -line {^pid=([0-9]+)$} [read $h] -> holder
+            close $h
+        }
+        if {$holder eq "" || [file exists /proc/$holder]} {
+            error "another build owns this project: $lock\n[expr {$holder eq {} ? {  (no pid recorded yet)} : "  pid $holder is still running"}]\n\
+                   Wait for it to finish.  Two builds of one PROJ_DIR delete each other's\n\
+                   project and backup.  Remove the lock by hand only if no Vivado\n\
+                   session is building this geometry (ps -ef | grep vivado)."
+        }
+        puts "removing stale build lock $lock (pid $holder is not running)"
+        file delete $lock
     }
-    # Escape JSON strings independently of Tcl quoting (spaces need no escape).
-    set prj_json [string map [list "\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"] $prj]
-    file mkdir $output_dir
-    set output [file join $output_dir [file tail $xci]]
-    set fd [open $output w]
-    puts -nonewline $fd [string map [list $marker "\"value\": \"$prj_json\""] $text]
-    close $fd
-    return $output
+    error "could not take build lock $lock"
 }
 
 proc build {} {
-    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
+    global PROJ_DIR
+    set lock $PROJ_DIR.lock
+    acquire_build_lock $lock
+    catch {build_locked} msg opts
+    file delete -force $lock
+    return -options $opts $msg
+}
 
-    foreach f [concat [list $XCI $XDC] $SRC] {
+proc build_locked {} {
+    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC XDC_DPTI JOBS BOARD_REPO BOARD_PART
+
+    foreach f [concat [list $XCI $XDC $XDC_DPTI] $SRC] {
         if {![file exists $f]} { error "missing: $f" }
     }
 
@@ -292,11 +433,16 @@ proc build {} {
     if {[catch {build_body} msg]} {
         puts "\n=== BUILD FAILED =============================================="
         puts "  $msg"
-        if {$had_prev} {
+        # Only discard the failed project when there is something to put in
+        # its place: deleting PROJ_DIR and then finding no .prev loses both.
+        if {$had_prev && [file isdirectory $prev]} {
             file delete -force $PROJ_DIR
             file rename $prev $PROJ_DIR
             puts "\n  The previous project has been PUT BACK, bitstream and .ltx"
             puts "  intact.  The board was never reprogrammed."
+        } elseif {$had_prev} {
+            puts "\n  The previous project could NOT be put back: $prev is gone."
+            puts "  The failed project is left in $PROJ_DIR; nothing was deleted."
         }
         error "build failed"
     }
@@ -304,11 +450,13 @@ proc build {} {
 }
 
 proc build_body {} {
-    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC JOBS BOARD_REPO BOARD_PART
+    global PART PROJ_DIR PROJ_NAME TOP XCI SRC XDC XDC_DPTI JOBS BOARD_REPO BOARD_PART
+    global DPTI_CLK_PHASE
     global FP_DIR FP_IPS HOLD_TCL NARR K8 K4 KDIM EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC
     global WB_BASE USE_V2 VARIANT
     global NUM_8X8 NUM_4X4
-    global SCRIPT_DIR
+    global SCRIPT_DIR HAVE_GOLDEN
+    global PLACE_DIRECTIVE ROUTE_DIRECTIVE INCR_REF
 
     create_project -force $PROJ_NAME $PROJ_DIR -part $PART
 
@@ -335,8 +483,8 @@ proc build_body {} {
     # build to exactly this.
     file mkdir $PROJ_DIR/$PROJ_NAME.gen/sources_1/ip/mig_7series_0
 
-    set import_xci [prepare_mig_xci $XCI [file join $PROJ_DIR mig_import]]
-    if {[catch {import_ip -files [list $import_xci]} m]} {
+    if {[catch {set import_xci [prepare_mig_xci $XCI [file join $PROJ_DIR mig_import]]
+    import_ip -files [list $import_xci]} m]} {
         puts "\nimport_ip failed (MIG): $m"
         error "import_ip failed"
     }
@@ -372,8 +520,11 @@ proc build_body {} {
     # request.  n_inv's INIT is 1, so a freshly programmed board runs exactly
     # what it ran before the invocation loop existed -- the single-invocation
     # numbers in the paper are reproducible without touching a probe.
-    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {20} CONFIG.C_NUM_PROBE_OUT {2}]
-    for {set i 0} {$i < 20} {incr i} {
+    # Oct 2026: 25 probes in -- probe_in20..24 are the asynchronous host's
+    # evidence (overlap2/overlap4 cycles, idle gap of context 0 and 1, the
+    # completion counter rb_seq); see systolic_dma_top.sv.
+    set vio_cfg [list CONFIG.C_NUM_PROBE_IN {25} CONFIG.C_NUM_PROBE_OUT {2}]
+    for {set i 0} {$i < 25} {incr i} {
         lappend vio_cfg CONFIG.C_PROBE_IN${i}_WIDTH [expr {$i == 4 ? 8 : 32}]
     }
     lappend vio_cfg CONFIG.C_PROBE_OUT0_WIDTH {4} CONFIG.C_PROBE_OUT0_INIT_VAL {0x1}
@@ -382,6 +533,7 @@ proc build_body {} {
 
     foreach f $SRC { add_files -norecurse $f }
     add_files -fileset constrs_1 -norecurse $XDC
+    add_files -fileset constrs_1 -norecurse $XDC_DPTI
     set_property top $TOP [current_fileset]
 
     # Geometry and the golden constants come from this script.  K_MAX_8X8 reaches
@@ -396,12 +548,14 @@ proc build_body {} {
         USE_LEGACY_JOB_PORTS=1'b0 \
         USE_V2=1'b$USE_V2 \
         EXPECT_WR_CHK=32'h$EXPECT_WR_CHK \
-        EXPECT_C_CHK=32'h$EXPECT_C_CHK ] [current_fileset]
+        EXPECT_C_CHK=32'h$EXPECT_C_CHK \
+        DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE ] [current_fileset]
     puts "building $VARIANT at N=$NARR (USE_V2=$USE_V2), fleet ${NUM_8X8}x8x8 + ${NUM_4X4}x4x4, project $PROJ_DIR"
     puts "K_MAX_8X8=$K8"
     puts "K_MAX_4X4=$K4"
+    puts "DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE degrees"
     puts "K_DIM=$KDIM  (= K8: one fold of the 8x8's full depth; the top clamps it to K4 for the 4x4s)"
-    puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC"
+    puts "golden row K8=$K8: EXPECT_WR_CHK=0x$EXPECT_WR_CHK EXPECT_C_CHK=0x$EXPECT_C_CHK EXPECT_CYC=$EXPECT_CYC[expr {$HAVE_GOLDEN ? {} : {  (none tabulated)}}]"
 
     generate_target all [get_ips]
     update_compile_order -fileset sources_1
@@ -420,6 +574,30 @@ proc build_body {} {
     if {![file exists $DRC_TCL]} { error "missing: $DRC_TCL" }
     add_files -fileset utils_1 -norecurse $DRC_TCL
     set_property STEPS.WRITE_BITSTREAM.TCL.PRE $DRC_TCL [get_runs impl_1]
+
+    # Routability.  At K8 = K4 = 512 with the 1x8x8 + 3x4x4 fleet the placed
+    # design fills 99.6% of the slices.  With the default directives, routing
+    # of that geometry is a lottery: the 2026-10-14 _s4 placement routed, the
+    # next one (same fleet, ~20 extra PHY flops) failed after 3h48m with 573
+    # nets unroutable from congestion (Route 35-162 / 35-2), hot spots in the
+    # 8x8 context's result bank and the PE array.  These directives spread the
+    # placement and give the router more rip-up-and-reroute effort; no timing
+    # constraint is touched.  Override with SYSTOLIC_PLACE_DIRECTIVE /
+    # SYSTOLIC_ROUTE_DIRECTIVE (Default restores the previous flow).  Both are
+    # recorded in fpga_config.txt.
+    set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $PLACE_DIRECTIVE [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE $ROUTE_DIRECTIVE [get_runs impl_1]
+    puts "impl_1: place_design -directive $PLACE_DIRECTIVE, route_design -directive $ROUTE_DIRECTIVE"
+
+    # SYSTOLIC_INCR_REF=<routed .dcp>: incremental implementation against a
+    # previous routed checkpoint of the same geometry.  Cells that match keep
+    # their placement and routing, which carries a placement that is known to
+    # route across a small RTL change.  Recorded in fpga_config.txt.
+    if {$INCR_REF ne ""} {
+        if {![file exists $INCR_REF]} { error "SYSTOLIC_INCR_REF: missing $INCR_REF" }
+        set_property incremental_checkpoint $INCR_REF [get_runs impl_1]
+        puts "impl_1: incremental against $INCR_REF"
+    }
 
     # -------------------------------------------------------------------------
     # Reproducibility gate.
@@ -450,6 +628,13 @@ proc build_body {} {
     set dir  [get_property DIRECTORY [get_runs impl_1]]
     set wns  [get_property STATS.WNS [get_runs impl_1]]
     set whs  [get_property STATS.WHS [get_runs impl_1]]
+
+    # FT2232H I/O and clocking gate on the routed design.  Its reports go to
+    # $dir/dpti_io/; the verdict is recorded in fpga_config.txt and enforced
+    # below, after the record is written.
+    open_run impl_1
+    set dpti_io_ok [verify_dpti_io_after_impl $dir/dpti_io]
+    close_design
     puts "\n=== bitstream ================================================="
     puts "  $VARIANT  N=$NARR  K_MAX_8X8=$K8  K_MAX_4X4=$K4  fleet ${NUM_8X8}x8x8+${NUM_4X4}x4x4"
     foreach b [glob -nocomplain $dir/*.bit] { puts "  $b" }
@@ -462,7 +647,96 @@ proc build_body {} {
         puts "  number happened to be right, which is not the same as being"
         puts "  trustworthy.  Rebuild before reading."
     }
+    foreach b [glob -nocomplain $dir/*.bit] {
+        set cfg [write_fpga_config $dir/fpga_config.txt $b $wns $whs $dpti_io_ok]
+        puts "  parameters recorded in $cfg"
+        puts "  host side:  export SYSTOLIC_FPGA_CONFIG=$cfg"
+    }
     close_project
+    if {!$dpti_io_ok} {
+        error "FT2232H I/O / clocking gate FAILED -- see $dir/dpti_io/summary.txt.\n\
+               Do not program this bitstream."
+    }
+}
+
+# -----------------------------------------------------------------------------
+# fpga_config.txt: the record of what this bitstream was built with, in the
+# KEY=VALUE form the runtime reads (runtime/fpga_matmul_tiled.h,
+# fpga_runtime_get_config).  The runtime reads K_MAX_8X8, K_MAX_4X4, N,
+# NUM_8X8 and NUM_4X4; every other line is for people.
+# JOB_QUEUE_DEPTH as systolic_accel_context.sv declares it (this build does
+# not override the parameter).
+proc get_job_queue_depth {} {
+    global SCRIPT_DIR
+    set depth 1
+    catch {
+        set f [open $SCRIPT_DIR/systolic_accel_context.sv r]
+        set text [read $f]
+        close $f
+        regexp {parameter integer JOB_QUEUE_DEPTH\s*=\s*(\d+)} $text -> depth
+    }
+    return $depth
+}
+
+proc write_fpga_config {path bit wns whs dpti_io_ok} {
+    global K8 K4 KDIM NARR NUM_8X8 NUM_4X4 VARIANT USE_V2 SCRIPT_DIR DPTI_CLK_PHASE
+    global PLACE_DIRECTIVE ROUTE_DIRECTIVE INCR_REF
+    set slab8 [expr {($K8 + 7) / 8 * 8}]
+    set slab4 [expr {($K4 + 7) / 8 * 8}]
+    if {$NUM_8X8 == 0} {
+        set slab $slab4
+    } elseif {$NUM_4X4 == 0 || $slab8 >= $slab4} {
+        set slab $slab8
+    } else {
+        set slab $slab4
+    }
+    set sha unknown
+    catch { set sha [lindex [exec sha256sum $bit] 0] }
+    set rev unknown
+    set dirty unknown
+    catch { set rev [exec git -C $SCRIPT_DIR rev-parse HEAD] }
+    catch {
+        set st [exec git -C $SCRIPT_DIR status --porcelain --untracked-files=no -- $SCRIPT_DIR/..]
+        set dirty [expr {$st eq "" ? 0 : 1}]
+    }
+    set f [open $path w]
+    puts $f "# fpga_config.txt -- written by dma_top_build.tcl with this bitstream"
+    puts $f "K_MAX_8X8=$K8"
+    puts $f "K_MAX_4X4=$K4"
+    puts $f "N=$NARR"
+    puts $f "NUM_8X8=$NUM_8X8"
+    puts $f "NUM_4X4=$NUM_4X4"
+    puts $f "K_DIM=$KDIM"
+    puts $f "VARIANT=$VARIANT"
+    puts $f "USE_V2=$USE_V2"
+    puts $f "HOST_SLAB_BYTES=[expr {$slab * 8 * $NARR}]"
+    # Every result read back starts with a 16-byte completion record
+    # (systolic_dma_top.sv, readback section); the runtime reads it only when
+    # this line says so, so a bitstream built before it still works.
+    puts $f "COMPLETION_HEADER=1"
+    # The board's DDR3 (Nexys Video: 512 MiB); the asynchronous runtime fits
+    # its per-device operand and result slots in it.
+    puts $f "DDR_BYTES=536870912"
+    # The context's job queue (systolic_accel_context.sv JOB_QUEUE_DEPTH, the
+    # default this build takes): invocations one accelerator holds at a time.
+    # The compiler declares the fleet's pipelining from it; the archived
+    # bitstream's record has no such line and is modelled serialized.
+    puts $f "PIPELINE_DEPTH=[get_job_queue_depth]"
+    puts $f "BITSTREAM=$bit"
+    puts $f "BITSTREAM_SHA256=$sha"
+    puts $f "RTL_GIT_REV=$rev"
+    puts $f "RTL_TREE_DIRTY=$dirty"
+    puts $f "WNS_NS=$wns"
+    puts $f "WHS_NS=$whs"
+    puts $f "TIMING_MET=[expr {($wns ne {} && $whs ne {} && $wns >= 0 && $whs >= 0 && $dpti_io_ok) ? 1 : 0}]"
+    puts $f "DPTI_IO_GATE=[expr {$dpti_io_ok ? {PASS} : {FAIL}}]"
+    puts $f "DPTI_CLKOUT0_PHASE=$DPTI_CLK_PHASE"
+    puts $f "IMPL_PLACE_DIRECTIVE=$PLACE_DIRECTIVE"
+    puts $f "IMPL_ROUTE_DIRECTIVE=$ROUTE_DIRECTIVE"
+    puts $f "IMPL_INCREMENTAL_REF=[expr {$INCR_REF eq {} ? {none} : $INCR_REF}]"
+    puts $f "BUILT=[clock format [clock seconds] -format {%Y-%m-%dT%H:%M:%S%z}]"
+    close $f
+    return $path
 }
 
 # -----------------------------------------------------------------------------
@@ -507,6 +781,9 @@ proc program {} {
     puts "  renumbering them would invalidate every photograph of a previous"
     puts "  run.  It is in the JTAG flag word; a write-back fault raises"
     puts "  led\[6\] like any other fault."
+    puts ""
+    puts "  Host side (compiler, runtime): this bitstream's parameters --"
+    puts "    export SYSTOLIC_FPGA_CONFIG=$dir/fpga_config.txt"
     puts ""
     puts "  Then:"
     puts "    vivado -mode batch -source dma_top_build.tcl -tclargs read $VARIANT $K8 $K4 $NARG $NUM_8X8 $NUM_4X4"
@@ -560,25 +837,38 @@ proc pick_device {} {
 # after synthesis and BEFORE allowing implementation to start.
 #
 # Implementation is forbidden unless Vivado itself reports both directions
-# between dpti_clkout and clk_pll_i as Asynchronous Groups.
+# between clk_dpti (the DPTI logic's clock: dpti_clkout through dpti_clk_gen's
+# MMCM) and clk_pll_i as Asynchronous Groups, and clk_dpti is derived from the
+# dpti_clkout port clock.
 proc verify_clock_groups_before_impl {} {
     puts ""
     puts "============================================================"
     puts "=== PRE-IMPLEMENTATION CLOCK CONSTRAINT CHECK ==="
     puts "============================================================"
 
-    set dpti [get_clocks -quiet dpti_clkout]
+    set port [get_clocks -quiet dpti_clkout]
+    set dpti [get_clocks -quiet clk_dpti]
     set pll  [get_clocks -quiet clk_pll_i]
 
-    if {[llength $dpti] != 1} {
+    if {[llength $port] != 1} {
         error "REPRODUCIBILITY CHECK FAILED: dpti_clkout clock not found"
+    }
+
+    if {[llength $dpti] != 1} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti clock not found (dpti_clk_gen MMCM output)"
     }
 
     if {[llength $pll] != 1} {
         error "REPRODUCIBILITY CHECK FAILED: clk_pll_i clock not found"
     }
 
-    puts "dpti_clkout = $dpti"
+    set master [get_property MASTER_CLOCK $dpti]
+    if {$master ne "dpti_clkout"} {
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti is derived from '$master', not dpti_clkout"
+    }
+
+    puts "dpti_clkout = $port"
+    puts "clk_dpti    = $dpti  (master $master, period [get_property PERIOD $dpti] ns)"
     puts "clk_pll_i   = $pll"
 
     set report_fwd [report_clock_interaction \
@@ -589,7 +879,7 @@ proc verify_clock_groups_before_impl {} {
     puts $report_fwd
 
     if {![string match "*Asynchronous Groups*" $report_fwd]} {
-        error "REPRODUCIBILITY CHECK FAILED: dpti_clkout -> clk_pll_i is NOT Asynchronous Groups"
+        error "REPRODUCIBILITY CHECK FAILED: clk_dpti -> clk_pll_i is NOT Asynchronous Groups"
     }
 
     set report_rev [report_clock_interaction \
@@ -600,13 +890,193 @@ proc verify_clock_groups_before_impl {} {
     puts $report_rev
 
     if {![string match "*Asynchronous Groups*" $report_rev]} {
-        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i -> dpti_clkout is NOT Asynchronous Groups"
+        error "REPRODUCIBILITY CHECK FAILED: clk_pll_i -> clk_dpti is NOT Asynchronous Groups"
     }
+
+    set missing [dpti_ports_without_io_delay]
+    if {[llength $missing] > 0} {
+        error "REPRODUCIBILITY CHECK FAILED: FT2232H ports without I/O delay: $missing"
+    }
+    puts "FT2232H ports: every input has an input delay, every output an output delay."
 
     puts ""
     puts "CLOCK CONSTRAINT CHECK PASSED."
     puts "Implementation is allowed to proceed."
     puts ""
+}
+
+# The FT2232H ports, by direction as the FPGA sees them.  dpti_d is in both.
+proc dpti_in_ports {}  { get_ports {dpti_d[*] dpti_rxf_n dpti_txe_n} }
+proc dpti_out_ports {} { get_ports {dpti_d[*] dpti_rd_n dpti_wr_n dpti_oe_n} }
+
+# Ports Vivado does not time: an input with no path from it, or an output with
+# no path to it, under either delay type.  (A port with no input/output delay
+# has no timing path, so this is the same question check_timing's
+# no_input_delay / no_output_delay asks, answered per port.)
+proc dpti_ports_without_io_delay {} {
+    set missing {}
+    foreach p [dpti_in_ports] {
+        foreach dt {max min} {
+            if {[llength [get_timing_paths -quiet -from $p -delay_type $dt -max_paths 1]] == 0} {
+                lappend missing "${p}:in:$dt"
+            }
+        }
+    }
+    foreach p [dpti_out_ports] {
+        foreach dt {max min} {
+            if {[llength [get_timing_paths -quiet -to $p -delay_type $dt -max_paths 1]] == 0} {
+                lappend missing "${p}:out:$dt"
+            }
+        }
+    }
+    return $missing
+}
+
+# -----------------------------------------------------------------------------
+# FT2232H I/O and clocking gate, on the ROUTED design (open_run impl_1).
+#
+# Writes every report to OUT and a verdict table to OUT/summary.txt; returns 1
+# only if all of these hold:
+#   1. no FT2232H port is unconstrained (input or output delay missing);
+#   2. input setup and hold slack >= 0 on every FT2232H input;
+#   3. output setup and hold slack >= 0 on every FT2232H output (dpti_d's
+#      data and output-enable paths included);
+#   4. WNS >= 0 and WHS >= 0 for the whole design;
+#   5. every register that captures an FT2232H input sits in that pin's
+#      ILOGIC, and every register that launches an FT2232H output (data and
+#      tristate) in that pin's OLOGIC;
+#   6. every strobe and tristate pad register has an asynchronous preset (and
+#      the data registers an asynchronous reset), so the pads go to their
+#      safe state without a clock;
+#   7. dpti_clk_gen's MMCM: COMPENSATION = ZHOLD, CLKFBIN driven by a BUFG
+#      fed from CLKFBOUT, CLKIN1 without CLOCK_DEDICATED_ROUTE = FALSE, and
+#      clk_dpti derived from dpti_clkout.
+# Never edits the design; only reads it.
+proc verify_dpti_io_after_impl {out} {
+    file mkdir $out
+    set ok 1
+    set lines {}
+    proc _dpti_note {var ok_var cond msg} {
+        upvar $var l
+        upvar $ok_var o
+        if {$cond} { lappend l "PASS  $msg" } else { lappend l "FAIL  $msg"; set o 0 }
+    }
+
+    # ---- reports (for people) -----------------------------------------------
+    report_clocks                    -file $out/clocks.rpt
+    report_clock_networks            -file $out/clock_networks.rpt
+    report_clock_utilization         -file $out/clock_utilization.rpt
+    report_clock_interaction -delay_type min_max -file $out/clock_interaction.rpt
+    report_cdc -details              -file $out/cdc.rpt
+    check_timing -verbose            -file $out/check_timing.rpt
+    report_methodology               -file $out/methodology.rpt
+    report_io                        -file $out/io.rpt
+    report_timing_summary -check_timing_verbose -max_paths 10 -file $out/timing_summary.rpt
+    report_timing -from [dpti_in_ports] -delay_type max -max_paths 30 -nworst 1 -file $out/input_setup.rpt
+    report_timing -from [dpti_in_ports] -delay_type min -max_paths 30 -nworst 1 -file $out/input_hold.rpt
+    report_timing -to [dpti_out_ports]  -delay_type max -max_paths 30 -nworst 1 -file $out/output_setup.rpt
+    report_timing -to [dpti_out_ports]  -delay_type min -max_paths 30 -nworst 1 -file $out/output_hold.rpt
+    report_datasheet                 -file $out/datasheet.rpt
+
+    # ---- 1. unconstrained ports ---------------------------------------------
+    set missing [dpti_ports_without_io_delay]
+    _dpti_note lines ok [expr {[llength $missing] == 0}] \
+        "unconstrained FT2232H ports: [expr {[llength $missing] ? $missing : {none}}]"
+
+    # ---- 2/3. per-port I/O slack --------------------------------------------
+    lappend lines ""
+    lappend lines [format "      %-14s %-4s %10s %10s" port dir setup hold]
+    foreach {dir ports opt} [list in [dpti_in_ports] -from out [dpti_out_ports] -to] {
+        foreach p $ports {
+            set su [get_timing_paths -quiet $opt $p -delay_type max -max_paths 1]
+            set ho [get_timing_paths -quiet $opt $p -delay_type min -max_paths 1]
+            set s_su [expr {[llength $su] ? [get_property SLACK $su] : {none}}]
+            set s_ho [expr {[llength $ho] ? [get_property SLACK $ho] : {none}}]
+            set good [expr {$s_su ne {none} && $s_ho ne {none} && $s_su ne {} && $s_ho ne {} \
+                            && $s_su >= 0 && $s_ho >= 0}]
+            if {!$good} { set ok 0 }
+            lappend lines [format "%-5s %-14s %-4s %10s %10s" \
+                [expr {$good ? {PASS} : {FAIL}}] $p $dir $s_su $s_ho]
+        }
+    }
+    lappend lines ""
+
+    # ---- 4. WNS / WHS ---------------------------------------------------------
+    set wp [get_timing_paths -quiet -delay_type max -max_paths 1]
+    set hp [get_timing_paths -quiet -delay_type min -max_paths 1]
+    set wns [expr {[llength $wp] ? [get_property SLACK $wp] : {}}]
+    set whs [expr {[llength $hp] ? [get_property SLACK $hp] : {}}]
+    _dpti_note lines ok [expr {$wns ne {} && $wns >= 0}] "WNS = $wns ns"
+    _dpti_note lines ok [expr {$whs ne {} && $whs >= 0}] "WHS = $whs ns (includes hold_margin.tcl's 0.150 ns on ui_clk)"
+
+    # ---- 5/6. I/O register packing and async preset ---------------------------
+    foreach {dir ports} [list in [dpti_in_ports] out [dpti_out_ports]] {
+        foreach p $ports {
+            set xy ?
+            regexp {X[0-9]+Y[0-9]+$} [get_sites -quiet -of_objects $p] xy
+            if {$dir eq "in"} {
+                set pins [all_fanout -quiet -from $p -flat -endpoints_only]
+                set want ILOGIC
+            } else {
+                set pins [all_fanin -quiet -to $p -flat -startpoints_only]
+                set want OLOGIC
+            }
+            set regs [get_cells -quiet -of_objects $pins -filter {IS_SEQUENTIAL}]
+            if {[llength $regs] == 0} {
+                _dpti_note lines ok 0 "$p ($dir): no register found"
+                continue
+            }
+            foreach r $regs {
+                set loc [get_property LOC $r]
+                _dpti_note lines ok [string match "${want}_$xy" $loc] \
+                    "$p ($dir): $r at $loc (want ${want}_$xy)"
+                # Strobes and tristate controls must PRESET (high = inactive /
+                # released) asynchronously; the data register d_o_r only needs
+                # an asynchronous reset of either kind, its pad being high-Z
+                # while d_t_r is preset.
+                if {$dir eq "out"} {
+                    set ref [get_property REF_NAME $r]
+                    set want_ref [expr {[string match "*d_o_r_reg*" $r] ? {FDPE FDCE} : {FDPE}}]
+                    _dpti_note lines ok [expr {[lsearch -exact $want_ref $ref] >= 0}] \
+                        "$p (out): $r is $ref (want [join $want_ref /]: safe without a clock)"
+                }
+            }
+        }
+    }
+
+    # ---- 7. MMCM and clock --------------------------------------------------
+    lappend lines ""
+    set mmcm [get_cells -quiet -hierarchical -filter {REF_NAME == MMCME2_ADV && NAME =~ *u_dpti_clk_gen*}]
+    if {[llength $mmcm] != 1} {
+        _dpti_note lines ok 0 "dpti_clk_gen MMCM: found [llength $mmcm] MMCME2_ADV"
+    } else {
+        _dpti_note lines ok [expr {[get_property COMPENSATION $mmcm] eq "ZHOLD"}] \
+            "MMCM $mmcm at [get_property LOC $mmcm]: COMPENSATION = [get_property COMPENSATION $mmcm]"
+        set fbdrv [get_cells -quiet -of_objects [get_pins -quiet -leaf -filter {DIRECTION == OUT} \
+                     -of_objects [get_nets -quiet -of_objects [get_pins $mmcm/CLKFBIN]]]]
+        set fbin  [get_cells -quiet -of_objects [get_pins -quiet -leaf -filter {DIRECTION == OUT} \
+                     -of_objects [get_nets -quiet -of_objects [get_pins -quiet $fbdrv/I]]]]
+        _dpti_note lines ok [expr {[llength $fbdrv] == 1 && [get_property REF_NAME $fbdrv] eq "BUFG" \
+                                   && $fbin eq $mmcm}] \
+            "MMCM feedback: CLKFBIN <- [expr {[llength $fbdrv] ? [get_property REF_NAME $fbdrv] : {nothing}}] <- $fbin"
+        set cdr [get_property CLOCK_DEDICATED_ROUTE [get_nets -quiet -of_objects [get_pins $mmcm/CLKIN1]]]
+        _dpti_note lines ok [expr {[string toupper $cdr] ne "FALSE"}] \
+            "MMCM CLKIN1 net CLOCK_DEDICATED_ROUTE = '[expr {$cdr eq {} ? {(default)} : $cdr}]'"
+    }
+    set cd [get_clocks -quiet clk_dpti]
+    _dpti_note lines ok [expr {[llength $cd] == 1 && [get_property MASTER_CLOCK $cd] eq "dpti_clkout"}] \
+        "clk_dpti: [expr {[llength $cd] ? "period [get_property PERIOD $cd] ns, master [get_property MASTER_CLOCK $cd]" : {missing}}]"
+
+    set f [open $out/summary.txt w]
+    puts $f "FT2232H I/O and clocking gate -- [expr {$ok ? {PASS} : {FAIL}}]"
+    puts $f "slack in ns; reports in this directory"
+    foreach l $lines { puts $f $l }
+    close $f
+
+    puts "\n=== FT2232H I/O and clocking gate: [expr {$ok ? {PASS} : {FAIL}}] ==="
+    foreach l $lines { puts "  $l" }
+    puts "  reports: $out"
+    return $ok
 }
 
 proc arm_run {v n} {
@@ -646,7 +1116,7 @@ proc arm_run {v n} {
 }
 
 proc read_vio {} {
-    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC K8 K4 NARR KDIM
+    global PROJ_DIR PROJ_NAME EXPECT_WR_CHK EXPECT_C_CHK EXPECT_CYC K8 K4 NARR KDIM HAVE_GOLDEN
     global WB_BASE VARIANT USE_V2
     # Re-point the board repo before opening: without it Vivado prints
     # "Board part ... is not found. BoardPart property will be unset", which is
@@ -736,6 +1206,12 @@ proc read_vio {} {
     set extdbg [pval $all_probes HEX      external_debug_sticky  probe_in17]
     set phydbg [pval $all_probes HEX      dpti_phy_debug_sync  probe_in18]
     set clkact [pval $all_probes HEX      dpti_clk_activity_sync probe_in19]
+    # the asynchronous host's evidence (probe_in20..24), counted from reset
+    set ovl2   [pval $all_probes UNSIGNED overlap2_cycles        probe_in20]
+    set ovl4   [pval $all_probes UNSIGNED overlap4_cycles        probe_in21]
+    set gap0   [pval $all_probes UNSIGNED idle_gap_cycles\[0\]   probe_in22]
+    set gap1   [pval $all_probes UNSIGNED idle_gap_cycles\[1\]   probe_in23]
+    set cseq   [pval $all_probes UNSIGNED rb_seq                 probe_in24]
     if {$nrun eq "" || $nrun == 0} { set nrun 1 }
 
     if {$wchk eq "" || $cyc eq ""} {
@@ -747,8 +1223,9 @@ proc read_vio {} {
 
     # Every expectation below is a RUN total: $nrun invocations, each seeding
     # and reading the same slab pattern into the same buffers.  The probes are
-    # context 0's -- the 8x8 -- so the payload depth is K8 (= K_DIM).
-    set want_words [expr {$nrun * $K8 * 2 * $NARR}]
+    # context 0's -- the 8x8 -- so the payload depth is K8 (= K_DIM), moved as
+    # whole 8-step windows: ceil(K8 / 8) * 8 steps of payload per invocation.
+    set want_words [expr {$nrun * (($K8 + 7) / 8 * 8) * 2 * $NARR}]
     # 0x$VAR does not substitute inside a braced expr -- Tcl parses the
     # expression before the variable is there.  Make the string first.
     set wr_hex 0x$EXPECT_WR_CHK
@@ -769,16 +1246,27 @@ proc read_vio {} {
     puts "     tb/run_top_sim.sh; reading the image back on the board is the"
     puts "     next step and is not in this bitstream.)"
     puts "  invocations         = $nrun     (folds_done $fdone)"
-    puts "  words written       = $wrds     (expect $want_words = n_inv*K_MAX_8X8*2*N)"
+    puts "  words written       = $wrds     (expect $want_words = n_inv*ceil(K_MAX_8X8/8)*8*2*N)"
     puts ""
     set cyc_ok [expr {$cyc ne "" && $cyc == $EXPECT_CYC}]
 
     puts "  chk_wr  0x$wchk     expected 0x$want_wchk    operands ($nrun x 0x$EXPECT_WR_CHK)"
     puts "  chk_c   0x$cchk     expected 0x$want_cchk    result   ($nrun x 0x$EXPECT_C_CHK)"
     puts "  cycles  $cyc              expected $EXPECT_CYC    control-FSM equivalence (125 vs 126 is the v2 read-mux question)"
+    if {!$HAVE_GOLDEN} {
+        puts "  (no golden row for K8 = $K8: the two checksum expectations above are"
+        puts "   placeholders, so their MATCH lines below say nothing about this build)"
+    }
     puts "  external debug     = 0x$extdbg"
     puts "  DPTI physical debug = 0x$phydbg"
     puts "  DPTI clock activity = 0x$clkact"
+    puts ""
+    puts "  --- asynchronous host (counted from reset) ---"
+    puts "  completions issued (rb_seq)       = $cseq"
+    puts "  cycles with >= 2 arrays in fold   = $ovl2"
+    puts "  cycles with 4 arrays in fold      = $ovl4"
+    puts "  idle gap, context 0 (8x8)  cycles = $gap0   (job_done -> next job_fire, summed)"
+    puts "  idle gap, context 1 (4x4#0) cycles = $gap1"
     puts ""
     puts "  any error latched   = $er"
     puts ""

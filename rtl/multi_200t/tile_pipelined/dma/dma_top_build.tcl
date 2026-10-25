@@ -268,6 +268,30 @@ proc wb_base {n} {
 }
 set WB_BASE       [expr {$K8 * 8 * $NARR + 4096}]
 
+proc prepare_mig_xci {xci output_dir} {
+    # MIG resolves XML_INPUT_FILE during import, after changing directories.
+    # Keep the checked-in XCI portable; only this build-local copy contains
+    # the absolute path of the PRJ in the current checkout.
+    set prj [file normalize [file join [file dirname $xci] nexys_video_mig_axi128.prj]]
+    if {![file isfile $prj] || ![file readable $prj]} { error "missing MIG project: $prj" }
+    set fd [open $xci r]
+    set text [read $fd]
+    close $fd
+    set marker {"value": "nexys_video_mig_axi128.prj"}
+    if {[string first $marker $text] < 0 ||
+        [string first $marker $text] != [string last $marker $text]} {
+        error "expected one portable MIG project reference in $xci"
+    }
+    # Escape JSON strings independently of Tcl quoting (spaces need no escape).
+    set prj_json [string map [list "\\" "\\\\" "\"" "\\\"" "\n" "\\n" "\r" "\\r" "\t" "\\t"] $prj]
+    file mkdir $output_dir
+    set output [file join $output_dir [file tail $xci]]
+    set fd [open $output w]
+    puts -nonewline $fd [string map [list $marker "\"value\": \"$prj_json\""] $text]
+    close $fd
+    return $output
+}
+
 set SCRIPT_DIR [file dirname [file normalize [info script]]]
 set ROOT       [file normalize $SCRIPT_DIR/..]      ;# .../tile_pipelined
 
@@ -459,7 +483,8 @@ proc build_body {} {
     # build to exactly this.
     file mkdir $PROJ_DIR/$PROJ_NAME.gen/sources_1/ip/mig_7series_0
 
-    if {[catch {import_ip -files $XCI} m]} {
+    if {[catch {set import_xci [prepare_mig_xci $XCI [file join $PROJ_DIR mig_import]]
+    import_ip -files [list $import_xci]} m]} {
         puts "\nimport_ip failed (MIG): $m"
         error "import_ip failed"
     }
