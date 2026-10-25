@@ -1,0 +1,82 @@
+FT2232H I/O and clocking gate -- PASS
+slack in ns; reports in this directory
+PASS  unconstrained FT2232H ports: none
+
+      port           dir       setup       hold
+PASS  dpti_d[7]      in   5.7279999999999998       1.26
+PASS  dpti_d[6]      in        5.718 1.2689999999999999
+PASS  dpti_d[5]      in   5.7220000000000004 1.2649999999999999
+PASS  dpti_d[4]      in   5.7329999999999997 1.2549999999999999
+PASS  dpti_d[3]      in   5.6859999999999999        1.3
+PASS  dpti_d[2]      in   5.7389999999999999      1.248
+PASS  dpti_d[1]      in   5.7279999999999998 1.2589999999999999
+PASS  dpti_d[0]      in   5.6740000000000004 1.3100000000000001
+PASS  dpti_rxf_n     in   5.7290000000000001      1.258
+PASS  dpti_txe_n     in   5.6559999999999997 1.3260000000000001
+PASS  dpti_d[7]      out  4.2720000000000002 0.13500000000000001
+PASS  dpti_d[6]      out  4.2649999999999997 0.13400000000000001
+PASS  dpti_d[5]      out  4.2640000000000002 0.13600000000000001
+PASS  dpti_d[4]      out  4.2750000000000004 0.13600000000000001
+PASS  dpti_d[3]      out  4.2389999999999999 0.13200000000000001
+PASS  dpti_d[2]      out  4.2859999999999996 0.13400000000000001
+PASS  dpti_d[1]      out  4.2750000000000004 0.13400000000000001
+PASS  dpti_d[0]      out  4.2439999999999998      0.128
+PASS  dpti_rd_n      out  4.3520000000000003 0.52400000000000002
+PASS  dpti_wr_n      out  4.3440000000000003 0.53300000000000003
+PASS  dpti_oe_n      out  4.3300000000000001 0.55000000000000004
+
+PASS  WNS = 0.099000000000000005 ns
+PASS  WHS = 0.016 ns (includes hold_margin.tcl's 0.150 ns on ui_clk)
+PASS  dpti_d[7] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[7] at ILOGIC_X0Y103 (want ILOGIC_X0Y103)
+PASS  dpti_d[6] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[6] at ILOGIC_X0Y110 (want ILOGIC_X0Y110)
+PASS  dpti_d[5] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[5] at ILOGIC_X0Y102 (want ILOGIC_X0Y102)
+PASS  dpti_d[4] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[4] at ILOGIC_X0Y101 (want ILOGIC_X0Y101)
+PASS  dpti_d[3] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[3] at ILOGIC_X0Y114 (want ILOGIC_X0Y114)
+PASS  dpti_d[2] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[2] at ILOGIC_X0Y106 (want ILOGIC_X0Y106)
+PASS  dpti_d[1] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[1] at ILOGIC_X0Y112 (want ILOGIC_X0Y112)
+PASS  dpti_d[0] (in): g_sync245_phy.u_dpti_sync245_phy/d_q_reg[0] at ILOGIC_X0Y128 (want ILOGIC_X0Y128)
+PASS  dpti_rxf_n (in): g_sync245_phy.u_dpti_sync245_phy/rxf_q_reg at ILOGIC_X0Y108 (want ILOGIC_X0Y108)
+PASS  dpti_txe_n (in): g_sync245_phy.u_dpti_sync245_phy/txe_q_reg at ILOGIC_X0Y123 (want ILOGIC_X0Y123)
+PASS  dpti_d[7] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[7] at OLOGIC_X0Y103 (want OLOGIC_X0Y103)
+PASS  dpti_d[7] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[7] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[7] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[7] at OLOGIC_X0Y103 (want OLOGIC_X0Y103)
+PASS  dpti_d[7] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[7] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[6] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[6] at OLOGIC_X0Y110 (want OLOGIC_X0Y110)
+PASS  dpti_d[6] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[6] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[6] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[6] at OLOGIC_X0Y110 (want OLOGIC_X0Y110)
+PASS  dpti_d[6] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[6] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[5] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[5] at OLOGIC_X0Y102 (want OLOGIC_X0Y102)
+PASS  dpti_d[5] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[5] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[5] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[5] at OLOGIC_X0Y102 (want OLOGIC_X0Y102)
+PASS  dpti_d[5] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[5] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[4] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[4] at OLOGIC_X0Y101 (want OLOGIC_X0Y101)
+PASS  dpti_d[4] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[4] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[4] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[4] at OLOGIC_X0Y101 (want OLOGIC_X0Y101)
+PASS  dpti_d[4] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[4] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[3] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[3] at OLOGIC_X0Y114 (want OLOGIC_X0Y114)
+PASS  dpti_d[3] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[3] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[3] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[3] at OLOGIC_X0Y114 (want OLOGIC_X0Y114)
+PASS  dpti_d[3] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[3] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[2] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[2] at OLOGIC_X0Y106 (want OLOGIC_X0Y106)
+PASS  dpti_d[2] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[2] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[2] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[2] at OLOGIC_X0Y106 (want OLOGIC_X0Y106)
+PASS  dpti_d[2] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[2] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[1] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[1] at OLOGIC_X0Y112 (want OLOGIC_X0Y112)
+PASS  dpti_d[1] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[1] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[1] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[1] at OLOGIC_X0Y112 (want OLOGIC_X0Y112)
+PASS  dpti_d[1] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[1] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_d[0] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[0] at OLOGIC_X0Y128 (want OLOGIC_X0Y128)
+PASS  dpti_d[0] (out): g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[0] is FDPE (want FDPE: safe without a clock)
+PASS  dpti_d[0] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[0] at OLOGIC_X0Y128 (want OLOGIC_X0Y128)
+PASS  dpti_d[0] (out): g_sync245_phy.u_dpti_sync245_phy/d_o_r_reg[0] is FDCE (want FDPE/FDCE: safe without a clock)
+PASS  dpti_rd_n (out): g_sync245_phy.u_dpti_sync245_phy/rd_n_pad_reg at OLOGIC_X0Y140 (want OLOGIC_X0Y140)
+PASS  dpti_rd_n (out): g_sync245_phy.u_dpti_sync245_phy/rd_n_pad_reg is FDPE (want FDPE: safe without a clock)
+PASS  dpti_wr_n (out): g_sync245_phy.u_dpti_sync245_phy/wr_n_pad_reg at OLOGIC_X0Y139 (want OLOGIC_X0Y139)
+PASS  dpti_wr_n (out): g_sync245_phy.u_dpti_sync245_phy/wr_n_pad_reg is FDPE (want FDPE: safe without a clock)
+PASS  dpti_oe_n (out): g_sync245_phy.u_dpti_sync245_phy/oe_n_pad_reg at OLOGIC_X0Y118 (want OLOGIC_X0Y118)
+PASS  dpti_oe_n (out): g_sync245_phy.u_dpti_sync245_phy/oe_n_pad_reg is FDPE (want FDPE: safe without a clock)
+
+PASS  MMCM u_dpti_clk_gen/u_mmcm at MMCME2_ADV_X0Y2: COMPENSATION = ZHOLD
+PASS  MMCM feedback: CLKFBIN <- BUFG <- u_dpti_clk_gen/u_mmcm
+PASS  MMCM CLKIN1 net CLOCK_DEDICATED_ROUTE = '(default)'
+PASS  clk_dpti: period 16.667 ns, master dpti_clkout

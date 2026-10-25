@@ -115,11 +115,19 @@ module mig_7series_0 #(
   // so a bench can place a second master's request inside it on purpose
   // (tb_dpti_direct.sv's AXI write-channel collision test). 0 (default) is
   // the model as it always was: wready high.
+  integer aw_stall=0, aw_wait=0, b_delay=0, bus_cycle=0;
+  integer wb_error_addr=-1, wb_error_resp=2;
+  integer response_due[$];
+  logic [1:0] response_code[$];
   integer w_stall = 0;
   integer w_stall_ctr = 0;
 
   initial begin
     if (!$value$plusargs("w_stall=%d", w_stall)) w_stall = 0;
+    if (!$value$plusargs("aw_stall=%d", aw_stall)) aw_stall = 0;
+    if (!$value$plusargs("b_delay=%d", b_delay)) b_delay = 0;
+    if (!$value$plusargs("wb_error_addr=%d", wb_error_addr)) wb_error_addr=-1;
+    if (!$value$plusargs("wb_error_resp=%d", wb_error_resp)) wb_error_resp=2;
     s_axi_awready = 1'b1; s_axi_wready = (w_stall == 0);
     s_axi_bvalid  = 1'b0; s_axi_bresp  = 2'b00; s_axi_bid = 2'b00;
   end
@@ -140,8 +148,23 @@ module mig_7series_0 #(
   always_ff @(posedge ui_clk) begin
     if (ui_clk_sync_rst) begin
       w_open <= 1'b0; s_axi_bvalid <= 1'b0;
+      response_due.delete(); response_code.delete(); bus_cycle=0;
+      aw_wait <= 0; s_axi_awready <= (aw_stall == 0);
     end else begin
       if (s_axi_bvalid && s_axi_bready) s_axi_bvalid <= 1'b0;
+      if (aw_stall > 0) begin
+        aw_wait <= (aw_wait == aw_stall) ? 0 : aw_wait + 1;
+        s_axi_awready <= (aw_wait == aw_stall);
+      end
+      bus_cycle++;
+      if (!s_axi_bvalid && response_due.size()!=0) begin
+        if (response_due[0] <= bus_cycle) begin
+          integer ignored_due;
+          ignored_due=response_due.pop_front();
+          s_axi_bresp <= response_code.pop_front();
+          s_axi_bvalid <= 1'b1;
+        end
+      end
 
       if (s_axi_awvalid && s_axi_awready) begin
         if (w_open) begin
@@ -187,11 +210,35 @@ module mig_7series_0 #(
           w_left <= w_left - 1;
           if (s_axi_wlast) begin
             w_open       <= 1'b0;
-            s_axi_bvalid <= 1'b1;
+            if (b_delay == 0 && response_due.size()==0 && !s_axi_bvalid) begin
+              s_axi_bvalid <= 1'b1;
+              s_axi_bresp <= (w_burst_base == wb_error_addr) ? 2'(wb_error_resp) : 2'b00;
+            end else begin
+              response_due.push_back(bus_cycle+b_delay);
+              response_code.push_back((w_burst_base == wb_error_addr) ? 2'(wb_error_resp) : 2'b00);
+            end
           end
         end
       end
     end
+  end
+
+  // AXI safety is checked on the actual shared bus, including host arbitration.
+  logic aw_held=0, w_held=0;
+  logic [28+8+3+2:0] aw_saved;
+  logic [144:0] w_saved;
+  always @(posedge ui_clk) begin
+    if (!ui_clk_sync_rst) begin
+      if (aw_held && (!s_axi_awvalid ||
+          {s_axi_awaddr,s_axi_awlen,s_axi_awsize,s_axi_awburst} !== aw_saved))
+        $fatal(1,"shared AW changed while backpressured");
+      if (w_held && (!s_axi_wvalid || {s_axi_wdata,s_axi_wstrb,s_axi_wlast} !== w_saved))
+        $fatal(1,"shared W changed while backpressured");
+    end
+    aw_held <= !ui_clk_sync_rst && s_axi_awvalid && !s_axi_awready;
+    w_held <= !ui_clk_sync_rst && s_axi_wvalid && !s_axi_wready;
+    aw_saved <= {s_axi_awaddr,s_axi_awlen,s_axi_awsize,s_axi_awburst};
+    w_saved <= {s_axi_wdata,s_axi_wstrb,s_axi_wlast};
   end
 
   // ---- read channel -------------------------------------------------------

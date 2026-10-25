@@ -117,6 +117,31 @@ module dpti_mem_write_cdc_engine #(
     );
 
     // ------------------------------------------------------------------------
+    // A next header may cross as soon as the previous payload's last beat
+    // leaves the CDC FIFO, while its B response is still outstanding. Keep
+    // that header until the writer is idle instead of losing its start pulse.
+    reg pending_start;
+    reg [AXI_ADDR_W-1:0] pending_base;
+    wire writer_busy;
+    wire writer_launch = pending_start && !writer_busy;
+    assign busy = writer_busy || pending_start || writer_start;
+    always @(posedge ui_clk or negedge ui_rst_n) begin
+        if (!ui_rst_n) begin
+            pending_start <= 1'b0;
+            pending_base <= '0;
+        end else begin
+            if (writer_launch) pending_start <= 1'b0;
+            if (writer_start) begin
+                pending_start <= 1'b1;
+                pending_base <= writer_base_addr;
+            end
+        end
+    end
+`ifndef SYNTHESIS
+    always @(posedge ui_clk) if (ui_rst_n && writer_start && pending_start && !writer_launch)
+        $fatal(1, "host write header overwritten before launch");
+`endif
+
     // AXI4 write engine.
     // ------------------------------------------------------------------------
 
@@ -130,14 +155,14 @@ module dpti_mem_write_cdc_engine #(
         .clk           (ui_clk),
         .rst_n         (ui_rst_n),
 
-        .start         (writer_start),
-        .base_addr     (writer_base_addr),
+        .start         (writer_launch),
+        .base_addr     (pending_base),
 
         .src_valid     (writer_valid),
         .src_data      (writer_data),
         .src_ready     (writer_ready),
 
-        .busy          (busy),
+        .busy          (writer_busy),
         .done          (done),
         .err_align     (err_align),
         .err_resp      (err_resp),

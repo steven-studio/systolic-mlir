@@ -1,0 +1,5 @@
+*.out
+# Simulation outputs the run scripts write next to themselves
+# (run_top_sim.sh, run_v2_benches.sh, run_dpti_phy_sim.sh,
+# run_dpti_clk_xsim.sh, tb/run_sim.sh).
+sim_out*/

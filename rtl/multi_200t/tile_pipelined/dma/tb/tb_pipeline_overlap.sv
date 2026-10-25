@@ -75,7 +75,7 @@ module tb_pipeline_overlap #(
   localparam integer MAX_JOBS    = 24;
   localparam integer SLAB_BASE   = 32'h0000_8000;
   localparam integer SLAB_STRIDE = 32'h0000_1000;   // 8 windows: k <= 56
-  localparam integer C_BASE      = 32'h0000_1000;
+  integer C_BASE      = 32'h0000_1000;
   localparam integer MEM_BYTES   = 131072;
   localparam integer JUNK        = 4096;
   localparam integer MAX_CYC     = 4_000_000;
@@ -217,7 +217,7 @@ module tb_pipeline_overlap #(
       job_est_cycles  <= 32'd1;
       job_a_base      <= 64'(SLAB_BASE + j * SLAB_STRIDE);
       job_b_base      <= 64'(SLAB_BASE + j * SLAB_STRIDE);
-      job_c_base      <= 64'(C_BASE + j * 256);
+      job_c_base      <= 64'(C_BASE + j * 256 + ((error_mode==1 && j==0) ? 4 : 0));
       job_valid       <= 1'b1;
       while (!job_ready) @(posedge clk);
       @(posedge clk);
@@ -376,6 +376,38 @@ module tb_pipeline_overlap #(
     end
   end
 
+  integer error_mode=0;
+  integer fourway=0, four_requests=0, rr_checks=0;
+  integer aw_backpressure=0, w_backpressure=0, b_wait_cycles=0;
+  integer last_owner=3;
+  initial begin
+    if ($value$plusargs("fourway=%d",fourway) && fourway!=0) begin
+      force dut.u_wb.desc_ready = 1'b0;
+      wait(dut.ctx_wb_desc_valid[0] && dut.ctx_wb_desc_valid[1] &&
+           dut.ctx_wb_desc_valid[2] && dut.ctx_wb_desc_valid[3]);
+      @(negedge clk);
+      release dut.u_wb.desc_ready;
+    end
+  end
+  always @(posedge clk) if (rstn) begin
+    if (dut.ctx_wb_desc_valid[0] && dut.ctx_wb_desc_valid[1] &&
+        dut.ctx_wb_desc_valid[2] && dut.ctx_wb_desc_valid[3]) four_requests++;
+    if (dut.wb_awvalid && !dut.wb_awready) aw_backpressure++;
+    if (dut.wb_wvalid && !dut.wb_wready) w_backpressure++;
+    if (dut.wb_inflight && dut.u_wb.state == 3) b_wait_cycles++;
+    if (dut.wb_eng_accept) begin
+      integer expected;
+      expected=-1;
+      for (int n=4;n>=1;n--) begin
+        automatic int d=(last_owner+n)%4;
+        if (dut.ctx_wb_desc_valid[d] && !dut.wb_fault[d]) expected=d;
+      end
+      if (int'(dut.wb_grant_idx)!=expected) $fatal(1,"round robin order mismatch");
+      last_owner=int'(dut.wb_grant_idx);
+      rr_checks++;
+    end
+  end
+
   // ---- checks -------------------------------------------------------------
   integer errors = 0;
   integer serial = 0;
@@ -462,7 +494,9 @@ module tb_pipeline_overlap #(
     integer waited, total_fill_ov, total_feed_ov, j, d, prev;
     integer dev_first_fire [0:3], dev_last_done [0:3], dev_last_rb [0:3];
     integer dev_fill_ov [0:3], dev_feed_ov [0:3], dev_min_gap [0:3];
+    if (!$value$plusargs("c_base=%d",C_BASE)) C_BASE=4096;
     if (!$value$plusargs("serial=%d", serial)) serial = 0;
+    if (!$value$plusargs("error_mode=%d",error_mode)) error_mode=0;
     if (!$value$plusargs("min_fill_overlaps=%d", min_fill_overlaps)) min_fill_overlaps = 0;
     if (!$value$plusargs("min_feed_overlaps=%d", min_feed_overlaps)) min_feed_overlaps = 0;
     if (!$value$plusargs("expect_min_gap=%d", expect_min_gap)) expect_min_gap = -1;
@@ -493,7 +527,7 @@ module tb_pipeline_overlap #(
     rstn = 1'b1;
     repeat (200) @(posedge clk);            // memory calibrated, fleet idle
 
-    for (j = 0; j < NJ; j++) begin
+    for (j = 0; j < ((error_mode!=0) ? 4 : NJ); j++) begin
       submit(j, JOB_DEV[j], JOB_KDESC[j], JOB_START[j]);
       if (serial) begin
         waited = 0;
@@ -503,6 +537,26 @@ module tb_pipeline_overlap #(
           errors++;
         end
       end
+    end
+    if (error_mode!=0) begin
+      waited=0;
+      while ((t_rb[1]<0 || t_rb[2]<0 || t_rb[3]<0 || !dut.wb_fault[0]) && waited<MAX_CYC) begin
+        @(posedge clk); waited++;
+      end
+      repeat(100) @(posedge clk);
+      if (waited>=MAX_CYC || t_done[0]>=0 || t_rb[0]>=0 || n_done[0]!=0 ||
+          !dut.wb_fault[0] || dut.wb_inflight || !dut.any_err ||
+          dut.err_w_owner || dut.u_mig_7series_0.errors!=0 || rr_checks!=4)
+        $fatal(1,"failed context escaped quarantine or blocked another context");
+      if ((error_mode==1 && !dut.wb_err_align) || (error_mode!=1 && !dut.wb_err_resp))
+        $fatal(1,"missing error indication");
+      for (d=1;d<4;d++) begin
+        macs_job[d]=mac_total[d]-mac_at_fold[d];
+        check_job(d);
+      end
+      if (errors!=0) $fatal(1,"healthy-context data mismatch");
+      $display("== PASS error_mode=%0d rejected_jobs=1 successful_jobs=3 checked_words=48 mismatches=0 ==",error_mode);
+      $finish;
     end
     waited = 0;
     while (waited < MAX_CYC) begin
@@ -583,6 +637,21 @@ module tb_pipeline_overlap #(
       errors++;
     end
     $display("PSUM jobs=%0d fill_overlaps=%0d feed_reduce_overlaps=%0d", NJ, total_fill_ov, total_feed_ov);
+    if (fourway!=0 && (four_requests==0 || rr_checks!=NJ ||
+        aw_backpressure==0 || w_backpressure==0 || b_wait_cycles==0))
+      $fatal(1,"missing directed fleet coverage");
+    if (fourway!=0) begin
+      integer latest_fold, earliest_publish;
+      latest_fold=0; earliest_publish=MAX_CYC;
+      for (int first=0;first<4;first++) begin
+        if (t_fold[first]>latest_fold) latest_fold=t_fold[first];
+        if (t_cv[first]<earliest_publish) earliest_publish=t_cv[first];
+      end
+      if (latest_fold>=earliest_publish) $fatal(1,"four-array compute intervals did not overlap");
+      $display("FOUR_COMPUTE overlap_cycles=%0d",earliest_publish-latest_fold);
+    end
+    $display("WB_COVER four_requests=%0d rr_checks=%0d aw_stalls=%0d w_stalls=%0d b_wait=%0d",
+      four_requests,rr_checks,aw_backpressure,w_backpressure,b_wait_cycles);
     $display("== %s: %0d job(s), %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", NJ, errors);
     if (errors != 0) $fatal(1);
     $finish;

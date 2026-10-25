@@ -50,6 +50,8 @@ module tb_dma_writeback_engine;
 
   wire                   done_valid;
   wire [7:0]             done_tag;
+  wire failed_valid;
+  integer successes=0, failures=0, checked_beats=0;
 
   wire [AXI_ID_W-1:0]    awid;
   wire [AXI_ADDR_W-1:0]  awaddr;
@@ -89,7 +91,7 @@ module tb_dma_writeback_engine;
     .clk(clk), .rst_n(rst_n), .init_calib_complete(1'b1),
     .desc_valid(desc_valid), .desc_ready(desc_ready), .desc_addr(desc_addr),
     .desc_beats(desc_beats), .desc_tag(desc_tag),
-    .done_valid(done_valid), .done_tag(done_tag),
+    .done_valid(done_valid), .done_tag(done_tag), .failed_valid(failed_valid),
     .m_axi_awid(awid), .m_axi_awaddr(awaddr), .m_axi_awlen(awlen),
     .m_axi_awsize(awsize), .m_axi_awburst(awburst), .m_axi_awlock(awlock),
     .m_axi_awcache(awcache), .m_axi_awprot(awprot), .m_axi_awqos(awqos),
@@ -139,6 +141,27 @@ module tb_dma_writeback_engine;
     wready  = (w_stall_n  == 0) ? 1'b1 : lfsr[7];
   end
 
+  always @(posedge clk) if (rst_n) begin
+    if (done_valid) successes++;
+    if (failed_valid) failures++;
+    if (wvalid && wready) checked_beats++;
+    if (done_valid && failed_valid) fail("success and failure together");
+    if ((done_valid || failed_valid) && b_pending != 0)
+      fail("retired with outstanding responses");
+  end
+  logic aw_held=0, w_held=0;
+  logic [AXI_ADDR_W+7:0] saved_aw;
+  logic [AXI_DATA_W+BYTES_PER_BEAT:0] saved_w;
+  always @(posedge clk) begin
+    if (rst_n) begin
+      if (aw_held && (!awvalid || {awaddr,awlen} !== saved_aw)) fail("AW changed under stall");
+      if (w_held && (!wvalid || {wdata,wstrb,wlast} !== saved_w)) fail("W changed under stall");
+    end
+    aw_held <= rst_n && awvalid && !awready;
+    w_held <= rst_n && wvalid && !wready;
+    saved_aw <= {awaddr,awlen}; saved_w <= {wdata,wstrb,wlast};
+  end
+
   // AW capture, with the 4 KiB check the real slave will not do for you.
   always_ff @(posedge clk) begin
     if (rst_n && awvalid && awready) begin
@@ -182,24 +205,34 @@ module tb_dma_writeback_engine;
           if (wlast !== (cur_beats_left == 1)) fail("wlast on the wrong beat");
         end
 
-        if (wlast) b_pending <= b_pending + 1;
+
       end
 
-      if (bvalid && bready && !(wvalid && wready && wlast))
-        b_pending <= b_pending - 1;
+      case ({(wvalid && wready && wlast), (bvalid && bready)})
+        2'b10: b_pending <= b_pending + 1;
+        2'b01: b_pending <= b_pending - 1;
+        default: ;
+      endcase
     end
   end
 
-  // B response, one cycle after the burst completes at the earliest.
+  integer response_delay=0, response_wait=0;
+  initial if (!$value$plusargs("b_delay=%d", response_delay)) response_delay=0;
+  // Optional delayed responses exercise credit exhaustion and final drain.
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       bvalid <= 1'b0;
       bresp  <= 2'b00;
+      response_wait <= 0;
     end else begin
       if (bvalid && bready) bvalid <= 1'b0;
       if ((b_pending > 0) && !bvalid) begin
-        bvalid <= 1'b1;
-        bresp  <= slave_err_mode ? 2'b10 : 2'b00;
+        if (response_wait < response_delay) response_wait <= response_wait + 1;
+        else begin
+          bvalid <= 1'b1;
+          bresp <= slave_err_mode ? 2'b10 : 2'b00;
+          response_wait <= 0;
+        end
       end
     end
   end
@@ -209,6 +242,11 @@ module tb_dma_writeback_engine;
   // dropped beat is visible in the memory image, not just in a count.
   integer src_n = 0;
   integer src_gap = 0;
+  logic src_held=0;
+  always_ff @(posedge clk) begin
+    if (!rst_n) src_held <= 1'b0;
+    else src_held <= src_valid && !src_ready;
+  end
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       src_n <= 0;
@@ -217,7 +255,7 @@ module tb_dma_writeback_engine;
     end
   end
   always_comb begin
-    src_valid = (src_gap == 0) ? 1'b1 : lfsr[11];
+    src_valid = src_held || (src_gap == 0) || lfsr[11];
     src_data  = {32'(src_n) + 32'h3000_0000, 32'(src_n) + 32'h2000_0000,
                  32'(src_n) + 32'h1000_0000, 32'(src_n)};
   end
@@ -344,16 +382,40 @@ module tb_dma_writeback_engine;
     if (!err_align) fail("a misaligned descriptor did not set err_align");
     if (q_wr != 0)  fail("a misaligned descriptor still issued an AW");
     if (done_valid) fail("a misaligned descriptor reported done");
+    if (failures != 1) fail("misaligned descriptor did not retire as failed");
     $display("  [5] misaligned descriptor refused     errors=%0d", errors);
 
     // 6. SLVERR must not pass as a successful write
     reset_all;
     slave_err_mode = 1'b1;
     send_desc(29'h0000_A000, 16, 8'hA6);
-    wait_done(4000);
+    begin
+      integer waited;
+      waited=0;
+      while (failures<2 && waited<4000) begin @(posedge clk); waited++; end
+      if (failures!=2) fail("SLVERR did not retire as failed");
+      if (successes!=4) fail("SLVERR produced a successful completion");
+    end
     if (!err_resp) fail("a SLVERR response did not set err_resp");
     $display("  [6] SLVERR flagged                    errors=%0d", errors);
 
+    // Invalid zero-length work also retires without issuing AW or consuming data.
+    reset_all;
+    slave_err_mode=0;
+    send_desc(29'h0000_B000, 0, 8'hA7);
+    repeat(20) @(posedge clk);
+    if (failures!=3 || q_wr!=0) fail("zero-length descriptor did not fail safely");
+    send_desc(29'h1FFF_FFF0, 2, 8'hA9);
+    repeat(20) @(posedge clk);
+    if (failures!=4 || q_wr!=0) fail("address-wrap descriptor did not fail safely");
+    // An earlier error must not poison a later valid descriptor.
+    send_desc(29'h0000_5000, 4, 8'hA8);
+    wait_done(4000);
+    check_image(29'h0000_5000, 4, 0);
+    repeat(2) @(posedge clk);
+    if (successes!=5 || failures!=4) fail("retirement counts wrong");
+    $display("CHECKED successes=%0d failures=%0d beats=%0d b_delay=%0d mismatches=%0d",
+      successes,failures,checked_beats,response_delay,errors);
     $display("== %s: %0d error(s) ==", (errors == 0) ? "PASS" : "FAIL", errors);
     if (errors != 0) $fatal(1);
     $finish;
