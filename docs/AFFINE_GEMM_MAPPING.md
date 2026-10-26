@@ -3009,3 +3009,130 @@ Tests:
   checked against the same expected line.
 - test/Systolic/affine_gemm_tiling_legality_alias.mlir: the decision under `assume-no-alias` in
   both passes.
+
+### 26.5 min loop bounds in C (S5.5, 2026-10-23)
+
+Standard C has no min. A C program writes a clipped tile as a macro or as two comparisons:
+
+    #define MIN(a, b) ((a) < (b) ? (a) : (b))
+    for (int ii = 0; ii < 10; ii += 4)
+      for (int i = ii; i < MIN(ii + 4, 10); ++i)        /* or: i < ii + 4 && i < 10 */
+
+systolic-cfront refused both. After preprocessing, the macro is a conditional expression, and a
+loop bound had to be one affine expression. A condition had to be one comparison. S5.5 translates
+them, exactly, as the affine.for upper bound min (P, Q):
+
+    affine.for %i = affine_map<(d0) -> (0 + d0 * 1)>(%ii)
+        to min affine_map<(d0) -> (4 + d0 * 1, 10)>(%ii) {
+
+For ii = 0, 4, 8 the loop runs i = 0..3, 4..7, 8..9; the last tile is not widened.
+
+What is accepted (`min_bound_of`, tools/systolic-cfront):
+
+- `counter < C` or `counter <= C`, where C is a conditional expression that is exactly
+  min(P, Q). Its condition compares P and Q, and its branches are those expressions as written
+  (the same typed AST up to parentheses, loads, no-op casts and commutation of `+` or `*`),
+  selecting the smaller. That covers
+  `(P) < (Q) ? (P) : (Q)` with `<` or `<=`, and `(P) > (Q) ? (Q) : (P)` with `>` or `>=`.
+- `counter < P && counter < Q`, with `<` or `<=` each. Either comparison may exchange its sides,
+  using `P > counter` or `P >= counter`. The conditional-bound comparison may likewise be
+  reversed (`MIN(P, Q) > counter`). Parentheses around the condition are accepted.
+- P and Q are integer constants or affine expressions of the enclosing counters (the rules of
+  every loop bound). With `<=`, the exclusive bound is P + 1.
+- The counter, P, Q, the conditional and both sides of its comparison have the counter's type
+  as written: no value is converted.
+
+How it is translated:
+
+- With the same counter terms, min(L + a, L + b) = L + min(a, b): one bound, possibly a
+  parallelotope (19.12). Two constants fold to one constant.
+- Otherwise the loop has two upper bounds and is non-box, like a triangle (19.13). Its values at
+  each outer point run below the smaller one. The interface's subscript ranges, the checks of its
+  header and the GEMM sites' executions are computed by running the nest.
+- Every node of P and Q is checked in its C type at every outer point where the condition is
+  tested. The two conditional branches are checked separately as well, preserving their own
+  intermediate operations and promotions. The conditional compares both operands; && evaluates
+  the second only when the first holds, so checking it everywhere only refuses more.
+
+What is refused, with the reason:
+
+- a function call in the bound, including one named min: its body, side effects and conversions
+  are not analysed;
+- a max;
+- a conditional that is not the smaller of its operands;
+- a min of three operands (a nested conditional);
+- a conversion: signed with unsigned, an int bound with a long counter;
+- an operand that overflows its type at some outer point;
+- an && that does not compare the counter on both sides, and `||`.
+
+A run-time bound (a parameter M) stays outside the subset, as for every loop bound.
+
+The front end only represents the program. Whether the nest is untiled and lowered is decided
+afterwards, as for MLIR input: by S5.3 and S5.4 (26.3, 26.4), then the box pipeline. Overlapping
+or gapped tiles, an untiling that would change the reduction order, and the rank-1 interleaved
+tiling stay on the host as written.
+
+The GEMM sites count a tiled nest's executions per tile: its point band is the site, and the tile
+loop is a loop around it. When S5.3 untiles the nest and the lowering offloads it as one GEMM,
+systolic-cc prints one "Executed: GEMM #N" line per tile. That is a report only: the planned and
+the actual tile invocations agree, and the results are checked.
+
+Tests:
+- test/CFront/min_bound.c: the spellings, the folds, M = 0, an enclosing loop that counts down,
+  interface ranges and site executions.
+- test/CFront/min_bound_unsupported.c: each refusal.
+- test/SystolicCC/affine_tiled_min.c: C to execution for M = 10, 12, 3, 1, 0 with T = 4, M = 16
+  with T = 1, M = 17 with T = 8, the three spellings, N-only, K-only (also outermost), M/N, M/N/K,
+  overlap, gap, a reorder and rank-1 adjacent or interleaved. The legality lines (computed by
+  enumeration) are checked in the compile's remarks. Every function is compared bitwise with the
+  loops as written on the CPU, and every offloaded call through --verify; strict FP offloads
+  nothing.
+
+#### S5.5 typed comparison completion (2026-10-26)
+
+The C front end normalizes clipped-bound comparisons before constructing the upper-bound
+map. This is independent of counter names and dimensions. It handles the six-loop order
+`i, j, k, ii, jj, kk`: the first three counters advance by static TM/TN/TK, and each point
+counter starts at its tile counter and stops at the clipped bound. This is tiling of M/N/K,
+not an added batch dimension. The existing discovery, untiling, legality, partitioning,
+planning and runtime lowering implementations are unchanged.
+
+Operand equivalence deliberately does **not** mean general mathematical equality. For
+example `tile + 4` and `4 + tile`, or `2 * tile` and `tile * 2`, can match only with the same
+typed operation tree. Every corresponding AST node must retain its type and cast kind;
+implicit integer promotions are retained. A promoted short outer counter can be used in an
+int bound, but promoting the point counter itself does not bypass the existing restrictions.
+Different grouping, cancellation, a conversion introduced in only one branch, or merely
+equal affine forms do not establish equivalence. In particular
+`(tile + INT_MAX) - (INT_MAX - 4)` is not accepted as `tile + 4`.
+
+All comparison operands **and both branches** go through the existing header expression and
+per-node C type range checks. No signed overflow, unsigned wrapping or lossy conversion is
+made legal by commutation. Calls, assignments, increments, volatile reads and atomic reads
+cannot establish a pure min bound. Checking a branch or an && operand that C might skip is
+conservative and can reject additional inputs; it does not admit undefined arithmetic.
+
+The static subset remains: runtime dimensions and runtime steps are unsupported; affine
+steps must be constant. Nested MIN, more than two && comparisons and || remain unsupported.
+Exact enumeration of a non-box domain still has the existing limit of 4,194,304 visited
+counter values. This change does not extend that limit or implement symbolic runtime domains.
+
+Validation is separated by stage:
+
+| Stage | Regression evidence |
+| --- | --- |
+| C translation | `CFront/tiled_gemm.c`: macro, swapped &&, reversed inclusive ternary, static step spellings; default 10x9x7 with 4x4x3 tiles, divisible sizes and tiles larger than dimensions |
+| Affine MLIR verification | Parse/verify every emitted variant with `systolic-opt` |
+| Tiled GEMM recognition | Run `--test-affine-matmul-discovery` separately and check recognition success |
+| Transformation legality | Check coverage, dependence, execution order and untiling independently of recognition |
+| Systolic lowering | Require exactly six `systolic.matmul_tile` operations for the default case |
+| Runtime/LLVM lowering | Require exactly six scheduled runtime calls at each checked stage |
+| Software runtime E2E | `SystolicCC/affine_tiled_min.c`: baseline and both new six-loop spellings compare bitwise with independent CPU loops; require six **completed runtime invocations per call**, obtained from `systolic_offload_stats`, and fail on a count mismatch |
+| Strict FP | No offloaded functions, zero completed invocations, and cancellation-sensitive data `2^80, 1, -2^80, 1` must accumulate to 1 in the written order |
+| FPGA hardware E2E | Not established by these tests; `SOFT_RUNTIME_MOCK_HARDWARE=1` still executes the software model |
+
+E2E invocation assertions also cover the pre-existing cases (including host-only illegal
+tilings). Integer-valued reassociation tests establish exact results for those inputs;
+they do not establish bitwise equivalence for arbitrary floating-point data with reassociation.
+`CFront/min_bound_unsupported.c` retains the original refusals and adds reversed comparisons,
+signed overflow, unsigned wrap, differing promotions, side effects and volatile/atomic input.
