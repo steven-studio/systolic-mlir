@@ -100,3 +100,89 @@ void or_bound(float A[restrict 10][4]) {
     for (int i = ii; i < ii + 4 || i < 10; ++i)
       A[i][0] = 1.0f;
 }
+
+// RUN: not %cfront --function=reversed_unsigned %s -o %t.reversed_unsigned 2>&1 | FileCheck %s --check-prefix=SAFE0
+// RUN: not test -e %t.reversed_unsigned
+// SAFE0: error: a loop condition joined by && must be
+void reversed_unsigned(float A[restrict 10][4]) {
+  for (int t = 0; t < 10; t += 4) for (int p = t; 10u > p && t + 4 > p; ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=reversed_overflow %s -o %t.reversed_overflow 2>&1 | FileCheck %s --check-prefix=SAFE1
+// RUN: not test -e %t.reversed_overflow
+// SAFE1: error: the loop bound overflows 'int'
+void reversed_overflow(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; (t + 2147483645 < 10 ? 2147483645 + t : 10) > p; ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=branch_call %s -o %t.branch_call 2>&1 | FileCheck %s --check-prefix=SAFE2
+// RUN: not test -e %t.branch_call
+// SAFE2: error: the loop bound calls 'next'
+void branch_call(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; p < (t + 4 < 10 ? next() : 10); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=branch_increment %s -o %t.branch_increment 2>&1 | FileCheck %s --check-prefix=SAFE3
+// RUN: not test -e %t.branch_increment
+// SAFE3: error: a min loop bound must not have side effects
+int min_state;
+void branch_increment(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; p < (t + 4 < 10 ? min_state++ + 4 : 10); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=volatile_read %s -o %t.volatile_read 2>&1 | FileCheck %s --check-prefix=SAFE4
+// RUN: not test -e %t.volatile_read
+// SAFE4: error: a min loop bound must not read volatile or atomic values
+void volatile_read(float A[restrict 10][4]) {
+  for (volatile int t = 0; t < 8; t += 4) for (int p = t; p < MIN(t + 4, 10); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=atomic_read %s -o %t.atomic_read 2>&1 | FileCheck %s --check-prefix=SAFE5
+// RUN: not test -e %t.atomic_read
+// SAFE5: error: a min loop bound must not read volatile or atomic values
+_Atomic int min_atomic;
+void atomic_read(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; p < MIN(t + 4, min_atomic); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=branch_conversion %s -o %t.branch_conversion 2>&1 | FileCheck %s --check-prefix=SAFE6
+// RUN: not test -e %t.branch_conversion
+// SAFE6: error: the loop condition compares the counter with a conditional expression of another type
+void branch_conversion(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; p < (t + 4 < 10 ? (unsigned)(4 + t) : 10); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=promoted_counter %s -o %t.promoted_counter 2>&1 | FileCheck %s --check-prefix=SAFE7
+// RUN: not test -e %t.promoted_counter
+// SAFE7: error: a loop condition joined by && must be
+void promoted_counter(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (short p = t; t + 4 > p && 10 > p; ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=reassociation %s -o %t.reassociation 2>&1 | FileCheck %s --check-prefix=SAFE8
+// RUN: not test -e %t.reassociation
+// SAFE8: error: the loop bound is a conditional expression whose branches are not the two sides of its comparison
+void reassociation(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; p < ((t + 2147483647) - 2147483643 < 10 ? t + 4 : 10); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=unsigned_wrap %s -o %t.unsigned_wrap 2>&1 | FileCheck %s --check-prefix=SAFE9
+// RUN: not test -e %t.unsigned_wrap
+// SAFE9: error: the loop bound wraps around in 'unsigned int'
+void unsigned_wrap(float A[restrict 10][4]) {
+  for (unsigned t = 0; t < 8u; t += 4u) for (unsigned p = t; p < (t + 4294967295u < 10u ? 4294967295u + t : 10u); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=branch_promotion %s -o %t.branch_promotion 2>&1 | FileCheck %s --check-prefix=SAFE10
+// RUN: not test -e %t.branch_promotion
+// SAFE10: error: the loop bound is a conditional expression whose branches are not the two sides of its comparison
+void branch_promotion(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (long p = t; p < ((long)t + 4L < 10L ? (long)(4 + t) : 10L); ++p) A[p][0] = 1;
+}
+
+// RUN: not %cfront --function=reversed_not_counter %s -o %t.reversed_not_counter 2>&1 | FileCheck %s --check-prefix=SAFE11
+// RUN: not test -e %t.reversed_not_counter
+// SAFE11: error: a loop condition joined by && must be
+void reversed_not_counter(float A[restrict 10][4]) {
+  for (int t = 0; t < 8; t += 4) for (int p = t; t + 4 > p && 10 > t; ++p) A[p][0] = 1;
+}

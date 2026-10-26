@@ -41,7 +41,9 @@
 // PLAN-DAG: note: 'reorder' stays on the host: no GEMM the systolic arrays can run was recognized in it
 // PLAN-DAG: note: 'r1_interleaved' stays on the host: no GEMM the systolic arrays can run was recognized in it
 // PLAN-DAG: note: 'r1_adjacent' is offloaded: 2 systolic tile invocation(s)
-// PLAN: wrote {{.*}} (14 function(s) offloaded
+// PLAN-DAG: note: 'mnk_swapped' is offloaded: 6 systolic tile invocation(s)
+// PLAN-DAG: note: 'mnk_commuted' is offloaded: 6 systolic tile invocation(s)
+// PLAN: wrote {{.*}} (16 function(s) offloaded
 //
 // The tiling legality the compile itself printed (its remarks, report=true):
 // RUN: FileCheck %s --check-prefix=LEGAL --input-file=%t.systolic/20-remarks.txt
@@ -62,6 +64,8 @@
 // LEGAL: remark: affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4): pattern: every tile-shaped loop is a tiling of the form section 26.1 records; coverage: PROVEN_VALID; dependence: PROVEN_INVALID; execution order: PROVEN_INVALID; untiling: PROVEN_INVALID (not performed); lowering: not through an untiling, the box pipeline decides the nest as written
 // LEGAL: remark: affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4): pattern: every tile-shaped loop is a tiling of the form section 26.1 records; coverage: PROVEN_VALID; dependence: PROVEN_INVALID; execution order: PROVEN_INVALID; untiling: PROVEN_INVALID (not performed); lowering: not through an untiling, the box pipeline decides the nest as written
 // LEGAL: remark: affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4): pattern: every tile-shaped loop is a tiling of the form section 26.1 records; coverage: PROVEN_VALID; dependence: PROVEN_VALID (the order of the iterations is kept); execution order: PROVEN_VALID (every element of C accumulates in the program's order); untiling: PROVEN_VALID (performed); lowering: decided by the box pipeline on the untiled nest
+// LEGAL: remark: affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4): pattern: every tile-shaped loop is a tiling of the form section 26.1 records; coverage: PROVEN_VALID; dependence: PROVEN_VALID (exact dependence test); execution order: PROVEN_VALID (every element of C accumulates in the program's order); untiling: PROVEN_VALID (performed); lowering: decided by the box pipeline on the untiled nest
+// LEGAL: remark: affine multiply-accumulate nest: tiling legality (docs/AFFINE_GEMM_MAPPING.md section 26.4): pattern: every tile-shaped loop is a tiling of the form section 26.1 records; coverage: PROVEN_VALID; dependence: PROVEN_VALID (exact dependence test); execution order: PROVEN_VALID (every element of C accumulates in the program's order); untiling: PROVEN_VALID (performed); lowering: decided by the box pipeline on the untiled nest
 //
 // RUN: %t > %t.soft
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
@@ -86,6 +90,8 @@
 // ALL: [case] reorder: equal, NOT OFFLOADED (0)
 // ALL: [case] r1_interleaved: equal, NOT OFFLOADED (0)
 // ALL: [case] r1_adjacent: equal, offloaded (14)
+// ALL: [case] mnk_swapped: equal, offloaded (6)
+// ALL: [case] mnk_commuted: equal, offloaded (6)
 // ALL: PASS: 0 differ
 //
 // RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
@@ -104,6 +110,8 @@
 // VERIFY: mn ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY: mnk ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY: r1_adjacent ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY: mnk_swapped ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
+// VERIFY: mnk_commuted ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Strict floating point (no --fp-reassociation): nothing is offloaded, and
@@ -128,8 +136,11 @@
 // STRICT-DAG: note: 'reorder' stays on the host
 // STRICT-DAG: note: 'r1_interleaved' stays on the host
 // STRICT-DAG: note: 'r1_adjacent' stays on the host
+// STRICT-DAG: note: 'mnk_swapped' stays on the host
+// STRICT-DAG: note: 'mnk_commuted' stays on the host
 // STRICT: wrote {{.*}} (0 function(s) offloaded
-// RUN: %t.strict | FileCheck %s --check-prefix=STRICTEXEC
+// RUN: %t.strict strict | FileCheck %s --check-prefix=STRICTEXEC
+// STRICTEXEC: strict cancellation: equal, expected 1, 0 invocation(s)
 // STRICTEXEC: PASS: 0 differ
 
 #include <stdio.h>
@@ -253,6 +264,16 @@ void r1_adjacent(float A[restrict 7][6], float B[restrict 6][6], float C[restric
     C[i + j] += A[i][k] * B[k][j];
 }
 
+void mnk_swapped(float A[restrict 10][7], float B[restrict 7][9], float C[restrict 10][9]) {
+  for (int ii = 0; ii < 10; ii += 4) for (int jj = 0; jj < 9; jj += 4) for (int kk = 0; kk < 7; kk += 3) for (int i = ii; ((ii + 4 > i) && (10 > i)); ++i) for (int j = jj; ((j < jj + 4) && (9 > j)); ++j) for (int k = kk; ((kk + 3 > k) && (k < 7)); ++k)
+    C[i][j] += A[i][k] * B[k][j];
+}
+
+void mnk_commuted(float A[restrict 10][7], float B[restrict 7][9], float C[restrict 10][9]) {
+  for (int ii = 0; ii < 10; ii += 4) for (int jj = 0; jj < 9; jj += 4) for (int kk = 0; kk < 7; kk += 3) for (int i = ii; (ii + 4 < 10 ? 4 + ii : 10) > i; ++i) for (int j = jj; j <= (jj + 3 >= 8 ? 8 : 3 + jj); ++j) for (int k = kk; (kk + 3 <= 7 ? 3 + kk : 7) > k; ++k)
+    C[i][j] += A[i][k] * B[k][j];
+}
+
 static float mul(float a, float b) { return a * b; }
 static void m10_t4_ref(float A[10][6], float B[6][5], float C[10][5]) {
   for (int ii = 0; ii < 10; ii += 4) for (int i = ii; i < MIN(ii + 4, 10); ++i) for (int j = 0; j < 5; ++j) for (int k = 0; k < 6; ++k)
@@ -349,40 +370,81 @@ static void r1_adjacent_ref(float A[7][6], float B[6][6], float C[12]) {
     C[i + j] = C[i + j] + mul(A[i][k], B[k][j]);
 }
 
+static void mnk_swapped_ref(float A[10][7], float B[7][9], float C[10][9]) {
+  for (int ii = 0; ii < 10; ii += 4) for (int jj = 0; jj < 9; jj += 4) for (int kk = 0; kk < 7; kk += 3) for (int i = ii; i < MIN(ii + 4, 10); ++i) for (int j = jj; j < MIN(jj + 4, 9); ++j) for (int k = kk; k < MIN(kk + 3, 7); ++k)
+    C[i][j] = C[i][j] + mul(A[i][k], B[k][j]);
+}
+
+static void mnk_commuted_ref(float A[10][7], float B[7][9], float C[10][9]) {
+  for (int ii = 0; ii < 10; ii += 4) for (int jj = 0; jj < 9; jj += 4) for (int kk = 0; kk < 7; kk += 3) for (int i = ii; i < MIN(ii + 4, 10); ++i) for (int j = jj; j < MIN(jj + 4, 9); ++j) for (int k = kk; k < MIN(kk + 3, 7); ++k)
+    C[i][j] = C[i][j] + mul(A[i][k], B[k][j]);
+}
+
 /* Integer-valued data: every sum is exact, so the results are bitwise equal
    whatever the order inside a tile; the initial C is nonzero. */
 static void fill(float *p, int n, int s) { for (int e = 0; e < n; ++e) p[e] = (float)((e * 7 + s) % 9 - 4); }
 static void fill_nz(float *p, int n, int s) { for (int e = 0; e < n; ++e) { int v = (e * 7 + s) % 9 - 4; p[e] = (float)(v ? v : 5 - 2 * (e & 1)); } }
 static int differ;
+static int strict_mode;
 static unsigned long long inv(void) { systolic_offload_stats_t s; systolic_offload_stats(&s); return s.per_device[0]+s.per_device[1]+s.per_device[2]+s.per_device[3]; }
-static void report(const char *n, const void *g, const void *w, size_t by, unsigned long long i) {
+static void report(const char *n, const void *g, const void *w, size_t by, unsigned long long i, unsigned long long expected) {
   int same = memcmp(g, w, by) == 0; differ += !same;
+  if (i != expected) {
+    printf("WRONG INVOCATIONS: %s: got %llu, expected %llu\n", n, i, expected);
+    ++differ;
+  }
   printf("[case] %s: %s, %s (%llu)\n", n, same ? "equal" : "DIFFERENT", i ? "offloaded" : "NOT OFFLOADED", i);
 }
-#define RUN(name, NA, NB, NC) do { static float A[NA], B[NB], C[NC], RA[NA], RB[NB], RC[NC]; \
+#define RUN(name, NA, NB, NC, EXPECTED) do { static float A[NA], B[NB], C[NC], RA[NA], RB[NB], RC[NC]; \
   fill_nz(A, NA, 1); fill_nz(B, NB, 2); fill(C, NC, 3); memcpy(RA, A, sizeof A); memcpy(RB, B, sizeof B); memcpy(RC, C, sizeof C); \
   unsigned long long before = inv(); name((void*)A,(void*)B,(void*)C); unsigned long long n = inv() - before; \
-  name##_ref((void*)RA,(void*)RB,(void*)RC); report(#name, C, RC, sizeof C, n); } while (0)
-int main(void) {
-  RUN(m10_t4, 60, 30, 50);
-  RUN(m12_t4, 72, 30, 60);
-  RUN(m3_t4, 18, 30, 15);
-  RUN(m1_t4, 6, 30, 5);
-  RUN(m0_t4, 6, 30, 5);
-  RUN(m16_t1, 96, 30, 80);
-  RUN(m17_t8, 102, 30, 85);
-  RUN(m10_t4_andand, 60, 30, 50);
-  RUN(m10_t4_le, 60, 30, 50);
-  RUN(n_only, 42, 54, 63);
-  RUN(k_only, 77, 55, 35);
-  RUN(k_only_outer, 77, 55, 35);
-  RUN(mn, 60, 54, 90);
-  RUN(mnk, 70, 63, 90);
-  RUN(overlap, 60, 30, 50);
-  RUN(gap, 60, 30, 50);
-  RUN(reorder, 77, 55, 35);
-  RUN(r1_interleaved, 42, 36, 12);
-  RUN(r1_adjacent, 42, 36, 12);
+  name##_ref((void*)RA,(void*)RB,(void*)RC); report(#name, C, RC, sizeof C, n, strict_mode ? 0 : EXPECTED); } while (0)
+/* Cancellation distinguishes the written order ((large + 1) - large) + 1
+   from a reassociation. Run only in strict mode, and require zero runtime
+   invocations as well as the exact answer and the independent CPU reference. */
+static void strict_cancellation(void) {
+  float A[10][7] = {{0}}, B[7][9], C[10][9] = {{0}}, R[10][9] = {{0}};
+  for (int row = 0; row < 10; ++row) {
+    A[row][0] = 0x1p80f; A[row][1] = 1.0f;
+    A[row][2] = -0x1p80f; A[row][3] = 1.0f;
+  }
+  for (int k = 0; k < 7; ++k)
+    for (int j = 0; j < 9; ++j) B[k][j] = 1.0f;
+  unsigned long long before = inv();
+  mnk_commuted(A, B, C);
+  unsigned long long calls = inv() - before;
+  mnk_commuted_ref(A, B, R);
+  int ok = calls == 0 && memcmp(C, R, sizeof C) == 0;
+  for (int i = 0; i < 10; ++i)
+    for (int j = 0; j < 9; ++j) ok &= C[i][j] == 1.0f;
+  printf("strict cancellation: %s, expected 1, %llu invocation(s)\n", ok ? "equal" : "DIFFERENT", calls);
+  differ += !ok;
+}
+
+int main(int argc, char **argv) {
+  strict_mode = argc > 1 && strcmp(argv[1], "strict") == 0;
+  RUN(m10_t4, 60, 30, 50, 3);
+  RUN(m12_t4, 72, 30, 60, 3);
+  RUN(m3_t4, 18, 30, 15, 2);
+  RUN(m1_t4, 6, 30, 5, 2);
+  RUN(m0_t4, 6, 30, 5, 0);
+  RUN(m16_t1, 96, 30, 80, 5);
+  RUN(m17_t8, 102, 30, 85, 7);
+  RUN(m10_t4_andand, 60, 30, 50, 3);
+  RUN(m10_t4_le, 60, 30, 50, 3);
+  RUN(n_only, 42, 54, 63, 3);
+  RUN(k_only, 77, 55, 35, 1);
+  RUN(k_only_outer, 77, 55, 35, 1);
+  RUN(mn, 60, 54, 90, 6);
+  RUN(mnk, 70, 63, 90, 6);
+  RUN(overlap, 60, 30, 50, 0);
+  RUN(gap, 60, 30, 50, 0);
+  RUN(reorder, 77, 55, 35, 0);
+  RUN(r1_interleaved, 42, 36, 12, 0);
+  RUN(r1_adjacent, 42, 36, 12, 14);
+  RUN(mnk_swapped, 70, 63, 90, 6);
+  RUN(mnk_commuted, 70, 63, 90, 6);
+  if (strict_mode) strict_cancellation();
   printf("%s: %d differ\n", differ ? "FAIL" : "PASS", differ);
   return differ;
 }

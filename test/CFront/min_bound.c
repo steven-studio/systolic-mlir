@@ -114,3 +114,30 @@ void tiles_down(float A[restrict 10][6], float B[restrict 6][5], float C[restric
 // IFACE:       {"name": "tiles_down",
 // IFACE-SAME:  {"name": "A", "ctype": "float (*restrict)[6]", "kind": "memref", "elem": "f32", "leading_extent": 10, "leading_min": 0,
 // SITES:       {"function": "tiles_down", {{.*}}"executions": 3}
+
+// Commuted operands retain their AST types and arithmetic grouping. The
+// short outer counter is promoted to int in BOTH comparison and branch.
+void promoted_commute(float A[restrict 10][4]) {
+  for (short tile = 0; tile < 10; tile += 4)
+    for (int point = tile; (tile + 4 < 10 ? 4 + tile : 10) > point; ++point)
+      A[point][0] = 1.0f;
+}
+// CHECK-LABEL: func.func @promoted_commute(
+// CHECK: affine.for %tile = 0 to 10 step 4
+// CHECK: affine.for %point = {{.*}} to min affine_map<(d0) -> (4 + d0 * 1, 10)>
+
+void commuted_product(float A[restrict 10][4]) {
+  for (int tile = 0; tile < 5; tile += 2)
+    for (int point = 2 * tile; point < (2 * tile + 4 < 10 ? 4 + tile * 2 : 10); ++point)
+      A[point][0] = 1.0f;
+}
+// CHECK-LABEL: func.func @commuted_product(
+// CHECK: affine.for %point = {{.*}} to min affine_map<(d0) -> (4 + d0 * 2, 10)>
+
+void swapped_inclusive(float A[restrict 10][4]) {
+  for (int tile = 0; tile < 10; tile = tile + 4)
+    for (int point = tile; ((tile + 3 >= point) && (point <= 9)); point++)
+      A[point][0] = 1.0f;
+}
+// CHECK-LABEL: func.func @swapped_inclusive(
+// CHECK: affine.for %point = {{.*}} to min affine_map<(d0) -> (4 + d0 * 1, 10)>

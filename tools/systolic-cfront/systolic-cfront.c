@@ -1912,9 +1912,11 @@ static const char *flipped_comparison(const char *cop) {
   return "<=";
 }
 
-/* Whether two integer expressions are the same as written (S5.5): one AST up
-   to parentheses, loads and no-op casts -- a macro argument that expands
-   twice. Exact and syntactic: `ii + 4` and `4 + ii` are not the same. */
+/* Typed operand equivalence for a min conditional: the same AST up to
+   parentheses, loads, no-op casts and commutation of + or *. No reassociation
+   or cancellation: intermediate operations and integer promotions stay in
+   their original types. All four operands are separately checked by
+   header_expr before translation; min_operand_check excludes side effects. */
 static int same_expr(const json_value *a, const json_value *b) {
   a = strip_parens_and_casts(a, kLoadNoOp);
   b = strip_parens_and_casts(b, kLoadNoOp);
@@ -1940,10 +1942,18 @@ static int same_expr(const json_value *a, const json_value *b) {
              strcmp(kind, "UnaryOperator") != 0) {
     return 0;
   }
+  int direct = 1;
   for (size_t i = 0; i < child_count(a); ++i)
-    if (!same_expr(child(a, i), child(b, i)))
-      return 0;
-  return 1;
+    if (!same_expr(child(a, i), child(b, i))) {
+      direct = 0;
+      break;
+    }
+  if (direct)
+    return 1;
+  return strcmp(kind, "BinaryOperator") == 0 && child_count(a) == 2 &&
+         (strcmp(opcode_of(a), "+") == 0 || strcmp(opcode_of(a), "*") == 0) &&
+         same_expr(child(a, 0), child(b, 1)) &&
+         same_expr(child(a, 1), child(b, 0));
 }
 
 /* The first function call in an expression, or NULL. */
@@ -1975,6 +1985,47 @@ static _Noreturn void refuse_call(const json_value *call) {
               name && *name ? name : "a function");
 }
 
+/* Only expressions whose evaluation can be repeated or exchanged. In
+   particular a volatile/atomic read is observable even without a call. The
+   affine/header parsers below impose the narrower integer expression subset. */
+static void min_purity_check(const json_value *n) {
+  if (strstr(qual_type(n), "volatile") || strstr(qual_type(n), "_Atomic"))
+    unsupported(n, "a min loop bound must not read volatile or atomic values");
+  const char *op = opcode_of(n);
+  if (strcmp(kind_of(n), "CompoundAssignOperator") == 0 ||
+      (strcmp(kind_of(n), "BinaryOperator") == 0 && strcmp(op, "=") == 0) ||
+      (strcmp(kind_of(n), "UnaryOperator") == 0 &&
+       (strcmp(op, "++") == 0 || strcmp(op, "--") == 0)))
+    unsupported(n, "a min loop bound must not have side effects");
+  for (size_t i = 0; i < child_count(n); ++i)
+    min_purity_check(child(n, i));
+}
+
+/* Normalize an upper comparison without changing its C operands or casts.
+   Integral promotions of the counter are deliberately not stripped. */
+static int clipped_comparison(const json_value *c, const char *decl,
+                              const json_value **bound, int *le) {
+  c = strip_parens_and_casts(c, kNoOp);
+  if (strcmp(kind_of(c), "BinaryOperator") != 0)
+    return 0;
+  const char *op = opcode_of(c);
+  const json_value *counter = child(c, 0);
+  *bound = child(c, 1);
+  if (strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
+    counter = child(c, 1);
+    *bound = child(c, 0);
+  } else if (strcmp(op, "<") != 0 && strcmp(op, "<=") != 0) {
+    return 0;
+  }
+  counter = strip_parens_and_casts(counter, kLoadNoOp);
+  if (strcmp(kind_of(counter), "DeclRefExpr") != 0 ||
+      !referenced_id(counter) || strcmp(referenced_id(counter), decl) != 0)
+    return 0;
+  min_purity_check(counter);
+  *le = op[1] == '=';
+  return 1;
+}
+
 /* An operand of a min bound, P or Q: no call, no conditional (a min of more
    than two operands), its value of the counter's type as written. */
 static void min_operand_check(const json_value *x, const char *vtype,
@@ -1982,6 +2033,7 @@ static void min_operand_check(const json_value *x, const char *vtype,
   const json_value *call = call_in(x);
   if (call)
     refuse_call(call);
+  min_purity_check(x);
   const json_value *v = strip_parens_and_casts(x, kLoadNoOp);
   if (strcmp(kind_of(v), "ConditionalOperator") == 0)
     unsupported(v, "the loop bound is a min of more than two operands (a "
@@ -2001,8 +2053,9 @@ static void min_operand_check(const json_value *x, const char *vtype,
                     exactly min(P, Q): a comparison of P and Q selecting the
                     smaller one -- (P) < (Q) ? (P) : (Q), as the usual MIN
                     macro expands, also with <=, or with > / >= and the
-                    branches exchanged (the same expressions as written);
+                    branches exchanged (typed operand equivalence, same_expr);
      counter OP P && counter OP' Q   (OP, OP' < or <=).
+   Each comparison may exchange its sides with the opposite relation.
    On 1: *p, *q are P and Q, and *p_le, *q_le whether the comparison of the
    counter with them is <= (the exclusive bound is then P + 1). The counter,
    P, Q, the conditional and both sides of its comparison must have the
@@ -2013,7 +2066,9 @@ static void min_operand_check(const json_value *x, const char *vtype,
    one named min), a conversion. */
 static int min_bound_of(const json_value *cond, const char *decl,
                         const char *vtype, const json_value **p, int *p_le,
-                        const json_value **q, int *q_le) {
+                        const json_value **q, int *q_le,
+                        const json_value **branch_t, const json_value **branch_f) {
+  cond = strip_parens_and_casts(cond, kNoOp);
   if (strcmp(kind_of(cond), "BinaryOperator") != 0)
     return 0;
   const char *cop = opcode_of(cond);
@@ -2025,18 +2080,11 @@ static int min_bound_of(const json_value *cond, const char *decl,
     int le[2];
     for (int s = 0; s < 2; ++s) {
       const json_value *c = sides[s];
-      const char *op = opcode_of(c);
-      const json_value *lhs = strip_parens_and_casts(child(c, 0), kLoadNoOp);
-      if (strcmp(kind_of(c), "BinaryOperator") != 0 ||
-          (strcmp(op, "<") != 0 && strcmp(op, "<=") != 0) ||
-          strcmp(kind_of(lhs), "DeclRefExpr") != 0 || !referenced_id(lhs) ||
-          strcmp(referenced_id(lhs), decl) != 0)
+      if (!clipped_comparison(c, decl, &bounds[s], &le[s]))
         unsupported(cond, "a loop condition joined by && must be 'counter < "
-                          "a && counter < b' (< or <= each, the counter "
-                          "itself on the left): the minimum of two upper "
-                          "bounds (docs/AFFINE_GEMM_MAPPING.md section 26.5)");
-      bounds[s] = child(c, 1);
-      le[s] = strcmp(op, "<=") == 0;
+                          "a && counter < b' (< or <= each, either side of "
+                          "each comparison): the minimum of two upper bounds "
+                          "(docs/AFFINE_GEMM_MAPPING.md section 26.5)");
       min_operand_check(bounds[s], vtype, c);
     }
     *p = bounds[0];
@@ -2045,18 +2093,19 @@ static int min_bound_of(const json_value *cond, const char *decl,
     *q_le = le[1];
     return 1;
   }
-  if (strcmp(cop, "<") != 0 && strcmp(cop, "<=") != 0)
-    return 0;
-  const json_value *rhs = strip_parens_and_casts(child(cond, 1), kLoadNoOp);
-  const json_value *converted = strip_parens_and_casts(child(cond, 1),
-                                                       kIndexCasts);
+  const json_value *bound;
+  int le;
+  /* Locate a conditional even if the counter was converted: preserve the
+     existing diagnostic rather than silently accepting the conversion. */
+  const json_value *candidate = child(cond,
+      strcmp(cop, ">") == 0 || strcmp(cop, ">=") == 0 ? 0 : 1);
+  const json_value *rhs = strip_parens_and_casts(candidate, kLoadNoOp);
+  const json_value *converted = strip_parens_and_casts(candidate, kIndexCasts);
   if (strcmp(kind_of(rhs), "CallExpr") == 0)
     refuse_call(rhs);
   if (strcmp(kind_of(converted), "ConditionalOperator") != 0)
     return 0;
-  const json_value *lhs = strip_parens_and_casts(child(cond, 0), kLoadNoOp);
-  if (rhs != converted || strcmp(kind_of(lhs), "DeclRefExpr") != 0 ||
-      !referenced_id(lhs) || strcmp(referenced_id(lhs), decl) != 0 ||
+  if (!clipped_comparison(cond, decl, &bound, &le) || rhs != converted ||
       strcmp(strip_qualifiers(qual_type(rhs)), vtype) != 0)
     unsupported(cond, "the loop condition compares the counter with a "
                       "conditional expression of another type, or not the "
@@ -2077,6 +2126,8 @@ static int min_bound_of(const json_value *cond, const char *decl,
   const json_value *t = child(rhs, 1), *f = child(rhs, 2);
   min_operand_check(x, vtype, test);
   min_operand_check(y, vtype, test);
+  min_operand_check(t, vtype, rhs);
+  min_operand_check(f, vtype, rhs);
   const int less = top[0] == '<';
   /* min: x < y ? x : y (or <=), x > y ? y : x (or >=) */
   const int is_min = less ? same_expr(t, x) && same_expr(f, y)
@@ -2093,7 +2144,9 @@ static int min_bound_of(const json_value *cond, const char *decl,
                      "a min (docs/AFFINE_GEMM_MAPPING.md section 26.5)");
   *p = x;
   *q = y;
-  *p_le = *q_le = strcmp(cop, "<=") == 0;
+  *p_le = *q_le = le;
+  *branch_t = t;
+  *branch_f = f;
   return 1;
 }
 
@@ -2350,9 +2403,11 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
      the affine.for upper bound min (P, Q), exactly; anything that only looks
      like one is refused by min_bound_of. */
   const json_value *min_p = NULL, *min_q = NULL;
+  const json_value *min_t = NULL, *min_f = NULL;
   int min_p_le = 0, min_q_le = 0;
   const int has_min = has_cond && min_bound_of(cond, decl, vtype, &min_p,
-                                               &min_p_le, &min_q, &min_q_le);
+                                               &min_p_le, &min_q, &min_q_le,
+                                               &min_t, &min_f);
   linear_form ub2_form = {0};
   int has_ub2 = 0;
   /* An affine condition E OP C (2 * i - 3 > 0): the equivalent comparison of
@@ -2552,6 +2607,21 @@ static void for_stmt(translator *tr, const json_value *s, int indent) {
       unsupported(cond, "the loop condition must be 'counter < bound', "
                         "'counter <= bound', 'counter > bound' or 'counter >= "
                         "bound'");
+  }
+
+  /* Branches may commute operands, but their own promotions and every
+     intermediate node must pass the same range checks as the comparison.
+     Checking both branches is conservative when C selects only one. */
+  if (min_t) {
+    long long a_unused;
+    linear_form f_unused;
+    int r_unused;
+    if (!header_expr(tr, min_t, NULL, &bound_nodes, &a_unused, &f_unused,
+                     &r_unused) ||
+        !header_expr(tr, min_f, NULL, &bound_nodes, &a_unused, &f_unused,
+                     &r_unused))
+      unsupported(cond, "the min branches must be affine integer expressions "
+                        "of the enclosing loop counters");
   }
 
   /* The values the counter takes, first, first + step, ... while the
