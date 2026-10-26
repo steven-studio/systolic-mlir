@@ -1,0 +1,35 @@
+systolic-matmul: C[2][3] = A[2][4] x B[4][3] on the 1x8x8 + 3x4x4 FPGA
+  K_MAX_8X8 = 16, K_MAX_4X4 = 16 (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt)
+
+  asynchronous runtime (--async): every tile submitted without waiting for the one before it, up to PIPELINE_DEPTH = 4 descriptor(s) in flight per array
+
+A[2][4]
+  -2 -2 -9 -5
+  -3 -6 -2 -5
+B[4][3]
+  -8 -5 -8
+  -3 -9 -4
+  -7 -6 -3
+  -7 -5 -9
+
+Pipeline
+  [1] Linalg     linalg.matmul 2x4 * 4x3 -> 2x3
+  [2] Systolic   1 systolic.matmul_tile (binary-search decomposition, K folded by k_max = 16 on the 8x8, 16 on the 4x4s)
+        the four arrays' fills share 3.51 operand words/cycle (assumed, not measured on this bitstream)
+        #0   C[0:2, 0:3] k[0:4]  on @acc_4x4_0 (device 1)  start_cycle=0 est_cycles=105
+  [3] FPGA       1 call(s) of fpga_tile_submit (gemm, tile, k_index, k_count, m, k, n, A, B, C, ldc, device, start, est) between fpga_gemm_begin and fpga_gemm_wait
+  [4] LLVM       JIT-compiled _mlir_ciface_systolic_matmul
+  [5] Runtime    1 FPGA invocation(s): device 0 (8x8) 0, device 1 1, device 2 0, device 3 0 (4x4)
+                 DPTI: 1117 B to the FPGA, 80 B back, 0.009 s
+                 batch: 1 descriptor(s) on the link before the first completion, 0 sent behind an in-flight one, 0 on a credit a completion freed; depth 4, most in flight 0/1/0/0; 0 submit(s) waited for host-queue room (0.000 ms)
+                 time: submit 0.008 ms (+ 0.000 ms waiting for host-queue room), link writes 0.859 ms, link reads 3.673 ms, collect 0.001 ms, wait 4.786 ms; first completion 4.701 ms after the first submit, last descriptor 0.902 ms
+
+FPGA result C[2][3]
+  120 107  96
+   91 106  99
+CPU reference C_ref[2][3]
+  120 107  96
+   91 106  99
+
+M N K = 2 3 4   FPGA invocations = 1   mismatches = 0 / 6
+Verification: PASS

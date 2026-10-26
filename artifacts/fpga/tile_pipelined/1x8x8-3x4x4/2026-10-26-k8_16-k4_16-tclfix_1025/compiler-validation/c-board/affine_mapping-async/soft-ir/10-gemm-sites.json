@@ -1,0 +1,7 @@
+{"sites": [
+  {"function": "expressions", "line": 59, "col": 3, "begin": 2890, "end": 3052, "from_macro": false, "executions": 1},
+  {"function": "runs_once", "line": 67, "col": 3, "begin": 3162, "end": 3354, "from_macro": false, "executions": 1},
+  {"function": "steps", "line": 76, "col": 3, "begin": 3461, "end": 3620, "from_macro": false, "executions": 1},
+  {"function": "split", "line": 84, "col": 3, "begin": 3725, "end": 3931, "from_macro": false, "executions": 1},
+  {"function": "near_max", "line": 93, "col": 3, "begin": 4040, "end": 4269, "from_macro": false, "executions": 1}
+]}

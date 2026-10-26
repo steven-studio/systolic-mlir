@@ -1,0 +1,40 @@
+module {
+  llvm.func @fpga_matmul_tiled_auto_scheduled(i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+  func.func @systolic_matmul(%arg0: tensor<7x16xf32>, %arg1: tensor<16x7xf32>, %arg2: tensor<7x7xf32>) -> tensor<7x7xf32> attributes {llvm.emit_c_interface} {
+    %0 = bufferization.to_buffer %arg1 read_only : tensor<16x7xf32> to memref<16x7xf32>
+    %1 = bufferization.to_buffer %arg0 read_only : tensor<7x16xf32> to memref<7x16xf32>
+    %alloca = memref.alloca() : memref<128xf32>
+    %alloca_0 = memref.alloca() : memref<128xf32>
+    %alloca_1 = memref.alloca() : memref<64xf32>
+    %2 = bufferization.to_buffer %arg2 : tensor<7x7xf32> to memref<7x7xf32>
+    %subview = memref.subview %2[0, 0] [7, 7] [1, 1] : memref<7x7xf32> to memref<7x7xf32, strided<[7, 1]>>
+    %reinterpret_cast = memref.reinterpret_cast %alloca_1 to offset: [0], sizes: [7, 7], strides: [7, 1] : memref<64xf32> to memref<7x7xf32>
+    memref.copy %subview, %reinterpret_cast : memref<7x7xf32, strided<[7, 1]>> to memref<7x7xf32>
+    %intptr = memref.extract_aligned_pointer_as_index %reinterpret_cast : memref<7x7xf32> -> index
+    %3 = arith.index_cast %intptr : index to i64
+    %4 = llvm.inttoptr %3 : i64 to !llvm.ptr
+    %subview_2 = memref.subview %1[0, 0] [7, 16] [1, 1] : memref<7x16xf32> to memref<7x16xf32, strided<[16, 1]>>
+    %reinterpret_cast_3 = memref.reinterpret_cast %alloca to offset: [0], sizes: [7, 16], strides: [16, 1] : memref<128xf32> to memref<7x16xf32>
+    memref.copy %subview_2, %reinterpret_cast_3 : memref<7x16xf32, strided<[16, 1]>> to memref<7x16xf32>
+    %intptr_4 = memref.extract_aligned_pointer_as_index %reinterpret_cast_3 : memref<7x16xf32> -> index
+    %5 = arith.index_cast %intptr_4 : index to i64
+    %6 = llvm.inttoptr %5 : i64 to !llvm.ptr
+    %subview_5 = memref.subview %0[0, 0] [16, 7] [1, 1] : memref<16x7xf32> to memref<16x7xf32, strided<[7, 1]>>
+    %reinterpret_cast_6 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 7], strides: [7, 1] : memref<128xf32> to memref<16x7xf32>
+    memref.copy %subview_5, %reinterpret_cast_6 : memref<16x7xf32, strided<[7, 1]>> to memref<16x7xf32>
+    %intptr_7 = memref.extract_aligned_pointer_as_index %reinterpret_cast_6 : memref<16x7xf32> -> index
+    %7 = arith.index_cast %intptr_7 : index to i64
+    %8 = llvm.inttoptr %7 : i64 to !llvm.ptr
+    %c7_i32 = arith.constant 7 : i32
+    %c16_i32 = arith.constant 16 : i32
+    %c7_i32_8 = arith.constant 7 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_9 = arith.constant 0 : i32
+    %c125_i32 = arith.constant 125 : i32
+    %9 = llvm.call @fpga_matmul_tiled_auto_scheduled(%c7_i32, %c16_i32, %c7_i32_8, %6, %8, %4, %c0_i32, %c0_i32_9, %c125_i32) : (i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32) -> i32
+    memref.copy %reinterpret_cast, %subview : memref<7x7xf32> to memref<7x7xf32, strided<[7, 1]>>
+    %10 = bufferization.to_tensor %2 restrict writable : memref<7x7xf32> to tensor<7x7xf32>
+    return %10 : tensor<7x7xf32>
+  }
+}
+

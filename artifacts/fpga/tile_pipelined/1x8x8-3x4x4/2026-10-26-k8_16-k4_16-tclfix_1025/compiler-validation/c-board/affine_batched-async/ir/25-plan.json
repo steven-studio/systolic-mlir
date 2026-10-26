@@ -1,0 +1,11 @@
+{
+ "source": "/home/steven-studio/work/systolic-mlir/test/SystolicCC/affine_batched.c",
+ "runtime": "board",
+ "submission": "asynchronous",
+ "k_max_8x8": 16,
+ "k_max_4x4": 16,
+ "pipeline_depth": 4,
+ "verify": true,
+ "offloaded": ["bat", "bat_mid", "bat_step", "bat_two", "bat_inner", "bat_tr_neg", "bat_down", "bat_offset", "bat_tiles"],
+ "translated_not_offloaded": []
+}

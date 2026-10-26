@@ -1,0 +1,27 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 26 01:20:16 2026
+| Host         : steven-studio-System-Product-Name running 64-bit Ubuntu 24.04.3 LTS
+| Command      : report_clock_networks -file /home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/dpti_io/clock_networks.rpt
+| Design       : systolic_dma_top
+| Device       : 7a200t-sbg484
+| Speed File   : -1  PRODUCTION 1.23 2018-06-13
+| Design State : Routed
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Clock Networks Report
+
+
+Constrained Clocks
+-------------------
+
+Clock dpti_clkout (59.9988MHz)(endpoints: 1015 clock, 1 nonclock)
+Port dpti_clkout
+
+Clock sys_clk_pin (100MHz)(endpoints: 183593 clock, 132 nonclock)
+Port sys_clk_pin
+
+Clock dbg_hub/inst/BSCANID.u_xsdbm_id/SWITCH_N_EXT_BSCAN.bscan_inst/SERIES7_BSCAN.bscan_inst/TCK (30.303MHz)(endpoints: 482 clock, 0 nonclock)
+BSCANE2/TCK (dbg_hub/inst/BSCANID.u_xsdbm_id/SWITCH_N_EXT_BSCAN.bscan_inst/SERIES7_BSCAN.bscan_inst)
+

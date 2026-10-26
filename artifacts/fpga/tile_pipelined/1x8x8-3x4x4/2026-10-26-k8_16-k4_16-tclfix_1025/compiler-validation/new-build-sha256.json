@@ -1,0 +1,63 @@
+{
+  "runtime-async-test": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/runtime-async-test",
+    "sha256": "aa1c199ed2a43e06adf57b6c1a05bffd8d858afe6c0ac21cdd10887d4d6ebbed",
+    "bytes": 549656,
+    "mtime": "2026-10-26T08:25:10.689972+08:00"
+  },
+  "runtime-dispatch-test": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/runtime-dispatch-test",
+    "sha256": "d01159e62f8c5dedc30e55787534334bbe6966dd471ede76698e04d982a74198",
+    "bytes": 185848,
+    "mtime": "2026-10-26T08:25:09.612026+08:00"
+  },
+  "systolic-cc": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-cc",
+    "sha256": "c97b1485fcfcf95437d1ca02279daeead9221788744ce6c66d1e0b6f3b526ec5",
+    "bytes": 73448,
+    "mtime": "2026-10-26T08:25:06.986334+08:00"
+  },
+  "systolic-cfront": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-cfront",
+    "sha256": "25df3e9f533b7231e7cc68fa61f87c6c5393c33aa3ab76f0782cf827ac9333e7",
+    "bytes": 121472,
+    "mtime": "2026-10-26T08:25:06.811417+08:00"
+  },
+  "systolic-cost": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-cost",
+    "sha256": "ebc949cdb8a1d126890261ff868fcac9af6eba57ae69a349c984e9d875483119",
+    "bytes": 662776,
+    "mtime": "2026-10-26T08:25:23.846313+08:00"
+  },
+  "systolic-matmul": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-matmul",
+    "sha256": "35dba5b9546e98ff155956b0f41f10d1b6c09d7091a71083f2075c46088f6d00",
+    "bytes": 86565328,
+    "mtime": "2026-10-26T08:25:32.098900+08:00"
+  },
+  "systolic-opt": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-opt",
+    "sha256": "2f4390f62885af1f716a8045e8732505573fef59b07ff64ad1b4ed5ad3993f20",
+    "bytes": 33654864,
+    "mtime": "2026-10-26T08:25:25.109250+08:00"
+  },
+  "systolic-translate": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-translate",
+    "sha256": "009b34ec5aebc735da1ba4768ffab6cfcb5d120da466201e2f7caef3aed0e500",
+    "bytes": 14914880,
+    "mtime": "2026-10-26T08:25:04.172298+08:00"
+  },
+  "libsystolic_fpga_runtime.a": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/runtime/libsystolic_fpga_runtime.a",
+    "sha256": "37b1dccba2541de4d40bc75bcc80ddde2f13f3b770cbe2a0c65e06861a2cfa2b",
+    "bytes": 928606
+  },
+  "llvm24-count": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/llvm24-test-utils/count",
+    "sha256": "28e2255b034def7b26a6d8fa5696b0c3cc7c4df4cd5c8a111c4c995eb2a775c1"
+  },
+  "llvm24-not": {
+    "path": "/tmp/systolic-rebuild-validation-20261026-vrZKJ5/llvm24-test-utils/not",
+    "sha256": "42f3606f2ec36bd706aceb46fd73828d87d66c39d6728f653ae8eb6bea483cf8"
+  }
+}

@@ -1,0 +1,133 @@
+systolic-matmul: C[17][9] = A[17][33] x B[33][9] on the 1x8x8 + 3x4x4 FPGA
+  K_MAX_8X8 = 16, K_MAX_4X4 = 16 (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt)
+
+  synchronous runtime (--sync): one fpga_matmul_tiled_auto_scheduled per tile, each waited for before the next
+
+A[17][33]
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+B[33][9]
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+
+Pipeline
+  [1] Linalg     linalg.matmul 17x33 * 33x9 -> 17x9
+  [2] Systolic   27 systolic.matmul_tile (binary-search decomposition, K folded by k_max = 16 on the 8x8, 16 on the 4x4s)
+        the four arrays' fills share 3.51 operand words/cycle (assumed, not measured on this bitstream)
+        #0   C[0:8, 0:8] k[0:16]  on @acc_8x8_0 (device 0)  start_cycle=0 est_cycles=125
+        #1   C[0:8, 0:8] k[16:32]  on @acc_8x8_0 (device 0)  start_cycle=42 est_cycles=125
+        #2   C[0:8, 0:8] k[32:33]  on @acc_8x8_0 (device 0)  start_cycle=128 est_cycles=110
+        #3   C[0:4, 8:9] k[0:16]  on @acc_4x4_0 (device 1)  start_cycle=0 est_cycles=117
+        #4   C[0:4, 8:9] k[16:32]  on @acc_4x4_0 (device 1)  start_cycle=42 est_cycles=117
+        #5   C[0:4, 8:9] k[32:33]  on @acc_4x4_0 (device 1)  start_cycle=120 est_cycles=102
+        #6   C[4:8, 8:9] k[0:16]  on @acc_4x4_1 (device 2)  start_cycle=0 est_cycles=117
+        #7   C[4:8, 8:9] k[16:32]  on @acc_4x4_1 (device 2)  start_cycle=42 est_cycles=117
+        #8   C[4:8, 8:9] k[32:33]  on @acc_4x4_1 (device 2)  start_cycle=120 est_cycles=102
+        #9   C[8:16, 0:8] k[0:16]  on @acc_8x8_0 (device 0)  start_cycle=197 est_cycles=125
+        #10  C[8:16, 0:8] k[16:32]  on @acc_8x8_0 (device 0)  start_cycle=266 est_cycles=125
+        #11  C[8:16, 0:8] k[32:33]  on @acc_8x8_0 (device 0)  start_cycle=335 est_cycles=110
+        #12  C[8:12, 8:9] k[0:16]  on @acc_4x4_2 (device 3)  start_cycle=0 est_cycles=117
+        #13  C[8:12, 8:9] k[16:32]  on @acc_4x4_2 (device 3)  start_cycle=42 est_cycles=117
+        #14  C[8:12, 8:9] k[32:33]  on @acc_4x4_2 (device 3)  start_cycle=120 est_cycles=102
+        #15  C[12:16, 8:9] k[0:16]  on @acc_4x4_0 (device 1)  start_cycle=189 est_cycles=117
+        #16  C[12:16, 8:9] k[16:32]  on @acc_4x4_0 (device 1)  start_cycle=258 est_cycles=117
+        #17  C[12:16, 8:9] k[32:33]  on @acc_4x4_0 (device 1)  start_cycle=327 est_cycles=102
+        #18  C[16:17, 0:4] k[0:16]  on @acc_4x4_1 (device 2)  start_cycle=189 est_cycles=117
+        #19  C[16:17, 0:4] k[16:32]  on @acc_4x4_1 (device 2)  start_cycle=258 est_cycles=117
+        #20  C[16:17, 0:4] k[32:33]  on @acc_4x4_1 (device 2)  start_cycle=327 est_cycles=102
+        #21  C[16:17, 4:8] k[0:16]  on @acc_4x4_2 (device 3)  start_cycle=189 est_cycles=117
+        #22  C[16:17, 4:8] k[16:32]  on @acc_4x4_2 (device 3)  start_cycle=258 est_cycles=117
+        #23  C[16:17, 4:8] k[32:33]  on @acc_4x4_2 (device 3)  start_cycle=327 est_cycles=102
+        #24  C[16:17, 8:9] k[0:16]  on @acc_4x4_0 (device 1)  start_cycle=396 est_cycles=117
+        #25  C[16:17, 8:9] k[16:32]  on @acc_4x4_0 (device 1)  start_cycle=465 est_cycles=117
+        #26  C[16:17, 8:9] k[32:33]  on @acc_4x4_0 (device 1)  start_cycle=534 est_cycles=102
+  [3] FPGA       27 call(s) of fpga_matmul_tiled_auto_scheduled (m, k, n, A, B, C, device, start, est)
+  [4] LLVM       JIT-compiled _mlir_ciface_systolic_matmul
+  [5] Runtime    27 FPGA invocation(s): device 0 (8x8) 6, device 1 9, device 2 6, device 3 6 (4x4)
+                 DPTI: 30159 B to the FPGA, 3312 B back, 0.072 s
+
+FPGA result C[17][9]
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+CPU reference C_ref[17][9]
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0 0
+
+M N K = 17 9 33   FPGA invocations = 27   mismatches = 0 / 153
+Verification: PASS

@@ -1,0 +1,39 @@
+systolic-matmul: C[4][4] = A[4][4] x B[4][4] on the 1x8x8 + 3x4x4 FPGA
+  K_MAX_8X8 = 16, K_MAX_4X4 = 16 (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt)
+
+  synchronous runtime (--sync): one fpga_matmul_tiled_auto_scheduled per tile, each waited for before the next
+
+A[4][4]
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+B[4][4]
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+
+Pipeline
+  [1] Linalg     linalg.matmul 4x4 * 4x4 -> 4x4
+  [2] Systolic   1 systolic.matmul_tile (binary-search decomposition, K folded by k_max = 16 on the 8x8, 16 on the 4x4s)
+        the four arrays' fills share 3.51 operand words/cycle (assumed, not measured on this bitstream)
+        #0   C[0:4, 0:4] k[0:4]  on @acc_4x4_0 (device 1)  start_cycle=0 est_cycles=105
+  [3] FPGA       1 call(s) of fpga_matmul_tiled_auto_scheduled (m, k, n, A, B, C, device, start, est)
+  [4] LLVM       JIT-compiled _mlir_ciface_systolic_matmul
+  [5] Runtime    1 FPGA invocation(s): device 0 (8x8) 0, device 1 1, device 2 0, device 3 0 (4x4)
+                 DPTI: 1117 B to the FPGA, 80 B back, 0.008 s
+
+FPGA result C[4][4]
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+CPU reference C_ref[4][4]
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+  0 0 0 0
+
+M N K = 4 4 4   FPGA invocations = 1   mismatches = 0 / 16
+Verification: PASS

@@ -1,0 +1,7 @@
+commit 075640b4872d4240a99d89af625d7dd7aa3fc207
+Author:     steven-studio <stevenyu.supreme@gmail.com>
+AuthorDate: Sun Oct 25 22:41:26 2026 +0800
+Commit:     steven-studio <stevenyu.supreme@gmail.com>
+CommitDate: Sun Oct 25 22:41:26 2026 +0800
+
+    docs: rewrite README in Traditional Chinese

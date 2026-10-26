@@ -1,0 +1,57 @@
+systolic-matmul: C[8][8] = A[8][8] x B[8][8] on the 1x8x8 + 3x4x4 FPGA
+  K_MAX_8X8 = 16, K_MAX_4X4 = 16 (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt)
+
+  asynchronous runtime (--async): every tile submitted without waiting for the one before it, up to PIPELINE_DEPTH = 4 descriptor(s) in flight per array
+
+A[8][8]
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+B[8][8]
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+
+Pipeline
+  [1] Linalg     linalg.matmul 8x8 * 8x8 -> 8x8
+  [2] Systolic   1 systolic.matmul_tile (binary-search decomposition, K folded by k_max = 16 on the 8x8, 16 on the 4x4s)
+        the four arrays' fills share 3.51 operand words/cycle (assumed, not measured on this bitstream)
+        #0   C[0:8, 0:8] k[0:8]  on @acc_8x8_0 (device 0)  start_cycle=0 est_cycles=117
+  [3] FPGA       1 call(s) of fpga_tile_submit (gemm, tile, k_index, k_count, m, k, n, A, B, C, ldc, device, start, est) between fpga_gemm_begin and fpga_gemm_wait
+  [4] LLVM       JIT-compiled _mlir_ciface_systolic_matmul
+  [5] Runtime    1 FPGA invocation(s): device 0 (8x8) 1, device 1 0, device 2 0, device 3 0 (4x4)
+                 DPTI: 1117 B to the FPGA, 272 B back, 0.008 s
+                 batch: 1 descriptor(s) on the link before the first completion, 0 sent behind an in-flight one, 0 on a credit a completion freed; depth 4, most in flight 1/0/0/0; 0 submit(s) waited for host-queue room (0.000 ms)
+                 time: submit 0.009 ms (+ 0.000 ms waiting for host-queue room), link writes 0.896 ms, link reads 2.276 ms, collect 0.001 ms, wait 3.275 ms; first completion 3.223 ms after the first submit, last descriptor 0.938 ms
+
+FPGA result C[8][8]
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+CPU reference C_ref[8][8]
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+  0 0 0 0 0 0 0 0
+
+M N K = 8 8 8   FPGA invocations = 1   mismatches = 0 / 64
+Verification: PASS

@@ -1,0 +1,14 @@
+gemm_example.c:60:3: remark: affine GEMM 24x20x40 lowered as 45 exact region(s) on 4 accelerator(s): makespan = 11536 cycles (read + compute + write), 15 output block(s)
+gemm_example.c:60:3: note: see current operation: 
+affine.for %arg3 = 0 to 24 {
+  affine.for %arg4 = 0 to 20 {
+    affine.for %arg5 = 0 to 40 {
+      %48 = affine.load %arg2[%arg3, %arg4] : memref<?x20xf32>
+      %49 = affine.load %arg0[%arg3, %arg5] : memref<?x40xf32>
+      %50 = affine.load %arg1[%arg5, %arg4] : memref<?x20xf32>
+      %51 = arith.mulf %49, %50 fastmath<reassoc> : f32
+      %52 = arith.addf %48, %51 fastmath<reassoc> : f32
+      affine.store %52, %arg2[%arg3, %arg4] : memref<?x20xf32>
+    }
+  }
+}

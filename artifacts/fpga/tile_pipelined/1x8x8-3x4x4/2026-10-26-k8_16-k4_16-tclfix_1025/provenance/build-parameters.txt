@@ -1,0 +1,7 @@
+SYSTOLIC_PROJ_TAG=shared_wb_r2_tclfix_1025
+SYSTOLIC_PLACE_DIRECTIVE=ExtraTimingOpt
+SYSTOLIC_ROUTE_DIRECTIVE=Explore
+DPTI_CLK_PHASE=0.0
+-tclargs build v1 16 16 1 1 3
+Vivado v2026.1 (64-bit), SW Build 6511674
+原始建置程序於 2026-10-25 啟動，2026-10-26 完成；本次驗證未重新執行建置。

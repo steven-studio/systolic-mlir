@@ -1,0 +1,46 @@
+[
+  {
+    "suite": "quick-sync",
+    "passed": 26,
+    "total": 26,
+    "mismatches": 0,
+    "compared_elements": 1068,
+    "unexpected_timeouts": 0,
+    "unexpected_runtime_errors": 0,
+    "started": "2026-10-26T08:21:34.974281+08:00",
+    "finished": "2026-10-26T08:21:37.914066+08:00"
+  },
+  {
+    "suite": "regression-sync",
+    "passed": 52,
+    "total": 52,
+    "mismatches": 0,
+    "compared_elements": 15875,
+    "unexpected_timeouts": 0,
+    "unexpected_runtime_errors": 0,
+    "started": "2026-10-26T08:21:37.914285+08:00",
+    "finished": "2026-10-26T08:22:08.581780+08:00"
+  },
+  {
+    "suite": "full-sync",
+    "passed": 43,
+    "total": 43,
+    "mismatches": 0,
+    "compared_elements": 7008,
+    "unexpected_timeouts": 0,
+    "unexpected_runtime_errors": 0,
+    "started": "2026-10-26T08:22:08.581990+08:00",
+    "finished": "2026-10-26T08:22:21.577116+08:00"
+  },
+  {
+    "suite": "regression-async",
+    "passed": 52,
+    "total": 52,
+    "mismatches": 0,
+    "compared_elements": 15875,
+    "unexpected_timeouts": 0,
+    "unexpected_runtime_errors": 0,
+    "started": "2026-10-26T08:22:21.577377+08:00",
+    "finished": "2026-10-26T08:22:51.125536+08:00"
+  }
+]

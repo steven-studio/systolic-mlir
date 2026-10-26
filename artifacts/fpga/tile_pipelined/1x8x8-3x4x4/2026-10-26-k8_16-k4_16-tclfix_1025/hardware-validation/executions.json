@@ -1,0 +1,58 @@
+[
+  {
+    "suite": "quick-sync",
+    "command": "bash /home/steven-studio/work/systolic-mlir/test/e2e/run_e2e.sh --backend board --build-dir /home/steven-studio/work/systolic-mlir/build --quick --mode sync --out /tmp/systolic-rebuild-validation-20261026-vrZKJ5/quick-sync",
+    "environment": {
+      "HOME": "/home/steven-studio",
+      "USER": "steven-studio",
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "SYSTOLIC_FPGA_CONFIG": "/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt"
+    },
+    "started": "2026-10-26T08:21:34.974281+08:00",
+    "git_commit": "075640b4872d4240a99d89af625d7dd7aa3fc207",
+    "returncode": 0,
+    "finished": "2026-10-26T08:21:37.914066+08:00"
+  },
+  {
+    "suite": "regression-sync",
+    "command": "bash /home/steven-studio/work/systolic-mlir/test/e2e/run_e2e.sh --backend board --build-dir /home/steven-studio/work/systolic-mlir/build --regression --mode sync --out /tmp/systolic-rebuild-validation-20261026-vrZKJ5/regression-sync",
+    "environment": {
+      "HOME": "/home/steven-studio",
+      "USER": "steven-studio",
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "SYSTOLIC_FPGA_CONFIG": "/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt"
+    },
+    "started": "2026-10-26T08:21:37.914285+08:00",
+    "git_commit": "075640b4872d4240a99d89af625d7dd7aa3fc207",
+    "returncode": 0,
+    "finished": "2026-10-26T08:22:08.581780+08:00"
+  },
+  {
+    "suite": "full-sync",
+    "command": "bash /home/steven-studio/work/systolic-mlir/test/e2e/run_e2e.sh --backend board --build-dir /home/steven-studio/work/systolic-mlir/build --mode sync --out /tmp/systolic-rebuild-validation-20261026-vrZKJ5/full-sync",
+    "environment": {
+      "HOME": "/home/steven-studio",
+      "USER": "steven-studio",
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "SYSTOLIC_FPGA_CONFIG": "/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt"
+    },
+    "started": "2026-10-26T08:22:08.581990+08:00",
+    "git_commit": "075640b4872d4240a99d89af625d7dd7aa3fc207",
+    "returncode": 0,
+    "finished": "2026-10-26T08:22:21.577116+08:00"
+  },
+  {
+    "suite": "regression-async",
+    "command": "bash /home/steven-studio/work/systolic-mlir/test/e2e/run_e2e.sh --backend board --build-dir /home/steven-studio/work/systolic-mlir/build --regression --mode async --out /tmp/systolic-rebuild-validation-20261026-vrZKJ5/regression-async",
+    "environment": {
+      "HOME": "/home/steven-studio",
+      "USER": "steven-studio",
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "SYSTOLIC_FPGA_CONFIG": "/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt"
+    },
+    "started": "2026-10-26T08:22:21.577377+08:00",
+    "git_commit": "075640b4872d4240a99d89af625d7dd7aa3fc207",
+    "returncode": 0,
+    "finished": "2026-10-26T08:22:51.125536+08:00"
+  }
+]

@@ -1,0 +1,619 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 26 01:21:34 2026
+| Host         : steven-studio-System-Product-Name running 64-bit Ubuntu 24.04.3 LTS
+| Command      : report_timing -to [get_ports {{dpti_d[*]} dpti_rd_n dpti_wr_n dpti_oe_n}] -delay_type max -max_paths 30 -nworst 1 -file /home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/dpti_io/output_setup.rpt
+| Design       : systolic_dma_top
+| Device       : 7a200t-sbg484
+| Speed File   : -1  PRODUCTION 1.23 2018-06-13
+| Design State : Routed
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Timing Report
+
+Slack (MET) :             4.239ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[3]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[3]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.117ns  (logic 4.116ns (99.976%)  route 0.001ns (0.024%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.948ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.948ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.852    -0.948    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y114        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[3]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y114        FDPE (Prop_fdpe_C_Q)         0.552    -0.396 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[3]/Q
+                         net (fo=1, routed)           0.001    -0.395    dpti_d_IOBUF[3]_inst/T
+    U17                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.564     3.169 r  dpti_d_IOBUF[3]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.169    dpti_d[3]
+    U17                                                               r  dpti_d[3]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.169    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.239    <hidden>
+
+Slack (MET) :             4.244ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[0]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[0]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.121ns  (logic 4.120ns (99.976%)  route 0.001ns (0.024%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.957ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.957ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.843    -0.957    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y128        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[0]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y128        FDPE (Prop_fdpe_C_Q)         0.552    -0.405 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[0]/Q
+                         net (fo=1, routed)           0.001    -0.404    dpti_d_IOBUF[0]_inst/T
+    U20                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.568     3.164 r  dpti_d_IOBUF[0]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.164    dpti_d[0]
+    U20                                                               r  dpti_d[0]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.164    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.244    <hidden>
+
+Slack (MET) :             4.264ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[5]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[5]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.086ns  (logic 4.085ns (99.976%)  route 0.001ns (0.024%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.942ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.942ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.858    -0.942    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y102        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[5]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y102        FDPE (Prop_fdpe_C_Q)         0.552    -0.390 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[5]/Q
+                         net (fo=1, routed)           0.001    -0.389    dpti_d_IOBUF[5]_inst/T
+    P16                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.533     3.144 r  dpti_d_IOBUF[5]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.144    dpti_d[5]
+    P16                                                               r  dpti_d[5]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.144    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.264    <hidden>
+
+Slack (MET) :             4.265ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[6]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[6]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.088ns  (logic 4.087ns (99.976%)  route 0.001ns (0.024%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.945ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.945ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.855    -0.945    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y110        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[6]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y110        FDPE (Prop_fdpe_C_Q)         0.552    -0.393 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[6]/Q
+                         net (fo=1, routed)           0.001    -0.392    dpti_d_IOBUF[6]_inst/T
+    R18                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.535     3.143 r  dpti_d_IOBUF[6]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.143    dpti_d[6]
+    R18                                                               r  dpti_d[6]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.143    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.265    <hidden>
+
+Slack (MET) :             4.272ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[7]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[7]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.080ns  (logic 4.079ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.943ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.943ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.857    -0.943    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y103        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[7]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y103        FDPE (Prop_fdpe_C_Q)         0.552    -0.391 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[7]/Q
+                         net (fo=1, routed)           0.001    -0.390    dpti_d_IOBUF[7]_inst/T
+    N14                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.527     3.136 r  dpti_d_IOBUF[7]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.136    dpti_d[7]
+    N14                                                               r  dpti_d[7]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.136    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.272    <hidden>
+
+Slack (MET) :             4.275ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[4]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[4]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.075ns  (logic 4.074ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.942ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.942ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.858    -0.942    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y101        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[4]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y101        FDPE (Prop_fdpe_C_Q)         0.552    -0.390 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[4]/Q
+                         net (fo=1, routed)           0.001    -0.389    dpti_d_IOBUF[4]_inst/T
+    R17                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.522     3.133 r  dpti_d_IOBUF[4]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.133    dpti_d[4]
+    R17                                                               r  dpti_d[4]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.133    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.275    <hidden>
+
+Slack (MET) :             4.275ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[1]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[1]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.078ns  (logic 4.077ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.945ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.945ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.855    -0.945    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y112        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[1]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y112        FDPE (Prop_fdpe_C_Q)         0.552    -0.393 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[1]/Q
+                         net (fo=1, routed)           0.001    -0.392    dpti_d_IOBUF[1]_inst/T
+    P14                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.525     3.133 r  dpti_d_IOBUF[1]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.133    dpti_d[1]
+    P14                                                               r  dpti_d[1]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.133    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.275    <hidden>
+
+Slack (MET) :             4.286ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[2]/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_d[2]
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.067ns  (logic 4.066ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUFT=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.944ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.944ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.856    -0.944    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y106        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[2]/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y106        FDPE (Prop_fdpe_C_Q)         0.552    -0.392 f  g_sync245_phy.u_dpti_sync245_phy/d_t_r_reg[2]/Q
+                         net (fo=1, routed)           0.001    -0.391    dpti_d_IOBUF[2]_inst/T
+    P15                  OBUFT (TriStatE_obuft_T_O)
+                                                      3.514     3.123 r  dpti_d_IOBUF[2]_inst/OBUFT/O
+                         net (fo=1, unset)            0.000     3.123    dpti_d[2]
+    P15                                                               r  dpti_d[2]
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.123    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.286    <hidden>
+
+Slack (MET) :             4.330ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/oe_n_pad_reg/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_oe_n
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.030ns  (logic 4.029ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUF=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.951ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.951ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.849    -0.951    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y118        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/oe_n_pad_reg/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y118        FDPE (Prop_fdpe_C_Q)         0.472    -0.479 r  g_sync245_phy.u_dpti_sync245_phy/oe_n_pad_reg/Q
+                         net (fo=1, routed)           0.001    -0.478    g_sync245_phy.u_dpti_sync245_phy_n_17
+    V17                  OBUF (Prop_obuf_I_O)         3.557     3.079 r  dpti_oe_n_OBUF_inst/O
+                         net (fo=0)                   0.000     3.079    dpti_oe_n
+    V17                                                               r  dpti_oe_n
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.079    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.330    <hidden>
+
+Slack (MET) :             4.344ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/wr_n_pad_reg/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_wr_n
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.010ns  (logic 4.009ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUF=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.945ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.945ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.855    -0.945    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y139        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/wr_n_pad_reg/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y139        FDPE (Prop_fdpe_C_Q)         0.472    -0.473 r  g_sync245_phy.u_dpti_sync245_phy/wr_n_pad_reg/Q
+                         net (fo=1, routed)           0.001    -0.472    g_sync245_phy.u_dpti_sync245_phy_n_18
+    R19                  OBUF (Prop_obuf_I_O)         3.537     3.065 r  dpti_wr_n_OBUF_inst/O
+                         net (fo=0)                   0.000     3.065    dpti_wr_n
+    R19                                                               r  dpti_wr_n
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.065    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.344    <hidden>
+
+Slack (MET) :             4.352ns  (required time - arrival time)
+  Source:                 g_sync245_phy.u_dpti_sync245_phy/rd_n_pad_reg/C
+                            (rising edge-triggered cell FDPE clocked by clk_dpti  {rise@0.000ns fall@8.333ns period=16.667ns})
+  Destination:            dpti_rd_n
+                            (output port clocked by dpti_clkout  {rise@0.000ns fall@8.334ns period=16.667ns})
+  Path Group:             dpti_clkout
+  Path Type:              Max at Slow Process Corner
+  Requirement:            16.667ns  (dpti_clkout rise@16.667ns - clk_dpti rise@0.000ns)
+  Data Path Delay:        4.001ns  (logic 4.000ns (99.975%)  route 0.001ns (0.025%))
+  Logic Levels:           1  (OBUF=1)
+  Output Delay:           9.000ns
+  Clock Path Skew:        0.945ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.000ns = ( 16.667 - 16.667 ) 
+    Source Clock Delay      (SCD):    -0.945ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.259ns  ((TSJ^2 + TIJ^2 + DJ^2)^1/2) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.200ns
+    Discrete Jitter          (DJ):    0.186ns
+    Phase Error              (PE):    0.118ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    Netlist Resource(s)
+  -------------------------------------------------------------------    -------------------
+                         (clock clk_dpti rise edge)
+                                                      0.000     0.000 r  <hidden>
+    Y18                                               0.000     0.000 r  dpti_clkout
+                         net (fo=0)                   0.000     0.000    u_dpti_clk_gen/dpti_clkout
+    Y18                  IBUF (Prop_ibuf_I_O)         1.512     1.512 r  u_dpti_clk_gen/u_ibuf/O
+                         net (fo=1, routed)           1.233     2.745    u_dpti_clk_gen/clkin_ibuf
+    MMCME2_ADV_X0Y2      MMCME2_ADV (Prop_mmcme2_adv_CLKIN1_CLKOUT0)
+                                                     -7.485    -4.739 r  u_dpti_clk_gen/u_mmcm/CLKOUT0
+                         net (fo=1, routed)           1.843    -2.896    u_dpti_clk_gen/clk0_raw
+    BUFGCTRL_X0Y1        BUFG (Prop_bufg_I_O)         0.096    -2.800 r  u_dpti_clk_gen/u_bufg_out/O
+                         net (fo=1015, routed)        1.855    -0.945    g_sync245_phy.u_dpti_sync245_phy/clk_dpti
+    OLOGIC_X0Y140        FDPE                                         r  g_sync245_phy.u_dpti_sync245_phy/rd_n_pad_reg/C
+  -------------------------------------------------------------------    -------------------
+    OLOGIC_X0Y140        FDPE (Prop_fdpe_C_Q)         0.472    -0.473 r  g_sync245_phy.u_dpti_sync245_phy/rd_n_pad_reg/Q
+                         net (fo=1, routed)           0.001    -0.472    g_sync245_phy.u_dpti_sync245_phy_n_16
+    P19                  OBUF (Prop_obuf_I_O)         3.528     3.056 r  dpti_rd_n_OBUF_inst/O
+                         net (fo=0)                   0.000     3.056    dpti_rd_n
+    P19                                                               r  dpti_rd_n
+  -------------------------------------------------------------------    -------------------
+
+                         (clock dpti_clkout rise edge)
+                                                     16.667    16.667 r  <hidden>
+                         clock pessimism              0.000    16.667    <hidden>
+                         clock uncertainty           -0.259    16.408    <hidden>
+                         output delay                -9.000     7.408    <hidden>
+  -------------------------------------------------------------------
+                         required time                          7.408    <hidden>
+                         arrival time                          -3.056    <hidden>
+  -------------------------------------------------------------------
+                         slack                                  4.352    <hidden>
+
+
+
+

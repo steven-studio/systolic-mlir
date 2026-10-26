@@ -1,0 +1,11 @@
+{"sites": [
+  {"function": "bat", "line": 64, "col": 3, "begin": 4370, "end": 4523, "from_macro": false, "executions": 1},
+  {"function": "bat_mid", "line": 68, "col": 3, "begin": 4625, "end": 4778, "from_macro": false, "executions": 1},
+  {"function": "bat_step", "line": 72, "col": 3, "begin": 4881, "end": 5037, "from_macro": false, "executions": 1},
+  {"function": "bat_two", "line": 76, "col": 3, "begin": 5148, "end": 5338, "from_macro": false, "executions": 1},
+  {"function": "bat_inner", "line": 80, "col": 3, "begin": 5442, "end": 5595, "from_macro": false, "executions": 1},
+  {"function": "bat_tr_neg", "line": 84, "col": 3, "begin": 5700, "end": 5857, "from_macro": false, "executions": 1},
+  {"function": "bat_down", "line": 88, "col": 3, "begin": 5960, "end": 6114, "from_macro": false, "executions": 1},
+  {"function": "bat_offset", "line": 92, "col": 3, "begin": 6219, "end": 6384, "from_macro": false, "executions": 1},
+  {"function": "bat_tiles", "line": 96, "col": 3, "begin": 6494, "end": 6650, "from_macro": false, "executions": 1}
+]}

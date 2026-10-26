@@ -1,0 +1,69 @@
+module {
+  llvm.func @fpga_gemm_wait(!llvm.ptr) -> i32
+  llvm.func @fpga_tile_submit(!llvm.ptr, i32, i32, i32, i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32) -> i32
+  llvm.func @fpga_gemm_begin(i32, i32, i32, i32) -> !llvm.ptr
+  func.func @systolic_matmul(%arg0: tensor<8x17xf32>, %arg1: tensor<17x8xf32>, %arg2: tensor<8x8xf32>) -> tensor<8x8xf32> attributes {llvm.emit_c_interface} {
+    %0 = bufferization.to_buffer %arg1 read_only : tensor<17x8xf32> to memref<17x8xf32>
+    %1 = bufferization.to_buffer %arg0 read_only : tensor<8x17xf32> to memref<8x17xf32>
+    %alloca = memref.alloca() : memref<128xf32>
+    %alloca_0 = memref.alloca() : memref<128xf32>
+    %2 = bufferization.to_buffer %arg2 : tensor<8x8xf32> to memref<8x8xf32>
+    %c8_i32 = arith.constant 8 : i32
+    %intptr = memref.extract_aligned_pointer_as_index %2 : memref<8x8xf32> -> index
+    %3 = arith.index_cast %intptr : index to i64
+    %4 = llvm.inttoptr %3 : i64 to !llvm.ptr
+    %c8_i32_1 = arith.constant 8 : i32
+    %c8_i32_2 = arith.constant 8 : i32
+    %c17_i32 = arith.constant 17 : i32
+    %c2_i32 = arith.constant 2 : i32
+    %5 = llvm.call @fpga_gemm_begin(%c8_i32_1, %c8_i32_2, %c17_i32, %c2_i32) : (i32, i32, i32, i32) -> !llvm.ptr
+    %subview = memref.subview %1[0, 0] [8, 16] [1, 1] : memref<8x17xf32> to memref<8x16xf32, strided<[17, 1]>>
+    %reinterpret_cast = memref.reinterpret_cast %alloca to offset: [0], sizes: [8, 16], strides: [16, 1] : memref<128xf32> to memref<8x16xf32>
+    memref.copy %subview, %reinterpret_cast : memref<8x16xf32, strided<[17, 1]>> to memref<8x16xf32>
+    %intptr_3 = memref.extract_aligned_pointer_as_index %reinterpret_cast : memref<8x16xf32> -> index
+    %6 = arith.index_cast %intptr_3 : index to i64
+    %7 = llvm.inttoptr %6 : i64 to !llvm.ptr
+    %subview_4 = memref.subview %0[0, 0] [16, 8] [1, 1] : memref<17x8xf32> to memref<16x8xf32, strided<[8, 1]>>
+    %reinterpret_cast_5 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [16, 8], strides: [8, 1] : memref<128xf32> to memref<16x8xf32>
+    memref.copy %subview_4, %reinterpret_cast_5 : memref<16x8xf32, strided<[8, 1]>> to memref<16x8xf32>
+    %intptr_6 = memref.extract_aligned_pointer_as_index %reinterpret_cast_5 : memref<16x8xf32> -> index
+    %8 = arith.index_cast %intptr_6 : index to i64
+    %9 = llvm.inttoptr %8 : i64 to !llvm.ptr
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_7 = arith.constant 0 : i32
+    %c2_i32_8 = arith.constant 2 : i32
+    %c8_i32_9 = arith.constant 8 : i32
+    %c16_i32 = arith.constant 16 : i32
+    %c8_i32_10 = arith.constant 8 : i32
+    %c0_i32_11 = arith.constant 0 : i32
+    %c0_i32_12 = arith.constant 0 : i32
+    %c125_i32 = arith.constant 125 : i32
+    %10 = llvm.call @fpga_tile_submit(%5, %c0_i32, %c0_i32_7, %c2_i32_8, %c8_i32_9, %c16_i32, %c8_i32_10, %7, %9, %4, %c8_i32, %c0_i32_11, %c0_i32_12, %c125_i32) : (!llvm.ptr, i32, i32, i32, i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32) -> i32
+    %subview_13 = memref.subview %1[0, 16] [8, 1] [1, 1] : memref<8x17xf32> to memref<8x1xf32, strided<[17, 1], offset: 16>>
+    %reinterpret_cast_14 = memref.reinterpret_cast %alloca to offset: [0], sizes: [8, 1], strides: [1, 1] : memref<128xf32> to memref<8x1xf32>
+    memref.copy %subview_13, %reinterpret_cast_14 : memref<8x1xf32, strided<[17, 1], offset: 16>> to memref<8x1xf32>
+    %intptr_15 = memref.extract_aligned_pointer_as_index %reinterpret_cast_14 : memref<8x1xf32> -> index
+    %11 = arith.index_cast %intptr_15 : index to i64
+    %12 = llvm.inttoptr %11 : i64 to !llvm.ptr
+    %subview_16 = memref.subview %0[16, 0] [1, 8] [1, 1] : memref<17x8xf32> to memref<1x8xf32, strided<[8, 1], offset: 128>>
+    %reinterpret_cast_17 = memref.reinterpret_cast %alloca_0 to offset: [0], sizes: [1, 8], strides: [8, 1] : memref<128xf32> to memref<1x8xf32>
+    memref.copy %subview_16, %reinterpret_cast_17 : memref<1x8xf32, strided<[8, 1], offset: 128>> to memref<1x8xf32>
+    %intptr_18 = memref.extract_aligned_pointer_as_index %reinterpret_cast_17 : memref<1x8xf32> -> index
+    %13 = arith.index_cast %intptr_18 : index to i64
+    %14 = llvm.inttoptr %13 : i64 to !llvm.ptr
+    %c0_i32_19 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %c2_i32_20 = arith.constant 2 : i32
+    %c8_i32_21 = arith.constant 8 : i32
+    %c1_i32_22 = arith.constant 1 : i32
+    %c8_i32_23 = arith.constant 8 : i32
+    %c0_i32_24 = arith.constant 0 : i32
+    %c42_i32 = arith.constant 42 : i32
+    %c110_i32 = arith.constant 110 : i32
+    %15 = llvm.call @fpga_tile_submit(%5, %c0_i32_19, %c1_i32, %c2_i32_20, %c8_i32_21, %c1_i32_22, %c8_i32_23, %12, %14, %4, %c8_i32, %c0_i32_24, %c42_i32, %c110_i32) : (!llvm.ptr, i32, i32, i32, i32, i32, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i32, i32, i32, i32) -> i32
+    %16 = bufferization.to_tensor %2 restrict writable : memref<8x8xf32> to tensor<8x8xf32>
+    %17 = llvm.call @fpga_gemm_wait(%5) : (!llvm.ptr) -> i32
+    return %16 : tensor<8x8xf32>
+  }
+}
+

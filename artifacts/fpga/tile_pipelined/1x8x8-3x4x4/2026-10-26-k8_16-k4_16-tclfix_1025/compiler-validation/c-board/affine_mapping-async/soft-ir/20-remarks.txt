@@ -1,0 +1,74 @@
+affine_mapping.c:59:3: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 425 cycles (read + compute + write), 1 output block(s)
+affine_mapping.c:59:3: note: see current operation: 
+affine.for %arg3 = 0 to 4 {
+  affine.for %arg4 = 0 to 4 {
+    affine.for %arg5 = 0 to 4 {
+      %4 = affine.load %arg2[%arg3 * 4, %arg4 * 2 + 1] : memref<?x8xf32>
+      %5 = affine.load %arg0[%arg3 * 2 + 1, %arg5 * 3] : memref<?x10xf32>
+      %6 = affine.load %arg1[%arg5 * 6 + 2, %arg4] : memref<?x4xf32>
+      %7 = arith.mulf %5, %6 fastmath<reassoc> : f32
+      %8 = arith.addf %4, %7 fastmath<reassoc> : f32
+      affine.store %8, %arg2[%arg3 * 4, %arg4 * 2 + 1] : memref<?x8xf32>
+    }
+  }
+}
+affine_mapping.c:67:3: remark: affine GEMM 8x8x8 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 364 cycles (read + compute + write), 1 output block(s)
+affine_mapping.c:67:3: note: see current operation: 
+affine.for %arg3 = 0 to 8 {
+  affine.for %arg4 = 3 to 4 {
+    affine.for %arg5 = 0 to 8 {
+      affine.for %arg6 = 0 to 8 {
+        %4 = affine.load %arg2[%arg3 + %arg4, %arg4 + %arg5] : memref<?x11xf32>
+        %5 = affine.load %arg0[%arg3 + %arg4 * 2, %arg6] : memref<?x8xf32>
+        %6 = affine.load %arg1[%arg6, %arg5 - %arg4 + 5] : memref<?x10xf32>
+        %7 = arith.mulf %5, %6 fastmath<reassoc> : f32
+        %8 = arith.addf %4, %7 fastmath<reassoc> : f32
+        affine.store %8, %arg2[%arg3 + %arg4, %arg4 + %arg5] : memref<?x11xf32>
+      }
+    }
+  }
+}
+affine_mapping.c:76:3: remark: affine GEMM 3x11x8 lowered as 3 exact region(s) on 4 accelerator(s): makespan = 429 cycles (read + compute + write), 3 output block(s)
+affine_mapping.c:76:3: note: see current operation: 
+affine.for %arg3 = 0 to 3 {
+  affine.for %arg4 = 0 to 11 {
+    affine.for %arg5 = 0 to 8 {
+      %6 = affine.load %arg2[%arg3 * -2 + 5, -%arg4 + 10] : memref<?x11xf32>
+      %7 = affine.load %arg0[%arg3 * -2 + 5, %arg5 * -2 + 14] : memref<?x15xf32>
+      %8 = affine.load %arg1[%arg5 * -2 + 14, -%arg4 + 10] : memref<?x11xf32>
+      %9 = arith.mulf %7, %8 fastmath<reassoc> : f32
+      %10 = arith.addf %6, %9 fastmath<reassoc> : f32
+      affine.store %10, %arg2[%arg3 * -2 + 5, -%arg4 + 10] : memref<?x11xf32>
+    }
+  }
+}
+affine_mapping.c:84:3: remark: affine GEMM 8x8x8 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 364 cycles (read + compute + write), 1 output block(s)
+affine_mapping.c:84:3: note: see current operation: 
+affine.for %arg3 = 0 to 2 {
+  affine.for %arg4 = 0 to 8 {
+    affine.for %arg5 = 1 to 8 step 2 {
+      affine.for %arg6 = 0 to 8 {
+        %4 = affine.load %arg2[%arg3 * 16 + %arg5 * 2 + 3, %arg4] : memref<?x8xf32>
+        %5 = affine.load %arg0[%arg3 * 8 + %arg5, %arg6] : memref<?x8xf32>
+        %6 = affine.load %arg1[%arg6, %arg4] : memref<?x8xf32>
+        %7 = arith.mulf %5, %6 fastmath<reassoc> : f32
+        %8 = arith.addf %4, %7 fastmath<reassoc> : f32
+        affine.store %8, %arg2[%arg3 * 16 + %arg5 * 2 + 3, %arg4] : memref<?x8xf32>
+      }
+    }
+  }
+}
+affine_mapping.c:93:3: remark: affine GEMM 7x8x8 lowered as 1 exact region(s) on 4 accelerator(s): makespan = 364 cycles (read + compute + write), 1 output block(s)
+affine_mapping.c:93:3: note: see current operation: 
+affine.for %arg3 = 9223372036854775800 to 9223372036854775807 {
+  affine.for %arg4 = 0 to 8 {
+    affine.for %arg5 = 0 to 8 {
+      %4 = affine.load %arg2[%arg3 - 9223372036854775800, %arg4] : memref<?x8xf32>
+      %5 = affine.load %arg0[%arg3 - 9223372036854775800, %arg5] : memref<?x8xf32>
+      %6 = affine.load %arg1[%arg5, %arg4] : memref<?x8xf32>
+      %7 = arith.mulf %5, %6 fastmath<reassoc> : f32
+      %8 = arith.addf %4, %7 fastmath<reassoc> : f32
+      affine.store %8, %arg2[%arg3 - 9223372036854775800, %arg4] : memref<?x8xf32>
+    }
+  }
+}

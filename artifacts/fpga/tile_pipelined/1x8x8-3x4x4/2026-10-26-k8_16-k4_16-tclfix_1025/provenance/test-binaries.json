@@ -1,0 +1,17 @@
+{
+  "systolic-matmul": {
+    "path": "/home/steven-studio/work/systolic-mlir/build/bin/systolic-matmul",
+    "sha256": "79b9c447aef76b4a36471bf33177fe5371ae8ebb5f5bf3be415d05084c119832",
+    "mtime": "2026-10-23T09:08:47.704813+08:00"
+  },
+  "runtime-dispatch-test": {
+    "path": "/home/steven-studio/work/systolic-mlir/build/bin/runtime-dispatch-test",
+    "sha256": "d01159e62f8c5dedc30e55787534334bbe6966dd471ede76698e04d982a74198",
+    "mtime": "2026-10-21T16:40:32.069174+08:00"
+  },
+  "runtime-async-test": {
+    "path": "/home/steven-studio/work/systolic-mlir/build/bin/runtime-async-test",
+    "sha256": "aa1c199ed2a43e06adf57b6c1a05bffd8d858afe6c0ac21cdd10887d4d6ebbed",
+    "mtime": "2026-10-21T16:40:32.892159+08:00"
+  }
+}

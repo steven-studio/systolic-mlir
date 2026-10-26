@@ -1,0 +1,21 @@
+{
+  "total": 172,
+  "counts": {
+    "PASS": 172
+  },
+  "groups": {
+    "CFront": 14,
+    "Systolic": 114,
+    "SystolicCC": 31,
+    "gemm_recognition": 12,
+    "reproducibility": 1
+  },
+  "elapsed_seconds": 66.81419134140015,
+  "integration_config": {
+    "passed": 109,
+    "failed": 0,
+    "skipped": 3
+  },
+  "r2_invariants": "PASS",
+  "old_build_execution_references": 0
+}

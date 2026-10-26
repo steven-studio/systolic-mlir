@@ -1,0 +1,42 @@
+[
+  {
+    "source": "test/reproducibility/gemm_example.c",
+    "submission": "sync",
+    "started": "2026-10-26T08:30:59.919600+08:00",
+    "finished": "2026-10-26T08:31:04.672485+08:00",
+    "result": "PASS",
+    "fpga_executed": 1,
+    "cpu_reference_or_planned_host": 1,
+    "cpu_fallback": 0
+  },
+  {
+    "source": "test/reproducibility/gemm_example.c",
+    "submission": "async",
+    "started": "2026-10-26T08:31:04.672691+08:00",
+    "finished": "2026-10-26T08:31:09.232143+08:00",
+    "result": "PASS",
+    "fpga_executed": 1,
+    "cpu_reference_or_planned_host": 1,
+    "cpu_fallback": 0
+  },
+  {
+    "source": "test/SystolicCC/affine_mapping.c",
+    "submission": "async",
+    "started": "2026-10-26T08:31:09.232419+08:00",
+    "finished": "2026-10-26T08:31:10.626447+08:00",
+    "result": "PASS",
+    "fpga_executed": 5,
+    "cpu_reference_or_planned_host": 0,
+    "cpu_fallback": 0
+  },
+  {
+    "source": "test/SystolicCC/affine_batched.c",
+    "submission": "async",
+    "started": "2026-10-26T08:31:10.626660+08:00",
+    "finished": "2026-10-26T08:31:12.942282+08:00",
+    "result": "PASS",
+    "fpga_executed": 9,
+    "cpu_reference_or_planned_host": 0,
+    "cpu_fallback": 0
+  }
+]

@@ -1,0 +1,11 @@
+{
+ "source": "/home/steven-studio/work/systolic-mlir/test/reproducibility/gemm_example.c",
+ "runtime": "board",
+ "submission": "synchronous",
+ "k_max_8x8": 16,
+ "k_max_4x4": 16,
+ "pipeline_depth": 4,
+ "verify": true,
+ "offloaded": ["gemm"],
+ "translated_not_offloaded": []
+}

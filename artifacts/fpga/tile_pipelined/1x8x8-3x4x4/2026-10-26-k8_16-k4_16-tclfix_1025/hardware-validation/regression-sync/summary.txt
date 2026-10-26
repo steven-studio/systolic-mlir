@@ -1,0 +1,64 @@
+CASE                   RESULT     EXIT RT_RC  TILES   FPGA  BYTES_TO  BYTES_BK NOTE
+1x1x1_zero             PASS          0     0      1      1      1117        80 
+1x1x1_positive         PASS          0     0      1      1      1117        80 
+1x1x1_negative         PASS          0     0      1      1      1117        80 
+1x1x1_mixed            PASS          0     0      1      1      1117        80 
+2x3x4_zero             PASS          0     0      1      1      1117        80 
+2x3x4_positive         PASS          0     0      1      1      1117        80 
+2x3x4_negative         PASS          0     0      1      1      1117        80 
+2x3x4_mixed            PASS          0     0      1      1      1117        80 
+4x4x4_zero             PASS          0     0      1      1      1117        80 
+4x4x4_positive         PASS          0     0      1      1      1117        80 
+4x4x4_negative         PASS          0     0      1      1      1117        80 
+4x4x4_mixed            PASS          0     0      1      1      1117        80 
+8x8x8_zero             PASS          0     0      1      1      1117       272 
+8x8x8_positive         PASS          0     0      1      1      1117       272 
+8x8x8_negative         PASS          0     0      1      1      1117       272 
+8x8x8_mixed            PASS          0     0      1      1      1117       272 
+8x4x16_zero            PASS          0     0      2      2      2234       160 
+8x4x16_positive        PASS          0     0      2      2      2234       160 
+8x4x16_negative        PASS          0     0      2      2      2234       160 
+8x4x16_mixed           PASS          0     0      2      2      2234       160 
+16x8x4_zero            PASS          0     0      2      2      2234       544 
+16x8x4_positive        PASS          0     0      2      2      2234       544 
+16x8x4_negative        PASS          0     0      2      2      2234       544 
+16x8x4_mixed           PASS          0     0      2      2      2234       544 
+16x8x40_zero           PASS          0     0      6      6      6702      1632 
+16x8x40_positive       PASS          0     0      6      6      6702      1632 
+16x8x40_negative       PASS          0     0      6      6      6702      1632 
+16x8x40_mixed          PASS          0     0      6      6      6702      1632 
+17x9x33_zero           PASS          0     0     27     27     30159      3312 
+17x9x33_positive       PASS          0     0     27     27     30159      3312 
+17x9x33_negative       PASS          0     0     27     27     30159      3312 
+17x9x33_mixed          PASS          0     0     27     27     30159      3312 
+32x32x32_zero          PASS          0     0     68     68     75956      9280 
+32x32x32_positive      PASS          0     0     68     68     75956      9280 
+32x32x32_negative      PASS          0     0     68     68     75956      9280 
+32x32x32_mixed         PASS          0     0     68     68     75956      9280 
+12x12x1_mixed          PASS          0     0      6      6      6702       672 
+12x12x15_mixed         PASS          0     0      6      6      6702       672 
+12x12x16_mixed         PASS          0     0      6      6      6702       672 
+12x12x17_mixed         PASS          0     0     12     12     13404      1344 
+12x12x35_mixed         PASS          0     0     18     18     20106      2016 
+4x4x16_mixed           PASS          0     0      1      1      1117        80 
+8x8x16_mixed           PASS          0     0      1      1      1117       272 
+8x8x17_mixed           PASS          0     0      2      2      2234       544 
+4x4x17_mixed           PASS          0     0      2      2      2234       160 
+64x64x64_mixed         PASS          0     0    580    580    647860     74816 
+32x64x32_mixed         PASS          0     0    142    142    158614     18656 
+16x16x31_mixed         PASS          0     0     14     14     15638      2272 
+32x32x65_mixed         PASS          0     0    170    170    189890     23200 
+7x7x16_mixed           PASS          0     0      1      1      1117       272 
+15x15x16_mixed         PASS          0     0      7      7      7819      1136 
+33x33x16_mixed         PASS          0     0     45     45     50265      5904 
+
+dispatch failure reported: NOT APPLICABLE on the board (the write failure is injected by the co-simulation's stand-in for libftdi)
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt, from SYSTOLIC_FPGA_CONFIG)
+hardware: Hardware configuration not independently verified: the FPGA does not report K_MAX_8X8 / K_MAX_4X4 (DPTI has no register read), so this run trusts that the board holds the bitstream described above
+runtime mode: sync (COMPLETION_HEADER = 1)
+cost model: v2
+configuration refusal: PASS
+runtime layer: PASS
+E2E cases: 52/52 PASS on backend board
+coverage (passing cases): tiles on device 0 (8x8) / 1 / 2 / 3 (4x4) = 409 / 372 / 340 / 328; edge tiles 115; K folded on the 8x8: yes, on a 4x4: yes; k = K_MAX_8X8 (16) run: yes, k = K_MAX_4X4 (16) run: yes
+E2E: PASS on backend board (K_MAX_8X8 = 16, K_MAX_4X4 = 16) -- hardware configuration not independently verified

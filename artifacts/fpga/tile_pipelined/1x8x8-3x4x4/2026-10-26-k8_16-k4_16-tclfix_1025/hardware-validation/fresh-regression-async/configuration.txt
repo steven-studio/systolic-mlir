@@ -1,0 +1,12 @@
+configuration
+  host       K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab
+             (the runtime's parser; SYSTOLIC_FPGA_CONFIG=/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt, from SYSTOLIC_FPGA_CONFIG)
+  runtime    async (systolic-matmul --async: fpga_gemm_begin / fpga_tile_submit / fpga_gemm_wait)
+  metadata   (the same file)
+             HOST_SLAB_BYTES = 1024: agrees with the K_MAX values
+             K_DIM = 16: agrees with K_MAX_8X8
+             BITSTREAM_SHA256 = 75f982b4161bbf7351e018d1652439d4d0aeb2275b3590281dc080ec5f5bc1a4: agrees with /home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/systolic_dma_top.bit
+             COMPLETION_HEADER = 1: results carry the completion record
+             VARIANT=v1, USE_V2=0, RTL_GIT_REV=075640b4872d4240a99d89af625d7dd7aa3fc207, RTL_TREE_DIRTY=0, TIMING_MET=1, WNS_NS=0.020144, WHS_NS=0.002302, BUILT=2026-10-26T01:21:49+0800
+  hardware   Hardware configuration not independently verified: the FPGA does not report K_MAX_8X8 / K_MAX_4X4 (DPTI has no register read), so this run trusts that the board holds the bitstream described above
+

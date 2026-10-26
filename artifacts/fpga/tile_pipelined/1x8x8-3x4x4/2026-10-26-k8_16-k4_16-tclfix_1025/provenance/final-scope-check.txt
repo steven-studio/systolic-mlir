@@ -1,0 +1,4 @@
+已追蹤修改：REPRODUCE.md
+新增封存：artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-26-k8_16-k4_16-tclfix_1025
+既有未追蹤：build_recovery/，未修改
+未修改 RTL、Compiler、Runtime、Cost Model、Vivado Tcl、測試或舊 Artifacts。

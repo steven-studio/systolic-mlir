@@ -1,0 +1,11 @@
+{
+ "source": "/home/steven-studio/work/systolic-mlir/test/SystolicCC/affine_mapping.c",
+ "runtime": "board",
+ "submission": "asynchronous",
+ "k_max_8x8": 16,
+ "k_max_4x4": 16,
+ "pipeline_depth": 4,
+ "verify": true,
+ "offloaded": ["expressions", "runs_once", "steps", "split", "near_max"],
+ "translated_not_offloaded": []
+}

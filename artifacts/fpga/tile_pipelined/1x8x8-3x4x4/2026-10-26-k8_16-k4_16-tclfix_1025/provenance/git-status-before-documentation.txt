@@ -1,0 +1,2 @@
+?? artifacts/fpga/tile_pipelined/1x8x8-3x4x4/2026-10-26-k8_16-k4_16-tclfix_1025/
+?? build_recovery/

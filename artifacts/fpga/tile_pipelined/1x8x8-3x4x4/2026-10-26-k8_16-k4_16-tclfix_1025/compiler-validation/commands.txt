@@ -1,0 +1,7 @@
+# 乾淨建置：正式腳本，新的獨立目錄，未使用既有 build/bin
+SYSTOLIC_BUILD=/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build bash scripts/reproducibility/build.sh --llvm-build /home/steven-studio/work/llvm-project/build --clang /home/steven-studio/work/clang24-build/bin/clang --jobs 4
+cmake -S . -B /tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build -DLLVM_EXTERNAL_LIT=/home/steven-studio/miniconda3/bin/lit
+PATH=/tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin:/tmp/systolic-rebuild-validation-20261026-vrZKJ5/llvm24-test-utils:/home/steven-studio/work/llvm-project/build/bin:/usr/local/bin:/usr/bin:/bin /home/steven-studio/miniconda3/bin/lit -a -j 4 -o /tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-lit-results.json /tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/test
+cmake --build /tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build --target check-e2e-config
+python3 eval/cost_model_v2/check_r2_invariants.py --tool /tmp/systolic-rebuild-validation-20261026-vrZKJ5/compiler-build/bin/systolic-cost
+# 實板命令與環境另見 fresh-executions.json、run_fresh_compiler_board_verified.py 及各 compile.log/execution.log。

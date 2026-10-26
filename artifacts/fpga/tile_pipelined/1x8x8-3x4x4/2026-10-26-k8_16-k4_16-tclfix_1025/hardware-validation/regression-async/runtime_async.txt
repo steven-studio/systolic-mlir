@@ -1,0 +1,125 @@
+configuration: K_MAX_8X8 = 16, K_MAX_4X4 = 16, 1024-byte operand slab, completion record (/home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/fpga_config.txt)
+backend: board (--backend)
+GEMM 16x16x32; devices 0 1 2 3
+
+mode A (one device (0), no staging): PASS
+    tiles=8 completed=8 failed=0 wall_ms=36.7 tiles_per_s=218.1 reads=9 empty=1 overlap2=0 overlap4=0 staged_behind=0 bytes_to=8936 bytes_from=2176 per_device=8/0/0/0 depth=4 depth2_passes=0 max_inflight=1/0/0/0 last_descriptor_us=29447 first_completion_us=4743 before_first_completion=1 behind_inflight=0 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=46 link_write_us=8008 link_read_us=24413 collect_us=4 wait_us=32725 polls=0
+mode B (every device, no staging): PASS
+    tiles=20 completed=20 failed=0 wall_ms=36.7 tiles_per_s=545.1 reads=7 empty=1 overlap2=7 overlap4=5 staged_behind=0 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=0 max_inflight=1/1/1/1 last_descriptor_us=30368 first_completion_us=6864 before_first_completion=4 behind_inflight=0 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=99 link_write_us=13728 link_read_us=18803 collect_us=4 wait_us=32820 polls=0
+mode C (every device, slab staged behind the running job): PASS
+    tiles=20 completed=20 failed=0 wall_ms=24.8 tiles_per_s=807.9 reads=3 empty=1 overlap2=3 overlap4=2 staged_behind=2 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=3 max_inflight=4/4/4/4 last_descriptor_us=17900 first_completion_us=14858 before_first_completion=16 behind_inflight=14 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=100 link_write_us=13899 link_read_us=6676 collect_us=3 wait_us=20796 polls=0
+mode D (two GEMMs interleaved, staging on): PASS
+    tiles=40 completed=40 failed=0 wall_ms=42.7 tiles_per_s=936.6 reads=5 empty=2 overlap2=5 overlap4=4 staged_behind=4 bytes_to=44680 bytes_from=4736 per_device=8/12/12/8 depth=4 depth2_passes=5 max_inflight=4/4/4/4 last_descriptor_us=34733 first_completion_us=14614 before_first_completion=16 behind_inflight=30 credit_waits=6 submits_blocked=0 blocked_us=0 submit_us=188 link_write_us=26650 link_read_us=11325 collect_us=8 wait_us=38416 polls=0
+mode X (folds spread across devices, float data, bit-exact vs the synchronous entry point): PASS
+    tiles=20 completed=20 failed=0 wall_ms=69.7 tiles_per_s=287.0 reads=3 empty=1 overlap2=3 overlap4=0 staged_behind=2 bytes_to=22340 bytes_from=2368 per_device=4/8/8/0 depth=4 depth2_passes=3 max_inflight=4/4/4/0 last_descriptor_us=18306 first_completion_us=12489 before_first_completion=12 behind_inflight=15 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=100 link_write_us=14101 link_read_us=7072 collect_us=3 wait_us=21389 polls=0
+[fpga-async] refused at submit: tile 0 fold 0/1 on device 0 (8x8, k=17, ldc=8): rc=-10 -- k outside 1..K_MAX of the device in the run-time configuration: compiled for another bitstream?
+[fpga-async] refused at submit: tile 0 fold 0/1 on device 1 (4x4, k=17, ldc=8): rc=-10 -- k outside 1..K_MAX of the device in the run-time configuration: compiled for another bitstream?
+[fpga-async] refused at submit: tile 0 fold 0/1 on device 4 (4x4, k=1, ldc=8): rc=-11 -- device, tile size or ldc < n
+[fpga-async] refused at submit: tile 0 fold 0/1 on device 0 (9x9, k=1, ldc=9): rc=-11 -- device, tile size or ldc < n
+[fpga-async] refused at submit: tile 0 fold 0/1 on device 1 (4x4, k=1, ldc=8): rc=-15
+[fpga-async] refused at submit: tile 0 fold 2/2 on device 1 (4x4, k=1, ldc=8): rc=-17
+[fpga-async] refused at submit: tile 0 fold 0/2 on device 1 (4x4, k=1, ldc=8): rc=-17
+[fpga-async] refused at submit: tile 0 fold 1/3 on device 1 (4x4, k=1, ldc=8): rc=-17
+[fpga-async] (this session's further refusals at submit are counted, not printed)
+[fpga-async] job 0xdd000000 on device 1 refused by the bitstream (status 1: k outside 1..K_MAX)
+mode V (refusals: host-side codes, then the bitstream's BAD_K record): PASS
+    k = K_MAX + 1 on device 0: rc=-10 (expected -10)
+    k = K_MAX + 1 on device 1: rc=-10 (expected -10)
+    device 4: rc=-11 (expected -11)
+    9x9 tile on device 0: rc=-11 (expected -11)
+    est_cycles = 0: rc=-15 (expected -15)
+    k_index >= k_count: rc=-17 (expected -17)
+    bytes those refusals put on the link: rc=0 (expected 0)
+    a valid fold 0/2: rc=0 (expected 0)
+    fold 0/2 again: rc=-17 (expected -17)
+    fold 1 with k_count 3: rc=-17 (expected -17)
+    fold 1/2: rc=0 (expected 0)
+    wait: rc=0 (expected 0)
+    submit after wait: rc=-17 (expected -17)
+    the two folds accumulated (elements wrong): rc=0 (expected 0)
+    k = K_MAX + 1 sent to device 1: rc=0 (expected 0)
+    its wait: rc=-18 (expected -18)
+    C untouched by the refused tile (elements): rc=0 (expected 0)
+    a GEMM after the refusal: submit: rc=0 (expected 0)
+    a GEMM after the refusal: wait: rc=0 (expected 0)
+    its mismatches: rc=0 (expected 0)
+    tiles=16 completed=6 failed=10 wall_ms=23.7 tiles_per_s=252.9 reads=5 empty=2 overlap2=1 overlap4=0 staged_behind=0 bytes_to=7819 bytes_from=496 per_device=0/4/1/1 depth=4 depth2_passes=3 max_inflight=0/2/1/1 last_descriptor_us=8055 first_completion_us=4942 before_first_completion=3 behind_inflight=2 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=34 link_write_us=5494 link_read_us=9960 collect_us=1 wait_us=15887 polls=0
+mode S (submission semantics: every submit returns before the first completion, descriptors queued behind in-flight ones): PASS
+    tiles=20 completed=20 failed=0 wall_ms=24.7 tiles_per_s=810.1 reads=3 empty=1 overlap2=3 overlap4=2 staged_behind=2 bytes_to=22340 bytes_from=2368 per_device=4/6/6/4 depth=4 depth2_passes=3 max_inflight=4/4/4/4 last_descriptor_us=17916 first_completion_us=14882 before_first_completion=16 behind_inflight=14 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=97 link_write_us=13933 link_read_us=6620 collect_us=3 wait_us=20774 polls=0
+    tiles=20 per_device=4/6/6/4; submits returned before the first completion: 20 (first completion at 14882 us after the first submit, last submit returned at 145 us); descriptors before the first completion: 16 (sum of min(tiles_d, depth) = 16); sent behind an in-flight descriptor: 14; waited for a credit: 2; submits blocked: 0
+mode Q (backpressure: SYSTOLIC_ASYNC_QUEUE_LIMIT=1 on a 4x larger GEMM, submits wait for room, never for the previous job): PASS
+    tiles=80 completed=80 failed=0 wall_ms=80.7 tiles_per_s=990.8 reads=11 empty=5 overlap2=11 overlap4=10 staged_behind=10 bytes_to=89360 bytes_from=9472 per_device=16/22/22/20 depth=4 depth2_passes=11 max_inflight=4/4/4/4 last_descriptor_us=73933 first_completion_us=13921 before_first_completion=16 behind_inflight=58 credit_waits=5 submits_blocked=80 blocked_us=70701 submit_us=596 link_write_us=54111 link_read_us=21280 collect_us=16 wait_us=5485 polls=0
+    GEMM 32x32x32, tiles=80 per_device=16/22/22/20; submits blocked for room: 80 (70701 us); descriptors sent on a freed credit: 5; most in flight per device 4/4/4/4 of depth 4
+mode M (three GEMMs of different shapes interleaved, waited for out of order, each checked while the others are outstanding): PASS
+    tiles=62 completed=62 failed=0 wall_ms=66.7 tiles_per_s=929.6 reads=9 empty=4 overlap2=9 overlap4=6 staged_behind=8 bytes_to=69254 bytes_from=7648 per_device=14/18/18/12 depth=4 depth2_passes=9 max_inflight=4/4/4/4 last_descriptor_us=59701 first_completion_us=14738 before_first_completion=16 behind_inflight=45 credit_waits=13 submits_blocked=0 blocked_us=0 submit_us=290 link_write_us=43365 link_read_us=18099 collect_us=22 wait_us=62355 polls=0
+    gemm 2 (8x8x32, 2 tiles): wait rc=0, every element right checked right after its wait with 32 of 62 tiles of the session completed
+    gemm 0 (16x16x32, 20 tiles): wait rc=0, every element right checked right after its wait with 48 of 62 tiles of the session completed
+    gemm 1 (16x16x64, 40 tiles): wait rc=0, every element right checked right after its wait with 62 of 62 tiles of the session completed
+[fpga-async] refused at submit: tile 99 fold 0/1 on device 1 (4x4, k=1, ldc=16): rc=-17
+mode P (poll / timed wait / release semantics: never blocking, states observed, -20 / -17 / -21 where due): PASS
+    first poll after the submits: submitted: 20 (expected 20)
+    first poll after the submits: done: 0 (expected 0)
+    first poll after the submits: completed: 0 (expected 0)
+    wait_for(1 ms): -20 (expected -20)
+    poll after the timed-out wait: 0 (expected 0)
+    submit after a wait: -17 (expected -17)
+    polled to done: 1 (expected 1)
+    polled: completed: 20 (expected 20)
+    polled: failed: 0 (expected 0)
+    polled: in_flight + staged + queued at the end: 0 (expected 0)
+    wait_for after done: 0 (expected 0)
+    mismatches: 0 (expected 0)
+    release after done: 0 (expected 0)
+    poll after release: -17 (expected -17)
+    release again: -17 (expected -17)
+    tile 0 fold 0 was seen: queued -> staged -> in_flight -> done; longest fpga_gemm_poll 61.1 us, longest fpga_tile_poll 2.1 us
+    release with tiles outstanding: -21 (expected -21)
+    wait_for(forever) of the second GEMM: 0 (expected 0)
+    its mismatches: 0 (expected 0)
+    its release: 0 (expected 0)
+    tiles=25 completed=24 failed=1 wall_ms=30.6 tiles_per_s=783.1 reads=4 empty=1 overlap2=4 overlap4=2 staged_behind=2 bytes_to=26808 bytes_from=2688 per_device=4/8/7/5 depth=4 depth2_passes=4 max_inflight=4/4/4/4 last_descriptor_us=23902 first_completion_us=14643 before_first_completion=16 behind_inflight=15 credit_waits=2 submits_blocked=0 blocked_us=0 submit_us=120 link_write_us=16759 link_read_us=9342 collect_us=4 wait_us=6897 polls=189
+mode F (transport failure mid-submission (SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7): nothing lost, -4, -14 after, recovery after close): NOT APPLICABLE -- no write-failure injector on this backend (SYSTOLIC_DPTI_COSIM_FAIL_WRITE is honoured only by the co-simulation's stand-in for libftdi; the runtime never reads it)
+[fpga-async] refused at submit: tile 0 fold 0/2 on device 1 (4x4, k=17, ldc=8): rc=-10 -- k outside 1..K_MAX of the device in the run-time configuration: compiled for another bitstream?
+[fpga-async] incomplete K folds: gemm 17 has 1 output tile(s) with folds that were refused at submit or never submitted; they fail (rc=-17), 0 held fold(s) dropped
+[fpga-async] refused at submit: tile 0 fold 0/2 on device 1 (4x4, k=17, ldc=8): rc=-10 -- k outside 1..K_MAX of the device in the run-time configuration: compiled for another bitstream?
+[fpga-async] incomplete K folds: gemm 18 has 1 output tile(s) with folds that were refused at submit or never submitted; they fail (rc=-17), 0 held fold(s) dropped
+[fpga-async] refused at submit: tile 0 fold 1/2 on device 1 (4x4, k=17, ldc=8): rc=-10 -- k outside 1..K_MAX of the device in the run-time configuration: compiled for another bitstream?
+[fpga-async] incomplete K folds: gemm 19 has 1 output tile(s) with folds that were refused at submit or never submitted; they fail (rc=-17), 0 held fold(s) dropped
+mode H (an output tile missing a fold refused at submit: the sealed GEMM's wait reports -17 within a bound, never waits for ever): PASS
+    tile 0 fold 0/2, k = K_MAX + 1 on device 1: -10 (expected -10)
+    tile 0 fold 1/2, k = 1: 0 (expected 0)
+    tile 1 fold 0/1, k = 1: 0 (expected 0)
+    wait_for (bounded): -17 (expected -17)
+    poll: 0 (expected 0)
+    done: 1 (expected 1)
+    completed: 1 (expected 1)
+    failed: 1 (expected 1)
+    held: 0 (expected 0)
+    first_error: -17 (expected -17)
+    tile 0 fold 0 (refused): state UNKNOWN: 0 (expected 0)
+    tile 0 fold 1: state FAILED: 6 (expected 6)
+    tile 0 fold 1: error: -17 (expected -17)
+    tile 1: state DONE: 5 (expected 5)
+    elements of the failed tile written: 0 (expected 0)
+    elements of tile 1 wrong: 0 (expected 0)
+    release: 0 (expected 0)
+    session tiles_submitted (2 accepted + 1 refused): 3 (expected 3)
+    session tiles_failed (the refused one + the dropped fold): 2 (expected 2)
+    session first_error (the refusal): -10 (expected -10)
+    tile 0 fold 0/2, k = K_MAX + 1 on device 1: -10 (expected -10)
+    tile 0 fold 1/2, k = 1: 0 (expected 0)
+    tile 1 fold 0/1, k = 1: 0 (expected 0)
+    done by polls alone within the bound: 1 (expected 1)
+    polled: failed: 1 (expected 1)
+    polled: first_error: -17 (expected -17)
+    polled: release: 0 (expected 0)
+    trailing: fold 0/2, k = 1: 0 (expected 0)
+    trailing: fold 1/2, k = K_MAX + 1: -10 (expected -10)
+    trailing: wait_for (bounded): no success over a partial K-sum: -17 (expected -17)
+    trailing: release: 0 (expected 0)
+    a GEMM after them: submit: 0 (expected 0)
+    a GEMM after them: wait: 0 (expected 0)
+    its mismatches: 0 (expected 0)
+    tiles=12 completed=6 failed=6 wall_ms=22.7 tiles_per_s=264.1 reads=5 empty=1 overlap2=1 overlap4=0 staged_behind=0 bytes_to=10053 bytes_from=720 per_device=0/4/1/1 depth=4 depth2_passes=4 max_inflight=0/2/1/1 last_descriptor_us=15926 first_completion_us=4912 before_first_completion=2 behind_inflight=3 credit_waits=0 submits_blocked=0 blocked_us=0 submit_us=43 link_write_us=6893 link_read_us=11163 collect_us=1 wait_us=15569 polls=8
+
+RUNTIME ASYNC: PASS -- NOT APPLICABLE 1 (mode F: co-simulation only), every other mode PASS

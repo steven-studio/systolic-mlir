@@ -1,0 +1,1075 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2026 Advanced Micro Devices, Inc. All Rights Reserved.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2026.1 (lin64) Build 6511674 Tue Jun 16 11:01:26 MDT 2026
+| Date         : Mon Oct 26 01:21:07 2026
+| Host         : steven-studio-System-Product-Name running 64-bit Ubuntu 24.04.3 LTS
+| Command      : report_methodology -file /home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.runs/impl_1/dpti_io/methodology.rpt
+| Design       : systolic_dma_top
+| Device       : xc7a200tsbg484-1
+| Speed File   : -1
+| Design State : Fully Routed
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Report Methodology
+
+Table of Contents
+-----------------
+1. REPORT SUMMARY
+2. REPORT DETAILS
+
+1. REPORT SUMMARY
+-----------------
+            Netlist: netlist
+          Floorplan: impl_1
+      Design limits: <entire design considered>
+             Max checks: <unlimited>
+             Checks found: 201
++-----------+----------+-------------------------------------------------+--------+
+| Rule      | Severity | Description                                     | Checks |
++-----------+----------+-------------------------------------------------+--------+
+| LUTAR-1   | Warning  | LUT drives async reset alert                    | 6      |
+| PDRC-190  | Warning  | Suboptimally placed synchronized register chain | 12     |
+| SYNTH-4   | Warning  | Shallow depth for a dedicated block RAM         | 80     |
+| SYNTH-6   | Warning  | Timing of a RAM block might be sub-optimal      | 80     |
+| TIMING-9  | Warning  | Unknown CDC Logic                               | 1      |
+| TIMING-10 | Warning  | Missing property on synchronizer                | 1      |
+| TIMING-18 | Warning  | Missing input or output delay                   | 2      |
+| ULMTCS-1  | Warning  | Control Sets use limits recommend reduction     | 1      |
+| XDCB-5    | Warning  | Runtime inefficient way to find pin objects     | 2      |
+| REQP-1959 | Advisory | connects_SERDES_RST_driver_not_FF               | 16     |
++-----------+----------+-------------------------------------------------+--------+
+
+2. REPORT DETAILS
+-----------------
+LUTAR-1#1 Warning
+LUT drives async reset alert  
+LUT cell dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.gwrrd_rst_sync_stage[2].rrst_inst/ngwrdrst.grst.g7serrst.rd_rst_reg[2]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[0]/PRE,
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[1]/PRE
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[2]/PRE. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+LUTAR-1#2 Warning
+LUT drives async reset alert  
+LUT cell dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.gwrrd_rst_sync_stage[2].wrst_inst/ngwrdrst.grst.g7serrst.wr_rst_reg[2]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[0]/PRE,
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[1]/PRE
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_rdfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[2]/PRE. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+LUTAR-1#3 Warning
+LUT drives async reset alert  
+LUT cell dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.gwrrd_rst_sync_stage[2].rrst_inst/ngwrdrst.grst.g7serrst.rd_rst_reg[2]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[0]/PRE,
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[1]/PRE
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.rd_rst_reg_reg[2]/PRE. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+LUTAR-1#4 Warning
+LUT drives async reset alert  
+LUT cell dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.gwrrd_rst_sync_stage[2].wrst_inst/ngwrdrst.grst.g7serrst.wr_rst_reg[2]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[0]/PRE,
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[1]/PRE
+dbg_hub/inst/BSCANID.u_xsdbm_id/CORE_XSDB.UUT_MASTER/U_ICON_INTERFACE/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_6_wrfifo_inst/inst_fifo_gen/gconvfifo.rf/grf.rf/rstblk/ngwrdrst.grst.g7serrst.wr_rst_reg_reg[2]/PRE. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+LUTAR-1#5 Warning
+LUT drives async reset alert  
+LUT cell u_dpti_link_ctrl/rst_sync[1]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) g_sync245_phy.u_dpti_sync245_phy/rst_sync_reg[0]/PRE
+g_sync245_phy.u_dpti_sync245_phy/rst_sync_reg[1]/PRE. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+LUTAR-1#6 Warning
+LUT drives async reset alert  
+LUT cell u_mig_7series_0/u_mig_7series_0_mig/u_iodelay_ctrl/rstdiv2_sync_r[11]_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__0/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__1/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__10/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__11/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__12/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__13/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__14/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__15/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__16/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__17/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__18/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__19/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__2/PRE,
+u_mig_7series_0/u_mig_7series_0_mig/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep__20/PRE
+ (the first 15 of 34 listed). The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+PDRC-190#1 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[0] in site SLICE_X40Y192 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[0] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#2 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[10] in site SLICE_X40Y190 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[10] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#3 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[11] in site SLICE_X20Y189 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[11] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#4 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[1] in site SLICE_X37Y192 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[1] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#5 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[2] in site SLICE_X21Y190 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[2] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#6 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[3] in site SLICE_X19Y190 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[3] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#7 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[4] in site SLICE_X36Y191 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[4] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#8 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[5] in site SLICE_X22Y190 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[5] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#9 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[6] in site SLICE_X23Y188 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[6] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#10 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[7] in site SLICE_X23Y191 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[7] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#11 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[8] in site SLICE_X37Y194 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[8] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+PDRC-190#12 Warning
+Suboptimally placed synchronized register chain  
+The FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[9] in site SLICE_X38Y186 is part of a synchronized register chain that is suboptimally placed as the load FDRE cell u_mig_7series_0/u_mig_7series_0_mig/temp_mon_enabled.u_tempmon/device_temp_r_reg[9] is not placed in the same (SLICE) site.
+Related violations: <none>
+
+SYNTH-4#1 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#2 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#3 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#4 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#5 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#6 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#7 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#8 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#9 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#10 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#11 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#12 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#13 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#14 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#15 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#16 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#17 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#18 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#19 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#20 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#21 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#22 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#23 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#24 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#25 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#26 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#27 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#28 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#29 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#30 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#31 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#32 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#33 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#34 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#35 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#36 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#37 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#38 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#39 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#40 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#41 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#42 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#43 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#44 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#45 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#46 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#47 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#48 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#49 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#50 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#51 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#52 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#53 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[4].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#54 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[5].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#55 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[6].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#56 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[7].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#57 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#58 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#59 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#60 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#61 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[4].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#62 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[5].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#63 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[6].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#64 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[7].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#65 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#66 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#67 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#68 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#69 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[4].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#70 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[5].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#71 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[6].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#72 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[7].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#73 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#74 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#75 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#76 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#77 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[4].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#78 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[5].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#79 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[6].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-4#80 Warning
+Shallow depth for a dedicated block RAM  
+The instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[7].mem_reg is implemented as block RAM but is better mapped onto distributed LUT RAM for the following reason: The depth (4 address bits) is shallow. Please use attribute (* ram_style = "distributed" *)  to instruct Vivado to infer distributed LUT RAM.
+Related violations: <none>
+
+SYNTH-6#1 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#2 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#3 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#4 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#5 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#6 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#7 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#8 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#9 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#10 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#11 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#12 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#13 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#14 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#15 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#16 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[0].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#17 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#18 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#19 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#20 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#21 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#22 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#23 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#24 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#25 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#26 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#27 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#28 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#29 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#30 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#31 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#32 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[1].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#33 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#34 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#35 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#36 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#37 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#38 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#39 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#40 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#41 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#42 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#43 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#44 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#45 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#46 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#47 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#48 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_4X4[2].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#49 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#50 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#51 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#52 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#53 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[4].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#54 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[5].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#55 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[6].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#56 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_0/BANK[7].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#57 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#58 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#59 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#60 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#61 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[4].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#62 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[5].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#63 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[6].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#64 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_a_buf_1/BANK[7].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#65 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#66 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#67 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#68 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#69 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[4].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#70 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[5].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#71 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[6].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#72 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_0/BANK[7].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#73 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[0].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#74 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[1].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#75 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[2].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#76 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[3].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#77 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[4].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#78 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[5].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#79 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[6].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+SYNTH-6#80 Warning
+Timing of a RAM block might be sub-optimal  
+The timing for the instance ACC_8X8[0].u_ctx/OP_V1.u_b_buf_1/BANK[7].mem_reg, implemented as a RAM block, might be sub-optimal as no output register was merged into the block.
+Related violations: <none>
+
+TIMING-9#1 Warning
+Unknown CDC Logic  
+One or more asynchronous Clock Domain Crossing has been detected between 2 clock domains through a set_false_path or a set_clock_groups or set_max_delay -datapath_only constraint but no double-registers logic synchronizer has been found on the side of the capture clock. It is recommended to run report_cdc for a complete and detailed CDC coverage. Please consider using XPM_CDC to avoid Critical severities
+Related violations: <none>
+
+TIMING-10#1 Warning
+Missing property on synchronizer  
+One or more logic synchronizer has been detected between 2 clock domains but the synchronizer does not have the property ASYNC_REG defined on one or both registers. It is recommended to run report_cdc for a complete and detailed CDC coverage
+Related violations: <none>
+
+TIMING-18#1 Warning
+Missing input or output delay  
+An output delay is missing on ddr3_reset_n relative to the rising and/or falling clock edge(s) of sys_clk_pin.
+Related violations: <none>
+
+TIMING-18#2 Warning
+Missing input or output delay  
+An output delay is missing on scheduler_c_done relative to the rising and/or falling clock edge(s) of sys_clk_pin.
+Related violations: <none>
+
+ULMTCS-1#1 Warning
+Control Sets use limits recommend reduction  
+This design uses 3229 control sets (vs. available limit of 33650, determined by 1 control set per CLB). This exceeds the control set use guideline of 7.5 percent. This is at a level where reduction is RECOMMENDED (see UG949). Use report_control_sets to get more details.
+Related violations: <none>
+
+XDCB-5#1 Warning
+Runtime inefficient way to find pin objects  
+The option '-to : [get_pins -hier -include_replicated_objects -filter {NAME =~ *temp_mon_enabled.u_tempmon/device_temp_sync_r1_reg[*]/D}]' of constraint 'set_max_delay' uses inefficient query to find pin objects (see constraint position '6' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /home/steven-studio/work/vivado/tile_pipelined/systolic_dma_v1_k8_16_k4_16_1x8x8_3x4x4_shared_wb_r2_tclfix_1025/systolic_dma.gen/sources_1/ip/mig_7series_0/mig_7series_0/user_design/constraints/mig_7series_0.xdc (Line: 356)
+Related violations: <none>
+
+XDCB-5#2 Warning
+Runtime inefficient way to find pin objects  
+The option 'objects : [get_pins -hierarchical -filter {NAME =~ *u_dpti_clk_gen/u_mmcm/CLKOUT0}]' of constraint 'create_generated_clock' uses inefficient query to find pin objects (see constraint position '17' in the Timing Constraint window in Vivado IDE). To reduce runtime, it is recommended to get the pins through the cell objects. Please refer to Using Constraints Guide (Constraints Efficiency). An example of optimal query is: get_pins -filter {REF_PIN_NAME=~yy*} -of_objects [get_cells -hierarchical xx*].
+Current XDC: /home/steven-studio/work/systolic-mlir/rtl/multi_200t/tile_pipelined/dma/nexys_video_dma_top.xdc (Line: 36)
+Related violations: <none>
+
+REQP-1959#1 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[1].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#2 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[3].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#3 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[4].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#4 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[5].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#5 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[6].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#6 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[7].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#7 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[8].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#8 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_C.ddr_byte_lane_C/ddr_byte_group_io/input_[9].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#9 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[0].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#10 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[1].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#11 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[4].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#12 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[5].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#13 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[6].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#14 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[7].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#15 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[8].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+REQP-1959#16 Advisory
+connects_SERDES_RST_driver_not_FF  
+u_mig_7series_0/u_mig_7series_0_mig/u_memc_ui_top_axi/mem_intfc0/ddr_phy_top0/u_ddr_mc_phy_wrapper/u_ddr_mc_phy/ddr_phy_4lanes_0.u_ddr_phy_4lanes/ddr_byte_lane_D.ddr_byte_lane_D/ddr_byte_group_io/input_[9].iserdes_dq_.iserdesdq: The RST pin should only be driven by a Flip-flop.
+Related violations: <none>
+
+
