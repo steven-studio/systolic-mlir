@@ -3,6 +3,9 @@
 #include <iostream>
 #include <limits>
 #include "Systolic/RankPartitionPresburgerDomain.h"
+#include "Systolic/RankPartitionWriteAddress.h"
+#include "Systolic/RankPartitionCollision.h"
+#include "Systolic/RankPartitionOrderedDependence.h"
 using namespace systolic::logical;
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -173,6 +176,349 @@ int main() {
     if (verify(
             !buildCoordinateRelationOnDomain(domainMap, symbolic),
             "unresolved symbol rejected"))
+      return 1;
+  }
+
+
+  // --------------------------------------------------------
+  // Phase 5.3.1: Exact symbolic output address.
+  // --------------------------------------------------------
+  {
+    // Source order: (b, i, j, k)
+    //
+    // Logical order: (I, J, K, Batch) = (i, j, k, b)
+    //
+    // Original output:
+    //
+    //   C[b][b+i][j]
+    //
+    // Expected logical output:
+    //
+    //   C[Batch][Batch+I][J]
+
+    PartitionCoordinateMap writeMap;
+
+    writeMap.sourceToLogical = {
+        {BigInt(0), BigInt(1), BigInt(0), BigInt(0)},
+        {BigInt(0), BigInt(0), BigInt(1), BigInt(0)},
+        {BigInt(0), BigInt(0), BigInt(0), BigInt(1)},
+        {BigInt(1), BigInt(0), BigInt(0), BigInt(0)}
+    };
+
+    writeMap.logicalToSource = {
+        {Rat(0), Rat(0), Rat(0), Rat(1)},
+        {Rat(1), Rat(0), Rat(0), Rat(0)},
+        {Rat(0), Rat(1), Rat(0), Rat(0)},
+        {Rat(0), Rat(0), Rat(1), Rat(0)}
+    };
+
+    const std::vector<std::vector<BigInt>> outputRows = {
+        {BigInt(1), BigInt(0), BigInt(0), BigInt(0)},
+        {BigInt(1), BigInt(1), BigInt(0), BigInt(0)},
+        {BigInt(0), BigInt(0), BigInt(1), BigInt(0)}
+    };
+
+    const std::vector<BigInt> outputOffsets = {
+        BigInt(0), BigInt(0), BigInt(0)
+    };
+
+    auto writeAddress =
+        buildSymbolicWriteAddress(
+            writeMap, outputRows, outputOffsets);
+
+    if (verify(writeAddress.has_value(),
+               "symbolic write-address construction"))
+      return 1;
+
+    const std::vector<std::vector<Rat>> expected = {
+        {Rat(0), Rat(0), Rat(0), Rat(1)},
+        {Rat(1), Rat(0), Rat(0), Rat(1)},
+        {Rat(0), Rat(1), Rat(0), Rat(0)}
+    };
+
+    if (verify(writeAddress->coefficients == expected,
+               "exact transformed C access"))
+      return 1;
+
+    if (verify(
+            writeAddress->offsets ==
+                std::vector<Rat>{Rat(0), Rat(0), Rat(0)},
+            "output offsets preserved"))
+      return 1;
+
+    // A malformed output access must not be accepted.
+    const std::vector<std::vector<BigInt>> invalidRows = {
+        {BigInt(1), BigInt(0)}
+    };
+
+    if (verify(
+            !buildSymbolicWriteAddress(
+                writeMap,
+                invalidRows,
+                {BigInt(0)}),
+            "malformed output access rejected"))
+      return 1;
+  }
+
+
+  // --------------------------------------------------------
+  // Phase 5.3.2: Exact symbolic write collisions.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    // Source:
+    //   x = (x0, x1)
+    //
+    // Logical:
+    //   z = (x1, x0)
+    //
+    // Domain:
+    //   0 <= x0 <= 2
+    //   x1 = 2*q
+    //
+    // Output:
+    //   C[x0]
+    //
+    // Therefore two iterations collide exactly when:
+    //
+    //   x0_first = x0_second
+    //
+    // Different x1 values may update the same C.
+
+    PartitionCoordinateMap collisionMap;
+
+    collisionMap.sourceToLogical = {
+        {BigInt(0), BigInt(1)},
+        {BigInt(1), BigInt(0)}
+    };
+
+    collisionMap.logicalToSource = {
+        {Rat(0), Rat(1)},
+        {Rat(1), Rat(0)}
+    };
+
+    IntegerPolyhedron collisionDomain(
+        PresburgerSpace::getSetSpace(2, 0, 1));
+
+    // [x0, x1, q, constant]
+    collisionDomain.addInequality({1, 0, 0, 0});
+    collisionDomain.addInequality({-1, 0, 0, 2});
+    collisionDomain.addEquality({0, 1, -2, 0});
+
+    const std::vector<std::vector<BigInt>> outputRows = {
+        {BigInt(1), BigInt(0)}
+    };
+
+    const std::vector<BigInt> outputOffsets = {
+        BigInt(5)
+    };
+
+    auto collisions =
+        buildCoordinateCollisionRelation(
+            collisionMap,
+            collisionDomain,
+            outputRows,
+            outputOffsets);
+
+    if (verify(collisions.has_value(),
+               "symbolic collision relation construction"))
+      return 1;
+
+    if (verify(
+            collisions->getNumDomainVars() == 4 &&
+            collisions->getNumRangeVars() == 4 &&
+            collisions->getNumLocalVars() == 2,
+            "independent source and local variables preserved"))
+      return 1;
+
+    // 2 copies of:
+    //   2 coordinate equalities
+    //   1 source-domain equality
+    //
+    // Plus:
+    //   1 collision equality
+    //
+    // Total: 7 equalities, 4 inequalities.
+
+    if (verify(
+            collisions->getNumEqualities() == 7 &&
+            collisions->getNumInequalities() == 4,
+            "both domains and collision equality preserved"))
+      return 1;
+
+    // Full relation layout:
+    //
+    // [x0_1, x1_1, z0_1, z1_1,
+    //  x0_2, x1_2, z0_2, z1_2,
+    //  q1, q2, constant]
+
+    auto hasEquality = [&](std::initializer_list<int64_t> expected) {
+
+      for (unsigned i = 0;
+           i < collisions->getNumEqualities();
+           ++i) {
+
+        auto row = collisions->getEquality(i);
+
+        if (row.size() != expected.size())
+          continue;
+
+        if (std::equal(
+                row.begin(), row.end(), expected.begin(),
+                [](const llvm::DynamicAPInt &actual,
+                   int64_t value) {
+                  return actual == llvm::DynamicAPInt(value);
+                }))
+          return true;
+      }
+
+      return false;
+    };
+
+    const bool exact =
+        // Both iterations must write the same C[x0+5].
+        hasEquality({
+            1, 0, 0, 0,
+           -1, 0, 0, 0,
+            0, 0, 0
+        }) &&
+
+        // First iteration: x1_1 = 2*q1.
+        hasEquality({
+            0, 1, 0, 0,
+            0, 0, 0, 0,
+           -2, 0, 0
+        }) &&
+
+        // Second iteration: x1_2 = 2*q2.
+        hasEquality({
+            0, 0, 0, 0,
+            0, 1, 0, 0,
+            0, -2, 0
+        });
+
+    if (verify(exact,
+               "exact collision equality and separate locals"))
+      return 1;
+
+    // Invalid C access dimensions must be rejected.
+    if (verify(
+            !buildCoordinateCollisionRelation(
+                collisionMap,
+                collisionDomain,
+                {{BigInt(1)}},
+                {BigInt(0)}),
+            "malformed collision output access rejected"))
+      return 1;
+
+    // Reject coefficients whose negation is not
+    // representable in signed int64.
+    const BigInt minimum(
+        std::numeric_limits<int64_t>::min());
+
+    if (verify(
+            !buildCoordinateCollisionRelation(
+                collisionMap,
+                collisionDomain,
+                {{minimum, BigInt(0)}},
+                {BigInt(0)}),
+            "collision coefficient overflow rejected"))
+      return 1;
+  }
+
+
+  // --------------------------------------------------------
+  // Phase 5.3.3: ordered write-dependence as a disjunction.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    // x=(x0,x1), z=(x1,x0), C[x0+5].
+    // Domain: 0<=x0<=2, x1=2*q (q is existential).
+    PartitionCoordinateMap orderMap;
+    orderMap.sourceToLogical = {
+        {BigInt(0), BigInt(1)},
+        {BigInt(1), BigInt(0)}
+    };
+    orderMap.logicalToSource = {
+        {Rat(0), Rat(1)},
+        {Rat(1), Rat(0)}
+    };
+
+    IntegerPolyhedron orderDomain(
+        PresburgerSpace::getSetSpace(2, 0, 1));
+    orderDomain.addInequality({1, 0, 0, 0});
+    orderDomain.addInequality({-1, 0, 0, 2});
+    orderDomain.addEquality({0, 1, -2, 0});
+
+    auto ordered = buildOrderedWriteDependenceBranches(
+        orderMap, orderDomain,
+        {{BigInt(1), BigInt(0)}}, {BigInt(5)});
+
+    if (verify(ordered.has_value() && ordered->size() == 2,
+               "lexicographic disjunction has two branches"))
+      return 1;
+
+    // Layout: [x0_1,x1_1,z0_1,z1_1,
+    //          x0_2,x1_2,z0_2,z1_2,q1,q2,constant].
+    auto contains = [](const mlir::presburger::IntegerRelation &rel,
+                       bool equality,
+                       std::initializer_list<int64_t> expected) {
+      const unsigned count = equality ? rel.getNumEqualities()
+                                      : rel.getNumInequalities();
+      for (unsigned i = 0; i < count; ++i) {
+        auto row = equality ? rel.getEquality(i) : rel.getInequality(i);
+        if (row.size() == expected.size() &&
+            std::equal(row.begin(), row.end(), expected.begin(),
+                       [](const llvm::DynamicAPInt &a, int64_t b) {
+                         return a == llvm::DynamicAPInt(b);
+                       }))
+          return true;
+      }
+      return false;
+    };
+
+    const auto &first = (*ordered)[0];
+    const auto &second = (*ordered)[1];
+
+    // t=0: x0_2-x0_1-1 >= 0.
+    if (verify(contains(first, false,
+                        {-1,0,0,0, 1,0,0,0, 0,0,-1}),
+               "first-difference branch at x0"))
+      return 1;
+
+    // t=1: x0_1=x0_2, x1_2-x1_1-1 >= 0.
+    if (verify(contains(second, true,
+                        {1,0,0,0, -1,0,0,0, 0,0,0}) &&
+               contains(second, false,
+                        {0,-1,0,0, 0,1,0,0, 0,0,-1}),
+               "first-difference branch at x1"))
+      return 1;
+
+    // Both branches retain the two independent local variables
+    // and the original collision equality x0_1 == x0_2.
+    const bool retained =
+        first.getNumLocalVars() == 2 &&
+        second.getNumLocalVars() == 2 &&
+        first.getNumEqualities() == 7 &&
+        second.getNumEqualities() == 8 &&
+        first.getNumInequalities() == 5 &&
+        second.getNumInequalities() == 5 &&
+        contains(first, true, {1,0,0,0, -1,0,0,0, 0,0,0}) &&
+        contains(second, true, {0,1,0,0, 0,0,0,0, -2,0,0}) &&
+        contains(second, true, {0,0,0,0, 0,1,0,0, 0,-2,0});
+    if (verify(retained, "collision and distinct locals retained"))
+      return 1;
+
+    // Domain mismatch is a recoverable failure, not an exception.
+    IntegerPolyhedron wrongDomain(PresburgerSpace::getSetSpace(1));
+    if (verify(!buildOrderedWriteDependenceBranches(
+                   orderMap, wrongDomain,
+                   {{BigInt(1), BigInt(0)}}, {BigInt(5)}),
+               "ordered dependence rejects mismatched domain"))
       return 1;
   }
 
