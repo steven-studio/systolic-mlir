@@ -6,6 +6,7 @@
 #include "Systolic/RankPartitionWriteAddress.h"
 #include "Systolic/RankPartitionCollision.h"
 #include "Systolic/RankPartitionOrderedDependence.h"
+#include "Systolic/RankPartitionDependenceLegality.h"
 using namespace systolic::logical;
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -519,6 +520,84 @@ int main() {
                    orderMap, wrongDomain,
                    {{BigInt(1), BigInt(0)}}, {BigInt(5)}),
                "ordered dependence rejects mismatched domain"))
+      return 1;
+  }
+
+
+  // --------------------------------------------------------
+  // Phase 5.3.4: integer-exact feasible ordered conflicts.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    PartitionCoordinateMap identity;
+    identity.sourceToLogical = {
+        {BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}};
+    identity.logicalToSource = {
+        {Rat(1), Rat(0)}, {Rat(0), Rat(1)}};
+
+    // x0 in [0,2], x1 in [0,2]; C[x0] has conflicts along x1.
+    IntegerPolyhedron domain(PresburgerSpace::getSetSpace(2));
+    domain.addInequality({1, 0, 0});
+    domain.addInequality({-1, 0, 2});
+    domain.addInequality({0, 1, 0});
+    domain.addInequality({0, -1, 2});
+
+    auto analysis = analyzeOrderedWriteConflicts(
+        identity, domain, {{BigInt(1), BigInt(0)}}, {BigInt(4)});
+    if (verify(analysis.has_value(),
+               "ordered conflict feasibility analysis"))
+      return 1;
+    // Branch t=0 contradicts the C[x0] equality. Branch t=1 is feasible.
+    if (verify(analysis->testedBranches == 2 &&
+               analysis->emptyBranches == 1 &&
+               analysis->feasibleBranches.size() == 1,
+               "integer-empty lexicographic branch removed"))
+      return 1;
+
+    auto floatingPolicy = classifyWriteExecution(
+        *analysis, WriteUpdateKind::FloatingAdd);
+    auto assignPolicy = classifyWriteExecution(
+        *analysis, WriteUpdateKind::Assign);
+    if (verify(!floatingPolicy.mayReorderWrites &&
+               floatingPolicy.mustPreserveOriginalOrder &&
+               floatingPolicy.requiresReductionProof &&
+               !assignPolicy.mayReorderWrites &&
+               assignPolicy.mustPreserveOriginalOrder &&
+               !assignPolicy.requiresReductionProof,
+               "colliding writes preserve original order"))
+      return 1;
+
+    // C[x0][x1] is injective over source iterations: no collisions.
+    auto injective = analyzeOrderedWriteConflicts(
+        identity, domain,
+        {{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}},
+        {BigInt(0), BigInt(0)});
+    if (verify(injective.has_value() &&
+               injective->feasibleBranches.empty() &&
+               injective->emptyBranches == 2,
+               "injective output access has no ordered conflicts"))
+      return 1;
+    auto noConflictPolicy = classifyWriteExecution(
+        *injective, WriteUpdateKind::Unknown);
+    if (verify(noConflictPolicy.mayReorderWrites &&
+               !noConflictPolicy.mustPreserveOriginalOrder &&
+               !noConflictPolicy.requiresReductionProof,
+               "no write conflicts permits write reordering"))
+      return 1;
+
+    // Test exact integer feasibility, not merely rational feasibility:
+    // x1 = 2*q and x1 = 1 cannot both hold for integer q.
+    IntegerPolyhedron parity(PresburgerSpace::getSetSpace(2, 0, 1));
+    parity.addEquality({0, 1, -2, 0});
+    parity.addEquality({0, 1, 0, -1});
+    auto parityResult = analyzeOrderedWriteConflicts(
+        identity, parity, {{BigInt(1), BigInt(0)}}, {BigInt(0)});
+    if (verify(parityResult.has_value() &&
+               parityResult->feasibleBranches.empty() &&
+               parityResult->emptyBranches == 2,
+               "integer-infeasible source domain rejected as conflict"))
       return 1;
   }
 
