@@ -54,6 +54,7 @@
 
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/AffineMatmulPartitioning.h"
+#include "Systolic/GeneralAffineMatmul.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 #include "Systolic/SystolicOps.h"
@@ -2515,6 +2516,11 @@ struct AffineMatmulToSystolicPass
            "systolic.matmul_tile";
   }
 
+  Option<bool> generalAffine{
+      *this, "general-affine",
+      llvm::cl::desc("Enable bounded exact subspace/fiber analysis after the dense fast path"),
+      llvm::cl::init(false)};
+
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
       llvm::cl::desc("Assume that A and B never overlap C. Without it, the "
@@ -2942,6 +2948,114 @@ struct AffineMatmulToSystolicPass
     return success();
   }
 
+  /// Certified output fibers are dense 1 x 1 x L contractions. Packing uses
+  /// the *original* index tuple of every source witness, never a guessed
+  /// inverse or the bounding box. C cannot alias either factor; distinct
+  /// fibers write distinct addresses, so only their internal order matters.
+  LogicalResult lowerGeneral(GeneralAffineMatmul &m, const SystolicFleet &fleet,
+                             std::string &why) {
+    if (!provablyDisjointFromOutput(m.loads[0].getMemRef(), m.store.getMemRef(),
+                                    assumeNoAlias) ||
+        !provablyDisjointFromOutput(m.loads[1].getMemRef(), m.store.getMemRef(),
+                                    assumeNoAlias)) {
+      why = "general affine factors may alias the output";
+      return failure();
+    }
+    if (!allowFpReassociation &&
+        !arith::bitEnumContainsAll(m.add.getFastmath(),
+                                   arith::FastMathFlags::reassoc)) {
+      why = "floating-point reassociation is not permitted for the exact fiber "
+            "jobs";
+      return failure();
+    }
+    if (fleet.resources.empty()) {
+      why = "general affine jobs require a declared fleet";
+      return failure();
+    }
+    SystolicOptimizerOptions options;
+    options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+    if (!parseCostModelVersion(costModel, options.costModel) ||
+        (operandPath != "v1" && operandPath != "v2")) {
+      why = "invalid cost model or operand path";
+      return failure();
+    }
+    options.beatWideOperandPath = operandPath == "v2";
+    SmallVector<SystolicTilePlan, 0> plans;
+    int64_t jobs = 0;
+    // Complete every failure-prone check before creating any operations.
+    for (const auto &fiber : m.fibers) {
+      auto p = planSystolicMatmul(m.anchor, 1, 1, fiber.size(), fleet, options);
+      if (failed(p)) {
+        why = "dense fiber planning failed";
+        return failure();
+      }
+      for (const auto &b : p->blocks)
+        jobs += b.invocations.size();
+      plans.push_back(std::move(*p));
+    }
+    OpBuilder builder(m.anchor);
+    Location loc = m.anchor->getLoc();
+    auto index = [&](int64_t x) -> Value {
+      return arith::ConstantIndexOp::create(builder, loc, x);
+    };
+    auto indices = [&](ArrayRef<int64_t> address) {
+      SmallVector<Value> values;
+      for (int64_t x : address)
+        values.push_back(index(x));
+      return values;
+    };
+    for (auto [f, fiber] : llvm::enumerate(m.fibers)) {
+      int64_t k = fiber.size();
+      auto aTy = MemRefType::get({1, k}, builder.getF32Type());
+      auto bTy = MemRefType::get({k, 1}, builder.getF32Type());
+      auto cTy = MemRefType::get({1, 1}, builder.getF32Type());
+      Value a = memref::AllocaOp::create(builder, loc, aTy);
+      Value b = memref::AllocaOp::create(builder, loc, bTy);
+      Value c = memref::AllocaOp::create(builder, loc, cTy);
+      Value zero = index(0);
+      for (auto [t, p] : llvm::enumerate(fiber)) {
+        const auto &point = m.points[p];
+        Value ordinal = index(t);
+        Value av = memref::LoadOp::create(builder, loc, m.loads[0].getMemRef(),
+                                          indices(point.address[0]));
+        Value bv = memref::LoadOp::create(builder, loc, m.loads[1].getMemRef(),
+                                          indices(point.address[1]));
+        memref::StoreOp::create(builder, loc, av, a, ValueRange{zero, ordinal});
+        memref::StoreOp::create(builder, loc, bv, b, ValueRange{ordinal, zero});
+      }
+      const auto &address = m.points[fiber.front()].address[2];
+      auto cIndices = indices(address);
+      Value old =
+          memref::LoadOp::create(builder, loc, m.store.getMemRef(), cIndices);
+      memref::StoreOp::create(builder, loc, old, c, ValueRange{zero, zero});
+      auto tensor = [&](Value buffer, ArrayRef<int64_t> shape,
+                        bool writable) -> Value {
+        return bufferization::ToTensorOp::create(
+            builder, loc, RankedTensorType::get(shape, builder.getF32Type()),
+            buffer, true, writable);
+      };
+      Value result = emitSystolicTilePlan(
+          builder, loc, tensor(a, {1, k}, false), tensor(b, {k, 1}, false),
+          tensor(c, {1, 1}, true), plans[f], fleet, nextGemmIndex++);
+      auto copy = bufferization::MaterializeInDestinationOp::create(builder, loc,
+                                                                    result, c);
+      copy.setRestrict(true);
+      copy.setWritable(true);
+      Value updated =
+          memref::LoadOp::create(builder, loc, c, ValueRange{zero, zero});
+      memref::StoreOp::create(builder, loc, updated, m.store.getMemRef(),
+                              cIndices);
+    }
+    if (report) {
+      m.anchor->emitRemark()
+          << "affine GEMM finite-domain lowered as " << jobs
+          << " exact region(s); source MACs=" << m.points.size()
+          << "; output fibers=" << m.fibers.size()
+          << "; exact Presburger cover and source-order certificate verified";
+    }
+    m.anchor->erase();
+    return success();
+  }
   void runOnOperation() override {
     ModuleOp module = getOperation();
 
@@ -3024,6 +3138,40 @@ struct AffineMatmulToSystolicPass
         matmuls.push_back(*result);
     }
 
+    SmallVector<GeneralAffineMatmul, 1> generalMatmuls;
+    if (generalAffine) {
+      llvm::SmallPtrSet<Operation *, 8> seen;
+      for (AffineMatmulCandidate candidate : candidates) {
+        std::string why;
+        auto general = analyzeGeneralAffineMatmul(candidate.anchor, why);
+        if (failed(general)) {
+          if (report)
+            candidate.anchor->emitRemark()
+                << "general affine analysis: " << why
+                << " [UNKNOWN: bounded exact analysis did not prove the domain]";
+          continue;
+        }
+        if (!seen.insert(general->anchor).second)
+          continue;
+        if (report) {
+          std::string description;
+          llvm::raw_string_ostream os(description);
+          describeOperandSubspaces(general->spaces, os);
+          general->anchor->emitRemark()
+              << "general affine subspaces: " << os.str()
+              << "; source MACs=" << general->points.size()
+              << "; output fibers=" << general->fibers.size()
+              << "; Presburger exact cover verified";
+        }
+        bool fast = llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
+          return general->anchor == m.anchor ||
+                 general->anchor->isAncestor(m.anchor) ||
+                 m.anchor->isAncestor(general->anchor);
+        });
+        if (!fast)
+          generalMatmuls.push_back(std::move(*general));
+      }
+    }
     // A tiled nest in which a GEMM is recognized gets its decision below
     // (lowered, or a remark). For the others, the reason of the outermost
     // candidate, as the recognizer gives it -- chosen now, while every
@@ -3089,6 +3237,13 @@ struct AffineMatmulToSystolicPass
       if (classify)
         remark << " ["
                << stringifyGemmMappingClass(u.outermost->mappingClass) << "]";
+    }
+    for (GeneralAffineMatmul &matmul : generalMatmuls) {
+      std::string why;
+      if (failed(lowerGeneral(matmul, *fleet, why)))
+        matmul.anchor->emitRemark()
+            << "general affine MAC recognized but not lowered: " << why
+            << " [VALID_BUT_LOWERING_UNSUPPORTED]";
     }
   }
 };

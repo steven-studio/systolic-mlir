@@ -1,4 +1,5 @@
 #include "Systolic/AffineMatmulAnalysis.h"
+#include "Systolic/GeneralAffineMatmul.h"
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicTilePlan.h"
@@ -77,6 +78,10 @@ struct TestAffineMatmulDiscoveryPass
                      "wrong mappings (M + 1, M - 1, I's scale doubled, loop "
                      "0's origin + 1, I's row of T zero), each of which the "
                      "certificate must refuse"),
+      llvm::cl::init(false)};
+
+  Option<bool> generalAffine{*this, "general-affine",
+      llvm::cl::desc("Also recognize finite exact general affine contractions"),
       llvm::cl::init(false)};
 
   Option<bool> geometry{
@@ -803,6 +808,20 @@ struct TestAffineMatmulDiscoveryPass
                                            &notRecognizedClass, recognition);
 
       if (failed(result)) {
+        if (generalAffine) {
+          std::string why;
+          auto general = analyzeGeneralAffineMatmul(candidate.anchor, why);
+          if (succeeded(general)) {
+            llvm::errs() << "general recognition result: success (finite exact contraction)\n"
+                         << "  class: PROVEN_VALID (decomposition, not an unrestricted dense box)\n"
+                         << "  source MACs: " << general->points.size()
+                         << "; output fibers: " << general->fibers.size() << "\n  ";
+            describeOperandSubspaces(general->spaces, llvm::errs());
+            llvm::errs() << "\n";
+            continue;
+          }
+          llvm::errs() << "general recognition: UNKNOWN: " << why << "\n";
+        }
         llvm::errs() << "recognition result: failure\n";
         llvm::errs() << "  reason: " << notRecognized << "\n";
         llvm::errs() << "  class: "

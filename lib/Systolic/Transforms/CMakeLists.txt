@@ -2,6 +2,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulToSystolic.cpp
   AffineMatmulAnalysis.cpp
   AffineMatmulPartitioning.cpp
+  GeneralAffineMatmul.cpp
   SystolicScheduling.cpp
   SystolicTilePlan.cpp
   SystolicOptimizer.cpp
