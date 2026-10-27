@@ -82,7 +82,7 @@ struct TestAffineMatmulDiscoveryPass
 
   Option<bool> generalAffine{*this, "general-affine",
       llvm::cl::desc("Also recognize finite exact general affine contractions"),
-      llvm::cl::init(false)};
+      llvm::cl::Hidden, llvm::cl::init(false)};
 
   Option<bool> geometry{
       *this, "geometry",
@@ -810,17 +810,18 @@ struct TestAffineMatmulDiscoveryPass
       if (failed(result)) {
         if (generalAffine) {
           std::string why;
-          auto general = analyzeGeneralAffineMatmul(candidate.anchor, why);
-          if (succeeded(general)) {
-            llvm::errs() << "general recognition result: success (finite exact contraction)\n"
-                         << "  class: PROVEN_VALID (decomposition, not an unrestricted dense box)\n"
-                         << "  source MACs: " << general->points.size()
-                         << "; output fibers: " << general->fibers.size() << "\n  ";
-            describeOperandSubspaces(general->spaces, llvm::errs());
-            llvm::errs() << "\n";
+          auto symbolic = analyzeSymbolicRankPartition(candidate.anchor, why);
+          if (symbolic) {
+            llvm::errs()
+                << "general symbolic partition: ANALYZED "
+                   "(lowering not integrated)\n"
+                << "  " << symbolic->diagnostic << "\n";
+            // Analysis succeeded. Do not print 'recognition result: failure'
+            // for this candidate; no executable lowering is claimed.
             continue;
           }
-          llvm::errs() << "general recognition: UNKNOWN: " << why << "\n";
+          llvm::errs() << "general symbolic partition: UNKNOWN: " << why
+                       << "\n";
         }
         llvm::errs() << "recognition result: failure\n";
         llvm::errs() << "  reason: " << notRecognized << "\n";

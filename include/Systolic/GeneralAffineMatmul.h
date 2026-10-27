@@ -153,6 +153,23 @@ struct GeneralAffineMatmul {
   SmallVector<SmallVector<unsigned>> fibers;
 };
 
+/// Symbolic rank-based analysis result. This is NOT an executable lowering
+/// plan: it contains no source-point enumeration or output fibers.
+struct SymbolicRankPartitionAnalysis {
+  std::string diagnostic;
+  presburger::IntegerRelation sourceToLogical;
+
+  SymbolicRankPartitionAnalysis(std::string text,
+                                presburger::IntegerRelation relation)
+      : diagnostic(std::move(text)), sourceToLogical(std::move(relation)) {}
+};
+
+/// Analyze a finite affine MAC without enumerating source iterations.
+/// A successful result certifies the rank partition and exact symbolic
+/// source-to-logical relation, NOT executable lowering legality.
+std::optional<SymbolicRankPartitionAnalysis>
+analyzeSymbolicRankPartition(Operation *anchor, std::string &why);
+
 /// Analysis only: never mutates IR. Bounded exact decision procedure for one
 /// linear-index MAC in a finite unit-step affine loop/then-guard chain. Unknown
 /// symbols, non-linear access forms, overflow, ambiguity and budgets refuse.

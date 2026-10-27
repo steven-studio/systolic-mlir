@@ -220,8 +220,7 @@ containsSourcePoint(
 
     if (constraint.coefficients.size() !=
         domain.sourceDimension)
-      throw std::invalid_argument(
-          "Domain constraint width mismatch");
+      return false;
 
     BigInt value = 0;
 
@@ -247,8 +246,7 @@ containsLogicalPoint(
 
   if (map.sourceToLogical.size() !=
       domain.sourceDimension)
-    throw std::invalid_argument(
-        "Coordinate map/domain dimension mismatch");
+    return false;
 
   const auto source =
       recoverSourceIteration(map, logical);

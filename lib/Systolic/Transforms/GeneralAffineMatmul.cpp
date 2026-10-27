@@ -1,6 +1,9 @@
 //===- GeneralAffineMatmul.cpp - Exact subspaces and finite domains
 //--------===//
 #include "Systolic/GeneralAffineMatmul.h"
+#include "Systolic/RankPartitionDomain.h"
+#include "Systolic/RankPartitionPresburgerDomain.h"
+#include <sstream>
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
 #include "mlir/IR/IntegerSet.h"
@@ -587,12 +590,13 @@ mlir::systolic::analyzeTensorSpaceDependencies(
   return out;
 }
 
-FailureOr<GeneralAffineMatmul>
-mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
-                                           unsigned budget) {
-  auto fail = [&](StringRef msg) -> FailureOr<GeneralAffineMatmul> {
+std::optional<SymbolicRankPartitionAnalysis>
+mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
+                                             std::string &why) {
+  auto fail = [&](StringRef msg)
+      -> std::optional<SymbolicRankPartitionAnalysis> {
     why = msg.str();
-    return failure();
+    return std::nullopt;
   };
   auto root = dyn_cast_or_null<affine::AffineForOp>(anchor);
   if (!root)
@@ -682,10 +686,6 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
   if (ivs.empty())
     return fail("empty source iteration universe");
 
-  // This budget limits the current finite execution decomposition,
-  // not the mathematical validity of the contraction.
-  if (budget == 0)
-    return fail("finite execution decomposition has zero point budget");
   std::array<IntMatrix, 3> rows;
   for (unsigned a = 0; a < 3; ++a) {
     auto map =
@@ -731,192 +731,203 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
     if (domain->getValue(d) != ivs[d])
       return fail("domain SSA order differs from source order");
   out.sourceDomain = domain;
-  SmallVector<AffineMap> lower, upper;
-  for (auto loop : out.loops) {
-    auto lb =
-        onUniverse(loop.getLowerBoundMap(), loop.getLowerBoundOperands(), ivs);
-    auto ub =
-        onUniverse(loop.getUpperBoundMap(), loop.getUpperBoundOperands(), ivs);
-    if (!lb || !ub)
-      return fail("loop bounds are not closed over the source universe");
-    lower.push_back(*lb);
-    upper.push_back(*ub);
+  // The former finite source-point enumeration has been removed.
+  //
+  // Exact affine access and source-domain analysis above are retained.
+  // Symbolic rank-based partition integration is not yet connected
+  // to the executable lowering path.
+  //
+  // Do not report successful recognition without an executable
+  // symbolic source-cover and reduction-order certificate.
+  // Phase 5.1: Connect real MLIR affine access matrices to the
+  // tested rank-based I/J/K/Batch analysis.
+  //
+  // This path is analysis-only. It must not claim executable
+  // recognition until symbolic job/reduction relations are ready.
+  {
+    namespace logical = ::systolic::logical;
+
+    std::array<logical::IntMatrix, 3> accessMatrices;
+
+    for (unsigned operand = 0; operand < 3; ++operand) {
+      for (const auto &row : rows[operand]) {
+        logical::IntRow converted;
+        converted.reserve(row.size());
+
+        for (int64_t coefficient : row)
+          converted.emplace_back(coefficient);
+
+        accessMatrices[operand].push_back(std::move(converted));
+      }
+    }
+
+    const auto partition = logical::analyzeRankPartition(
+        accessMatrices[0],
+        accessMatrices[1],
+        accessMatrices[2],
+        ivs.size());
+
+    if (!partition)
+      return fail("rank-based partition analysis failed");
+
+    const auto expanded =
+        logical::expandRankPartition(*partition);
+    if (!expanded)
+      return fail("rank-based partition expansion failed");
+
+    const auto coordinateMap =
+        logical::buildPartitionCoordinateMap(*expanded);
+
+    if (!coordinateMap)
+      return fail("rank-based coordinate map construction failed");
+
+    // ========================================================
+    // Phase 5.2.3:
+    // Integrate exact source-domain constraints with z = T*x.
+    //
+    // R(x,z) = { (x,z) | x in D, z = T*x }.
+    //
+    // No enumeration of source iteration points.
+    // ========================================================
+
+    using namespace mlir::presburger;
+
+    const unsigned n =
+        static_cast<unsigned>(ivs.size());
+
+    if (out.sourceDomain->getNumDimVars() != n ||
+        out.sourceDomain->getNumSymbolVars() != 0)
+      return fail("invalid symbolic source domain");
+
+    const unsigned localCount =
+        out.sourceDomain->getNumLocalVars();
+
+    // Convert FlatAffineValueConstraints to an
+    // IntegerPolyhedron while preserving exact constraints.
+    //
+    // Both representations use:
+    //
+    //   [source dimensions, locals, constant]
+    //
+    // when there are no symbols.
+
+    IntegerPolyhedron symbolicSource(
+        PresburgerSpace::getSetSpace(
+            n, 0, localCount));
+
+    const unsigned sourceColumns =
+        n + localCount + 1;
+
+    // Copy every source-domain equality.
+    for (unsigned i = 0;
+         i < out.sourceDomain->getNumEqualities();
+         ++i) {
+
+      auto row = out.sourceDomain->getEquality(i);
+
+      if (row.size() != sourceColumns)
+        return fail("malformed source-domain equality");
+
+      symbolicSource.addEquality(row);
+    }
+
+    // Copy every source-domain inequality.
+    for (unsigned i = 0;
+         i < out.sourceDomain->getNumInequalities();
+         ++i) {
+
+      auto row = out.sourceDomain->getInequality(i);
+
+      if (row.size() != sourceColumns)
+        return fail("malformed source-domain inequality");
+
+      symbolicSource.addInequality(row);
+    }
+
+    // Compose:
+    //
+    //   x in D
+    //   z = T*x
+    //
+    // The result preserves existential local variables.
+
+    auto symbolicRelation =
+        logical::buildCoordinateRelationOnDomain(
+            *coordinateMap,
+            symbolicSource);
+
+    if (!symbolicRelation)
+      return fail(
+          "symbolic coordinate/domain relation construction failed");
+
+    // Validate the relation's variable layout.
+    //
+    // [x(n), z(n), locals(localCount), constant]
+
+    if (symbolicRelation->getNumDomainVars() != n ||
+        symbolicRelation->getNumRangeVars() != n ||
+        symbolicRelation->getNumSymbolVars() != 0 ||
+        symbolicRelation->getNumLocalVars() != localCount)
+      return fail("symbolic relation dimension mismatch");
+
+
+    std::ostringstream report;
+
+    report << "SYMBOLIC_PARTITION_READY:"
+           << " I=" << expanded->i.size()
+           << " J=" << expanded->j.size()
+           << " K=" << expanded->k.size()
+           << " Batch=" << expanded->partitions.size()
+           << " SourceRank=" << expanded->sourceRank
+           << " VirtualI=" << expanded->virtualI
+           << " VirtualJ=" << expanded->virtualJ
+           << " VirtualK=" << expanded->virtualK;
+
+    report << " PresburgerEqualities="
+           << symbolicRelation->getNumEqualities()
+           << " PresburgerInequalities="
+           << symbolicRelation->getNumInequalities()
+           << " PresburgerLocals="
+           << symbolicRelation->getNumLocalVars();
+
+    report << " T=[";
+
+    for (std::size_t r = 0;
+         r < coordinateMap->sourceToLogical.size(); ++r) {
+
+      if (r)
+        report << ";";
+
+      const auto &row = coordinateMap->sourceToLogical[r];
+
+      for (std::size_t c = 0; c < row.size(); ++c) {
+        if (c)
+          report << ",";
+
+        report << row[c];
+      }
+    }
+
+    report << "]";
+
+    // Analysis succeeds; executable lowering is still unsupported.
+    // Keep the exact relation rather than communicating success via 'why'.
+    return SymbolicRankPartitionAnalysis(
+        report.str(), std::move(*symbolicRelation));
+
   }
-  SmallVector<AffineMap> conditions;
-  for (auto g : guards) {
-    auto set = g.getIntegerSet();
-    auto map = onUniverse(AffineMap::get(set.getNumDims(), set.getNumSymbols(),
-                                         set.getConstraints(), g.getContext()),
-                          g.getOperands(), ivs);
-    if (!map)
-      return fail("guard has an external parameter");
-    conditions.push_back(*map);
-  }
-  std::map<SmallVector<int64_t>, unsigned> outputs;
-  std::map<SmallVector<int64_t>, unsigned> physicalOutputs;
-  // Shared/I/J quotient representatives all belong to C's row space.
-  // They drive the logical output partition key, while actual C addresses
-  // independently check that no write dependence crosses those partitions.
-  IntMatrix outputCoordinates =
-      sumOf(out.spaces.shared, sumOf(out.spaces.core[0], out.spaces.core[1]));
-  auto dot = [&](ArrayRef<int64_t> row,
-                 ArrayRef<int64_t> x) -> std::optional<int64_t> {
-    int64_t total = 0;
-    for (unsigned d = 0; d < x.size(); ++d) {
-      auto t = llvm::checkedMul(row[d], x[d]);
-      auto s = t ? llvm::checkedAdd(total, *t) : std::nullopt;
-      if (!s)
-        return std::nullopt;
-      total = *s;
-    }
-    return total;
-  };
-  std::set<SmallVector<int64_t>> unique;
-  SmallVector<int64_t> point(ivs.size(), 0);
-  uint64_t work = 0;
-  std::function<bool(unsigned)> enumerate = [&](unsigned depth) {
-    if (++work > uint64_t(budget) * 16u)
-      return false;
-    if (depth < ivs.size()) {
-      std::optional<int64_t> lo, hi;
-      for (auto e : lower[depth].getResults()) {
-        auto v = eval(e, point);
-        if (!v)
-          return false;
-        lo = lo ? std::max(*lo, *v) : *v;
-      }
-      for (auto e : upper[depth].getResults()) {
-        auto v = eval(e, point);
-        if (!v)
-          return false;
-        hi = hi ? std::min(*hi, *v) : *v;
-      }
-      if (!lo || !hi)
-        return false;
-      // Do not use stale deeper IVs when evaluating bounds. Affine verifier
-      // already ensures each bound only reads enclosing IVs.
-      for (int64_t x = *lo; x < *hi;) {
-        point[depth] = x;
-        if (!enumerate(depth + 1))
-          return false;
-        auto next = llvm::checkedAdd(x, int64_t(1));
-        if (!next)
-          return false;
-        x = *next;
-      }
-      return true;
-    }
-    for (unsigned g = 0; g < guards.size(); ++g)
-      for (auto [d, e] : llvm::enumerate(conditions[g].getResults())) {
-        auto v = eval(e, point);
-        if (!v)
-          return false;
-        if (guards[g].getIntegerSet().isEq(d) ? *v != 0 : *v < 0)
-          return true;
-      }
-    if (out.points.size() >= budget || !unique.insert(point).second)
-      return false;
-    GeneralAffinePoint p;
-    p.source = point;
-    for (const auto &row : out.spaces.coordinateFrame) {
-      auto y = dot(row, point);
-      if (!y)
-        return false;
-      p.logical.push_back(*y);
-    }
-    for (unsigned a = 0; a < 3; ++a) {
-      auto ty = cast<MemRefType>(out.loads[a].getMemRef().getType());
-      if (!ty.getLayout().isIdentity())
-        return false;
-      for (auto [d, e] : llvm::enumerate(out.access[a].getResults())) {
-        auto v = eval(e, point);
-        if (!v || *v < 0 || (!ty.isDynamicDim(d) && *v >= ty.getDimSize(d)))
-          return false;
-        p.address[a].push_back(*v);
-      }
-    }
-    SmallVector<int64_t> key;
-    for (const auto &row : outputCoordinates) {
-      auto y = dot(row, point);
-      if (!y)
-        return false;
-      key.push_back(*y);
-    }
-    key.append(p.address[2].begin(), p.address[2].end());
-    auto [it, inserted] = outputs.emplace(key, out.fibers.size());
-    auto [physical, firstWrite] =
-        physicalOutputs.emplace(p.address[2], it->second);
-    if (!firstWrite && physical->second != it->second)
-      return false;
-    if (inserted)
-      out.fibers.emplace_back();
-    out.fibers[it->second].push_back(out.points.size());
-    out.points.push_back(std::move(p));
-    return true;
-  };
-  if (!enumerate(0))
-    return fail(
-        "finite execution decomposition failed: point/work budget, "
-        "bounds, memory layout, alias partition, or checked arithmetic; "
-        "this does not establish mathematical invalidity");
-  if (out.points.empty())
-    return fail("empty source domain");
-  // An independent Presburger equality checks the constructed cover against
-  // loop/guard constraints. Singleton pieces retain integer congruences and
-  // source witnesses; nothing is replaced by a rational bounding polytope.
-  using namespace presburger;
-  auto pointSpace = PresburgerSpace::getSetSpace(ivs.size());
-  auto cover = PresburgerSet::getEmpty(pointSpace);
-  auto jobSpace = PresburgerSpace::getRelationSpace(ivs.size(), 2);
-  auto relation = std::make_shared<PresburgerRelation>(
-      PresburgerRelation::getEmpty(jobSpace));
-  auto logicalSpace = PresburgerSpace::getRelationSpace(ivs.size(), ivs.size());
-  auto logical = std::make_shared<PresburgerRelation>(
-      PresburgerRelation::getEmpty(logicalSpace));
-  for (auto [f, fiber] : llvm::enumerate(out.fibers))
-    for (auto [t, p] : llvm::enumerate(fiber)) {
-      IntegerPolyhedron singleton(pointSpace);
-      IntegerRelation entry(jobSpace);
-      SmallVector<int64_t> coords(out.points[p].source);
-      coords.push_back(f);
-      coords.push_back(t);
-      for (unsigned d = 0; d < coords.size(); ++d) {
-        SmallVector<int64_t> row(coords.size() + 1, 0);
-        row[d] = 1;
-        auto neg = llvm::checkedSub(int64_t(0), coords[d]);
-        if (!neg)
-          return fail("point certificate offset overflow");
-        row.back() = *neg;
-        entry.addEquality(row);
-        if (d < ivs.size()) {
-          SmallVector<int64_t> eq(ivs.size() + 1, 0);
-          eq[d] = 1;
-          eq.back() = *neg;
-          singleton.addEquality(eq);
-        }
-      }
-      IntegerRelation logicalEntry(logicalSpace);
-      for (unsigned d = 0; d < 2 * ivs.size(); ++d) {
-        int64_t value = d < ivs.size() ? out.points[p].source[d]
-                                       : out.points[p].logical[d - ivs.size()];
-        auto neg = llvm::checkedSub(int64_t(0), value);
-        if (!neg)
-          return fail("logical certificate offset overflow");
-        SmallVector<int64_t> row(2 * ivs.size() + 1, 0);
-        row[d] = 1;
-        row.back() = *neg;
-        logicalEntry.addEquality(row);
-      }
-      cover.unionInPlace(singleton);
-      relation->unionInPlace(entry);
-      logical->unionInPlace(logicalEntry);
-    }
-  PresburgerSet source(*domain);
-  if (!cover.isEqual(source))
-    return fail("Presburger exact source cover verification failed");
-  out.sourceToJobs = relation;
-  out.sourceToLogical = logical;
-  return out;
+}
+
+// Legacy finite point/fiber lowering is deliberately unavailable.
+// Never return a partially initialized GeneralAffineMatmul to the lowerer.
+FailureOr<GeneralAffineMatmul>
+mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor,
+                                           std::string &why,
+                                           unsigned budget) {
+  (void)anchor;
+  (void)budget;
+  why = "symbolic lowering not integrated: legacy point/fiber path disabled";
+  return failure();
 }
 
 void mlir::systolic::describeOperandSubspaces(const OperandSubspaces &s,

@@ -12,6 +12,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_llvm_executable(
   tensor-space-dependencies-test
+  PARTIAL_SOURCES_INTENDED
   TensorSpaceDependenciesTest.cpp
 )
 
@@ -34,3 +35,28 @@ target_link_libraries(tensor-space-dependencies-test PRIVATE
 )
 
 mlir_check_all_link_libraries(tensor-space-dependencies-test)
+
+# Phase 5.2.1: symbolic source-to-logical coordinate relation.
+add_llvm_executable(
+  rank-partition-presburger-test
+  PARTIAL_SOURCES_INTENDED
+  RankPartitionPresburgerTest.cpp
+)
+llvm_update_compile_flags(rank-partition-presburger-test)
+target_link_libraries(rank-partition-presburger-test PRIVATE
+  MLIRPresburger
+  MLIRSystolic
+  MLIRSystolicTransforms
+  MLIRExecutionEngine
+  MLIRExecutionEngineUtils
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRLLVMToLLVMIRTranslation
+  MLIRTargetLLVMIRExport
+  MLIRParser
+  MLIRPass
+  MLIRIR
+  MLIRSupport
+  mlir_c_runner_utils
+  systolic_fpga_runtime
+)
+mlir_check_all_link_libraries(rank-partition-presburger-test)

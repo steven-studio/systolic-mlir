@@ -57,12 +57,12 @@ inline BigInt positiveMod(BigInt a, const BigInt &m) {
   return r;
 }
 
-inline BigInt exactDot(
+inline std::optional<BigInt> exactDot(
     const IntRow &a,
     const IntRow &b) {
 
   if (a.size() != b.size())
-    throw std::invalid_argument("Dot-product width mismatch");
+    return std::nullopt;
 
   BigInt result = 0;
 
@@ -72,17 +72,17 @@ inline BigInt exactDot(
   return result;
 }
 
-inline IntRow multiply(
-    const IntMatrix &matrix,
-    const IntRow &vector) {
-
+inline std::optional<IntRow> multiply(
+    const IntMatrix &matrix, const IntRow &vector) {
   IntRow result;
-
-  for (const auto &row : matrix)
-    result.push_back(exactDot(row, vector));
-
+  for (const auto &row : matrix) {
+    auto value = exactDot(row, vector);
+    if (!value) return std::nullopt;
+    result.push_back(*value);
+  }
   return result;
 }
+
 
 } // namespace symbolic_detail
 
@@ -192,20 +192,18 @@ inline bool containsSymbolicPoint(
     return false;
 
   if (domain.denominator <= 0)
-    throw std::invalid_argument(
-        "Symbolic denominator must be positive");
+    return false;
 
   if (domain.inverseNumerator.size() != domain.dimension)
-    throw std::invalid_argument(
-        "Malformed symbolic inverse matrix");
+    return false;
 
   // Exact congruence constraints:
   //
   // M*z == 0 (mod d).
-  const IntRow numerators =
-      symbolic_detail::multiply(domain.inverseNumerator, z);
+  auto numerators = symbolic_detail::multiply(domain.inverseNumerator, z);
+  if (!numerators) return false;
 
-  for (const BigInt &value : numerators) {
+  for (const BigInt &value : *numerators) {
     if (symbolic_detail::positiveMod(
             value, domain.denominator) != 0)
       return false;
@@ -213,10 +211,8 @@ inline bool containsSymbolicPoint(
 
   // Exact transformed inequalities.
   for (const auto &constraint : domain.inequalities) {
-    if (symbolic_detail::exactDot(
-            constraint.coefficients, z) >
-        constraint.upperBound)
-      return false;
+    auto value = symbolic_detail::exactDot(constraint.coefficients, z);
+    if (!value || *value > constraint.upperBound) return false;
   }
 
   return true;
