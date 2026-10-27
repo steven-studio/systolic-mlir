@@ -81,6 +81,14 @@
 // ALL-NEXT:   [case] ng_skew: equal to the reference, 16 invocation(s)
 // SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #15
 // MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #15
+// Four source executions, each with two runtime tiles: formerly a synthetic
+// site incorrectly reported only one execution.
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #16
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #17
+// SOFT-NEXT:  [systolic-cc] CPU Executed: GEMM #18
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #16
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #17
+// MOCK-NEXT:  [systolic-cc] FPGA Executed: GEMM #18
 // ALL-NEXT:   [case] ng_matvec4: equal to the reference, 8 invocation(s)
 // ALL-NEXT:   PASS: 0 case(s) differ
 // ALL-EMPTY:

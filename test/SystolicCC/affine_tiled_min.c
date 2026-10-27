@@ -71,6 +71,7 @@
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.soft
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t > %t.mock
 // RUN: FileCheck %s --check-prefix=ALL --input-file=%t.mock
+// RUN: %python %S/Inputs/site_identity.py tiled %t.mock
 // ALL: [case] m10_t4: equal, offloaded (3)
 // ALL: [case] m12_t4: equal, offloaded (3)
 // ALL: [case] m3_t4: equal, offloaded (2)

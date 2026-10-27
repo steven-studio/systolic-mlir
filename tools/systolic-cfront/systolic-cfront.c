@@ -3496,6 +3496,13 @@ static int mac_parts(const json_value *n, const json_value **lhs,
   if (strcmp(k, "BinaryOperator") == 0 && strcmp(op, "=") == 0) {
     const json_value *r = strip_value(child(n, 1));
     const char *rop = opcode_of(r);
+    /* Assignment/last-write and K=1 products are already supported by the
+       compiler; discover their original sites instead of inventing them
+       after lowering. This is metadata, not recognition or legality. */
+    if (is_product_of_reads(r)) {
+      *product = r;
+      return 1;
+    }
     if (strcmp(kind_of(r), "BinaryOperator") == 0 &&
         (strcmp(rop, "+") == 0 || strcmp(rop, "-") == 0)) {
       for (int side = 0; side < 2; ++side)
@@ -3511,6 +3518,7 @@ static int mac_parts(const json_value *n, const json_value **lhs,
 typedef struct {
   const json_value **loops;
   long long *executions;
+  int *report;
   size_t n, cap;
 } site_set;
 
@@ -3522,53 +3530,59 @@ static void find_sites(const json_value *n, loop_frame *stack, size_t depth,
   int is_loop = strcmp(k, "ForStmt") == 0 || strcmp(k, "WhileStmt") == 0 ||
                 strcmp(k, "DoStmt") == 0;
   const json_value *lhs, *product;
-  if (depth >= 3 && mac_parts(n, &lhs, &product)) {
+  if (depth >= 1 && mac_parts(n, &lhs, &product)) {
     strvec in_lhs = {0}, in_product = {0};
     collect_decl_ids(lhs, &in_lhs);
     collect_decl_ids(product, &in_product);
-    size_t used = 0, top = 0;
+    size_t used = 0, top = depth - 1;
     int reduction = 0;
     for (size_t d = 0; d < depth; ++d) {
-      int uses = 0, reduces = 0;
+      int uses = 0;
       for (size_t c = 0; c < stack[d].ids.n; ++c) {
         const char *id = stack[d].ids.items[c];
         int l = strvec_contains(&in_lhs, id), p = strvec_contains(&in_product, id);
         uses |= l || p;
-        reduces |= p && !l;
+        reduction |= p && !l;
       }
       if (uses && used++ == 0)
         top = d;
-      reduction |= reduces;
     }
-    if (used >= 3 && reduction) {
-      int seen = 0;
-      for (size_t s = 0; s < sites->n; ++s)
-        if (sites->loops[s] == stack[top].loop)
-          seen = 1;
-      if (!seen) {
-        /* Once per site: every statement of it has the same enclosing
-           loops. */
-        long long executions = 1;
-        for (size_t d = 0; d < top; ++d)
-          executions = executions < 0 || stack[d].trips < 0
-                           ? -1 : executions * stack[d].trips;
-        /* Loops whose bounds read the enclosing counters (constant extent or
-           a triangle): their points, counted by running them. */
-        if (executions < 0)
-          executions = site_executions(stack, top);
-        if (sites->n == sites->cap) {
-          sites->cap = sites->cap ? 2 * sites->cap : 8;
-          sites->loops = realloc(sites->loops, sites->cap * sizeof *sites->loops);
-          sites->executions = realloc(sites->executions,
-                                      sites->cap * sizeof *sites->executions);
-          if (!sites->loops || !sites->executions) {
-            fprintf(stderr, "systolic-cfront: out of memory\n");
-            exit(2);
-          }
-        }
-        sites->executions[sites->n] = executions;
-        sites->loops[sites->n++] = stack[top].loop;
+    /* Discover all product candidates, including degenerate/assignment
+       GEMMs. Preserve the existing CPU-only reporting policy; candidates
+       are promoted to reported GEMMs when uniquely matched to lowering.
+       Identity discovery never grants transformation legality. */
+    int seen = 0;
+    for (size_t s = 0; s < sites->n; ++s)
+      if (sites->loops[s] == stack[top].loop) {
+        sites->report[s] |= used >= 3 && reduction;
+        seen = 1;
       }
+    if (!seen) {
+      /* Once per site: every statement of it has the same enclosing
+         loops. */
+      long long executions = 1;
+      for (size_t d = 0; d < top; ++d)
+        executions = executions < 0 || stack[d].trips < 0
+                         ? -1 : executions * stack[d].trips;
+      /* Loops whose bounds read the enclosing counters (constant extent or
+         a triangle): their points, counted by running them. */
+      if (executions < 0)
+        executions = site_executions(stack, top);
+      if (sites->n == sites->cap) {
+        sites->cap = sites->cap ? 2 * sites->cap : 8;
+        sites->loops = realloc(sites->loops, sites->cap * sizeof *sites->loops);
+        sites->executions = realloc(sites->executions,
+                                    sites->cap * sizeof *sites->executions);
+        sites->report = realloc(sites->report,
+                                sites->cap * sizeof *sites->report);
+        if (!sites->loops || !sites->executions || !sites->report) {
+          fprintf(stderr, "systolic-cfront: out of memory\n");
+          exit(2);
+        }
+      }
+      sites->executions[sites->n] = executions;
+      sites->report[sites->n] = used >= 3 && reduction;
+      sites->loops[sites->n++] = stack[top].loop;
     }
   }
   if (is_loop) {
@@ -3606,6 +3620,35 @@ static void find_sites(const json_value *n, loop_frame *stack, size_t depth,
     find_sites(child(n, i), stack, depth, sites);
 }
 
+/* An anchor may move outward when normalization recognizes a whole band.
+   Only a chain of single-statement for bodies can name the same site: never
+   infer identity from source proximity or a containing range alone. */
+static int site_anchor_chain(const json_value *n, const json_value *site) {
+  if (n == site)
+    return 1;
+  if (strcmp(kind_of(n), "ForStmt") != 0 || child_count(n) != 5)
+    return 0;
+  n = child(n, 4);
+  while (strcmp(kind_of(n), "CompoundStmt") == 0 && child_count(n) == 1)
+    n = child(n, 0);
+  return strcmp(kind_of(n), "ForStmt") == 0 && site_anchor_chain(n, site);
+}
+
+static void write_site_anchors(const json_value *n, const json_value *site,
+                               const source_map *sm, FILE *out, int *first) {
+  if (site_anchor_chain(n, site)) {
+    long long begin = node_offset(n);
+    long line = 0, col = 0;
+    if (begin >= 0)
+      source_map_line_col(sm, begin, &line, &col);
+    fprintf(out, "%s{\"line\": %ld, \"col\": %ld, \"begin\": %lld}",
+            *first ? "" : ", ", line, col, begin);
+    *first = 0;
+  }
+  for (size_t i = 0; i < child_count(n); ++i)
+    write_site_anchors(child(n, i), site, sm, out, first);
+}
+
 /* Appends one function's sites, as JSON objects, to *out. */
 static void write_sites(const json_value *fn, const source_map *sm,
                         FILE *out, int *first) {
@@ -3627,13 +3670,17 @@ static void write_sites(const json_value *fn, const source_map *sm,
     fprintf(out, "%s  {\"function\": ", *first ? "" : ",\n");
     json_escape(out, json_string(json_get(fn, "name"), ""));
     fprintf(out, ", \"line\": %ld, \"col\": %ld, \"begin\": %lld, "
-                 "\"end\": %lld, \"from_macro\": %s, \"executions\": %lld}",
-            line, col, begin, end, from_macro ? "true" : "false",
-            sites.executions[s]);
+                 "\"end\": %lld, \"from_macro\": %s, \"anchors\": [",
+            line, col, begin, end, from_macro ? "true" : "false");
+    int first_anchor = 1;
+    write_site_anchors(fn, loop, sm, out, &first_anchor);
+    fprintf(out, "], \"report\": %s, \"executions\": %lld}",
+            sites.report[s] ? "true" : "false", sites.executions[s]);
     *first = 0;
   }
   free(sites.loops);
   free(sites.executions);
+  free(sites.report);
 }
 
 /* ------------------------------------------------------------------- main */
