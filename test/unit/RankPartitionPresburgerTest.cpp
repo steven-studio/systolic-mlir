@@ -7,6 +7,7 @@
 #include "Systolic/RankPartitionCollision.h"
 #include "Systolic/RankPartitionOrderedDependence.h"
 #include "Systolic/RankPartitionDependenceLegality.h"
+#include "Systolic/RankPartitionReductionSemantics.h"
 using namespace systolic::logical;
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -598,6 +599,73 @@ int main() {
                parityResult->feasibleBranches.empty() &&
                parityResult->emptyBranches == 2,
                "integer-infeasible source domain rejected as conflict"))
+      return 1;
+  }
+
+
+  // --------------------------------------------------------
+  // Phase 5.3.5: conservative operator-aware reduction policy.
+  // This is not a proof that generated parallel code is legal.
+  // --------------------------------------------------------
+  {
+    using systolic::logical::IntegerAddSemantics;
+    using systolic::logical::ReductionOperatorEvidence;
+    using systolic::logical::ReductionOrderDecision;
+    using systolic::logical::ReductionWriteUpdateKind;
+    using systolic::logical::classifyReductionOrder;
+
+    ReductionOperatorEvidence evidence;
+    const auto preserve = ReductionOrderDecision::PreserveSourceOrder;
+    const auto candidate = ReductionOrderDecision::ReassociationCandidate;
+    const auto noCollision = ReductionOrderDecision::NoOutputWriteCollision;
+
+    if (verify(classifyReductionOrder(false, evidence) == noCollision,
+               "no feasible ordered output-write collision"))
+      return 1;
+
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "unknown update preserves source order"))
+      return 1;
+
+    evidence.updateIsRecognizedReduction = true;
+    evidence.operandsIndependentOfDestination = true;
+    evidence.noOtherObservableEffects = true;
+    evidence.update = ReductionWriteUpdateKind::Assign;
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "overwrite preserves last-writer order"))
+      return 1;
+
+    evidence.update = ReductionWriteUpdateKind::IntegerAdd;
+    evidence.integerSemantics = IntegerAddSemantics::MayOverflowOrUB;
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "unproven integer overflow preserves order"))
+      return 1;
+
+    evidence.integerSemantics = IntegerAddSemantics::ModularWrap;
+    if (verify(classifyReductionOrder(true, evidence) == candidate,
+               "proven wrapping integer reduction is candidate only"))
+      return 1;
+
+    evidence.operandsIndependentOfDestination = false;
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "destination-dependent operand forbids reassociation"))
+      return 1;
+    evidence.operandsIndependentOfDestination = true;
+
+    evidence.update = ReductionWriteUpdateKind::FloatingAdd;
+    evidence.floatingReassociationPermitted = false;
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "strict floating reduction preserves order"))
+      return 1;
+
+    evidence.floatingReassociationPermitted = true;
+    if (verify(classifyReductionOrder(true, evidence) == candidate,
+               "explicit FP reassociation yields candidate only"))
+      return 1;
+
+    evidence.noOtherObservableEffects = false;
+    if (verify(classifyReductionOrder(true, evidence) == preserve,
+               "observable effects forbid reduction reorder"))
       return 1;
   }
 
