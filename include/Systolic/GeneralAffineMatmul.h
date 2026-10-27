@@ -9,6 +9,58 @@
 #include <memory>
 
 namespace mlir::systolic {
+
+/// One affine tensor access:
+///
+///   f(x) = F*x + b
+///
+/// F has tensorRank rows and sourceRank columns.
+/// Its rational row space and source kernel are analyzed independently
+/// of any GEMM-specific I/J/K interpretation.
+struct TensorAccessSpace {
+  lattice::IntMatrix accessMatrix;
+  lattice::IntVector offsets;
+
+  lattice::IntMatrix rowBasis;
+  lattice::IntMatrix kernel;
+
+  unsigned rank = 0;
+};
+
+/// Exact rational row-space analysis of three independent tensor accesses.
+///
+/// Pair order:
+///   0 = A intersect B
+///   1 = A intersect C
+///   2 = B intersect C
+///
+/// No logical coordinate partition or executable batch is inferred here.
+struct TensorContractionSpaces {
+  std::array<TensorAccessSpace, 3> operands;
+
+  std::array<lattice::IntMatrix, 3> pairIntersections;
+
+  lattice::IntMatrix tripleIntersection;
+
+  lattice::IntMatrix combinedSpace;
+  lattice::IntMatrix combinedKernel;
+
+  unsigned combinedRank = 0;
+};
+
+/// Analyze three affine access matrices over a common source universe.
+///
+/// All matrices have sourceRank columns.
+/// offsets[a].size() must equal accessMatrices[a].size().
+///
+/// Returns nullopt on malformed dimensions or arithmetic failure.
+/// Does not enumerate source points or impose a fixed mathematical rank cap.
+std::optional<TensorContractionSpaces>
+analyzeTensorContractionSpaces(
+    const std::array<lattice::IntMatrix, 3> &accessMatrices,
+    const std::array<lattice::IntVector, 3> &offsets,
+    unsigned sourceRank);
+
 /// Row spaces are over Q, represented by independent primitive integer rows.
 /// Constants are NOT coordinates of these spaces. Quotient complements are
 /// deterministic representatives, not set differences or canonical bases.
@@ -28,12 +80,6 @@ struct OperandSubspaces {
       coordinateFrame; // independent core/shared + residual; full rank
   std::array<unsigned, 7> ranks{}; // A,B,C,ABsum,ACsum,BCsum,ABCsum
   bool independentCore = false;
-  // x=V(P*,I,J,K). Inverse rows use exact positive denominators. The stored
-  // integer logical point is the inverse numerator; no divisibility is assumed.
-  lattice::IntMatrix parametricSourceFrame;
-  std::array<lattice::IntMatrix, 3> parametricOperandMaps;
-  SmallVector<int64_t> frameDenominators;
-  bool hasParametricCore = false;
 };
 
 struct GeneralAffinePoint {

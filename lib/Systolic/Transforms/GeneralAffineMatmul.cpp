@@ -98,120 +98,6 @@ static std::optional<IntMatrix> complement(const IntMatrix &x,
   }
   return result;
 }
-/// Pairwise intersections alone need not form a distributive decomposition.
-/// Work in the primal annihilators instead: I must be invisible to B, J to A,
-/// and K to C. At fixed partition coordinates the three restrictions must be
-/// full rank-2 GEMM views. Completing these directions gives a rational frame,
-/// not a license to execute its partition axes independently. The exact source
-/// relation below still retains every integer witness and write dependence.
-static void recoverParametricFrame(const std::array<IntMatrix, 3> &rows,
-                                   unsigned n, OperandSubspaces &out) {
-  if (n < 3 || out.ranks[0] != 2 || out.ranks[1] != 2 || out.ranks[2] != 2)
-    return;
-  std::array<IntMatrix, 3> kernel;
-  const unsigned invisible[3] = {1, 0, 2};
-  for (unsigned r = 0; r < 3; ++r) {
-    auto e = lattice::columnEchelon(rows[invisible[r]], n);
-    if (!e)
-      return;
-    kernel[r] = e->kernel;
-    // Sums avoid mistaking a union of two annihilator hyperplanes for a
-    // complete obstruction. This is a bounded candidate search, not a
-    // completeness claim; every accepted frame is checked exactly.
-    unsigned count = kernel[r].size();
-    for (unsigned a = 0; a < count && kernel[r].size() < 16; ++a)
-      for (unsigned b = a + 1; b < count && kernel[r].size() < 16; ++b) {
-        IntVector v(n, 0);
-        bool valid = true;
-        for (unsigned d = 0; d < n; ++d) {
-          auto sum = llvm::checkedAdd(kernel[r][a][d], kernel[r][b][d]);
-          if (!sum) {
-            valid = false;
-            break;
-          }
-          v[d] = *sum;
-        }
-        if (valid)
-          kernel[r].push_back(v);
-      }
-  }
-  auto restrict = [&](const IntMatrix &m,
-                      const IntMatrix &directions) -> std::optional<IntMatrix> {
-    IntMatrix result(m.size(), IntVector(directions.size(), 0));
-    for (unsigned a = 0; a < m.size(); ++a)
-      for (unsigned b = 0; b < directions.size(); ++b)
-        for (unsigned d = 0; d < n; ++d) {
-          auto p = llvm::checkedMul(m[a][d], directions[b][d]);
-          auto q = p ? llvm::checkedAdd(result[a][b], *p) : std::nullopt;
-          if (!q)
-            return std::nullopt;
-          result[a][b] = *q;
-        }
-    return result;
-  };
-  unsigned attempts = 0;
-  for (const auto &i : kernel[0])
-    for (const auto &j : kernel[1])
-      for (const auto &k : kernel[2]) {
-        if (++attempts > 128)
-          return;
-        IntMatrix directions{i, j, k};
-        std::array<IntMatrix, 3> projected;
-        bool valid = true;
-        for (unsigned a = 0; a < 3; ++a) {
-          auto p = restrict(rows[a], directions);
-          if (!p || rankOf(*p, 3) != std::optional<unsigned>(2)) {
-            valid = false;
-            break;
-          }
-          projected[a] = *p;
-          unsigned absent = a == 0 ? 1 : a == 1 ? 0 : 2;
-          for (const auto &row : *p)
-            valid &= row[absent] == 0;
-        }
-        if (!valid || rankOf(directions, n) != std::optional<unsigned>(3))
-          continue;
-        IntMatrix ambient(n, IntVector(n, 0));
-        for (unsigned d = 0; d < n; ++d)
-          ambient[d][d] = 1;
-        auto partitions = complement(ambient, directions, n);
-        if (!partitions || partitions->size() + 3 != n)
-          continue;
-        IntMatrix columns = sumOf(*partitions, directions);
-        IntMatrix sourceFrame(n, IntVector(n, 0));
-        for (unsigned a = 0; a < n; ++a)
-          for (unsigned b = 0; b < n; ++b)
-            sourceFrame[a][b] = columns[b][a];
-        IntMatrix numeratorRows;
-        SmallVector<int64_t> denominators;
-        for (unsigned d = 0; d < n; ++d) {
-          auto inverse = lattice::rowTimesInverse(ambient[d], sourceFrame);
-          if (!inverse) {
-            valid = false;
-            break;
-          }
-          numeratorRows.push_back(inverse->numerators);
-          denominators.push_back(inverse->denominator);
-        }
-        std::array<IntMatrix, 3> physical;
-        for (unsigned a = 0; a < 3 && valid; ++a) {
-          auto m = restrict(rows[a], columns);
-          if (!m)
-            valid = false;
-          else
-            physical[a] = *m;
-        }
-        if (!valid)
-          continue;
-        out.parametricSourceFrame = sourceFrame;
-        out.parametricOperandMaps = physical;
-        out.coordinateFrame = numeratorRows;
-        out.frameDenominators = denominators;
-        out.hasParametricCore = true;
-        return;
-      }
-}
-
 static std::optional<OperandSubspaces>
 subspaces(const std::array<IntMatrix, 3> &rows, unsigned n) {
   OperandSubspaces out;
@@ -277,9 +163,6 @@ subspaces(const std::array<IntMatrix, 3> &rows, unsigned n) {
     return std::nullopt;
   out.unusedComplement = *unused;
   out.unobservedKernel = kernel->kernel;
-  if (!out.independentCore || out.core[0].size() != 1 ||
-      out.core[1].size() != 1 || out.core[2].size() != 1)
-    recoverParametricFrame(rows, n, out);
   return out;
 }
 static std::optional<int64_t> eval(AffineExpr e, ArrayRef<int64_t> x) {
@@ -374,6 +257,107 @@ static std::optional<IntVector> linearRow(AffineExpr e, unsigned n) {
 }
 } // namespace
 
+std::optional<TensorContractionSpaces>
+mlir::systolic::analyzeTensorContractionSpaces(
+    const std::array<IntMatrix, 3> &accessMatrices,
+    const std::array<IntVector, 3> &offsets,
+    unsigned sourceRank) {
+
+  TensorContractionSpaces out;
+
+  IntMatrix allRows;
+
+  // Step 1: Analyze each operand independently.
+  for (unsigned a = 0; a < 3; ++a) {
+    const auto &matrix = accessMatrices[a];
+
+    if (matrix.size() != offsets[a].size())
+      return std::nullopt;
+
+    for (const auto &row : matrix)
+      if (row.size() != sourceRank)
+        return std::nullopt;
+
+    auto rowBasis = basis(matrix, sourceRank);
+    auto echelon = lattice::columnEchelon(matrix, sourceRank);
+
+    if (!rowBasis || !echelon)
+      return std::nullopt;
+
+    if (rowBasis->size() != echelon->rank)
+      return std::nullopt;
+
+    if (echelon->kernel.size() + echelon->rank != sourceRank)
+      return std::nullopt;
+
+    auto &operand = out.operands[a];
+
+    operand.accessMatrix = matrix;
+    operand.offsets = offsets[a];
+    operand.rowBasis = *rowBasis;
+    operand.kernel = echelon->kernel;
+    operand.rank = echelon->rank;
+
+    allRows = sumOf(allRows, matrix);
+  }
+
+  // Step 2: Compute exact pairwise intersections.
+  constexpr unsigned first[3] = {0, 0, 1};
+  constexpr unsigned second[3] = {1, 2, 2};
+
+  for (unsigned p = 0; p < 3; ++p) {
+    const auto &x = out.operands[first[p]].rowBasis;
+    const auto &y = out.operands[second[p]].rowBasis;
+
+    auto xy = intersection(x, y, sourceRank);
+    auto sumRank = rankOf(sumOf(x, y), sourceRank);
+
+    if (!xy || !sumRank)
+      return std::nullopt;
+
+    // Grassmann dimension identity.
+    if (xy->size() + *sumRank != x.size() + y.size())
+      return std::nullopt;
+
+    out.pairIntersections[p] = *xy;
+  }
+
+  // Step 3: Triple intersection.
+  //
+  // (A intersect B) intersect C
+  auto abc = intersection(
+      out.pairIntersections[0],
+      out.operands[2].rowBasis,
+      sourceRank);
+
+  if (!abc)
+    return std::nullopt;
+
+  out.tripleIntersection = *abc;
+
+  // Step 4: Combined observable row space.
+  auto combinedBasis = basis(allRows, sourceRank);
+  auto combinedEchelon =
+      lattice::columnEchelon(allRows, sourceRank);
+
+  if (!combinedBasis || !combinedEchelon)
+    return std::nullopt;
+
+  if (combinedBasis->size() != combinedEchelon->rank)
+    return std::nullopt;
+
+  if (combinedEchelon->kernel.size() +
+          combinedEchelon->rank != sourceRank)
+    return std::nullopt;
+
+  out.combinedSpace = *combinedBasis;
+  out.combinedKernel = combinedEchelon->kernel;
+  out.combinedRank = combinedEchelon->rank;
+
+  return out;
+}
+
+
 FailureOr<GeneralAffineMatmul>
 mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
                                            unsigned budget) {
@@ -464,8 +448,15 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
       return fail("general path requires unit-step loops without iter_args");
     ivs.push_back(loop.getInductionVar());
   }
-  if (ivs.empty() || ivs.size() > 8 || budget == 0)
-    return fail("source universe or point budget exceeded");
+  // The source iteration dimension is a mathematical input parameter.
+  // Do not impose an arbitrary upper bound on the number of IVs.
+  if (ivs.empty())
+    return fail("empty source iteration universe");
+
+  // This budget limits the current finite execution decomposition,
+  // not the mathematical validity of the contraction.
+  if (budget == 0)
+    return fail("finite execution decomposition has zero point budget");
   std::array<IntMatrix, 3> rows;
   for (unsigned a = 0; a < 3; ++a) {
     auto map =
@@ -635,8 +626,10 @@ mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
     return true;
   };
   if (!enumerate(0))
-    return fail("finite exact decomposition budget, bounds, layout, or checked "
-                "arithmetic failed");
+    return fail(
+        "finite execution decomposition failed: point/work budget, "
+        "bounds, memory layout, alias partition, or checked arithmetic; "
+        "this does not establish mathematical invalidity");
   if (out.points.empty())
     return fail("empty source domain");
   // An independent Presburger equality checks the constructed cover against
@@ -730,15 +723,5 @@ void mlir::systolic::describeOperandSubspaces(const OperandSubspaces &s,
   matrix("C-only-quotient", s.exclusive[2]);
   matrix("unused-dual-complement", s.unusedComplement);
   matrix("unobserved-source-kernel", s.unobservedKernel);
-  if (s.hasParametricCore) {
-    os << "; parametric partition dims=" << s.coordinateFrame.size() - 3;
-    matrix("source-frame-V", s.parametricSourceFrame);
-    os << "; inverse denominators=[";
-    llvm::interleaveComma(s.frameDenominators, os);
-    os << "]";
-    matrix("A-in-frame", s.parametricOperandMaps[0]);
-    matrix("B-in-frame", s.parametricOperandMaps[1]);
-    matrix("C-in-frame", s.parametricOperandMaps[2]);
-  }
   os << "; independent core=" << (s.independentCore ? "yes" : "no");
 }
