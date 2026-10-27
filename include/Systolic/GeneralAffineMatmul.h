@@ -61,6 +61,48 @@ analyzeTensorContractionSpaces(
     const std::array<lattice::IntVector, 3> &offsets,
     unsigned sourceRank);
 
+/// Linear dependencies among three rational operand row spaces.
+///
+/// Each relation is a coefficient vector over the concatenated independent
+/// operand bases [A | B | C], not a source-iteration direction.
+///
+/// These are rational vector-space facts represented by integral vectors.
+/// They do not by themselves establish an integer lattice decomposition,
+/// memory dependence legality, or executable batch partition.
+struct TensorSpaceDependencies {
+  // Offsets into [A basis | B basis | C basis], including final total.
+  std::array<unsigned, 4> coefficientOffsets{};
+
+  // Kernel of the combined basis transpose.
+  lattice::IntMatrix allRelations;
+
+  // Pair order: AB, AC, BC. Rows use full coefficient coordinates.
+  std::array<lattice::IntMatrix, 3> pairRelations;
+
+  // Span of all pairwise-supported dependencies.
+  lattice::IntMatrix pairGeneratedRelations;
+
+  // Representatives of allRelations / pairGeneratedRelations.
+  // Not a canonical quotient basis.
+  lattice::IntMatrix essentialThreeWayRelations;
+
+  unsigned relationRank = 0;
+  unsigned pairGeneratedRank = 0;
+  unsigned essentialThreeWayRank = 0;
+};
+
+/// Analyze exact linear dependencies among three operand row spaces.
+///
+/// Preconditions:
+/// - Operand row bases are independent over Q.
+/// - Every row has sourceRank coefficients.
+///
+/// No fixed tensor rank, source dimension, or candidate-search cap.
+/// Returns nullopt on malformed dimensions or arithmetic failure.
+std::optional<TensorSpaceDependencies>
+analyzeTensorSpaceDependencies(const TensorContractionSpaces &spaces,
+                               unsigned sourceRank);
+
 /// Row spaces are over Q, represented by independent primitive integer rows.
 /// Constants are NOT coordinates of these spaces. Quotient complements are
 /// deterministic representatives, not set differences or canonical bases.

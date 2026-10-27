@@ -7,6 +7,7 @@
 #include "mlir/IR/Matchers.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -357,6 +358,234 @@ mlir::systolic::analyzeTensorContractionSpaces(
   return out;
 }
 
+
+std::optional<TensorSpaceDependencies>
+mlir::systolic::analyzeTensorSpaceDependencies(
+    const TensorContractionSpaces &spaces, unsigned sourceRank) {
+
+  TensorSpaceDependencies out;
+
+  // The three row bases are independent within their own operand spaces.
+  std::array<IntMatrix, 3> bases;
+
+  for (unsigned a = 0; a < 3; ++a) {
+    bases[a] = spaces.operands[a].rowBasis;
+
+    for (const auto &row : bases[a])
+      if (row.size() != sourceRank)
+        return std::nullopt;
+
+    auto r = rankOf(bases[a], sourceRank);
+    if (!r || *r != bases[a].size())
+      return std::nullopt;
+
+    if (bases[a].size() > std::numeric_limits<unsigned>::max() -
+                              out.coefficientOffsets[a])
+      return std::nullopt;
+
+    out.coefficientOffsets[a + 1] =
+        out.coefficientOffsets[a] + bases[a].size();
+  }
+
+  const unsigned total = out.coefficientOffsets[3];
+
+  // Build the linear map Phi:
+  //
+  //   Phi(alpha, beta, gamma)
+  //       = A^T alpha + B^T beta + C^T gamma
+  //
+  // Matrix shape: sourceRank x total.
+  IntMatrix phi(sourceRank, IntVector(total, 0));
+
+  for (unsigned a = 0; a < 3; ++a)
+    for (unsigned r = 0; r < bases[a].size(); ++r)
+      for (unsigned d = 0; d < sourceRank; ++d)
+        phi[d][out.coefficientOffsets[a] + r] = bases[a][r][d];
+
+  auto full = lattice::columnEchelon(phi, total);
+  if (!full)
+    return std::nullopt;
+
+  auto fullBasis = basis(full->kernel, total);
+  if (!fullBasis)
+    return std::nullopt;
+
+  auto sumRank = rankOf(sumOf(sumOf(bases[0], bases[1]), bases[2]),
+                        sourceRank);
+
+  if (!sumRank || *sumRank > total)
+    return std::nullopt;
+
+  // Rank-nullity certificate.
+  if (fullBasis->size() != total - *sumRank)
+    return std::nullopt;
+
+  out.allRelations = *fullBasis;
+  out.relationRank = fullBasis->size();
+
+  const unsigned first[3] = {0, 0, 1};
+  const unsigned second[3] = {1, 2, 2};
+
+  IntMatrix pairRows;
+
+  // Compute the kernel of each pair's basis transpose and embed the
+  // resulting relations into the full [A | B | C] coordinate system.
+  for (unsigned p = 0; p < 3; ++p) {
+    const unsigned a = first[p];
+    const unsigned b = second[p];
+
+    const unsigned ra = bases[a].size();
+    const unsigned rb = bases[b].size();
+
+    if (ra > std::numeric_limits<unsigned>::max() - rb)
+      return std::nullopt;
+
+    const unsigned pairTotal = ra + rb;
+
+    IntMatrix pairPhi(sourceRank, IntVector(pairTotal, 0));
+
+    for (unsigned r = 0; r < ra; ++r)
+      for (unsigned d = 0; d < sourceRank; ++d)
+        pairPhi[d][r] = bases[a][r][d];
+
+    for (unsigned r = 0; r < rb; ++r)
+      for (unsigned d = 0; d < sourceRank; ++d)
+        pairPhi[d][ra + r] = bases[b][r][d];
+
+    auto pairKernel = lattice::columnEchelon(pairPhi, pairTotal);
+    if (!pairKernel)
+      return std::nullopt;
+
+    auto pairBasis = basis(pairKernel->kernel, pairTotal);
+    if (!pairBasis)
+      return std::nullopt;
+
+    auto pairRank = rankOf(sumOf(bases[a], bases[b]), sourceRank);
+    if (!pairRank || *pairRank > pairTotal)
+      return std::nullopt;
+
+    if (pairBasis->size() != pairTotal - *pairRank)
+      return std::nullopt;
+
+    for (const auto &relation : *pairBasis) {
+      IntVector embedded(total, 0);
+
+      for (unsigned r = 0; r < ra; ++r)
+        embedded[out.coefficientOffsets[a] + r] = relation[r];
+
+      for (unsigned r = 0; r < rb; ++r)
+        embedded[out.coefficientOffsets[b] + r] = relation[ra + r];
+
+      out.pairRelations[p].push_back(embedded);
+      pairRows.push_back(embedded);
+    }
+  }
+
+  auto generated = basis(pairRows, total);
+  if (!generated)
+    return std::nullopt;
+
+  out.pairGeneratedRelations = *generated;
+  out.pairGeneratedRank = generated->size();
+
+  // Pairwise-generated relations must belong to ker(Phi).
+  for (const auto &row : *generated) {
+    auto combinedRank = rankOf(
+        sumOf(out.allRelations, IntMatrix{row}), total);
+
+    if (!combinedRank || *combinedRank != out.relationRank)
+      return std::nullopt;
+  }
+
+  // Pick representatives for:
+  //
+  //   ker(Phi) / span(pairwise-supported relations)
+  //
+  // The complement is relative, not canonical.
+  auto essential = complement(out.allRelations, *generated, total);
+  if (!essential)
+    return std::nullopt;
+
+  if (out.pairGeneratedRank > out.relationRank)
+    return std::nullopt;
+
+  if (essential->size() !=
+      out.relationRank - out.pairGeneratedRank)
+    return std::nullopt;
+
+  out.essentialThreeWayRelations = *essential;
+  out.essentialThreeWayRank = essential->size();
+
+  // Verify Phi * relation = 0 using checked integer arithmetic.
+  // A failure here indicates an invalid relation or an arithmetic
+  // representation failure, not a mathematical non-contraction.
+  auto annihilates = [&](const IntVector &relation) -> bool {
+    if (relation.size() != total)
+      return false;
+
+    for (unsigned d = 0; d < sourceRank; ++d) {
+      int64_t sum = 0;
+
+      for (unsigned c = 0; c < total; ++c) {
+        auto product = llvm::checkedMul(phi[d][c], relation[c]);
+        if (!product)
+          return false;
+
+        auto next = llvm::checkedAdd(sum, *product);
+        if (!next)
+          return false;
+
+        sum = *next;
+      }
+
+      if (sum != 0)
+        return false;
+    }
+
+    return true;
+  };
+
+  for (const auto &relation : out.allRelations)
+    if (!annihilates(relation))
+      return std::nullopt;
+
+  for (const auto &relation : out.pairGeneratedRelations)
+    if (!annihilates(relation))
+      return std::nullopt;
+
+  for (const auto &relation : out.essentialThreeWayRelations)
+    if (!annihilates(relation))
+      return std::nullopt;
+
+  // Verify that the chosen quotient representatives give a direct
+  // sum decomposition of the full rational relation space.
+  //
+  // ker(Phi) = R_pair (+) R_essential
+  //
+  // The decomposition is exact over Q, not a certificate of an
+  // integer lattice direct sum.
+  auto essentialRank =
+      rankOf(out.essentialThreeWayRelations, total);
+
+  auto reconstructedRank = rankOf(
+      sumOf(out.pairGeneratedRelations,
+            out.essentialThreeWayRelations),
+      total);
+
+  if (!essentialRank || !reconstructedRank)
+    return std::nullopt;
+
+  if (*essentialRank != out.essentialThreeWayRank)
+    return std::nullopt;
+
+  if (*reconstructedRank != out.relationRank)
+    return std::nullopt;
+
+  if (out.pairGeneratedRank + *essentialRank != out.relationRank)
+    return std::nullopt;
+
+  return out;
+}
 
 FailureOr<GeneralAffineMatmul>
 mlir::systolic::analyzeGeneralAffineMatmul(Operation *anchor, std::string &why,
