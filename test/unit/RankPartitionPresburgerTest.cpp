@@ -29,14 +29,18 @@
 #include "Systolic/RankPartitionLogicalDomainNormalization.h"
 #include <functional>
 #include "Systolic/RankPartitionSourceAccessEmission.h"
+#include "Systolic/RankPartitionGuardedMacEmission.h"
 #include "Systolic/RankPartitionGuardedMemoryEmission.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <tuple>
 using namespace systolic::logical;
@@ -5240,6 +5244,7 @@ int main() {
       std::vector<int64_t> shape;
       bool isFloat = false;
       unsigned integerWidth = 64;
+      unsigned floatWidth = 32; // Phase 3b-3: 16, 32 or 64
       std::vector<int64_t> strides; // empty: identity layout
     };
 
@@ -5309,8 +5314,15 @@ int main() {
 
     auto elementTypeOf = [](OpBuilder &builder,
                             const OperandSpec &spec) -> Type {
-      if (spec.isFloat)
+      if (spec.isFloat) {
+        if (spec.floatWidth == 16)
+          return builder.getF16Type();
+
+        if (spec.floatWidth == 64)
+          return builder.getF64Type();
+
         return builder.getF32Type();
+      }
 
       return builder.getIntegerType(spec.integerWidth);
     };
@@ -6754,6 +6766,1036 @@ int main() {
       if (verify(ok, "3b2 store value type and dominance validated"))
         return 1;
     }
+
+    // ======================================================
+    // Phase 5.4.3d-3b-3:
+    // Guarded multiply-accumulate with exact reduction
+    // semantics, on the Phase 3b-2 fixtures.
+    //
+    // The reference replays
+    //
+    //   C[fC(x)] = C[fC(x)] + A[fA(x)] * B[fB(x)]
+    //
+    // in source lexicographic order over the source domain
+    // with the element type's own arithmetic: f32 / f64 with
+    // one rounding per operation (volatile temporaries keep
+    // the compiler from contracting), integers narrower than
+    // 64 bits wrapping to their width, 64-bit integers
+    // exact. The emitted operation tree is interpreted and
+    // its final memory, event multiset and per-element store
+    // sequences are compared bit for bit.
+    //
+    // Every float scenario with collisions must also show
+    // that the reference evaluated in reversed source order
+    // differs: the order of a floating-point reduction is
+    // observable, and the emitter preserves it. Integer
+    // reductions are order independent, so for them the
+    // reversed reference must agree.
+    // ======================================================
+
+    // Canonical bits of a value: the integer itself, or the
+    // bit pattern of the double (f32 values are exact
+    // doubles). Neither IEEE 754 nor the arith dialect fixes
+    // the sign or payload of a NaN an operation produces, so
+    // every NaN maps to one canonical pattern: the comparison
+    // requires both sides to produce a NaN, not the same NaN.
+
+    auto bitsOf = [](bool isFloat, int64_t integer, double real)
+        -> int64_t {
+      if (!isFloat)
+        return integer;
+
+      if (std::isnan(real))
+        real = std::numeric_limits<double>::quiet_NaN();
+
+      int64_t bits = 0;
+      static_assert(sizeof(bits) == sizeof(real));
+      std::memcpy(&bits, &real, sizeof(bits));
+      return bits;
+    };
+
+    auto wrapWidth = [](__int128 exact, unsigned width) -> int64_t {
+      const __int128 modulus = static_cast<__int128>(1) << width;
+      __int128 remainder = exact % modulus;
+
+      if (remainder < 0)
+        remainder += modulus;
+
+      if (remainder >= modulus / 2)
+        remainder -= modulus;
+
+      return static_cast<int64_t>(remainder);
+    };
+
+    // Test data families (see macBuffer).
+    enum class MacData { Cancellation, Rounding, Special };
+
+    struct MacSpec {
+      FixtureSpec fixture;
+      GuardedMacSemantics semantics;
+      MacData data = MacData::Cancellation;
+    };
+
+    // Typed initial buffers.
+    //
+    // Cancellation (float): along the first index, A cycles
+    // through +M, 1, -M, 1 with M = 2^24 for f32 and M = 2^56
+    // for f64, one bit beyond the significand; B is 1. A sum
+    // of such products cancels the two large terms, and
+    // whether the small terms survive depends on the order in
+    // which they meet the large ones; evaluating f32 in a
+    // wider format gives a different answer.
+    //
+    // Rounding (float, one update per element): even
+    // elements multiply (1 + 2^-(p-1)) by (1 - 2^-(p-1)) and
+    // add -1: the exact product 1 - 2^-(2p-2) rounds to 1, so
+    // the result is 0 with one rounding per operation and
+    // -2^-(2p-2) under a fused multiply-add or a wider
+    // product. Odd elements add 1 to 2^p + 2: the exact sum
+    // 2^p + 3 is a tie, resolved to the even 2^p + 4.
+    //
+    // Special (float, one update per element): signed zeros,
+    // infinities, overflow, a subnormal product that rounds
+    // to zero, and NaN production and propagation.
+    //
+    // Integers: narrow widths get products beyond their
+    // width so that wrapping occurs; i64 stays small.
+
+    auto macBuffer = [&](const OperandSpec &spec, unsigned operand,
+                         MacData data) {
+      exec::MemoryBuffer buffer;
+      buffer.shape = spec.shape;
+
+      const std::size_t size = bufferSize(spec.shape);
+
+      if (spec.isFloat) {
+        buffer.isFloat = true;
+
+        const bool single = spec.floatWidth == 32;
+        const int precision = single ? 24 : 53;
+
+        const std::size_t innerExtent =
+            size / static_cast<std::size_t>(spec.shape.front());
+
+        for (std::size_t linear = 0; linear < size; ++linear) {
+          double value = 0.0;
+
+          if (data == MacData::Cancellation) {
+            if (operand == 0) {
+              const std::size_t first = linear / innerExtent;
+              const double large = std::ldexp(1.0, precision);
+              value = first % 4 == 0 ? large
+                      : first % 4 == 2 ? -large
+                                       : 1.0;
+            } else if (operand == 1) {
+              value = 1.0;
+            } else {
+              value = 0.3125 * static_cast<double>(linear + 1);
+            }
+          } else if (data == MacData::Rounding) {
+            const double epsilon = std::ldexp(1.0, 1 - precision);
+
+            if (linear % 2 == 0) {
+              value = operand == 0 ? 1.0 + epsilon
+                      : operand == 1 ? 1.0 - epsilon
+                                     : -1.0;
+            } else {
+              value = operand == 0 ? std::ldexp(1.0, precision) + 2.0
+                      : operand == 1 ? 1.0
+                                     : 1.0;
+            }
+          } else {
+            const double infinity = std::numeric_limits<double>::infinity();
+            const double quietNaN = std::numeric_limits<double>::quiet_NaN();
+            const double huge = single ? 3.0e38 : 1.0e308;
+            const double tiny = single ? std::ldexp(1.0, -149)
+                                       : std::ldexp(1.0, -1074);
+
+            // (a, b, c) -> c + a * b
+            switch (linear % 8) {
+            case 0: // -0 + (-0 * 1) = -0
+              value = operand == 0 ? -0.0 : operand == 1 ? 1.0 : -0.0;
+              break;
+            case 1: // -0 + (+0 * 1) = +0
+              value = operand == 0 ? 0.0 : operand == 1 ? 1.0 : -0.0;
+              break;
+            case 2: // 5 + inf = inf
+              value = operand == 0 ? infinity : operand == 1 ? 1.0 : 5.0;
+              break;
+            case 3: // inf + (inf * -1) = NaN
+              value = operand == 0 ? infinity : operand == 1 ? -1.0 : infinity;
+              break;
+            case 4: // 1 + (inf * 0) = NaN
+              value = operand == 0 ? infinity : operand == 1 ? 0.0 : 1.0;
+              break;
+            case 5: // 0 + huge * 4 overflows to inf
+              value = operand == 0 ? huge : operand == 1 ? 4.0 : 0.0;
+              break;
+            case 6: // 0 + tiny * 0.5 rounds (tie) to +0
+              value = operand == 0 ? tiny : operand == 1 ? 0.5 : 0.0;
+              break;
+            default: // NaN propagates
+              value = operand == 0 ? quietNaN : operand == 1 ? 1.0 : 1.0;
+              break;
+            }
+          }
+
+          buffer.floatData.push_back(
+              single ? static_cast<double>(static_cast<float>(value))
+                     : value);
+        }
+
+        return buffer;
+      }
+
+      for (std::size_t linear = 0; linear < size; ++linear) {
+        int64_t value = 0;
+
+        if (spec.integerWidth < 64) {
+          if (operand == 0)
+            value = 100000 + 1000 * static_cast<int64_t>(linear);
+          else if (operand == 1)
+            value = 30000 + static_cast<int64_t>(linear);
+          else
+            value = 1000 + static_cast<int64_t>(linear);
+
+          value = wrapWidth(value, spec.integerWidth);
+        } else if (operand == 0) {
+          value = 1000 * static_cast<int64_t>(linear + 1);
+        } else if (operand == 1) {
+          value = static_cast<int64_t>(linear + 1);
+        } else {
+          value = 100 + static_cast<int64_t>(linear);
+        }
+
+        buffer.data.push_back(value);
+      }
+
+      return buffer;
+    };
+
+    auto bufferBits = [&](const exec::MemoryBuffer &buffer) {
+      std::vector<int64_t> bits;
+
+      if (buffer.isFloat) {
+        for (double value : buffer.floatData)
+          bits.push_back(bitsOf(true, 0, value));
+      } else {
+        bits = buffer.data;
+      }
+
+      return bits;
+    };
+
+    struct MacEvent {
+      bool isStore;
+      unsigned operand;
+      std::vector<int64_t> indices;
+      int64_t bits;
+
+      bool operator<(const MacEvent &other) const {
+        return std::tie(operand, isStore, indices, bits) <
+               std::tie(other.operand, other.isStore,
+                        other.indices, other.bits);
+      }
+
+      bool operator==(const MacEvent &other) const {
+        return operand == other.operand &&
+               isStore == other.isStore &&
+               indices == other.indices && bits == other.bits;
+      }
+    };
+
+    struct MacRun {
+      std::array<exec::MemoryBuffer, 3> buffers;
+      std::vector<MacEvent> trace;
+    };
+
+    // Independent source-order reference of the MAC.
+
+    auto macReference = [&](const MacSpec &mac, bool reversed)
+        -> std::optional<MacRun> {
+      const FixtureSpec &spec = mac.fixture;
+      const GuardedMacSemantics &semantics = mac.semantics;
+
+      MacRun run;
+
+      for (unsigned i = 0; i < 3; ++i)
+        run.buffers[i] = macBuffer(spec.operands[i], i, mac.data);
+
+      const OperandSpec &element = spec.operands[2];
+      const bool isFloat = element.isFloat;
+      const unsigned width =
+          isFloat ? element.floatWidth : element.integerWidth;
+
+      const AffineIntegerDomain domain = domainOf(spec);
+
+      for (const auto &coordinates :
+           enumerateBox(spec.sourceBox, reversed)) {
+
+        IntRow x;
+
+        for (int64_t coordinate : coordinates)
+          x.emplace_back(coordinate);
+
+        if (!containsSourcePoint(domain, x))
+          continue;
+
+        std::array<std::size_t, 3> offsets{};
+        std::array<std::vector<int64_t>, 3> addresses;
+        std::array<unsigned, 3> bufferOf{};
+
+        for (unsigned i = 0; i < 3; ++i) {
+          const auto &operand = spec.operands[i];
+
+          if (operand.rows.size() != operand.offsets.size())
+            return std::nullopt;
+
+          for (std::size_t r = 0; r < operand.rows.size(); ++r) {
+            if (operand.rows[r].size() != x.size())
+              return std::nullopt;
+
+            BigInt address = operand.offsets[r];
+
+            for (std::size_t j = 0; j < x.size(); ++j)
+              address += operand.rows[r][j] * x[j];
+
+            if (address <
+                    BigInt(std::numeric_limits<int64_t>::min()) ||
+                address >
+                    BigInt(std::numeric_limits<int64_t>::max()))
+              return std::nullopt;
+
+            addresses[i].push_back(address.convert_to<int64_t>());
+          }
+
+          bufferOf[i] = spec.sharedAB && i == 1 ? 0 : i;
+
+          auto linear = linearIndex(
+              spec.operands[bufferOf[i]].shape, addresses[i]);
+
+          if (!linear)
+            return std::nullopt;
+
+          offsets[i] = *linear;
+        }
+
+        if (isFloat) {
+          const double a = run.buffers[bufferOf[0]].floatData[offsets[0]];
+          const double b = run.buffers[bufferOf[1]].floatData[offsets[1]];
+          const double old = run.buffers[2].floatData[offsets[2]];
+
+          run.trace.push_back({false, bufferOf[0], addresses[0], bitsOf(true, 0, a)});
+          run.trace.push_back({false, bufferOf[1], addresses[1], bitsOf(true, 0, b)});
+          run.trace.push_back({false, 2, addresses[2], bitsOf(true, 0, old)});
+
+          const double leftFactor = semantics.aIsLeftFactor ? a : b;
+          const double rightFactor = semantics.aIsLeftFactor ? b : a;
+
+          // IEEE 754 round to nearest even in software
+          // (llvm::APFloat), independent of the host's
+          // floating-point unit that the interpreter uses.
+
+          const auto roundingMode = llvm::APFloat::rmNearestTiesToEven;
+
+          double sum = 0.0;
+
+          if (width == 32) {
+            llvm::APFloat product(static_cast<float>(leftFactor));
+            product.multiply(llvm::APFloat(static_cast<float>(rightFactor)),
+                             roundingMode);
+
+            llvm::APFloat accumulator(static_cast<float>(old));
+
+            if (semantics.accumulatorIsLeftAddend) {
+              accumulator.add(product, roundingMode);
+              sum = static_cast<double>(accumulator.convertToFloat());
+            } else {
+              product.add(accumulator, roundingMode);
+              sum = static_cast<double>(product.convertToFloat());
+            }
+          } else {
+            llvm::APFloat product(leftFactor);
+            product.multiply(llvm::APFloat(rightFactor), roundingMode);
+
+            llvm::APFloat accumulator(old);
+
+            if (semantics.accumulatorIsLeftAddend) {
+              accumulator.add(product, roundingMode);
+              sum = accumulator.convertToDouble();
+            } else {
+              product.add(accumulator, roundingMode);
+              sum = product.convertToDouble();
+            }
+          }
+
+          run.buffers[2].floatData[offsets[2]] = sum;
+          run.trace.push_back({true, 2, addresses[2], bitsOf(true, 0, sum)});
+          continue;
+        }
+
+        const int64_t a = run.buffers[bufferOf[0]].data[offsets[0]];
+        const int64_t b = run.buffers[bufferOf[1]].data[offsets[1]];
+        const int64_t old = run.buffers[2].data[offsets[2]];
+
+        run.trace.push_back({false, bufferOf[0], addresses[0], a});
+        run.trace.push_back({false, bufferOf[1], addresses[1], b});
+        run.trace.push_back({false, 2, addresses[2], old});
+
+        const __int128 leftFactor = semantics.aIsLeftFactor ? a : b;
+        const __int128 rightFactor = semantics.aIsLeftFactor ? b : a;
+
+        auto settle = [&](__int128 exact) -> std::optional<int64_t> {
+          if (width < 64)
+            return wrapWidth(exact, width);
+
+          if (exact < std::numeric_limits<int64_t>::min() ||
+              exact > std::numeric_limits<int64_t>::max())
+            return std::nullopt; // mirrors the checked interpreter
+
+          return static_cast<int64_t>(exact);
+        };
+
+        auto product = settle(leftFactor * rightFactor);
+
+        if (!product)
+          return std::nullopt;
+
+        auto sum = settle(semantics.accumulatorIsLeftAddend
+                              ? static_cast<__int128>(old) + *product
+                              : static_cast<__int128>(*product) + old);
+
+        if (!sum)
+          return std::nullopt;
+
+        run.buffers[2].data[offsets[2]] = *sum;
+        run.trace.push_back({true, 2, addresses[2], *sum});
+      }
+
+      return run;
+    };
+
+    // Emit the MAC on a fixture, check its structure, execute
+    // the actual operation tree and compare with the
+    // reference.
+
+    auto runMac = [&](const char *name, const MacSpec &mac,
+                      std::size_t expectedVisited,
+                      std::size_t expectedAccepted,
+                      bool expectOrderSensitive) -> bool {
+      const FixtureSpec &spec = mac.fixture;
+      const GuardedMacSemantics &semantics = mac.semantics;
+
+      Fixture f;
+
+      if (!buildFixture(f, spec)) {
+        std::cerr << "3b3 " << name << ": fixture failed\n";
+        return false;
+      }
+
+      auto loads = emitGuardedMemoryLoads(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2]);
+
+      if (!loads) {
+        std::cerr << "3b3 " << name << ": loads refused\n";
+        return false;
+      }
+
+      const auto before = countOps(f.thenBlock);
+
+      auto emitted = emitGuardedMultiplyAccumulate(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2], *loads,
+          semantics);
+
+      if (!emitted) {
+        std::cerr << "3b3 " << name << ": MAC refused\n";
+        return false;
+      }
+
+      const bool isFloat = spec.operands[2].isFloat;
+
+      Operation *multiply = emitted->multiply;
+      Operation *add = emitted->add;
+      memref::StoreOp store = emitted->store;
+
+      // Structure: exactly mul, add, store appended in that
+      // order before the terminator, source operation
+      // kinds, source operand order, strict flags.
+
+      bool structure =
+          multiply && add && store &&
+          countOps(f.thenBlock) == before + 3 &&
+          multiply->getBlock() == f.thenBlock &&
+          add->getBlock() == f.thenBlock &&
+          store->getBlock() == f.thenBlock &&
+          multiply->getNextNode() == add &&
+          add->getNextNode() == store.getOperation() &&
+          store->getNextNode() == f.thenBlock->getTerminator() &&
+          multiply->getNumOperands() == 2 && add->getNumOperands() == 2 &&
+          multiply->getNumResults() == 1 && add->getNumResults() == 1 &&
+          emitted->result == add->getResult(0) &&
+          store.getValue() == emitted->result &&
+          store.getMemRef() == f.operands[2].memref;
+
+      Value valueA = loads->loadA.getResult();
+      Value valueB = loads->loadB.getResult();
+      Value valueC = loads->loadC.getResult();
+
+      if (structure) {
+        structure =
+            multiply->getOperand(0) ==
+                (semantics.aIsLeftFactor ? valueA : valueB) &&
+            multiply->getOperand(1) ==
+                (semantics.aIsLeftFactor ? valueB : valueA) &&
+            add->getOperand(0) ==
+                (semantics.accumulatorIsLeftAddend
+                     ? valueC : multiply->getResult(0)) &&
+            add->getOperand(1) ==
+                (semantics.accumulatorIsLeftAddend
+                     ? multiply->getResult(0) : valueC);
+      }
+
+      if (structure) {
+        if (isFloat) {
+          auto mulf = dyn_cast<arith::MulFOp>(multiply);
+          auto addf = dyn_cast<arith::AddFOp>(add);
+
+          structure = mulf && addf &&
+                      mulf.getFastmath() == arith::FastMathFlags::none &&
+                      addf.getFastmath() == arith::FastMathFlags::none &&
+                      !mulf.getRoundingmodeAttr() &&
+                      !addf.getRoundingmodeAttr();
+        } else {
+          auto muli = dyn_cast<arith::MulIOp>(multiply);
+          auto addi = dyn_cast<arith::AddIOp>(add);
+
+          structure = muli && addi &&
+                      muli.getOverflowFlags() ==
+                          arith::IntegerOverflowFlags::none &&
+                      addi.getOverflowFlags() ==
+                          arith::IntegerOverflowFlags::none;
+        }
+      }
+
+      if (!structure) {
+        std::cerr << "3b3 " << name << ": malformed MAC structure\n";
+        return false;
+      }
+
+      // One statement: a second MAC is refused and leaves
+      // nothing behind.
+
+      auto second = emitGuardedMultiplyAccumulate(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2], *loads,
+          semantics);
+
+      if (second || countOps(f.thenBlock) != before + 3) {
+        std::cerr << "3b3 " << name << ": second MAC accepted\n";
+        return false;
+      }
+
+      if (failed(mlir::verify(f.module))) {
+        std::cerr << "3b3 " << name << ": verifier failed\n";
+        return false;
+      }
+
+      if (std::getenv("RANK_PARTITION_DUMP_IR")) {
+        llvm::errs() << "3b3 " << name << " IR:\n";
+        f.module.print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
+      if (!imageAgreesWithOracle(f, spec, expectedAccepted)) {
+        std::cerr << "3b3 " << name
+                  << ": exact logical image disagrees with the"
+                     " BigInt oracle\n";
+        return false;
+      }
+
+      // Execute the actual operation tree.
+
+      exec::MemoryState memory;
+
+      for (unsigned i = 0; i < 3; ++i)
+        memory.buffers[f.entry->getArgument(i)] =
+            macBuffer(spec.operands[i], i, mac.data);
+
+      auto execution = exec::interpretGuardedLoopNest(
+          f.guarded->outermost, f.guarded->guardIf,
+          f.guarded->logicalIVs, f.recovered->sourceIVs,
+          f.operands[0].access.indices,
+          f.operands[1].access.indices,
+          f.operands[2].access.indices,
+          &memory);
+
+      if (!execution ||
+          execution->visitedPoints != expectedVisited ||
+          execution->acceptedPoints != expectedAccepted ||
+          execution->accessByLogical.size() != expectedAccepted ||
+          execution->sourceCounts.size() != expectedAccepted) {
+        std::cerr << "3b3 " << name << ": interpreter failure\n";
+        return false;
+      }
+
+      auto reference = macReference(mac, false);
+      auto reversedReference = macReference(mac, true);
+
+      if (!reference || !reversedReference) {
+        std::cerr << "3b3 " << name << ": reference failed\n";
+        return false;
+      }
+
+      // Order sensitivity of the reference itself.
+
+      const bool reversedAgrees =
+          bufferBits(reversedReference->buffers[2]) ==
+          bufferBits(reference->buffers[2]);
+
+      if (reversedAgrees == expectOrderSensitive) {
+        std::cerr << "3b3 " << name
+                  << ": reference order sensitivity check failed\n";
+        return false;
+      }
+
+      // Final memory, bit for bit.
+
+      for (unsigned i = 0; i < 3; ++i) {
+        const auto &actual =
+            memory.buffers[f.entry->getArgument(i)];
+
+        if (actual.shape != reference->buffers[i].shape ||
+            actual.isFloat != reference->buffers[i].isFloat ||
+            bufferBits(actual) != bufferBits(reference->buffers[i])) {
+          std::cerr << "3b3 " << name
+                    << ": memory contents differ, operand " << i
+                    << "\n";
+          return false;
+        }
+      }
+
+      // Event multiset and per-element store order.
+
+      std::vector<MacEvent> observed;
+
+      for (const auto &event : memory.trace) {
+        std::optional<unsigned> operand;
+
+        for (unsigned i = 0; i < 3; ++i)
+          if (event.memref == f.entry->getArgument(i))
+            operand = i;
+
+        if (!operand || event.isFloat != isFloat)
+          return false;
+
+        observed.push_back(
+            {event.isStore, *operand, event.indices,
+             bitsOf(event.isFloat, event.value, event.floatValue)});
+      }
+
+      if (observed.size() != reference->trace.size() ||
+          observed.size() != 4 * expectedAccepted) {
+        std::cerr << "3b3 " << name << ": event count "
+                  << observed.size() << "\n";
+        return false;
+      }
+
+      auto storeSequences =
+          [](const std::vector<MacEvent> &trace) {
+            std::map<std::vector<int64_t>, std::vector<int64_t>>
+                sequences;
+
+            for (const auto &event : trace)
+              if (event.isStore)
+                sequences[event.indices].push_back(event.bits);
+
+            return sequences;
+          };
+
+      if (storeSequences(observed) !=
+          storeSequences(reference->trace)) {
+        std::cerr << "3b3 " << name
+                  << ": per-element store order differs\n";
+        return false;
+      }
+
+      std::vector<MacEvent> sortedObserved = observed;
+      std::vector<MacEvent> sortedReference = reference->trace;
+
+      std::sort(sortedObserved.begin(), sortedObserved.end());
+      std::sort(sortedReference.begin(), sortedReference.end());
+
+      if (sortedObserved != sortedReference) {
+        std::cerr << "3b3 " << name << ": event multiset differs\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    auto floatVariant = [](FixtureSpec spec, unsigned width) {
+      for (auto &operand : spec.operands) {
+        operand.isFloat = true;
+        operand.floatWidth = width;
+      }
+
+      return spec;
+    };
+
+    auto integerVariant = [](FixtureSpec spec, unsigned width) {
+      for (auto &operand : spec.operands) {
+        operand.isFloat = false;
+        operand.integerWidth = width;
+      }
+
+      return spec;
+    };
+
+    GuardedMacSemantics strict;
+
+    GuardedMacSemantics mirrored;
+    mirrored.aIsLeftFactor = false;
+    mirrored.accumulatorIsLeftAddend = false;
+
+    FixtureSpec sharedMac = skewSpec;
+    sharedMac.sharedAB = true;
+    sharedMac.operands[1] = OperandSpec{swapRows, zero2, {5, 4}};
+
+    FixtureSpec triangleMac = skewSpec;
+    triangleMac.extraInequalities = {
+        {{BigInt(-1), BigInt(1)}, BigInt(0)}};
+
+    // Identity accesses under swapped loops: every element
+    // receives one update from the A, B and C values at the
+    // same linear position, so per-position data tables
+    // describe each result directly.
+
+    FixtureSpec identityAccess{
+        swapT, unitBox2, unitBox2,
+        {OperandSpec{identityRows, zero2, {4, 4}},
+         OperandSpec{identityRows, zero2, {4, 4}},
+         OperandSpec{identityRows, zero2, {4, 4}}},
+        false, false};
+
+    // Positive scenarios.
+
+    if (verify(runMac("i64 unimodular", {skewSpec, strict}, 28, 16, false),
+               "3b3 i64 MAC under the unimodular skew matches the"
+               " source-order reference"))
+      return 1;
+
+    if (verify(runMac("f32 unimodular", {floatVariant(skewSpec, 32), strict},
+                      28, 16, true),
+               "3b3 f32 MAC under the unimodular skew matches the"
+               " source-order reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("f64 unimodular", {floatVariant(skewSpec, 64), strict},
+                      28, 16, true),
+               "3b3 f64 MAC under the unimodular skew matches the"
+               " source-order reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("i32 wrapping", {integerVariant(skewSpec, 32), strict},
+                      28, 16, false),
+               "3b3 i32 MAC wraps exactly like the source-order"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("f32 mirrored order",
+                      {floatVariant(skewSpec, 32), mirrored}, 28, 16, true),
+               "3b3 f32 MAC with mirrored operand order matches the"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("f32 rounding",
+                      {floatVariant(identityAccess, 32), strict,
+                       MacData::Rounding},
+                      16, 16, false),
+               "3b3 f32 MAC rounds each operation once (inexact"
+               " products, ties to even) like the software reference"))
+      return 1;
+
+    if (verify(runMac("f64 rounding",
+                      {floatVariant(identityAccess, 64), strict,
+                       MacData::Rounding},
+                      16, 16, false),
+               "3b3 f64 MAC rounds each operation once (inexact"
+               " products, ties to even) like the software reference"))
+      return 1;
+
+    if (verify(runMac("f32 special values",
+                      {floatVariant(identityAccess, 32), strict,
+                       MacData::Special},
+                      16, 16, false),
+               "3b3 f32 MAC with signed zeros, infinities, overflow,"
+               " subnormal rounding and NaNs matches the software"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("f64 special values",
+                      {floatVariant(identityAccess, 64), strict,
+                       MacData::Special},
+                      16, 16, false),
+               "3b3 f64 MAC with signed zeros, infinities, overflow,"
+               " subnormal rounding and NaNs matches the software"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("i64 shared A/B", {sharedMac, strict}, 28, 16, false),
+               "3b3 i64 MAC with a shared A/B memref matches the"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("f32 non-unimodular",
+                      {floatVariant(stretchSpec, 32), strict}, 28, 16, true),
+               "3b3 f32 MAC under the non-unimodular stretch matches"
+               " the reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("i64 non-unimodular", {stretchSpec, strict}, 28, 16,
+                      false),
+               "3b3 i64 MAC under the non-unimodular stretch matches"
+               " the reference"))
+      return 1;
+
+    if (verify(runMac("f32 swap injective",
+                      {floatVariant(swapInjectiveSpec, 32), strict},
+                      16, 16, false),
+               "3b3 f32 MAC over reordered injective outputs matches"
+               " the reference"))
+      return 1;
+
+    if (verify(runMac("i64 dense unimodular", {denseUnimodularSpec, strict},
+                      400, 16, false),
+               "3b3 i64 MAC under the unit-pivot-free map matches the"
+               " reference"))
+      return 1;
+
+    if (verify(runMac("f32 negative coordinates",
+                      {floatVariant(negativeSpec, 32), strict}, 28, 16, true),
+               "3b3 f32 MAC with negative coordinates matches the"
+               " reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("f32 sheared stretch",
+                      {floatVariant(shearedStretchSpec, 32), strict},
+                      40, 16, true),
+               "3b3 f32 MAC under the non-diagonal non-unimodular map"
+               " matches the reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("f32 three-dimensional",
+                      {floatVariant(threeDimSpec, 32), strict}, 112, 64,
+                      true),
+               "3b3 f32 MAC over the three-loop nest matches the"
+               " reference bit for bit"))
+      return 1;
+
+    if (verify(runMac("f32 triangle", {floatVariant(triangleMac, 32), strict},
+                      28, 10, true),
+               "3b3 f32 MAC over the non-box source domain matches the"
+               " reference bit for bit"))
+      return 1;
+
+    // Negative scenarios: each refusal leaves the then block
+    // unchanged (no multiply, add or store) and a verifying
+    // module.
+
+    auto expectMacRefused =
+        [&](const char *name, const FixtureSpec &spec,
+            const GuardedMacSemantics &semantics,
+            std::function<void(Fixture &, EmittedGuardedMemoryLoads &,
+                               GuardedMemoryOperand &)>
+                mutate) -> bool {
+      Fixture f;
+
+      if (!buildFixture(f, spec)) {
+        std::cerr << "3b3 " << name << ": fixture failed\n";
+        return false;
+      }
+
+      auto loads = emitGuardedMemoryLoads(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2]);
+
+      if (!loads) {
+        std::cerr << "3b3 " << name << ": loads refused\n";
+        return false;
+      }
+
+      EmittedGuardedMemoryLoads handles = *loads;
+      GuardedMemoryOperand cOperand = f.operands[2];
+
+      if (mutate)
+        mutate(f, handles, cOperand);
+
+      const auto before = countOps(f.thenBlock);
+
+      auto emitted = emitGuardedMultiplyAccumulate(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], cOperand, handles, semantics);
+
+      if (emitted || countOps(f.thenBlock) != before ||
+          failed(mlir::verify(f.module))) {
+        std::cerr << "3b3 " << name << ": not refused\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    if (verify(expectMacRefused("i1", integerVariant(baseSpec, 1), strict,
+                                nullptr),
+               "3b3 unsupported element type i1 refused"))
+      return 1;
+
+    if (verify(expectMacRefused("f16", floatVariant(baseSpec, 16), strict,
+                                nullptr),
+               "3b3 unsupported element type f16 refused"))
+      return 1;
+
+    {
+      GuardedMacSemantics contracting;
+      contracting.fastMath = arith::FastMathFlags::contract;
+
+      if (verify(expectMacRefused("fast-math", floatVariant(baseSpec, 32),
+                                  contracting, nullptr),
+                 "3b3 fast-math flags on the source refused"))
+        return 1;
+
+      GuardedMacSemantics noSignedWrap;
+      noSignedWrap.integerOverflow = arith::IntegerOverflowFlags::nsw;
+
+      if (verify(expectMacRefused("overflow-flags", baseSpec, noSignedWrap,
+                                  nullptr),
+                 "3b3 integer overflow flags on the source refused"))
+        return 1;
+
+      GuardedMacSemantics directed;
+      directed.roundingMode = arith::RoundingMode::upward;
+
+      if (verify(expectMacRefused("rounding-mode", floatVariant(baseSpec, 32),
+                                  directed, nullptr),
+                 "3b3 rounding-mode attribute on the source refused"))
+        return 1;
+    }
+
+    // Invalid operand type: a load of another buffer with
+    // another element type in place of the A load.
+
+    if (verify(expectMacRefused(
+                   "operand-type", baseSpec, strict,
+                   [](Fixture &f, EmittedGuardedMemoryLoads &handles,
+                      GuardedMemoryOperand &) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(f.guarded->outermost);
+                     Value other = memref::AllocaOp::create(
+                         f.builder, f.loc,
+                         MemRefType::get({5, 4}, f.builder.getI32Type()));
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     memref::LoadOp replaced = handles.loadA;
+                     handles.loadA = memref::LoadOp::create(
+                         f.builder, f.loc, other, handles.indicesA);
+                     replaced->erase(); // isolate the type check
+                   }),
+               "3b3 load of another element type refused"))
+      return 1;
+
+    // Invalid SSA dominance: the C load inside a nested
+    // region does not dominate the statement.
+
+    if (verify(expectMacRefused(
+                   "dominance", baseSpec, strict,
+                   [](Fixture &f, EmittedGuardedMemoryLoads &handles,
+                      GuardedMemoryOperand &cOperand) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     Value truth = arith::ConstantIntOp::create(
+                         f.builder, f.loc, 1, 1);
+                     auto nested = scf::IfOp::create(
+                         f.builder, f.loc, TypeRange{}, truth, false);
+                     f.builder.setInsertionPointToStart(
+                         &nested.getThenRegion().front());
+                     memref::LoadOp replaced = handles.loadC;
+                     handles.loadC = memref::LoadOp::create(
+                         f.builder, f.loc, cOperand.memref,
+                         handles.indicesC);
+                     replaced->erase(); // isolate the block check
+                   }),
+               "3b3 load that does not dominate the statement refused"))
+      return 1;
+
+    // Rejected memory access: the C operand claims another
+    // access than the one its SSA computes.
+
+    if (verify(expectMacRefused(
+                   "memory-access", baseSpec, strict,
+                   [](Fixture &, EmittedGuardedMemoryLoads &,
+                      GuardedMemoryOperand &cOperand) {
+                     cOperand.accessOffsets = {BigInt(1)};
+                   }),
+               "3b3 inconsistent C access refused"))
+      return 1;
+
+    // Tampered handles.
+
+    if (verify(expectMacRefused(
+                   "tampered-handles", baseSpec, strict,
+                   [](Fixture &, EmittedGuardedMemoryLoads &handles,
+                      GuardedMemoryOperand &) {
+                     memref::LoadOp replaced = handles.loadC;
+                     handles.loadC = handles.loadA;
+                     replaced->erase(); // isolate the memref check
+                   }),
+               "3b3 tampered loads struct refused"))
+      return 1;
+
+    // Reversed reduction order: with loads forged for the
+    // colliding access C'[x0 + x1] under swapped loops, the
+    // MAC emitter itself refuses the statement.
+
+    if (verify(expectMacRefused(
+                   "reversed-order", swapInjectiveSpec, strict,
+                   [](Fixture &f, EmittedGuardedMemoryLoads &handles,
+                      GuardedMemoryOperand &cOperand) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(f.guarded->outermost);
+                     Value other = memref::AllocaOp::create(
+                         f.builder, f.loc,
+                         MemRefType::get({7}, f.builder.getI64Type()));
+                     const std::vector<std::vector<BigInt>> rows =
+                         {{BigInt(1), BigInt(1)}};
+                     const std::vector<BigInt> offsets = {BigInt(0)};
+                     auto access = emitSourceAffineAccess(
+                         f.builder, f.loc, f.map, f.plan->bounds,
+                         *f.guarded, *f.recovered, rows, offsets);
+                     if (!access)
+                       return;
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     Value index = arith::IndexCastOp::create(
+                         f.builder, f.loc, f.builder.getIndexType(),
+                         access->indices[0]);
+                     memref::LoadOp forged = memref::LoadOp::create(
+                         f.builder, f.loc, other, ValueRange{index});
+                     handles.loadC->erase();
+                     handles.loadC = forged;
+                     handles.indicesC = {index};
+                     cOperand = GuardedMemoryOperand{other, rows, offsets,
+                                                     *access};
+                   }),
+               "3b3 reversed reduction order refused by the MAC emitter"))
+      return 1;
   }
 
   std::cout << "All coordinate relation tests passed.\n";

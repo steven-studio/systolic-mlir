@@ -19,6 +19,14 @@
 //   scf.if
 //   scf.yield
 //   memref.load / memref.store (only with a memory model)
+//   arith.mulf / arith.addf on f32 and f64 (Phase 3b-3:
+//     strict IEEE 754, one rounding per operation)
+//   arith.addi / arith.muli on integers narrower than 64
+//     bits wrap to their width (Phase 3b-3); 64-bit
+//     integer arithmetic stays checked; overflow flags,
+//     fast-math flags and rounding-mode attributes are
+//     refused; other integer operations on types narrower
+//     than 64 bits (except i1 logic) are refused
 //
 // Unsupported operations cause failure.
 //
@@ -35,6 +43,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -74,7 +83,14 @@ struct ExecutionResult {
 
 struct MemoryBuffer {
   std::vector<std::int64_t> shape;
+
+  // Integer elements (any width up to 64, sign extended).
   std::vector<std::int64_t> data;
+
+  // Phase 3b-3: f32 / f64 elements. An f32 element is a
+  // double holding an exactly representable float.
+  bool isFloat = false;
+  std::vector<double> floatData;
 };
 
 struct MemoryEvent {
@@ -82,6 +98,10 @@ struct MemoryEvent {
   mlir::Value memref;
   Point indices;
   std::int64_t value = 0;
+
+  // Phase 3b-3: set for float elements.
+  bool isFloat = false;
+  double floatValue = 0.0;
 };
 
 struct MemoryState {
@@ -117,6 +137,11 @@ interpretGuardedLoopNest(
     return std::nullopt;
 
   llvm::DenseMap<Value, std::int64_t> values;
+
+  // Phase 3b-3: f32 values are stored as exactly
+  // representable doubles; f64 values as themselves.
+  llvm::DenseMap<Value, double> floatValues;
+
   ExecutionResult result;
   bool valid = true;
 
@@ -139,6 +164,30 @@ interpretGuardedLoopNest(
     if (it == values.end())
       return std::nullopt;
     return it->second;
+  };
+
+  auto lookupFloat = [&](Value value)
+      -> std::optional<double> {
+    auto it = floatValues.find(value);
+    if (it == floatValues.end())
+      return std::nullopt;
+    return it->second;
+  };
+
+  // Two's complement wrap of an exact result to `width`
+  // bits (Phase 3b-3: integers narrower than 64 bits).
+  auto wrapToWidth = [](__int128 exact, unsigned width)
+      -> std::int64_t {
+    if (width < 1 || width > 63)
+      return 0; // never reached: callers only pass 2..63
+
+    const __int128 modulus = static_cast<__int128>(1) << width;
+    __int128 remainder = exact % modulus;
+    if (remainder < 0)
+      remainder += modulus;
+    if (remainder >= modulus / 2)
+      remainder -= modulus;
+    return static_cast<std::int64_t>(remainder);
   };
 
   std::function<void(Block &)> executeBlock;
@@ -211,6 +260,20 @@ interpretGuardedLoopNest(
       return;
 
     if (auto constant = dyn_cast<arith::ConstantOp>(&op)) {
+      if (auto floatAttribute =
+              dyn_cast<FloatAttr>(constant.getValue())) {
+        Type type = constant.getResult().getType();
+
+        if (!type.isF32() && !type.isF64()) {
+          valid = false;
+          return;
+        }
+
+        floatValues[constant.getResult()] =
+            floatAttribute.getValueAsDouble();
+        return;
+      }
+
       auto attribute =
           dyn_cast<IntegerAttr>(constant.getValue());
 
@@ -393,13 +456,34 @@ interpretGuardedLoopNest(
       auto type = dyn_cast<MemRefType>(memref.getType());
 
       if (!type || !type.hasStaticShape() ||
-          !type.getElementType().isInteger(64) ||
           type.getShape() !=
               llvm::ArrayRef<std::int64_t>(buffer.shape) ||
           indices.size() != buffer.shape.size()) {
         valid = false;
         return;
       }
+
+      // Element type: integers up to 64 bits in `data`,
+      // f32 / f64 in `floatData`.
+
+      Type elementType = type.getElementType();
+
+      const bool floatElement =
+          elementType.isF32() || elementType.isF64();
+
+      const bool integerElement =
+          elementType.isSignlessInteger() &&
+          elementType.getIntOrFloatBitWidth() <= 64;
+
+      if (!(floatElement || integerElement) ||
+          buffer.isFloat != floatElement) {
+        valid = false;
+        return;
+      }
+
+      const std::size_t elementCount =
+          floatElement ? buffer.floatData.size()
+                       : buffer.data.size();
 
       Point point;
       point.reserve(indices.size());
@@ -420,7 +504,7 @@ interpretGuardedLoopNest(
         // The running extent never exceeds the buffer
         // size, so neither product below can overflow.
 
-        if (extent > static_cast<__int128>(buffer.data.size()) /
+        if (extent > static_cast<__int128>(elementCount) /
                          buffer.shape[d]) {
           valid = false;
           return;
@@ -431,13 +515,49 @@ interpretGuardedLoopNest(
         extent *= buffer.shape[d];
       }
 
-      if (extent != static_cast<__int128>(buffer.data.size()) ||
+      if (extent != static_cast<__int128>(elementCount) ||
           linear < 0 || linear >= extent) {
         valid = false;
         return;
       }
 
       const std::size_t offset = static_cast<std::size_t>(linear);
+
+      // An f32 element must be an exactly representable
+      // float (NaN excepted).
+
+      auto exactForWidth = [&](double value) {
+        return !elementType.isF32() || std::isnan(value) ||
+               static_cast<double>(static_cast<float>(value)) == value;
+      };
+
+      if (floatElement) {
+        if (load) {
+          const double loaded = buffer.floatData[offset];
+
+          if (!exactForWidth(loaded)) {
+            valid = false;
+            return;
+          }
+
+          floatValues[load.getResult()] = loaded;
+          memory->trace.push_back(
+              {false, memref, std::move(point), 0, true, loaded});
+          return;
+        }
+
+        auto stored = lookupFloat(store.getValue());
+
+        if (!stored || !exactForWidth(*stored)) {
+          valid = false;
+          return;
+        }
+
+        buffer.floatData[offset] = *stored;
+        memory->trace.push_back(
+            {true, memref, std::move(point), 0, true, *stored});
+        return;
+      }
 
       if (load) {
         const std::int64_t loaded = buffer.data[offset];
@@ -463,6 +583,55 @@ interpretGuardedLoopNest(
     if (op.getNumOperands() == 2 &&
         op.getNumResults() == 1) {
 
+      Type resultType = op.getResult(0).getType();
+
+      // Phase 3b-3: strict IEEE 754 multiplication and
+      // addition. Each operation rounds once; volatile
+      // temporaries keep the compiler from contracting.
+
+      if (resultType.isF32() || resultType.isF64()) {
+        auto floatLhs = lookupFloat(op.getOperand(0));
+        auto floatRhs = lookupFloat(op.getOperand(1));
+
+        const bool multiply = isa<arith::MulFOp>(&op);
+        const bool add = isa<arith::AddFOp>(&op);
+
+        if (!floatLhs || !floatRhs || !(multiply || add)) {
+          valid = false;
+          return;
+        }
+
+        arith::FastMathFlags flags =
+            multiply ? cast<arith::MulFOp>(&op).getFastmath()
+                     : cast<arith::AddFOp>(&op).getFastmath();
+
+        const bool roundingMode =
+            multiply ? cast<arith::MulFOp>(&op).getRoundingmode().has_value()
+                     : cast<arith::AddFOp>(&op).getRoundingmode().has_value();
+
+        if (flags != arith::FastMathFlags::none || roundingMode) {
+          valid = false;
+          return;
+        }
+
+        double rounded = 0.0;
+
+        if (resultType.isF32()) {
+          volatile float left = static_cast<float>(*floatLhs);
+          volatile float right = static_cast<float>(*floatRhs);
+          volatile float out = multiply ? left * right : left + right;
+          rounded = static_cast<double>(out);
+        } else {
+          volatile double left = *floatLhs;
+          volatile double right = *floatRhs;
+          volatile double out = multiply ? left * right : left + right;
+          rounded = out;
+        }
+
+        floatValues[op.getResult(0)] = rounded;
+        return;
+      }
+
       auto lhs = lookup(op.getOperand(0));
       auto rhs = lookup(op.getOperand(1));
 
@@ -473,7 +642,51 @@ interpretGuardedLoopNest(
 
       std::optional<std::int64_t> output;
 
-      if (isa<arith::AddIOp>(&op)) {
+      // Phase 3b-3: addi / muli on integers narrower than
+      // 64 bits wrap to their width; 64-bit results stay
+      // checked.
+
+      if (auto addi = dyn_cast<arith::AddIOp>(&op);
+          addi && addi.getOverflowFlags() !=
+                      arith::IntegerOverflowFlags::none) {
+        valid = false;
+        return;
+      }
+
+      if (auto muli = dyn_cast<arith::MulIOp>(&op);
+          muli && muli.getOverflowFlags() !=
+                      arith::IntegerOverflowFlags::none) {
+        valid = false;
+        return;
+      }
+
+      auto narrowType = dyn_cast<IntegerType>(resultType);
+
+      const bool narrowResult =
+          narrowType && narrowType.getWidth() > 1 &&
+          narrowType.getWidth() < 64;
+
+      // Only addi / muli are modelled on narrow integers.
+
+      if (narrowResult &&
+          !isa<arith::AddIOp, arith::MulIOp>(&op)) {
+        valid = false;
+        return;
+      }
+
+      const bool narrow =
+          narrowResult && narrowType.isSignless() &&
+          isa<arith::AddIOp, arith::MulIOp>(&op);
+
+      if (narrow) {
+        const __int128 exact =
+            isa<arith::AddIOp>(&op)
+                ? static_cast<__int128>(*lhs) + *rhs
+                : static_cast<__int128>(*lhs) * *rhs;
+
+        output = wrapToWidth(exact, narrowType.getWidth());
+
+      } else if (isa<arith::AddIOp>(&op)) {
         output = checked(
             static_cast<__int128>(*lhs) + *rhs);
 
