@@ -5,7 +5,10 @@
 // Test-only interpreter for the generated MLIR subset.
 //
 // Supported:
-//   affine.for with constant bounds
+//   affine.for with constant bounds, or with affine-map
+//     bounds over interpreted operands (Phase 3b-4)
+//   affine.load / affine.store (Phase 3b-4, only with a
+//     memory model; the map is evaluated exactly)
 //   affine.yield
 //   arith.constant
 //   arith.index_cast
@@ -36,6 +39,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -43,6 +48,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -122,7 +128,10 @@ interpretGuardedLoopNest(
 
   using namespace mlir;
 
-  if (!outermost || !guardedIf || logicalIVs.empty())
+  // Phase 3b-4: with no guard, a plain nest is executed
+  // and only its memory model is observed.
+
+  if (!outermost || (guardedIf && logicalIVs.empty()))
     return std::nullopt;
 
   const bool observingAccesses =
@@ -190,6 +199,106 @@ interpretGuardedLoopNest(
     return static_cast<std::int64_t>(remainder);
   };
 
+  // Phase 3b-4: exact evaluation of an affine map on
+  // interpreted operand values (dims first, then symbols).
+
+  std::function<std::optional<std::int64_t>(
+      AffineExpr, llvm::ArrayRef<std::int64_t>, unsigned)>
+      evaluateExpr;
+
+  evaluateExpr = [&](AffineExpr expr, llvm::ArrayRef<std::int64_t> operands,
+                     unsigned numDims) -> std::optional<std::int64_t> {
+    if (auto constant = dyn_cast<AffineConstantExpr>(expr))
+      return constant.getValue();
+
+    if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+      if (dim.getPosition() >= numDims)
+        return std::nullopt;
+      return operands[dim.getPosition()];
+    }
+
+    if (auto symbol = dyn_cast<AffineSymbolExpr>(expr)) {
+      const std::size_t position = numDims + symbol.getPosition();
+      if (position >= operands.size())
+        return std::nullopt;
+      return operands[position];
+    }
+
+    auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+
+    if (!binary)
+      return std::nullopt;
+
+    auto lhs = evaluateExpr(binary.getLHS(), operands, numDims);
+    auto rhs = evaluateExpr(binary.getRHS(), operands, numDims);
+
+    if (!lhs || !rhs)
+      return std::nullopt;
+
+    const __int128 a = *lhs;
+    const __int128 b = *rhs;
+
+    switch (expr.getKind()) {
+    case AffineExprKind::Add:
+      return checked(a + b);
+    case AffineExprKind::Mul:
+      return checked(a * b);
+    case AffineExprKind::FloorDiv: {
+      if (b <= 0)
+        return std::nullopt;
+      __int128 q = a / b;
+      if (a % b != 0 && a < 0)
+        --q;
+      return checked(q);
+    }
+    case AffineExprKind::CeilDiv: {
+      if (b <= 0)
+        return std::nullopt;
+      __int128 q = a / b;
+      if (a % b != 0 && a > 0)
+        ++q;
+      return checked(q);
+    }
+    case AffineExprKind::Mod: {
+      if (b <= 0)
+        return std::nullopt;
+      __int128 r = a % b;
+      if (r < 0)
+        r += b;
+      return checked(r);
+    }
+    default:
+      return std::nullopt;
+    }
+  };
+
+  auto evaluateMap = [&](AffineMap map, ValueRange mapOperands)
+      -> std::optional<std::vector<std::int64_t>> {
+    if (map.getNumInputs() != mapOperands.size())
+      return std::nullopt;
+
+    std::vector<std::int64_t> operands;
+    operands.reserve(mapOperands.size());
+
+    for (Value operand : mapOperands) {
+      auto value = lookup(operand);
+      if (!value)
+        return std::nullopt;
+      operands.push_back(*value);
+    }
+
+    std::vector<std::int64_t> results;
+
+    for (AffineExpr expr : map.getResults()) {
+      auto value = evaluateExpr(expr, operands, map.getNumDims());
+      if (!value)
+        return std::nullopt;
+      results.push_back(*value);
+    }
+
+    return results;
+  };
+
   std::function<void(Block &)> executeBlock;
   std::function<void(Operation &)> executeOp;
 
@@ -206,13 +315,33 @@ interpretGuardedLoopNest(
       return;
 
     if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
-      if (!loop.hasConstantBounds()) {
-        valid = false;
-        return;
+      std::int64_t lower = 0;
+      std::int64_t upper = 0;
+
+      if (loop.hasConstantBounds()) {
+        lower = loop.getConstantLowerBound();
+        upper = loop.getConstantUpperBound();
+      } else {
+        // affine.for: the lower bound is the maximum of its
+        // map's results, the upper bound the minimum.
+
+        auto lowerResults = evaluateMap(loop.getLowerBoundMap(),
+                                        loop.getLowerBoundOperands());
+        auto upperResults = evaluateMap(loop.getUpperBoundMap(),
+                                        loop.getUpperBoundOperands());
+
+        if (!lowerResults || !upperResults ||
+            lowerResults->empty() || upperResults->empty()) {
+          valid = false;
+          return;
+        }
+
+        lower = *std::max_element(lowerResults->begin(),
+                                  lowerResults->end());
+        upper = *std::min_element(upperResults->begin(),
+                                  upperResults->end());
       }
 
-      const std::int64_t lower = loop.getConstantLowerBound();
-      const std::int64_t upper = loop.getConstantUpperBound();
       const llvm::APInt stepValue = loop.getStep();
 
       if (!stepValue.isSignedIntN(64)) {
@@ -427,7 +556,8 @@ interpretGuardedLoopNest(
       return;
     }
 
-    if (isa<memref::LoadOp, memref::StoreOp>(&op)) {
+    if (isa<memref::LoadOp, memref::StoreOp, affine::AffineLoadOp,
+            affine::AffineStoreOp>(&op)) {
 
       // Memory operations are interpreted only against
       // an explicit memory model.
@@ -437,12 +567,59 @@ interpretGuardedLoopNest(
         return;
       }
 
-      auto load = dyn_cast<memref::LoadOp>(&op);
-      auto store = dyn_cast<memref::StoreOp>(&op);
+      Value memref;
+      std::vector<std::int64_t> indexValues;
+      bool isLoad = false;
+      Value storedValue;
+      Value loadedResult;
 
-      Value memref = load ? load.getMemRef() : store.getMemRef();
-      ValueRange indices =
-          load ? load.getIndices() : store.getIndices();
+      if (auto load = dyn_cast<memref::LoadOp>(&op)) {
+        memref = load.getMemRef();
+        isLoad = true;
+        loadedResult = load.getResult();
+        for (Value index : load.getIndices()) {
+          auto coordinate = lookup(index);
+          if (!coordinate) {
+            valid = false;
+            return;
+          }
+          indexValues.push_back(*coordinate);
+        }
+      } else if (auto store = dyn_cast<memref::StoreOp>(&op)) {
+        memref = store.getMemRef();
+        storedValue = store.getValue();
+        for (Value index : store.getIndices()) {
+          auto coordinate = lookup(index);
+          if (!coordinate) {
+            valid = false;
+            return;
+          }
+          indexValues.push_back(*coordinate);
+        }
+      } else if (auto load = dyn_cast<affine::AffineLoadOp>(&op)) {
+        // Phase 3b-4: the source nest's own accesses.
+        memref = load.getMemRef();
+        isLoad = true;
+        loadedResult = load.getResult();
+        auto evaluated =
+            evaluateMap(load.getAffineMap(), load.getMapOperands());
+        if (!evaluated) {
+          valid = false;
+          return;
+        }
+        indexValues = std::move(*evaluated);
+      } else {
+        auto store = cast<affine::AffineStoreOp>(&op);
+        memref = store.getMemRef();
+        storedValue = store.getValueToStore();
+        auto evaluated =
+            evaluateMap(store.getAffineMap(), store.getMapOperands());
+        if (!evaluated) {
+          valid = false;
+          return;
+        }
+        indexValues = std::move(*evaluated);
+      }
 
       auto bufferIt = memory->buffers.find(memref);
 
@@ -458,7 +635,7 @@ interpretGuardedLoopNest(
       if (!type || !type.hasStaticShape() ||
           type.getShape() !=
               llvm::ArrayRef<std::int64_t>(buffer.shape) ||
-          indices.size() != buffer.shape.size()) {
+          indexValues.size() != buffer.shape.size()) {
         valid = false;
         return;
       }
@@ -486,16 +663,15 @@ interpretGuardedLoopNest(
                        : buffer.data.size();
 
       Point point;
-      point.reserve(indices.size());
+      point.reserve(indexValues.size());
 
       __int128 linear = 0;
       __int128 extent = 1;
 
       for (std::size_t d = 0; d < buffer.shape.size(); ++d) {
-        auto coordinate = lookup(indices[d]);
+        const std::int64_t coordinate = indexValues[d];
 
-        if (!coordinate || *coordinate < 0 ||
-            *coordinate >= buffer.shape[d] ||
+        if (coordinate < 0 || coordinate >= buffer.shape[d] ||
             buffer.shape[d] <= 0) {
           valid = false;
           return;
@@ -510,8 +686,8 @@ interpretGuardedLoopNest(
           return;
         }
 
-        point.push_back(*coordinate);
-        linear = linear * buffer.shape[d] + *coordinate;
+        point.push_back(coordinate);
+        linear = linear * buffer.shape[d] + coordinate;
         extent *= buffer.shape[d];
       }
 
@@ -532,7 +708,7 @@ interpretGuardedLoopNest(
       };
 
       if (floatElement) {
-        if (load) {
+        if (isLoad) {
           const double loaded = buffer.floatData[offset];
 
           if (!exactForWidth(loaded)) {
@@ -540,13 +716,13 @@ interpretGuardedLoopNest(
             return;
           }
 
-          floatValues[load.getResult()] = loaded;
+          floatValues[loadedResult] = loaded;
           memory->trace.push_back(
               {false, memref, std::move(point), 0, true, loaded});
           return;
         }
 
-        auto stored = lookupFloat(store.getValue());
+        auto stored = lookupFloat(storedValue);
 
         if (!stored || !exactForWidth(*stored)) {
           valid = false;
@@ -559,15 +735,15 @@ interpretGuardedLoopNest(
         return;
       }
 
-      if (load) {
+      if (isLoad) {
         const std::int64_t loaded = buffer.data[offset];
-        values[load.getResult()] = loaded;
+        values[loadedResult] = loaded;
         memory->trace.push_back(
             {false, memref, std::move(point), loaded});
         return;
       }
 
-      auto stored = lookup(store.getValue());
+      auto stored = lookup(storedValue);
 
       if (!stored) {
         valid = false;

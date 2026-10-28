@@ -1000,10 +1000,24 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
 
     // Analysis succeeds; executable lowering is still unsupported.
     // Keep the exact relation rather than communicating success via 'why'.
-    return SymbolicRankPartitionAnalysis(
+    SymbolicRankPartitionAnalysis analysis(
         report.str(), std::move(*symbolicRelation),
         std::move(orderedConflicts->feasibleBranches),
         orderedConflicts->emptyBranches, reductionDecision);
+
+    // Phase 5.4.3d-3b-4: hand the verified statement to the guarded
+    // emitters. Every field is the object this analysis already built.
+    RecognizedMacStatement statement(*coordinateMap, symbolicSource);
+    statement.loops = out.loops;
+    statement.loads = out.loads;
+    statement.store = out.store;
+    statement.multiply = out.multiply;
+    statement.add = out.add;
+    statement.accessRows = rows;
+    statement.accessOffsets = out.accessOffsets;
+    analysis.statement = std::move(statement);
+
+    return analysis;
 
   }
 }

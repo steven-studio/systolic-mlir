@@ -8,6 +8,7 @@
 #include "mlir/Analysis/Presburger/PresburgerRelation.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace mlir::systolic {
@@ -155,11 +156,39 @@ struct GeneralAffineMatmul {
   SmallVector<SmallVector<unsigned>> fibers;
 };
 
+/// Phase 5.4.3d-3b-4: the recognized MAC statement, exactly as the
+/// symbolic analysis verified it, for the guarded emitters
+/// (RankPartitionRecognizedMacAdapter.h). Nothing here is recomputed: the
+/// loops are the source loops outermost first (the source iteration order),
+/// the loads and the store are the statement's operations, the access rows
+/// and offsets are the linear forms of the access maps over that loop
+/// universe, the coordinate map is the rank partition's z = T*x, and the
+/// source domain is the exact index set over [loops, locals, constant].
+struct RecognizedMacStatement {
+  SmallVector<affine::AffineForOp> loops;
+  std::array<affine::AffineLoadOp, 3> loads; // A, B, C
+  affine::AffineStoreOp store;
+  arith::MulFOp multiply;
+  arith::AddFOp add;
+  std::array<lattice::IntMatrix, 3> accessRows;
+  std::array<lattice::IntVector, 3> accessOffsets;
+  ::systolic::logical::PartitionCoordinateMap coordinateMap;
+  presburger::IntegerPolyhedron sourceDomain;
+
+  RecognizedMacStatement(::systolic::logical::PartitionCoordinateMap map,
+                         presburger::IntegerPolyhedron domain)
+      : coordinateMap(std::move(map)), sourceDomain(std::move(domain)) {}
+};
+
 /// Symbolic rank-based analysis result. This is NOT an executable lowering
 /// plan: it contains no source-point enumeration or output fibers.
 struct SymbolicRankPartitionAnalysis {
   std::string diagnostic;
   presburger::IntegerRelation sourceToLogical;
+
+  // Phase 5.4.3d-3b-4: the recognized statement (see above). Present
+  // whenever the analysis succeeds.
+  std::optional<RecognizedMacStatement> statement;
 
   // Exact nonempty ordered write-conflict relations.
   //

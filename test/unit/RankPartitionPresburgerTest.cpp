@@ -31,6 +31,10 @@
 #include "Systolic/RankPartitionSourceAccessEmission.h"
 #include "Systolic/RankPartitionGuardedMacEmission.h"
 #include "Systolic/RankPartitionGuardedMemoryEmission.h"
+#include "Systolic/RankPartitionRecognizedMacAdapter.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/OwningOpRef.h"
+#include "mlir/Parser/Parser.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -7796,6 +7800,745 @@ int main() {
                    }),
                "3b3 reversed reduction order refused by the MAC emitter"))
       return 1;
+  }
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-3b-4:
+  // Recognized GEMM to guarded MAC twin, differentially.
+  //
+  // Each scenario is a real affine GEMM nest parsed from
+  // text. The adapter recognizes it with the production
+  // recognizer and emits the complete guarded statement into
+  // a private, never-called twin function. The ORIGINAL nest
+  // and the twin are then executed separately on identical,
+  // independently initialised memory, and their final C
+  // contents, memory event multisets and per-element store
+  // sequences are compared bit for bit. The original nest's
+  // own execution is the oracle: no lowering algorithm is
+  // involved in producing the expected result.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace ::systolic::logical;
+    namespace exec = ::systolic::logical::testing;
+
+    // A GEMM nest as MLIR text. Arguments are C, A, B in that
+    // order; `loops` opens the loop nest, `closes` closes it.
+
+    struct GemmText {
+      std::string name;
+      std::string cType, aType, bType;
+      std::string loops;
+      int depth = 3;
+      std::string cIndex, aIndex, bIndex;
+      bool productFirst = false;
+      std::string flags;          // e.g. " fastmath<reassoc>"
+      std::string argumentAttrs = " {llvm.noalias}";
+      std::string element = "f32";
+      std::string prologue;       // extra ops before the nest
+      bool aIsC = false;          // A reads C's memref
+      std::string cMemref = "%C"; // the memref C is read and written through
+    };
+
+    auto gemmModule = [](const GemmText &g) {
+      std::string closes;
+      for (int i = 0; i < g.depth; ++i)
+        closes += " }";
+
+      std::string aMemref = g.aIsC ? g.cMemref : "%A";
+      std::string aType = g.aIsC ? g.cType : g.aType;
+      std::string mul = g.element == "f32" ? "arith.mulf" : "arith.muli";
+      std::string add = g.element == "f32" ? "arith.addf" : "arith.addi";
+
+      std::string text = "module {\n  func.func @" + g.name + "(%C: " +
+                         g.cType + g.argumentAttrs + ", %A: " + g.aType +
+                         g.argumentAttrs + ", %B: " + g.bType +
+                         g.argumentAttrs + ") {\n" + g.prologue + "    " +
+                         g.loops + "\n" +
+                         "      %c = affine.load " + g.cMemref + "[" +
+                         g.cIndex + "] : " + g.cType + "\n" +
+                         "      %a = affine.load " + aMemref + "[" +
+                         g.aIndex + "] : " + aType + "\n" +
+                         "      %b = affine.load %B[" + g.bIndex + "] : " +
+                         g.bType + "\n" +
+                         "      %p = " + mul + " %a, %b" + g.flags + " : " +
+                         g.element + "\n" +
+                         (g.productFirst
+                              ? "      %s = " + add + " %p, %c" + g.flags +
+                                    " : " + g.element + "\n"
+                              : "      %s = " + add + " %c, %p" + g.flags +
+                                    " : " + g.element + "\n") +
+                         "      affine.store %s, " + g.cMemref + "[" +
+                         g.cIndex + "] : " + g.cType + "\n" + "    " +
+                         closes + "\n" +
+                         "    func.return\n  }\n}\n";
+      return text;
+    };
+
+    const std::string loops3 =
+        "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+        " affine.for %k = 0 to 4 {";
+
+    // Data families (f32), per linear buffer position.
+
+    enum class TwinData { Cancellation, Rounding, Special };
+
+    auto bufferOf = [](MemRefType type, unsigned role, TwinData data) {
+      // role: 0 = A, 1 = B, 2 = C
+      exec::MemoryBuffer buffer;
+      buffer.shape.assign(type.getShape().begin(), type.getShape().end());
+      buffer.isFloat = true;
+
+      std::size_t size = 1;
+      for (int64_t extent : buffer.shape)
+        size *= static_cast<std::size_t>(extent);
+
+      const std::size_t lastExtent =
+          static_cast<std::size_t>(buffer.shape.back());
+
+      for (std::size_t linear = 0; linear < size; ++linear) {
+        double value = 0.0;
+
+        if (data == TwinData::Cancellation) {
+          // +2^24, 1, -2^24, 1 along A's last index, the one the
+          // reduction loop walks in every scenario, with B = 1:
+          // the four products of one C element cancel their
+          // large terms and keep the small ones or not depending
+          // on the order in which they are added.
+          if (role == 0) {
+            const std::size_t last = linear % lastExtent;
+            value = last % 4 == 0 ? 16777216.0
+                    : last % 4 == 2 ? -16777216.0
+                                    : 1.0;
+          } else if (role == 1) {
+            value = 1.0;
+          } else {
+            value = 0.3125 * static_cast<double>(linear + 1);
+          }
+        } else if (data == TwinData::Rounding) {
+          // Inexact products and ties.
+          const double epsilon = std::ldexp(1.0, -23);
+          if (role == 0)
+            value = linear % 2 == 0 ? 1.0 + epsilon
+                                    : 16777218.0;
+          else if (role == 1)
+            value = linear % 2 == 0 ? 1.0 - epsilon : 1.0;
+          else
+            value = linear % 2 == 0 ? -1.0 : 1.0;
+        } else {
+          const double infinity = std::numeric_limits<double>::infinity();
+          const double quietNaN = std::numeric_limits<double>::quiet_NaN();
+          switch (linear % 6) {
+          case 0:
+            value = role == 2 ? -0.0 : role == 0 ? -0.0 : 1.0;
+            break;
+          case 1:
+            value = role == 0 ? infinity : 1.0;
+            break;
+          case 2:
+            value = role == 1 ? 0.0 : role == 0 ? infinity : 1.0;
+            break;
+          case 3:
+            value = role == 0 ? 3.0e38 : role == 1 ? 4.0 : 0.0;
+            break;
+          case 4:
+            value = role == 0 ? quietNaN : 1.0;
+            break;
+          default:
+            value = role == 2 ? 0.0 : std::ldexp(1.0, -149);
+            break;
+          }
+        }
+
+        buffer.floatData.push_back(
+            static_cast<double>(static_cast<float>(value)));
+      }
+
+      return buffer;
+    };
+
+    auto canonicalBits = [](double real) -> int64_t {
+      if (std::isnan(real))
+        real = std::numeric_limits<double>::quiet_NaN();
+      int64_t bits = 0;
+      std::memcpy(&bits, &real, sizeof(bits));
+      return bits;
+    };
+
+    struct TwinEvent {
+      bool isStore;
+      unsigned role;
+      std::vector<int64_t> indices;
+      int64_t bits;
+
+      bool operator<(const TwinEvent &other) const {
+        return std::tie(role, isStore, indices, bits) <
+               std::tie(other.role, other.isStore, other.indices,
+                        other.bits);
+      }
+
+      bool operator==(const TwinEvent &other) const {
+        return role == other.role && isStore == other.isStore &&
+               indices == other.indices && bits == other.bits;
+      }
+    };
+
+    // Build a context + module from text and find the source
+    // function and its outermost loop.
+
+    struct ParsedGemm {
+      MLIRContext context;
+      OwningOpRef<ModuleOp> module;
+      func::FuncOp function;
+      affine::AffineForOp outermost;
+    };
+
+    auto parseGemm = [](ParsedGemm &parsed, const std::string &text,
+                        const std::string &name) -> bool {
+      parsed.context.loadDialect<affine::AffineDialect, arith::ArithDialect,
+                                 scf::SCFDialect, func::FuncDialect,
+                                 memref::MemRefDialect, LLVM::LLVMDialect>();
+
+      parsed.module = parseSourceString<ModuleOp>(text, &parsed.context);
+
+      if (!parsed.module)
+        return false;
+
+      parsed.function = parsed.module->lookupSymbol<func::FuncOp>(name);
+
+      if (!parsed.function)
+        return false;
+
+      for (Operation &op : parsed.function.getBody().front()) {
+        if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
+          parsed.outermost = loop;
+          break;
+        }
+      }
+
+      return static_cast<bool>(parsed.outermost);
+    };
+
+    auto moduleText = [](ModuleOp module) {
+      std::string text;
+      llvm::raw_string_ostream stream(text);
+      module.print(stream);
+      return text;
+    };
+
+    auto functionText = [](func::FuncOp function) {
+      std::string text;
+      llvm::raw_string_ostream stream(text);
+      function.print(stream);
+      return text;
+    };
+
+    // From the original nest's own trace (load C, load A,
+    // load B, store C per iteration), replay every C element's
+    // reduction forward and reversed with llvm::APFloat and
+    // report whether some element's final value depends on the
+    // order. The source loop order is what the twin must keep.
+
+    auto orderMatters = [&](const exec::MemoryState &memory,
+                            const exec::MemoryBuffer &initialC,
+                            Value cMemref) -> std::optional<bool> {
+      std::map<std::vector<int64_t>, std::vector<std::pair<double, double>>>
+          factors;
+
+      const auto &trace = memory.trace;
+
+      if (trace.size() % 4 != 0)
+        return std::nullopt;
+
+      for (std::size_t i = 0; i < trace.size(); i += 4) {
+        const auto &loadC = trace[i];
+        const auto &loadA = trace[i + 1];
+        const auto &loadB = trace[i + 2];
+        const auto &storeC = trace[i + 3];
+
+        if (loadC.isStore || loadA.isStore || loadB.isStore ||
+            !storeC.isStore || loadC.memref != cMemref ||
+            storeC.memref != cMemref || storeC.indices != loadC.indices)
+          return std::nullopt;
+
+        factors[storeC.indices].push_back(
+            {loadA.floatValue, loadB.floatValue});
+      }
+
+      auto replay = [&](const std::vector<int64_t> &indices,
+                        const std::vector<std::pair<double, double>> &pairs,
+                        bool reversed) -> std::optional<float> {
+        std::size_t linear = 0;
+        for (std::size_t d = 0; d < indices.size(); ++d) {
+          if (indices[d] < 0 || indices[d] >= initialC.shape[d])
+            return std::nullopt;
+          linear = linear * static_cast<std::size_t>(initialC.shape[d]) +
+                   static_cast<std::size_t>(indices[d]);
+        }
+
+        llvm::APFloat accumulator(
+            static_cast<float>(initialC.floatData[linear]));
+
+        const auto mode = llvm::APFloat::rmNearestTiesToEven;
+
+        for (std::size_t k = 0; k < pairs.size(); ++k) {
+          const auto &pair = pairs[reversed ? pairs.size() - 1 - k : k];
+          llvm::APFloat product(static_cast<float>(pair.first));
+          product.multiply(llvm::APFloat(static_cast<float>(pair.second)),
+                           mode);
+          accumulator.add(product, mode);
+        }
+
+        return accumulator.convertToFloat();
+      };
+
+      bool differs = false;
+
+      for (const auto &[indices, pairs] : factors) {
+        auto forward = replay(indices, pairs, false);
+        auto backward = replay(indices, pairs, true);
+
+        if (!forward || !backward)
+          return std::nullopt;
+
+        int32_t forwardBits = 0, backwardBits = 0;
+        std::memcpy(&forwardBits, &*forward, sizeof(forwardBits));
+        std::memcpy(&backwardBits, &*backward, sizeof(backwardBits));
+
+        if (forwardBits != backwardBits)
+          differs = true;
+      }
+
+      return differs;
+    };
+
+    // The differential run.
+
+    auto runTwin = [&](const GemmText &gemm, TwinData data,
+                       std::size_t expectedVisited,
+                       std::size_t expectedAccepted,
+                       bool expectOrderSensitive) -> bool {
+      const std::string label = gemm.name + "/" +
+                                (data == TwinData::Cancellation ? "cancel"
+                                 : data == TwinData::Rounding  ? "round"
+                                                               : "special");
+
+      ParsedGemm parsed;
+
+      if (!parseGemm(parsed, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b4 " << label << ": parse failed\n";
+        return false;
+      }
+
+      const std::string sourceBefore = functionText(parsed.function);
+      const std::size_t operationsBefore =
+          std::distance(parsed.module->getBody()->begin(),
+                        parsed.module->getBody()->end());
+
+      OpBuilder builder(&parsed.context);
+      std::string why;
+
+      auto twin = emitGuardedMacTwin(builder, parsed.outermost,
+                                     gemm.name + "_twin", why);
+
+      if (!twin) {
+        std::cerr << "3b4 " << label << ": " << why << "\n";
+        return false;
+      }
+
+      // Exactly one new top-level operation: the twin.
+
+      if (std::distance(parsed.module->getBody()->begin(),
+                        parsed.module->getBody()->end()) !=
+          static_cast<std::ptrdiff_t>(operationsBefore + 1)) {
+        std::cerr << "3b4 " << label << ": unexpected module change\n";
+        return false;
+      }
+
+      // The twin is private and unreferenced; the source
+      // function is byte-for-byte unchanged.
+
+      if (!twin->function || !twin->function.isPrivate() ||
+          twin->function.getName() != gemm.name + "_twin" ||
+          !twin->function.symbolKnownUseEmpty(*parsed.module) ||
+          failed(mlir::verify(*parsed.module))) {
+        std::cerr << "3b4 " << label << ": twin not isolated or invalid\n";
+        return false;
+      }
+
+      if (functionText(parsed.function) != sourceBefore) {
+        std::cerr << "3b4 " << label << ": source function changed\n";
+        return false;
+      }
+
+      if (std::getenv("RANK_PARTITION_DUMP_IR")) {
+        llvm::errs() << "3b4 " << label << " IR:\n";
+        parsed.module->print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
+      // Operand roles: the source statement's loads appear as
+      // C, A, B (the text generator's order); the twin's
+      // arguments are A, B, C.
+
+      llvm::SmallVector<Value> sourceLoads;
+      Value sourceStore;
+
+      parsed.outermost.walk([&](Operation *op) {
+        if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+          sourceLoads.push_back(load.getMemRef());
+        else if (auto store = dyn_cast<affine::AffineStoreOp>(op))
+          sourceStore = store.getMemRef();
+      });
+
+      if (sourceLoads.size() != 3 || sourceStore != sourceLoads[0]) {
+        std::cerr << "3b4 " << label << ": unexpected source statement\n";
+        return false;
+      }
+
+      std::array<Value, 3> sourceMemrefs = {sourceLoads[1], sourceLoads[2],
+                                            sourceLoads[0]};
+
+      std::array<Value, 3> twinMemrefs = {
+          twin->function.getArgument(0), twin->function.getArgument(1),
+          twin->function.getArgument(2)};
+
+      exec::MemoryState sourceMemory;
+      exec::MemoryState twinMemory;
+
+      for (unsigned role = 0; role < 3; ++role) {
+        auto type = cast<MemRefType>(sourceMemrefs[role].getType());
+        sourceMemory.buffers[sourceMemrefs[role]] =
+            bufferOf(type, role, data);
+        twinMemory.buffers[twinMemrefs[role]] = bufferOf(type, role, data);
+      }
+
+      auto sourceRun = exec::interpretGuardedLoopNest(
+          parsed.outermost, scf::IfOp(), ValueRange{}, ValueRange{},
+          ValueRange{}, ValueRange{}, ValueRange{}, &sourceMemory);
+
+      auto twinRun = exec::interpretGuardedLoopNest(
+          twin->nest.outermost, twin->nest.guardIf, twin->nest.logicalIVs,
+          twin->recovery.sourceIVs, twin->operands[0].access.indices,
+          twin->operands[1].access.indices, twin->operands[2].access.indices,
+          &twinMemory);
+
+      if (!sourceRun || !twinRun) {
+        std::cerr << "3b4 " << label << ": interpretation failed\n";
+        return false;
+      }
+
+      // The order of the source reduction must be observable in
+      // the order-sensitive family (and may be elsewhere).
+
+      if (expectOrderSensitive) {
+        auto sensitive = orderMatters(
+            sourceMemory,
+            bufferOf(cast<MemRefType>(sourceMemrefs[2].getType()), 2, data),
+            sourceMemrefs[2]);
+
+        if (!sensitive || !*sensitive) {
+          std::cerr << "3b4 " << label
+                    << ": reduction order is not observable in the"
+                       " source data\n";
+          return false;
+        }
+      }
+
+      if (twinRun->visitedPoints != expectedVisited ||
+          twinRun->acceptedPoints != expectedAccepted ||
+          twinRun->sourceCounts.size() != expectedAccepted ||
+          sourceMemory.trace.size() != 4 * expectedAccepted ||
+          twinMemory.trace.size() != 4 * expectedAccepted) {
+        std::cerr << "3b4 " << label << ": counts: visited "
+                  << twinRun->visitedPoints << " accepted "
+                  << twinRun->acceptedPoints << " source events "
+                  << sourceMemory.trace.size() << "\n";
+        return false;
+      }
+
+      // Final contents of every buffer, bit for bit.
+
+      for (unsigned role = 0; role < 3; ++role) {
+        const auto &source = sourceMemory.buffers[sourceMemrefs[role]];
+        const auto &mirror = twinMemory.buffers[twinMemrefs[role]];
+
+        if (source.floatData.size() != mirror.floatData.size())
+          return false;
+
+        for (std::size_t i = 0; i < source.floatData.size(); ++i) {
+          if (canonicalBits(source.floatData[i]) !=
+              canonicalBits(mirror.floatData[i])) {
+            std::cerr << "3b4 " << label << ": buffer " << role
+                      << " differs at " << i << "\n";
+            return false;
+          }
+        }
+      }
+
+      // Memory events: same multiset of (role, address, value)
+      // and the same per-element store sequence.
+
+      auto events = [&](const exec::MemoryState &memory,
+                        const std::array<Value, 3> &memrefs)
+          -> std::optional<std::vector<TwinEvent>> {
+        std::vector<TwinEvent> out;
+
+        for (const auto &event : memory.trace) {
+          std::optional<unsigned> role;
+
+          for (unsigned r = 0; r < 3; ++r)
+            if (event.memref == memrefs[r] && !role)
+              role = r;
+
+          if (!role || !event.isFloat)
+            return std::nullopt;
+
+          out.push_back({event.isStore, *role, event.indices,
+                         canonicalBits(event.floatValue)});
+        }
+
+        return out;
+      };
+
+      auto sourceEvents = events(sourceMemory, sourceMemrefs);
+      auto twinEvents = events(twinMemory, twinMemrefs);
+
+      if (!sourceEvents || !twinEvents)
+        return false;
+
+      auto storeSequences = [](const std::vector<TwinEvent> &trace) {
+        std::map<std::vector<int64_t>, std::vector<int64_t>> sequences;
+        for (const auto &event : trace)
+          if (event.isStore)
+            sequences[event.indices].push_back(event.bits);
+        return sequences;
+      };
+
+      if (storeSequences(*sourceEvents) != storeSequences(*twinEvents)) {
+        std::cerr << "3b4 " << label
+                  << ": per-element store order differs\n";
+        return false;
+      }
+
+      std::sort(sourceEvents->begin(), sourceEvents->end());
+      std::sort(twinEvents->begin(), twinEvents->end());
+
+      if (*sourceEvents != *twinEvents) {
+        std::cerr << "3b4 " << label << ": event multiset differs\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    // A refusal must leave the module unchanged and report
+    // UNKNOWN or REFUSED.
+
+    auto expectTwinRefused = [&](const GemmText &gemm,
+                                 const char *expectedPrefix,
+                                 const char *expectedFragment) -> bool {
+      ParsedGemm parsed;
+
+      if (!parseGemm(parsed, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b4 " << gemm.name << ": parse failed\n";
+        return false;
+      }
+
+      const std::string before = moduleText(*parsed.module);
+
+      OpBuilder builder(&parsed.context);
+      std::string why;
+
+      auto twin = emitGuardedMacTwin(builder, parsed.outermost,
+                                     gemm.name + "_twin", why);
+
+      if (twin || moduleText(*parsed.module) != before ||
+          why.rfind(expectedPrefix, 0) != 0 ||
+          why.find(expectedFragment) == std::string::npos ||
+          failed(mlir::verify(*parsed.module))) {
+        std::cerr << "3b4 " << gemm.name << ": not refused as expected: "
+                  << why << "\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    // ---- recognized nests ----
+
+    GemmText plain{"plain", "memref<4x4xf32>", "memref<4x4xf32>",
+                   "memref<4x4xf32>", loops3, 3, "%i, %j", "%i, %k",
+                   "%k, %j"};
+
+    GemmText skew{"skew", "memref<8x4xf32>", "memref<8x4xf32>",
+                  "memref<4x4xf32>", loops3, 3, "%i + %j, %j",
+                  "%i + %j, %k", "%k, %j"};
+
+    GemmText stretch{"stretch", "memref<16x4xf32>", "memref<16x4xf32>",
+                     "memref<4x4xf32>", loops3, 3, "2 * %i + %j, %j",
+                     "2 * %i + %j, %k", "%k, %j"};
+
+    GemmText stretchOffsets{"stretch_offsets", "memref<16x4xf32>",
+                            "memref<16x8xf32>", "memref<8x4xf32>", loops3, 3,
+                            "2 * %i + %j + 1, 3 - %j",
+                            "2 * %i + %j + 1, %k + 2", "%k + 2, 3 - %j",
+                            true};
+
+    GemmText reversedLoops{"reversed_loops", "memref<4x4xf32>",
+                           "memref<4x4xf32>", "memref<4x4xf32>",
+                           "affine.for %k = 0 to 4 { affine.for %i = 0 to 4 {"
+                           " affine.for %j = 0 to 4 {",
+                           3, "%i, %j", "%i, %k", "%k, %j"};
+
+    GemmText triangular{"triangular", "memref<4x4xf32>", "memref<4x4xf32>",
+                        "memref<4x4xf32>",
+                        "affine.for %i = 0 to 4 { affine.for %j = "
+                        "affine_map<(d0) -> (d0)>(%i) to 4 {"
+                        " affine.for %k = 0 to 4 {",
+                        3, "%i, %j", "%i, %k", "%k, %j"};
+
+    GemmText strideK{"stride_k", "memref<4x4xf32>", "memref<4x8xf32>",
+                     "memref<8x4xf32>", loops3, 3, "%i, %j", "%i, 2 * %k",
+                     "2 * %k, %j"};
+
+    GemmText allocated{"allocated", "memref<4x4xf32>", "memref<4x4xf32>",
+                       "memref<4x4xf32>", loops3, 3, "%i, %j", "%i, %k",
+                       "%k, %j"};
+    allocated.argumentAttrs = "";
+    allocated.prologue = "    %Cbuf = memref.alloc() : memref<4x4xf32>\n";
+    allocated.cMemref = "%Cbuf"; // A and B are plain arguments, C is fresh
+
+    struct Case {
+      GemmText gemm;
+      std::size_t visited;
+      std::size_t accepted;
+      bool orderSensitive; // the cancellation family must expose the order
+      const char *claim;
+    };
+
+    // stride_k reads A's columns 0, 2, 4, 6, where the pattern
+    // is +M, -M, +M, -M: every order cancels exactly, so the
+    // order check is not asserted for it.
+
+    const std::vector<Case> cases = {
+        {plain, 64, 64, true, "3b4 plain GEMM twin matches the source"},
+        {skew, 7 * 4 * 4, 64, true,
+         "3b4 skewed-access GEMM twin matches the source"},
+        {stretch, 10 * 4 * 4, 64, true,
+         "3b4 non-unimodular (det 2) GEMM twin matches the source"},
+        {stretchOffsets, 10 * 4 * 4, 64, true,
+         "3b4 non-unimodular GEMM with offsets, negative coefficients and"
+         " product-first addition twin matches the source"},
+        {reversedLoops, 64, 64, true,
+         "3b4 GEMM with the reduction loop outermost twin matches the"
+         " source order"},
+        {triangular, 64, 40, true,
+         "3b4 triangular (affine-bound) GEMM twin matches the source"},
+        {strideK, 64, 64, false, "3b4 strided-K GEMM twin matches the source"},
+    };
+
+    for (const Case &c : cases) {
+      for (TwinData data :
+           {TwinData::Cancellation, TwinData::Rounding, TwinData::Special}) {
+        std::string claim = c.claim;
+        claim += data == TwinData::Cancellation
+                     ? (c.orderSensitive ? " (order-sensitive data)"
+                                         : " (cancellation data)")
+                 : data == TwinData::Rounding ? " (rounding data)"
+                                              : " (special values)";
+
+        if (verify(runTwin(c.gemm, data, c.visited, c.accepted,
+                           data == TwinData::Cancellation &&
+                               c.orderSensitive),
+                   claim.c_str()))
+          return 1;
+      }
+    }
+
+    if (verify(runTwin(allocated, TwinData::Cancellation, 64, 64, true),
+               "3b4 GEMM into a fresh allocation (no llvm.noalias) twin"
+               " matches the source (order-sensitive data)"))
+      return 1;
+
+    // ---- UNKNOWN / REFUSED ----
+
+    GemmText det9{"det9", "memref<16x16xf32>", "memref<16x16xf32>",
+                  "memref<16x16xf32>", loops3, 3,
+                  "%i + %j - 2 * %k + 6, %i - 2 * %j + %k + 6",
+                  "%i + %j - 2 * %k + 6, %i + %j + %k",
+                  "%i + %j + %k, %i - 2 * %j + %k + 6"};
+
+    if (verify(expectTwinRefused(det9, "UNKNOWN:",
+                                 "more than one congruence local"),
+               "3b4 coordinate map with several congruence locals (det 9)"
+               " returns UNKNOWN"))
+      return 1;
+
+    GemmText relaxed = plain;
+    relaxed.name = "relaxed";
+    relaxed.flags = " fastmath<reassoc>";
+
+    if (verify(expectTwinRefused(relaxed, "UNKNOWN:", "fast-math flags"),
+               "3b4 fast-math flags on the source statement return UNKNOWN"))
+      return 1;
+
+    GemmText mayAlias = plain;
+    mayAlias.name = "may_alias";
+    mayAlias.argumentAttrs = "";
+
+    if (verify(expectTwinRefused(mayAlias, "UNKNOWN:", "may alias C"),
+               "3b4 arguments without llvm.noalias return UNKNOWN"))
+      return 1;
+
+    GemmText readsOutput = plain;
+    readsOutput.name = "reads_output";
+    readsOutput.aIsC = true;
+
+    if (verify(expectTwinRefused(readsOutput, "REFUSED:",
+                                 "shares its buffer with C"),
+               "3b4 A reading the C buffer is refused"))
+      return 1;
+
+    GemmText integer = plain;
+    integer.name = "integer";
+    integer.element = "i32";
+    integer.cType = integer.aType = integer.bType = "memref<4x4xi32>";
+
+    if (verify(expectTwinRefused(integer, "UNKNOWN:",
+                                 "not a recognized GEMM"),
+               "3b4 integer MAC (not recognized) returns UNKNOWN"))
+      return 1;
+
+    GemmText stepped = plain;
+    stepped.name = "stepped";
+    stepped.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                    " affine.for %k = 0 to 8 step 2 {";
+    stepped.aType = "memref<4x8xf32>";
+    stepped.bType = "memref<8x4xf32>";
+
+    if (verify(expectTwinRefused(stepped, "UNKNOWN:",
+                                 "not a recognized GEMM"),
+               "3b4 non-unit loop step (not recognized) returns UNKNOWN"))
+      return 1;
+
+    {
+      ParsedGemm parsed;
+      bool ok = parseGemm(parsed, gemmModule(plain), "plain");
+      std::string why;
+
+      if (ok) {
+        OpBuilder builder(&parsed.context);
+        ok = emitGuardedMacTwin(builder, parsed.outermost, "plain", why)
+                 .has_value() == false &&
+             why.rfind("REFUSED:", 0) == 0 &&
+             why.find("twin symbol already exists") != std::string::npos;
+      }
+
+      if (verify(ok, "3b4 twin name clashing with an existing symbol is"
+                     " refused"))
+        return 1;
+    }
   }
 
   std::cout << "All coordinate relation tests passed.\n";
