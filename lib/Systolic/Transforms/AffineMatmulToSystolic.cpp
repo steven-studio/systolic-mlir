@@ -2518,8 +2518,8 @@ struct AffineMatmulToSystolicPass
 
   Option<bool> generalAffine{
       *this, "general-affine",
-      llvm::cl::desc("Enable bounded exact subspace/fiber analysis after the dense fast path"),
-      llvm::cl::init(false)};
+      llvm::cl::desc("Internal test control for bounded exact fallback; systolic-cc enables it automatically"),
+      llvm::cl::Hidden, llvm::cl::init(false)};
 
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
@@ -3163,13 +3163,10 @@ struct AffineMatmulToSystolicPass
               << "; output fibers=" << general->fibers.size()
               << "; Presburger exact cover verified";
         }
-        bool fast = llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
-          return general->anchor == m.anchor ||
-                 general->anchor->isAncestor(m.anchor) ||
-                 m.anchor->isAncestor(general->anchor);
-        });
-        if (!fast)
-          generalMatmuls.push_back(std::move(*general));
+        // Recognition is not a successful offload plan. Keep this independent
+        // certificate until lowering chooses a path; a successful fast plan
+        // blocks overlapping general candidates before their anchors disappear.
+        generalMatmuls.push_back(std::move(*general));
       }
     }
     // A tiled nest in which a GEMM is recognized gets its decision below
@@ -3202,12 +3199,20 @@ struct AffineMatmulToSystolicPass
              countersRewritten(normalizations, outermost->anchor)});
     }
 
+    SmallVector<bool, 8> generalBlocked(generalMatmuls.size(), false);
     for (const LogicalMatmul &matmul : matmuls) {
+      SmallVector<unsigned, 4> overlaps;
+      for (unsigned i = 0; i < generalMatmuls.size(); ++i)
+        if (!generalBlocked[i] && nested(generalMatmuls[i].anchor, matmul.anchor))
+          overlaps.push_back(i);
       std::string why;
       GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
       bool hardError = false;
-      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError)))
+      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError))) {
+        for (unsigned i : overlaps)
+          generalBlocked[i] = true;
         continue;
+      }
       if (hardError) {
         signalPassFailure();
         return;
@@ -3238,7 +3243,13 @@ struct AffineMatmulToSystolicPass
         remark << " ["
                << stringifyGemmMappingClass(u.outermost->mappingClass) << "]";
     }
-    for (GeneralAffineMatmul &matmul : generalMatmuls) {
+    for (auto [i, matmul] : llvm::enumerate(generalMatmuls)) {
+      if (generalBlocked[i])
+        continue;
+      // lowerOne has not mutated a rejected nest. The general analysis proves
+      // its own exact source cover, bounds and order; lowerGeneral separately
+      // rechecks aliasing, FP permission, budgets and the dense plans. Hard
+      // compiler/planner errors above are never converted into a fallback.
       std::string why;
       if (failed(lowerGeneral(matmul, *fleet, why)))
         matmul.anchor->emitRemark()

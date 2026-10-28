@@ -230,7 +230,6 @@ typedef struct {
   long k_max_8x8, k_max_4x4;
   int verify;
   int fp_reassociation;         /* --fp-reassociation */
-  int general_affine;           /* --general-affine: bounded exact path */
   int no_reduction_batches;     /* --no-reduction-batches */
   int fp_distribute;            /* --fp-distribute */
   double verify_rtol;
@@ -1086,6 +1085,11 @@ static void add_frontend_flags(strvec *v, const options *a) {
 
 static int compile(driver *d) {
   const options *a = d->a;
+  /* Internal regression isolation only; not a public command-line switch.
+     Snapshot once so discovery/planning and final lowering cannot disagree. */
+  const char *fast_only = getenv("SYSTOLIC_CC_TEST_FAST_PATH_ONLY");
+  const char *general_affine =
+      fast_only && strcmp(fast_only, "1") == 0 ? "false" : "true";
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
   char *cfront = format("%s/systolic-cfront", a->self_dir);
   char *offload_rt = format("%s/runtime/offload", SYSTOLIC_SOURCE_DIR);
@@ -1174,13 +1178,12 @@ static int compile(driver *d) {
   if (nfns) {
     strvec c2 = argv_of(opt, fleet,
                         format("--affine-matmul-to-systolic=report=true "
-                               "cost-model=%s%s%s%s",
+                               "cost-model=%s%s%s general-affine=%s",
                                a->cost_model,
                                a->no_reduction_batches
                                    ? " reduction-batches=false"
                                    : "",
-                               a->fp_distribute ? " fp-distribute=true" : "",
-                               a->general_affine ? " general-affine=true" : ""),
+                               a->fp_distribute ? " fp-distribute=true" : "", general_affine),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
@@ -1394,10 +1397,9 @@ static int compile(driver *d) {
       return -1;
     strvec c4 = argv_of(
         opt, fleet,
-        format("--affine-matmul-to-systolic=cost-model=%s%s%s%s", a->cost_model,
+        format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s", a->cost_model,
                a->no_reduction_batches ? " reduction-batches=false" : "",
-               a->fp_distribute ? " fp-distribute=true" : "",
-               a->general_affine ? " general-affine=true" : ""),
+               a->fp_distribute ? " fp-distribute=true" : "", general_affine),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))
@@ -1506,7 +1508,7 @@ static void usage(void) {
           "[--llvm-build DIR] [--runtime soft|board] [--fpga-config FILE] "
           "[--submission auto|sync|async] [--cost-model v1|v2] "
           "[--k-max-8x8 N] [--k-max-4x4 N] [--verify] [--verify-rtol R] "
-          "[--keep-dir DIR] [--explain] [--general-affine] [--fp-reassociation] "
+          "[--keep-dir DIR] [--explain] [--fp-reassociation] "
           "[--no-reduction-batches] [--fp-distribute] [-DNAME[=VAL]] "
           "[-IDIR] [-std=STD] "
           "[-ON] FILE.c "
@@ -1592,8 +1594,6 @@ int main(int argc, char **argv) {
       explain = 1;
     } else if (strcmp(s, "--verify") == 0) {
       a.verify = 1;
-    } else if (strcmp(s, "--general-affine") == 0) {
-      a.general_affine = 1;
     } else if (strcmp(s, "--fp-reassociation") == 0) {
       a.fp_reassociation = 1;
     } else if (strcmp(s, "--reduction-batches") == 0) {

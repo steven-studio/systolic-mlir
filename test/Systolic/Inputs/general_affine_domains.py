@@ -62,7 +62,13 @@ for variant,T in enumerate(([[2,1,-1],[1,-2,1],[1,1,2]],
     positive('frame-'+str(variant),transformed,exp,64,len({c for a,b,c in exp}),64)
 _,discovery=call('discovery',base,False)
 assert 'general recognition result: success' in discovery and 'source MACs: 64; output fibers: 37' in discovery
+def dimensions(count):
+    start=base.index('    affine.for %i');end=base.index('    func.return')
+    prefix=''.join(f'    affine.for %p{d} = 0 to 1 {{\n' for d in range(count))
+    return base[:start]+prefix+base[start:end]+'    }\n'*count+base[end:]
+positive('iv-limit8',dimensions(5),expected,64,37)
 negatives={
+ 'iv-limit9':dimensions(6),
  'alias':base.replace(' {llvm.noalias}',''),
  'strict':base.replace(' fastmath<reassoc>',''),
  'bounds':base.replace('16x16xf32','8x8xf32'),

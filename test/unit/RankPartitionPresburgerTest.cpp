@@ -21,6 +21,14 @@
 #include "llvm/ADT/DenseMap.h"
 #include <iterator>
 #include <optional>
+#include "Systolic/RankPartitionLoopNestEmission.h"
+#include "Systolic/RankPartitionGuardedLoopNestEmission.h"
+#include "RankPartitionLoopExecutionTest.h"
+#include "Systolic/RankPartitionSourceIVRecoveryPlan.h"
+#include "Systolic/RankPartitionSourceIVEmission.h"
+#include "Systolic/RankPartitionLogicalDomainNormalization.h"
+#include <functional>
+#include "Systolic/RankPartitionSourceAccessEmission.h"
 using namespace systolic::logical;
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -3036,6 +3044,1902 @@ int main() {
             "two-sided existential SSA matches Presburger over 64 points"))
       return 1;
 
+  }
+
+
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-2a:
+  // Affine Loop Nest Construction.
+  //
+  // Validate real generated MLIR operations.
+  // This is not yet an execution test.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+    using namespace systolic::logical;
+
+    MLIRContext context;
+
+    context.loadDialect<
+        affine::AffineDialect,
+        func::FuncDialect>();
+
+    OpBuilder builder(&context);
+    Location loc = builder.getUnknownLoc();
+
+    // Exact triangle domain:
+    //
+    // i >= 0
+    // j >= 0
+    // i + j <= 7
+    //
+    // Candidate iteration box:
+    //
+    // 0 <= i,j <= 7
+
+    IntegerPolyhedron triangle(
+        PresburgerSpace::getSetSpace(2));
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{1, 0, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{0, 1, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{-1, -1, 7});
+
+    PresburgerSet domain(triangle);
+
+    auto plan = buildSymbolicIterationPlan(
+        domain,
+        {{0, 7}, {0, 7}});
+
+    if (verify(
+            plan.has_value(),
+            "2a triangle iteration plan constructed"))
+      return 1;
+
+    auto module = ModuleOp::create(loc);
+
+    builder.setInsertionPointToStart(
+        module.getBody());
+
+    auto functionType = builder.getFunctionType(
+        {},
+        {});
+
+    auto function = func::FuncOp::create(
+        builder,
+        loc,
+        "test_affine_loop_nest",
+        functionType);
+
+    Block *entry = function.addEntryBlock();
+
+    builder.setInsertionPointToStart(entry);
+
+    func::ReturnOp::create(
+        builder,
+        loc);
+
+    // Insert the generated loop nest before return.
+
+    builder.setInsertionPoint(
+        entry->getTerminator());
+
+    auto emitted = emitAffineLoopNest(
+        builder,
+        loc,
+        *plan);
+
+    if (verify(
+            emitted.has_value(),
+            "2a affine loop nest emitted"))
+      return 1;
+
+    if (verify(
+            emitted->logicalIVs.size() == 2 &&
+            emitted->outermost != nullptr,
+            "2a two logical induction variables"))
+      return 1;
+
+    bool correctIVTypes = true;
+
+    for (Value iv : emitted->logicalIVs) {
+      correctIVTypes &=
+          iv.getType().isIndex();
+    }
+
+    if (verify(
+            correctIVTypes,
+            "2a affine induction variables are index"))
+      return 1;
+
+    std::size_t loopCount = 0;
+
+    module.walk(
+        [&](affine::AffineForOp) {
+          ++loopCount;
+        });
+
+    if (verify(
+            loopCount == 2,
+            "2a exactly two affine loops generated"))
+      return 1;
+
+    if (verify(
+            succeeded(mlir::verify(module)),
+            "2a generated affine loop nest passes verifier"))
+      return 1;
+
+    // ------------------------------------------------------
+    // Negative test:
+    // An unsafe closed upper bound must be rejected
+    // without creating any MLIR operation.
+    // ------------------------------------------------------
+
+    IntegerPolyhedron bounded(
+        PresburgerSpace::getSetSpace(1));
+
+    bounded.addInequality(
+        llvm::SmallVector<int64_t>{1, 0});
+
+    bounded.addInequality(
+        llvm::SmallVector<int64_t>{-1, 7});
+
+    PresburgerSet boundedDomain(bounded);
+
+    SymbolicIterationPlan unsafe(
+        boundedDomain,
+        {{0, std::numeric_limits<int64_t>::max()}});
+
+    auto negativeModule = ModuleOp::create(loc);
+
+    builder.setInsertionPointToStart(
+        negativeModule.getBody());
+
+    auto negativeFunction = func::FuncOp::create(
+        builder,
+        loc,
+        "test_unsafe_affine_nest",
+        functionType);
+
+    Block *negativeEntry =
+        negativeFunction.addEntryBlock();
+
+    builder.setInsertionPointToStart(
+        negativeEntry);
+
+    func::ReturnOp::create(
+        builder,
+        loc);
+
+    builder.setInsertionPoint(
+        negativeEntry->getTerminator());
+
+    auto rejected = emitAffineLoopNest(
+        builder,
+        loc,
+        unsafe);
+
+    std::size_t negativeLoops = 0;
+
+    negativeFunction.walk(
+        [&](affine::AffineForOp) {
+          ++negativeLoops;
+        });
+
+    if (verify(
+            !rejected.has_value() &&
+            negativeLoops == 0 &&
+            succeeded(mlir::verify(negativeModule)),
+            "2a unsafe upper bound rejected without IR"))
+      return 1;
+  }
+
+
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-2b:
+  // Guarded Affine Loop Nest Integration.
+  //
+  // This tests generated MLIR structure and verification.
+  // Actual loop execution belongs to Phase 2c.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+
+    MLIRContext context;
+
+    context.loadDialect<
+        affine::AffineDialect,
+        arith::ArithDialect,
+        scf::SCFDialect,
+        func::FuncDialect>();
+
+    OpBuilder builder(&context);
+    Location loc = builder.getUnknownLoc();
+
+    IntegerPolyhedron triangle(
+        PresburgerSpace::getSetSpace(2));
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{1, 0, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{0, 1, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{-1, -1, 7});
+
+    PresburgerSet domain(triangle);
+
+    auto plan = buildSymbolicIterationPlan(
+        domain,
+        {{0, 7}, {0, 7}});
+
+    if (verify(
+            plan.has_value(),
+            "2b symbolic iteration plan constructed"))
+      return 1;
+
+    auto module = ModuleOp::create(loc);
+
+    builder.setInsertionPointToStart(
+        module.getBody());
+
+    auto functionType = builder.getFunctionType(
+        {}, {});
+
+    auto function = func::FuncOp::create(
+        builder,
+        loc,
+        "test_guarded_affine_nest",
+        functionType);
+
+    Block *entry = function.addEntryBlock();
+
+    builder.setInsertionPointToStart(entry);
+
+    func::ReturnOp::create(builder, loc);
+
+    builder.setInsertionPoint(
+        entry->getTerminator());
+
+    auto emitted = emitGuardedAffineLoopNest(
+        builder,
+        loc,
+        *plan);
+
+    if (verify(
+            emitted.has_value(),
+            "2b guarded affine loop nest emitted"))
+      return 1;
+
+    bool structure =
+        emitted->logicalIVs.size() == 2 &&
+        emitted->logicalI64IVs.size() == 2 &&
+        emitted->outermost &&
+        emitted->guardIf &&
+        emitted->predicate;
+
+    if (verify(
+            structure,
+            "2b generated loop and guard structure"))
+      return 1;
+
+    std::size_t loops = 0;
+    std::size_t ifs = 0;
+    std::size_t indexCasts = 0;
+
+    function.walk([&](affine::AffineForOp) {
+      ++loops;
+    });
+
+    function.walk([&](scf::IfOp) {
+      ++ifs;
+    });
+
+    function.walk([&](arith::IndexCastOp) {
+      ++indexCasts;
+    });
+
+    if (verify(
+            loops == 2 &&
+            ifs == 1 &&
+            indexCasts == 2,
+            "2b two affine loops and one guarded region"))
+      return 1;
+
+    bool nesting = true;
+
+    auto *innerBlock =
+        emitted->logicalIVs.back()
+            .getParentBlock();
+
+    if (!innerBlock)
+      nesting = false;
+
+    if (nesting) {
+      auto innerLoop =
+          dyn_cast<affine::AffineForOp>(
+              innerBlock->getParentOp());
+
+      nesting =
+          static_cast<bool>(innerLoop) &&
+          emitted->guardIf->getParentOp() ==
+              innerLoop.getOperation();
+    }
+
+    if (verify(
+            nesting,
+            "2b scf.if nested inside innermost affine.for"))
+      return 1;
+
+    if (verify(
+            succeeded(mlir::verify(module)),
+            "2b mixed dialect MLIR passes verifier"))
+      return 1;
+
+    // ------------------------------------------------------
+    // Negative test:
+    // An invalid plan must not generate partial IR.
+    // ------------------------------------------------------
+
+    IntegerPolyhedron bounded(
+        PresburgerSpace::getSetSpace(1));
+
+    bounded.addInequality(
+        llvm::SmallVector<int64_t>{1, 0});
+
+    bounded.addInequality(
+        llvm::SmallVector<int64_t>{-1, 7});
+
+    SymbolicIterationPlan unsafe(
+        PresburgerSet(bounded),
+        {{0, std::numeric_limits<int64_t>::max()}});
+
+    auto negativeModule = ModuleOp::create(loc);
+
+    builder.setInsertionPointToStart(
+        negativeModule.getBody());
+
+    auto negativeFunction = func::FuncOp::create(
+        builder,
+        loc,
+        "test_guarded_nest_rejection",
+        functionType);
+
+    Block *negativeEntry =
+        negativeFunction.addEntryBlock();
+
+    builder.setInsertionPointToStart(negativeEntry);
+
+    func::ReturnOp::create(builder, loc);
+
+    builder.setInsertionPoint(
+        negativeEntry->getTerminator());
+
+    auto rejected = emitGuardedAffineLoopNest(
+        builder,
+        loc,
+        unsafe);
+
+    std::size_t rejectedLoops = 0;
+    std::size_t rejectedIfs = 0;
+
+    negativeFunction.walk(
+        [&](affine::AffineForOp) {
+          ++rejectedLoops;
+        });
+
+    negativeFunction.walk(
+        [&](scf::IfOp) {
+          ++rejectedIfs;
+        });
+
+    if (verify(
+            !rejected &&
+            rejectedLoops == 0 &&
+            rejectedIfs == 0 &&
+            succeeded(mlir::verify(negativeModule)),
+            "2b unsafe plan rejected without residual IR"))
+      return 1;
+  }
+
+
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-2c-1:
+  // Execute actual generated affine.for/scf.if MLIR.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+    using namespace systolic::logical;
+    using namespace systolic::logical::testing;
+
+    MLIRContext context;
+
+    context.loadDialect<
+        affine::AffineDialect,
+        arith::ArithDialect,
+        scf::SCFDialect,
+        func::FuncDialect>();
+
+    OpBuilder builder(&context);
+    Location loc = builder.getUnknownLoc();
+
+    // D = {(i,j) : i >= 0, j >= 0, i+j <= 7}
+
+    IntegerPolyhedron triangle(
+        PresburgerSpace::getSetSpace(2));
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{1, 0, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{0, 1, 0});
+
+    triangle.addInequality(
+        llvm::SmallVector<int64_t>{-1, -1, 7});
+
+    PresburgerSet domain(triangle);
+
+    auto plan = buildSymbolicIterationPlan(
+        domain, {{0, 7}, {0, 7}});
+
+    if (verify(
+            plan.has_value(),
+            "2c triangle iteration plan"))
+      return 1;
+
+    auto module = ModuleOp::create(loc);
+
+    builder.setInsertionPointToStart(
+        module.getBody());
+
+    auto function = func::FuncOp::create(
+        builder,
+        loc,
+        "test_exact_execution",
+        builder.getFunctionType({}, {}));
+
+    Block *entry = function.addEntryBlock();
+
+    builder.setInsertionPointToStart(entry);
+    func::ReturnOp::create(builder, loc);
+
+    builder.setInsertionPoint(entry->getTerminator());
+
+    auto emitted = emitGuardedAffineLoopNest(
+        builder, loc, *plan);
+
+    if (verify(
+            emitted.has_value(),
+            "2c guarded affine nest constructed"))
+      return 1;
+
+    if (verify(
+            succeeded(mlir::verify(module)),
+            "2c executable-subset MLIR verifier"))
+      return 1;
+
+    // Interpret the actual emitted Operation Tree.
+
+    auto execution = interpretGuardedLoopNest(
+        emitted->outermost,
+        emitted->guardIf,
+        emitted->logicalIVs);
+
+    if (verify(
+            execution.has_value(),
+            "2c generated affine/scf IR interpreted"))
+      return 1;
+
+    if (verify(
+            execution->visitedPoints == 64,
+            "2c all 64 candidate points visited"))
+      return 1;
+
+    if (verify(
+            execution->acceptedPoints == 36,
+            "2c exactly 36 triangle points executed"))
+      return 1;
+
+    bool exactlyOnce = true;
+
+    for (int64_t i = 0; i < 8; ++i) {
+      for (int64_t j = 0; j < 8; ++j) {
+
+        Point point{i, j};
+
+        auto it = execution->counts.find(point);
+
+        const std::size_t actual =
+            it == execution->counts.end()
+                ? 0 : it->second;
+
+        llvm::SmallVector<int64_t> coordinates{i, j};
+
+        const bool expected =
+            domain.containsPoint(coordinates);
+
+        if (actual != (expected ? 1u : 0u))
+          exactlyOnce = false;
+      }
+    }
+
+    if (verify(
+            exactlyOnce,
+            "2c every Presburger point executed exactly once"))
+      return 1;
+  }
+
+
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-3a-1:
+  // Source IV Recovery Arithmetic Preflight.
+  // --------------------------------------------------------
+  {
+    using namespace systolic::logical;
+
+    // Unimodular:
+    //
+    // z0 = i + j
+    // z1 = j
+    //
+    // i = z0 - z1
+    // j = z1
+
+    PartitionCoordinateMap map;
+
+    map.sourceToLogical = {
+        {BigInt(1), BigInt(1)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    auto inverse =
+        domain_detail::invertIntegerMatrix(
+            map.sourceToLogical);
+
+    if (verify(
+            inverse.has_value(),
+            "3a1 unimodular inverse constructed"))
+      return 1;
+
+    map.logicalToSource = *inverse;
+
+    auto recovery = buildSourceIVRecoveryPlan(
+        map, {{0, 7}, {0, 7}});
+
+    if (verify(
+            recovery.has_value() &&
+            recovery->denominator == 1 &&
+            recovery->dimension == 2 &&
+            recovery->inverseNumerator[0][0] == 1 &&
+            recovery->inverseNumerator[0][1] == -1 &&
+            recovery->inverseNumerator[1][0] == 0 &&
+            recovery->inverseNumerator[1][1] == 1,
+            "3a1 unimodular recovery plan"))
+      return 1;
+
+    // Non-unimodular:
+    //
+    // z0 = 2*i
+    // z1 = j
+    //
+    // i = z0/2
+    // j = z1
+
+    PartitionCoordinateMap nonUnimodular;
+
+    nonUnimodular.sourceToLogical = {
+        {BigInt(2), BigInt(0)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    auto nonUniInverse =
+        domain_detail::invertIntegerMatrix(
+            nonUnimodular.sourceToLogical);
+
+    if (verify(
+            nonUniInverse.has_value(),
+            "3a1 non-unimodular inverse constructed"))
+      return 1;
+
+    nonUnimodular.logicalToSource = *nonUniInverse;
+
+    auto nonUniRecovery =
+        buildSourceIVRecoveryPlan(
+            nonUnimodular,
+            {{0, 6}, {0, 3}});
+
+    if (verify(
+            nonUniRecovery.has_value() &&
+            nonUniRecovery->denominator == 2 &&
+            nonUniRecovery->inverseNumerator[0][0] == 1 &&
+            nonUniRecovery->inverseNumerator[0][1] == 0 &&
+            nonUniRecovery->inverseNumerator[1][0] == 0 &&
+            nonUniRecovery->inverseNumerator[1][1] == 2,
+            "3a1 non-unimodular recovery plan"))
+      return 1;
+
+    // A malformed inverse must be rejected.
+
+    PartitionCoordinateMap inconsistent = map;
+
+    inconsistent.logicalToSource[0][0] = Rat(2);
+
+    if (verify(
+            !buildSourceIVRecoveryPlan(
+                inconsistent,
+                {{0, 7}, {0, 7}}),
+            "3a1 inconsistent inverse rejected"))
+      return 1;
+
+    // An unsafe intermediate sum must be rejected.
+    //
+    // i = z0 - z1
+    //
+    // The interval z0 = positive large,
+    // z1 = negative large can exceed i64.
+
+    const int64_t large =
+        std::numeric_limits<int64_t>::max() - 1;
+
+    if (verify(
+            !buildSourceIVRecoveryPlan(
+                map,
+                {{large, large}, {-large, -large}}),
+            "3a1 unsafe intermediate arithmetic rejected"))
+      return 1;
+
+    // Invalid bounds must also be rejected.
+
+    if (verify(
+            !buildSourceIVRecoveryPlan(
+                map,
+                {{8, 0}, {0, 7}}),
+            "3a1 invalid recovery bounds rejected"))
+      return 1;
+  }
+
+
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-3a-2:
+  // Actual Source IV Recovery SSA Emission.
+  //
+  // Tests:
+  //   - Unimodular inverse
+  //   - Non-unimodular inverse
+  //   - Recovery SSA inside scf.if
+  //   - MLIR verification
+  //
+  // Arithmetic execution/oracle comparison follows
+  // in Phase 3a-3.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+    using namespace systolic::logical;
+
+    bool allCasesPassed = true;
+
+    for (int caseNumber = 0; caseNumber < 2;
+         ++caseNumber) {
+
+      const bool nonUnimodular =
+          caseNumber == 1;
+
+      PartitionCoordinateMap coordinateMap;
+
+      if (nonUnimodular) {
+        coordinateMap.sourceToLogical = {
+            {BigInt(2), BigInt(0)},
+            {BigInt(0), BigInt(1)}
+        };
+      } else {
+        coordinateMap.sourceToLogical = {
+            {BigInt(1), BigInt(1)},
+            {BigInt(0), BigInt(1)}
+        };
+      }
+
+      auto inverse =
+          domain_detail::invertIntegerMatrix(
+              coordinateMap.sourceToLogical);
+
+      if (!inverse) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+      coordinateMap.logicalToSource = *inverse;
+
+      // Source domain: 0 <= x0,x1 <= 3.
+      //
+      // Exact logical image is derived through
+      // the existing Presburger projection API.
+
+      IntegerPolyhedron source(
+          PresburgerSpace::getSetSpace(2));
+
+      source.addInequality(
+          llvm::SmallVector<int64_t>{1, 0, 0});
+      source.addInequality(
+          llvm::SmallVector<int64_t>{-1, 0, 3});
+      source.addInequality(
+          llvm::SmallVector<int64_t>{0, 1, 0});
+      source.addInequality(
+          llvm::SmallVector<int64_t>{0, -1, 3});
+
+      auto logicalDomain = buildLogicalDomain(
+          coordinateMap, PresburgerSet(source));
+
+      if (!logicalDomain) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+      const std::vector<ClosedIntegerInterval>
+          bounds = {{0, 6}, {0, 3}};
+
+      // Construct a guard-friendly exact logical image
+      // independently from the general projection.
+
+      AffineIntegerDomain sourceInequalities;
+      sourceInequalities.sourceDimension = 2;
+
+      // 0 <= x0 <= 3, 0 <= x1 <= 3.
+      sourceInequalities.inequalities = {
+          {{BigInt(-1), BigInt(0)}, BigInt(0)},
+          {{BigInt(1), BigInt(0)}, BigInt(3)},
+          {{BigInt(0), BigInt(-1)}, BigInt(0)},
+          {{BigInt(0), BigInt(1)}, BigInt(3)}
+      };
+
+      auto normalized = buildRecoverableLogicalDomain(
+          coordinateMap, sourceInequalities);
+
+      if (!normalized) {
+        std::cerr
+            << "3a2: exact normalization failed, case="
+            << caseNumber << "\\n";
+        allCasesPassed = false;
+        break;
+      }
+
+      // Independent symbolic equivalence check:
+      //
+      // normalized \\ projected = empty
+      // projected \\ normalized = empty
+
+      auto extra =
+          normalized->subtract(*logicalDomain);
+
+      auto missing =
+          logicalDomain->subtract(*normalized);
+
+      if (!extra.isIntegerEmpty() ||
+          !missing.isIntegerEmpty()) {
+        std::cerr
+            << "3a2: domain equivalence failed, case="
+            << caseNumber << "\\n";
+        allCasesPassed = false;
+        break;
+      }
+
+      auto plan = buildSymbolicIterationPlan(
+          *normalized, bounds);
+
+      if (!plan || !buildExactGuardPlan(*plan)) {
+        std::cerr
+            << "3a2: normalized guard rejected, case="
+            << caseNumber << "\\n";
+        allCasesPassed = false;
+        break;
+      }
+
+      std::cerr
+          << "3a2 DEBUG: caseNumber=" << caseNumber
+          << ", disjuncts="
+          << logicalDomain->getNumDisjuncts()
+          << "\\n";
+
+      for (const auto &disjunct :
+           logicalDomain->getAllDisjuncts()) {
+        std::cerr
+            << "3a2 DEBUG: dimensions="
+            << disjunct.getNumDimVars()
+            << ", locals="
+            << disjunct.getNumLocalVars()
+            << ", equalities="
+            << disjunct.getNumEqualities()
+            << ", inequalities="
+            << disjunct.getNumInequalities()
+            << "\\n";
+      }
+
+      std::cerr
+          << "3a2 DEBUG: exactGuardPlan="
+          << (plan && buildExactGuardPlan(*plan)
+                  ? "ACCEPT"
+                  : "REJECT")
+          << "\\n";
+
+      if (!plan) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+      MLIRContext context;
+
+      context.loadDialect<
+          affine::AffineDialect,
+          arith::ArithDialect,
+          scf::SCFDialect,
+          func::FuncDialect>();
+
+      OpBuilder builder(&context);
+      Location loc = builder.getUnknownLoc();
+
+      auto module = ModuleOp::create(loc);
+
+      builder.setInsertionPointToStart(
+          module.getBody());
+
+      auto function = func::FuncOp::create(
+          builder,
+          loc,
+          nonUnimodular
+              ? "test_nonunimodular_source_iv"
+              : "test_unimodular_source_iv",
+          builder.getFunctionType({}, {}));
+
+      Block *entry = function.addEntryBlock();
+
+      builder.setInsertionPointToStart(entry);
+
+      func::ReturnOp::create(builder, loc);
+
+      builder.setInsertionPoint(
+          entry->getTerminator());
+
+      auto guarded = emitGuardedAffineLoopNest(
+          builder, loc, *plan);
+
+      if (!guarded) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+      auto recovered = emitSourceIVRecovery(
+          builder,
+          loc,
+          coordinateMap,
+          bounds,
+          *guarded);
+
+      if (!recovered ||
+          recovered->sourceIVs.size() != 2) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+      Block *thenBlock =
+          &guarded->guardIf
+               .getThenRegion().front();
+
+      for (Value iv : recovered->sourceIVs) {
+        if (!iv.getType().isInteger(64) ||
+            !iv.getDefiningOp() ||
+            iv.getDefiningOp()->getBlock() !=
+                thenBlock) {
+          { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        }
+      }
+
+      if (!allCasesPassed)
+        break;
+
+
+      // --------------------------------------------------
+      // Phase 5.4.3d-3b-1a:
+      //
+      // Emit A/B/C source-space affine access SSA.
+      //
+      // This is SSA construction and structural
+      // verification. Numeric access execution is
+      // deferred to 3b-1b.
+      // --------------------------------------------------
+
+      const std::vector<std::vector<BigInt>>
+          accessARows = {
+              {BigInt(1), BigInt(0)},
+              {BigInt(0), BigInt(1)}
+          };
+
+      const std::vector<std::vector<BigInt>>
+          accessBRows = {
+              {BigInt(0), BigInt(1)},
+              {BigInt(1), BigInt(0)}
+          };
+
+      const std::vector<std::vector<BigInt>>
+          accessCRows = {
+              {BigInt(1), BigInt(1)}
+          };
+
+      auto accessA = emitSourceAffineAccess(
+          builder, loc, coordinateMap, bounds,
+          *guarded, *recovered,
+          accessARows,
+          {BigInt(0), BigInt(0)});
+
+      auto accessB = emitSourceAffineAccess(
+          builder, loc, coordinateMap, bounds,
+          *guarded, *recovered,
+          accessBRows,
+          {BigInt(0), BigInt(0)});
+
+      auto accessC = emitSourceAffineAccess(
+          builder, loc, coordinateMap, bounds,
+          *guarded, *recovered,
+          accessCRows,
+          {BigInt(0)});
+
+      if (!accessA || !accessB || !accessC ||
+          accessA->indices.size() != 2 ||
+          accessB->indices.size() != 2 ||
+          accessC->indices.size() != 1) {
+
+        std::cerr
+            << "3b1a: access SSA emission failed"
+            << ", case=" << caseNumber << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      Block *accessThenBlock =
+          &guarded->guardIf.getThenRegion().front();
+
+      auto checkAccess = [&](const EmittedSourceAccess &access) {
+        for (Value index : access.indices) {
+          if (!index ||
+              !index.getType().isInteger(64) ||
+              !index.getDefiningOp() ||
+              index.getDefiningOp()->getBlock() !=
+                  accessThenBlock)
+            return false;
+        }
+        return true;
+      };
+
+      if (!checkAccess(*accessA) ||
+          !checkAccess(*accessB) ||
+          !checkAccess(*accessC)) {
+
+        std::cerr
+            << "3b1a: access indices outside guard"
+            << ", case=" << caseNumber << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      // Reject an unsafe coefficient without adding
+      // further operations to the generated IR.
+
+      const std::size_t operationCountBefore =
+          std::distance(
+              accessThenBlock->begin(),
+              accessThenBlock->end());
+
+      auto unsafeAccess = emitSourceAffineAccess(
+          builder, loc, coordinateMap, bounds,
+          *guarded, *recovered,
+          {{BigInt(
+              std::numeric_limits<int64_t>::max()),
+            BigInt(1)}},
+          {BigInt(0)});
+
+      const std::size_t operationCountAfter =
+          std::distance(
+              accessThenBlock->begin(),
+              accessThenBlock->end());
+
+      if (unsafeAccess ||
+          operationCountBefore != operationCountAfter) {
+
+        std::cerr
+            << "3b1a: unsafe access was not rejected"
+            << ", case=" << caseNumber << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      std::cout
+          << "PASS: 3b1a "
+          << (nonUnimodular
+                  ? "non-unimodular"
+                  : "unimodular")
+          << " guarded A/B/C access SSA emitted\n";
+
+      std::size_t divisionCount = 0;
+
+      guarded->guardIf.walk(
+          [&](arith::DivSIOp) {
+            ++divisionCount;
+          });
+
+      if (nonUnimodular) {
+        if (divisionCount != 2)
+          { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+      } else {
+        if (divisionCount != 0)
+          { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+      }
+
+      if (!allCasesPassed)
+        break;
+
+      if (failed(mlir::verify(module))) {
+        { std::cerr << "3a2 DEBUG: failure at line " << __LINE__ << ", caseNumber=" << caseNumber << "\n"; allCasesPassed = false; }
+        break;
+      }
+
+
+
+      // --------------------------------------------------
+      // Phase 5.4.3d-3b-1b:
+      //
+      // Execute the generated A/B/C Access SSA using
+      // the actual affine.for / scf.if interpreter.
+      //
+      // Compare every accepted logical point against
+      // an independent BigInt source-space oracle.
+      // --------------------------------------------------
+
+      auto accessExecution =
+          systolic::logical::testing::interpretGuardedLoopNest(
+              guarded->outermost,
+              guarded->guardIf,
+              guarded->logicalIVs,
+              recovered->sourceIVs,
+              accessA->indices,
+              accessB->indices,
+              accessC->indices);
+
+      if (!accessExecution ||
+          accessExecution->visitedPoints != 28 ||
+          accessExecution->acceptedPoints != 16 ||
+          accessExecution->accessByLogical.size() != 16) {
+
+        std::cerr
+            << "3b1b: access interpreter/count failure"
+            << ", case=" << caseNumber << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      using AccessPoint =
+          systolic::logical::testing::Point;
+
+      std::map<AccessPoint, std::vector<AccessPoint>>
+          expectedAccesses;
+
+      auto toI64 = [](const BigInt &value)
+          -> std::optional<int64_t> {
+
+        if (value <
+                BigInt(
+                    std::numeric_limits<int64_t>::min()) ||
+            value >
+                BigInt(
+                    std::numeric_limits<int64_t>::max()))
+          return std::nullopt;
+
+        return value.convert_to<int64_t>();
+      };
+
+      auto referenceAccess =
+          [&](const std::vector<std::vector<BigInt>> &rows,
+              const std::vector<BigInt> &offsets,
+              const IntRow &sourceCoordinates)
+              -> std::optional<AccessPoint> {
+
+        if (rows.size() != offsets.size())
+          return std::nullopt;
+
+        AccessPoint result;
+
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+
+          if (rows[r].size() != sourceCoordinates.size())
+            return std::nullopt;
+
+          BigInt address = offsets[r];
+
+          for (std::size_t j = 0;
+               j < sourceCoordinates.size(); ++j) {
+
+            address +=
+                rows[r][j] * sourceCoordinates[j];
+          }
+
+          auto coordinate = toI64(address);
+
+          if (!coordinate)
+            return std::nullopt;
+
+          result.push_back(*coordinate);
+        }
+
+        return result;
+      };
+
+      for (int64_t x0 = 0; x0 <= 3; ++x0) {
+        for (int64_t x1 = 0; x1 <= 3; ++x1) {
+
+          IntRow sourcePoint = {
+              BigInt(x0),
+              BigInt(x1)
+          };
+
+          auto logicalPoint =
+              mapSourceIteration(
+                  coordinateMap, sourcePoint);
+
+          if (!logicalPoint ||
+              logicalPoint->size() != 2) {
+
+            allCasesPassed = false;
+            break;
+          }
+
+          AccessPoint logicalKey;
+
+          for (const BigInt &coordinate :
+               *logicalPoint) {
+
+            auto value = toI64(coordinate);
+
+            if (!value) {
+              allCasesPassed = false;
+              break;
+            }
+
+            logicalKey.push_back(*value);
+          }
+
+          if (!allCasesPassed)
+            break;
+
+          auto a = referenceAccess(
+              accessARows,
+              {BigInt(0), BigInt(0)},
+              sourcePoint);
+
+          auto b = referenceAccess(
+              accessBRows,
+              {BigInt(0), BigInt(0)},
+              sourcePoint);
+
+          auto c = referenceAccess(
+              accessCRows,
+              {BigInt(0)},
+              sourcePoint);
+
+          if (!a || !b || !c) {
+            allCasesPassed = false;
+            break;
+          }
+
+          auto inserted = expectedAccesses.emplace(
+              logicalKey,
+              std::vector<AccessPoint>{
+                  *a, *b, *c
+              });
+
+          if (!inserted.second) {
+            allCasesPassed = false;
+            break;
+          }
+        }
+
+        if (!allCasesPassed)
+          break;
+      }
+
+      if (!allCasesPassed)
+        break;
+
+      if (accessExecution->accessByLogical !=
+              expectedAccesses) {
+
+        std::cerr
+            << "3b1b: Access SSA / BigInt mismatch"
+            << ", case=" << caseNumber << "\n";
+
+        for (const auto &entry : expectedAccesses) {
+
+          auto actual =
+              accessExecution->accessByLogical.find(
+                  entry.first);
+
+          if (actual == accessExecution
+                            ->accessByLogical.end() ||
+              actual->second != entry.second) {
+
+            std::cerr
+                << "  mismatch at logical point (";
+
+            for (std::size_t i = 0;
+                 i < entry.first.size(); ++i) {
+
+              if (i != 0)
+                std::cerr << ",";
+
+              std::cerr << entry.first[i];
+            }
+
+            std::cerr << ")\n";
+            break;
+          }
+        }
+
+        allCasesPassed = false;
+        break;
+      }
+
+      std::cout
+          << "PASS: 3b1b "
+          << (nonUnimodular
+                  ? "non-unimodular"
+                  : "unimodular")
+          << " A/B/C Access SSA matches BigInt"
+          << " at 16 source points\n";
+
+      // --------------------------------------------------
+      // Phase 5.4.3d-3a-3b-2:
+      //
+      // Interpret the ACTUAL emitted affine.for tree,
+      // exact scf.if predicate, and recovery SSA.
+      //
+      // The source-domain oracle is constructed
+      // independently from expected source points.
+      // --------------------------------------------------
+
+      auto endToEnd = systolic::logical::testing::interpretGuardedLoopNest(
+          guarded->outermost,
+          guarded->guardIf,
+          guarded->logicalIVs,
+          recovered->sourceIVs);
+
+      if (!endToEnd) {
+        std::cerr
+            << "3a3b2: operation-tree interpreter failed"
+            << ", case=" << caseNumber << "\n";
+        allCasesPassed = false;
+        break;
+      }
+
+      // Generated affine.for loops must visit exactly
+      // 7 * 4 candidate logical coordinates.
+
+      if (endToEnd->visitedPoints != 28 ||
+          endToEnd->acceptedPoints != 16) {
+
+        std::cerr
+            << "3a3b2: incorrect loop/guard counts"
+            << ", case=" << caseNumber
+            << ", visited=" << endToEnd->visitedPoints
+            << ", accepted=" << endToEnd->acceptedPoints
+            << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      // Construct an independent expected map from
+      // the original SOURCE domain, not from the
+      // normalized logical domain or guard predicate.
+
+      systolic::logical::testing::ExecutionCounts expectedLogicalCounts;
+      systolic::logical::testing::ExecutionCounts expectedSourceCounts;
+
+      for (int64_t x0 = 0; x0 <= 3; ++x0) {
+        for (int64_t x1 = 0; x1 <= 3; ++x1) {
+
+          IntRow sourcePoint = {
+              BigInt(x0),
+              BigInt(x1)
+          };
+
+          auto logicalPoint = mapSourceIteration(
+              coordinateMap, sourcePoint);
+
+          if (!logicalPoint ||
+              logicalPoint->size() != 2) {
+            allCasesPassed = false;
+            break;
+          }
+
+          systolic::logical::testing::Point logicalKey;
+          bool representable = true;
+
+          for (const BigInt &coordinate :
+               *logicalPoint) {
+
+            if (coordinate <
+                    BigInt(
+                        std::numeric_limits<int64_t>::min()) ||
+                coordinate >
+                    BigInt(
+                        std::numeric_limits<int64_t>::max())) {
+              representable = false;
+              break;
+            }
+
+            logicalKey.push_back(
+                coordinate.convert_to<int64_t>());
+          }
+
+          if (!representable) {
+            allCasesPassed = false;
+            break;
+          }
+
+          ++expectedLogicalCounts[logicalKey];
+          ++expectedSourceCounts[
+              systolic::logical::testing::Point{x0, x1}];
+        }
+
+        if (!allCasesPassed)
+          break;
+      }
+
+      if (!allCasesPassed)
+        break;
+
+      // Exact equality of maps establishes:
+      //
+      // - no missing logical/source points;
+      // - no unexpected logical/source points;
+      // - correct multiplicities;
+      // - each expected source point executed once.
+
+      if (endToEnd->counts != expectedLogicalCounts ||
+          endToEnd->sourceCounts != expectedSourceCounts ||
+          endToEnd->counts.size() != 16 ||
+          endToEnd->sourceCounts.size() != 16) {
+
+        std::cerr
+            << "3a3b2: exactly-once mismatch"
+            << ", case=" << caseNumber
+            << ", logicalKeys="
+            << endToEnd->counts.size()
+            << ", sourceKeys="
+            << endToEnd->sourceCounts.size()
+            << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      std::cout
+          << "PASS: 3a3b2 "
+          << (nonUnimodular
+                  ? "non-unimodular"
+                  : "unimodular")
+          << " actual loop/guard/recovery exactly once"
+          << " (28 visited, 16 accepted)\n";
+
+      // --------------------------------------------------
+      // Phase 5.4.3d-3a-3a:
+      // Evaluate the emitted recovery SSA expression DAG.
+      //
+      // This is arithmetic SSA evaluation, not yet
+      // end-to-end interpretation of affine.for/scf.if.
+      // --------------------------------------------------
+
+      std::size_t checkedPoints = 0;
+      std::size_t outsidePoints = 0;
+
+      for (int64_t z0 = bounds[0].lower;
+           z0 <= bounds[0].upper; ++z0) {
+        for (int64_t z1 = bounds[1].lower;
+             z1 <= bounds[1].upper; ++z1) {
+
+          IntRow logical = {
+              BigInt(z0), BigInt(z1)
+          };
+
+          // Independent arbitrary-precision oracle.
+          auto expected = recoverSourceIteration(
+              coordinateMap, logical);
+
+          bool inSourceDomain =
+              expected.has_value();
+
+          if (expected) {
+            for (const BigInt &coordinate : *expected) {
+              if (coordinate < 0 || coordinate > 3)
+                inSourceDomain = false;
+            }
+          }
+
+
+          // --------------------------------------------------
+          // Phase 5.4.3d-3a-3b-1:
+          // Evaluate the ACTUAL emitted Guard SSA.
+          //
+          // The BigInt oracle must not decide whether the
+          // generated scf.if predicate is true.
+          //
+          // Arithmetic is checked, not allowed to wrap.
+          // This is valid for the already preflighted
+          // arithmetic ranges in these test cases.
+          // --------------------------------------------------
+
+          std::function<std::optional<int64_t>(Value)>
+              evaluateGuard;
+
+          evaluateGuard = [&](Value value)
+              -> std::optional<int64_t> {
+
+            if (value == guarded->logicalIVs[0])
+              return z0;
+
+            if (value == guarded->logicalIVs[1])
+              return z1;
+
+            if (auto cast =
+                    value.getDefiningOp<arith::IndexCastOp>())
+              return evaluateGuard(cast.getIn());
+
+            if (auto constant =
+                    value.getDefiningOp<arith::ConstantOp>()) {
+              auto attr = llvm::dyn_cast<IntegerAttr>(
+                  constant.getValue());
+
+              if (!attr)
+                return std::nullopt;
+
+              const llvm::APInt integer = attr.getValue();
+
+              if (!integer.isSignedIntN(64))
+                return std::nullopt;
+
+              return integer.getSExtValue();
+            }
+
+            if (auto add =
+                    value.getDefiningOp<arith::AddIOp>()) {
+              auto lhs = evaluateGuard(add.getLhs());
+              auto rhs = evaluateGuard(add.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              __int128 result =
+                  static_cast<__int128>(*lhs) + *rhs;
+
+              if (result <
+                      std::numeric_limits<int64_t>::min() ||
+                  result >
+                      std::numeric_limits<int64_t>::max())
+                return std::nullopt;
+
+              return static_cast<int64_t>(result);
+            }
+
+            if (auto mul =
+                    value.getDefiningOp<arith::MulIOp>()) {
+              auto lhs = evaluateGuard(mul.getLhs());
+              auto rhs = evaluateGuard(mul.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              __int128 result =
+                  static_cast<__int128>(*lhs) * *rhs;
+
+              if (result <
+                      std::numeric_limits<int64_t>::min() ||
+                  result >
+                      std::numeric_limits<int64_t>::max())
+                return std::nullopt;
+
+              return static_cast<int64_t>(result);
+            }
+
+            if (auto rem =
+                    value.getDefiningOp<arith::RemSIOp>()) {
+              auto lhs = evaluateGuard(rem.getLhs());
+              auto rhs = evaluateGuard(rem.getRhs());
+
+              if (!lhs || !rhs || *rhs == 0)
+                return std::nullopt;
+
+              if (*lhs ==
+                      std::numeric_limits<int64_t>::min() &&
+                  *rhs == -1)
+                return std::nullopt;
+
+              return *lhs % *rhs;
+            }
+
+            if (auto div =
+                    value.getDefiningOp<arith::DivSIOp>()) {
+              auto lhs = evaluateGuard(div.getLhs());
+              auto rhs = evaluateGuard(div.getRhs());
+
+              if (!lhs || !rhs || *rhs == 0)
+                return std::nullopt;
+
+              if (*lhs ==
+                      std::numeric_limits<int64_t>::min() &&
+                  *rhs == -1)
+                return std::nullopt;
+
+              return *lhs / *rhs;
+            }
+
+            if (auto floor =
+                    value.getDefiningOp<arith::FloorDivSIOp>()) {
+              auto lhs = evaluateGuard(floor.getLhs());
+              auto rhs = evaluateGuard(floor.getRhs());
+
+              if (!lhs || !rhs || *rhs == 0)
+                return std::nullopt;
+
+              __int128 a = *lhs;
+              __int128 b = *rhs;
+
+              __int128 q = a / b;
+              __int128 r = a % b;
+
+              if (r != 0 &&
+                  ((r > 0) != (b > 0)))
+                --q;
+
+              if (q <
+                      std::numeric_limits<int64_t>::min() ||
+                  q >
+                      std::numeric_limits<int64_t>::max())
+                return std::nullopt;
+
+              return static_cast<int64_t>(q);
+            }
+
+            if (auto cmp =
+                    value.getDefiningOp<arith::CmpIOp>()) {
+              auto lhs = evaluateGuard(cmp.getLhs());
+              auto rhs = evaluateGuard(cmp.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              switch (cmp.getPredicate()) {
+              case arith::CmpIPredicate::eq:
+                return *lhs == *rhs ? 1 : 0;
+              case arith::CmpIPredicate::ne:
+                return *lhs != *rhs ? 1 : 0;
+              case arith::CmpIPredicate::sge:
+                return *lhs >= *rhs ? 1 : 0;
+              case arith::CmpIPredicate::sgt:
+                return *lhs > *rhs ? 1 : 0;
+              case arith::CmpIPredicate::sle:
+                return *lhs <= *rhs ? 1 : 0;
+              case arith::CmpIPredicate::slt:
+                return *lhs < *rhs ? 1 : 0;
+              default:
+                return std::nullopt;
+              }
+            }
+
+            if (auto op =
+                    value.getDefiningOp<arith::AndIOp>()) {
+              auto lhs = evaluateGuard(op.getLhs());
+              auto rhs = evaluateGuard(op.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              return *lhs & *rhs;
+            }
+
+            if (auto op =
+                    value.getDefiningOp<arith::OrIOp>()) {
+              auto lhs = evaluateGuard(op.getLhs());
+              auto rhs = evaluateGuard(op.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              return *lhs | *rhs;
+            }
+
+            return std::nullopt;
+          };
+
+          auto guardResult = evaluateGuard(
+              guarded->guardIf.getCondition());
+
+          if (!guardResult ||
+              (*guardResult != 0 && *guardResult != 1)) {
+            std::cerr
+                << "3a3b1: guard SSA evaluation failed"
+                << ", case=" << caseNumber
+                << ", z=(" << z0 << "," << z1 << ")\n";
+
+            allCasesPassed = false;
+            break;
+          }
+
+          const bool guardAccepted = *guardResult == 1;
+
+          // Independent reference:
+          // exact integer recovery + source bounds.
+          //
+          // The reference is used ONLY to check the
+          // emitted predicate, not to compute it.
+
+          if (guardAccepted != inSourceDomain) {
+            std::cerr
+                << "3a3b1: guard/oracle mismatch"
+                << ", case=" << caseNumber
+                << ", z=(" << z0 << "," << z1 << ")"
+                << ", guard=" << guardAccepted
+                << ", oracle=" << inSourceDomain
+                << "\n";
+
+            allCasesPassed = false;
+            break;
+          }
+
+          // Model scf.if entry using the emitted SSA
+          // predicate, not the BigInt oracle.
+
+          if (!guardAccepted) {
+            ++outsidePoints;
+            continue;
+          }
+
+          // Evaluate actual MLIR SSA definitions.
+          //
+          // Every sourceIV is a Value whose defining
+          // operation was emitted by emitSourceIVRecovery.
+          //
+          // Evaluation is deliberately restricted to
+          // the exact arithmetic subset this phase emits.
+
+          std::function<std::optional<int64_t>(
+              Value)> evaluate;
+
+          evaluate = [&](Value value)
+              -> std::optional<int64_t> {
+
+            // Logical affine induction variables:
+            // substitute the current test coordinates.
+
+            if (value == guarded->logicalIVs[0])
+              return z0;
+
+            if (value == guarded->logicalIVs[1])
+              return z1;
+
+            if (auto cast =
+                    value.getDefiningOp<
+                        arith::IndexCastOp>()) {
+              return evaluate(cast.getIn());
+            }
+
+            if (auto constant =
+                    value.getDefiningOp<
+                        arith::ConstantOp>()) {
+
+              auto integerAttr =
+                  llvm::dyn_cast<IntegerAttr>(
+                      constant.getValue());
+
+              if (!integerAttr)
+                return std::nullopt;
+
+              const llvm::APInt integer =
+                  integerAttr.getValue();
+
+              if (!integer.isSignedIntN(64))
+                return std::nullopt;
+
+              return integer.getSExtValue();
+            }
+
+            if (auto multiply =
+                    value.getDefiningOp<
+                        arith::MulIOp>()) {
+
+              auto lhs = evaluate(multiply.getLhs());
+              auto rhs = evaluate(multiply.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              __int128 product =
+                  static_cast<__int128>(*lhs) *
+                  static_cast<__int128>(*rhs);
+
+              if (product <
+                      std::numeric_limits<int64_t>::min() ||
+                  product >
+                      std::numeric_limits<int64_t>::max())
+                return std::nullopt;
+
+              return static_cast<int64_t>(product);
+            }
+
+            if (auto addition =
+                    value.getDefiningOp<
+                        arith::AddIOp>()) {
+
+              auto lhs = evaluate(addition.getLhs());
+              auto rhs = evaluate(addition.getRhs());
+
+              if (!lhs || !rhs)
+                return std::nullopt;
+
+              __int128 sum =
+                  static_cast<__int128>(*lhs) +
+                  static_cast<__int128>(*rhs);
+
+              if (sum <
+                      std::numeric_limits<int64_t>::min() ||
+                  sum >
+                      std::numeric_limits<int64_t>::max())
+                return std::nullopt;
+
+              return static_cast<int64_t>(sum);
+            }
+
+            if (auto division =
+                    value.getDefiningOp<
+                        arith::DivSIOp>()) {
+
+              auto lhs = evaluate(division.getLhs());
+              auto rhs = evaluate(division.getRhs());
+
+              if (!lhs || !rhs || *rhs == 0)
+                return std::nullopt;
+
+              if (*lhs ==
+                      std::numeric_limits<int64_t>::min() &&
+                  *rhs == -1)
+                return std::nullopt;
+
+              return *lhs / *rhs;
+            }
+
+            // Unsupported operation or SSA value.
+            return std::nullopt;
+          };
+
+          IntRow actual;
+          bool evaluationSucceeded = true;
+
+          for (Value sourceIV : recovered->sourceIVs) {
+
+            auto value = evaluate(sourceIV);
+
+            if (!value) {
+              evaluationSucceeded = false;
+              break;
+            }
+
+            actual.push_back(BigInt(*value));
+          }
+
+          if (!evaluationSucceeded ||
+              actual != *expected) {
+
+            std::cerr
+                << "3a3a SSA mismatch: case="
+                << caseNumber
+                << ", z=(" << z0 << "," << z1 << ")"
+                << "\n";
+
+            allCasesPassed = false;
+            break;
+          }
+
+          // Independent forward-map round trip.
+          auto reconstructedLogical =
+              mapSourceIteration(
+                  coordinateMap, actual);
+
+          if (!reconstructedLogical ||
+              *reconstructedLogical != logical) {
+
+            std::cerr
+                << "3a3a round-trip mismatch: case="
+                << caseNumber
+                << ", z=(" << z0 << "," << z1 << ")"
+                << "\n";
+
+            allCasesPassed = false;
+            break;
+          }
+
+          ++checkedPoints;
+        }
+
+        if (!allCasesPassed)
+          break;
+      }
+
+      if (!allCasesPassed)
+        break;
+
+      if (checkedPoints != 16 ||
+          outsidePoints != 12) {
+
+        std::cerr
+            << "3a3a unexpected point counts: case="
+            << caseNumber
+            << ", checked=" << checkedPoints
+            << ", outside=" << outsidePoints
+            << "\n";
+
+        allCasesPassed = false;
+        break;
+      }
+
+      std::cout
+          << "PASS: 3a3a "
+          << (nonUnimodular
+                  ? "non-unimodular"
+                  : "unimodular")
+          << " emitted SSA matches BigInt at "
+          << checkedPoints
+          << " source points\n";
+
+    }
+
+    if (verify(
+            allCasesPassed,
+            "3a2 source recovery SSA emitted for both maps"))
+      return 1;
+
+    // A malformed coordinate map must fail preflight
+    // without inserting recovery operations.
+
+    PartitionCoordinateMap malformed;
+
+    malformed.sourceToLogical = {
+        {BigInt(1), BigInt(0)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    malformed.logicalToSource = {
+        {Rat(2), Rat(0)},
+        {Rat(0), Rat(1)}
+    };
+
+    if (verify(
+            !buildSourceIVRecoveryPlan(
+                malformed, {{0, 3}, {0, 3}}),
+            "3a2 malformed inverse rejected before emission"))
+      return 1;
   }
 
   std::cout << "All coordinate relation tests passed.\n";

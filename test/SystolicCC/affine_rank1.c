@@ -1,4 +1,7 @@
 // REQUIRES: cfront-clang
+// This fixture isolates the established fast-path decisions and their
+// intentional refusals; all existing assertions remain in force. Automatic
+// general fallback is independently tested by general_affine.c without opt-in.
 //
 // Rank-1 affine accesses and a C that is not injective on the (I, J) box
 // (S4; the recognizer's section 25; test/Systolic/affine_gemm_rank1.mlir pins
@@ -27,7 +30,7 @@
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
-// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 'c10_j10' is offloaded: 3 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'c10_j11' is offloaded: 3 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 6 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'cipj' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
@@ -74,9 +77,9 @@
 //
 // Every offloaded call also against the function as written, on the CPU, with
 // the synchronous and the asynchronous submission:
-// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// RUN: %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.va 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // VERIFY: c10_j10 ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY: c10_j11 ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
@@ -155,7 +158,7 @@
 // ASYNC-NEXT:  return
 //
 // Strict floating point (no --fp-reassociation): nothing is offloaded.
-// RUN: %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
 // STRICT-DAG: note: 'c10_j10' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 'c10_j11' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 'cipj' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums

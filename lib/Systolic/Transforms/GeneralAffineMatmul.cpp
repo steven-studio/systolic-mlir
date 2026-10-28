@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include "Systolic/RankPartitionScheduleLegality.h"
 
 using namespace mlir;
 using namespace mlir::systolic;
@@ -871,6 +872,41 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
       return fail("symbolic relation dimension mismatch");
 
 
+    // Phase 5.4.1: exact ordered output-write conflict analysis on the
+    // actual MLIR source domain and original C access function.
+    // This is ANALYSIS ONLY, never a certificate for parallel lowering.
+    std::vector<std::vector<logical::BigInt>> outputRows;
+    std::vector<logical::BigInt> outputOffsets;
+    outputRows.reserve(rows[2].size());
+    outputOffsets.reserve(out.accessOffsets[2].size());
+    for (const auto &sourceRow : rows[2]) {
+      std::vector<logical::BigInt> converted;
+      converted.reserve(sourceRow.size());
+      for (int64_t coefficient : sourceRow)
+        converted.emplace_back(coefficient);
+      outputRows.push_back(std::move(converted));
+    }
+    for (int64_t offset : out.accessOffsets[2])
+      outputOffsets.emplace_back(offset);
+
+    auto orderedConflicts = logical::analyzeOrderedWriteConflicts(
+        *coordinateMap, symbolicSource, outputRows, outputOffsets);
+    if (!orderedConflicts)
+      return fail("symbolic ordered write-conflict analysis failed");
+
+    // The structural recognizer above proved exactly one f32 load/add/mul/
+    // store MAC. It did NOT prove alias freedom, independence of all operand
+    // accesses from the destination, or FP reassociation permission.
+    // Therefore never promote this f32 reduction to a reorder candidate.
+    logical::ReductionOperatorEvidence evidence;
+    evidence.update = logical::ReductionWriteUpdateKind::FloatingAdd;
+    evidence.updateIsRecognizedReduction = true;
+    evidence.operandsIndependentOfDestination = false; // not proven
+    evidence.noOtherObservableEffects = false;        // not proven
+    evidence.floatingReassociationPermitted = false;  // not proven
+    const auto reductionDecision =
+        logical::classifyReductionOrder(*orderedConflicts, evidence);
+
     std::ostringstream report;
 
     report << "SYMBOLIC_PARTITION_READY:"
@@ -889,6 +925,58 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
            << symbolicRelation->getNumInequalities()
            << " PresburgerLocals="
            << symbolicRelation->getNumLocalVars();
+
+    report << " OrderedConflictBranches="
+           << orderedConflicts->feasibleBranches.size()
+           << " EmptyConflictBranches=" << orderedConflicts->emptyBranches
+           << " ReductionOrder=";
+    switch (reductionDecision) {
+    case logical::ReductionOrderDecision::NoOutputWriteCollision:
+      report << "NoOutputWriteCollision";
+      break;
+    case logical::ReductionOrderDecision::PreserveSourceOrder:
+      report << "PreserveSourceOrder";
+      break;
+    case logical::ReductionOrderDecision::ReassociationCandidate:
+      report << "ReassociationCandidate";
+      break;
+    }
+
+
+    // ========================================================
+    // Phase 5.4.2c:
+    // Check the rank-based coordinate transformation T as a
+    // candidate lexicographic execution schedule.
+    //
+    // This checks ordered OUTPUT-WRITE dependences only.
+    //
+    // A legal result is NOT a full lowering legality proof.
+    // The actual FPGA scheduler must be checked separately.
+    // ========================================================
+
+    auto coordinateScheduleCheck =
+        logical::checkOrderedWriteSchedule(
+            *orderedConflicts,
+            coordinateMap->sourceToLogical,
+            n);
+
+    if (!coordinateScheduleCheck)
+      return fail(
+          "rank-based coordinate schedule check failed");
+
+    const bool coordinateSchedulePreservesWrites =
+        coordinateScheduleCheck->preservesOrderedWrites;
+
+    report << " CoordinateScheduleWriteOrder="
+           << (coordinateSchedulePreservesWrites
+                   ? "LEGAL"
+                   : "ILLEGAL");
+
+    report << " ScheduleViolationBranches="
+           << coordinateScheduleCheck->feasibleViolationBranches;
+
+    report << " ScheduleTestedBranches="
+           << coordinateScheduleCheck->testedViolationBranches;
 
     report << " T=[";
 
@@ -913,7 +1001,9 @@ mlir::systolic::analyzeSymbolicRankPartition(Operation *anchor,
     // Analysis succeeds; executable lowering is still unsupported.
     // Keep the exact relation rather than communicating success via 'why'.
     return SymbolicRankPartitionAnalysis(
-        report.str(), std::move(*symbolicRelation));
+        report.str(), std::move(*symbolicRelation),
+        std::move(orderedConflicts->feasibleBranches),
+        orderedConflicts->emptyBranches, reductionDecision);
 
   }
 }

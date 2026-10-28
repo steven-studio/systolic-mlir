@@ -44,6 +44,10 @@ add_llvm_executable(
 )
 llvm_update_compile_flags(rank-partition-presburger-test)
 target_link_libraries(rank-partition-presburger-test PRIVATE
+  MLIRAffineDialect
+  MLIRArithDialect
+  MLIRSCFDialect
+  MLIRFuncDialect
   MLIRPresburger
   MLIRSystolic
   MLIRSystolicTransforms

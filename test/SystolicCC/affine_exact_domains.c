@@ -1,4 +1,7 @@
 // REQUIRES: cfront-clang
+// This fixture isolates the established fast-path decisions and their
+// intentional refusals; all existing assertions remain in force. Automatic
+// general fallback is independently tested by general_affine.c without opt-in.
 //
 // Exact non-box iteration domains end to end (docs/AFFINE_GEMM_MAPPING.md section 19.13,
 // 2026-10-18): C nests whose loop bounds do not shift together, translated by the front end
@@ -32,7 +35,7 @@
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
-// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 'ex_degenerate' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
 // PLAN-DAG: note: 'ex_rep_triangle' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 3 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 'ex_cond_minus' is offloaded: 1 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet{{$}}
@@ -73,7 +76,7 @@
 // ALL: PASS: 0 differ
 //
 // Every offloaded call also against the function as written, on the CPU:
-// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // VERIFY-COUNT-10: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH

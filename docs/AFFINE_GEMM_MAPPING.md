@@ -3136,3 +3136,40 @@ tilings). Integer-valued reassociation tests establish exact results for those i
 they do not establish bitwise equivalence for arbitrary floating-point data with reassociation.
 `CFront/min_bound_unsupported.c` retains the original refusals and adds reversed comparisons,
 signed overflow, unsigned wrap, differing promotions, side effects and volatile/atomic input.
+
+
+### Automatic bounded general-affine fallback in systolic-cc
+
+`systolic-cc` automatically enables bounded general-affine analysis in both
+its planning and final lowering phases. No public general-affine CLI flag is
+required or accepted. For example:
+
+```sh
+build/bin/systolic-cc --runtime soft --submission sync \
+  --fp-reassociation --verify input.c -o output
+```
+
+The existing recognition/lowering path remains first choice. A successful fast
+plan keeps its original jobs and blocks overlapping general candidates. If no
+fast plan is emitted, a bounded general candidate may be used only after its
+independent exact source-domain, physical-address, multiplicity and order
+certificate and the existing alias/FP checks succeed. Hard compiler/planner
+errors are not bypassed. Strict FP never implicitly gains reassociation.
+
+The general path still requires a static finite domain, at most eight execution
+IVs and 512 MAC points, checked arithmetic and bounded temporary storage.
+Unsupported or over-budget inputs remain on the CPU without partial jobs.
+`--fp-reassociation` remains an explicit, separate permission.
+
+For developer isolation, the lowering pass retains the hidden internal option
+`general-affine` (default false when invoking the pass directly); the driver
+supplies `general-affine=true` for ordinary compiles. The test-only discovery pass has the same
+hidden analysis control. This is not a public systolic-cc switch: direct MLIR
+pass tests can still compare the established fast path against the combined
+pipeline without changing ordinary compiler usage.
+
+Legacy algorithm-specific driver fixtures may set the internal test environment
+`SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1` to request `general-affine=false` in both
+phases. It is not a public CLI option, and ordinary users leave it unset. The
+automatic E2E tests compare successful Test 2/3/4 plan IR byte-for-byte against
+this fast-only control, and independently require real automatic completions.

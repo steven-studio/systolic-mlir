@@ -8,16 +8,27 @@
 #ifdef AUDIT_STATS
 #include "systolic_offload.h"
 #endif
-#if CASE < 3
+#if CASE < 3 || CASE == 5
 #define N 16
 #else
 #define N 64
 #endif
 static float A[N][N], B[N][N], C[N][N];
+#ifndef REPEAT_TRIPS
+#define REPEAT_TRIPS 2
+#endif
 #if CASE == 1
 void kernel(float C[restrict 16][N], float A[restrict 16][N], float B[restrict 16][N]) {
+#ifdef EXTRA_IVS
+    for (int p0=0; p0<1; ++p0)
+    for (int p1=0; p1<1; ++p1)
+    for (int p2=0; p2<1; ++p2)
+    for (int p3=0; p3<1; ++p3)
+    for (int p4=0; p4<1; ++p4)
+    for (int p5=0; p5<1; ++p5)
+#endif
 #ifdef REPEAT
-    for (int p=0; p<2; ++p)
+    for (int p=0; p<REPEAT_TRIPS; ++p)
 #endif
     for (int i=0; i<4; ++i)
         for (int j=0; j<4; ++j)
@@ -46,6 +57,13 @@ void kernel(float C[restrict 64][N], float A[restrict 64][N], float B[restrict 6
             for (int k=0; k<4; ++k)
                 for (int l=0; l<4; ++l)
         C[i+2*k+3*l][j+5*k+6*l] += A[i+3*k+5*l][2*i+3*l+6*k] * B[3*j+2*k+3*l][5*j+6*k+l];
+}
+#elif CASE == 5
+void kernel(float C[restrict N][N], float A[restrict N][N], float B[restrict N][N]) {
+  for (int i=0; i<4; ++i)
+    for (int j=0; j<4; ++j)
+      for (int k=0; k<4; ++k)
+        C[2*i+3*j][0] += A[2*i+3*j][k] * B[k][0];
 }
 #endif
 int main(void) {

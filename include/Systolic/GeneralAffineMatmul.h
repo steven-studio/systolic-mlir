@@ -4,9 +4,11 @@
 #define SYSTOLIC_GENERAL_AFFINE_MATMUL_H
 
 #include "Systolic/AffineMatmulAnalysis.h"
+#include "Systolic/RankPartitionReductionSemantics.h"
 #include "mlir/Analysis/Presburger/PresburgerRelation.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include <memory>
+#include <vector>
 
 namespace mlir::systolic {
 
@@ -159,9 +161,34 @@ struct SymbolicRankPartitionAnalysis {
   std::string diagnostic;
   presburger::IntegerRelation sourceToLogical;
 
-  SymbolicRankPartitionAnalysis(std::string text,
-                                presburger::IntegerRelation relation)
-      : diagnostic(std::move(text)), sourceToLogical(std::move(relation)) {}
+  // Exact nonempty ordered write-conflict relations.
+  //
+  // Layout:
+  // [x1, z1, x2, z2, locals1, locals2, constant]
+  //
+  // These relations are preserved for future schedule legality
+  // analysis. They are NOT a lowering legality certificate.
+  std::vector<presburger::IntegerRelation>
+      feasibleOrderedWriteRelations;
+
+  std::size_t orderedConflictBranches = 0;
+  std::size_t emptyConflictBranches = 0;
+
+  ::systolic::logical::ReductionOrderDecision reductionOrder =
+      ::systolic::logical::ReductionOrderDecision::PreserveSourceOrder;
+
+  SymbolicRankPartitionAnalysis(
+      std::string text,
+      presburger::IntegerRelation relation,
+      std::vector<presburger::IntegerRelation> orderedWrites,
+      std::size_t emptyBranches,
+      ::systolic::logical::ReductionOrderDecision decision)
+      : diagnostic(std::move(text)),
+        sourceToLogical(std::move(relation)),
+        feasibleOrderedWriteRelations(std::move(orderedWrites)),
+        orderedConflictBranches(feasibleOrderedWriteRelations.size()),
+        emptyConflictBranches(emptyBranches),
+        reductionOrder(decision) {}
 };
 
 /// Analyze a finite affine MAC without enumerating source iterations.

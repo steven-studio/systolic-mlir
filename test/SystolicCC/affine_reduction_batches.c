@@ -1,4 +1,7 @@
 // REQUIRES: cfront-clang
+// This fixture isolates the established fast-path decisions and their
+// intentional refusals; all existing assertions remain in force. Automatic
+// general fallback is independently tested by general_affine.c without opt-in.
 //
 // Reduction-batch partitioning (docs/AFFINE_GEMM_MAPPING.md section 23, on by
 // default; systolic-cc --no-reduction-batches turns it off). The loops of a multiply-accumulate nest
@@ -26,7 +29,7 @@
 // NO REAL HARDWARE HERE: the software runtime model computes every tile;
 // SOFT_RUNTIME_MOCK_HARDWARE=1 makes it claim to be the FPGA.
 //
-// RUN: %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --explain %s -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
 // PLAN-DAG: note: 't1' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 't2' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 8 invocation(s) per call (the loops around them repeat them)
 // PLAN-DAG: note: 't5' is offloaded: 2 systolic tile invocation(s) on the 1x8x8 + 3x4x4 fleet; 32 invocation(s) per call (the loops around them repeat them)
@@ -74,16 +77,16 @@
 // Every offloaded call also against the function as written, on the CPU, with
 // the synchronous and the asynchronous submission (the asynchronous one waits
 // for each reduction batch iteration before the next reads C):
-// RUN: %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --verify %s -o %t.v > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.v 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
-// RUN: %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation --submission async --verify %s -o %t.va > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.va 2>&1 >/dev/null | FileCheck %s --check-prefix=VERIFY
 // VERIFY-COUNT-18: verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // Non-integer data (-DFRACTIONAL): the reduction batches reorder each sum, so
 // these results are checked within a relative tolerance -- not bitwise:
-// RUN: %systolic-cc --fp-reassociation -DFRACTIONAL --verify --verify-rtol 1e-4 %s -o %t.f > /dev/null 2>&1
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --fp-reassociation -DFRACTIONAL --verify --verify-rtol 1e-4 %s -o %t.f > /dev/null 2>&1
 // RUN: env SOFT_RUNTIME_MOCK_HARDWARE=1 %t.f 2>&1 >/dev/null | FileCheck %s --check-prefix=RTOL
 // RTOL-COUNT-18: verified: {{[0-9]+}} elements equal the CPU reference (relative tolerance 0.0001)
 // RTOL-NOT: MISMATCH
@@ -91,7 +94,7 @@
 // Strict floating point (no --fp-reassociation): nothing is offloaded, and
 // nothing is cut (last write wins runs only on a nest that may be lowered):
 // t2_assign and assign_t5 are refused at recognition as written, as before.
-// RUN: %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --explain %s -o %t.strict 2>&1 | FileCheck %s --check-prefix=STRICT
 // STRICT-DAG: note: 't1' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't2' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
 // STRICT-DAG: note: 't5' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums
@@ -105,7 +108,7 @@
 // kernel here except the assignments stays on the host (RE-DECIDED 2026-10-21,
 // docs section 20.5, last write wins: was "except the assignments with K = 1";
 // t2_assign and assign_t5 are cut to K = 1 first, 2 -> 4 offloaded).
-// RUN: %systolic-cc --no-reduction-batches --fp-reassociation --explain %s -o %t.off 2>&1 | FileCheck %s --check-prefix=OFF
+// RUN: env SYSTOLIC_CC_TEST_FAST_PATH_ONLY=1 %systolic-cc --no-reduction-batches --fp-reassociation --explain %s -o %t.off 2>&1 | FileCheck %s --check-prefix=OFF
 // OFF-DAG: note: 't1' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't2' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}
 // OFF-DAG: note: 't5' stays on the host: no GEMM the systolic arrays can run was recognized in it{{$}}

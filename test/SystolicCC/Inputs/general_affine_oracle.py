@@ -12,7 +12,7 @@ import re
 
 def source(case, n):
     points = []
-    for x in product(range(4), repeat=3 if case < 3 else 4):
+    for x in product(range(4), repeat=3 if case in (1, 2, 5) else 4):
         i, j, k = x[:3]
         l = x[3] if len(x) == 4 else 0
         if case == 1:
@@ -23,9 +23,12 @@ def source(case, n):
         elif case == 3:
             a = i+2*k+3*l, 2*i+4*k+5*l
             b, c = (5*k+6*l+j, 3*k+2*l+2*j), (i, j)
-        else:
+        elif case == 4:
             a, b = (i+3*k+5*l, 2*i+6*k+3*l), (3*j+2*k+3*l, 5*j+6*k+l)
             c = i+2*k+3*l, j+5*k+6*l
+        else:
+            assert case == 5
+            a, b, c = (2*i+3*j, k), (k, 0), (2*i+3*j, 0)
         assert all(0 <= v < n for pair in (a, b, c) for v in pair)
         points.append((a[0]*n+a[1], b[0]*n+b[1], c[0]*n+c[1]))
     return points
