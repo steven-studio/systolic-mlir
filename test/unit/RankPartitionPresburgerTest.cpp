@@ -40,6 +40,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/raw_ostream.h"
@@ -55,6 +57,7 @@ using namespace systolic::logical;
 // separate translation unit (this file must not see mlir::systolic).
 namespace systolic::logical::testing {
 void registerProductionGemmPass();
+void loadProductionDialects(mlir::MLIRContext &context);
 }
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -7846,6 +7849,7 @@ int main() {
       std::string prologue;       // extra ops before the nest
       bool aIsC = false;          // A reads C's memref
       std::string cMemref = "%C"; // the memref C is read and written through
+      std::string modulePrologue; // e.g. a systolic.device fleet (3b-6)
     };
 
     auto gemmModule = [](const GemmText &g) {
@@ -7855,10 +7859,12 @@ int main() {
 
       std::string aMemref = g.aIsC ? g.cMemref : "%A";
       std::string aType = g.aIsC ? g.cType : g.aType;
-      std::string mul = g.element == "f32" ? "arith.mulf" : "arith.muli";
-      std::string add = g.element == "f32" ? "arith.addf" : "arith.addi";
+      const bool floating = g.element == "f32" || g.element == "f64";
+      std::string mul = floating ? "arith.mulf" : "arith.muli";
+      std::string add = floating ? "arith.addf" : "arith.addi";
 
-      std::string text = "module {\n  func.func @" + g.name + "(%C: " +
+      std::string text = "module {\n" + g.modulePrologue +
+                         "  func.func @" + g.name + "(%C: " +
                          g.cType + g.argumentAttrs + ", %A: " + g.aType +
                          g.argumentAttrs + ", %B: " + g.bType +
                          g.argumentAttrs + ") {\n" + g.prologue + "    " +
@@ -8006,6 +8012,7 @@ int main() {
       parsed.context.loadDialect<affine::AffineDialect, arith::ArithDialect,
                                  scf::SCFDialect, func::FuncDialect,
                                  memref::MemRefDialect, LLVM::LLVMDialect>();
+      ::systolic::logical::testing::loadProductionDialects(parsed.context);
 
       parsed.module = parseSourceString<ModuleOp>(text, &parsed.context);
 
@@ -9051,6 +9058,526 @@ int main() {
                  " guarded path could take stay unchanged"))
         return 1;
     }
+
+    // ------------------------------------------------------------------
+    // Phase 5.4.3d-3b-6: the certified device-job lowering through the
+    // production pass (RankPartitionDeviceJobLowering.h, docs section 27).
+    // The decision order of the guarded path is device jobs, guarded MAC,
+    // source as written; certified-offload-first (test control) tries the
+    // device jobs before the established fast path, so that the two
+    // producers of the same tile plan can be compared byte for byte.
+    // ------------------------------------------------------------------
+
+    const std::string fleetText =
+        "  systolic.device @acc_8x8_0 rows = 8 cols = 8 dataflow = "
+        "output_stationary k_max = 16 tile_overhead = 95 "
+        "read_bytes_per_cycle = 4.000000e+00 write_bytes_per_cycle = "
+        "3.200000e+00 read_overhead = 11 write_overhead = 11 operand_lanes = "
+        "8 k_window = 8\n"
+        "  systolic.device @acc_4x4_0 rows = 4 cols = 4 dataflow = "
+        "output_stationary k_max = 16 tile_overhead = 95 "
+        "read_bytes_per_cycle = 4.000000e+00 write_bytes_per_cycle = "
+        "3.200000e+00 read_overhead = 11 write_overhead = 11 operand_lanes = "
+        "8 k_window = 8\n"
+        "  systolic.device @acc_4x4_1 rows = 4 cols = 4 dataflow = "
+        "output_stationary k_max = 16 tile_overhead = 95 "
+        "read_bytes_per_cycle = 4.000000e+00 write_bytes_per_cycle = "
+        "3.200000e+00 read_overhead = 11 write_overhead = 11 operand_lanes = "
+        "8 k_window = 8\n"
+        "  systolic.device @acc_4x4_2 rows = 4 cols = 4 dataflow = "
+        "output_stationary k_max = 16 tile_overhead = 95 "
+        "read_bytes_per_cycle = 4.000000e+00 write_bytes_per_cycle = "
+        "3.200000e+00 read_overhead = 11 write_overhead = 11 operand_lanes = "
+        "8 k_window = 8\n";
+
+    enum class OffloadExpectation { Offloaded, FastPath, GuardedMac, Unchanged };
+
+    struct OffloadShape {
+      int64_t M = 0, N = 0, K = 0;
+      // The static origin of each operand's view: A, B, C.
+      std::array<std::array<int64_t, 2>, 3> origins{};
+      // False: the tiles are the fast path's for another decomposition
+      // (a batched or general view), not this box's partition.
+      bool checkPartition = true;
+    };
+
+    const char *certifiedRemark =
+        "by the certified device-job lowering";
+    const char *certifiedRefusal = "certified device offload not applied: ";
+
+    // Runs the pass; checks the decision and, for a lowered nest, re-derives
+    // from the IR that the tiles partition [0, M) x [0, N) x [0, K) exactly
+    // and read the operands at the expected origins. `text` receives the
+    // function after the pass.
+    auto runOffload = [&](const GemmText &gemm, const std::string &options,
+                          OffloadExpectation expectation,
+                          const OffloadShape &shape,
+                          const std::vector<std::string> &remarks,
+                          std::string *text) -> bool {
+      const std::string label = gemm.name + "{" + options + "}";
+
+      ParsedGemm produced;
+      if (!parseGemm(produced, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b6 " << label << ": parse failed\n";
+        return false;
+      }
+      const std::string before = functionText(produced.function);
+      const FunctionType signatureBefore = produced.function.getFunctionType();
+
+      ::systolic::logical::testing::registerProductionGemmPass();
+
+      std::string diagnostics;
+      ScopedDiagnosticHandler diagnosticHandler(
+          &produced.context, [&](Diagnostic &diagnostic) {
+            diagnostics += diagnostic.str() + "\n";
+            return success();
+          });
+
+      PassManager manager(&produced.context, ModuleOp::getOperationName());
+      if (failed(parsePassPipeline("affine-matmul-to-systolic{" + options +
+                                       "}",
+                                   manager, llvm::errs()))) {
+        std::cerr << "3b6 " << label << ": pipeline parse failed\n";
+        return false;
+      }
+      if (failed(manager.run(*produced.module))) {
+        std::cerr << "3b6 " << label << ": the pass failed\n" << diagnostics;
+        return false;
+      }
+      if (failed(mlir::verify(*produced.module))) {
+        std::cerr << "3b6 " << label << ": output does not verify\n";
+        return false;
+      }
+      if (produced.function.getFunctionType() != signatureBefore) {
+        std::cerr << "3b6 " << label << ": the signature changed\n";
+        return false;
+      }
+      if (text)
+        *text = functionText(produced.function);
+
+      auto reported = [&](const std::string &fragment) {
+        return diagnostics.find(fragment) != std::string::npos;
+      };
+      for (const std::string &fragment : remarks)
+        if (!reported(fragment)) {
+          std::cerr << "3b6 " << label << ": report lacks \"" << fragment
+                    << "\":\n"
+                    << diagnostics;
+          return false;
+        }
+
+      // The IR after the pass.
+      unsigned affineOps = 0, guards = 0, tiles = 0;
+      SmallVector<Operation *> tileOps;
+      SmallVector<bufferization::ToTensorOp> tensors;
+      produced.function.walk([&](Operation *op) {
+        if (isa<affine::AffineForOp, affine::AffineLoadOp,
+                affine::AffineStoreOp>(op))
+          ++affineOps;
+        if (isa<scf::IfOp>(op))
+          ++guards;
+        if (op->getName().getStringRef() == "systolic.matmul_tile") {
+          ++tiles;
+          tileOps.push_back(op);
+        }
+        if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(op))
+          tensors.push_back(toTensor);
+      });
+
+      const bool certified = reported(certifiedRemark);
+
+      switch (expectation) {
+      case OffloadExpectation::Unchanged:
+        if (functionText(produced.function) != before || certified) {
+          std::cerr << "3b6 " << label << ": the function changed\n"
+                    << diagnostics;
+          return false;
+        }
+        return true;
+      case OffloadExpectation::GuardedMac:
+        if (tiles != 0 || guards != 1 || certified) {
+          std::cerr << "3b6 " << label << ": expected the guarded MAC nest"
+                    << " (tiles " << tiles << ", guards " << guards << ")\n"
+                    << diagnostics;
+          return false;
+        }
+        return true;
+      case OffloadExpectation::FastPath:
+        if (tiles == 0 || certified) {
+          std::cerr << "3b6 " << label << ": expected the fast path's tiles"
+                    << " (tiles " << tiles << ")\n"
+                    << diagnostics;
+          return false;
+        }
+        break;
+      case OffloadExpectation::Offloaded:
+        if (tiles == 0 || affineOps != 0 || guards != 0 || !certified) {
+          std::cerr << "3b6 " << label << ": expected the certified device"
+                    << " jobs (tiles " << tiles << ", affine ops "
+                    << affineOps << ", guards " << guards << ")\n"
+                    << diagnostics;
+          return false;
+        }
+        break;
+      }
+
+      if (!shape.checkPartition)
+        return true;
+
+      // The tiles partition the GEMM: each output block is an
+      // extract_slice of C (static offsets and sizes), its K folds chain
+      // through c_in in order and sum to K; the blocks lie inside C, are
+      // pairwise disjoint and cover it.
+      struct Block {
+        int64_t row, column, m, n;
+        int64_t k = 0;
+        int64_t folds = 0;
+      };
+      std::vector<Block> blocks;
+      llvm::DenseMap<Operation *, size_t> blockOfTile;
+      for (Operation *tile : tileOps) {
+        auto attr = [&](StringRef name) {
+          auto value = tile->getAttrOfType<IntegerAttr>(name);
+          return value ? value.getInt() : int64_t(-1);
+        };
+        const int64_t m = attr("m"), n = attr("n"), k = attr("k");
+        Value cIn = tile->getOperand(2);
+        size_t index;
+        if (auto slice = cIn.getDefiningOp<tensor::ExtractSliceOp>()) {
+          auto offsets = slice.getStaticOffsets();
+          auto sizes = slice.getStaticSizes();
+          if (offsets.size() != 2 || sizes.size() != 2 || sizes[0] != m ||
+              sizes[1] != n) {
+            std::cerr << "3b6 " << label << ": a tile's C slice is not its "
+                      << "m x n block\n";
+            return false;
+          }
+          blocks.push_back({offsets[0], offsets[1], m, n});
+          index = blocks.size() - 1;
+        } else if (Operation *previous = cIn.getDefiningOp();
+                   previous && blockOfTile.count(previous)) {
+          index = blockOfTile[previous];
+          if (blocks[index].m != m || blocks[index].n != n) {
+            std::cerr << "3b6 " << label << ": a K fold changes the block\n";
+            return false;
+          }
+        } else if (cIn.getDefiningOp<bufferization::ToTensorOp>()) {
+          blocks.push_back({0, 0, m, n}); // the whole GEMM, no fleet
+          index = blocks.size() - 1;
+        } else {
+          std::cerr << "3b6 " << label << ": a tile's c_in is unexpected\n";
+          return false;
+        }
+        blockOfTile[tile] = index;
+        if (k <= 0) {
+          std::cerr << "3b6 " << label << ": a tile has no reduction\n";
+          return false;
+        }
+        if (auto kIndex = tile->getAttrOfType<IntegerAttr>("systolic.k_index");
+            kIndex && kIndex.getInt() != blocks[index].folds) {
+          std::cerr << "3b6 " << label << ": K folds out of order\n";
+          return false;
+        }
+        blocks[index].k += k;
+        ++blocks[index].folds;
+      }
+      int64_t area = 0;
+      for (const Block &b : blocks) {
+        if (b.row < 0 || b.column < 0 || b.m <= 0 || b.n <= 0 ||
+            b.row + b.m > shape.M || b.column + b.n > shape.N ||
+            b.k != shape.K) {
+          std::cerr << "3b6 " << label << ": a block lies outside the GEMM"
+                    << " or its folds do not sum to K\n";
+          return false;
+        }
+        area += b.m * b.n;
+      }
+      for (size_t i = 0; i < blocks.size(); ++i)
+        for (size_t j = i + 1; j < blocks.size(); ++j) {
+          const Block &p = blocks[i], &q = blocks[j];
+          if (p.row < q.row + q.m && q.row < p.row + p.m &&
+              p.column < q.column + q.n && q.column < p.column + p.n) {
+            std::cerr << "3b6 " << label << ": two blocks overlap\n";
+            return false;
+          }
+        }
+      if (area != shape.M * shape.N) {
+        std::cerr << "3b6 " << label << ": the blocks cover " << area
+                  << " of " << shape.M * shape.N << " elements\n";
+        return false;
+      }
+
+      // The operand views: A, B, C tensors taken at the expected origins.
+      if (expectation == OffloadExpectation::Offloaded) {
+        if (tensors.size() != 3) {
+          std::cerr << "3b6 " << label << ": " << tensors.size()
+                    << " operand tensors\n";
+          return false;
+        }
+        for (unsigned a = 0; a < 3; ++a) {
+          Value source = tensors[a].getBuffer();
+          std::array<int64_t, 2> origin{0, 0};
+          if (auto view = source.getDefiningOp<memref::SubViewOp>()) {
+            auto offsets = view.getStaticOffsets();
+            if (offsets.size() != 2) {
+              std::cerr << "3b6 " << label << ": a view is not rank 2\n";
+              return false;
+            }
+            origin = {offsets[0], offsets[1]};
+            source = view.getSource();
+          }
+          if (!isa<BlockArgument>(source) || origin != shape.origins[a]) {
+            std::cerr << "3b6 " << label << ": operand " << a
+                      << " is not read at its origin (" << origin[0] << ", "
+                      << origin[1] << ")\n";
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
+    const std::string certifiedOptions =
+        "general-affine=true certified-offload-first=true "
+        "allow-fp-reassociation=true report=true";
+    const std::string fastOptions =
+        "general-affine=true allow-fp-reassociation=true report=true";
+    const std::string strictCertifiedOptions =
+        "general-affine=true certified-offload-first=true report=true";
+
+    // The two producers of one tile plan agree byte for byte.
+    auto sameAsFastPath = [&](const GemmText &gemm, const OffloadShape &shape,
+                              const char *claim) -> bool {
+      std::string certifiedText, fastText;
+      if (!runOffload(gemm, certifiedOptions, OffloadExpectation::Offloaded,
+                      shape, {certifiedRemark}, &certifiedText) ||
+          !runOffload(gemm, fastOptions, OffloadExpectation::FastPath, shape,
+                      {" lowered as "}, &fastText))
+        return false;
+      if (certifiedText != fastText) {
+        std::cerr << "3b6 " << gemm.name << ": the certified lowering and "
+                  << "the fast path differ:\n--- certified ---\n"
+                  << certifiedText << "\n--- fast path ---\n" << fastText;
+        return false;
+      }
+      return verify(true, claim) == 0;
+    };
+
+    auto withFleet = [&](GemmText gemm, const char *name) {
+      gemm.name = name;
+      gemm.modulePrologue = fleetText;
+      return gemm;
+    };
+    auto loopsOf = [](int M, int N, int K) {
+      return "affine.for %i = 0 to " + std::to_string(M) +
+             " { affine.for %j = 0 to " + std::to_string(N) +
+             " { affine.for %k = 0 to " + std::to_string(K) + " {";
+    };
+    auto square = [](int M, int N, int K, const char *name) {
+      return GemmText{name,
+                      "memref<" + std::to_string(M) + "x" + std::to_string(N) +
+                          "xf32>",
+                      "memref<" + std::to_string(M) + "x" + std::to_string(K) +
+                          "xf32>",
+                      "memref<" + std::to_string(K) + "x" + std::to_string(N) +
+                          "xf32>",
+                      "", 3, "%i, %j", "%i, %k", "%k, %j"};
+    };
+
+    // Standard contiguous GEMMs: whole matrices, the fleet's plan.
+    {
+      GemmText small = withFleet(plain, "device_plain");
+      if (!sameAsFastPath(small, {4, 4, 4, {}},
+                          "3b6 device jobs: 4x4x4 GEMM offloaded, identical"
+                          " to the fast path"))
+        return 1;
+
+      GemmText big = square(16, 16, 16, "device_16");
+      big.loops = loopsOf(16, 16, 16);
+      big = withFleet(big, "device_16");
+      if (!sameAsFastPath(big, {16, 16, 16, {}},
+                          "3b6 device jobs: 16x16x16 GEMM over the fleet"
+                          " (10 blocks), identical to the fast path"))
+        return 1;
+
+      GemmText deep = square(8, 8, 40, "device_k40");
+      deep.loops = loopsOf(8, 8, 40);
+      deep = withFleet(deep, "device_k40");
+      if (!sameAsFastPath(deep, {8, 8, 40, {}},
+                          "3b6 device jobs: K = 40 folded by k_max in order,"
+                          " identical to the fast path"))
+        return 1;
+
+      GemmText partial = square(6, 8, 8, "device_partial");
+      partial.loops = loopsOf(6, 8, 8);
+      partial = withFleet(partial, "device_partial");
+      if (!sameAsFastPath(partial, {6, 8, 8, {}},
+                          "3b6 device jobs: partial tile (M = 6), identical"
+                          " to the fast path"))
+        return 1;
+
+      // The reduction loop outermost: the same jobs.
+      GemmText kOuter = plain;
+      kOuter.loops = "affine.for %k = 0 to 4 { affine.for %i = 0 to 4 {"
+                     " affine.for %j = 0 to 4 {";
+      kOuter = withFleet(kOuter, "device_k_outer");
+      if (!sameAsFastPath(kOuter, {4, 4, 4, {}},
+                          "3b6 device jobs: reduction loop outermost,"
+                          " identical to the fast path"))
+        return 1;
+
+      // A sub-box with constant offsets: static subviews at the origins.
+      GemmText offsets{"device_offsets", "memref<6x6xf32>", "memref<6x6xf32>",
+                       "memref<6x6xf32>", loops3, 3, "%i + 1, %j + 2",
+                       "%i + 1, %k", "%k, %j + 2"};
+      offsets = withFleet(offsets, "device_offsets");
+      if (!sameAsFastPath(offsets, {4, 4, 4, {{{1, 0}, {0, 2}, {1, 2}}}},
+                          "3b6 device jobs: views with constant offsets,"
+                          " identical to the fast path"))
+        return 1;
+
+      // No fleet: one unassigned tile over the whole GEMM.
+      if (verify(runOffload(plain, certifiedOptions,
+                            OffloadExpectation::Offloaded, {4, 4, 4, {}},
+                            {certifiedRemark}, nullptr),
+                 "3b6 device jobs: without a fleet one whole-GEMM tile"))
+        return 1;
+
+      // Permission by the reassoc flag alone.
+      GemmText flagged = withFleet(relaxed, "device_reassoc");
+      if (verify(runOffload(flagged, strictCertifiedOptions,
+                            OffloadExpectation::Offloaded, {4, 4, 4, {}},
+                            {certifiedRemark}, nullptr),
+                 "3b6 device jobs: the reassoc flag permits the offload"))
+        return 1;
+    }
+
+    // Strict semantics: no offload; the guarded MAC nest takes the nest.
+    if (verify(runOffload(withFleet(plain, "strict_plain"),
+                          strictCertifiedOptions,
+                          OffloadExpectation::GuardedMac, {4, 4, 4, {}},
+                          {std::string(certifiedRefusal) +
+                               "UNKNOWN: strict floating-point semantics",
+                           "replaced by its exact guarded MAC nest"},
+                          nullptr),
+               "3b6 device jobs: strict floating point is never offloaded;"
+               " the guarded MAC nest follows"))
+      return 1;
+
+    // Outside the contract: UNKNOWN with the reason, the next decision
+    // takes over (the fast path where it can, else the guarded MAC nest).
+    // An f64 nest is refused upstream: the symbolic recognizer admits f32
+    // accumulating MACs only (the device contract's J9 is then never
+    // reached); the fast path lowers an f64 tile, which systolic-cc does
+    // not offload.
+    struct Refusal {
+      GemmText gemm;
+      OffloadExpectation next;
+      OffloadShape shape;
+      std::string reason;
+      const char *claim;
+    };
+    GemmText f64 = plain;
+    f64.name = "device_f64";
+    f64.element = "f64";
+    f64.cType = f64.aType = f64.bType = "memref<4x4xf64>";
+    GemmText transposed = plain;
+    transposed.name = "device_transposed";
+    transposed.aIndex = "%k, %i";
+    GemmText repeatedDevice = plain;
+    repeatedDevice.name = "device_repeated";
+    repeatedDevice.loops = "affine.for %r = 0 to 2 { " + loops3;
+    repeatedDevice.depth = 4;
+
+    const std::vector<Refusal> refusals = {
+        {withFleet(f64, "device_f64"), OffloadExpectation::FastPath,
+         {4, 4, 4, {}}, "",
+         "3b6 device jobs: f64 is not a recognized GEMM (f32 only), the"
+         " fast path's tile is not the certified lowering's"},
+        {withFleet(triangular, "device_triangular"),
+         OffloadExpectation::GuardedMac, {4, 4, 4, {}},
+         "UNKNOWN: the logical domain is not a box",
+         "3b6 device jobs: a triangular domain is UNKNOWN; the guarded MAC"
+         " nest follows"},
+        {withFleet(stretch, "device_stretch"), OffloadExpectation::FastPath,
+         {4, 4, 4, {}}, "UNKNOWN: the coordinate map is not unimodular",
+         "3b6 device jobs: a non-unimodular map is UNKNOWN"},
+        {withFleet(transposed, "device_transposed"),
+         OffloadExpectation::FastPath, {4, 4, 4, {}},
+         "UNKNOWN: A is not read as (I, K)",
+         "3b6 device jobs: a transposed factor is UNKNOWN"},
+        {withFleet(repeatedDevice, "device_repeated"),
+         OffloadExpectation::FastPath, {4, 4, 4, {}},
+         "UNKNOWN: the nest has 4 logical coordinates",
+         "3b6 device jobs: a repetition (batch) loop is UNKNOWN"},
+    };
+    for (const Refusal &r : refusals) {
+      // The fast path's tiles for a batched or general view are not the
+      // M x N x K partition of this nest's box: the IR check is skipped
+      // for them by giving the fast path its own extents.
+      OffloadShape shape = r.shape;
+      if (r.next == OffloadExpectation::FastPath &&
+          (r.gemm.name == "device_stretch" ||
+           r.gemm.name == "device_repeated"))
+        shape.checkPartition = false;
+      std::vector<std::string> expected;
+      if (!r.reason.empty())
+        expected.push_back(std::string(certifiedRefusal) + r.reason);
+      else
+        expected.push_back("UNKNOWN: not a recognized GEMM: not one f32 "
+                           "accumulating MAC");
+      if (verify(runOffload(r.gemm, certifiedOptions, r.next, shape, expected,
+                            nullptr),
+                 r.claim))
+        return 1;
+    }
+
+    // Strided K (A[i][2k]): a non-unit coefficient.
+    {
+      GemmText strided = plain;
+      strided.name = "device_stride_k";
+      strided.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                      " affine.for %k = 0 to 4 {";
+      strided.aType = "memref<4x8xf32>";
+      strided.bType = "memref<8x4xf32>";
+      strided.aIndex = "%i, 2 * %k";
+      strided.bIndex = "2 * %k, %j";
+      if (verify(runOffload(withFleet(strided, "device_stride_k"),
+                            certifiedOptions, OffloadExpectation::FastPath,
+                            {4, 4, 4, {}},
+                            {std::string(certifiedRefusal) +
+                             "UNKNOWN: operand A reads its dimension 1 "
+                             "through a strided"},
+                            nullptr),
+                 "3b6 device jobs: a strided factor view is UNKNOWN"))
+        return 1;
+    }
+
+    // Memory, decided by the shared preflight before either path: may-alias
+    // arguments are UNKNOWN (nothing else takes the nest either);
+    // assume-no-alias admits the jobs; an input reading C's buffer is
+    // REFUSED.
+    if (verify(runOffload(withFleet(mayAlias, "device_may_alias"),
+                          certifiedOptions, OffloadExpectation::Unchanged,
+                          {4, 4, 4, {}}, {"UNKNOWN: A may alias C"},
+                          nullptr),
+               "3b6 device jobs: arguments without llvm.noalias are UNKNOWN"
+               " and stay unchanged"))
+      return 1;
+    if (verify(runOffload(withFleet(mayAlias, "device_assume"),
+                          certifiedOptions + " assume-no-alias=true",
+                          OffloadExpectation::Offloaded, {4, 4, 4, {}},
+                          {certifiedRemark}, nullptr),
+               "3b6 device jobs: assume-no-alias admits the jobs"))
+      return 1;
+    if (verify(runOffload(withFleet(readsOutput, "device_reads_output"),
+                          certifiedOptions, OffloadExpectation::Unchanged,
+                          {4, 4, 4, {}},
+                          {"REFUSED: A shares its buffer with C",
+                           "[PROVEN_INVALID]"},
+                          nullptr),
+               "3b6 device jobs: a factor reading C's buffer is REFUSED"))
+      return 1;
   }
 
   std::cout << "All coordinate relation tests passed.\n";

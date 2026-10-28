@@ -110,6 +110,17 @@ struct GuardedMacPreflight {
   std::array<std::vector<BigInt>, 3> accessOffsets;
   GuardedMacSemantics semantics;
 
+  // Phase 3b-6: the attributes of the source statement as written.
+  // prepareGuardedMac accepts only the strict defaults (then these are
+  // none / false); prepareRecognizedGemm records whatever is written, for
+  // a caller with its own arithmetic contract (the device-job lowering,
+  // whose permission is the accumulation's reassoc flag). The MAC
+  // emitters refuse a preflight whose recorded attributes are not strict.
+  mlir::arith::FastMathFlags multiplyFastMath =
+      mlir::arith::FastMathFlags::none;
+  mlir::arith::FastMathFlags addFastMath = mlir::arith::FastMathFlags::none;
+  bool roundingModeAttributes = false;
+
   GuardedMacPreflight(PartitionCoordinateMap map,
                       mlir::presburger::IntegerPolyhedron domain,
                       SymbolicIterationPlan iterationPlan)
@@ -124,6 +135,16 @@ struct GuardedMacPreflight {
 std::optional<GuardedMacPreflight>
 prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
                   GuardedMacOutcome &outcome, std::string &why);
+
+// Phase 3b-6: the same preflight without the strict-attribute decision.
+// Every other decision is prepareGuardedMac's (recognition, statement
+// shape, memory disjointness, exact domain, box, access functions); the
+// statement's fast-math flags and rounding-mode attributes are recorded on
+// the result instead of refused. Not for the MAC emitters: they mirror
+// nothing but the strict defaults and refuse such a preflight.
+std::optional<GuardedMacPreflight>
+prepareRecognizedGemm(mlir::Operation *anchor, bool assumeNoAlias,
+                      GuardedMacOutcome &outcome, std::string &why);
 
 struct EmittedGuardedMacStatement {
   EmittedGuardedAffineLoopNest nest;

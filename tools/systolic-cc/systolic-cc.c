@@ -1090,6 +1090,14 @@ static int compile(driver *d) {
   const char *fast_only = getenv("SYSTOLIC_CC_TEST_FAST_PATH_ONLY");
   const char *general_affine =
       fast_only && strcmp(fast_only, "1") == 0 ? "false" : "true";
+  /* The same isolation for Phase 3b-6 (docs/AFFINE_GEMM_MAPPING.md section
+     27): the certified device-job lowering of recognized GEMMs tried before
+     the established fast path. Snapshot once, for both phases. */
+  const char *certified_first =
+      getenv("SYSTOLIC_CC_TEST_CERTIFIED_OFFLOAD_FIRST");
+  const char *certified_opt = certified_first && strcmp(certified_first, "1") == 0
+                                  ? " certified-offload-first=true"
+                                  : "";
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
   char *cfront = format("%s/systolic-cfront", a->self_dir);
   char *offload_rt = format("%s/runtime/offload", SYSTOLIC_SOURCE_DIR);
@@ -1178,12 +1186,12 @@ static int compile(driver *d) {
   if (nfns) {
     strvec c2 = argv_of(opt, fleet,
                         format("--affine-matmul-to-systolic=report=true "
-                               "cost-model=%s%s%s general-affine=%s",
+                               "cost-model=%s%s%s general-affine=%s%s",
                                a->cost_model,
                                a->no_reduction_batches
                                    ? " reduction-batches=false"
                                    : "",
-                               a->fp_distribute ? " fp-distribute=true" : "", general_affine),
+                               a->fp_distribute ? " fp-distribute=true" : "", general_affine, certified_opt),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
@@ -1397,9 +1405,9 @@ static int compile(driver *d) {
       return -1;
     strvec c4 = argv_of(
         opt, fleet,
-        format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s", a->cost_model,
+        format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s%s", a->cost_model,
                a->no_reduction_batches ? " reduction-batches=false" : "",
-               a->fp_distribute ? " fp-distribute=true" : "", general_affine),
+               a->fp_distribute ? " fp-distribute=true" : "", general_affine, certified_opt),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))

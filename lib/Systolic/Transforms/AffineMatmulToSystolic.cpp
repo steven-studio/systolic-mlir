@@ -55,6 +55,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
+#include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
@@ -2523,6 +2524,17 @@ struct AffineMatmulToSystolicPass
       *this, "general-affine",
       llvm::cl::desc("Internal test control for bounded exact fallback; systolic-cc enables it automatically"),
       llvm::cl::Hidden, llvm::cl::init(false)};
+  // Phase 5.4.3d-3b-6 (docs/AFFINE_GEMM_MAPPING.md section 27): the
+  // certified device-job lowering of the recognized GEMMs (under
+  // general-affine) is tried before the established fast path instead of
+  // after it. Internal test control: in ordinary compiles the fast path
+  // remains the first choice and the certified lowering is the first
+  // decision of the guarded path for the nests the fast path leaves.
+  Option<bool> certifiedOffloadFirst{
+      *this, "certified-offload-first",
+      llvm::cl::desc("Internal test control: try the certified device-job "
+                     "lowering of recognized GEMMs before the fast path"),
+      llvm::cl::Hidden, llvm::cl::init(false)};
 
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
@@ -3145,11 +3157,14 @@ struct AffineMatmulToSystolicPass
     }
 
     SmallVector<GeneralAffineMatmul, 1> generalMatmuls;
-    // Phase 5.4.3d-3b-5: nests the guarded MAC replacement accepts in its
-    // preflight (RankPartitionRecognizedMacAdapter.h). Nothing is mutated
-    // here; each replacement is committed after the fast path, nest by nest,
-    // transactionally. A nest the preflight does not accept keeps the legacy
-    // general path below exactly as before.
+    // Phase 5.4.3d-3b-5 / 3b-6: nests the shared preflight of the guarded
+    // path accepts (RankPartitionRecognizedMacAdapter.h, without the
+    // strict-attribute decision: the device-job lowering has its own
+    // arithmetic contract, the guarded MAC replacement re-runs the strict
+    // one at commit). Nothing is mutated here; each replacement is committed
+    // after the fast path, nest by nest, transactionally. A nest the
+    // preflight does not accept keeps the legacy general path below exactly
+    // as before.
     struct GuardedMacCandidate {
       Operation *anchor; // the source nest's outermost loop
       std::string diagnostic;
@@ -3176,7 +3191,7 @@ struct AffineMatmulToSystolicPass
           std::string guardedWhy;
           ::systolic::logical::GuardedMacOutcome outcome =
               ::systolic::logical::GuardedMacOutcome::Unknown;
-          auto preflight = ::systolic::logical::prepareGuardedMac(
+          auto preflight = ::systolic::logical::prepareRecognizedGemm(
               candidate.anchor, assumeNoAlias, outcome, guardedWhy);
           if (preflight) {
             Operation *root = preflight->outermost.getOperation();
@@ -3249,7 +3264,99 @@ struct AffineMatmulToSystolicPass
 
     SmallVector<bool, 8> generalBlocked(generalMatmuls.size(), false);
     SmallVector<bool, 8> guardedBlocked(guardedCandidates.size(), false);
-    for (const LogicalMatmul &matmul : matmuls) {
+    // Phase 5.4.3d-3b-6: the certified device-job lowering of a recognized
+    // GEMM (RankPartitionDeviceJobLowering.h), the first decision of the
+    // guarded path: device jobs when the contract holds, the guarded MAC
+    // nest otherwise, the source as written when both refuse. The plan is
+    // the fast path's (planSystolicMatmul, emitSystolicTilePlan), under the
+    // same cost-model options.
+    SystolicOptimizerOptions deviceOptions;
+    deviceOptions.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+    const bool deviceOptionsValid =
+        parseCostModelVersion(costModel, deviceOptions.costModel) &&
+        (operandPath == "v1" || operandPath == "v2");
+    deviceOptions.beatWideOperandPath = operandPath == "v2";
+    auto attemptDeviceJobs =
+        [&](OpBuilder &builder, Operation *anchor,
+            ::systolic::logical::GuardedMacOutcome &outcome, std::string &why,
+            bool &hardError) -> std::optional<DeviceJobReplacement> {
+      // The options matter only with a fleet (as for the fast path): a
+      // fleet-less module keeps emitting one whole-GEMM tile.
+      if (!deviceOptionsValid && !fleet->resources.empty()) {
+        hardError = true;
+        outcome = ::systolic::logical::GuardedMacOutcome::Unsupported;
+        why = "REFUSED: cost-model and operand-path must each be v1 or v2";
+        return std::nullopt;
+      }
+      return replaceGemmWithDeviceJobs(builder, anchor, *fleet, deviceOptions,
+                                       assumeNoAlias, allowFpReassociation,
+                                       nextGemmIndex, outcome, why,
+                                       hardError);
+    };
+    auto reportDeviceJobs = [&](const DeviceJobReplacement &replaced) {
+      if (!report)
+        return;
+      auto remark = replaced.firstEmitted->emitRemark()
+                    << "affine GEMM " << replaced.M << "x" << replaced.N << "x"
+                    << replaced.K << " lowered as " << replaced.invocations
+                    << " exact region(s) by the certified device-job lowering "
+                       "(docs/AFFINE_GEMM_MAPPING.md section 27)";
+      if (replaced.makespan)
+        remark << " on " << fleet->resources.size()
+               << " accelerator(s): makespan = " << *replaced.makespan
+               << " cycles (read + compute + write), " << replaced.blocks
+               << " output block(s)";
+      remark << "; " << replaced.diagnostic;
+    };
+    // With certified-offload-first the certified lowering runs now, before
+    // the fast path; a nest it replaces is withdrawn from the fast plans
+    // and the later decisions (their anchors are inside it or around it).
+    SmallVector<bool, 8> fastBlocked(matmuls.size(), false);
+    SmallVector<bool, 8> certifiedTried(guardedCandidates.size(), false);
+    if (certifiedOffloadFirst) {
+      for (auto [i, guarded] : llvm::enumerate(guardedCandidates)) {
+        SmallVector<unsigned, 4> fastOverlaps;
+        for (unsigned j = 0; j < matmuls.size(); ++j)
+          if (!fastBlocked[j] && nested(matmuls[j].anchor, guarded.anchor))
+            fastOverlaps.push_back(j);
+        SmallVector<unsigned, 4> generalOverlaps;
+        for (unsigned j = 0; j < generalMatmuls.size(); ++j)
+          if (!generalBlocked[j] &&
+              nested(generalMatmuls[j].anchor, guarded.anchor))
+            generalOverlaps.push_back(j);
+        OpBuilder builder(guarded.anchor);
+        std::string why;
+        ::systolic::logical::GuardedMacOutcome outcome =
+            ::systolic::logical::GuardedMacOutcome::Unknown;
+        bool hardError = false;
+        auto replaced =
+            attemptDeviceJobs(builder, guarded.anchor, outcome, why, hardError);
+        if (hardError) {
+          signalPassFailure();
+          return;
+        }
+        certifiedTried[i] = true;
+        if (!replaced) {
+          // The nest is as written: the fast path decides next. An
+          // emitter's refusal of an accepted nest is always reported.
+          if (report ||
+              outcome == ::systolic::logical::GuardedMacOutcome::Unsupported)
+            guarded.anchor->emitRemark()
+                << "certified device offload not applied: " << why << " ["
+                << stringifyGemmMappingClass(guardedClass(outcome)) << "]";
+          continue;
+        }
+        guardedBlocked[i] = true;
+        for (unsigned j : fastOverlaps)
+          fastBlocked[j] = true;
+        for (unsigned j : generalOverlaps)
+          generalBlocked[j] = true;
+        reportDeviceJobs(*replaced);
+      }
+    }
+    for (auto [fastIndex, matmul] : llvm::enumerate(matmuls)) {
+      if (fastBlocked[fastIndex])
+        continue;
       SmallVector<unsigned, 4> overlaps;
       for (unsigned i = 0; i < generalMatmuls.size(); ++i)
         if (!generalBlocked[i] && nested(generalMatmuls[i].anchor, matmul.anchor))
@@ -3301,14 +3408,38 @@ struct AffineMatmulToSystolicPass
         remark << " ["
                << stringifyGemmMappingClass(u.outermost->mappingClass) << "]";
     }
-    // Phase 5.4.3d-3b-5: transactional guarded MAC replacement. The
-    // preflight is re-run on the nest as it is now; the statement is emitted
-    // in the nest's position on its own memrefs, verified, and only then is
-    // the source nest erased. Any failure leaves the source untouched.
+    // Phase 5.4.3d-3b-5 / 3b-6: the guarded path's decisions, in order:
+    // (1) the certified device-job lowering, (2) the transactional guarded
+    // MAC replacement, (3) the source as written. Each preflight is re-run
+    // on the nest as it is now; a replacement is emitted in the nest's
+    // position on its own memrefs, verified, and only then is the source
+    // nest erased. Any failure leaves the source untouched.
     for (auto [i, guarded] : llvm::enumerate(guardedCandidates)) {
       if (guardedBlocked[i])
         continue;
       OpBuilder builder(guarded.anchor);
+      if (!certifiedTried[i]) {
+        std::string deviceWhy;
+        ::systolic::logical::GuardedMacOutcome deviceOutcome =
+            ::systolic::logical::GuardedMacOutcome::Unknown;
+        bool hardError = false;
+        auto offloaded = attemptDeviceJobs(builder, guarded.anchor,
+                                           deviceOutcome, deviceWhy, hardError);
+        if (hardError) {
+          signalPassFailure();
+          return;
+        }
+        if (offloaded) {
+          reportDeviceJobs(*offloaded);
+          continue;
+        }
+        if (report ||
+            deviceOutcome == ::systolic::logical::GuardedMacOutcome::Unsupported)
+          guarded.anchor->emitRemark()
+              << "certified device offload not applied: " << deviceWhy << " ["
+              << stringifyGemmMappingClass(guardedClass(deviceOutcome))
+              << "]";
+      }
       std::string why;
       ::systolic::logical::GuardedMacOutcome outcome =
           ::systolic::logical::GuardedMacOutcome::Unknown;
@@ -3322,9 +3453,14 @@ struct AffineMatmulToSystolicPass
               << replaced->diagnostic;
         continue;
       }
-      guarded.anchor->emitRemark()
-          << "guarded MAC replacement not applied: " << why << " ["
-          << stringifyGemmMappingClass(guardedClass(outcome)) << "]";
+      // An emitter's refusal of an accepted nest is always reported; a
+      // strictness or legality refusal only in report mode (as the
+      // preflight's refusals are).
+      if (report ||
+          outcome == ::systolic::logical::GuardedMacOutcome::Unsupported)
+        guarded.anchor->emitRemark()
+            << "guarded MAC replacement not applied: " << why << " ["
+            << stringifyGemmMappingClass(guardedClass(outcome)) << "]";
     }
     for (auto [i, matmul] : llvm::enumerate(generalMatmuls)) {
       if (generalBlocked[i])

@@ -5,6 +5,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   GeneralAffineMatmul.cpp
   RankPartitionExactInclusion.cpp
   RankPartitionRecognizedMacAdapter.cpp
+  RankPartitionDeviceJobLowering.cpp
   BoostNoExceptions.cpp
   SystolicScheduling.cpp
   SystolicTilePlan.cpp

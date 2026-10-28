@@ -50,6 +50,8 @@ target_link_libraries(rank-partition-presburger-test PRIVATE
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRFuncDialect
+  MLIRTensorDialect
+  MLIRBufferizationDialect
   MLIRPresburger
   MLIRSystolic
   MLIRSystolicTransforms

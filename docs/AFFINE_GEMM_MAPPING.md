@@ -3173,3 +3173,150 @@ Legacy algorithm-specific driver fixtures may set the internal test environment
 phases. It is not a public CLI option, and ordinary users leave it unset. The
 automatic E2E tests compare successful Test 2/3/4 plan IR byte-for-byte against
 this fast-only control, and independently require real automatic completions.
+
+## 27. Certified device-job lowering of recognized GEMMs (Phase 5.4.3d-3b-6, 2026-10-28)
+
+The guarded path of Phases 3b-4 and 3b-5 (the symbolic rank partition, its exact Presburger
+objects, the transactional in-place replacement) gets a second target besides the exact guarded
+MAC nest: the repository's existing device-job representation. Nothing new is invented on the
+device side; the lowering produces the `systolic.matmul_tile` plan of `SystolicTilePlan.h`
+(`planSystolicMatmul`, `emitSystolicTilePlan`) on rank-2 views of the source memrefs, exactly as
+the fast path (§4, §8) and the linalg path do, and the established pipeline
+(`TileMatmulForFpga.cpp`, the runtime ABI) turns it into jobs. Code:
+`include/Systolic/RankPartitionDeviceJobLowering.h`, `lib/Systolic/Transforms/RankPartitionDeviceJobLowering.cpp`;
+the shared preflight without the strict-attribute decision is `prepareRecognizedGemm`
+(`RankPartitionRecognizedMacAdapter.h`).
+
+### 27.1 The device job, as the code defines it
+
+- One job is one invocation of one accelerator: `C[m x n] += A[m x k] x B[k x n]`
+  (`runtime/fpga_matmul_tiled.h:14-24`, `runtime/fpga_async_runtime.h:71-76`). A and B are staged
+  contiguously (no leading dimensions of their own), C is addressed by a pointer and a row stride
+  (`ldc`, column stride 1), `m, n` at most the array (8 or 4), `1 <= k <= K_MAX` (16 on the
+  validated bitstreams). Always accumulate: no field selects an overwrite, there is no C input to
+  the array ("cross-invocation accumulation is on the host", `docs/E2E.md` §6).
+- The array computes each invocation from a zero accumulator and the host adds the result into C
+  (`runtime/fpga_matmul_tiled.cpp:688-700`, `fpga_async_runtime.cpp:494-499`); K beyond `K_MAX` is
+  folded by the compiler into invocations added into C in ascending order
+  (`SystolicTilePlan.cpp`, `fpga_async_runtime.h:71-75`).
+- The datapath (`rtl/multi_200t/tile_pipelined/core/systolic_pe.sv`, `fp_mul.sv`, `fp_add.sv`,
+  `ip/fp32/*.xci`): Xilinx Floating-Point Operator 7.1 cores, binary32 multiply and binary32 add,
+  two roundings, no fused multiply-add, no wider accumulator. Products arrive in ascending k and go
+  to bank `t mod 16`, each bank starting from the all-zero word (+0.0); after the feed a four-level
+  in-place tree adds the sixteen banks. The cores' rounding and denormal behaviour is asserted, not
+  verified, in this repository: the co-simulation model `test/e2e/cosim/fp_ieee.sv` states round to
+  nearest even with denormal inputs and outputs flushed to zero, "as the Floating-Point Operator IP
+  does". Only binary32 exists on every signature.
+- The software runtime model (`runtime/offload/soft_runtime.c:226-233`) sums each invocation
+  sequentially in k from +0.0 in binary32 and adds into C; it mirrors the fold order, not the
+  array's bank-and-tree order, and says so.
+
+### 27.2 Arithmetic contract: no offload is provable under strict semantics
+
+For one element and one invocation over products `p_1 .. p_m` the loop computes
+`((C + p_1) + p_2) + ...` while the device computes `v` = the bank-and-tree sum of
+`(+0) + p_t`, and the host `C + v`, then the next fold's `v'` likewise. These are different IEEE
+operations: association order; the +0 start (a −0 sum becomes +0); flush-to-zero of subnormal
+products and sums (asserted); NaN payloads. None of these is data-independent, so no
+compile-time certificate of bitwise equality with the strict loop exists, for any K -- not even
+K = 1 (the −0 and the subnormal cases remain). This is §6's conclusion, now with the RTL's order
+made explicit. Policy, unchanged: under strict semantics the certified lowering returns UNKNOWN
+("strict floating-point semantics: ...") and the guarded MAC nest of Phase 3b-5 takes the nest
+(bitwise the loop's result, on the host). The device path therefore requires the separately
+specified relaxed contract that already exists: the program's permission to reassociate (the
+`reassoc` fast-math flag on the accumulation, which `systolic-cc --fp-reassociation` sets, or the
+pass option `allow-fp-reassociation`). Under it (§6): results equal the loop's exactly when every
+partial sum is exact (integer-valued data within binary32, the regime of every end-to-end test);
+otherwise they may differ in rounding, in the sign of a zero and in NaN payload, and on the board
+also by flush-to-zero; `--verify-rtol` is the tolerance check for such data
+(`test/SystolicCC/affine_assignment_signzero.c` shows the bitwise/tolerance distinction). The
+software model and the board can differ from each other on inexact data for the same reasons.
+Nothing enables the permission silently: a strict nest is never offloaded.
+
+### 27.3 The job-lowering legality contract (J1-J10)
+
+Decided on the recognizer's certified objects (the coordinate map z = T x, the exact source
+domain, the access linear forms) before any operation is created; a failed item is UNKNOWN unless
+stated:
+
+- J1 **exact coverage**: three logical coordinates (no batch coordinate); T unimodular (integral
+  inverse, no congruence); the exact logical domain {z : T⁻¹z ∈ D} equals its candidate box, both
+  inclusions decided with conjunctive integer emptiness only (§19.14). A non-box domain
+  (triangular), a non-unimodular map (C[2i+j][j]) and a repetition loop are UNKNOWN in this
+  phase.
+- J2 **exact address mapping**: with x = T⁻¹z, every memref dimension of A, B and C reads exactly
+  one logical coordinate with coefficient one plus a constant, A as (I, K), B as (K, J), C as
+  (I, J): the standard contiguous layout; the view of X is the memref or the static
+  `memref.subview X[o_0, o_1] [E_0, E_1] [1, 1]` with origin o_d = offset_d + lower bound of the
+  coordinate and extent E_d. Strided (`A[i][2k]`), transposed (`A[k][i]`), skewed, flattened and
+  broadcast views are UNKNOWN in this phase. (The fast path lowers many of them through its
+  general views, §19.11; the certified path does not re-derive those.)
+- J3 **dimensions and tiles**: M, N, K are the box extents; the plan's output blocks and K folds
+  are re-verified to partition [0, M) x [0, N) x [0, K) -- blocks inside C, pairwise disjoint,
+  total area M·N, folds contiguous from 0 to K in ascending order (`planPartitionsBox`).
+- J4 **layout**: rank-2 identity-layout memrefs, static shapes except a dynamic leading dimension
+  (the C front end's `float A[][16]`), whose upper bound is the program's own guarantee, as the
+  fast path assumes (§5); the lower bound and every static bound are checked in exact arithmetic.
+- J5 **no skipped or duplicated contribution**: J1 (every box point is an iteration and every
+  iteration a box point, each once by the recognizer's multiplicity proof) with J3.
+- J6 **accumulator initialization**: the statement accumulates, so do the jobs; nothing is zeroed.
+- J7 **writeback**: `bufferization.materialize_in_destination` into C's view, as the fast path.
+- J8 **memory**: A and B provably disjoint from C by the production rule (§7); an input sharing
+  C's buffer is REFUSED (PROVEN_INVALID); the nest writes only C (recognizer).
+- J9 **precision**: f32 operands (the recognizer admits f32 accumulating MACs only; the check is
+  repeated against the ABI).
+- J10 **arithmetic**: §27.2; a rounding-mode attribute is UNKNOWN.
+
+Transactional (as Phase 3b-5): the views, tensors, plan and writeback are emitted immediately
+before the source nest on the source memrefs; the function is verified; only then is the nest
+erased; any failure erases what was created. The GEMM index of the asynchronous lowering is
+advanced on success only.
+
+### 27.4 Decision order in the pass
+
+Under `general-affine` (which `systolic-cc` sets) the guarded path decides, per recognized nest
+the fast path left: (1) the certified device jobs, (2) the guarded MAC nest, (3) the source as
+written. The established fast path remains the first choice of the pass (the user decision of
+2026-10-20, "Automatic bounded general-affine fallback"): in ordinary compiles a standard
+contiguous GEMM under permission is the fast path's, and the certified lowering is reached for the
+nests it leaves. The hidden pass option `certified-offload-first` (mirrored by the test-only
+environment variable `SYSTOLIC_CC_TEST_CERTIFIED_OFFLOAD_FIRST=1` in `systolic-cc`) tries the
+certified lowering before the fast path, so that the two producers of one plan can be compared:
+on every nest both accept, their IR is byte for byte the same (`test/Systolic/affine_gemm_certified_offload.mlir`,
+`diff`). Remarks: "affine GEMM MxNxK lowered as R exact region(s) by the certified device-job
+lowering (...)" -- the driver's `--explain` reads it as it reads the fast path's -- and, in report
+mode, "certified device offload not applied: <reason> [class]".
+
+### 27.5 Verification (2026-10-28; software runtime model, the board NOT RUN)
+
+- `build/bin/rank-partition-presburger-test`: 292 checks (274 before the phase); the new ones run
+  the production pass and re-derive from the IR that the tiles partition the GEMM and read the
+  operands at their origins: 4x4x4, 16x16x16 (ten blocks), 8x8x40 (K folds), 6x8x8 (partial
+  tile), the reduction loop outermost, constant-offset views -- each byte-identical to the fast
+  path --, no fleet (one tile), permission by the flag alone; strict semantics (UNKNOWN, the
+  guarded MAC nest follows); f64, triangular, non-unimodular, transposed, repetition loop, strided,
+  may-alias, assume-no-alias, an input reading C's buffer.
+- `test/Systolic/affine_gemm_certified_offload.mlir`: the plan with the fleet (ten tiles, partial
+  tile with K folds on a dynamic leading dimension, two nests with memory operations between
+  them in order), the `diff` against the fast path, the strict run, the lowering to
+  `fpga_matmul_tiled_auto_scheduled` calls.
+- `test/SystolicCC/certified_offload.c`: compiled by `systolic-cc` on the software runtime model
+  with `--verify`: six kernels offloaded (gemm16: 10 invocations, K = 40 folds, a partial tile,
+  two nests in one function, constant-offset views; the transposed kernel by the fast path), every
+  offloaded call bitwise equal to the CPU reference on integer data, the program's output equal
+  to the plain clang build's, the same through the fast path, and nothing offloaded under strict
+  semantics.
+- `ninja -C build check-systolic`: 183 tests, 181 passed; the two pre-existing failures
+  (`SystolicCC/general_affine.c`, `Systolic/general_affine_domains.mlir`: the disabled legacy
+  point/fiber path) unchanged.
+
+### 27.6 Limitations and remaining work
+
+Non-box domains (a box decomposition of the exact domain), non-unimodular maps, strided,
+transposed, skewed and flattened views (the §19.11 view formula on the certified rows and
+offsets), batch coordinates (repetition loops), and the ordered-output and reduction-batch
+decompositions are not lowered by the certified path in this phase; the fast path keeps lowering
+those it recognizes, under the same relaxed contract. A bitwise strict-semantics offload would
+need a device that accumulates into C in the loop's order with the loop's rounding, which this
+ABI and RTL do not offer. The FP cores' rounding and denormal behaviour remains unverified
+(§27.1); `--verify-rtol` is the only check for inexact data.

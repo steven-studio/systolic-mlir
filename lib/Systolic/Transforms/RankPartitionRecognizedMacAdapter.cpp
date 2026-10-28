@@ -79,9 +79,13 @@ Disjointness disjointFromOutput(Value input, Value output,
 // unqualified name `systolic` would be ambiguous with mlir::systolic.
 namespace systolic::logical {
 
-std::optional<GuardedMacPreflight>
-prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
-                  GuardedMacOutcome &outcome, std::string &why) {
+// The shared preflight. `strictAttributes`: refuse any fast-math flag or
+// rounding-mode attribute on the statement (prepareGuardedMac); otherwise
+// record them (prepareRecognizedGemm, Phase 3b-6).
+static std::optional<GuardedMacPreflight>
+prepareRecognizedGemmImpl(mlir::Operation *anchor, bool assumeNoAlias,
+                          bool strictAttributes, GuardedMacOutcome &outcome,
+                          std::string &why) {
   using namespace mlir::presburger;
 
   auto unknown = [&](const Twine &message)
@@ -187,15 +191,20 @@ prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
   if (store.getValueToStore() != add.getResult())
     return unknown("the store does not store the sum");
 
-  if (multiply.getFastmath() != arith::FastMathFlags::none ||
-      add.getFastmath() != arith::FastMathFlags::none)
-    return unknown("fast-math flags on the source statement are not "
-                   "mirrored in this phase");
-  if (multiply.getRoundingmode().has_value() ||
-      add.getRoundingmode().has_value())
-    return unknown("a rounding-mode attribute on the source statement is "
-                   "not mirrored in this phase");
+  const bool roundingModeAttributes = multiply.getRoundingmode().has_value() ||
+                                      add.getRoundingmode().has_value();
+  if (strictAttributes) {
+    if (multiply.getFastmath() != arith::FastMathFlags::none ||
+        add.getFastmath() != arith::FastMathFlags::none)
+      return unknown("fast-math flags on the source statement are not "
+                     "mirrored in this phase");
+    if (roundingModeAttributes)
+      return unknown("a rounding-mode attribute on the source statement is "
+                     "not mirrored in this phase");
+  }
 
+  // The MAC emitters' strict defaults; what is written is recorded on the
+  // preflight below.
   semantics.fastMath = arith::FastMathFlags::none;
   semantics.roundingMode = std::nullopt;
   semantics.integerOverflow = arith::IntegerOverflowFlags::none;
@@ -350,16 +359,42 @@ prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
   preflight.memrefs = memrefs;
   preflight.diagnostic = analysis->diagnostic;
   preflight.semantics = semantics;
+  preflight.multiplyFastMath = multiply.getFastmath();
+  preflight.addFastMath = add.getFastmath();
+  preflight.roundingModeAttributes = roundingModeAttributes;
 
   outcome = GuardedMacOutcome::Proven;
   why = preflight.diagnostic;
   return preflight;
 }
 
+std::optional<GuardedMacPreflight>
+prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
+                  GuardedMacOutcome &outcome, std::string &why) {
+  return prepareRecognizedGemmImpl(anchor, assumeNoAlias,
+                                   /*strictAttributes=*/true, outcome, why);
+}
+
+std::optional<GuardedMacPreflight>
+prepareRecognizedGemm(mlir::Operation *anchor, bool assumeNoAlias,
+                      GuardedMacOutcome &outcome, std::string &why) {
+  return prepareRecognizedGemmImpl(anchor, assumeNoAlias,
+                                   /*strictAttributes=*/false, outcome, why);
+}
+
 std::optional<EmittedGuardedMacStatement>
 emitGuardedMacStatement(mlir::OpBuilder &builder, mlir::Location loc,
                         const GuardedMacPreflight &preflight,
                         llvm::ArrayRef<mlir::Value> memrefs, std::string &why) {
+
+  // Phase 3b-6: a preflight that recorded non-strict attributes
+  // (prepareRecognizedGemm) is not for the MAC emitters.
+  if (preflight.multiplyFastMath != mlir::arith::FastMathFlags::none ||
+      preflight.addFastMath != mlir::arith::FastMathFlags::none ||
+      preflight.roundingModeAttributes) {
+    why = "REFUSED: the preflight recorded non-strict arithmetic attributes";
+    return std::nullopt;
+  }
 
   if (memrefs.size() != 3) {
     why = "REFUSED: three memrefs are required";
