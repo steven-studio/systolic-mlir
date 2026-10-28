@@ -1,0 +1,417 @@
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p1':
+Classifying expressions for: @sum_p1
+  %s.0 = phi i64 [ 0, %entry ], [ %add1, %for.inc ]
+  -->  {0,+,1,+,1}<%for.cond> U: full-set S: full-set		Exits: ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %add1 = add i64 %s.0, %add
+  -->  {1,+,2,+,1}<%for.cond> U: full-set S: full-set		Exits: (1 + (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + (2 * %n))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,1}<%for.cond> U: full-set S: full-set  -->  ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p1
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p1':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p2':
+Classifying expressions for: @sum_p2
+  %s.0 = phi i64 [ 0, %entry ], [ %add1, %for.inc ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %add1 = add i64 %s.0, %mul
+  -->  {1,+,4,+,5,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (4 * %n) + (5 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set  -->  ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p2
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p2':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p3':
+Classifying expressions for: @sum_p3
+  %s.0 = phi i64 [ 0, %entry ], [ %add2, %for.inc ]
+  -->  {0,+,1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: ((2 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (4 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add2 = add i64 %s.0, %mul1
+  -->  {1,+,8,+,19,+,18,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (8 * %n) + (19 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set  -->  ((2 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (4 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p3
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p3':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p4':
+Classifying expressions for: @sum_p4
+  %s.0 = phi i64 [ 0, %entry ], [ %add3, %for.inc ]
+  -->  {0,+,1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: ((15 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (20 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517222 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (15 * %n) + (20 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (50 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add3 = add i64 %s.0, %mul2
+  -->  {1,+,16,+,65,+,110,+,84,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * %n) + (28 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (65 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517242 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set  -->  ((15 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (20 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517222 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p4
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p4':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p5':
+Classifying expressions for: @sum_p5
+  %s.0 = phi i64 [ 0, %entry ], [ %add4, %for.inc ]
+  -->  {0,+,1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set		Exits: ((24 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (60 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (130 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (15 * %n) + (20 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (50 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul3 = mul i64 %mul2, %add
+  -->  {1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * %n) + (120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (130 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (180 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add4 = add i64 %s.0, %mul3
+  -->  {1,+,32,+,211,+,570,+,750,+,480,+,120}<%for.cond> U: full-set S: full-set		Exits: (1 + (32 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (32 * %n) + (190 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (211 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set  -->  ((24 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (60 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (130 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p5
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p5':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p6':
+Classifying expressions for: @sum_p6
+  %s.0 = phi i64 [ 0, %entry ], [ %add5, %for.inc ]
+  -->  {0,+,1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set		Exits: ((56 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (224 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (700 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517406 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2635249153387078800 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (15 * %n) + (20 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (50 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul3 = mul i64 %mul2, %add
+  -->  {1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * %n) + (120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (130 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (180 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul4 = mul i64 %mul3, %add
+  -->  {1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * %n) + (168 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (602 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (700 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add5 = add i64 %s.0, %mul4
+  -->  {1,+,64,+,665,+,2702,+,5460,+,5880,+,3240,+,720}<%for.cond> U: full-set S: full-set		Exits: (1 + (64 * %n) + (72 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (392 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2635249153387078800 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set  -->  ((56 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (224 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (700 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517406 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2635249153387078800 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p6
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p6':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p7':
+Classifying expressions for: @sum_p7
+  %s.0 = phi i64 [ 0, %entry ], [ %add6, %for.inc ]
+  -->  {0,+,1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond> U: full-set S: full-set		Exits: ((16 * (trunc i71 (((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (64 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (644 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1680 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236516496 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (15 * %n) + (20 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (50 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul3 = mul i64 %mul2, %add
+  -->  {1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * %n) + (120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (130 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (180 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul4 = mul i64 %mul3, %add
+  -->  {1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * %n) + (168 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (602 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (700 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul5 = mul i64 %mul4, %add
+  -->  {1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * %n) + (448 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (1932 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (2128 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (8400 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add6 = add i64 %s.0, %mul5
+  -->  {1,+,128,+,2059,+,12138,+,35406,+,57120,+,52080,+,25200,+,5040}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i71 (((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (80 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (128 * %n) + (2059 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236516048 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond> U: full-set S: full-set  -->  ((16 * (trunc i71 (((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (64 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (644 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1680 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236516496 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @sum_p7
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p7':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p8':
+Classifying expressions for: @sum_p8
+  %s.0 = phi i64 [ 0, %entry ], [ %add7, %for.inc ]
+  -->  %s.0 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * %n) + (12 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (15 * %n) + (20 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (50 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul3 = mul i64 %mul2, %add
+  -->  {1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set		Exits: (1 + (8 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * %n) + (120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (130 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (180 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul4 = mul i64 %mul3, %add
+  -->  {1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * %n) + (168 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (602 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (700 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1120 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul5 = mul i64 %mul4, %add
+  -->  {1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond> U: full-set S: full-set		Exits: (1 + (16 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * %n) + (448 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (1932 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (2128 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (8400 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul6 = mul i64 %mul5, %add
+  -->  ({1,+,1}<nw><%for.cond> * {1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond>) U: full-set S: full-set		Exits: ((1 + %n) * (1 + (16 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * %n) + (448 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (1932 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (2128 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (8400 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64))))		LoopDispositions: { %for.cond: Computable }
+  %add7 = add i64 %s.0, %mul6
+  -->  (({1,+,1}<nw><%for.cond> * {1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond>) + %s.0) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  %s.0 U: full-set S: full-set
+Determining loop execution counts for: @sum_p8
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'sum_p8':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'general_cubic':
+Classifying expressions for: @general_cubic
+  %s.0 = phi i64 [ 0, %entry ], [ %add8, %for.inc ]
+  -->  {0,+,-2,+,51,+,78,+,42}<%for.cond> U: full-set S: full-set		Exits: ((14 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (26 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (51 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2 * %n))		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 7, %add
+  -->  {7,+,7}<%for.cond> U: full-set S: full-set		Exits: (7 + (7 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul1 = mul i64 %mul, %add
+  -->  {7,+,21,+,14}<%for.cond> U: full-set S: full-set		Exits: (7 + (14 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (21 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul2 = mul i64 %mul1, %add
+  -->  {7,+,49,+,84,+,42}<%for.cond> U: full-set S: full-set		Exits: (7 + (14 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (49 * %n) + (84 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul3 = mul i64 3, %add
+  -->  {3,+,3}<%for.cond> U: full-set S: full-set		Exits: (3 + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %mul4 = mul i64 %mul3, %add
+  -->  {3,+,9,+,6}<%for.cond> U: full-set S: full-set		Exits: (3 + (6 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (9 * %n))		LoopDispositions: { %for.cond: Computable }
+  %sub = sub i64 %mul2, %mul4
+  -->  {4,+,40,+,78,+,42}<%for.cond> U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: (4 + (14 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (40 * %n) + (78 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul5 = mul i64 11, %add
+  -->  {11,+,11}<%for.cond> U: full-set S: full-set		Exits: (11 + (11 * %n))		LoopDispositions: { %for.cond: Computable }
+  %add6 = add i64 %sub, %mul5
+  -->  {15,+,51,+,78,+,42}<%for.cond> U: full-set S: full-set		Exits: (15 + (14 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (51 * %n) + (78 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %sub7 = sub i64 %add6, 17
+  -->  {-2,+,51,+,78,+,42}<%for.cond> U: full-set S: full-set		Exits: (-2 + (14 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (51 * %n) + (78 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %add8 = add i64 %s.0, %sub7
+  -->  {-2,+,49,+,129,+,120,+,42}<%for.cond> U: full-set S: full-set		Exits: (-2 + (14 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (40 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (49 * %n) + (129 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,-2,+,51,+,78,+,42}<%for.cond> U: full-set S: full-set  -->  ((14 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (26 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (51 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2 * %n)) U: full-set S: full-set
+Determining loop execution counts for: @general_cubic
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'general_cubic':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'shifted_square':
+Classifying expressions for: @shifted_square
+  %i.0 = phi i64 [ %start, %entry ], [ %add1, %for.inc ]
+  -->  {%start,+,%step}<%for.cond> U: full-set S: full-set		Exits: ((%n * %step) + %start)		LoopDispositions: { %for.cond: Computable }
+  %s.0 = phi i64 [ %initial, %entry ], [ %add, %for.inc ]
+  -->  {%initial,+,(%start * %start),+,(((2 * %start) + %step) * %step),+,(2 * %step * %step)}<%for.cond> U: full-set S: full-set		Exits: (((((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * ((2 * %start) + %step)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * %step)) * %step) + (%n * %start * %start) + %initial)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %i.0, %i.0
+  -->  {(%start * %start),+,(((2 * %start) + %step) * %step),+,(2 * %step * %step)}<%for.cond> U: full-set S: full-set		Exits: ((((((2 * %start) + %step) * %n) + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * %step)) * %step) + (%start * %start))		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %s.0, %mul
+  -->  {((%start * %start) + %initial),+,((((2 * %start) + %step) * %step) + (%start * %start)),+,(((2 * %start) + (3 * %step)) * %step),+,(2 * %step * %step)}<%for.cond> U: full-set S: full-set		Exits: (((((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * %step)) * %step) + (((((2 * %start) + %step) * %step) + (%start * %start)) * %n) + (%start * %start) + %initial)		LoopDispositions: { %for.cond: Computable }
+  %add1 = add i64 %i.0, %step
+  -->  {(%start + %step),+,%step}<%for.cond> U: full-set S: full-set		Exits: (((1 + %n) * %step) + %start)		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {%initial,+,(%start * %start),+,(((2 * %start) + %step) * %step),+,(2 * %step * %step)}<%for.cond> U: full-set S: full-set  -->  (((((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * ((2 * %start) + %step)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * %step)) * %step) + (%n * %start * %start) + %initial) U: full-set S: full-set
+Determining loop execution counts for: @shifted_square
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'shifted_square':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'triangular':
+Classifying expressions for: @triangular
+  %z.0 = phi i64 [ 0, %entry ], [ %add, %for.inc ]
+  -->  {0,+,0,+,0,+,1,+,2}<%for.cond> U: full-set S: full-set		Exits: ((6148914691236517206 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236517205 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %y.0 = phi i64 [ 0, %entry ], [ %add1, %for.inc ]
+  -->  {0,+,0,+,1,+,2}<%for.cond> U: full-set S: full-set		Exits: ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %x.0 = phi i64 [ 0, %entry ], [ %add2, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %z.0, %y.0
+  -->  {0,+,0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + (6148914691236517206 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %x.0, %x.0
+  -->  {0,+,1,+,2}<%for.cond> U: full-set S: full-set		Exits: ((2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %add1 = add i64 %y.0, %mul
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %add2 = add i64 %x.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %z.0.lcssa = phi i64 [ %z.0, %for.cond ]
+  -->  {0,+,0,+,0,+,1,+,2}<%for.cond> U: full-set S: full-set  -->  ((6148914691236517206 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236517205 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64))) U: full-set S: full-set
+Determining loop execution counts for: @triangular
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'triangular':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'nonlinear_self':
+Classifying expressions for: @nonlinear_self
+  %x.0 = phi i64 [ 2, %entry ], [ %add, %for.inc ]
+  -->  %x.0 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %x.0, %x.0
+  -->  (%x.0 * %x.0) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %add = add i64 %mul, 1
+  -->  (1 + (%x.0 * %x.0)) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %x.0.lcssa = phi i64 [ %x.0, %for.cond ]
+  -->  %x.0 U: full-set S: full-set
+Determining loop execution counts for: @nonlinear_self
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'nonlinear_self':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'exponential':
+Classifying expressions for: @exponential
+  %x.0 = phi i64 [ 1, %entry ], [ %mul, %for.inc ]
+  -->  %x.0 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %x.0, 2
+  -->  (2 * %x.0) U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: <<Unknown>>		LoopDispositions: { %for.cond: Variant }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %x.0.lcssa = phi i64 [ %x.0, %for.cond ]
+  -->  %x.0 U: full-set S: full-set
+Determining loop execution counts for: @exponential
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'exponential':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'unknown_exit':
+Classifying expressions for: @unknown_exit
+  %x.0 = phi i64 [ 2, %entry ], [ %add, %while.body ]
+  -->  %x.0 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.cond: Variant }
+  %mul = mul i64 %x.0, %x.0
+  -->  (%x.0 * %x.0) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.cond: Variant }
+  %add = add i64 %mul, 1
+  -->  (1 + (%x.0 * %x.0)) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.cond: Variant }
+  %x.0.lcssa = phi i64 [ %x.0, %while.cond ]
+  -->  %x.0 U: full-set S: full-set
+Determining loop execution counts for: @unknown_exit
+Loop %while.cond: Unpredictable backedge-taken count.
+Loop %while.cond: Unpredictable constant max backedge-taken count. 
+Loop %while.cond: Unpredictable symbolic max backedge-taken count. 
+Loop info for function 'unknown_exit':
+Parallel Loop at depth 1 containing: %while.cond<header><exiting>,%while.body<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'fixed_square':
+Classifying expressions for: @fixed_square
+  %i.0 = phi i64 [ 1, %entry ], [ %inc, %for.inc ]
+  -->  {1,+,1}<nuw><nsw><%for.cond> U: [1,12) S: [1,12)		Exits: 11		LoopDispositions: { %for.cond: Computable }
+  %s.0 = phi i64 [ 0, %entry ], [ %add, %for.inc ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: 385		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %i.0, %i.0
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: 121		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %s.0, %mul
+  -->  {1,+,4,+,5,+,2}<%for.cond> U: full-set S: full-set		Exits: 506		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %i.0, 1
+  -->  {2,+,1}<nuw><nsw><%for.cond> U: [2,13) S: [2,13)		Exits: 12		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set  -->  385 U: [385,386) S: [385,386)
+Determining loop execution counts for: @fixed_square
+Loop %for.cond: backedge-taken count is i64 10
+Loop %for.cond: constant max backedge-taken count is i64 10
+Loop %for.cond: symbolic max backedge-taken count is i64 10
+Loop %for.cond: Trip multiple is 11
+Loop info for function 'fixed_square':
+Parallel Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
+Printing analysis 'Scalar Evolution Analysis' for function 'observable_square':
+Classifying expressions for: @observable_square
+  %s.0 = phi i64 [ 0, %entry ], [ %add1, %for.inc ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)		LoopDispositions: { %for.cond: Computable }
+  %t.0 = phi i64 [ 0, %entry ], [ %inc, %for.inc ]
+  -->  {0,+,1}<nuw><%for.cond> U: full-set S: full-set		Exits: %n		LoopDispositions: { %for.cond: Computable }
+  %add = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,3,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (2 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (3 * %n))		LoopDispositions: { %for.cond: Computable }
+  %add1 = add i64 %s.0, %mul
+  -->  {1,+,4,+,5,+,2}<%for.cond> U: full-set S: full-set		Exits: (1 + (4 * %n) + (5 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))		LoopDispositions: { %for.cond: Computable }
+  %inc = add i64 %t.0, 1
+  -->  {1,+,1}<nw><%for.cond> U: full-set S: full-set		Exits: (1 + %n)		LoopDispositions: { %for.cond: Computable }
+  %s.0.lcssa = phi i64 [ %s.0, %for.cond ]
+  -->  {0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set  -->  ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n) U: full-set S: full-set
+Determining loop execution counts for: @observable_square
+Loop %for.cond: backedge-taken count is %n
+Loop %for.cond: constant max backedge-taken count is i64 -1
+Loop %for.cond: symbolic max backedge-taken count is %n
+Loop %for.cond: Trip multiple is 1
+Loop info for function 'observable_square':
+Loop at depth 1 containing: %for.cond<header><exiting>,%for.body,%for.inc<latch>
