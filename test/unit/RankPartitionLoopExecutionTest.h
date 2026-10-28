@@ -18,6 +18,7 @@
 //   arith.ori
 //   scf.if
 //   scf.yield
+//   memref.load / memref.store (only with a memory model)
 //
 // Unsupported operations cause failure.
 //
@@ -25,10 +26,13 @@
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 
 #include <cstdint>
@@ -58,6 +62,33 @@ struct ExecutionResult {
   std::size_t acceptedPoints = 0;
 };
 
+// Phase 5.4.3d-3b-2:
+//
+// Optional memory model for memref.load / memref.store.
+//
+// Buffers are keyed by the memref SSA value. The element
+// type must be i64, the static memref shape must equal
+// the buffer shape and every access must be in bounds;
+// anything else fails closed. Every executed memory
+// operation is appended to `trace` in execution order.
+
+struct MemoryBuffer {
+  std::vector<std::int64_t> shape;
+  std::vector<std::int64_t> data;
+};
+
+struct MemoryEvent {
+  bool isStore = false;
+  mlir::Value memref;
+  Point indices;
+  std::int64_t value = 0;
+};
+
+struct MemoryState {
+  llvm::DenseMap<mlir::Value, MemoryBuffer> buffers;
+  std::vector<MemoryEvent> trace;
+};
+
 inline std::optional<ExecutionResult>
 interpretGuardedLoopNest(
     mlir::affine::AffineForOp outermost,
@@ -66,7 +97,8 @@ interpretGuardedLoopNest(
     mlir::ValueRange sourceIVs = {},
     mlir::ValueRange accessA = {},
     mlir::ValueRange accessB = {},
-    mlir::ValueRange accessC = {}) {
+    mlir::ValueRange accessC = {},
+    MemoryState *memory = nullptr) {
 
   using namespace mlir;
 
@@ -329,6 +361,102 @@ interpretGuardedLoopNest(
       } else if (!condition.getElseRegion().empty()) {
         executeBlock(condition.getElseRegion().front());
       }
+      return;
+    }
+
+    if (isa<memref::LoadOp, memref::StoreOp>(&op)) {
+
+      // Memory operations are interpreted only against
+      // an explicit memory model.
+
+      if (!memory) {
+        valid = false;
+        return;
+      }
+
+      auto load = dyn_cast<memref::LoadOp>(&op);
+      auto store = dyn_cast<memref::StoreOp>(&op);
+
+      Value memref = load ? load.getMemRef() : store.getMemRef();
+      ValueRange indices =
+          load ? load.getIndices() : store.getIndices();
+
+      auto bufferIt = memory->buffers.find(memref);
+
+      if (bufferIt == memory->buffers.end()) {
+        valid = false;
+        return;
+      }
+
+      MemoryBuffer &buffer = bufferIt->second;
+
+      auto type = dyn_cast<MemRefType>(memref.getType());
+
+      if (!type || !type.hasStaticShape() ||
+          !type.getElementType().isInteger(64) ||
+          type.getShape() !=
+              llvm::ArrayRef<std::int64_t>(buffer.shape) ||
+          indices.size() != buffer.shape.size()) {
+        valid = false;
+        return;
+      }
+
+      Point point;
+      point.reserve(indices.size());
+
+      __int128 linear = 0;
+      __int128 extent = 1;
+
+      for (std::size_t d = 0; d < buffer.shape.size(); ++d) {
+        auto coordinate = lookup(indices[d]);
+
+        if (!coordinate || *coordinate < 0 ||
+            *coordinate >= buffer.shape[d] ||
+            buffer.shape[d] <= 0) {
+          valid = false;
+          return;
+        }
+
+        // The running extent never exceeds the buffer
+        // size, so neither product below can overflow.
+
+        if (extent > static_cast<__int128>(buffer.data.size()) /
+                         buffer.shape[d]) {
+          valid = false;
+          return;
+        }
+
+        point.push_back(*coordinate);
+        linear = linear * buffer.shape[d] + *coordinate;
+        extent *= buffer.shape[d];
+      }
+
+      if (extent != static_cast<__int128>(buffer.data.size()) ||
+          linear < 0 || linear >= extent) {
+        valid = false;
+        return;
+      }
+
+      const std::size_t offset = static_cast<std::size_t>(linear);
+
+      if (load) {
+        const std::int64_t loaded = buffer.data[offset];
+        values[load.getResult()] = loaded;
+        memory->trace.push_back(
+            {false, memref, std::move(point), loaded});
+        return;
+      }
+
+      auto stored = lookup(store.getValue());
+
+      if (!stored) {
+        valid = false;
+        return;
+      }
+
+      buffer.data[offset] = *stored;
+      memory->trace.push_back(
+          {true, memref, std::move(point), *stored});
       return;
     }
 

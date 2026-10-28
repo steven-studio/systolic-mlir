@@ -46,6 +46,7 @@ llvm_update_compile_flags(rank-partition-presburger-test)
 target_link_libraries(rank-partition-presburger-test PRIVATE
   MLIRAffineDialect
   MLIRArithDialect
+  MLIRMemRefDialect
   MLIRSCFDialect
   MLIRFuncDialect
   MLIRPresburger

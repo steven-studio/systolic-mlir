@@ -29,6 +29,16 @@
 #include "Systolic/RankPartitionLogicalDomainNormalization.h"
 #include <functional>
 #include "Systolic/RankPartitionSourceAccessEmission.h"
+#include "Systolic/RankPartitionGuardedMemoryEmission.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <map>
+#include <tuple>
 using namespace systolic::logical;
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
@@ -4940,6 +4950,1810 @@ int main() {
                 malformed, {{0, 3}, {0, 3}}),
             "3a2 malformed inverse rejected before emission"))
       return 1;
+  }
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-3b-1b (completion):
+  //
+  // Execute the A/B/C Access SSA with nonzero offsets and
+  // negative coefficients, for the unimodular and the
+  // non-unimodular map, through the existing chain and the
+  // existing interpreter only, against the BigInt source
+  // oracle. Then refuse malformed access functions without
+  // residual IR.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+    using namespace ::systolic::logical;
+    namespace exec = ::systolic::logical::testing;
+
+    for (int caseNumber = 0; caseNumber < 2; ++caseNumber) {
+
+      const bool nonUnimodular = caseNumber == 1;
+
+      const char *label =
+          nonUnimodular ? "non-unimodular" : "unimodular";
+
+      bool ok = true;
+
+      auto fail = [&](const char *what) {
+        std::cerr << "3b1b completion (" << label << "): "
+                  << what << "\n";
+        ok = false;
+      };
+
+      PartitionCoordinateMap coordinateMap;
+
+      if (nonUnimodular) {
+        coordinateMap.sourceToLogical = {
+            {BigInt(2), BigInt(0)},
+            {BigInt(0), BigInt(1)}
+        };
+      } else {
+        coordinateMap.sourceToLogical = {
+            {BigInt(1), BigInt(1)},
+            {BigInt(0), BigInt(1)}
+        };
+      }
+
+      auto inverse = domain_detail::invertIntegerMatrix(
+          coordinateMap.sourceToLogical);
+
+      if (!inverse) {
+        fail("inverse");
+      } else {
+        coordinateMap.logicalToSource = *inverse;
+      }
+
+      // Source domain 0 <= x0, x1 <= 3.
+
+      AffineIntegerDomain sourceInequalities;
+      sourceInequalities.sourceDimension = 2;
+      sourceInequalities.inequalities = {
+          {{BigInt(-1), BigInt(0)}, BigInt(0)},
+          {{BigInt(1), BigInt(0)}, BigInt(3)},
+          {{BigInt(0), BigInt(-1)}, BigInt(0)},
+          {{BigInt(0), BigInt(1)}, BigInt(3)}
+      };
+
+      const std::vector<ClosedIntegerInterval> bounds =
+          {{0, 6}, {0, 3}};
+
+      std::optional<SymbolicIterationPlan> plan;
+
+      if (ok) {
+        auto normalized = buildRecoverableLogicalDomain(
+            coordinateMap, sourceInequalities);
+
+        if (!normalized)
+          fail("normalization");
+        else
+          plan = buildSymbolicIterationPlan(*normalized, bounds);
+
+        if (ok && !plan)
+          fail("plan");
+      }
+
+      // A[x0 + 1][x1], B[3 - x1][x0], C[3 - x0 + x1]:
+      // nonzero offsets and negative coefficients.
+
+      const std::array<std::vector<std::vector<BigInt>>, 3> rows = {
+          std::vector<std::vector<BigInt>>{
+              {BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}},
+          std::vector<std::vector<BigInt>>{
+              {BigInt(0), BigInt(-1)}, {BigInt(1), BigInt(0)}},
+          std::vector<std::vector<BigInt>>{
+              {BigInt(-1), BigInt(1)}}};
+
+      const std::array<std::vector<BigInt>, 3> offsets = {
+          std::vector<BigInt>{BigInt(1), BigInt(0)},
+          std::vector<BigInt>{BigInt(3), BigInt(0)},
+          std::vector<BigInt>{BigInt(3)}};
+
+      MLIRContext context;
+
+      context.loadDialect<
+          affine::AffineDialect,
+          arith::ArithDialect,
+          scf::SCFDialect,
+          func::FuncDialect>();
+
+      OpBuilder builder(&context);
+      Location loc = builder.getUnknownLoc();
+
+      auto module = ModuleOp::create(loc);
+
+      builder.setInsertionPointToStart(module.getBody());
+
+      auto function = func::FuncOp::create(
+          builder, loc, "access_completion",
+          builder.getFunctionType({}, {}));
+
+      Block *entry = function.addEntryBlock();
+
+      builder.setInsertionPointToStart(entry);
+
+      func::ReturnOp::create(builder, loc);
+
+      builder.setInsertionPoint(entry->getTerminator());
+
+      std::optional<EmittedGuardedAffineLoopNest> guarded;
+      std::optional<EmittedSourceIVRecovery> recovered;
+      std::array<std::optional<EmittedSourceAccess>, 3> accesses;
+
+      if (ok) {
+        guarded = emitGuardedAffineLoopNest(builder, loc, *plan);
+
+        if (!guarded)
+          fail("guarded nest");
+      }
+
+      if (ok) {
+        recovered = emitSourceIVRecovery(
+            builder, loc, coordinateMap, bounds, *guarded);
+
+        if (!recovered)
+          fail("recovery");
+      }
+
+      for (unsigned i = 0; ok && i < 3; ++i) {
+        accesses[i] = emitSourceAffineAccess(
+            builder, loc, coordinateMap, bounds,
+            *guarded, *recovered, rows[i], offsets[i]);
+
+        if (!accesses[i])
+          fail("access emission");
+      }
+
+      if (ok && failed(mlir::verify(module)))
+        fail("verifier");
+
+      std::optional<exec::ExecutionResult> execution;
+
+      if (ok) {
+        execution = exec::interpretGuardedLoopNest(
+            guarded->outermost, guarded->guardIf,
+            guarded->logicalIVs, recovered->sourceIVs,
+            accesses[0]->indices, accesses[1]->indices,
+            accesses[2]->indices);
+
+        if (!execution ||
+            execution->visitedPoints != 28 ||
+            execution->acceptedPoints != 16 ||
+            execution->accessByLogical.size() != 16)
+          fail("interpreter counts");
+      }
+
+      if (ok) {
+        std::map<exec::Point, std::vector<exec::Point>> expected;
+
+        for (int64_t x0 = 0; x0 <= 3 && ok; ++x0) {
+          for (int64_t x1 = 0; x1 <= 3 && ok; ++x1) {
+            const IntRow x = {BigInt(x0), BigInt(x1)};
+
+            auto logical = mapSourceIteration(coordinateMap, x);
+
+            if (!logical || logical->size() != 2) {
+              fail("forward map");
+              break;
+            }
+
+            exec::Point key;
+
+            for (const BigInt &coordinate : *logical)
+              key.push_back(coordinate.convert_to<int64_t>());
+
+            std::vector<exec::Point> indices;
+
+            for (unsigned i = 0; i < 3; ++i) {
+              exec::Point point;
+
+              for (std::size_t r = 0; r < rows[i].size(); ++r) {
+                BigInt address = offsets[i][r];
+
+                for (std::size_t j = 0; j < 2; ++j)
+                  address += rows[i][r][j] * x[j];
+
+                point.push_back(address.convert_to<int64_t>());
+              }
+
+              indices.push_back(std::move(point));
+            }
+
+            if (!expected.emplace(key, std::move(indices)).second)
+              fail("duplicate logical point");
+          }
+        }
+
+        if (ok && execution->accessByLogical != expected)
+          fail("access index mismatch against BigInt oracle");
+      }
+
+      if (ok) {
+        Block *thenBlock =
+            &guarded->guardIf.getThenRegion().front();
+
+        const auto before =
+            std::distance(thenBlock->begin(), thenBlock->end());
+
+        // Two rows, one offset.
+        auto sizeMismatch = emitSourceAffineAccess(
+            builder, loc, coordinateMap, bounds,
+            *guarded, *recovered, rows[0], {BigInt(0)});
+
+        // A row with three coefficients.
+        auto rankMismatch = emitSourceAffineAccess(
+            builder, loc, coordinateMap, bounds,
+            *guarded, *recovered,
+            {{BigInt(1), BigInt(0), BigInt(0)}}, {BigInt(0)});
+
+        const auto after =
+            std::distance(thenBlock->begin(), thenBlock->end());
+
+        if (sizeMismatch || rankMismatch || before != after ||
+            failed(mlir::verify(module)))
+          fail("malformed access not refused cleanly");
+      }
+
+      if (verify(ok, nonUnimodular
+                         ? "3b1b non-unimodular access SSA with offsets and"
+                           " negative coefficients matches BigInt at 16"
+                           " source points; malformed accesses refused"
+                         : "3b1b unimodular access SSA with offsets and"
+                           " negative coefficients matches BigInt at 16"
+                           " source points; malformed accesses refused"))
+        return 1;
+    }
+  }
+
+  // --------------------------------------------------------
+  // Phase 5.4.3d-3b-2:
+  // Guarded memory operations.
+  //
+  // The reference never evaluates emitted SSA. It
+  // enumerates the SOURCE domain in source lexicographic
+  // order with BigInt address arithmetic and replays the
+  // statement on its own memory.
+  //
+  // The test-side update
+  //
+  //   new = 2*old + a + b
+  //
+  // is an arbitrary order-sensitive pure function, not a
+  // MAC prototype: A holds multiples of 1000 and B values
+  // below 1000, so a + b identifies the (a, b) pair and the
+  // final value of an element depends on the order of its
+  // updates. Every scenario with collisions additionally
+  // proves that the reference evaluated in reversed source
+  // order differs from the forward reference.
+  // --------------------------------------------------------
+  {
+    using namespace mlir;
+    using namespace mlir::presburger;
+    using namespace ::systolic::logical;
+    namespace exec = ::systolic::logical::testing;
+
+    struct OperandSpec {
+      std::vector<std::vector<BigInt>> rows;
+      std::vector<BigInt> offsets;
+      std::vector<int64_t> shape;
+      bool isFloat = false;
+      unsigned integerWidth = 64;
+      std::vector<int64_t> strides; // empty: identity layout
+    };
+
+    struct FixtureSpec {
+      std::vector<std::vector<BigInt>> T;
+      std::vector<ClosedIntegerInterval> sourceBox;
+      std::vector<ClosedIntegerInterval> bounds;
+      std::array<OperandSpec, 3> operands;
+      bool sharedAB = false;
+      bool hasCollisions = false;
+
+      // Further source constraints coefficients . x <= bound
+      // cutting the box (a non-box source domain).
+      std::vector<AffineInequality> extraInequalities;
+
+      bool loadMemRefDialect = true;
+    };
+
+    struct Fixture {
+      PartitionCoordinateMap map;
+      AffineIntegerDomain inequalities;
+      std::optional<IntegerPolyhedron> sourceDomain;
+      std::optional<SymbolicIterationPlan> plan;
+      MLIRContext context;
+      OpBuilder builder{&context};
+      Location loc = builder.getUnknownLoc();
+      ModuleOp module;
+      func::FuncOp function;
+      Block *entry = nullptr;
+      std::optional<EmittedGuardedAffineLoopNest> guarded;
+      std::optional<EmittedSourceIVRecovery> recovered;
+      std::array<GuardedMemoryOperand, 3> operands;
+      Block *thenBlock = nullptr;
+    };
+
+    auto countOps = [](Block *block) {
+      return std::distance(block->begin(), block->end());
+    };
+
+    // The source domain of a spec as inequalities over x:
+    // the box plus the extra constraints.
+
+    auto domainOf = [](const FixtureSpec &spec) {
+      const std::size_t n = spec.sourceBox.size();
+
+      AffineIntegerDomain domain;
+      domain.sourceDimension = n;
+
+      for (std::size_t i = 0; i < n; ++i) {
+        IntRow lowRow(n, BigInt(0));
+        IntRow highRow(n, BigInt(0));
+
+        lowRow[i] = BigInt(-1);
+        highRow[i] = BigInt(1);
+
+        domain.inequalities.push_back(
+            {lowRow, BigInt(-spec.sourceBox[i].lower)});
+        domain.inequalities.push_back(
+            {highRow, BigInt(spec.sourceBox[i].upper)});
+      }
+
+      for (const auto &extra : spec.extraInequalities)
+        domain.inequalities.push_back(extra);
+
+      return domain;
+    };
+
+    auto elementTypeOf = [](OpBuilder &builder,
+                            const OperandSpec &spec) -> Type {
+      if (spec.isFloat)
+        return builder.getF32Type();
+
+      return builder.getIntegerType(spec.integerWidth);
+    };
+
+    // Build the complete pre-3b-2 chain for one spec.
+
+    auto buildFixture = [&](Fixture &f,
+                            const FixtureSpec &spec) -> bool {
+      const std::size_t n = spec.T.size();
+
+      if (n == 0 || spec.sourceBox.size() != n ||
+          spec.bounds.size() != n)
+        return false;
+
+      f.map.sourceToLogical = spec.T;
+
+      auto inverse = domain_detail::invertIntegerMatrix(spec.T);
+
+      if (!inverse)
+        return false;
+
+      f.map.logicalToSource = *inverse;
+
+      IntegerPolyhedron source(
+          PresburgerSpace::getSetSpace(static_cast<unsigned>(n)));
+
+      f.inequalities = domainOf(spec);
+
+      // coefficients . x <= bound  <=>  -coefficients . x + bound >= 0
+
+      for (const auto &constraint : f.inequalities.inequalities) {
+        if (constraint.coefficients.size() != n)
+          return false;
+
+        llvm::SmallVector<int64_t> row(n + 1, 0);
+
+        for (std::size_t i = 0; i < n; ++i)
+          row[i] = -constraint.coefficients[i].convert_to<int64_t>();
+
+        row[n] = constraint.upperBound.convert_to<int64_t>();
+
+        source.addInequality(row);
+      }
+
+      f.sourceDomain = source;
+
+      auto normalized =
+          buildRecoverableLogicalDomain(f.map, f.inequalities);
+
+      if (!normalized)
+        return false;
+
+      f.plan = buildSymbolicIterationPlan(*normalized, spec.bounds);
+
+      if (!f.plan)
+        return false;
+
+      f.context.loadDialect<
+          affine::AffineDialect,
+          arith::ArithDialect,
+          scf::SCFDialect,
+          func::FuncDialect>();
+
+      if (spec.loadMemRefDialect)
+        f.context.loadDialect<memref::MemRefDialect>();
+
+      f.module = ModuleOp::create(f.loc);
+
+      f.builder.setInsertionPointToStart(f.module.getBody());
+
+      SmallVector<Type> argumentTypes;
+
+      for (const auto &operand : spec.operands) {
+        MemRefLayoutAttrInterface layout;
+
+        if (!operand.strides.empty())
+          layout = StridedLayoutAttr::get(
+              &f.context, 0, operand.strides);
+
+        argumentTypes.push_back(MemRefType::get(
+            operand.shape, elementTypeOf(f.builder, operand),
+            layout));
+      }
+
+      f.function = func::FuncOp::create(
+          f.builder, f.loc, "guarded_memory",
+          f.builder.getFunctionType(argumentTypes, {}));
+
+      f.entry = f.function.addEntryBlock();
+
+      f.builder.setInsertionPointToStart(f.entry);
+
+      func::ReturnOp::create(f.builder, f.loc);
+
+      f.builder.setInsertionPoint(f.entry->getTerminator());
+
+      f.guarded = emitGuardedAffineLoopNest(
+          f.builder, f.loc, *f.plan);
+
+      if (!f.guarded)
+        return false;
+
+      f.recovered = emitSourceIVRecovery(
+          f.builder, f.loc, f.map, spec.bounds, *f.guarded);
+
+      if (!f.recovered)
+        return false;
+
+      f.thenBlock = &f.guarded->guardIf.getThenRegion().front();
+
+      for (unsigned i = 0; i < 3; ++i) {
+        auto access = emitSourceAffineAccess(
+            f.builder, f.loc, f.map, spec.bounds,
+            *f.guarded, *f.recovered,
+            spec.operands[i].rows, spec.operands[i].offsets);
+
+        if (!access)
+          return false;
+
+        Value memref = f.entry->getArgument(
+            spec.sharedAB && i == 1 ? 0 : i);
+
+        f.operands[i] = GuardedMemoryOperand{
+            memref, spec.operands[i].rows,
+            spec.operands[i].offsets, *access};
+      }
+
+      return true;
+    };
+
+    // Test-side update built between the two emitter
+    // calls: new = 2*old + a + b.
+
+    auto buildUpdate = [&](Fixture &f,
+                           const EmittedGuardedMemoryLoads &loads)
+        -> Value {
+      memref::LoadOp loadA = loads.loadA;
+      memref::LoadOp loadB = loads.loadB;
+      memref::LoadOp loadC = loads.loadC;
+
+      OpBuilder::InsertionGuard guard(f.builder);
+
+      f.builder.setInsertionPoint(f.thenBlock->getTerminator());
+
+      Value two = arith::ConstantIntOp::create(
+          f.builder, f.loc, 2, 64);
+
+      Value scaled = arith::MulIOp::create(
+          f.builder, f.loc, two, loadC.getResult());
+
+      Value sum = arith::AddIOp::create(
+          f.builder, f.loc, scaled, loadA.getResult());
+
+      return arith::AddIOp::create(
+          f.builder, f.loc, sum, loadB.getResult());
+    };
+
+    // Independent reference.
+
+    struct ReferenceEvent {
+      bool isStore;
+      unsigned operand;
+      std::vector<int64_t> indices;
+      int64_t value;
+
+      bool operator<(const ReferenceEvent &other) const {
+        return std::tie(operand, isStore, indices, value) <
+               std::tie(other.operand, other.isStore,
+                        other.indices, other.value);
+      }
+
+      bool operator==(const ReferenceEvent &other) const {
+        return operand == other.operand &&
+               isStore == other.isStore &&
+               indices == other.indices &&
+               value == other.value;
+      }
+    };
+
+    auto bufferSize = [](const std::vector<int64_t> &shape) {
+      std::size_t size = 1;
+
+      for (int64_t extent : shape)
+        size *= static_cast<std::size_t>(extent);
+
+      return size;
+    };
+
+    auto initialBuffer = [&](const OperandSpec &spec,
+                             unsigned operand) {
+      exec::MemoryBuffer buffer;
+      buffer.shape = spec.shape;
+
+      const std::size_t size = bufferSize(spec.shape);
+
+      for (std::size_t linear = 0; linear < size; ++linear) {
+        int64_t value = 0;
+
+        if (operand == 0)
+          value = static_cast<int64_t>(1000 * (linear + 1));
+        else if (operand == 1)
+          value = static_cast<int64_t>(linear + 1);
+        else
+          value = static_cast<int64_t>(100 + linear);
+
+        buffer.data.push_back(value);
+      }
+
+      return buffer;
+    };
+
+    auto linearIndex = [](const std::vector<int64_t> &shape,
+                          const std::vector<int64_t> &indices)
+        -> std::optional<std::size_t> {
+      if (indices.size() != shape.size())
+        return std::nullopt;
+
+      std::size_t linear = 0;
+
+      for (std::size_t d = 0; d < shape.size(); ++d) {
+        if (indices[d] < 0 || indices[d] >= shape[d])
+          return std::nullopt;
+
+        linear = linear * static_cast<std::size_t>(shape[d]) +
+                 static_cast<std::size_t>(indices[d]);
+      }
+
+      return linear;
+    };
+
+    // Source points in ascending (or descending)
+    // lexicographic order.
+
+    auto enumerateBox = [](const std::vector<ClosedIntegerInterval> &box,
+                           bool descending) {
+      std::vector<std::vector<int64_t>> points;
+      std::vector<int64_t> point(box.size(), 0);
+
+      std::function<void(std::size_t)> recurse =
+          [&](std::size_t dim) {
+            if (dim == box.size()) {
+              points.push_back(point);
+              return;
+            }
+
+            if (descending) {
+              for (int64_t v = box[dim].upper;
+                   v >= box[dim].lower; --v) {
+                point[dim] = v;
+                recurse(dim + 1);
+              }
+            } else {
+              for (int64_t v = box[dim].lower;
+                   v <= box[dim].upper; ++v) {
+                point[dim] = v;
+                recurse(dim + 1);
+              }
+            }
+          };
+
+      recurse(0);
+
+      return points;
+    };
+
+    struct ReferenceRun {
+      std::array<exec::MemoryBuffer, 3> buffers;
+      std::vector<ReferenceEvent> trace;
+    };
+
+    auto referenceRun = [&](const FixtureSpec &spec,
+                            bool reversed)
+        -> std::optional<ReferenceRun> {
+      ReferenceRun run;
+
+      for (unsigned i = 0; i < 3; ++i)
+        run.buffers[i] = initialBuffer(spec.operands[i], i);
+
+      const AffineIntegerDomain domain = domainOf(spec);
+
+      for (const auto &coordinates :
+           enumerateBox(spec.sourceBox, reversed)) {
+
+        IntRow x;
+
+        for (int64_t coordinate : coordinates)
+          x.emplace_back(coordinate);
+
+        if (!containsSourcePoint(domain, x))
+          continue;
+
+        std::array<std::vector<int64_t>, 3> addresses;
+
+        for (unsigned i = 0; i < 3; ++i) {
+          const auto &operand = spec.operands[i];
+
+          if (operand.rows.size() != operand.offsets.size())
+            return std::nullopt;
+
+          for (std::size_t r = 0; r < operand.rows.size(); ++r) {
+            if (operand.rows[r].size() != x.size())
+              return std::nullopt;
+
+            BigInt address = operand.offsets[r];
+
+            for (std::size_t j = 0; j < x.size(); ++j)
+              address += operand.rows[r][j] * x[j];
+
+            if (address <
+                    BigInt(std::numeric_limits<int64_t>::min()) ||
+                address >
+                    BigInt(std::numeric_limits<int64_t>::max()))
+              return std::nullopt;
+
+            addresses[i].push_back(address.convert_to<int64_t>());
+          }
+        }
+
+        std::array<int64_t, 3> loaded;
+
+        for (unsigned i = 0; i < 3; ++i) {
+          const unsigned buffer = spec.sharedAB && i == 1 ? 0 : i;
+
+          auto linear = linearIndex(
+              spec.operands[buffer].shape, addresses[i]);
+
+          if (!linear)
+            return std::nullopt;
+
+          loaded[i] = run.buffers[buffer].data[*linear];
+
+          run.trace.push_back(
+              {false, buffer, addresses[i], loaded[i]});
+        }
+
+        const __int128 updated =
+            static_cast<__int128>(2) * loaded[2] +
+            static_cast<__int128>(loaded[0]) + loaded[1];
+
+        if (updated < std::numeric_limits<int64_t>::min() ||
+            updated > std::numeric_limits<int64_t>::max())
+          return std::nullopt;
+
+        auto linear = linearIndex(
+            spec.operands[2].shape, addresses[2]);
+
+        if (!linear)
+          return std::nullopt;
+
+        run.buffers[2].data[*linear] =
+            static_cast<int64_t>(updated);
+
+        run.trace.push_back(
+            {true, 2, addresses[2], static_cast<int64_t>(updated)});
+      }
+
+      return run;
+    };
+
+    // The exact z-only image of the source domain must
+    // agree with the BigInt membership oracle at every
+    // point of the logical box (test-only enumeration).
+
+    auto imageAgreesWithOracle = [&](Fixture &f,
+                                     const FixtureSpec &spec,
+                                     std::size_t expectedAccepted)
+        -> bool {
+      auto image = buildExactLogicalImage(f.map, *f.sourceDomain);
+
+      if (!image)
+        return false;
+
+      std::size_t accepted = 0;
+
+      for (const auto &coordinates : enumerateBox(spec.bounds, false)) {
+        IntRow z;
+
+        for (int64_t coordinate : coordinates)
+          z.emplace_back(coordinate);
+
+        const bool expected =
+            containsLogicalPoint(f.map, f.inequalities, z);
+
+        IntegerPolyhedron cut = *image;
+
+        cut.setAndEliminate(0, llvm::ArrayRef<int64_t>(coordinates));
+
+        const bool actual = !cut.isIntegerEmpty();
+
+        if (actual != expected)
+          return false;
+
+        if (actual)
+          ++accepted;
+      }
+
+      return accepted == expectedAccepted;
+    };
+
+    // Run one accepted scenario end to end and compare
+    // with the reference.
+
+    auto runAccepted = [&](const char *name,
+                           const FixtureSpec &spec,
+                           std::size_t expectedVisited,
+                           std::size_t expectedAccepted) -> bool {
+      Fixture f;
+
+      if (!buildFixture(f, spec)) {
+        std::cerr << "3b2 " << name << ": fixture failed\n";
+        return false;
+      }
+
+      const auto before = countOps(f.thenBlock);
+
+      auto loads = emitGuardedMemoryLoads(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2]);
+
+      if (!loads) {
+        std::cerr << "3b2 " << name << ": loads refused\n";
+        return false;
+      }
+
+      // Three loads and one index cast per index.
+
+      std::ptrdiff_t indexCount = 0;
+
+      for (const auto &operand : f.operands)
+        indexCount += static_cast<std::ptrdiff_t>(
+            operand.access.indices.size());
+
+      if (countOps(f.thenBlock) != before + 3 + indexCount) {
+        std::cerr << "3b2 " << name << ": unexpected load ops\n";
+        return false;
+      }
+
+      const bool isFloat = spec.operands[2].isFloat;
+
+      for (memref::LoadOp load :
+           {loads->loadA, loads->loadB, loads->loadC}) {
+        if (!load || load->getBlock() != f.thenBlock ||
+            (isFloat ? !load.getResult().getType().isF32()
+                     : !load.getResult().getType().isInteger(64))) {
+          std::cerr << "3b2 " << name << ": malformed load\n";
+          return false;
+        }
+
+        for (Value index : load.getIndices()) {
+          if (!index.getType().isIndex() ||
+              !index.getDefiningOp<arith::IndexCastOp>() ||
+              index.getDefiningOp()->getBlock() != f.thenBlock) {
+            std::cerr << "3b2 " << name
+                      << ": malformed load index\n";
+            return false;
+          }
+        }
+      }
+
+      if (loads->loadA.getMemRef() != f.operands[0].memref ||
+          loads->loadB.getMemRef() != f.operands[1].memref ||
+          loads->loadC.getMemRef() != f.operands[2].memref) {
+        std::cerr << "3b2 " << name << ": wrong memref\n";
+        return false;
+      }
+
+      Value stored = isFloat ? loads->loadC.getResult()
+                             : buildUpdate(f, *loads);
+
+      const auto beforeStore = countOps(f.thenBlock);
+
+      auto store = emitGuardedMemoryStore(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered, f.operands[0], f.operands[1],
+          f.operands[2], *loads, stored);
+
+      if (!store || !store->store ||
+          countOps(f.thenBlock) != beforeStore + 1 ||
+          store->store->getBlock() != f.thenBlock ||
+          store->store.getValue() != stored ||
+          store->store.getMemRef() != f.operands[2].memref ||
+          !llvm::equal(store->store.getIndices(),
+                       loads->loadC.getIndices()) ||
+          store->store->getNextNode() !=
+              f.thenBlock->getTerminator()) {
+        std::cerr << "3b2 " << name
+                  << ": store refused or malformed\n";
+        return false;
+      }
+
+      // A second store is one statement too many.
+
+      auto secondStore = emitGuardedMemoryStore(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered, f.operands[0], f.operands[1],
+          f.operands[2], *loads, stored);
+
+      if (secondStore || countOps(f.thenBlock) != beforeStore + 1) {
+        std::cerr << "3b2 " << name << ": second store accepted\n";
+        return false;
+      }
+
+      if (failed(mlir::verify(f.module))) {
+        std::cerr << "3b2 " << name << ": verifier failed\n";
+        return false;
+      }
+
+      if (std::getenv("RANK_PARTITION_DUMP_IR")) {
+        llvm::errs() << "3b2 " << name << " IR:\n";
+        f.module.print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
+      if (!imageAgreesWithOracle(f, spec, expectedAccepted)) {
+        std::cerr << "3b2 " << name
+                  << ": exact logical image disagrees with the"
+                     " BigInt oracle\n";
+        return false;
+      }
+
+      if (isFloat)
+        return true; // structural and verifier coverage only
+
+      // Execute the actual operation tree with a memory
+      // model, then compare against the reference.
+
+      exec::MemoryState memory;
+
+      for (unsigned i = 0; i < 3; ++i)
+        memory.buffers[f.entry->getArgument(i)] =
+            initialBuffer(spec.operands[i], i);
+
+      auto execution = exec::interpretGuardedLoopNest(
+          f.guarded->outermost, f.guarded->guardIf,
+          f.guarded->logicalIVs, f.recovered->sourceIVs,
+          f.operands[0].access.indices,
+          f.operands[1].access.indices,
+          f.operands[2].access.indices,
+          &memory);
+
+      if (!execution ||
+          execution->visitedPoints != expectedVisited ||
+          execution->acceptedPoints != expectedAccepted ||
+          execution->accessByLogical.size() != expectedAccepted ||
+          execution->sourceCounts.size() != expectedAccepted) {
+        std::cerr << "3b2 " << name << ": interpreter failure\n";
+        return false;
+      }
+
+      // Observed A/B/C indices at every accepted logical
+      // point against the BigInt oracle.
+
+      std::map<exec::Point, std::vector<exec::Point>> expectedAccess;
+
+      for (const auto &coordinates : enumerateBox(spec.sourceBox, false)) {
+        IntRow x;
+
+        for (int64_t coordinate : coordinates)
+          x.emplace_back(coordinate);
+
+        if (!containsSourcePoint(f.inequalities, x))
+          continue;
+
+        auto logical = mapSourceIteration(f.map, x);
+
+        if (!logical || logical->size() != x.size())
+          return false;
+
+        exec::Point key;
+
+        for (const BigInt &coordinate : *logical)
+          key.push_back(coordinate.convert_to<int64_t>());
+
+        std::vector<exec::Point> indices;
+
+        for (const auto &operand : spec.operands) {
+          exec::Point point;
+
+          for (std::size_t r = 0; r < operand.rows.size(); ++r) {
+            BigInt address = operand.offsets[r];
+
+            for (std::size_t j = 0; j < x.size(); ++j)
+              address += operand.rows[r][j] * x[j];
+
+            point.push_back(address.convert_to<int64_t>());
+          }
+
+          indices.push_back(std::move(point));
+        }
+
+        if (!expectedAccess.emplace(key, std::move(indices)).second)
+          return false;
+      }
+
+      if (execution->accessByLogical != expectedAccess) {
+        std::cerr << "3b2 " << name << ": access index mismatch\n";
+        return false;
+      }
+
+      auto reference = referenceRun(spec, false);
+
+      if (!reference) {
+        std::cerr << "3b2 " << name << ": reference failed\n";
+        return false;
+      }
+
+      // The reference itself must be order sensitive
+      // exactly when the scenario has collisions.
+
+      auto reversedReference = referenceRun(spec, true);
+
+      if (!reversedReference ||
+          (reversedReference->buffers[2].data ==
+           reference->buffers[2].data) != !spec.hasCollisions) {
+        std::cerr << "3b2 " << name
+                  << ": reference order sensitivity check failed\n";
+        return false;
+      }
+
+      // Final memory contents.
+
+      for (unsigned i = 0; i < 3; ++i) {
+        const auto &actual =
+            memory.buffers[f.entry->getArgument(i)];
+
+        if (actual.shape != reference->buffers[i].shape ||
+            actual.data != reference->buffers[i].data) {
+          std::cerr << "3b2 " << name
+                    << ": memory contents differ, operand " << i
+                    << "\n";
+          return false;
+        }
+      }
+
+      // Event multiset and per-element store order.
+
+      std::vector<ReferenceEvent> observed;
+
+      for (const auto &event : memory.trace) {
+        std::optional<unsigned> operand;
+
+        for (unsigned i = 0; i < 3; ++i)
+          if (event.memref == f.entry->getArgument(i))
+            operand = i;
+
+        if (!operand)
+          return false;
+
+        observed.push_back(
+            {event.isStore, *operand, event.indices, event.value});
+      }
+
+      if (observed.size() != reference->trace.size() ||
+          observed.size() != 4 * expectedAccepted) {
+        std::cerr << "3b2 " << name << ": event count "
+                  << observed.size() << "\n";
+        return false;
+      }
+
+      auto storeSequences =
+          [](const std::vector<ReferenceEvent> &trace) {
+            std::map<std::vector<int64_t>, std::vector<int64_t>>
+                sequences;
+
+            for (const auto &event : trace)
+              if (event.isStore)
+                sequences[event.indices].push_back(event.value);
+
+            return sequences;
+          };
+
+      if (storeSequences(observed) !=
+          storeSequences(reference->trace)) {
+        std::cerr << "3b2 " << name
+                  << ": per-element store order differs\n";
+        return false;
+      }
+
+      std::vector<ReferenceEvent> sortedObserved = observed;
+      std::vector<ReferenceEvent> sortedReference = reference->trace;
+
+      std::sort(sortedObserved.begin(), sortedObserved.end());
+      std::sort(sortedReference.begin(), sortedReference.end());
+
+      if (sortedObserved != sortedReference) {
+        std::cerr << "3b2 " << name << ": event multiset differs\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    const std::vector<std::vector<BigInt>> identityRows = {
+        {BigInt(1), BigInt(0)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    const std::vector<std::vector<BigInt>> swapRows = {
+        {BigInt(0), BigInt(1)},
+        {BigInt(1), BigInt(0)}
+    };
+
+    const std::vector<BigInt> zero2 = {BigInt(0), BigInt(0)};
+
+    const std::vector<ClosedIntegerInterval> unitBox2 =
+        {{0, 3}, {0, 3}};
+
+    const std::vector<std::vector<BigInt>> skewT = {
+        {BigInt(1), BigInt(1)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    const std::vector<std::vector<BigInt>> stretchT = {
+        {BigInt(2), BigInt(0)},
+        {BigInt(0), BigInt(1)}
+    };
+
+    const std::vector<std::vector<BigInt>> swapT = {
+        {BigInt(0), BigInt(1)},
+        {BigInt(1), BigInt(0)}
+    };
+
+    // P1: unimodular skew; A[x0+1][x1], B[3-x1][x0],
+    // C[x1] (collisions along x0, order preserved).
+
+    FixtureSpec skewSpec{
+        skewT, unitBox2, {{0, 6}, {0, 3}},
+        {OperandSpec{identityRows, {BigInt(1), BigInt(0)}, {5, 4}},
+         OperandSpec{{{BigInt(0), BigInt(-1)}, {BigInt(1), BigInt(0)}},
+                     {BigInt(3), BigInt(0)}, {4, 4}},
+         OperandSpec{{{BigInt(0), BigInt(1)}}, {BigInt(0)}, {4}}},
+        false, true};
+
+    if (verify(runAccepted("unimodular", skewSpec, 28, 16),
+               "3b2 unimodular guarded loads/store match the"
+               " source-order reference"))
+      return 1;
+
+    // P1': A and B read the same memref (read/read).
+
+    {
+      FixtureSpec shared = skewSpec;
+      shared.sharedAB = true;
+      shared.operands[1] = OperandSpec{swapRows, zero2, {5, 4}};
+
+      if (verify(runAccepted("shared-ab", shared, 28, 16),
+                 "3b2 shared A/B memref accepted and matches the"
+                 " reference"))
+        return 1;
+    }
+
+    // P2: non-unimodular stretch; A[x0+1][3-x1],
+    // B[3-x1][x0+1], C[6-x0-x1] (anti-diagonal
+    // collisions, order preserved; congruence guard and
+    // divsi recovery).
+
+    FixtureSpec stretchSpec{
+        stretchT, unitBox2, {{0, 6}, {0, 3}},
+        {OperandSpec{{{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(-1)}},
+                     {BigInt(1), BigInt(3)}, {5, 4}},
+         OperandSpec{{{BigInt(0), BigInt(-1)}, {BigInt(1), BigInt(0)}},
+                     {BigInt(3), BigInt(1)}, {4, 5}},
+         OperandSpec{{{BigInt(-1), BigInt(-1)}}, {BigInt(6)}, {7}}},
+        false, true};
+
+    if (verify(runAccepted("non-unimodular", stretchSpec, 28, 16),
+               "3b2 non-unimodular guarded loads/store match the"
+               " source-order reference"))
+      return 1;
+
+    // P3: swapped loops with an injective C[3-x0][x1]:
+    // no write collision, any order is legal.
+
+    FixtureSpec swapInjectiveSpec{
+        swapT, unitBox2, unitBox2,
+        {OperandSpec{{{BigInt(-1), BigInt(0)}, {BigInt(0), BigInt(1)}},
+                     {BigInt(3), BigInt(1)}, {4, 5}},
+         OperandSpec{{{BigInt(0), BigInt(1)}, {BigInt(-1), BigInt(0)}},
+                     {BigInt(0), BigInt(3)}, {4, 4}},
+         OperandSpec{{{BigInt(-1), BigInt(0)}, {BigInt(0), BigInt(1)}},
+                     {BigInt(3), BigInt(0)}, {4, 4}}},
+        false, false};
+
+    if (verify(runAccepted("swap-injective", swapInjectiveSpec, 16, 16),
+               "3b2 reordered injective writes match the"
+               " source-order reference"))
+      return 1;
+
+    // P4: unimodular T without a unit coefficient
+    // (det 1); the z-only image makes the domain
+    // equality decidable.
+
+    FixtureSpec denseUnimodularSpec{
+        {{BigInt(2), BigInt(3)}, {BigInt(3), BigInt(5)}},
+        unitBox2, {{0, 15}, {0, 24}},
+        {OperandSpec{identityRows, zero2, {4, 4}},
+         OperandSpec{swapRows, zero2, {4, 4}},
+         OperandSpec{{{BigInt(0), BigInt(1)}}, {BigInt(0)}, {4}}},
+        false, true};
+
+    if (verify(runAccepted("dense-unimodular", denseUnimodularSpec,
+                           400, 16),
+               "3b2 unimodular map without unit pivot accepted and"
+               " matches the reference"))
+      return 1;
+
+    // P5: negative source and logical coordinates with
+    // a negative partial sum in the C access.
+
+    FixtureSpec negativeSpec{
+        stretchT, {{-2, 1}, {2, 5}}, {{-4, 2}, {2, 5}},
+        {OperandSpec{identityRows, {BigInt(2), BigInt(-2)}, {4, 4}},
+         OperandSpec{swapRows, {BigInt(-2), BigInt(2)}, {4, 4}},
+         OperandSpec{{{BigInt(1), BigInt(1)}}, {BigInt(0)}, {7}}},
+        false, true};
+
+    if (verify(runAccepted("negative-coordinates", negativeSpec, 28, 16),
+               "3b2 negative coordinates accepted and match the"
+               " reference"))
+      return 1;
+
+    // P6: non-diagonal non-unimodular T (det 2) with a
+    // multi-term congruence guard.
+
+    FixtureSpec shearedStretchSpec{
+        {{BigInt(2), BigInt(1)}, {BigInt(0), BigInt(1)}},
+        unitBox2, {{0, 9}, {0, 3}},
+        {OperandSpec{identityRows, zero2, {4, 4}},
+         OperandSpec{swapRows, zero2, {4, 4}},
+         OperandSpec{{{BigInt(1), BigInt(1)}}, {BigInt(0)}, {7}}},
+        false, true};
+
+    if (verify(runAccepted("sheared-stretch", shearedStretchSpec, 40, 16),
+               "3b2 non-diagonal non-unimodular map accepted and"
+               " matches the reference"))
+      return 1;
+
+    // P7: three source loops, a rank-3 memref.
+
+    FixtureSpec threeDimSpec{
+        {{BigInt(1), BigInt(1), BigInt(0)},
+         {BigInt(0), BigInt(1), BigInt(0)},
+         {BigInt(0), BigInt(0), BigInt(1)}},
+        {{0, 3}, {0, 3}, {0, 3}}, {{0, 6}, {0, 3}, {0, 3}},
+        {OperandSpec{{{BigInt(1), BigInt(0), BigInt(0)},
+                      {BigInt(0), BigInt(1), BigInt(0)},
+                      {BigInt(0), BigInt(0), BigInt(1)}},
+                     {BigInt(0), BigInt(0), BigInt(0)}, {4, 4, 4}},
+         OperandSpec{{{BigInt(0), BigInt(0), BigInt(1)},
+                      {BigInt(1), BigInt(0), BigInt(0)}},
+                     zero2, {4, 4}},
+         OperandSpec{{{BigInt(0), BigInt(1), BigInt(0)},
+                      {BigInt(0), BigInt(0), BigInt(1)}},
+                     zero2, {4, 4}}},
+        false, true};
+
+    if (verify(runAccepted("three-dimensional", threeDimSpec, 112, 64),
+               "3b2 three-loop nest with a rank-3 memref matches the"
+               " reference"))
+      return 1;
+
+    // P8: f32 element type (structural and verifier
+    // coverage only; the interpreter executes i64).
+
+    {
+      FixtureSpec floatSpec = stretchSpec;
+
+      for (auto &operand : floatSpec.operands)
+        operand.isFloat = true;
+
+      if (verify(runAccepted("f32", floatSpec, 28, 16),
+                 "3b2 f32 memrefs accepted and verified"))
+        return 1;
+    }
+
+    // P9: a non-box source domain, x1 <= x0 (10 points),
+    // under the unimodular skew.
+
+    {
+      FixtureSpec triangle = skewSpec;
+      triangle.extraInequalities = {
+          {{BigInt(-1), BigInt(1)}, BigInt(0)}};
+
+      if (verify(runAccepted("triangle", triangle, 28, 10),
+                 "3b2 non-box source domain accepted and matches the"
+                 " reference"))
+        return 1;
+    }
+
+    // Rejections: each returns nullopt, creates no
+    // operation, and leaves a verifiable module.
+
+    auto expectLoadsRefused =
+        [&](const char *name, const FixtureSpec &spec,
+            std::function<void(Fixture &)> mutate) -> bool {
+      Fixture f;
+
+      if (!buildFixture(f, spec)) {
+        std::cerr << "3b2 " << name << ": fixture failed\n";
+        return false;
+      }
+
+      if (mutate)
+        mutate(f);
+
+      const auto before = countOps(f.thenBlock);
+
+      auto loads = emitGuardedMemoryLoads(
+          f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+          *f.guarded, *f.recovered,
+          f.operands[0], f.operands[1], f.operands[2]);
+
+      if (loads || countOps(f.thenBlock) != before ||
+          failed(mlir::verify(f.module))) {
+        std::cerr << "3b2 " << name << ": not refused\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    // R1: swapped loops with C[x0+x1]: the anti-diagonal
+    // updates would be reversed. The whole statement is
+    // refused before the first load exists.
+
+    {
+      FixtureSpec reversedSpec{
+          swapT, unitBox2, unitBox2,
+          {OperandSpec{identityRows, zero2, {4, 4}},
+           OperandSpec{swapRows, zero2, {4, 4}},
+           OperandSpec{{{BigInt(1), BigInt(1)}}, {BigInt(0)}, {7}}},
+          false, true};
+
+      if (verify(expectLoadsRefused("reversed-order", reversedSpec, nullptr),
+                 "3b2 reversed reduction order refused before any"
+                 " load (no speculative reordering)"))
+        return 1;
+    }
+
+    FixtureSpec baseSpec = stretchSpec;
+
+    // R2: rank mismatch (one C row for a rank-2 memref).
+
+    {
+      FixtureSpec spec = baseSpec;
+      spec.operands[2].shape = {7, 7};
+
+      if (verify(expectLoadsRefused("rank", spec, nullptr),
+                 "3b2 access rank mismatch refused"))
+        return 1;
+    }
+
+    // R3: out of bounds: high, tight (f == shape), low.
+
+    {
+      FixtureSpec spec = baseSpec;
+      spec.operands[0].shape = {3, 4};
+
+      if (verify(expectLoadsRefused("oob-high", spec, nullptr),
+                 "3b2 out-of-bounds (high) access refused"))
+        return 1;
+
+      spec = baseSpec;
+      spec.operands[0].shape = {4, 4}; // x0 + 1 reaches 4
+
+      if (verify(expectLoadsRefused("oob-tight", spec, nullptr),
+                 "3b2 out-of-bounds (f == extent) access refused"))
+        return 1;
+
+      spec = baseSpec;
+      spec.operands[0].offsets = {BigInt(-1), BigInt(3)};
+
+      if (verify(expectLoadsRefused("oob-low", spec, nullptr),
+                 "3b2 out-of-bounds (low) access refused"))
+        return 1;
+    }
+
+    // R4: dynamic shape.
+
+    {
+      FixtureSpec spec = baseSpec;
+      spec.operands[0].shape = {ShapedType::kDynamic, 4};
+
+      if (verify(expectLoadsRefused("dynamic", spec, nullptr),
+                 "3b2 dynamic memref shape refused"))
+        return 1;
+    }
+
+    // R5: element type mismatch.
+
+    {
+      FixtureSpec spec = baseSpec;
+      spec.operands[0].integerWidth = 32;
+
+      if (verify(expectLoadsRefused("element-type", spec, nullptr),
+                 "3b2 element type mismatch refused"))
+        return 1;
+    }
+
+    // R20: the MemRef dialect is not loaded.
+
+    {
+      FixtureSpec spec = baseSpec;
+      spec.loadMemRefDialect = false;
+
+      if (verify(expectLoadsRefused("memref-dialect", spec, nullptr),
+                 "3b2 unloaded MemRef dialect refused"))
+        return 1;
+    }
+
+    // R13: non-identity layout (strided<[1, 1]> maps
+    // distinct indices to one element).
+
+    {
+      FixtureSpec spec = swapInjectiveSpec;
+      spec.operands[2].strides = {1, 1};
+
+      if (verify(expectLoadsRefused("layout", spec, nullptr),
+                 "3b2 non-identity memref layout refused"))
+        return 1;
+    }
+
+    // R6: A and C are the same memref value, or views of
+    // the same buffer.
+
+    if (verify(expectLoadsRefused(
+                   "alias", baseSpec,
+                   [](Fixture &f) {
+                     f.operands[0].memref = f.operands[2].memref;
+                   }),
+               "3b2 provable A/C aliasing refused"))
+      return 1;
+
+    if (verify(expectLoadsRefused(
+                   "alias-view", baseSpec,
+                   [](Fixture &f) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(f.guarded->outermost);
+                     Value view = memref::CastOp::create(
+                         f.builder, f.loc,
+                         f.operands[2].memref.getType(),
+                         f.operands[2].memref);
+                     f.operands[1].memref = view;
+                     // The view has C's shape; reuse C's rows.
+                     f.operands[1].accessRows = f.operands[2].accessRows;
+                     f.operands[1].accessOffsets =
+                         f.operands[2].accessOffsets;
+                     f.operands[1].access = f.operands[2].access;
+                   }),
+               "3b2 B/C aliasing through a view refused"))
+      return 1;
+
+    // R9: foreign memory effects inside the guard.
+
+    if (verify(expectLoadsRefused(
+                   "foreign-store", baseSpec,
+                   [](Fixture &f) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     Value zero = arith::ConstantIndexOp::create(
+                         f.builder, f.loc, 0);
+                     Value value = arith::ConstantIntOp::create(
+                         f.builder, f.loc, 1, 64);
+                     memref::StoreOp::create(
+                         f.builder, f.loc, value,
+                         f.operands[2].memref, ValueRange{zero});
+                   }),
+               "3b2 foreign memory store refused"))
+      return 1;
+
+    if (verify(expectLoadsRefused(
+                   "foreign-load", baseSpec,
+                   [](Fixture &f) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     Value zero = arith::ConstantIndexOp::create(
+                         f.builder, f.loc, 0);
+                     memref::LoadOp::create(
+                         f.builder, f.loc, f.operands[2].memref,
+                         ValueRange{zero});
+                   }),
+               "3b2 foreign memory load refused"))
+      return 1;
+
+    if (verify(expectLoadsRefused(
+                   "foreign-alloc", baseSpec,
+                   [](Fixture &f) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(
+                         f.thenBlock->getTerminator());
+                     memref::AllocOp::create(
+                         f.builder, f.loc,
+                         MemRefType::get({1}, f.builder.getI64Type()));
+                   }),
+               "3b2 foreign allocation refused"))
+      return 1;
+
+    // R11: a source domain inconsistent with the plan.
+
+    if (verify(expectLoadsRefused(
+                   "domain", baseSpec,
+                   [](Fixture &f) {
+                     IntegerPolyhedron smaller(
+                         PresburgerSpace::getSetSpace(2));
+                     smaller.addInequality(
+                         llvm::SmallVector<int64_t>{1, 0, 0});
+                     smaller.addInequality(
+                         llvm::SmallVector<int64_t>{-1, 0, 2});
+                     smaller.addInequality(
+                         llvm::SmallVector<int64_t>{0, 1, 0});
+                     smaller.addInequality(
+                         llvm::SmallVector<int64_t>{0, -1, 2});
+                     f.sourceDomain = smaller;
+                   }),
+               "3b2 source domain inconsistent with the plan refused"))
+      return 1;
+
+    // R12: access rows that differ from the emitted SSA.
+
+    if (verify(expectLoadsRefused(
+                   "stale-rows", baseSpec,
+                   [](Fixture &f) {
+                     f.operands[0].accessOffsets = {BigInt(0), BigInt(3)};
+                   }),
+               "3b2 access rows differing from the emitted SSA refused"))
+      return 1;
+
+    // R15 / R16: tampered loop-nest or recovery handles.
+
+    {
+      Fixture f;
+
+      bool ok = buildFixture(f, baseSpec);
+
+      if (ok) {
+        const auto before = countOps(f.thenBlock);
+
+        EmittedGuardedAffineLoopNest tamperedNest = *f.guarded;
+        std::swap(tamperedNest.logicalIVs[0], tamperedNest.logicalIVs[1]);
+
+        auto nestLoads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            tamperedNest, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+
+        EmittedSourceIVRecovery tamperedRecovery = *f.recovered;
+        std::swap(tamperedRecovery.sourceIVs[0],
+                  tamperedRecovery.sourceIVs[1]);
+
+        auto recoveryLoads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            *f.guarded, tamperedRecovery,
+            f.operands[0], f.operands[1], f.operands[2]);
+
+        EmittedGuardedAffineLoopNest nulledNest = *f.guarded;
+        nulledNest.logicalIVs[1] = Value();
+
+        auto nulledLoads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            nulledNest, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+
+        ok = !nestLoads && !recoveryLoads && !nulledLoads &&
+             countOps(f.thenBlock) == before &&
+             succeeded(mlir::verify(f.module));
+      }
+
+      if (verify(ok, "3b2 tampered loop-nest and recovery handles refused"))
+        return 1;
+    }
+
+    // R23: a tampered loads struct is refused by the
+    // store call.
+
+    {
+      Fixture f;
+
+      bool ok = buildFixture(f, baseSpec);
+
+      std::optional<EmittedGuardedMemoryLoads> loads;
+
+      if (ok) {
+        loads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            *f.guarded, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+        ok = loads.has_value();
+      }
+
+      if (ok) {
+        Value stored = buildUpdate(f, *loads);
+
+        const auto before = countOps(f.thenBlock);
+
+        EmittedGuardedMemoryLoads swapped = *loads;
+        swapped.loadC = loads->loadA;
+
+        EmittedGuardedMemoryLoads reindexed = *loads;
+        reindexed.indicesC = loads->indicesB;
+
+        EmittedGuardedMemoryLoads nulled = *loads;
+        nulled.indicesC[0] = Value();
+
+        for (const EmittedGuardedMemoryLoads *tampered :
+             {&swapped, &reindexed, &nulled}) {
+          auto store = emitGuardedMemoryStore(
+              f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+              *f.guarded, *f.recovered, f.operands[0], f.operands[1],
+              f.operands[2], *tampered, stored);
+
+          if (store)
+            ok = false;
+        }
+
+        ok = ok && countOps(f.thenBlock) == before &&
+             succeeded(mlir::verify(f.module));
+      }
+
+      if (verify(ok, "3b2 tampered loads struct refused by the store"))
+        return 1;
+    }
+
+    // R14 / R18: a plan whose box does not cover the
+    // domain, and a two-disjunct plan.
+
+    {
+      Fixture f;
+
+      bool ok = buildFixture(f, skewSpec);
+
+      if (ok) {
+        const auto before = countOps(f.thenBlock);
+
+        SymbolicIterationPlan narrow(
+            f.plan->logicalDomain, {{0, 5}, {0, 3}});
+
+        auto narrowLoads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, narrow, *f.sourceDomain,
+            *f.guarded, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+
+        // The same point set described by two disjuncts:
+        // P and its slice z1 <= 1. unionInPlace(const
+        // IntegerRelation &) appends unconditionally; the
+        // slice keeps the second disjunct a different
+        // description of points already in P.
+
+        IntegerRelation slice = f.plan->logicalDomain.getDisjunct(0);
+
+        llvm::SmallVector<int64_t> sliceRow(slice.getNumCols(), 0);
+        sliceRow[1] = -1;
+        sliceRow.back() = 1;
+        slice.addInequality(sliceRow);
+
+        PresburgerSet twoDisjuncts = f.plan->logicalDomain;
+        twoDisjuncts.unionInPlace(slice);
+
+        SymbolicIterationPlan doubled(twoDisjuncts, f.plan->bounds);
+
+        auto doubledLoads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, doubled, *f.sourceDomain,
+            *f.guarded, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+
+        ok = !narrowLoads && !doubledLoads &&
+             doubled.logicalDomain.getNumDisjuncts() == 2 &&
+             countOps(f.thenBlock) == before &&
+             succeeded(mlir::verify(f.module));
+      }
+
+      if (verify(ok, "3b2 uncovering box and multi-disjunct plan refused"))
+        return 1;
+    }
+
+    // R17: a memref that does not dominate the nest.
+
+    if (verify(expectLoadsRefused(
+                   "dominance", baseSpec,
+                   [](Fixture &f) {
+                     OpBuilder::InsertionGuard guard(f.builder);
+                     f.builder.setInsertionPoint(
+                         f.entry->getTerminator());
+                     Value late = memref::AllocaOp::create(
+                         f.builder, f.loc,
+                         cast<MemRefType>(
+                             f.operands[0].memref.getType()));
+                     f.operands[0].memref = late;
+                   }),
+               "3b2 memref defined after the nest refused"))
+      return 1;
+
+    // R19: an access emitted under vacuous bounds whose
+    // index arithmetic overflows i64 on the exact domain
+    // (the overflow certificate V10 fires before the
+    // tensor-bounds check V9 here).
+
+    if (verify(expectLoadsRefused(
+                   "oversized-access", baseSpec,
+                   [](Fixture &f) {
+                     const std::vector<ClosedIntegerInterval>
+                         vacuous = {{0, 0}, {0, 0}};
+                     const BigInt huge =
+                         BigInt(std::int64_t(1) << 62);
+                     auto access = emitSourceAffineAccess(
+                         f.builder, f.loc, f.map, vacuous,
+                         *f.guarded, *f.recovered,
+                         {{huge, BigInt(0)}, {BigInt(0), BigInt(1)}},
+                         {BigInt(0), BigInt(0)});
+                     if (!access)
+                       return;
+                     f.operands[0].accessRows =
+                         {{huge, BigInt(0)}, {BigInt(0), BigInt(1)}};
+                     f.operands[0].accessOffsets = {BigInt(0), BigInt(0)};
+                     f.operands[0].access = *access;
+                   }),
+               "3b2 access overflowing i64 on the exact domain refused"))
+      return 1;
+
+    // R21: an access emitted under vacuous bounds whose
+    // arithmetic fits i64 but leaves the tensor on the
+    // exact domain (V9 alone refuses: 8*x0 reaches 24
+    // on memref<5x4>).
+
+    if (verify(expectLoadsRefused(
+                   "oversized-access", baseSpec,
+                   [](Fixture &f) {
+                     const std::vector<ClosedIntegerInterval>
+                         vacuous = {{0, 0}, {0, 0}};
+                     auto access = emitSourceAffineAccess(
+                         f.builder, f.loc, f.map, vacuous,
+                         *f.guarded, *f.recovered,
+                         {{BigInt(8), BigInt(0)}, {BigInt(0), BigInt(1)}},
+                         {BigInt(0), BigInt(0)});
+                     if (!access)
+                       return;
+                     f.operands[0].accessRows =
+                         {{BigInt(8), BigInt(0)}, {BigInt(0), BigInt(1)}};
+                     f.operands[0].accessOffsets = {BigInt(0), BigInt(0)};
+                     f.operands[0].access = *access;
+                   }),
+               "3b2 access leaving the tensor on the exact domain refused"))
+      return 1;
+
+    // R22: on the source domain x0 == x1 the access
+    // 2^62*(x0 - x1) is 0 and in bounds, but its first
+    // product overflows i64 at x0 >= 2: V10 alone refuses.
+
+    {
+      FixtureSpec diagonal{
+          identityRows, unitBox2, unitBox2,
+          {OperandSpec{identityRows, zero2, {4, 4}},
+           OperandSpec{swapRows, zero2, {4, 4}},
+           OperandSpec{identityRows, zero2, {4, 4}}},
+          false, false};
+
+      diagonal.extraInequalities = {
+          {{BigInt(1), BigInt(-1)}, BigInt(0)},
+          {{BigInt(-1), BigInt(1)}, BigInt(0)}};
+
+      if (verify(expectLoadsRefused(
+                     "overflow-only", diagonal,
+                     [](Fixture &f) {
+                       const std::vector<ClosedIntegerInterval>
+                           vacuous = {{0, 0}, {0, 0}};
+                       const BigInt huge =
+                           BigInt(std::int64_t(1) << 62);
+                       const std::vector<std::vector<BigInt>> rows =
+                           {{huge, -huge}, {BigInt(0), BigInt(1)}};
+                       auto access = emitSourceAffineAccess(
+                           f.builder, f.loc, f.map, vacuous,
+                           *f.guarded, *f.recovered, rows,
+                           {BigInt(0), BigInt(0)});
+                       if (!access)
+                         return;
+                       f.operands[0].accessRows = rows;
+                       f.operands[0].accessOffsets = {BigInt(0), BigInt(0)};
+                       f.operands[0].access = *access;
+                     }),
+                 "3b2 in-bounds access with overflowing i64 products"
+                 " refused"))
+        return 1;
+    }
+
+    // R7 / R8: store value of the wrong type, or not
+    // dominating the store.
+
+    {
+      Fixture f;
+
+      bool ok = buildFixture(f, baseSpec);
+
+      std::optional<EmittedGuardedMemoryLoads> loads;
+
+      if (ok) {
+        loads = emitGuardedMemoryLoads(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            *f.guarded, *f.recovered,
+            f.operands[0], f.operands[1], f.operands[2]);
+        ok = loads.has_value();
+      }
+
+      if (ok) {
+        OpBuilder::InsertionGuard guard(f.builder);
+        f.builder.setInsertionPoint(f.thenBlock->getTerminator());
+
+        Value narrow = arith::ConstantIntOp::create(
+            f.builder, f.loc, 1, 32);
+
+        Value truth = arith::ConstantIntOp::create(
+            f.builder, f.loc, 1, 1);
+
+        auto nested = scf::IfOp::create(
+            f.builder, f.loc, TypeRange{}, truth, false);
+
+        f.builder.setInsertionPointToStart(
+            &nested.getThenRegion().front());
+
+        Value hidden = arith::ConstantIntOp::create(
+            f.builder, f.loc, 7, 64);
+
+        const auto before = countOps(f.thenBlock);
+
+        auto wrongType = emitGuardedMemoryStore(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            *f.guarded, *f.recovered, f.operands[0], f.operands[1],
+            f.operands[2], *loads, narrow);
+
+        auto notDominating = emitGuardedMemoryStore(
+            f.builder, f.loc, f.map, *f.plan, *f.sourceDomain,
+            *f.guarded, *f.recovered, f.operands[0], f.operands[1],
+            f.operands[2], *loads, hidden);
+
+        ok = !wrongType && !notDominating &&
+             countOps(f.thenBlock) == before &&
+             succeeded(mlir::verify(f.module));
+      }
+
+      if (verify(ok, "3b2 store value type and dominance validated"))
+        return 1;
+    }
   }
 
   std::cout << "All coordinate relation tests passed.\n";
