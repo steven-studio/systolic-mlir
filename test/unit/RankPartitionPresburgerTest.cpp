@@ -35,9 +35,12 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -48,6 +51,11 @@
 #include <map>
 #include <tuple>
 using namespace systolic::logical;
+// Phase 5.4.3d-3b-5: the production GEMM pass is registered through a
+// separate translation unit (this file must not see mlir::systolic).
+namespace systolic::logical::testing {
+void registerProductionGemmPass();
+}
 static int verify(bool ok, const char *name) {
   if (!ok) { std::cerr << "FAIL: " << name << "\n"; return 1; }
   std::cout << "PASS: " << name << "\n";
@@ -8537,6 +8545,510 @@ int main() {
 
       if (verify(ok, "3b4 twin name clashing with an existing symbol is"
                      " refused"))
+        return 1;
+    }
+
+    // ======================================================
+    // Phase 5.4.3d-3b-5:
+    // The production pass (affine-matmul-to-systolic with
+    // general-affine=true, as systolic-cc runs it) replaces a
+    // proven nest in place. The transformed function and the
+    // untouched original are executed on identical memory and
+    // compared bit for bit; the original nest's execution is
+    // the oracle.
+    // ======================================================
+
+    enum class ProductionExpectation { Replaced, Unchanged, FastPath };
+
+    // `remarks`: fragments the pass must report on the nest (with
+    // report=true). Without report=true the pass must stay silent.
+    auto runProduction = [&](const GemmText &gemm, TwinData data,
+                             const std::string &options,
+                             ProductionExpectation expectation,
+                             std::size_t expectedAccepted,
+                             const std::vector<std::string> &remarks) -> bool {
+      const std::string label =
+          gemm.name + "/" +
+          (data == TwinData::Cancellation ? "cancel"
+           : data == TwinData::Rounding  ? "round"
+                                         : "special") +
+          "{" + options + "}";
+
+      ParsedGemm original;
+      ParsedGemm produced;
+
+      if (!parseGemm(original, gemmModule(gemm), gemm.name) ||
+          !parseGemm(produced, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b5 " << label << ": parse failed\n";
+        return false;
+      }
+
+      const std::string before = functionText(produced.function);
+      const auto topLevelBefore =
+          std::distance(produced.module->getBody()->begin(),
+                        produced.module->getBody()->end());
+      const FunctionType signatureBefore = produced.function.getFunctionType();
+
+      ::systolic::logical::testing::registerProductionGemmPass();
+
+      // The pass's remarks are the production diagnostics; keep them
+      // for the failure report and for the decision checks.
+      std::string diagnostics;
+      ScopedDiagnosticHandler diagnosticHandler(
+          &produced.context, [&](Diagnostic &diagnostic) {
+            diagnostics += diagnostic.str() + "\n";
+            return success();
+          });
+
+      // Anchored on the module, as systolic-opt anchors on the root
+      // operation it parsed; the pass is then scheduled on this
+      // module itself.
+      PassManager manager(&produced.context, ModuleOp::getOperationName());
+
+      if (failed(parsePassPipeline("affine-matmul-to-systolic{" + options +
+                                       "}",
+                                   manager, llvm::errs()))) {
+        std::cerr << "3b5 " << label << ": pipeline parse failed\n";
+        return false;
+      }
+
+      if (failed(manager.run(*produced.module))) {
+        std::cerr << "3b5 " << label << ": the pass failed\n";
+        return false;
+      }
+
+      if (failed(mlir::verify(*produced.module))) {
+        std::cerr << "3b5 " << label << ": output does not verify\n";
+        return false;
+      }
+
+      // No twin or other new top-level operation; the signature
+      // is kept.
+
+      if (std::distance(produced.module->getBody()->begin(),
+                        produced.module->getBody()->end()) !=
+              topLevelBefore ||
+          produced.function.getFunctionType() != signatureBefore) {
+        std::cerr << "3b5 " << label << ": module structure changed\n";
+        return false;
+      }
+
+      // The pass's report. Without report=true the replacement says
+      // nothing (the established fast path reports its own refusal
+      // unconditionally, as before); with report=true the decision
+      // on the nest is stated, and a replacement is reported as such
+      // and never as "not applied".
+
+      const bool reporting = options.find("report=true") != std::string::npos;
+      const char *replacedRemark =
+          "affine GEMM replaced by its exact guarded MAC nest";
+      const char *notAppliedRemark = "guarded MAC replacement not applied: ";
+
+      auto reported = [&](const std::string &fragment) {
+        return diagnostics.find(fragment) != std::string::npos;
+      };
+
+      if (!reporting &&
+          (reported(replacedRemark) || reported(notAppliedRemark))) {
+        std::cerr << "3b5 " << label
+                  << ": guarded MAC remark without report=true:\n"
+                  << diagnostics;
+        return false;
+      }
+
+      if (reporting) {
+        const bool expectReplaced =
+            expectation == ProductionExpectation::Replaced;
+
+        if (reported(replacedRemark) != expectReplaced ||
+            (expectation == ProductionExpectation::Unchanged &&
+             !reported(notAppliedRemark))) {
+          std::cerr << "3b5 " << label << ": unexpected report:\n"
+                    << diagnostics;
+          return false;
+        }
+
+        for (const std::string &fragment : remarks) {
+          if (!reported(fragment)) {
+            std::cerr << "3b5 " << label << ": report lacks \"" << fragment
+                      << "\":\n"
+                      << diagnostics;
+            return false;
+          }
+        }
+      }
+
+      if (expectation == ProductionExpectation::Unchanged) {
+        if (functionText(produced.function) != before) {
+          std::cerr << "3b5 " << label << ": function changed\n";
+          return false;
+        }
+
+        return true;
+      }
+
+      if (expectation == ProductionExpectation::FastPath) {
+        // The established fast path owns the nest: tiles, no guard.
+        bool tiles = false, guards = false;
+
+        produced.function.walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "systolic.matmul_tile")
+            tiles = true;
+          if (isa<scf::IfOp>(op))
+            guards = true;
+        });
+
+        if (!tiles || guards) {
+          std::cerr << "3b5 " << label
+                    << ": the fast path did not take the nest\n";
+          return false;
+        }
+
+        return true;
+      }
+
+      // Replaced: no affine memory operation remains, the nest
+      // carries the exact guard and memref operations, and the
+      // function body is the prologue, one nest and the return.
+
+      std::size_t affineMemory = 0, guards = 0, memrefLoads = 0,
+                  memrefStores = 0, topLoops = 0;
+
+      produced.function.walk([&](Operation *op) {
+        if (isa<affine::AffineLoadOp, affine::AffineStoreOp>(op))
+          ++affineMemory;
+        if (isa<scf::IfOp>(op))
+          ++guards;
+        if (isa<memref::LoadOp>(op))
+          ++memrefLoads;
+        if (isa<memref::StoreOp>(op))
+          ++memrefStores;
+      });
+
+      affine::AffineForOp producedNest;
+
+      for (Operation &op : produced.function.getBody().front()) {
+        if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
+          ++topLoops;
+          producedNest = loop;
+        }
+      }
+
+      if (affineMemory != 0 || guards != 1 || memrefLoads != 3 ||
+          memrefStores != 1 || topLoops != 1 || !producedNest) {
+        std::cerr << "3b5 " << label << ": unexpected replacement shape:"
+                  << " affine memory ops " << affineMemory << ", guards "
+                  << guards << ", memref loads " << memrefLoads
+                  << ", memref stores " << memrefStores << ", top loops "
+                  << topLoops << "\ndiagnostics:\n" << diagnostics;
+        return false;
+      }
+
+      if (std::getenv("RANK_PARTITION_DUMP_IR")) {
+        llvm::errs() << "3b5 " << label << " IR:\n";
+        produced.module->print(llvm::errs());
+        llvm::errs() << "\n";
+      }
+
+      // Operand roles: the original statement's loads appear as
+      // C, A, B; the replacement's loads as A, B, C.
+
+      llvm::SmallVector<Value> sourceLoads, producedLoads;
+      Value sourceStore, producedStore;
+
+      original.outermost.walk([&](Operation *op) {
+        if (auto load = dyn_cast<affine::AffineLoadOp>(op))
+          sourceLoads.push_back(load.getMemRef());
+        else if (auto store = dyn_cast<affine::AffineStoreOp>(op))
+          sourceStore = store.getMemRef();
+      });
+
+      producedNest.walk([&](Operation *op) {
+        if (auto load = dyn_cast<memref::LoadOp>(op))
+          producedLoads.push_back(load.getMemRef());
+        else if (auto store = dyn_cast<memref::StoreOp>(op))
+          producedStore = store.getMemRef();
+      });
+
+      if (sourceLoads.size() != 3 || producedLoads.size() != 3 ||
+          sourceStore != sourceLoads[0] || producedStore != producedLoads[2]) {
+        std::cerr << "3b5 " << label << ": unexpected statement roles\n";
+        return false;
+      }
+
+      std::array<Value, 3> sourceMemrefs = {sourceLoads[1], sourceLoads[2],
+                                            sourceLoads[0]};
+      std::array<Value, 3> producedMemrefs = {
+          producedLoads[0], producedLoads[1], producedLoads[2]};
+
+      // The replacement reads and writes the function's own
+      // buffers: the same arguments (or the same allocation) as
+      // the original, by position.
+
+      for (unsigned role = 0; role < 3; ++role) {
+        auto sourceArg = dyn_cast<BlockArgument>(sourceMemrefs[role]);
+        auto producedArg = dyn_cast<BlockArgument>(producedMemrefs[role]);
+
+        // The two functions live in different contexts: types are
+        // compared by their text.
+        std::string sourceType, producedType;
+        llvm::raw_string_ostream(sourceType) << sourceMemrefs[role].getType();
+        llvm::raw_string_ostream(producedType)
+            << producedMemrefs[role].getType();
+
+        if ((sourceArg == nullptr) != (producedArg == nullptr) ||
+            (sourceArg && producedArg &&
+             sourceArg.getArgNumber() != producedArg.getArgNumber()) ||
+            sourceType != producedType) {
+          std::cerr << "3b5 " << label << ": operand " << role
+                    << " is not the original buffer\n";
+          return false;
+        }
+      }
+
+      exec::MemoryState sourceMemory;
+      exec::MemoryState producedMemory;
+
+      for (unsigned role = 0; role < 3; ++role) {
+        auto type = cast<MemRefType>(sourceMemrefs[role].getType());
+        sourceMemory.buffers[sourceMemrefs[role]] = bufferOf(type, role, data);
+        producedMemory.buffers[producedMemrefs[role]] =
+            bufferOf(type, role, data);
+      }
+
+      auto sourceRun = exec::interpretGuardedLoopNest(
+          original.outermost, scf::IfOp(), ValueRange{}, ValueRange{},
+          ValueRange{}, ValueRange{}, ValueRange{}, &sourceMemory);
+
+      auto producedRun = exec::interpretGuardedLoopNest(
+          producedNest, scf::IfOp(), ValueRange{}, ValueRange{},
+          ValueRange{}, ValueRange{}, ValueRange{}, &producedMemory);
+
+      if (!sourceRun || !producedRun ||
+          sourceMemory.trace.size() != 4 * expectedAccepted ||
+          producedMemory.trace.size() != 4 * expectedAccepted) {
+        std::cerr << "3b5 " << label << ": interpretation failed or"
+                  << " executed " << producedMemory.trace.size() / 4
+                  << " statements\n";
+        return false;
+      }
+
+      if (data == TwinData::Cancellation && gemm.name != "stride_k") {
+        auto sensitive = orderMatters(
+            sourceMemory,
+            bufferOf(cast<MemRefType>(sourceMemrefs[2].getType()), 2, data),
+            sourceMemrefs[2]);
+
+        if (!sensitive || !*sensitive) {
+          std::cerr << "3b5 " << label
+                    << ": reduction order is not observable\n";
+          return false;
+        }
+      }
+
+      for (unsigned role = 0; role < 3; ++role) {
+        const auto &source = sourceMemory.buffers[sourceMemrefs[role]];
+        const auto &mirror = producedMemory.buffers[producedMemrefs[role]];
+
+        if (source.floatData.size() != mirror.floatData.size())
+          return false;
+
+        for (std::size_t i = 0; i < source.floatData.size(); ++i) {
+          if (canonicalBits(source.floatData[i]) !=
+              canonicalBits(mirror.floatData[i])) {
+            std::cerr << "3b5 " << label << ": buffer " << role
+                      << " differs at " << i << "\n";
+            return false;
+          }
+        }
+      }
+
+      auto events = [&](const exec::MemoryState &memory,
+                        const std::array<Value, 3> &memrefs)
+          -> std::optional<std::vector<TwinEvent>> {
+        std::vector<TwinEvent> out;
+
+        for (const auto &event : memory.trace) {
+          std::optional<unsigned> role;
+
+          for (unsigned r = 0; r < 3; ++r)
+            if (event.memref == memrefs[r] && !role)
+              role = r;
+
+          if (!role || !event.isFloat)
+            return std::nullopt;
+
+          out.push_back({event.isStore, *role, event.indices,
+                         canonicalBits(event.floatValue)});
+        }
+
+        return out;
+      };
+
+      auto sourceEvents = events(sourceMemory, sourceMemrefs);
+      auto producedEvents = events(producedMemory, producedMemrefs);
+
+      if (!sourceEvents || !producedEvents)
+        return false;
+
+      auto storeSequences = [](const std::vector<TwinEvent> &trace) {
+        std::map<std::vector<int64_t>, std::vector<int64_t>> sequences;
+        for (const auto &event : trace)
+          if (event.isStore)
+            sequences[event.indices].push_back(event.bits);
+        return sequences;
+      };
+
+      if (storeSequences(*sourceEvents) != storeSequences(*producedEvents)) {
+        std::cerr << "3b5 " << label
+                  << ": per-element store order differs\n";
+        return false;
+      }
+
+      std::sort(sourceEvents->begin(), sourceEvents->end());
+      std::sort(producedEvents->begin(), producedEvents->end());
+
+      if (*sourceEvents != *producedEvents) {
+        std::cerr << "3b5 " << label << ": event multiset differs\n";
+        return false;
+      }
+
+      return true;
+    };
+
+    const std::string strictOptions = "general-affine=true report=true";
+
+    // In strict floating point the fast path refuses every nest
+    // here (its tiles reassociate), so each one reaches the
+    // guarded replacement.
+
+    for (const Case &c : cases) {
+      for (TwinData data :
+           {TwinData::Cancellation, TwinData::Rounding, TwinData::Special}) {
+        std::string claim = "3b5 production pass: ";
+        claim += c.claim + 4; // drop the "3b4 " prefix
+        // In production the nest is replaced in place, not twinned.
+        for (std::size_t at = claim.find(" twin "); at != std::string::npos;
+             at = claim.find(" twin ", at))
+          claim.replace(at, 6, " replacement ");
+        claim += data == TwinData::Cancellation
+                     ? (c.orderSensitive ? " (order-sensitive data)"
+                                         : " (cancellation data)")
+                 : data == TwinData::Rounding ? " (rounding data)"
+                                              : " (special values)";
+
+        if (verify(runProduction(c.gemm, data, strictOptions,
+                                 ProductionExpectation::Replaced,
+                                 c.accepted, {}),
+                   claim.c_str()))
+          return 1;
+      }
+    }
+
+    // The replacement does not depend on reporting: without
+    // report=true the pass replaces the nest and says nothing about
+    // it.
+
+    if (verify(runProduction(plain, TwinData::Cancellation,
+                             "general-affine=true",
+                             ProductionExpectation::Replaced, 64, {}),
+               "3b5 production pass: plain GEMM replaced without report=true,"
+               " silently"))
+      return 1;
+
+    if (verify(runProduction(allocated, TwinData::Cancellation, strictOptions,
+                             ProductionExpectation::Replaced, 64, {}),
+               "3b5 production pass: GEMM into a fresh allocation replaced"
+               " and matches the source"))
+      return 1;
+
+    // Unsupported nests stay exactly as written, and the pass states
+    // why, with the mapping class of the decision.
+
+    if (verify(runProduction(mayAlias, TwinData::Cancellation, strictOptions,
+                             ProductionExpectation::Unchanged, 64,
+                             {"UNKNOWN: A may alias C", "[UNKNOWN]"}),
+               "3b5 production pass: arguments without llvm.noalias stay"
+               " unchanged (UNKNOWN)"))
+      return 1;
+
+    if (verify(runProduction(mayAlias, TwinData::Cancellation,
+                             "general-affine=true assume-no-alias=true",
+                             ProductionExpectation::Replaced, 64, {}),
+               "3b5 production pass: assume-no-alias option admits the"
+               " replacement and it matches the source"))
+      return 1;
+
+    struct UnchangedCase {
+      const GemmText *gemm;
+      std::vector<std::string> remarks;
+    };
+
+    const std::vector<UnchangedCase> unchangedCases = {
+        {&det9, {"UNKNOWN:", "[UNKNOWN]"}},
+        {&readsOutput,
+         {"REFUSED: A shares its buffer with C", "[PROVEN_INVALID]"}},
+        {&integer, {"UNKNOWN: not a recognized GEMM", "[UNKNOWN]"}},
+        {&stepped, {"UNKNOWN: not a recognized GEMM", "[UNKNOWN]"}},
+    };
+
+    for (const UnchangedCase &u : unchangedCases) {
+      std::string claim =
+          "3b5 production pass: " + u.gemm->name + " stays unchanged";
+
+      if (verify(runProduction(*u.gemm, TwinData::Cancellation, strictOptions,
+                               ProductionExpectation::Unchanged, 64,
+                               u.remarks),
+                 claim.c_str()))
+        return 1;
+    }
+
+    // A repetition loop around the nest: the preflight accepts the
+    // nest (the repetition is a batch coordinate), but the emitted
+    // schedule orders the batch innermost, which would change the
+    // order of the additions into each C element; the loads emitter
+    // refuses at commit (Phase 3b-2 order preservation), and the
+    // transaction leaves the source exactly as written.
+
+    {
+      GemmText repeated = plain;
+      repeated.name = "repeated";
+      // (%p names the product in the generated text.)
+      repeated.loops = "affine.for %r = 0 to 2 { " + loops3;
+      repeated.depth = 4;
+
+      if (verify(runProduction(repeated, TwinData::Cancellation, strictOptions,
+                               ProductionExpectation::Unchanged, 128,
+                               {"REFUSED: guarded memory loads emission",
+                                "[VALID_BUT_LOWERING_UNSUPPORTED]"}),
+                 "3b5 production pass: a repetition loop the emitted schedule"
+                 " would reorder is refused at commit and stays unchanged"))
+        return 1;
+    }
+
+    // A dense nest whose statement carries fastmath<reassoc> is the
+    // established fast path's: it is tiled, never guarded.
+
+    if (verify(runProduction(relaxed, TwinData::Cancellation, strictOptions,
+                             ProductionExpectation::FastPath, 64, {}),
+               "3b5 production pass: a reassociable dense GEMM stays with"
+               " the fast path"))
+      return 1;
+
+    // The same flags on a nest the fast path cannot lower (triangular
+    // domain): neither path applies, the nest stays as written.
+
+    {
+      GemmText relaxedTriangular = triangular;
+      relaxedTriangular.name = "relaxed_triangular";
+      relaxedTriangular.flags = " fastmath<reassoc>";
+
+      if (verify(runProduction(relaxedTriangular, TwinData::Cancellation,
+                               strictOptions,
+                               ProductionExpectation::Unchanged, 40,
+                               {"UNKNOWN: fast-math flags", "[UNKNOWN]"}),
+                 "3b5 production pass: fast-math flags on a nest only the"
+                 " guarded path could take stay unchanged"))
         return 1;
     }
   }

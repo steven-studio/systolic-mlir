@@ -41,6 +41,7 @@ add_llvm_executable(
   rank-partition-presburger-test
   PARTIAL_SOURCES_INTENDED
   RankPartitionPresburgerTest.cpp
+  RankPartitionProductionPassRegistration.cpp
 )
 llvm_update_compile_flags(rank-partition-presburger-test)
 target_link_libraries(rank-partition-presburger-test PRIVATE

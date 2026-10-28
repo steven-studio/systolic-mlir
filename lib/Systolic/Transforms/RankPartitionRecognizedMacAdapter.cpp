@@ -1,8 +1,9 @@
 //===- RankPartitionRecognizedMacAdapter.cpp -------------------------------===//
 //
-// Phase 5.4.3d-3b-4: from a recognized GEMM (the symbolic rank partition
-// analysis) to the complete guarded MAC statement of Phases 1 to 3b-3,
-// emitted into a private, never-called twin function. See the header.
+// Phase 5.4.3d-3b-4 / 3b-5: from a recognized GEMM (the symbolic rank
+// partition analysis) to the complete guarded MAC statement of Phases 1 to
+// 3b-3: into a private twin function (3b-4), or in place of the source nest
+// (3b-5, transactional). See the header.
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,6 +18,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/Verifier.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
@@ -28,10 +30,10 @@ using namespace mlir;
 namespace {
 
 /// The disjointness rule of the production lowering
-/// (AffineMatmulToSystolic.cpp, provablyDisjointFromOutput) without its
-/// assume-no-alias escape: views are traced to the buffer they view; two views
-/// of one buffer may overlap; different buffers are disjoint when one of them
-/// is a fresh allocation or a restrict (llvm.noalias) argument.
+/// (AffineMatmulToSystolic.cpp, provablyDisjointFromOutput): views are traced
+/// to the buffer they view; two views of one buffer may overlap; different
+/// buffers are disjoint when one of them is a fresh allocation or a restrict
+/// (llvm.noalias) argument, or when the caller assumes no aliasing.
 enum class Disjointness { Proven, Overlapping, Unknown };
 
 bool isNoAliasArgument(Value memref) {
@@ -54,9 +56,12 @@ Value viewRoot(Value memref) {
   return memref;
 }
 
-Disjointness disjointFromOutput(Value input, Value output) {
+Disjointness disjointFromOutput(Value input, Value output,
+                                bool assumeNoAlias) {
   if (input == output)
     return Disjointness::Overlapping;
+  if (assumeNoAlias)
+    return Disjointness::Proven;
   Value inputRoot = viewRoot(input);
   Value outputRoot = viewRoot(output);
   if (inputRoot == outputRoot)
@@ -74,18 +79,20 @@ Disjointness disjointFromOutput(Value input, Value output) {
 // unqualified name `systolic` would be ambiguous with mlir::systolic.
 namespace systolic::logical {
 
-std::optional<GuardedMacTwin>
-emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
-                   llvm::StringRef twinName, std::string &why) {
+std::optional<GuardedMacPreflight>
+prepareGuardedMac(mlir::Operation *anchor, bool assumeNoAlias,
+                  GuardedMacOutcome &outcome, std::string &why) {
   using namespace mlir::presburger;
 
   auto unknown = [&](const Twine &message)
-      -> std::optional<GuardedMacTwin> {
+      -> std::optional<GuardedMacPreflight> {
+    outcome = GuardedMacOutcome::Unknown;
     why = ("UNKNOWN: " + message).str();
     return std::nullopt;
   };
-  auto refused = [&](const Twine &message)
-      -> std::optional<GuardedMacTwin> {
+  auto invalid = [&](const Twine &message)
+      -> std::optional<GuardedMacPreflight> {
+    outcome = GuardedMacOutcome::Invalid;
     why = ("REFUSED: " + message).str();
     return std::nullopt;
   };
@@ -116,21 +123,19 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
       return unknown("incomplete recognized statement");
 
   affine::AffineForOp outermost = statement.loops.front();
-  auto sourceFunction = outermost->getParentOfType<func::FuncOp>();
-  if (!sourceFunction)
-    return unknown("the source nest is not inside a func.func");
-  auto module = sourceFunction->getParentOfType<ModuleOp>();
+  if (!outermost->getBlock())
+    return unknown("the source nest is detached");
+  if (outermost->getNumResults() != 0)
+    return unknown("the source nest yields results");
+
+  auto module = outermost->getParentOfType<ModuleOp>();
   if (!module)
-    return unknown("the source function is not inside a module");
-  if (sourceFunction->getParentOp() != module.getOperation())
-    return unknown("the source function is not a direct child of its "
-                   "module (nested symbol tables are not supported)");
-  if (SymbolTable::lookupSymbolIn(module, twinName))
-    return refused("the twin symbol already exists: " + twinName);
+    return unknown("the source nest is not inside a module");
 
   // The emitted addresses are i64 cast to index: exact only on a 64-bit
   // index type (a caller obligation of the Phase 3b-2 emitter).
-  if (DataLayout(module).getTypeSizeInBits(builder.getIndexType()) != 64)
+  if (DataLayout(module).getTypeSizeInBits(
+          IndexType::get(anchor->getContext())) != 64)
     return unknown("the index type is not 64 bits wide");
 
   // ------------------------------------------------------------------
@@ -196,15 +201,15 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
   semantics.integerOverflow = arith::IntegerOverflowFlags::none;
 
   // ------------------------------------------------------------------
-  // Memory disjointness of A and B from C: proven, or UNKNOWN.
+  // Memory disjointness of A and B from C: proven, invalid, or UNKNOWN.
   // ------------------------------------------------------------------
 
   for (unsigned input = 0; input < 2; ++input) {
-    switch (disjointFromOutput(memrefs[input], memrefs[2])) {
+    switch (disjointFromOutput(memrefs[input], memrefs[2], assumeNoAlias)) {
     case Disjointness::Proven:
       break;
     case Disjointness::Overlapping:
-      return refused(Twine(input == 0 ? "A" : "B") +
+      return invalid(Twine(input == 0 ? "A" : "B") +
                      " shares its buffer with C");
     case Disjointness::Unknown:
       return unknown(Twine(input == 0 ? "A" : "B") +
@@ -323,8 +328,8 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
 
   // Access functions, exactly the recognizer's linear forms.
 
-  std::array<std::vector<std::vector<BigInt>>, 3> rows;
-  std::array<std::vector<BigInt>, 3> offsets;
+  GuardedMacPreflight preflight(map, domain, *plan);
+
   for (unsigned a = 0; a < 3; ++a) {
     if (statement.accessRows[a].size() != statement.accessOffsets[a].size())
       return unknown("malformed access function");
@@ -335,11 +340,119 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
       converted.reserve(n);
       for (int64_t coefficient : row)
         converted.emplace_back(coefficient);
-      rows[a].push_back(std::move(converted));
+      preflight.accessRows[a].push_back(std::move(converted));
     }
     for (int64_t offset : statement.accessOffsets[a])
-      offsets[a].emplace_back(offset);
+      preflight.accessOffsets[a].emplace_back(offset);
   }
+
+  preflight.outermost = outermost;
+  preflight.memrefs = memrefs;
+  preflight.diagnostic = analysis->diagnostic;
+  preflight.semantics = semantics;
+
+  outcome = GuardedMacOutcome::Proven;
+  why = preflight.diagnostic;
+  return preflight;
+}
+
+std::optional<EmittedGuardedMacStatement>
+emitGuardedMacStatement(mlir::OpBuilder &builder, mlir::Location loc,
+                        const GuardedMacPreflight &preflight,
+                        llvm::ArrayRef<mlir::Value> memrefs, std::string &why) {
+
+  if (memrefs.size() != 3) {
+    why = "REFUSED: three memrefs are required";
+    return std::nullopt;
+  }
+
+  OpBuilder::InsertionGuard insertionGuard(builder);
+
+  auto nest = emitGuardedAffineLoopNest(builder, loc, preflight.plan);
+  if (!nest) {
+    why = "REFUSED: guarded loop nest emission";
+    return std::nullopt;
+  }
+
+  // From here on, every failure erases the whole nest.
+  auto failNest = [&](const Twine &message)
+      -> std::optional<EmittedGuardedMacStatement> {
+    affine::AffineForOp outermost = nest->outermost;
+    outermost->erase();
+    why = ("REFUSED: " + message).str();
+    return std::nullopt;
+  };
+
+  auto recovery = emitSourceIVRecovery(builder, loc, preflight.coordinateMap,
+                                       preflight.plan.bounds, *nest);
+  if (!recovery)
+    return failNest("source IV recovery emission");
+
+  std::array<GuardedMemoryOperand, 3> operands;
+  for (unsigned a = 0; a < 3; ++a) {
+    auto access = emitSourceAffineAccess(
+        builder, loc, preflight.coordinateMap, preflight.plan.bounds, *nest,
+        *recovery, preflight.accessRows[a], preflight.accessOffsets[a]);
+    if (!access)
+      return failNest("source access emission");
+    operands[a] = GuardedMemoryOperand{memrefs[a], preflight.accessRows[a],
+                                       preflight.accessOffsets[a], *access};
+  }
+
+  auto loads = emitGuardedMemoryLoads(
+      builder, loc, preflight.coordinateMap, preflight.plan,
+      preflight.sourceDomain, *nest, *recovery, operands[0], operands[1],
+      operands[2]);
+  if (!loads)
+    return failNest("guarded memory loads emission");
+
+  auto mac = emitGuardedMultiplyAccumulate(
+      builder, loc, preflight.coordinateMap, preflight.plan,
+      preflight.sourceDomain, *nest, *recovery, operands[0], operands[1],
+      operands[2], *loads, preflight.semantics);
+  if (!mac)
+    return failNest("guarded multiply-accumulate emission");
+
+  EmittedGuardedMacStatement statement;
+  statement.nest = *nest;
+  statement.recovery = *recovery;
+  statement.operands = operands;
+  statement.loads = *loads;
+  statement.mac = *mac;
+  return statement;
+}
+
+std::optional<GuardedMacTwin>
+emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
+                   llvm::StringRef twinName, std::string &why) {
+
+  GuardedMacOutcome outcome = GuardedMacOutcome::Unknown;
+  auto preflight = prepareGuardedMac(anchor, /*assumeNoAlias=*/false,
+                                     outcome, why);
+  if (!preflight)
+    return std::nullopt;
+
+  auto refused = [&](const Twine &message) -> std::optional<GuardedMacTwin> {
+    why = ("REFUSED: " + message).str();
+    return std::nullopt;
+  };
+  auto unknown = [&](const Twine &message) -> std::optional<GuardedMacTwin> {
+    why = ("UNKNOWN: " + message).str();
+    return std::nullopt;
+  };
+
+  affine::AffineForOp outermost = preflight->outermost;
+  auto sourceFunction = outermost->getParentOfType<func::FuncOp>();
+  if (!sourceFunction)
+    return unknown("the source nest is not inside a func.func");
+  auto module = sourceFunction->getParentOfType<ModuleOp>();
+  if (!module)
+    return unknown("the source function is not inside a module");
+  if (sourceFunction->getParentOp() != module.getOperation())
+    return unknown("the source function is not a direct child of its "
+                   "module (nested symbol tables are not supported)");
+  if (SymbolTable::lookupSymbolIn(module, twinName))
+    return refused("the twin symbol already exists: " + twinName);
 
   // ------------------------------------------------------------------
   // The twin: created last, erased on any refusal.
@@ -350,7 +463,7 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
 
   Location loc = outermost.getLoc();
   SmallVector<Type> argumentTypes;
-  for (Value memref : memrefs)
+  for (Value memref : preflight->memrefs)
     argumentTypes.push_back(memref.getType());
 
   auto twin = func::FuncOp::create(
@@ -361,54 +474,78 @@ emitGuardedMacTwin(mlir::OpBuilder &builder, mlir::Operation *anchor,
   func::ReturnOp::create(builder, loc);
   builder.setInsertionPoint(entry->getTerminator());
 
-  auto failTwin = [&](const Twine &message)
-      -> std::optional<GuardedMacTwin> {
+  SmallVector<Value, 3> arguments(entry->getArguments());
+  auto statement =
+      emitGuardedMacStatement(builder, loc, *preflight, arguments, why);
+  if (!statement) {
     twin.erase();
+    return std::nullopt;
+  }
+
+  GuardedMacTwin result(preflight->coordinateMap, preflight->sourceDomain,
+                        preflight->plan);
+  result.function = twin;
+  result.nest = statement->nest;
+  result.recovery = statement->recovery;
+  result.operands = statement->operands;
+  result.loads = statement->loads;
+  result.mac = statement->mac;
+  result.semantics = preflight->semantics;
+
+  why = preflight->diagnostic;
+  return result;
+}
+
+std::optional<GuardedMacReplacement>
+replaceGemmWithGuardedMac(mlir::OpBuilder &builder, mlir::Operation *anchor,
+                          bool assumeNoAlias, GuardedMacOutcome &outcome,
+                          std::string &why) {
+
+  // 1. Every decision, before any operation is created.
+  auto preflight = prepareGuardedMac(anchor, assumeNoAlias, outcome, why);
+  if (!preflight)
+    return std::nullopt;
+
+  affine::AffineForOp original = preflight->outermost;
+
+  auto unsupported = [&](const Twine &message)
+      -> std::optional<GuardedMacReplacement> {
+    outcome = GuardedMacOutcome::Unsupported;
     why = ("REFUSED: " + message).str();
     return std::nullopt;
   };
 
-  auto nest = emitGuardedAffineLoopNest(builder, loc, *plan);
-  if (!nest)
-    return failTwin("guarded loop nest emission");
+  // 2. The statement immediately before the source nest, on the source
+  //    memrefs. Both nests exist only until step 4, inside this call.
+  OpBuilder::InsertionGuard insertionGuard(builder);
+  builder.setInsertionPoint(original);
 
-  auto recovery = emitSourceIVRecovery(builder, loc, map, plan->bounds, *nest);
-  if (!recovery)
-    return failTwin("source IV recovery emission");
-
-  std::array<GuardedMemoryOperand, 3> operands;
-  for (unsigned a = 0; a < 3; ++a) {
-    auto access = emitSourceAffineAccess(builder, loc, map, plan->bounds,
-                                         *nest, *recovery, rows[a],
-                                         offsets[a]);
-    if (!access)
-      return failTwin("source access emission");
-    operands[a] = GuardedMemoryOperand{entry->getArgument(a), rows[a],
-                                       offsets[a], *access};
+  auto statement = emitGuardedMacStatement(builder, original.getLoc(),
+                                           *preflight, preflight->memrefs,
+                                           why);
+  if (!statement) {
+    outcome = GuardedMacOutcome::Unsupported;
+    return std::nullopt;
   }
 
-  auto loads = emitGuardedMemoryLoads(builder, loc, map, *plan, domain, *nest,
-                                      *recovery, operands[0], operands[1],
-                                      operands[2]);
-  if (!loads)
-    return failTwin("guarded memory loads emission");
+  affine::AffineForOp replacement = statement->nest.outermost;
 
-  auto mac = emitGuardedMultiplyAccumulate(
-      builder, loc, map, *plan, domain, *nest, *recovery, operands[0],
-      operands[1], operands[2], *loads, semantics);
-  if (!mac)
-    return failTwin("guarded multiply-accumulate emission");
+  // 3. The new nest must verify before the source is touched.
+  if (failed(mlir::verify(replacement.getOperation()))) {
+    replacement->erase();
+    return unsupported("the replacement nest does not verify");
+  }
 
-  GuardedMacTwin result(map, domain, *plan);
-  result.function = twin;
-  result.nest = *nest;
-  result.recovery = *recovery;
-  result.operands = operands;
-  result.loads = *loads;
-  result.mac = *mac;
-  result.semantics = semantics;
+  // 4. The source nest goes; it has no results and no external uses.
+  original->erase();
 
-  why = analysis->diagnostic;
+  GuardedMacReplacement result;
+  result.outermost = replacement;
+  result.statement = *statement;
+  result.diagnostic = preflight->diagnostic;
+
+  outcome = GuardedMacOutcome::Proven;
+  why = preflight->diagnostic;
   return result;
 }
 

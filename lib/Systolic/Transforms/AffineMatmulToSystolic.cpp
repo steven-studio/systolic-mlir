@@ -55,6 +55,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
+#include "Systolic/RankPartitionRecognizedMacAdapter.h"
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicDialect.h"
 #include "Systolic/SystolicOps.h"
@@ -66,10 +67,12 @@
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -2605,7 +2608,10 @@ struct AffineMatmulToSystolicPass
       llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<affine::AffineDialect, bufferization::BufferizationDialect,
+    // Phase 5.4.3d-3b-5: the guarded MAC replacement creates scf.if and
+    // arith operations in a module that may contain none.
+    registry.insert<affine::AffineDialect, arith::ArithDialect,
+                    bufferization::BufferizationDialect, scf::SCFDialect,
                     tensor::TensorDialect, memref::MemRefDialect,
                     SystolicDialect>();
   }
@@ -3139,9 +3145,51 @@ struct AffineMatmulToSystolicPass
     }
 
     SmallVector<GeneralAffineMatmul, 1> generalMatmuls;
+    // Phase 5.4.3d-3b-5: nests the guarded MAC replacement accepts in its
+    // preflight (RankPartitionRecognizedMacAdapter.h). Nothing is mutated
+    // here; each replacement is committed after the fast path, nest by nest,
+    // transactionally. A nest the preflight does not accept keeps the legacy
+    // general path below exactly as before.
+    struct GuardedMacCandidate {
+      Operation *anchor; // the source nest's outermost loop
+      std::string diagnostic;
+    };
+    SmallVector<GuardedMacCandidate, 1> guardedCandidates;
+    auto guardedClass = [](::systolic::logical::GuardedMacOutcome outcome) {
+      switch (outcome) {
+      case ::systolic::logical::GuardedMacOutcome::Proven:
+        return GemmMappingClass::ProvenValid;
+      case ::systolic::logical::GuardedMacOutcome::Invalid:
+        return GemmMappingClass::ProvenInvalid;
+      case ::systolic::logical::GuardedMacOutcome::Unsupported:
+        return GemmMappingClass::ValidButLoweringUnsupported;
+      case ::systolic::logical::GuardedMacOutcome::Unknown:
+        break;
+      }
+      return GemmMappingClass::Unknown;
+    };
     if (generalAffine) {
       llvm::SmallPtrSet<Operation *, 8> seen;
+      llvm::SmallPtrSet<Operation *, 8> guardedRoots;
       for (AffineMatmulCandidate candidate : candidates) {
+        {
+          std::string guardedWhy;
+          ::systolic::logical::GuardedMacOutcome outcome =
+              ::systolic::logical::GuardedMacOutcome::Unknown;
+          auto preflight = ::systolic::logical::prepareGuardedMac(
+              candidate.anchor, assumeNoAlias, outcome, guardedWhy);
+          if (preflight) {
+            Operation *root = preflight->outermost.getOperation();
+            if (guardedRoots.insert(root).second)
+              guardedCandidates.push_back({root, preflight->diagnostic});
+            continue;
+          }
+          if (report)
+            candidate.anchor->emitRemark()
+                << "guarded MAC replacement not applied: " << guardedWhy
+                << " [" << stringifyGemmMappingClass(guardedClass(outcome))
+                << "]";
+        }
         std::string why;
         auto general = analyzeGeneralAffineMatmul(candidate.anchor, why);
         if (failed(general)) {
@@ -3200,17 +3248,27 @@ struct AffineMatmulToSystolicPass
     }
 
     SmallVector<bool, 8> generalBlocked(generalMatmuls.size(), false);
+    SmallVector<bool, 8> guardedBlocked(guardedCandidates.size(), false);
     for (const LogicalMatmul &matmul : matmuls) {
       SmallVector<unsigned, 4> overlaps;
       for (unsigned i = 0; i < generalMatmuls.size(); ++i)
         if (!generalBlocked[i] && nested(generalMatmuls[i].anchor, matmul.anchor))
           overlaps.push_back(i);
+      // A successful fast plan owns its nest: overlapping guarded
+      // candidates are blocked before their anchors disappear.
+      SmallVector<unsigned, 4> guardedOverlaps;
+      for (unsigned i = 0; i < guardedCandidates.size(); ++i)
+        if (!guardedBlocked[i] &&
+            nested(guardedCandidates[i].anchor, matmul.anchor))
+          guardedOverlaps.push_back(i);
       std::string why;
       GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
       bool hardError = false;
       if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError))) {
         for (unsigned i : overlaps)
           generalBlocked[i] = true;
+        for (unsigned i : guardedOverlaps)
+          guardedBlocked[i] = true;
         continue;
       }
       if (hardError) {
@@ -3242,6 +3300,31 @@ struct AffineMatmulToSystolicPass
       if (classify)
         remark << " ["
                << stringifyGemmMappingClass(u.outermost->mappingClass) << "]";
+    }
+    // Phase 5.4.3d-3b-5: transactional guarded MAC replacement. The
+    // preflight is re-run on the nest as it is now; the statement is emitted
+    // in the nest's position on its own memrefs, verified, and only then is
+    // the source nest erased. Any failure leaves the source untouched.
+    for (auto [i, guarded] : llvm::enumerate(guardedCandidates)) {
+      if (guardedBlocked[i])
+        continue;
+      OpBuilder builder(guarded.anchor);
+      std::string why;
+      ::systolic::logical::GuardedMacOutcome outcome =
+          ::systolic::logical::GuardedMacOutcome::Unknown;
+      auto replaced = ::systolic::logical::replaceGemmWithGuardedMac(
+          builder, guarded.anchor, assumeNoAlias, outcome, why);
+      if (replaced) {
+        if (report)
+          replaced->outermost->emitRemark()
+              << "affine GEMM replaced by its exact guarded MAC nest "
+                 "(docs/AFFINE_GEMM_MAPPING.md, Phase 5.4.3d): "
+              << replaced->diagnostic;
+        continue;
+      }
+      guarded.anchor->emitRemark()
+          << "guarded MAC replacement not applied: " << why << " ["
+          << stringifyGemmMappingClass(guardedClass(outcome)) << "]";
     }
     for (auto [i, matmul] : llvm::enumerate(generalMatmuls)) {
       if (generalBlocked[i])
