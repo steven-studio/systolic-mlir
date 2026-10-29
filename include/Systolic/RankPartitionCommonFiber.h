@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Systolic/RankPartitionIterationPlan.h"
 #include "Systolic/TensorLogicalSpaces.h"
 
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
@@ -255,6 +256,172 @@ countReductionFibers(const mlir::presburger::IntegerRelation &domain,
   }
   counts.remainder = counts.total - counts.device;
   return counts;
+}
+
+// Phase 5.4.3d-3b-8 M2b-1 (docs/AFFINE_GEMM_MAPPING.md section 29.8):
+//
+// The host remainder of an output block, in pieces with exact bounds.
+//
+// For a block G with the common fiber F = [f0, f1] within the K range
+// [k0, k1] the remainder R(G) = {(i, j, k) in D' : (i, j) in G, k not in F}
+// is the disjoint union of the lower piece P- = D' ∩ (G × [k0, f0 - 1]) and
+// the upper piece P+ = D' ∩ (G × [f1 + 1, k1]); without a common fiber the
+// single piece is D' ∩ (G × [k0, k1]). Each piece is one conjunctive
+// polyhedron (D' with six bounds added). A non-empty piece is iterated by one
+// guarded nest over its exact bounding box: per coordinate the least and the
+// greatest value an integer point of the piece attains. The least value is
+// the least t for which the piece has an integer point with z_v <= t: that
+// predicate is monotone in t, false below the least value and true from it
+// on, so bisection over the piece's known range decides it with
+// O(log range) conjunctive integer emptiness checks -- no rational
+// relaxation (whose bound can be looser than the integer one), no sampling.
+// The box only bounds the sweep: the nest's guard is the piece itself, every
+// point of the piece lies in its box by definition, and the iteration plan
+// re-certifies the inclusion (buildSymbolicIterationPlan). A piece without
+// an establishable bound is refused (nullopt: the caller answers UNKNOWN).
+
+struct RemainderPiece {
+  mlir::presburger::IntegerPolyhedron set; // non-empty, no locals
+  std::vector<ClosedIntegerInterval> box; // exact bounds, coordinate order
+};
+
+namespace fiber_detail {
+
+// The least value of coordinate `v` over the integer points of `piece`, a
+// non-empty polyhedron on which low <= z_v <= high holds. Invariant of the
+// bisection: piece ∩ {z_v <= hi} is non-empty (at first: it is the piece)
+// and piece ∩ {z_v <= lo - 1} is empty (at first: z_v >= low on the piece);
+// it ends with lo == hi, the least value.
+inline std::optional<std::int64_t>
+leastCoordinate(const mlir::presburger::IntegerPolyhedron &piece, unsigned v,
+                std::int64_t low, std::int64_t high) {
+  using namespace mlir::presburger;
+  if (low > high || v >= piece.getNumVars())
+    return std::nullopt;
+  BigInt lo(low), hi(high);
+  while (lo < hi) {
+    const BigInt mid = floorDiv(lo + hi, BigInt(2)); // lo <= mid < hi
+    auto m = toI64(mid);
+    if (!m)
+      return std::nullopt;
+    IntegerPolyhedron cut(piece);
+    cut.addBound(BoundType::UB, v, llvm::DynamicAPInt(*m));
+    if (cut.isIntegerEmpty())
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return toI64(lo);
+}
+
+// The greatest value, symmetrically: piece ∩ {z_v >= lo} is non-empty and
+// piece ∩ {z_v >= hi + 1} is empty throughout.
+inline std::optional<std::int64_t>
+greatestCoordinate(const mlir::presburger::IntegerPolyhedron &piece,
+                   unsigned v, std::int64_t low, std::int64_t high) {
+  using namespace mlir::presburger;
+  if (low > high || v >= piece.getNumVars())
+    return std::nullopt;
+  BigInt lo(low), hi(high);
+  while (lo < hi) {
+    const BigInt mid = ceilDiv(lo + hi, BigInt(2)); // lo < mid <= hi
+    auto m = toI64(mid);
+    if (!m)
+      return std::nullopt;
+    IntegerPolyhedron cut(piece);
+    cut.addBound(BoundType::LB, v, llvm::DynamicAPInt(*m));
+    if (cut.isIntegerEmpty())
+      hi = mid - 1;
+    else
+      lo = mid;
+  }
+  return toI64(lo);
+}
+
+} // namespace fiber_detail
+
+// The exact bounding box of the integer points of `piece`: a non-empty
+// polyhedron without locals or symbols whose constraints include the bounds
+// `within` (one interval per coordinate). nullopt: the preconditions fail
+// or a bound does not fit i64. On an empty piece the result is meaningless;
+// callers decide emptiness first.
+inline std::optional<std::vector<ClosedIntegerInterval>>
+exactBoundingBox(const mlir::presburger::IntegerPolyhedron &piece,
+                 const std::vector<ClosedIntegerInterval> &within) {
+  if (piece.getNumVars() != within.size() || piece.getNumLocalVars() != 0 ||
+      piece.getNumSymbolVars() != 0 || within.empty())
+    return std::nullopt;
+  std::vector<ClosedIntegerInterval> box(within.size());
+  for (unsigned v = 0; v < within.size(); ++v) {
+    if (within[v].lower > within[v].upper)
+      return std::nullopt;
+    auto least = fiber_detail::leastCoordinate(piece, v, within[v].lower,
+                                               within[v].upper);
+    auto greatest = fiber_detail::greatestCoordinate(
+        piece, v, within[v].lower, within[v].upper);
+    if (!least || !greatest || *least > *greatest)
+      return std::nullopt;
+    box[v] = {*least, *greatest};
+  }
+  return box;
+}
+
+// The remainder pieces of `block` whose common fiber is `fiber` (empty: the
+// whole block is the host's) within the K range [kLower, kUpper]: at most
+// two, each non-empty, each with its exact bounding box; an empty vector
+// when the block has no remainder. nullopt: the domain is not a conjunctive
+// three-dimensional polyhedron without locals or symbols, the roles or the
+// block are malformed, or a bound does not fit i64 (callers refuse).
+inline std::optional<std::vector<RemainderPiece>>
+remainderPieces(const mlir::presburger::IntegerRelation &domain,
+                FiberRoles roles, const OutputBlock &block,
+                const ReductionInterval &fiber, std::int64_t kLower,
+                std::int64_t kUpper) {
+  using namespace mlir::presburger;
+  if (domain.getNumVars() != 3 || domain.getNumLocalVars() != 0 ||
+      domain.getNumSymbolVars() != 0 || domain.getNumDomainVars() != 0 ||
+      roles.i > 2 || roles.j > 2 || roles.k > 2 || roles.i == roles.j ||
+      roles.i == roles.k || roles.j == roles.k ||
+      block.rowLower > block.rowUpper ||
+      block.columnLower > block.columnUpper || kLower > kUpper)
+    return std::nullopt;
+  if (!fiber.empty && (fiber.lower > fiber.upper || fiber.lower < kLower ||
+                       fiber.upper > kUpper))
+    return std::nullopt;
+  std::vector<RemainderPiece> pieces;
+  auto piece = [&](std::int64_t kFrom, std::int64_t kTo) -> bool {
+    IntegerPolyhedron set(domain);
+    set.addBound(BoundType::LB, roles.i, llvm::DynamicAPInt(block.rowLower));
+    set.addBound(BoundType::UB, roles.i, llvm::DynamicAPInt(block.rowUpper));
+    set.addBound(BoundType::LB, roles.j,
+                 llvm::DynamicAPInt(block.columnLower));
+    set.addBound(BoundType::UB, roles.j,
+                 llvm::DynamicAPInt(block.columnUpper));
+    set.addBound(BoundType::LB, roles.k, llvm::DynamicAPInt(kFrom));
+    set.addBound(BoundType::UB, roles.k, llvm::DynamicAPInt(kTo));
+    if (set.isIntegerEmpty())
+      return true; // nothing to iterate
+    std::vector<ClosedIntegerInterval> within(3);
+    within[roles.i] = {block.rowLower, block.rowUpper};
+    within[roles.j] = {block.columnLower, block.columnUpper};
+    within[roles.k] = {kFrom, kTo};
+    auto box = exactBoundingBox(set, within);
+    if (!box)
+      return false;
+    pieces.push_back({std::move(set), std::move(*box)});
+    return true;
+  };
+  if (fiber.empty) {
+    if (!piece(kLower, kUpper))
+      return std::nullopt;
+  } else {
+    // fiber.lower > kLower keeps fiber.lower - 1 in range; likewise above.
+    if (fiber.lower > kLower && !piece(kLower, fiber.lower - 1))
+      return std::nullopt;
+    if (fiber.upper < kUpper && !piece(fiber.upper + 1, kUpper))
+      return std::nullopt;
+  }
+  return pieces;
 }
 
 } // namespace systolic::logical

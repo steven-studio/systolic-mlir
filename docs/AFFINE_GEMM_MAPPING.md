@@ -3454,7 +3454,8 @@ Memory: every A element the device reads, (i, k) with k ∈ K_common(G_b), is re
 for every j of the block; every B element (k, j) likewise; every C cell of a block with device
 work has a nonempty fiber. The device and the host touch only addresses the source touches, so no
 bound beyond §27's J4 is needed, dynamic leading dimensions included. The remainder nests execute
-R_b under the exact Phase 2b guard; the Phase 3b-2 emitters' V3 is relaxed to inclusion
+R_b under the exact Phase 2b guard (M2b-1: one nest per non-empty piece of R_b, each over the
+piece's exact bounding box, §29.8); the Phase 3b-2 emitters' V3 is relaxed to inclusion
 (`partialDomain`: every disjunct of the plan inside T(D)), the exactly-once property being this
 section's partition proof. In that mode the emitters also admit a dynamic leading dimension (the
 C front end's array parameters): the remainder accesses only addresses the source accesses, so the
@@ -3528,5 +3529,55 @@ strict runs). Numbers: see the phase report.
 
 Blocks with a cell whose fiber is empty get no device work (M3 would combine the masks of §28);
 congruence fibers (M4), batch coordinates and non-unimodular maps remain refused; no cost policy
-(M2): the hybrid is taken whenever one block has a common fiber. The host remainder is one guarded
-nest per block over the block's full K range; its cost is the guard evaluations over that range.
+(M2): the hybrid is taken whenever one block has a common fiber. The host remainder's nests sweep
+the exact bounding boxes of their pieces (§29.8); the guard is still evaluated at every point of a
+box, so their cost is the sum of the box volumes, not the remainder's size.
+
+### 29.8 The remainder's loop bounds (Phase 5.4.3d-3b-8 M2b-1, 2026-10-29) [proved]
+
+M1 swept each block's remainder over the block times the whole K range: for the reference domain
+(64 × 64 × 64, k ≤ i, the fleet's 145 blocks) 262144 guard evaluations for 10880 host MACs --
+every (i, j, k) of the box tested once. M2b-1 keeps the guard and shrinks the sweep. Code:
+`remainderPieces` / `exactBoundingBox` in `include/Systolic/RankPartitionCommonFiber.h`, used by
+`replaceGemmWithDeviceJobs` before anything is emitted.
+
+**Pieces.** For a block G with the common fiber F = [f0, f1] ⊆ [k0, k1], R_b = P⁻ ⊔ P⁺ with
+P⁻ = D' ∩ (G × [k0, f0 − 1]) and P⁺ = D' ∩ (G × [f1 + 1, k1]); a block without a common fiber has
+the single piece D' ∩ (G × [k0, k1]). The pieces are disjoint (disjoint K ranges), each is one
+conjunctive polyhedron (D' with six bounds added), and their union is R_b. Every non-empty piece
+gets its own guarded nest; an empty piece gets none.
+
+**Bounds.** The nest of a piece P sweeps the exact bounding box of P's integer points: per
+coordinate the least and the greatest value an integer point of P attains. The least value is the
+least t with P ∩ {z_v ≤ t} ≠ ∅; that predicate is monotone in t (false below the least value, true
+from it on), so bisection over the piece's known range decides it with ⌈log₂ range⌉ conjunctive
+integer emptiness checks; the greatest value symmetrically. No rational relaxation (its bound can
+be looser than the integer one: 3k = 2i + 2 on i ∈ [0, 4] has the single integer point (2, 0, 2)
+while the rational hull spans i ∈ [0, 4], k ∈ [2/3, 10/3]), no sampling, no heuristic. A bound
+that cannot be established is UNKNOWN before anything is emitted; the device jobs, the counts and
+the arithmetic contract are untouched.
+
+**Correctness.** (1) Nothing is lost: every point of P has each coordinate between P's least and
+greatest value, so P ⊆ box(P); `buildSymbolicIterationPlan` re-certifies P \ box(P) = ∅ (P has no
+locals, so the subtraction is sound), and the nest's guard is P itself, so the nest, sweeping its
+box once in lexicographic order, executes exactly the points of P, each once. (2) No device point:
+the device runs G × F; P⁻ has k ≤ f0 − 1 and P⁺ has k ≥ f1 + 1; a block without a common fiber
+has no device work; distinct blocks are disjoint. (3) Nothing outside D': P ⊆ D'. (4) Exactly
+once: the blocks partition the output box, R_b = P⁻ ⊔ P⁺, and each piece's nest executes it
+exactly once, so every remainder point is executed by exactly one nest, once. The emitters' checks
+V1-V4 and V3′ (§29.2) apply to each nest unchanged; the strict guarded MAC path of Phase 3b-5 is
+untouched (its nest still sweeps the whole box).
+
+**Counts (analytical).** Reference domain with 8 × 8 blocks: rows [8b, 8b + 7] share the fiber
+[0, 8b]; the one piece above it is {i, k ∈ [8b + 1, 8b + 7], k ≤ i} × the block's columns, a
+7 × 8 × 7 box holding 224 points: 64 × 392 = 25088 guard evaluations for the 14336 host MACs
+(M1: 262144). The fleet's plan: 37 blocks of 8 × 8 (7 × 8 × 7 boxes) and 108 of 4 × 4 (3 × 4 × 3
+boxes): 18392 guard evaluations for the 10880 host MACs (M1: 262144), so 59 % of the swept points
+are remainder points. j ≤ k ≤ i: a block below the diagonal gets two nests (k ∈ [c0, c1 − 1] with
+j ≤ k; k ∈ [r0 + 1, r1] with k ≤ i), a block on it one nest over the whole block, a block above it
+none; the remark's nest count is the number of non-empty pieces. Verification (unit: the pieces
+against a brute-force oracle on the reference domains, shifted and negative bounds, degenerate
+intervals, partial blocks, refusals; the emitted nests interpreted: visited points = the boxes,
+accepted points = the remainder, each once, bounds attained; lit
+`affine_gemm_common_fiber_remainder.mlir`; C `common_fiber_remainder.c`) and the host
+measurements: the phase report.

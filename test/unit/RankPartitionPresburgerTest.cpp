@@ -21,6 +21,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include <iterator>
 #include <optional>
+#include <set>
 #include "Systolic/RankPartitionLoopNestEmission.h"
 #include "Systolic/RankPartitionGuardedLoopNestEmission.h"
 #include "RankPartitionLoopExecutionTest.h"
@@ -10704,6 +10705,642 @@ int main() {
                  "3b8 hybrid: without the option the partial-fiber refusal"
                  " of Phase 3b-7 stands"))
         return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 5.4.3d-3b-8 M2b-1 (docs section 29.8): the host remainder in
+    // pieces over exact bounding boxes. (6a) The piece arithmetic against
+    // a brute-force oracle (membership of every box point); (6b) the
+    // emitted nests, interpreted: the visited points are exactly the
+    // boxes, the accepted points are exactly the remainder, each once,
+    // none of the device's, none outside D', and every bound is attained
+    // (the boxes are tight); (6c) the strict fallback is untouched; (6d)
+    // unsupported inputs are refused.
+    // ------------------------------------------------------------------
+    {
+      using namespace mlir::presburger;
+      namespace fib = ::systolic::logical;
+      using Point3 = std::array<int64_t, 3>;
+
+      auto box3 = [](int64_t lo0, int64_t hi0, int64_t lo1, int64_t hi1,
+                     int64_t lo2, int64_t hi2) {
+        IntegerPolyhedron d(PresburgerSpace::getSetSpace(3));
+        const int64_t lo[3] = {lo0, lo1, lo2}, hi[3] = {hi0, hi1, hi2};
+        for (unsigned v = 0; v < 3; ++v) {
+          d.addBound(BoundType::LB, v, DynamicAPInt(lo[v]));
+          d.addBound(BoundType::UB, v, DynamicAPInt(hi[v]));
+        }
+        return d;
+      };
+      auto row = [](int64_t a, int64_t b, int64_t c, int64_t d) {
+        return SmallVector<DynamicAPInt, 4>{DynamicAPInt(a), DynamicAPInt(b),
+                                           DynamicAPInt(c), DynamicAPInt(d)};
+      };
+      const fib::FiberRoles ijk{0, 1, 2};
+
+      // The oracle: the integer points of D' ∩ (block × [kFrom, kTo]) by
+      // membership, with their bounding box.
+      struct OraclePiece {
+        std::set<Point3> points;
+        Point3 lo{}, hi{};
+      };
+      auto enumerate = [&](const IntegerPolyhedron &d, fib::FiberRoles roles,
+                           const fib::OutputBlock &block, int64_t kFrom,
+                           int64_t kTo) {
+        OraclePiece piece;
+        bool first = true;
+        for (int64_t i = block.rowLower; i <= block.rowUpper; ++i)
+          for (int64_t j = block.columnLower; j <= block.columnUpper; ++j)
+            for (int64_t k = kFrom; k <= kTo; ++k) {
+              Point3 p{};
+              p[roles.i] = i;
+              p[roles.j] = j;
+              p[roles.k] = k;
+              if (!d.containsPoint(ArrayRef<int64_t>(p.data(), 3)))
+                continue;
+              piece.points.insert(p);
+              for (unsigned v = 0; v < 3; ++v) {
+                if (first || p[v] < piece.lo[v])
+                  piece.lo[v] = p[v];
+                if (first || p[v] > piece.hi[v])
+                  piece.hi[v] = p[v];
+              }
+              first = false;
+            }
+        return piece;
+      };
+      // One block against the oracle: as many pieces as non-empty sides,
+      // the oracle's boxes, and on every point of a box the same
+      // membership (the guard set is exactly the oracle's piece). Returns
+      // the sum of the box volumes (the guard evaluations), -1 on failure;
+      // adds the remainder points to `points`.
+      auto checkBlock = [&](const IntegerPolyhedron &d, fib::FiberRoles roles,
+                            const fib::OutputBlock &block, int64_t kLo,
+                            int64_t kHi, const std::string &label,
+                            int64_t &points) -> int64_t {
+        auto fiber = fib::commonReductionFiber(d, roles, block, kLo, kHi);
+        if (!fiber) {
+          std::cerr << "m2b1 " << label << ": the common fiber is refused\n";
+          return -1;
+        }
+        auto pieces = fib::remainderPieces(d, roles, block, *fiber, kLo, kHi);
+        if (!pieces) {
+          std::cerr << "m2b1 " << label << ": the pieces are refused\n";
+          return -1;
+        }
+        std::vector<OraclePiece> expected;
+        auto side = [&](int64_t from, int64_t to) {
+          OraclePiece piece = enumerate(d, roles, block, from, to);
+          if (!piece.points.empty())
+            expected.push_back(std::move(piece));
+        };
+        if (fiber->empty) {
+          side(kLo, kHi);
+        } else {
+          if (fiber->lower > kLo)
+            side(kLo, fiber->lower - 1);
+          if (fiber->upper < kHi)
+            side(fiber->upper + 1, kHi);
+        }
+        if (expected.size() != pieces->size()) {
+          std::cerr << "m2b1 " << label << ": " << pieces->size()
+                    << " piece(s), the oracle has " << expected.size() << "\n";
+          return -1;
+        }
+        int64_t volume = 0;
+        for (std::size_t p = 0; p < expected.size(); ++p) {
+          const OraclePiece &oracle = expected[p];
+          const fib::RemainderPiece &piece = (*pieces)[p];
+          if (piece.box.size() != 3 || piece.set.getNumLocalVars() != 0) {
+            std::cerr << "m2b1 " << label << ": piece " << p
+                      << " is malformed\n";
+            return -1;
+          }
+          int64_t pieceVolume = 1;
+          for (unsigned v = 0; v < 3; ++v) {
+            if (piece.box[v].lower != oracle.lo[v] ||
+                piece.box[v].upper != oracle.hi[v]) {
+              std::cerr << "m2b1 " << label << ": piece " << p
+                        << " coordinate " << v << " spans ["
+                        << piece.box[v].lower << ", " << piece.box[v].upper
+                        << "], the oracle's points [" << oracle.lo[v] << ", "
+                        << oracle.hi[v] << "]\n";
+              return -1;
+            }
+            pieceVolume *= piece.box[v].upper - piece.box[v].lower + 1;
+          }
+          volume += pieceVolume;
+          for (int64_t z0 = piece.box[0].lower; z0 <= piece.box[0].upper; ++z0)
+            for (int64_t z1 = piece.box[1].lower; z1 <= piece.box[1].upper;
+                 ++z1)
+              for (int64_t z2 = piece.box[2].lower; z2 <= piece.box[2].upper;
+                   ++z2) {
+                const Point3 q{z0, z1, z2};
+                const bool inSet =
+                    piece.set.containsPoint(ArrayRef<int64_t>(q.data(), 3));
+                if (inSet != (oracle.points.count(q) != 0)) {
+                  std::cerr << "m2b1 " << label << ": piece " << p
+                            << " and the oracle disagree at (" << z0 << ", "
+                            << z1 << ", " << z2 << ")\n";
+                  return -1;
+                }
+              }
+          points += static_cast<int64_t>(oracle.points.size());
+        }
+        return volume;
+      };
+      // A grid of blocks: every block against the oracle, and the sum of
+      // the remainder points against the exact count of section 29.
+      auto gridOf = [](int64_t iLo, int64_t iHi, int64_t jLo, int64_t jHi,
+                       int64_t size) {
+        std::vector<fib::OutputBlock> blocks;
+        for (int64_t i = iLo; i <= iHi; i += size)
+          for (int64_t j = jLo; j <= jHi; j += size)
+            blocks.push_back({i, std::min(i + size - 1, iHi), j,
+                              std::min(j + size - 1, jHi)});
+        return blocks;
+      };
+      auto checkGrid = [&](const IntegerPolyhedron &d,
+                           const std::vector<fib::OutputBlock> &blocks,
+                           int64_t iLo, int64_t iHi, int64_t jLo, int64_t jHi,
+                           int64_t kLo, int64_t kHi, const char *label,
+                           int64_t &sweep, int64_t &points) -> bool {
+        sweep = 0;
+        points = 0;
+        for (const fib::OutputBlock &block : blocks) {
+          const int64_t volume =
+              checkBlock(d, ijk, block, kLo, kHi, label, points);
+          if (volume < 0)
+            return false;
+          sweep += volume;
+        }
+        auto counts = fib::countReductionFibers(d, ijk, blocks, iLo, iHi, jLo,
+                                                jHi, kLo, kHi);
+        if (!counts || counts->remainder != BigInt(points)) {
+          std::cerr << "m2b1 " << label << ": the pieces hold " << points
+                    << " points, the remainder count differs\n";
+          return false;
+        }
+        return true;
+      };
+
+      // (6a) The reference domains on 64^3 with 8 x 8 blocks.
+      const std::vector<fib::OutputBlock> grid64 = gridOf(0, 63, 0, 63, 8);
+      int64_t sweep = 0, points = 0;
+      {
+        IntegerPolyhedron kLeI = box3(0, 63, 0, 63, 0, 63);
+        kLeI.addInequality(row(1, 0, -1, 0)); // i - k >= 0
+        const bool ok = checkGrid(kLeI, grid64, 0, 63, 0, 63, 0, 63,
+                                  "k <= i on 64^3", sweep, points);
+        // Block rows [8b, 8b + 7]: the upper piece is i, k in [8b + 1,
+        // 8b + 7] with k <= i, j the block's: a 7 x 8 x 7 box of 224
+        // points per block; 64 blocks.
+        if (verify(ok && points == 14336 && sweep == 64 * 392,
+                   "m2b1 pieces: k <= i on 64^3 with 8x8 blocks: one upper"
+                   " piece per block over its exact 7x8x7 box, 25088 guard"
+                   " evaluations for the 14336 host MACs (the full K sweep"
+                   " took 262144)"))
+          return 1;
+      }
+      {
+        IntegerPolyhedron kLeIJ = box3(0, 63, 0, 63, 0, 63);
+        kLeIJ.addInequality(row(1, 1, -1, 0)); // i + j - k >= 0
+        const bool ok = checkGrid(kLeIJ, grid64, 0, 63, 0, 63, 0, 63,
+                                  "k <= i + j on 64^3", sweep, points);
+        if (verify(ok && points == 15456 && sweep < 64 * 4096,
+                   "m2b1 pieces: k <= i + j on 64^3: upper pieces over exact"
+                   " boxes, 15456 host MACs"))
+          return 1;
+      }
+      {
+        IntegerPolyhedron kGeJ = box3(0, 63, 0, 63, 0, 63);
+        kGeJ.addInequality(row(0, -1, 1, 0)); // k - j >= 0
+        const bool ok = checkGrid(kGeJ, grid64, 0, 63, 0, 63, 0, 63,
+                                  "k >= j on 64^3", sweep, points);
+        // Block columns [8c, 8c + 7]: the lower piece is j, k in [8c,
+        // 8c + 6] with k >= j, i the block's: an 8 x 7 x 7 box.
+        if (verify(ok && points == 14336 && sweep == 64 * 392,
+                   "m2b1 pieces: k >= j on 64^3: one lower piece per block"
+                   " over its exact 8x7x7 box"))
+          return 1;
+      }
+      {
+        IntegerPolyhedron between = box3(0, 63, 0, 63, 0, 63);
+        between.addInequality(row(1, 0, -1, 0)); // i - k >= 0
+        between.addInequality(row(0, -1, 1, 0)); // k - j >= 0
+        const bool ok = checkGrid(between, grid64, 0, 63, 0, 63, 0, 63,
+                                  "j <= k <= i on 64^3", sweep, points);
+        // Below the diagonal both pieces (28 blocks x 2), on it the whole
+        // block (8 blocks, no common fiber), above it nothing.
+        std::size_t pieceCount = 0;
+        for (const fib::OutputBlock &block : grid64) {
+          auto fiber = fib::commonReductionFiber(between, ijk, block, 0, 63);
+          auto pieces = fiber ? fib::remainderPieces(between, ijk, block,
+                                                     *fiber, 0, 63)
+                              : std::nullopt;
+          if (!pieces)
+            return verify(false, "m2b1 pieces: j <= k <= i representable");
+          pieceCount += pieces->size();
+        }
+        if (verify(ok && points == 13504 && pieceCount == 28 * 2 + 8,
+                   "m2b1 pieces: j <= k <= i on 64^3: two pieces below the"
+                   " diagonal, the whole block on it, nothing above; 13504"
+                   " host MACs"))
+          return 1;
+      }
+      // Shifted and negative bounds: i in [-3, 4], j in [-2, 1], k in
+      // [-5, 6], j - 1 <= k <= i; two blocks of four rows.
+      {
+        IntegerPolyhedron shiftedD = box3(-3, 4, -2, 1, -5, 6);
+        shiftedD.addInequality(row(1, 0, -1, 0)); // i - k >= 0
+        shiftedD.addInequality(row(0, -1, 1, 1)); // k - j + 1 >= 0
+        const std::vector<fib::OutputBlock> blocks{{-3, 0, -2, 1},
+                                                   {1, 4, -2, 1}};
+        const bool ok = checkGrid(shiftedD, blocks, -3, 4, -2, 1, -5, 6,
+                                  "negative bounds", sweep, points);
+        auto upper = fib::commonReductionFiber(shiftedD, ijk, blocks[1], -5, 6);
+        auto pieces = upper ? fib::remainderPieces(shiftedD, ijk, blocks[1],
+                                                   *upper, -5, 6)
+                            : std::nullopt;
+        // Rows [1, 4]: the common fiber is [0, 1]; below it k in [-3, -1]
+        // with j in [-2, 0]; above it k in [2, 4] with i in [2, 4].
+        if (verify(ok && pieces && pieces->size() == 2 &&
+                       (*pieces)[0].box[0].lower == 1 &&
+                       (*pieces)[0].box[0].upper == 4 &&
+                       (*pieces)[0].box[1].lower == -2 &&
+                       (*pieces)[0].box[1].upper == 0 &&
+                       (*pieces)[0].box[2].lower == -3 &&
+                       (*pieces)[0].box[2].upper == -1 &&
+                       (*pieces)[1].box[0].lower == 2 &&
+                       (*pieces)[1].box[0].upper == 4 &&
+                       (*pieces)[1].box[1].lower == -2 &&
+                       (*pieces)[1].box[1].upper == 1 &&
+                       (*pieces)[1].box[2].lower == 2 &&
+                       (*pieces)[1].box[2].upper == 4,
+                   "m2b1 pieces: shifted and negative bounds, both pieces"
+                   " over their exact boxes"))
+          return 1;
+      }
+      // Degenerate intervals: a K range of one value, a block whose fiber
+      // is the whole range (no remainder), a piece of one point.
+      {
+        IntegerPolyhedron kLeI = box3(0, 63, 0, 63, 0, 63);
+        kLeI.addInequality(row(1, 0, -1, 0));
+        int64_t one = 0;
+        const int64_t whole = checkBlock(kLeI, ijk, {3, 8, 0, 7}, 5, 5,
+                                         "K = {5}, rows 3..8", one);
+        int64_t none = 0;
+        const int64_t covered = checkBlock(kLeI, ijk, {5, 8, 0, 7}, 5, 5,
+                                           "K = {5}, rows 5..8", none);
+        int64_t single = 0;
+        const int64_t point = checkBlock(kLeI, ijk, {0, 1, 0, 0}, 0, 63,
+                                         "rows 0..1, one column", single);
+        if (verify(whole == 32 && one == 32 && covered == 0 && none == 0 &&
+                       point == 1 && single == 1,
+                   "m2b1 pieces: degenerate intervals (a one-value K range"
+                   " without and with a common fiber, a one-point piece)"))
+          return 1;
+      }
+      // Partial output blocks: an 11 x 13 output under 8 x 8 blocks (edge
+      // blocks of 3 x 8, 8 x 5 and 3 x 5), k <= i + j within [0, 15].
+      {
+        IntegerPolyhedron partial = box3(0, 10, 0, 12, 0, 15);
+        partial.addInequality(row(1, 1, -1, 0));
+        const bool ok = checkGrid(partial, gridOf(0, 10, 0, 12, 8), 0, 10, 0,
+                                  12, 0, 15, "partial blocks", sweep, points);
+        if (verify(ok && points > 0,
+                   "m2b1 pieces: partial output blocks at the box's edge"))
+          return 1;
+      }
+      // Exactness: the bounds are the integer points', not the rational
+      // relaxation's. 3k = 2i + 2 on i in [0, 4] has the single integer
+      // point (2, 0, 2); its rational hull spans i in [0, 4], k in [2/3,
+      // 10/3].
+      {
+        IntegerPolyhedron sparse = box3(0, 4, 0, 0, 0, 10);
+        sparse.addEquality(row(-2, 0, 3, -2)); // 3k - 2i - 2 = 0
+        auto box = fib::exactBoundingBox(sparse, {{0, 4}, {0, 0}, {0, 10}});
+        if (verify(box && (*box)[0].lower == 2 && (*box)[0].upper == 2 &&
+                       (*box)[1].lower == 0 && (*box)[1].upper == 0 &&
+                       (*box)[2].lower == 2 && (*box)[2].upper == 2,
+                   "m2b1 pieces: the exact bounding box is the integer"
+                   " points' (2, 0, 2), tighter than the rational hull"))
+          return 1;
+      }
+      // (6d) Unsupported inputs are refused, not approximated.
+      {
+        IntegerPolyhedron kLeI = box3(0, 63, 0, 63, 0, 63);
+        kLeI.addInequality(row(1, 0, -1, 0));
+        const fib::OutputBlock block{8, 15, 0, 7};
+        fib::ReductionInterval fiber;
+        fiber.empty = false;
+        fiber.lower = 0;
+        fiber.upper = 8;
+        IntegerPolyhedron withLocal = kLeI;
+        withLocal.appendVar(VarKind::Local);
+        withLocal.addEquality(
+            {DynamicAPInt(0), DynamicAPInt(0), DynamicAPInt(1), DynamicAPInt(-2),
+             DynamicAPInt(0)}); // k = 2q
+        IntegerPolyhedron planar(PresburgerSpace::getSetSpace(2));
+        fib::ReductionInterval outside;
+        outside.empty = false;
+        outside.lower = 70;
+        outside.upper = 80;
+        if (verify(!fib::remainderPieces(withLocal, ijk, block, fiber, 0, 63) &&
+                       !fib::remainderPieces(planar, ijk, block, fiber, 0,
+                                             63) &&
+                       !fib::remainderPieces(kLeI, fib::FiberRoles{0, 0, 2},
+                                             block, fiber, 0, 63) &&
+                       !fib::remainderPieces(kLeI, ijk, {15, 8, 0, 7}, fiber,
+                                             0, 63) &&
+                       !fib::remainderPieces(kLeI, ijk, block, outside, 0,
+                                             63) &&
+                       !fib::remainderPieces(kLeI, ijk, block, fiber, 5, 4) &&
+                       !fib::exactBoundingBox(kLeI, {{0, 63}, {0, 63}}),
+                   "m2b1 pieces: a local, a planar domain, equal roles, an"
+                   " inverted block, a fiber outside K, an empty K range"
+                   " and a dimension mismatch are refused"))
+          return 1;
+      }
+
+      // (6b) The emitted nests of the executed scenarios, interpreted.
+      struct RemainderScenario {
+        const GemmText *gemm;
+        Point3 lo, hi; // the logical box (the source coordinates)
+        std::function<bool(int64_t, int64_t, int64_t)> in; // D' membership
+        const char *claim;
+      };
+      auto checkNests = [&](const RemainderScenario &s,
+                            int64_t *sweepOut) -> bool {
+        const std::string label = s.gemm->name;
+        ParsedGemm produced;
+        std::string diagnostics;
+        if (!parseGemm(produced, gemmModule(*s.gemm), s.gemm->name) ||
+            !runPass(produced, hybridOptions, diagnostics) ||
+            diagnostics.find("(section 29)") == std::string::npos) {
+          std::cerr << "m2b1 " << label << ": not lowered as a hybrid\n"
+                    << diagnostics;
+          return false;
+        }
+        const std::string key = "and the remainder on the host (";
+        const auto at = diagnostics.find(key);
+        if (at == std::string::npos) {
+          std::cerr << "m2b1 " << label << ": no host count in the remark\n";
+          return false;
+        }
+        const int64_t reportedHost =
+            std::stoll(diagnostics.substr(at + key.size()));
+        // The device's points from the tiles: block from the C slice (or
+        // the tile it continues), K from the A slice.
+        std::set<Point3> device;
+        llvm::DenseMap<Operation *, std::array<int64_t, 2>> blockOfTile;
+        bool deviceOk = true;
+        produced.function.walk([&](Operation *tile) {
+          if (tile->getName().getStringRef() != "systolic.matmul_tile" ||
+              !deviceOk)
+            return;
+          auto attr = [&](StringRef name) {
+            return tile->getAttrOfType<IntegerAttr>(name).getInt();
+          };
+          const int64_t m = attr("m"), n = attr("n"), k = attr("k");
+          int64_t k0 = 0;
+          if (auto aSlice =
+                  tile->getOperand(0).getDefiningOp<tensor::ExtractSliceOp>())
+            k0 = aSlice.getStaticOffsets()[1];
+          std::array<int64_t, 2> origin{0, 0};
+          Value cIn = tile->getOperand(2);
+          if (auto cSlice = cIn.getDefiningOp<tensor::ExtractSliceOp>()) {
+            origin = {cSlice.getStaticOffsets()[0],
+                      cSlice.getStaticOffsets()[1]};
+          } else if (Operation *previous = cIn.getDefiningOp();
+                     previous && blockOfTile.count(previous)) {
+            origin = blockOfTile[previous];
+          }
+          blockOfTile[tile] = origin;
+          for (int64_t r = 0; r < m; ++r)
+            for (int64_t c = 0; c < n; ++c)
+              for (int64_t kk = 0; kk < k; ++kk) {
+                const Point3 p{s.lo[0] + origin[0] + r, s.lo[1] + origin[1] + c,
+                               s.lo[2] + k0 + kk};
+                if (!s.in(p[0], p[1], p[2]) || !device.insert(p).second) {
+                  std::cerr << "m2b1 " << label << ": the device point ("
+                            << p[0] << ", " << p[1] << ", " << p[2]
+                            << ") is outside D' or runs twice\n";
+                  deviceOk = false;
+                }
+              }
+        });
+        if (!deviceOk)
+          return false;
+        // The remainder nests: three constant-bound loops and one guard.
+        exec::MemoryState memory;
+        const unsigned roleOf[3] = {2, 0, 1};
+        for (unsigned a = 0; a < 3; ++a) {
+          Value argument = produced.function.getArgument(a);
+          memory.buffers[argument] = maskBuffer(
+              cast<MemRefType>(argument.getType()), roleOf[a],
+              MaskData::Integers);
+        }
+        std::set<Point3> host;
+        int64_t sweep = 0, accepted = 0, nests = 0;
+        for (Operation &op : produced.function.getBody().front()) {
+          auto loop = dyn_cast<affine::AffineForOp>(&op);
+          if (!loop)
+            continue;
+          ++nests;
+          SmallVector<Value, 3> ivs;
+          Point3 lo{}, hi{};
+          affine::AffineForOp level = loop;
+          for (unsigned d = 0; d < 3; ++d) {
+            if (!level || !level.hasConstantBounds()) {
+              std::cerr << "m2b1 " << label << ": a nest without constant"
+                        << " bounds\n";
+              return false;
+            }
+            ivs.push_back(level.getInductionVar());
+            lo[d] = level.getConstantLowerBound();
+            hi[d] = level.getConstantUpperBound() - 1;
+            if (d == 2)
+              break;
+            affine::AffineForOp next;
+            unsigned inner = 0;
+            for (Operation &child : level.getBody()->getOperations())
+              if (auto f = dyn_cast<affine::AffineForOp>(&child)) {
+                next = f;
+                ++inner;
+              }
+            if (inner != 1) {
+              std::cerr << "m2b1 " << label << ": a nest is not a chain of"
+                        << " three loops\n";
+              return false;
+            }
+            level = next;
+          }
+          scf::IfOp guard;
+          unsigned guards = 0;
+          level.getBody()->walk([&](scf::IfOp ifOp) {
+            guard = ifOp;
+            ++guards;
+          });
+          if (guards != 1) {
+            std::cerr << "m2b1 " << label << ": a nest has " << guards
+                      << " guards\n";
+            return false;
+          }
+          auto run = exec::interpretGuardedLoopNest(
+              loop, guard, ValueRange(ivs), ValueRange{}, ValueRange{},
+              ValueRange{}, ValueRange{}, &memory);
+          if (!run) {
+            std::cerr << "m2b1 " << label << ": a nest did not execute\n";
+            return false;
+          }
+          int64_t volume = 1;
+          for (unsigned d = 0; d < 3; ++d)
+            volume *= hi[d] - lo[d] + 1;
+          if (static_cast<int64_t>(run->visitedPoints) != volume ||
+              run->acceptedPoints == 0) {
+            std::cerr << "m2b1 " << label << ": a nest visited "
+                      << run->visitedPoints << " points of a box of "
+                      << volume << " and accepted " << run->acceptedPoints
+                      << "\n";
+            return false;
+          }
+          Point3 seenLo{}, seenHi{};
+          bool first = true;
+          for (const auto &entry : run->counts) {
+            const Point3 p{entry.first[0], entry.first[1], entry.first[2]};
+            if (entry.second != 1 || !s.in(p[0], p[1], p[2]) ||
+                device.count(p) || !host.insert(p).second) {
+              std::cerr << "m2b1 " << label << ": the host point (" << p[0]
+                        << ", " << p[1] << ", " << p[2] << ") runs "
+                        << entry.second << " time(s), is outside D', or is"
+                        << " the device's\n";
+              return false;
+            }
+            for (unsigned d = 0; d < 3; ++d) {
+              if (first || p[d] < seenLo[d])
+                seenLo[d] = p[d];
+              if (first || p[d] > seenHi[d])
+                seenHi[d] = p[d];
+            }
+            first = false;
+          }
+          for (unsigned d = 0; d < 3; ++d)
+            if (seenLo[d] != lo[d] || seenHi[d] != hi[d]) {
+              std::cerr << "m2b1 " << label << ": loop " << d << " spans ["
+                        << lo[d] << ", " << hi[d] << "] but its points ["
+                        << seenLo[d] << ", " << seenHi[d]
+                        << "]: the bounds are not tight\n";
+              return false;
+            }
+          sweep += volume;
+          accepted += static_cast<int64_t>(run->acceptedPoints);
+        }
+        // The partition: every point of D' is the device's or the host's,
+        // and the remark counts the host's.
+        int64_t total = 0;
+        for (int64_t i = s.lo[0]; i <= s.hi[0]; ++i)
+          for (int64_t j = s.lo[1]; j <= s.hi[1]; ++j)
+            for (int64_t k = s.lo[2]; k <= s.hi[2]; ++k) {
+              if (!s.in(i, j, k))
+                continue;
+              ++total;
+              const Point3 p{i, j, k};
+              if (!host.count(p) && !device.count(p)) {
+                std::cerr << "m2b1 " << label << ": the point (" << i << ", "
+                          << j << ", " << k << ") of D' runs nowhere\n";
+                return false;
+              }
+            }
+        if (static_cast<int64_t>(host.size() + device.size()) != total ||
+            accepted != reportedHost || nests == 0) {
+          std::cerr << "m2b1 " << label << ": " << host.size() << " host + "
+                    << device.size() << " device points for " << total
+                    << " of D'; the remark says " << reportedHost
+                    << " host MACs, the nests accepted " << accepted << "\n";
+          return false;
+        }
+        if (sweepOut)
+          *sweepOut = sweep;
+        return true;
+      };
+      GemmText bigFleet = withFleet(square(16, 16, 16, "m2b1_fleet_k_le_i"),
+                                    "m2b1_fleet_k_le_i");
+      bigFleet.loops = "affine.for %i = 0 to 16 { affine.for %j = 0 to 16 {"
+                       " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
+      GemmText bothFleet = withFleet(square(16, 16, 16, "m2b1_fleet_between"),
+                                     "m2b1_fleet_between");
+      bothFleet.loops = "affine.for %i = 0 to 16 { affine.for %j = 0 to 16 {"
+                        " affine.for %k = affine_map<(d0) -> (d0)>(%j) to "
+                        "affine_map<(d0) -> (d0 + 1)>(%i) {";
+      const std::vector<RemainderScenario> scenarios = {
+          {&caseA, {0, 0, 0}, {3, 3, 3},
+           [](int64_t i, int64_t, int64_t k) { return k <= i; },
+           "m2b1 nests: k <= i without a fleet: the nests sweep exactly"
+           " their boxes, execute exactly the remainder once, bounds"
+           " attained"},
+          {&caseB, {0, 0, 0}, {3, 3, 3},
+           [](int64_t i, int64_t j, int64_t k) { return k <= i + j; },
+           "m2b1 nests: k <= i + j without a fleet"},
+          {&caseC, {0, 0, 0}, {3, 3, 3},
+           [](int64_t, int64_t j, int64_t k) { return k >= j; },
+           "m2b1 nests: k >= j without a fleet"},
+          {&caseD, {0, 0, 0}, {3, 3, 7},
+           [](int64_t i, int64_t j, int64_t k) { return j <= k && k <= i + 3; },
+           "m2b1 nests: j <= k <= i + 3 without a fleet (pieces on both"
+           " sides)"},
+          {&shifted, {1, 0, 1}, {3, 2, 3},
+           [](int64_t i, int64_t, int64_t k) { return k <= i; },
+           "m2b1 nests: nonzero lower bounds and offsets"},
+          {&bigFleet, {0, 0, 0}, {15, 15, 15},
+           [](int64_t i, int64_t, int64_t k) { return k <= i; },
+           "m2b1 nests: k <= i with the fleet: every block's nest over its"
+           " exact box, the partition exact"},
+          {&bothFleet, {0, 0, 0}, {15, 15, 15},
+           [](int64_t i, int64_t j, int64_t k) { return j <= k && k <= i; },
+           "m2b1 nests: j <= k <= i with the fleet: two pieces per block"
+           " below the diagonal, whole blocks on it, the partition exact"},
+      };
+      for (const RemainderScenario &s : scenarios) {
+        int64_t sweptPoints = 0;
+        if (verify(checkNests(s, &sweptPoints), s.claim))
+          return 1;
+        if (s.gemm == &bigFleet &&
+            verify(sweptPoints == 2 * 392 + 8 * 36,
+                   "m2b1 nests: k <= i on 16^3 with the fleet sweeps 1072"
+                   " points (two 7x8x7 and eight 3x4x3 boxes) for its 640"
+                   " host MACs; the full K sweep took 4096"))
+          return 1;
+      }
+      // (6c) The strict fallback is untouched: the Phase 3b-5 guarded MAC
+      // nest over the whole box.
+      {
+        ParsedGemm produced;
+        std::string diagnostics;
+        bool wholeBox = false;
+        if (parseGemm(produced, gemmModule(caseA), caseA.name) &&
+            runPass(produced,
+                    "general-affine=true certified-offload-first=true "
+                    "common-fiber-offload=true report=true",
+                    diagnostics) &&
+            diagnostics.find("UNKNOWN: strict floating-point semantics") !=
+                std::string::npos) {
+          wholeBox = true;
+          unsigned loops = 0;
+          produced.function.walk([&](affine::AffineForOp loop) {
+            ++loops;
+            if (!loop.hasConstantBounds() ||
+                loop.getConstantLowerBound() != 0 ||
+                loop.getConstantUpperBound() != 4)
+              wholeBox = false;
+          });
+          wholeBox = wholeBox && loops == 3;
+        }
+        if (verify(wholeBox,
+                   "m2b1 nests: the strict fallback still sweeps the whole"
+                   " 4x4x4 box"))
+          return 1;
+      }
     }
   }
 

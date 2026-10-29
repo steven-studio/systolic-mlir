@@ -520,6 +520,8 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
   struct FiberBlock {
     ::systolic::logical::OutputBlock block;       // logical I / J values
     ::systolic::logical::ReductionInterval fiber; // common fiber, or empty
+    // M2b-1: the remainder's iteration plans, one per non-empty piece.
+    std::vector<::systolic::logical::SymbolicIterationPlan> remainderPlans;
   };
   std::vector<FiberBlock> fiberBlocks;
   std::optional<SystolicTilePlan> trimmed; // the device plan (with a fleet)
@@ -654,6 +656,27 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
       if (trimmed->blocks.empty())
         return unknown("no output block has a common reduction fiber: "
                        "nothing for the device");
+    }
+    // M2b-1 (section 29.8): the host remainder of every block as pieces
+    // (below / above its common fiber, or the whole block without one),
+    // each with the exact bounding box of its integer points, and the
+    // certified iteration plan of each: the guard is the piece, the box is
+    // the sweep. A piece without an establishable bound is UNKNOWN.
+    for (FiberBlock &fb : fiberBlocks) {
+      auto pieces = ::systolic::logical::remainderPieces(
+          logical, roles, fb.block, fb.fiber, kLowerAbs, kUpperAbs);
+      if (!pieces)
+        return unknown("the exact bounds of a host remainder piece cannot "
+                       "be established");
+      for (::systolic::logical::RemainderPiece &piece : *pieces) {
+        auto remainderPlan = ::systolic::logical::buildSymbolicIterationPlan(
+            PresburgerSet(piece.set), piece.box);
+        if (!remainderPlan ||
+            !::systolic::logical::buildExactGuardPlan(*remainderPlan))
+          return unknown("the host remainder of an output block is not "
+                         "representable over its exact bounds");
+        fb.remainderPlans.push_back(std::move(*remainderPlan));
+      }
     }
   }
 
@@ -809,58 +832,15 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
 
   // Phase 3b-8: the host remainder, after the device write-back: per block
   // the contributions outside its common fiber (or the whole block when it
-  // has none), a guarded MAC nest over the block and the K range whose
-  // exact guard is D' intersected with that set, with the source's own
-  // fast-math flags.
+  // has none) as guarded MAC nests whose exact guard is D' intersected with
+  // that set, with the source's own fast-math flags. M2b-1: one nest per
+  // non-empty piece over the piece's exact bounding box (planned above).
   int64_t remainderNests = 0;
-  if (pre->commonFiber) {
-    const IntegerRelation &logical =
-        pre->common.plan.logicalDomain.getDisjunct(0);
-    for (const FiberBlock &fb : fiberBlocks) {
-      PresburgerSet remainder =
-          PresburgerSet::getEmpty(PresburgerSpace::getSetSpace(3));
-      auto part = [&](std::optional<int64_t> kBelow,
-                      std::optional<int64_t> kAbove) {
-        IntegerPolyhedron piece(logical);
-        piece.addBound(BoundType::LB, roles.i, DynamicAPInt(fb.block.rowLower));
-        piece.addBound(BoundType::UB, roles.i, DynamicAPInt(fb.block.rowUpper));
-        piece.addBound(BoundType::LB, roles.j,
-                       DynamicAPInt(fb.block.columnLower));
-        piece.addBound(BoundType::UB, roles.j,
-                       DynamicAPInt(fb.block.columnUpper));
-        piece.addBound(BoundType::LB, roles.k, DynamicAPInt(kLowerAbs));
-        piece.addBound(BoundType::UB, roles.k, DynamicAPInt(kUpperAbs));
-        if (kBelow)
-          piece.addBound(BoundType::UB, roles.k, DynamicAPInt(*kBelow));
-        if (kAbove)
-          piece.addBound(BoundType::LB, roles.k, DynamicAPInt(*kAbove));
-        if (!piece.isIntegerEmpty())
-          remainder.unionInPlace(piece);
-      };
-      if (fb.fiber.empty) {
-        part(std::nullopt, std::nullopt);
-      } else {
-        if (fb.fiber.lower > kLowerAbs)
-          part(fb.fiber.lower - 1, std::nullopt);
-        if (fb.fiber.upper < kUpperAbs)
-          part(std::nullopt, fb.fiber.upper + 1);
-      }
-      if (remainder.isIntegerEmpty())
-        continue;
-      std::vector<::systolic::logical::ClosedIntegerInterval> bounds(3);
-      bounds[roles.i] = {fb.block.rowLower, fb.block.rowUpper};
-      bounds[roles.j] = {fb.block.columnLower, fb.block.columnUpper};
-      bounds[roles.k] = {kLowerAbs, kUpperAbs};
-      auto remainderPlan =
-          ::systolic::logical::buildSymbolicIterationPlan(remainder, bounds);
-      if (!remainderPlan ||
-          !::systolic::logical::buildExactGuardPlan(*remainderPlan)) {
-        rollback();
-        return unsupported("the host remainder of an output block is not "
-                           "representable");
-      }
+  for (const FiberBlock &fb : fiberBlocks) {
+    for (const ::systolic::logical::SymbolicIterationPlan &remainderPlan :
+         fb.remainderPlans) {
       ::systolic::logical::GuardedMacPreflight remainderPreflight = pre->common;
-      remainderPreflight.plan = *remainderPlan;
+      remainderPreflight.plan = remainderPlan;
       remainderPreflight.partialDomain = true;
       remainderPreflight.semantics.mirrorFastMath = true;
       remainderPreflight.semantics.multiplyFastMath =
