@@ -9042,20 +9042,27 @@ int main() {
                " the fast path"))
       return 1;
 
-    // The same flags on a nest the fast path cannot lower (triangular
-    // domain): neither path applies, the nest stays as written.
+    // The same flags on a nest no path can take: the fast path refuses the
+    // non-box domain, the certified device lowering refuses the partial
+    // reduction fibers (K bound depending on i, Phase 3b-7), the guarded
+    // MAC nest refuses the flags; the nest stays as written. (Until Phase
+    // 3b-7 a flagged triangle with complete fibers was this scenario; it is
+    // now offloaded through the exact output mask.)
 
     {
-      GemmText relaxedTriangular = triangular;
-      relaxedTriangular.name = "relaxed_triangular";
-      relaxedTriangular.flags = " fastmath<reassoc>";
+      GemmText relaxedPartial = plain;
+      relaxedPartial.name = "relaxed_partial_fibers";
+      relaxedPartial.loops =
+          "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+          " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
+      relaxedPartial.flags = " fastmath<reassoc>";
 
-      if (verify(runProduction(relaxedTriangular, TwinData::Cancellation,
+      if (verify(runProduction(relaxedPartial, TwinData::Cancellation,
                                strictOptions,
                                ProductionExpectation::Unchanged, 40,
                                {"UNKNOWN: fast-math flags", "[UNKNOWN]"}),
-                 "3b5 production pass: fast-math flags on a nest only the"
-                 " guarded path could take stay unchanged"))
+                 "3b5 production pass: fast-math flags on a nest no path can"
+                 " take stay unchanged"))
         return 1;
     }
 
@@ -9090,7 +9097,13 @@ int main() {
         "3.200000e+00 read_overhead = 11 write_overhead = 11 operand_lanes = "
         "8 k_window = 8\n";
 
-    enum class OffloadExpectation { Offloaded, FastPath, GuardedMac, Unchanged };
+    enum class OffloadExpectation {
+      Offloaded,
+      FastPath,
+      GuardedMac,
+      Unchanged,
+      Masked // Phase 3b-7: dense GEMM into a temporary + exact output mask
+    };
 
     struct OffloadShape {
       int64_t M = 0, N = 0, K = 0;
@@ -9185,8 +9198,21 @@ int main() {
       });
 
       const bool certified = reported(certifiedRemark);
+      const bool masked = reported("with an exact output mask");
+      unsigned allocations = 0;
+      produced.function.walk([&](memref::AllocOp) { ++allocations; });
 
       switch (expectation) {
+      case OffloadExpectation::Masked:
+        if (tiles == 0 || guards != 1 || !certified || !masked ||
+            allocations != 1) {
+          std::cerr << "3b7 " << label << ": expected the masked device"
+                    << " jobs (tiles " << tiles << ", guards " << guards
+                    << ", allocations " << allocations << ")\n"
+                    << diagnostics;
+          return false;
+        }
+        break;
       case OffloadExpectation::Unchanged:
         if (functionText(produced.function) != before || certified) {
           std::cerr << "3b6 " << label << ": the function changed\n"
@@ -9211,7 +9237,8 @@ int main() {
         }
         break;
       case OffloadExpectation::Offloaded:
-        if (tiles == 0 || affineOps != 0 || guards != 0 || !certified) {
+        if (tiles == 0 || affineOps != 0 || guards != 0 || !certified ||
+            masked) {
           std::cerr << "3b6 " << label << ": expected the certified device"
                     << " jobs (tiles " << tiles << ", affine ops "
                     << affineOps << ", guards " << guards << ")\n"
@@ -9307,8 +9334,10 @@ int main() {
         return false;
       }
 
-      // The operand views: A, B, C tensors taken at the expected origins.
-      if (expectation == OffloadExpectation::Offloaded) {
+      // The operand views: A, B, C tensors taken at the expected origins
+      // (masked: C's tensor is the fresh temporary).
+      if (expectation == OffloadExpectation::Offloaded ||
+          expectation == OffloadExpectation::Masked) {
         if (tensors.size() != 3) {
           std::cerr << "3b6 " << label << ": " << tensors.size()
                     << " operand tensors\n";
@@ -9316,6 +9345,14 @@ int main() {
         }
         for (unsigned a = 0; a < 3; ++a) {
           Value source = tensors[a].getBuffer();
+          if (a == 2 && expectation == OffloadExpectation::Masked) {
+            if (!source.getDefiningOp<memref::AllocOp>()) {
+              std::cerr << "3b7 " << label << ": the dense GEMM does not"
+                        << " run into the temporary\n";
+              return false;
+            }
+            continue;
+          }
           std::array<int64_t, 2> origin{0, 0};
           if (auto view = source.getDefiningOp<memref::SubViewOp>()) {
             auto offsets = view.getStaticOffsets();
@@ -9484,6 +9521,11 @@ int main() {
     GemmText transposed = plain;
     transposed.name = "device_transposed";
     transposed.aIndex = "%k, %i";
+    GemmText partialFibers = plain;
+    partialFibers.name = "device_partial_fibers";
+    partialFibers.loops =
+        "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+        " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
     GemmText repeatedDevice = plain;
     repeatedDevice.name = "device_repeated";
     repeatedDevice.loops = "affine.for %r = 0 to 2 { " + loops3;
@@ -9494,11 +9536,16 @@ int main() {
          {4, 4, 4, {}}, "",
          "3b6 device jobs: f64 is not a recognized GEMM (f32 only), the"
          " fast path's tile is not the certified lowering's"},
-        {withFleet(triangular, "device_triangular"),
+        // (Until Phase 3b-7 a triangle with complete reduction fibers was
+        // the non-box refusal here; it is now offloaded through the exact
+        // output mask, so the non-box domain no path can take is one whose
+        // K bound depends on i: partial fibers.)
+        {withFleet(partialFibers, "device_partial_fibers"),
          OffloadExpectation::GuardedMac, {4, 4, 4, {}},
-         "UNKNOWN: the logical domain is not a box",
-         "3b6 device jobs: a triangular domain is UNKNOWN; the guarded MAC"
-         " nest follows"},
+         "UNKNOWN: the reduction fiber of an output coordinate is a proper "
+         "part of the K range",
+         "3b6 device jobs: a non-box domain with partial reduction fibers"
+         " is UNKNOWN; the guarded MAC nest follows"},
         {withFleet(stretch, "device_stretch"), OffloadExpectation::FastPath,
          {4, 4, 4, {}}, "UNKNOWN: the coordinate map is not unimodular",
          "3b6 device jobs: a non-unimodular map is UNKNOWN"},
@@ -9578,6 +9625,541 @@ int main() {
                           nullptr),
                "3b6 device jobs: a factor reading C's buffer is REFUSED"))
       return 1;
+
+    // ------------------------------------------------------------------
+    // Phase 5.4.3d-3b-7: exact non-box domains through dense device jobs
+    // and an exact output mask (docs section 28). The executed scenarios
+    // run the pass without a fleet (one whole-box tile), execute the
+    // produced function with the software runtime's arithmetic for the
+    // tile, and compare with the original nest: selected outputs under the
+    // declared contract, unselected outputs bitwise unchanged.
+    // ------------------------------------------------------------------
+
+    // Runs the pass on `produced`; the diagnostics are collected.
+    auto runPass = [&](ParsedGemm &produced, const std::string &options,
+                       std::string &diagnostics) -> bool {
+      ::systolic::logical::testing::registerProductionGemmPass();
+      ScopedDiagnosticHandler diagnosticHandler(
+          &produced.context, [&](Diagnostic &diagnostic) {
+            diagnostics += diagnostic.str() + "\n";
+            return success();
+          });
+      PassManager manager(&produced.context, ModuleOp::getOperationName());
+      if (failed(parsePassPipeline("affine-matmul-to-systolic{" + options +
+                                       "}",
+                                   manager, llvm::errs())))
+        return false;
+      if (failed(manager.run(*produced.module)))
+        return false;
+      return succeeded(mlir::verify(*produced.module));
+    };
+
+    // The buffer behind a tensor operand: the memref, or the base of a
+    // static unit-stride subview with its origin.
+    struct ViewRef {
+      Value memref;
+      std::array<int64_t, 2> origin{0, 0};
+    };
+    auto viewOf = [](Value tensor) -> std::optional<ViewRef> {
+      auto toTensor = tensor.getDefiningOp<bufferization::ToTensorOp>();
+      if (!toTensor)
+        return std::nullopt;
+      ViewRef ref;
+      ref.memref = toTensor.getBuffer();
+      if (auto view = ref.memref.getDefiningOp<memref::SubViewOp>()) {
+        auto offsets = view.getStaticOffsets();
+        auto strides = view.getStaticStrides();
+        if (offsets.size() != 2 || strides.size() != 2 || strides[0] != 1 ||
+            strides[1] != 1)
+          return std::nullopt;
+        ref.origin = {offsets[0], offsets[1]};
+        ref.memref = view.getSource();
+      }
+      return ref;
+    };
+
+    // Executes the function after the pass: affine nests with the
+    // interpreter, memref.alloc as a fresh buffer (NaN-filled until
+    // written), and the fleet-less dense GEMM (three to_tensor, one
+    // whole-box matmul_tile, materialize_in_destination) with the software
+    // runtime's arithmetic: per element a binary32 sum of binary32 products
+    // from +0 in ascending k, then one add into the destination's value.
+    auto executeOffloaded = [&](func::FuncOp function,
+                                exec::MemoryState &memory) -> bool {
+      auto bufferAt = [&](Value memref) -> exec::MemoryBuffer * {
+        auto it = memory.buffers.find(memref);
+        return it == memory.buffers.end() ? nullptr : &it->second;
+      };
+      for (Operation &op : function.getBody().front()) {
+        if (auto loop = dyn_cast<affine::AffineForOp>(&op)) {
+          auto run = exec::interpretGuardedLoopNest(
+              loop, scf::IfOp(), ValueRange{}, ValueRange{}, ValueRange{},
+              ValueRange{}, ValueRange{}, &memory);
+          if (!run) {
+            std::cerr << "3b7: a nest of the produced function did not "
+                         "execute\n";
+            return false;
+          }
+          continue;
+        }
+        if (auto alloc = dyn_cast<memref::AllocOp>(&op)) {
+          auto type = alloc.getType();
+          if (!type.hasStaticShape() || !type.getElementType().isF32())
+            return false;
+          exec::MemoryBuffer buffer;
+          buffer.shape.assign(type.getShape().begin(), type.getShape().end());
+          buffer.isFloat = true;
+          buffer.floatData.assign(static_cast<std::size_t>(type.getNumElements()),
+                                  std::numeric_limits<double>::quiet_NaN());
+          memory.buffers[alloc.getResult()] = std::move(buffer);
+          continue;
+        }
+        if (isa<arith::ConstantOp, bufferization::ToTensorOp,
+                memref::SubViewOp>(&op) ||
+            op.getName().getStringRef() == "systolic.matmul_tile")
+          continue; // consumed by the write-back below
+        if (auto writeBack =
+                dyn_cast<bufferization::MaterializeInDestinationOp>(&op)) {
+          Operation *tile = writeBack.getSource().getDefiningOp();
+          if (!tile || tile->getName().getStringRef() != "systolic.matmul_tile" ||
+              tile->hasAttr("device")) {
+            std::cerr << "3b7: expected one fleet-less whole-box tile\n";
+            return false;
+          }
+          auto attr = [&](StringRef name) {
+            return tile->getAttrOfType<IntegerAttr>(name).getInt();
+          };
+          const int64_t m = attr("m"), n = attr("n"), k = attr("k");
+          auto a = viewOf(tile->getOperand(0));
+          auto b = viewOf(tile->getOperand(1));
+          auto c = viewOf(tile->getOperand(2));
+          Value destination = writeBack.getDest();
+          if (!a || !b || !c || destination != c->memref ||
+              c->origin != std::array<int64_t, 2>{0, 0}) {
+            std::cerr << "3b7: the tile's operands are not plain views\n";
+            return false;
+          }
+          exec::MemoryBuffer *bufA = bufferAt(a->memref);
+          exec::MemoryBuffer *bufB = bufferAt(b->memref);
+          exec::MemoryBuffer *bufC = bufferAt(c->memref);
+          if (!bufA || !bufB || !bufC || !bufA->isFloat || !bufB->isFloat ||
+              !bufC->isFloat || bufA->shape.size() != 2 ||
+              bufB->shape.size() != 2 || bufC->shape.size() != 2 ||
+              bufC->shape[0] != m || bufC->shape[1] != n ||
+              a->origin[0] + m > bufA->shape[0] ||
+              a->origin[1] + k > bufA->shape[1] ||
+              b->origin[0] + k > bufB->shape[0] ||
+              b->origin[1] + n > bufB->shape[1]) {
+            std::cerr << "3b7: the tile's views do not fit the buffers\n";
+            return false;
+          }
+          for (int64_t r = 0; r < m; ++r)
+            for (int64_t col = 0; col < n; ++col) {
+              volatile float acc = 0.0f;
+              for (int64_t kk = 0; kk < k; ++kk) {
+                volatile float left = static_cast<float>(
+                    bufA->floatData[(a->origin[0] + r) * bufA->shape[1] +
+                                    a->origin[1] + kk]);
+                volatile float right = static_cast<float>(
+                    bufB->floatData[(b->origin[0] + kk) * bufB->shape[1] +
+                                    b->origin[1] + col]);
+                volatile float product = left * right;
+                acc = acc + product;
+              }
+              volatile float prior =
+                  static_cast<float>(bufC->floatData[r * n + col]);
+              volatile float out = prior + acc;
+              bufC->floatData[r * n + col] = out;
+            }
+          continue;
+        }
+        if (isa<func::ReturnOp>(&op))
+          break;
+        std::cerr << "3b7: unexpected top-level operation "
+                  << op.getName().getStringRef().str() << "\n";
+        return false;
+      }
+      return true;
+    };
+
+    enum class MaskData { Integers, Special, Rounding };
+
+    // A, B, C per family. Integers: nonzero small integers (every partial
+    // sum exact: the relaxed contract is bitwise). Special: zeros and
+    // negative factors (-0 products), NaN and -0 in C. Rounding: the
+    // inexact products of the 3b-3 family (the contract is a tolerance).
+    auto maskBuffer = [&](MemRefType type, unsigned role, MaskData data) {
+      if (data == MaskData::Rounding)
+        return bufferOf(type, role, TwinData::Rounding);
+      exec::MemoryBuffer buffer;
+      buffer.shape.assign(type.getShape().begin(), type.getShape().end());
+      buffer.isFloat = true;
+      const std::size_t columns = static_cast<std::size_t>(buffer.shape[1]);
+      const std::size_t size =
+          static_cast<std::size_t>(buffer.shape[0]) * columns;
+      for (std::size_t linear = 0; linear < size; ++linear) {
+        const std::size_t r = linear / columns, c = linear % columns;
+        double value = 0.0;
+        if (data == MaskData::Integers) {
+          const int magnitude = static_cast<int>((r * 7 + c * 3 + role) % 9) + 1;
+          value = ((r + c + role) % 2 == 0 ? 1.0 : -1.0) * magnitude;
+        } else {
+          if (role == 2) {
+            switch (linear % 5) {
+            case 0:
+              value = std::numeric_limits<double>::quiet_NaN();
+              break;
+            case 1:
+              value = -0.0;
+              break;
+            case 2:
+              value = 0.0;
+              break;
+            default:
+              value = static_cast<double>(static_cast<int>(linear % 7) - 3);
+            }
+          } else {
+            // Rows of zeros and negative factors give -0 products.
+            value = (r % 3 == 0) ? 0.0
+                                 : static_cast<double>(
+                                       static_cast<int>((r * 5 + c) % 5) - 2);
+          }
+        }
+        buffer.floatData.push_back(value);
+      }
+      return buffer;
+    };
+
+    // Equality of two f32 values under the relaxed contract of section 6
+    // on exact data: NaN matches NaN, a zero matches a zero of either
+    // sign, everything else bitwise.
+    auto contractEqual = [](double expected, double actual, MaskData data) {
+      if (std::isnan(expected) || std::isnan(actual))
+        return std::isnan(expected) && std::isnan(actual);
+      if (data == MaskData::Rounding) {
+        if (std::isinf(expected) || std::isinf(actual))
+          return expected == actual;
+        const double scale = std::max(std::fabs(expected), 1.0);
+        return std::fabs(expected - actual) <= 1e-5 * scale;
+      }
+      if (expected == 0.0 && actual == 0.0)
+        return true;
+      return std::memcmp(&expected, &actual, sizeof(double)) == 0;
+    };
+
+    // The executed differential scenario.
+    auto runMaskedExecution = [&](const GemmText &gemm, MaskData data,
+                                  const std::string &options) -> bool {
+      const std::string label =
+          gemm.name + "/" +
+          (data == MaskData::Integers ? "integers"
+           : data == MaskData::Special ? "special"
+                                       : "rounding") +
+          "{" + options + "}";
+      ParsedGemm original, produced;
+      if (!parseGemm(original, gemmModule(gemm), gemm.name) ||
+          !parseGemm(produced, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b7 " << label << ": parse failed\n";
+        return false;
+      }
+      std::string diagnostics;
+      if (!runPass(produced, options, diagnostics)) {
+        std::cerr << "3b7 " << label << ": the pass failed\n" << diagnostics;
+        return false;
+      }
+      if (diagnostics.find("with an exact output mask") == std::string::npos) {
+        std::cerr << "3b7 " << label << ": not lowered with the mask\n"
+                  << diagnostics;
+        return false;
+      }
+
+      // The same data behind both functions' arguments.
+      exec::MemoryState sourceMemory, producedMemory;
+      std::array<Value, 3> sourceArgs, producedArgs; // C, A, B
+      for (unsigned i = 0; i < 3; ++i) {
+        sourceArgs[i] = original.function.getArgument(i);
+        producedArgs[i] = produced.function.getArgument(i);
+      }
+      // roles: argument 0 is C (role 2), 1 is A (role 0), 2 is B (role 1)
+      const unsigned roleOf[3] = {2, 0, 1};
+      for (unsigned i = 0; i < 3; ++i) {
+        auto type = cast<MemRefType>(sourceArgs[i].getType());
+        sourceMemory.buffers[sourceArgs[i]] = maskBuffer(type, roleOf[i], data);
+        producedMemory.buffers[producedArgs[i]] =
+            maskBuffer(type, roleOf[i], data);
+      }
+      const exec::MemoryBuffer initialC = sourceMemory.buffers[sourceArgs[0]];
+
+      auto sourceRun = exec::interpretGuardedLoopNest(
+          original.outermost, scf::IfOp(), ValueRange{}, ValueRange{},
+          ValueRange{}, ValueRange{}, ValueRange{}, &sourceMemory);
+      if (!sourceRun) {
+        std::cerr << "3b7 " << label << ": the source nest did not execute\n";
+        return false;
+      }
+      if (!executeOffloaded(produced.function, producedMemory))
+        return false;
+
+      // Selected: the elements the source nest stored.
+      const exec::MemoryBuffer &sourceC = sourceMemory.buffers[sourceArgs[0]];
+      const exec::MemoryBuffer &producedC =
+          producedMemory.buffers[producedArgs[0]];
+      std::vector<bool> selected(initialC.floatData.size(), false);
+      std::size_t stores = 0;
+      for (const exec::MemoryEvent &event : sourceMemory.trace) {
+        if (!event.isStore || event.memref != sourceArgs[0])
+          continue;
+        const std::size_t linear =
+            static_cast<std::size_t>(event.indices[0]) *
+                static_cast<std::size_t>(initialC.shape[1]) +
+            static_cast<std::size_t>(event.indices[1]);
+        selected[linear] = true;
+        ++stores;
+      }
+      std::size_t selectedCount = 0;
+      for (std::size_t e = 0; e < selected.size(); ++e) {
+        const double before = initialC.floatData[e];
+        const double expected = sourceC.floatData[e];
+        const double actual = producedC.floatData[e];
+        if (!selected[e]) {
+          if (std::memcmp(&before, &actual, sizeof(double)) != 0) {
+            std::cerr << "3b7 " << label << ": unselected element " << e
+                      << " changed from " << before << " to " << actual
+                      << "\n";
+            return false;
+          }
+          continue;
+        }
+        ++selectedCount;
+        if (!contractEqual(expected, actual, data)) {
+          std::cerr << "3b7 " << label << ": selected element " << e
+                    << " is " << actual << ", the source gives " << expected
+                    << "\n";
+          return false;
+        }
+      }
+      // A and B untouched.
+      for (unsigned i = 1; i < 3; ++i) {
+        const auto &before = sourceMemory.buffers[sourceArgs[i]].floatData;
+        const auto &after = producedMemory.buffers[producedArgs[i]].floatData;
+        if (before.size() != after.size() ||
+            std::memcmp(before.data(), after.data(),
+                        before.size() * sizeof(double)) != 0) {
+          std::cerr << "3b7 " << label << ": a factor changed\n";
+          return false;
+        }
+      }
+      if (selectedCount == 0 || selectedCount == selected.size()) {
+        std::cerr << "3b7 " << label << ": the mask selects " << selectedCount
+                  << " of " << selected.size() << " elements\n";
+        return false;
+      }
+      return true;
+    };
+
+    // The domains (C, A, B declared as in the 3b-4 fixtures: C is the
+    // first argument).
+    GemmText upper = plain;
+    upper.name = "mask_upper";
+    upper.loops = "affine.for %i = 0 to 4 { affine.for %j = "
+                  "affine_map<(d0) -> (d0)>(%i) to 4 { affine.for %k = 0 to 4 {";
+    GemmText lowerInclusive = plain;
+    lowerInclusive.name = "mask_lower";
+    lowerInclusive.loops =
+        "affine.for %i = 0 to 4 { affine.for %j = 0 to "
+        "affine_map<(d0) -> (d0 + 1)>(%i) { affine.for %k = 0 to 4 {";
+    GemmText lowerStrict = plain;
+    lowerStrict.name = "mask_lower_strict";
+    lowerStrict.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to "
+                        "affine_map<(d0) -> (d0)>(%i) { affine.for %k = 0 to 4 {";
+    GemmText offsetsMask{"mask_offsets", "memref<8x8xf32>", "memref<8x8xf32>",
+                         "memref<8x8xf32>",
+                         "affine.for %i = 2 to 6 { affine.for %j = "
+                         "affine_map<(d0) -> (d0)>(%i) to 7 { affine.for %k = "
+                         "1 to 5 {",
+                         3, "%i + 1, %j + 1", "%i + 1, %k", "%k, %j + 1"};
+    GemmText hexagon{"mask_hexagon", "memref<8x8xf32>", "memref<8x8xf32>",
+                     "memref<8x8xf32>",
+                     "affine.for %i = 0 to 8 { affine.for %j = max "
+                     "affine_map<(d0) -> (0, 3 - d0)>(%i) to min "
+                     "affine_map<(d0) -> (8, 12 - d0)>(%i) { affine.for %k = "
+                     "0 to 8 {",
+                     3, "%i, %j", "%i, %k", "%k, %j"};
+    GemmText kFromI = plain;
+    kFromI.name = "mask_k_from_i";
+    kFromI.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                   " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
+    GemmText kFromJ = plain;
+    kFromJ.name = "mask_k_from_j";
+    kFromJ.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                   " affine.for %k = affine_map<(d0) -> (d0)>(%j) to 4 {";
+    GemmText kEqualsI = plain;
+    kEqualsI.name = "mask_k_equals_i";
+    kEqualsI.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                     " affine.for %k = affine_map<(d0) -> (d0)>(%i) to "
+                     "affine_map<(d0) -> (d0 + 1)>(%i) {";
+    GemmText emptyDomain = plain;
+    emptyDomain.name = "mask_empty";
+    emptyDomain.loops = "affine.for %i = 0 to 4 { affine.for %j = "
+                        "affine_map<(d0) -> (d0 + 4)>(%i) to 4 { affine.for "
+                        "%k = 0 to 4 {";
+
+    // Executed: selected outputs under the contract, the rest untouched.
+    struct Executed {
+      const GemmText *gemm;
+      MaskData data;
+      const char *claim;
+    };
+    const std::vector<Executed> executed = {
+        {&upper, MaskData::Integers,
+         "3b7 masked offload: upper-triangular output, exact data, selected"
+         " outputs bitwise, unselected untouched"},
+        {&upper, MaskData::Special,
+         "3b7 masked offload: upper-triangular output with NaN, -0 and zero"
+         " products under the contract"},
+        {&upper, MaskData::Rounding,
+         "3b7 masked offload: upper-triangular output, inexact data within"
+         " the contract's tolerance"},
+        {&lowerInclusive, MaskData::Integers,
+         "3b7 masked offload: lower-triangular output (j <= i)"},
+        {&lowerStrict, MaskData::Integers,
+         "3b7 masked offload: strictly lower-triangular output (j < i)"},
+        {&lowerStrict, MaskData::Special,
+         "3b7 masked offload: strictly lower-triangular output with NaN and"
+         " -0 in C"},
+        {&offsetsMask, MaskData::Integers,
+         "3b7 masked offload: nonzero bounds and constant offsets"},
+        {&offsetsMask, MaskData::Rounding,
+         "3b7 masked offload: nonzero bounds and offsets, inexact data"},
+        {&hexagon, MaskData::Integers,
+         "3b7 masked offload: a hexagonal output domain (two cut corners)"},
+        {&hexagon, MaskData::Special,
+         "3b7 masked offload: a hexagonal output domain with NaN and -0"
+         " in C"},
+    };
+    const std::string maskedOptions =
+        "general-affine=true certified-offload-first=true "
+        "allow-fp-reassociation=true report=true";
+    for (const Executed &e : executed)
+      if (verify(runMaskedExecution(*e.gemm, e.data, maskedOptions), e.claim))
+        return 1;
+
+    // A skewed triangle (C[i+j][j], j < 4 - i) with a dynamic leading
+    // dimension of A: the candidate box's I range is the interval image
+    // [0, 6] of the loop bounds; the dense box is tightened to the rows the
+    // nest reads, [0, 3], and its last row is proven an iteration, so the
+    // dense GEMM reads no row past the array (review finding, section 28.2).
+    {
+      GemmText skewDynamic{"mask_skew_dynamic", "memref<8x4xf32>",
+                           "memref<?x4xf32>", "memref<4x4xf32>",
+                           "affine.for %i = 0 to 4 { affine.for %j = 0 to "
+                           "affine_map<(d0) -> (4 - d0)>(%i) { affine.for %k "
+                           "= 0 to 4 {",
+                           3, "%i + %j, %j", "%i + %j, %k", "%k, %j"};
+      if (verify(runOffload(skewDynamic, maskedOptions,
+                            OffloadExpectation::Masked, {4, 4, 4, {}},
+                            {"with an exact output mask"}, nullptr),
+                 "3b7 masked offload: a skewed triangle on a dynamic leading"
+                 " dimension reads only the rows the nest reads"))
+        return 1;
+    }
+
+    // Permission by the flag alone (structural: the interpreter does not
+    // execute flagged statements, and the flag changes no arithmetic here).
+    {
+      GemmText flagged = upper;
+      flagged.name = "mask_reassoc";
+      flagged.flags = " fastmath<reassoc>";
+      if (verify(runOffload(flagged, strictCertifiedOptions,
+                            OffloadExpectation::Masked, {4, 4, 4, {}},
+                            {"with an exact output mask"}, nullptr),
+                 "3b7 masked offload: the reassoc flag permits the masked"
+                 " offload"))
+        return 1;
+    }
+
+    // With the fleet: partial tiles and K folds of the dense box, the mask
+    // around them; the tiles partition the 6 x 8 x 40 box.
+    {
+      GemmText deep{"mask_deep_partial", "memref<6x8xf32>", "memref<6x40xf32>",
+                    "memref<40x8xf32>",
+                    "affine.for %i = 0 to 6 { affine.for %j = "
+                    "affine_map<(d0) -> (d0)>(%i) to 8 { affine.for %k = 0 "
+                    "to 40 {",
+                    3, "%i, %j", "%i, %k", "%k, %j"};
+      if (verify(runOffload(withFleet(deep, "mask_deep_partial"),
+                            maskedOptions, OffloadExpectation::Masked,
+                            {6, 8, 40, {}}, {"with an exact output mask"},
+                            nullptr),
+                 "3b7 masked offload: partial tile and K folds over the"
+                 " fleet, the tiles partition the box"))
+        return 1;
+    }
+
+    // Refused: partial reduction fibers (a K bound depending on i or j, K
+    // pinned to i), the empty domain; strict semantics; may-alias
+    // arguments. The next decision takes over each time.
+    struct MaskRefusal {
+      const GemmText *gemm;
+      std::string options;
+      OffloadExpectation next;
+      std::string reason;
+      const char *claim;
+    };
+    GemmText upperAlias = upper;
+    upperAlias.name = "mask_may_alias";
+    upperAlias.argumentAttrs = "";
+    const std::vector<MaskRefusal> maskRefusals = {
+        {&kFromI, maskedOptions, OffloadExpectation::GuardedMac,
+         "UNKNOWN: the reduction fiber of an output coordinate is a proper "
+         "part of the K range",
+         "3b7 masked offload: a K bound depending on i is refused (partial"
+         " fibers); the guarded MAC nest follows"},
+        {&kFromJ, maskedOptions, OffloadExpectation::GuardedMac,
+         "UNKNOWN: the reduction fiber of an output coordinate is a proper "
+         "part of the K range",
+         "3b7 masked offload: a K bound depending on j is refused"},
+        // K pinned to i (k = i only): the certified lowering refuses the
+        // mask (the fiber of every output is the single value i); the fast
+        // path's established normalization (x = U x', section 19.12, since
+        // 2026-10-18 and unchanged by Phases 3b-6/3b-7: the IR is the same
+        // in both decision orders) lowers it as a batch loop over i of
+        // 1 x 4 x 1 tiles, C[i][0..4) += A[i][i] x B[i][0..4): one product
+        // per element, the elements the nest writes. Executed bitwise
+        // against the CPU reference in test/SystolicCC/masked_offload.c
+        // (k_equals_i, nonzero C). The remark below pins the lowering that
+        // took the nest.
+        {&kEqualsI, maskedOptions, OffloadExpectation::FastPath,
+         "UNKNOWN: the reduction fiber of an output coordinate is a proper "
+         "part of the K range",
+         "3b7 masked offload: K pinned to i is refused; the fast path's"
+         " batched 1x4x1 lowering takes it"},
+        {&emptyDomain, maskedOptions, OffloadExpectation::GuardedMac,
+         "UNKNOWN: the iteration domain is empty",
+         "3b7 masked offload: an empty domain is not offloaded"},
+        {&upper, strictCertifiedOptions, OffloadExpectation::GuardedMac,
+         "UNKNOWN: strict floating-point semantics",
+         "3b7 masked offload: strict semantics are never offloaded; the"
+         " guarded MAC nest follows"},
+        {&upperAlias, maskedOptions, OffloadExpectation::Unchanged,
+         "UNKNOWN: A may alias C",
+         "3b7 masked offload: may-alias arguments stay unchanged"},
+    };
+    for (const MaskRefusal &r : maskRefusals) {
+      std::vector<std::string> expected = {r.reason};
+      if (r.reason.rfind("UNKNOWN: A may alias", 0) != 0)
+        expected[0] = std::string(certifiedRefusal) + r.reason;
+      if (r.gemm == &kEqualsI) {
+        expected.push_back("affine GEMM 1x4x1 lowered as 1 exact region(s)");
+        expected.push_back("batched: 4 batch iteration(s) of 1 batch loop(s)");
+      }
+      OffloadShape shape{4, 4, 4, {}};
+      shape.checkPartition = false;
+      if (verify(runOffload(*r.gemm, r.options, r.next, shape, expected,
+                            nullptr),
+                 r.claim))
+        return 1;
+    }
   }
 
   std::cout << "All coordinate relation tests passed.\n";

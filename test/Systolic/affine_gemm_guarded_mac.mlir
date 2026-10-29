@@ -110,13 +110,15 @@ module {
     func.return
   }
 
-  // fast-math flags are not mirrored (and the triangular domain keeps the
-  // fast path away): the nest stays as written.
+  // fast-math flags are not mirrored, and no other path takes the nest (a
+  // K bound depending on i: not centrally symmetric for the fast path,
+  // partial reduction fibers for the certified device lowering, Phase 3b-7
+  // section 28): the nest stays as written.
   // REPLACE-LABEL: func.func @relaxed(
   // REPLACE:        affine.load %arg0
   // REPLACE:        arith.mulf {{.*}} fastmath<reassoc>
   func.func @relaxed(%C: memref<4x4xf32> {llvm.noalias}, %A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}) {
-    affine.for %i = 0 to 4 { affine.for %j = affine_map<(d0) -> (d0)>(%i) to 4 { affine.for %k = 0 to 4 {
+    affine.for %i = 0 to 4 { affine.for %j = 0 to 4 { affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {
       %c = affine.load %C[%i, %j] : memref<4x4xf32>
       %a = affine.load %A[%i, %k] : memref<4x4xf32>
       %b = affine.load %B[%k, %j] : memref<4x4xf32>

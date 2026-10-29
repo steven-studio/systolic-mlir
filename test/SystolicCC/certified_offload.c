@@ -91,13 +91,16 @@ void transposed(float A[restrict 4][4], float B[restrict 4][4],
         C[i][j] += A[k][i] * B[k][j];
 }
 
-// A triangular domain (k <= i): not a box, no device job in this phase and
-// no fast plan; it runs on the host.
+// A triangular output domain (j >= i, every reduction fiber complete): no
+// fast plan (not centrally symmetric); since Phase 3b-7 the certified
+// lowering runs it as the dense 4 x 4 x 4 GEMM into a zero temporary and
+// adds the selected elements into C under the exact output mask
+// (docs/AFFINE_GEMM_MAPPING.md section 28).
 void triangular(float A[restrict 4][4], float B[restrict 4][4],
                 float C[restrict 4][4]) {
   for (int i = 0; i < 4; ++i)
-    for (int j = 0; j < 4; ++j)
-      for (int k = 0; k <= i; ++k)
+    for (int j = i; j < 4; ++j)
+      for (int k = 0; k < 4; ++k)
         C[i][j] += A[i][k] * B[k][j];
 }
 
@@ -194,9 +197,9 @@ int main(void) {
 // PLAN-DAG: note: 'two_nests' is offloaded: {{[0-9]+}} systolic tile invocation(s)
 // PLAN-DAG: note: 'offsets' is offloaded: 1 systolic tile invocation(s)
 // PLAN-DAG: note: 'transposed' is offloaded: {{[0-9]+}} systolic tile invocation(s)
-// PLAN-DAG: note: 'triangular' stays on the host
+// PLAN-DAG: note: 'triangular' is offloaded: 1 systolic tile invocation(s)
 // PLAN-DAG: note: 'may_alias' stays on the host
-// PLAN:     wrote {{.*}} (6 function(s) offloaded, runtime: software model, NOT the FPGA
+// PLAN:     wrote {{.*}} (7 function(s) offloaded, runtime: software model, NOT the FPGA
 //
 // Which path made each plan (20-remarks.txt of the kept compilation):
 //
@@ -205,7 +208,7 @@ int main(void) {
 // REMARKS-DAG: remark: affine GEMM 6x8x8 lowered as {{[0-9]+}} exact region(s) by the certified device-job lowering
 // REMARKS-DAG: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) by the certified device-job lowering
 // REMARKS-DAG: remark: certified device offload not applied: UNKNOWN: A is not read as (I, K)
-// REMARKS-DAG: remark: certified device offload not applied: UNKNOWN: the logical domain is not a box
+// REMARKS-DAG: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) by the certified device-job lowering (docs/AFFINE_GEMM_MAPPING.md section 27) with an exact output mask over the non-box domain (section 28)
 // REMARKS-DAG: remark: guarded MAC replacement not applied: UNKNOWN: A may alias C
 //
 // Every offloaded call equals the CPU reference bitwise:
@@ -216,6 +219,7 @@ int main(void) {
 // VERIFY-DAG: two_nests ({{.*}}): verified: {{[0-9]+}} elements equal the CPU reference (bitwise)
 // VERIFY-DAG: offsets ({{.*}}): verified: 40 elements equal the CPU reference (bitwise)
 // VERIFY-DAG: transposed ({{.*}}): verified: 16 elements equal the CPU reference (bitwise)
+// VERIFY-DAG: triangular ({{.*}}): verified: 16 elements equal the CPU reference (bitwise)
 // VERIFY-NOT: MISMATCH
 //
 // STRICT-DAG: note: 'gemm16' stays on the host: its GEMM is offloaded only with permission to reassociate floating-point sums (--fp-reassociation)

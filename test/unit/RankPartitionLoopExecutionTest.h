@@ -167,20 +167,39 @@ interpretGuardedLoopNest(
     return static_cast<std::int64_t>(number);
   };
 
+  // Phase 3b-7: a constant defined outside the executed nest (the
+  // production lowering hoists its constants before its loops) is read
+  // from its defining operation.
   auto lookup = [&](Value value)
       -> std::optional<std::int64_t> {
     auto it = values.find(value);
-    if (it == values.end())
-      return std::nullopt;
-    return it->second;
+    if (it != values.end())
+      return it->second;
+    if (auto constant = value.getDefiningOp<arith::ConstantOp>())
+      if (auto attribute = dyn_cast<IntegerAttr>(constant.getValue())) {
+        const std::int64_t constantValue =
+            attribute.getValue().getSExtValue();
+        values[value] = constantValue;
+        return constantValue;
+      }
+    return std::nullopt;
   };
 
   auto lookupFloat = [&](Value value)
       -> std::optional<double> {
     auto it = floatValues.find(value);
-    if (it == floatValues.end())
-      return std::nullopt;
-    return it->second;
+    if (it != floatValues.end())
+      return it->second;
+    if (auto constant = value.getDefiningOp<arith::ConstantOp>())
+      if (auto attribute = dyn_cast<FloatAttr>(constant.getValue())) {
+        Type type = constant.getResult().getType();
+        if (!type.isF32() && !type.isF64())
+          return std::nullopt;
+        const double constantValue = attribute.getValueAsDouble();
+        floatValues[value] = constantValue;
+        return constantValue;
+      }
+    return std::nullopt;
   };
 
   // Two's complement wrap of an exact result to `width`

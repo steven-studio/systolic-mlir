@@ -3301,6 +3301,9 @@ struct AffineMatmulToSystolicPass
                     << replaced.K << " lowered as " << replaced.invocations
                     << " exact region(s) by the certified device-job lowering "
                        "(docs/AFFINE_GEMM_MAPPING.md section 27)";
+      if (replaced.maskedOutput)
+        remark << " with an exact output mask over the non-box domain "
+                  "(section 28)";
       if (replaced.makespan)
         remark << " on " << fleet->resources.size()
                << " accelerator(s): makespan = " << *replaced.makespan

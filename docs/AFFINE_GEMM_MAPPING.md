@@ -3320,3 +3320,98 @@ those it recognizes, under the same relaxed contract. A bitwise strict-semantics
 need a device that accumulates into C in the loop's order with the loop's rounding, which this
 ABI and RTL do not offer. The FP cores' rounding and denormal behaviour remains unverified
 (§27.1); `--verify-rtol` is the only check for inexact data.
+
+## 28. Exact non-box domains: dense device jobs with an exact output mask (Phase 5.4.3d-3b-7, 2026-10-29)
+
+Section 27 lowered a recognized GEMM whose logical domain is exactly its box. This section lowers a
+non-box domain D ⊆ B = B_I × B_J × B_K when it factors as D = O × B_K for an output domain O: every
+output coordinate's reduction fiber D(i, j) = {k : (i, j, k) ∈ D} is empty or the whole K range.
+Code: `prepareDeviceJobs` / `replaceGemmWithDeviceJobs` (`RankPartitionDeviceJobLowering.cpp`,
+`maskedOutput`).
+
+### 28.1 Legality [proved]
+
+**Theorem.** Let the dense GEMM of the box compute T(i, j) = Σ_{k ∈ B_K} A(i, k) B(k, j) for every
+(i, j) ∈ B_I × B_J (up to the relaxed contract of §6), and let O = {(i, j) : D(i, j) ≠ ∅}. If every
+nonempty fiber equals B_K, then for (i, j) ∈ O the source adds exactly the products of B_K into
+C(i, j), the same multiset as T(i, j), and for (i, j) ∉ O the source adds nothing. Hence
+C' = C + [O]·T is the source's result under the relaxed contract, and C(i, j) for (i, j) ∉ O is
+untouched. Conversely, a fiber that is a proper nonempty part of B_K cannot be served by any dense
+sum over B_K (it would add products the source never adds), so such a domain is refused.
+
+**Decision, exact and conjunctive only** (no set difference, no projection; §19.14). With D' the
+logical domain over (z_0, z_1, z_2) (one polyhedron without locals; T unimodular, as §27 requires),
+K the role coordinate and [k_lo, k_hi] the K range -- the box's, tightened to D's own constant
+bounds in K -- the property "for all (z, k') with z ∈ D', k_lo ≤ k' ≤ k_hi: z[K := k'] ∈ D'" fails
+iff for some facet f (a · z + c ≥ 0) of D' the conjunctive set
+{(z, k') : z ∈ D', k_lo ≤ k' ≤ k_hi, a · z[K := k'] + c ≤ −1} has an integer point; an equality
+contributes its two facets. Each set is decided with `isIntegerEmpty`. An empty D' is refused
+("nothing to offload"). Then O = D' at K = k_lo: every (i, j) with a nonempty fiber has (i, j, k_lo)
+∈ D' and no other (i, j) does, so the substitution gives O exactly as a conjunctive polyhedron over
+(I, J) inside B_I × B_J, with no existential quantifier.
+
+### 28.2 The mask and the emission
+
+O becomes a Phase 2b iteration plan over the I × J box (`buildSymbolicIterationPlan`,
+`buildExactGuardPlan`: the predicate is proven representable in i64 over the box, no index
+overflow) and is emitted by `emitGuardedAffineLoopNest`: `affine.for` over I and J with an
+`scf.if` of the exact predicate. The lowering emits, before the source nest and transactionally
+(§27): the A and B views and tensors as in §27; `T = memref.alloc() : memref<M×N×f32>`, zeroed
+(+0.0) by an affine nest as the fast path zeroes an assignment's C (§20.2); the dense plan of the
+box into T's tensor and `materialize_in_destination` into T; then the mask nest whose then-block
+does `C[i][j] = C[i][j] + T[i - lo_I][j - lo_J]` with `affine.load` / `affine.store` through C's
+certified view (J2 offsets) and a plain `arith.addf`. T is freed by the pipeline's deallocation
+with the function's other allocations (the fast path's host buffers, §24, are handled the same
+way). The asynchronous lowering places `fpga_gemm_wait` before the mask nest (the first reader
+of T). A, B are read over the whole box (in bounds by J4); only T and the selected elements of C
+are written; unselected elements of C are neither read nor written; the mask evaluates no memory.
+
+**Arithmetic.** §27 accumulates each fold's device sum v_f into C in order, ((C + v_1) + v_2)…;
+the masked path accumulates them into T first, ((0 + v_1) + v_2)…, and adds T into C once. With
+one fold the two are bitwise equal: 0 + v_1 = v_1 for every v_1 but −0, and a sum the device
+starts at +0 under round-to-nearest is never −0. With several folds the masked path reassociates
+the fold sums (C + (v_1 + v_2) against (C + v_1) + v_2), which §6's relaxed contract permits;
+results are bitwise the loop's when every partial sum is exact, as before. Strict semantics are
+never offloaded (§27.2).
+
+**Memory safety of the dense reads.** The dense GEMM reads A and B over the whole box, including
+rows and columns no selected output needs. The box is first tightened in every coordinate to the
+domain's own constant bounds (valid bounds of every iteration). A static dimension is then checked
+against the box (J4). A dynamic leading dimension has no static bound (J4 takes the program's own,
+which §27 could because every box row was an iteration); here the box's last row must be proven an
+iteration of the nest -- the domain restricted to that coordinate value is integer-nonempty --
+otherwise UNKNOWN (for B the top K value is attained whenever the fibers are complete). So every
+row the dense GEMM reads is a row the source reads, and no read leaves the array. (Review finding
+of 2026-10-29; before the fix a skewed masked nest with `float A[][4]` read past A.)
+
+### 28.3 Verification (2026-10-29; software runtime model, the board NOT RUN)
+
+- `build/bin/rank-partition-presburger-test`: 311 checks (292 before). The executed scenarios run
+  the production pass without a fleet, execute the produced function (the tile with the software
+  runtime's arithmetic, the nests with the interpreter) and the original nest on the same data:
+  upper, lower, strictly lower triangles, nonzero bounds with constant offsets, a hexagon (max/min
+  bounds); exact data (selected outputs bitwise, unselected bitwise untouched), C holding NaN, −0
+  and zero products (the contract: NaN for NaN, zeros of either sign), inexact data (tolerance);
+  permission by the flag; with the fleet a 6 × 8 × 40 triangle (partial tile, three K folds,
+  the tiles re-derived from the IR to partition the box). Refused: K bounds depending on i or j,
+  K pinned to i, the empty domain, strict semantics (the guarded MAC nest follows), may-alias
+  arguments (unchanged). A skewed triangle (`C[i+j][j]`, j < 4 − i) with a dynamic leading
+  dimension of A: the box tightened to the four rows the nest reads.
+- `test/Systolic/affine_gemm_masked_offload.mlir`: the IR shape (temporary, zero nest, tiles into
+  the temporary, mask nest), K folds, a hexagon, two nests in one function, the refusal, the
+  default-order `diff`, the strict run, the asynchronous wait before the mask.
+- `test/SystolicCC/masked_offload.c`: upper, strictly lower and anti-diagonal triangles, offsets,
+  two nests, a skewed triangle on `float A[][4]`, and K pinned to i (k = i only: refused by the
+  mask -- the fiber is one value --, lowered by the fast path's established normalization as a
+  batch loop of 1 x 4 x 1 tiles, unchanged since Phase 3b-6, verified bitwise), offloaded in the
+  pass's default order on the software runtime model and bitwise equal
+  to the CPU reference with nonzero C; the reduction-dependent kernel on the host; nothing
+  offloaded under strict semantics.
+- `ninja -C build check-systolic`: 185 tests, 183 passed; the two pre-existing failures unchanged.
+
+### 28.4 Limitations
+
+Domains whose fibers vary with (i, j) (a K bound depending on an output coordinate) are refused:
+they need per-fiber jobs or a different decomposition. Non-unimodular maps, strided or transposed
+views and batch coordinates remain §27's limitations. The temporary costs M × N floats and one
+dense GEMM of the box, whatever the fraction of O in it; no cost-based decision is made.

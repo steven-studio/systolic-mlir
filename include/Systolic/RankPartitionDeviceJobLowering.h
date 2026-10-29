@@ -57,6 +57,22 @@
 //      differ in rounding, in the sign of a zero and in NaN payload; a
 //      rounding-mode attribute is UNKNOWN).
 //
+// Phase 3b-7 (section 28): a non-box domain D is lowered when it factors
+// as D = O x BK -- every output coordinate's reduction fiber is empty or the
+// whole K range of the box (the full-reduction-fiber property, decided
+// facet by facet with conjunctive integer emptiness) -- as the dense GEMM
+// of the box into a fresh zero temporary T, then C[i][j] += T[i][j] for
+// (i, j) in O under the exact Presburger guard of Phase 2b (O is D at the
+// lowest K value: a conjunctive polyhedron, no projection). Unselected
+// elements of C are never read or written. The box is tightened to the
+// domain's constant bounds, and with a dynamic leading dimension the box's
+// last row must be an iteration of the nest (the dense GEMM reads every row
+// of the box). Arithmetic: the folds' sums are added into T from +0 in
+// order and T is added into C once -- with one fold bitwise section 27's
+// result (a sum from +0 is never -0), with several folds a reassociation
+// of the fold sums, permitted by the relaxed contract. A domain with a
+// partial fiber (a K bound depending on i or j) is UNKNOWN.
+//
 // Transactional: the jobs are emitted immediately before the source nest
 // on the source memrefs, the function is verified, and only then is the
 // source nest erased; any failure erases what was created and leaves the
@@ -100,6 +116,15 @@ struct DeviceJobPreflight {
   bool permittedByFlag = false;       // the accumulation carries reassoc
   bool permittedByOption = false;     // allow-fp-reassociation
 
+  // Phase 3b-7: the domain is not a box. The dense GEMM of the box runs
+  // into a zero temporary and the exact output mask (`maskPlan`, over the
+  // I and J box coordinates in that order) selects the elements of C that
+  // receive it. `maskLower` are the box's lower bounds of I and J: the
+  // temporary's element of (i, j) is T[i - maskLower[0]][j - maskLower[1]].
+  bool maskedOutput = false;
+  std::optional<::systolic::logical::SymbolicIterationPlan> maskPlan;
+  std::array<int64_t, 2> maskLower{};
+
   explicit DeviceJobPreflight(::systolic::logical::GuardedMacPreflight pre)
       : common(std::move(pre)) {}
 };
@@ -115,6 +140,7 @@ prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
 
 struct DeviceJobReplacement {
   int64_t M = 0, N = 0, K = 0;
+  bool maskedOutput = false; // Phase 3b-7: dense GEMM + exact output mask
   int64_t blocks = 0;      // output blocks (1 without a fleet)
   int64_t invocations = 0; // systolic.matmul_tile operations
   std::optional<int64_t> makespan; // the plan's, with a fleet

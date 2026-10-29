@@ -8,6 +8,7 @@
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 
 #include "Systolic/RankPartitionExactInclusion.h"
+#include "Systolic/RankPartitionGuardedLoopNestEmission.h"
 #include "Systolic/SystolicOps.h"
 
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
@@ -16,6 +17,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/STLExtras.h"
@@ -216,12 +219,13 @@ prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
   if (!inBox || !covers)
     return unknown("the equality of the logical domain and its box is "
                    "undecided");
-  if (!*covers)
-    return unknown("the logical domain is not a box (an iteration of the "
-                   "box is not an iteration of the nest): non-box domains "
-                   "are not lowered in this phase");
   if (!*inBox)
     return unknown("the logical domain exceeds its candidate box");
+  // Phase 3b-7: a non-box domain is lowered through an exact output mask
+  // when it factors as O x BK (decided below, once the roles are known).
+  const bool isBox = *covers;
+  if (!isBox && logical.isIntegerEmpty())
+    return unknown("the iteration domain is empty: nothing to offload");
 
   // ------------------------------------------------------------------
   // J2 the access functions in logical coordinates: one coordinate per
@@ -271,6 +275,125 @@ prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
   if (coordinate[1][0] != roleK || coordinate[1][1] != roleJ)
     return unknown("B is not read as (K, J): a transposed or role-swapped "
                    "factor view is not lowered in this phase");
+  if (!isBox) {
+    // The dense box: the candidate box (the interval-arithmetic image of
+    // the loop bounds under T) tightened in every coordinate to the
+    // domain's own constant bounds -- valid bounds of every iteration, so
+    // the dense GEMM covers no more than the hull of the domain.
+    auto tighten = [&](int coordinate) -> bool {
+      if (auto tight = logical.getConstantBound64(BoundType::LB, coordinate);
+          tight && *tight > lower[coordinate]) {
+        extent[coordinate] -= *tight - lower[coordinate];
+        lower[coordinate] = *tight;
+      }
+      if (auto tight = logical.getConstantBound64(BoundType::UB, coordinate);
+          tight && *tight < lower[coordinate] + extent[coordinate] - 1)
+        extent[coordinate] = *tight - lower[coordinate] + 1;
+      return extent[coordinate] > 0;
+    };
+    for (int coordinate : {roleI, roleJ, roleK})
+      if (!tighten(coordinate))
+        return unknown("the domain's range in a coordinate is empty");
+    const int64_t kLower = lower[roleK];
+    const int64_t kUpper = lower[roleK] + extent[roleK] - 1;
+
+    // The full-reduction-fiber property: for every (i, j, k) in D and
+    // every k' in [kLower, kUpper], (i, j, k') is in D. Its negation is the
+    // union, over the facets f of D, of the conjunctive sets
+    //   { (z, k') : z in D, kLower <= k' <= kUpper, f violated at z[K := k'] }
+    // (an equality is two facets); each is decided with integer emptiness,
+    // no set difference and no projection (section 19.14).
+    auto violated = [&](ArrayRef<DynamicAPInt> row, bool negate) -> bool {
+      // row: a . z + c >= 0 over (z0, z1, z2, 1); violated at z[K := k']
+      // means a . z' + c <= -1, i.e. -(a . z') - c - 1 >= 0.
+      IntegerPolyhedron witness(logical);
+      witness.appendVar(VarKind::SetDim, 1); // k' is variable 3
+      witness.addBound(BoundType::LB, 3, DynamicAPInt(kLower));
+      witness.addBound(BoundType::UB, 3, DynamicAPInt(kUpper));
+      SmallVector<DynamicAPInt, 5> facet(5, DynamicAPInt(0));
+      for (unsigned i = 0; i < 3; ++i) {
+        const DynamicAPInt a = negate ? -row[i] : row[i];
+        if (static_cast<int>(i) == roleK)
+          facet[3] -= a;
+        else
+          facet[i] -= a;
+      }
+      facet[4] = -(negate ? -row[3] : row[3]) - 1;
+      witness.addInequality(facet);
+      return !witness.isIntegerEmpty();
+    };
+    for (unsigned r = 0; r < logical.getNumInequalities(); ++r)
+      if (violated(logical.getInequality(r), false))
+        return unknown("the reduction fiber of an output coordinate is a "
+                       "proper part of the K range (a K bound depends on i "
+                       "or j): the output mask would skip contributions; "
+                       "not lowered");
+    for (unsigned r = 0; r < logical.getNumEqualities(); ++r)
+      if (violated(logical.getEquality(r), false) ||
+          violated(logical.getEquality(r), true))
+        return unknown("the reduction fiber of an output coordinate is a "
+                       "proper part of the K range (an equality constrains "
+                       "K): not lowered");
+
+    // Memory safety of the dense reads with a dynamic leading dimension
+    // (J4 takes its upper bound as the program's own): the dense GEMM reads
+    // every row of the box, so the box's last row must be a row the nest
+    // itself reads -- an iteration with that coordinate value must exist
+    // (exact: one equality on the domain, integer emptiness). A static
+    // dimension is checked against the box below as before. For B the top
+    // K value is attained whenever the fiber property holds and the domain
+    // is nonempty; the check is kept for symmetry.
+    auto attained = [&](int coordinate, int64_t value) -> bool {
+      IntegerPolyhedron slice(logical);
+      slice.addBound(BoundType::EQ, coordinate, DynamicAPInt(value));
+      return !slice.isIntegerEmpty();
+    };
+    if (types[0].isDynamicDim(0) &&
+        !attained(roleI, lower[roleI] + extent[roleI] - 1))
+      return unknown("the last row of the dense box is not an iteration of "
+                     "the nest: with a dynamic leading dimension of A the "
+                     "dense GEMM could read past the array");
+    if (types[1].isDynamicDim(0) && !attained(roleK, kUpper))
+      return unknown("the last reduction row of the dense box is not an "
+                     "iteration of the nest: with a dynamic leading "
+                     "dimension of B the dense GEMM could read past the "
+                     "array");
+
+    // The output domain O = D at K = kLower, over (I, J), inside the box
+    // BI x BJ; the exact guard of Phase 2b evaluates its membership.
+    IntegerPolyhedron output(PresburgerSpace::getSetSpace(2));
+    auto substitute = [&](ArrayRef<DynamicAPInt> row, bool equality) {
+      SmallVector<DynamicAPInt, 3> reduced(3, DynamicAPInt(0));
+      reduced[0] = row[roleI];
+      reduced[1] = row[roleJ];
+      reduced[2] = row[3] + row[roleK] * DynamicAPInt(kLower);
+      if (equality)
+        output.addEquality(reduced);
+      else
+        output.addInequality(reduced);
+    };
+    for (unsigned r = 0; r < logical.getNumInequalities(); ++r)
+      substitute(logical.getInequality(r), false);
+    for (unsigned r = 0; r < logical.getNumEqualities(); ++r)
+      substitute(logical.getEquality(r), true);
+    std::vector<::systolic::logical::ClosedIntegerInterval> maskBounds(2);
+    maskBounds[0].lower = lower[roleI];
+    maskBounds[0].upper = lower[roleI] + extent[roleI] - 1;
+    maskBounds[1].lower = lower[roleJ];
+    maskBounds[1].upper = lower[roleJ] + extent[roleJ] - 1;
+    auto maskPlan = ::systolic::logical::buildSymbolicIterationPlan(
+        PresburgerSet(output), maskBounds);
+    if (!maskPlan)
+      return unknown("the output domain is not representable over the I x "
+                     "J box");
+    if (!::systolic::logical::buildExactGuardPlan(*maskPlan))
+      return unknown("the output mask is not representable in i64 "
+                     "arithmetic over the I x J box");
+    result.maskedOutput = true;
+    result.maskPlan = std::move(*maskPlan);
+    result.maskLower = {lower[roleI], lower[roleJ]};
+  }
+
   result.M = extent[roleI];
   result.N = extent[roleJ];
   result.K = extent[roleK];
@@ -402,8 +525,34 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
                       ? aTensor
                       : tensorOf(viewOf(pre->views[1]), pre->views[1],
                                  /*writable=*/false);
-  Value cView = viewOf(pre->views[2]);
-  Value cTensor = tensorOf(cView, pre->views[2], /*writable=*/true);
+  // Phase 3b-7: the dense GEMM of a masked domain runs into a fresh
+  // temporary T, zeroed first (as the fast path zeroes an assignment's C);
+  // the pipeline's deallocation frees it with the function's other
+  // allocations.
+  Value temporary;
+  Value cView;
+  if (pre->maskedOutput) {
+    temporary = memref::AllocOp::create(
+        builder, loc, MemRefType::get({pre->M, pre->N}, f32));
+    Value zero = arith::ConstantOp::create(builder, loc,
+                                           builder.getZeroAttr(f32));
+    {
+      OpBuilder::InsertionGuard zeroGuard(builder);
+      auto rows = affine::AffineForOp::create(builder, loc, 0, pre->M, 1);
+      builder.setInsertionPointToStart(rows.getBody());
+      auto columns = affine::AffineForOp::create(builder, loc, 0, pre->N, 1);
+      builder.setInsertionPointToStart(columns.getBody());
+      affine::AffineStoreOp::create(
+          builder, loc, zero, temporary,
+          ValueRange{rows.getInductionVar(), columns.getInductionVar()});
+    }
+    cView = temporary;
+  } else {
+    cView = viewOf(pre->views[2]);
+  }
+  DeviceJobView cSpec = pre->views[2];
+  cSpec.size = {pre->M, pre->N};
+  Value cTensor = tensorOf(cView, cSpec, /*writable=*/true);
 
   const int64_t gemmIndex = nextGemmIndex;
   Value result;
@@ -423,6 +572,40 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
   writeBack.setRestrict(true);
   writeBack.setWritable(true);
 
+  // Phase 3b-7: C[i][j] += T[i][j] for (i, j) in O, under the exact guard;
+  // nothing else of C is read or written.
+  if (pre->maskedOutput) {
+    auto nest = ::systolic::logical::emitGuardedAffineLoopNest(
+        builder, loc, *pre->maskPlan);
+    if (!nest) {
+      rollback();
+      return unsupported("the output mask nest could not be emitted");
+    }
+    Block *thenBlock = nest->guardIf.thenBlock();
+    if (!thenBlock || nest->logicalIVs.size() != 2) {
+      rollback();
+      return unsupported("the output mask nest has an unexpected shape");
+    }
+    OpBuilder::InsertionGuard maskGuard(builder);
+    builder.setInsertionPoint(thenBlock->getTerminator());
+    MLIRContext *context = builder.getContext();
+    AffineExpr i = getAffineDimExpr(0, context);
+    AffineExpr j = getAffineDimExpr(1, context);
+    const int64_t lowerI = pre->maskLower[0], lowerJ = pre->maskLower[1];
+    const DeviceJobView &c = pre->views[2];
+    AffineMap temporaryMap =
+        AffineMap::get(2, 0, {i - lowerI, j - lowerJ}, context);
+    AffineMap cMap = AffineMap::get(
+        2, 0, {i - lowerI + c.origin[0], j - lowerJ + c.origin[1]}, context);
+    Value t = affine::AffineLoadOp::create(builder, loc, temporary,
+                                           temporaryMap, nest->logicalIVs);
+    Value cValue = affine::AffineLoadOp::create(builder, loc, c.memref, cMap,
+                                                nest->logicalIVs);
+    Value sum = arith::AddFOp::create(builder, loc, cValue, t);
+    affine::AffineStoreOp::create(builder, loc, sum, c.memref, cMap,
+                                  nest->logicalIVs);
+  }
+
   // Verify before the source goes.
   if (failed(mlir::verify(parent))) {
     rollback();
@@ -433,6 +616,7 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
   replacement.M = pre->M;
   replacement.N = pre->N;
   replacement.K = pre->K;
+  replacement.maskedOutput = pre->maskedOutput;
   if (plan) {
     replacement.blocks = static_cast<int64_t>(plan->blocks.size());
     for (const SystolicTileBlock &b : plan->blocks)

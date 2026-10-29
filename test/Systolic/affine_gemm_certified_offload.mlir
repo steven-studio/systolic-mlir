@@ -6,47 +6,70 @@
 // test control certified-offload-first makes the certified lowering take
 // the nest before the fast path so that the two can be compared.
 //
-// RUN: systolic-opt --systolic-declare-fpga-fleet \
-// RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true allow-fp-reassociation=true report=true" \
-// RUN:   %s 2>&1 | FileCheck %s --check-prefix=CERTIFIED
+// The file holds two modules (-split-input-file). The second one, @stretch,
+// is lowered by the fast path alone; it is kept apart so that the byte-for-
+// byte comparison of the two decision orders below stays exact: the GEMM
+// index (systolic.gemm, the asynchronous lowering's bookkeeping) is given in
+// decision order, and a nest only the fast path lowers would get another
+// index in the other order. The remarks (stderr) and the IR (stdout) are
+// checked by separate runs: with several modules their interleaving in one
+// stream is not fixed.
 //
-// The two producers of one plan agree byte for byte.
-// RUN: systolic-opt --systolic-declare-fpga-fleet \
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
+// RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true allow-fp-reassociation=true report=true" \
+// RUN:   %s 2>&1 >/dev/null | FileCheck %s --check-prefix=REMARK
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
+// RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true allow-fp-reassociation=true" \
+// RUN:   %s | FileCheck %s --check-prefix=CERTIFIED
+//
+// The two producers of one plan agree byte for byte, in every module.
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
 // RUN:   --affine-matmul-to-systolic="general-affine=true allow-fp-reassociation=true" %s -o %t.fast.mlir
-// RUN: systolic-opt --systolic-declare-fpga-fleet \
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
 // RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true allow-fp-reassociation=true" %s -o %t.certified.mlir
 // RUN: diff %t.fast.mlir %t.certified.mlir
 //
 // Under strict floating point nothing is offloaded (section 6): the device's
 // order of additions, its +0 start and its flush-to-zero are not the loop's;
 // the guarded MAC nest of Phase 3b-5 takes the nests instead.
-// RUN: systolic-opt --systolic-declare-fpga-fleet \
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
 // RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true report=true" \
-// RUN:   %s 2>&1 | FileCheck %s --check-prefix=STRICT
+// RUN:   %s 2>&1 >/dev/null | FileCheck %s --check-prefix=STRICT
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
+// RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true" \
+// RUN:   %s | FileCheck %s --check-prefix=STRICTIR
 //
 // The emitted tiles are real device jobs of the existing runtime ABI.
-// RUN: systolic-opt --systolic-declare-fpga-fleet \
+// RUN: systolic-opt --systolic-declare-fpga-fleet -split-input-file \
 // RUN:   --affine-matmul-to-systolic="general-affine=true certified-offload-first=true allow-fp-reassociation=true" \
 // RUN:   --lower-systolic-matmul-tile-to-fpga --systolic-runtime-to-llvm %s | FileCheck %s --check-prefix=RUNTIME
 //
-// The remarks precede the printed module.
-// CERTIFIED-DAG: remark: affine GEMM 16x16x16 lowered as 10 exact region(s) by the certified device-job lowering (docs/AFFINE_GEMM_MAPPING.md section 27) on 4 accelerator(s)
-// CERTIFIED-DAG: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) by the certified device-job lowering
-// CERTIFIED-DAG: remark: affine GEMM 6x8x40 lowered as 3 exact region(s) by the certified device-job lowering
-// CERTIFIED-DAG: remark: certified device offload not applied: UNKNOWN: the logical domain is not a box
-// CERTIFIED-DAG: remark: certified device offload not applied: UNKNOWN: the coordinate map is not unimodular
-// CERTIFIED-DAG: remark: affine GEMM replaced by its exact guarded MAC nest
-// CERTIFIED-DAG: remark: guarded MAC replacement not applied: UNKNOWN: A may alias C
+// REMARK-DAG: remark: affine GEMM 16x16x16 lowered as 10 exact region(s) by the certified device-job lowering (docs/AFFINE_GEMM_MAPPING.md section 27) on 4 accelerator(s)
+// REMARK-DAG: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) by the certified device-job lowering
+// REMARK-DAG: remark: affine GEMM 6x8x40 lowered as 3 exact region(s) by the certified device-job lowering
+// REMARK-DAG: remark: affine GEMM 4x4x4 lowered as 1 exact region(s) by the certified device-job lowering (docs/AFFINE_GEMM_MAPPING.md section 27) with an exact output mask over the non-box domain (section 28)
+// REMARK-DAG: remark: guarded MAC replacement not applied: UNKNOWN: A may alias C
+// The second module: the certified lowering refuses the non-unimodular map,
+// the fast path lowers the nest through its general view (section 19.11).
+// REMARK-DAG: remark: certified device offload not applied: UNKNOWN: the coordinate map is not unimodular (its inverse is not integral): a congruence domain is not lowered in this phase
+// REMARK-DAG: remark: affine GEMM 4x1x4 lowered as 1 exact region(s) on 4 accelerator(s): makespan = {{[0-9]+}} cycles (read + compute + write), 1 output block(s), batched: 4 batch iteration(s) of 1 batch loop(s)
+// REMARK-NOT: remark: affine GEMM 4x1x4 lowered as {{.*}} by the certified device-job lowering
 //
 // STRICT-DAG: remark: certified device offload not applied: UNKNOWN: strict floating-point semantics: the device sums each invocation from +0 in its own order
 // STRICT-DAG: remark: affine GEMM not lowered to systolic.matmul_tile: floating-point reassociation is not permitted
 // STRICT-DAG: remark: affine GEMM replaced by its exact guarded MAC nest
-// STRICT-NOT: systolic.matmul_tile
-// STRICT-LABEL: func.func @may_alias(
+// STRICTIR-LABEL: func.func @gemm16(
+// STRICTIR-NOT:   systolic.matmul_tile
+// STRICTIR:       scf.if
+// STRICTIR-LABEL: func.func @stretch(
+// STRICTIR-NOT:   systolic.matmul_tile
+// STRICTIR:       scf.if
 //
 // RUNTIME-LABEL: llvm.func @gemm16(
 // RUNTIME-COUNT-10: llvm.call @fpga_matmul_tiled_auto_scheduled
 // RUNTIME-LABEL: llvm.func @siblings(
+// RUNTIME: llvm.call @fpga_matmul_tiled_auto_scheduled
+// RUNTIME-LABEL: llvm.func @stretch(
 // RUNTIME: llvm.call @fpga_matmul_tiled_auto_scheduled
 module {
   // 16 x 16 x 16: ten invocations over the 1x8x8 + 3x4x4 fleet, the plan of
@@ -73,7 +96,8 @@ module {
   }
 
   // Two nests in one function with memory operations before, between and
-  // after them: each is replaced in its own position, in order.
+  // after them: each nest is replaced in its own position, the surrounding
+  // operations stay where they are, in their order.
   // CERTIFIED-LABEL: func.func @siblings(
   // CERTIFIED:        memref.store %cst, %arg0[%c0, %c0]
   // CERTIFIED:        systolic.matmul_tile
@@ -134,12 +158,16 @@ module {
     func.return
   }
 
-  // A triangular domain: not a box, UNKNOWN for the device jobs (and not
-  // centrally symmetric for the fast path); the exact guarded MAC nest of
-  // Phase 3b-5 takes it (its statement is strict).
+  // A triangular output domain (every reduction fiber complete): not a box
+  // and not centrally symmetric for the fast path; since Phase 3b-7 the
+  // certified lowering runs the dense GEMM of the box into a zero temporary
+  // and adds the selected elements into C under the exact output mask
+  // (section 28).
   // CERTIFIED-LABEL: func.func @triangular(
-  // CERTIFIED-NOT:    systolic.matmul_tile
+  // CERTIFIED:        memref.alloc() : memref<4x4xf32>
+  // CERTIFIED:        systolic.matmul_tile {{.*}} m = 4 n = 4 k = 4
   // CERTIFIED:        scf.if
+  // CERTIFIED:          affine.store {{.*}}, %arg0
   // CERTIFIED:        return
   func.func @triangular(%C: memref<4x4xf32> {llvm.noalias}, %A: memref<4x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}) {
     affine.for %i = 0 to 4 { affine.for %j = affine_map<(d0) -> (d0)>(%i) to 4 { affine.for %k = 0 to 4 {
@@ -149,24 +177,6 @@ module {
       %p = arith.mulf %a, %b : f32
       %s = arith.addf %c, %p : f32
       affine.store %s, %C[%i, %j] : memref<4x4xf32>
-    } } }
-    func.return
-  }
-
-  // A non-unimodular map (C[2i+j][j], det 2): UNKNOWN for the device jobs in
-  // this phase; the fast path lowers it through its general view.
-  // CERTIFIED-LABEL: func.func @stretch(
-  // CERTIFIED-NOT:    scf.if
-  // CERTIFIED:        systolic.matmul_tile
-  // CERTIFIED:        return
-  func.func @stretch(%C: memref<16x4xf32> {llvm.noalias}, %A: memref<16x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}) {
-    affine.for %i = 0 to 4 { affine.for %j = 0 to 4 { affine.for %k = 0 to 4 {
-      %c = affine.load %C[2 * %i + %j, %j] : memref<16x4xf32>
-      %a = affine.load %A[2 * %i + %j, %k] : memref<16x4xf32>
-      %b = affine.load %B[%k, %j] : memref<4x4xf32>
-      %p = arith.mulf %a, %b : f32
-      %s = arith.addf %c, %p : f32
-      affine.store %s, %C[2 * %i + %j, %j] : memref<16x4xf32>
     } } }
     func.return
   }
@@ -184,6 +194,36 @@ module {
       %p = arith.mulf %a, %b : f32
       %s = arith.addf %c, %p : f32
       affine.store %s, %C[%i, %j] : memref<4x4xf32>
+    } } }
+    func.return
+  }
+}
+
+// -----
+
+// A non-unimodular map (C[2i+j][j], det 2): UNKNOWN for the certified
+// device jobs in this phase (the remark above names the reason), and the
+// fast path keeps its established lowering through its general view
+// (section 19.11): a batch loop over i with 4 x 1 x 4 tiles, no exact
+// guard, no temporary. The lowering that took the nest is verified by the
+// remark of the fast path and by the shape of its IR.
+// CERTIFIED-LABEL: func.func @stretch(
+// CERTIFIED-NOT:    scf.if
+// CERTIFIED-NOT:    memref.alloc
+// CERTIFIED:        affine.for
+// CERTIFIED:        systolic.matmul_tile {{.*}} m = 4 n = 1 k = 4
+// CERTIFIED-NOT:    scf.if
+// CERTIFIED-NOT:    memref.alloc
+// CERTIFIED:        return
+module {
+  func.func @stretch(%C: memref<16x4xf32> {llvm.noalias}, %A: memref<16x4xf32> {llvm.noalias}, %B: memref<4x4xf32> {llvm.noalias}) {
+    affine.for %i = 0 to 4 { affine.for %j = 0 to 4 { affine.for %k = 0 to 4 {
+      %c = affine.load %C[2 * %i + %j, %j] : memref<16x4xf32>
+      %a = affine.load %A[2 * %i + %j, %k] : memref<16x4xf32>
+      %b = affine.load %B[%k, %j] : memref<4x4xf32>
+      %p = arith.mulf %a, %b : f32
+      %s = arith.addf %c, %p : f32
+      affine.store %s, %C[2 * %i + %j, %j] : memref<16x4xf32>
     } } }
     func.return
   }
