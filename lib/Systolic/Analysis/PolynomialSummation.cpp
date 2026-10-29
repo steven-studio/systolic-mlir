@@ -20,11 +20,15 @@ Integer residue(const Integer &value, const Integer &modulus) {
   return result;
 }
 
+} // namespace
+
 // A sound enclosure on ALL integer t in [0,last]. C(t,k) is nonnegative
 // and nondecreasing there. No sampling or floating-point roots are involved.
-std::pair<Rational, Rational> range(const Polynomial &p, const Integer &last) {
+std::pair<Rational, Rational> Polynomial::bounds(const Integer &last) const {
+  if (last < 0)
+    throw std::invalid_argument("negative polynomial range horizon");
   Rational lower(0), upper(0);
-  const auto &a = p.coefficients();
+  const auto &a = coefficients();
   if (!a.empty())
     lower = upper = a[0];
   for (unsigned k = 1; k < a.size(); ++k) {
@@ -36,7 +40,6 @@ std::pair<Rational, Rational> range(const Polynomial &p, const Integer &last) {
   }
   return {lower, upper};
 }
-} // namespace
 
 Integer binomial(const Integer &n, unsigned k) {
   if (k > MaxDegree)
@@ -396,7 +399,7 @@ AnalysisResult analyze(const std::vector<Recurrence> &system,
     auto checkRange = [&](const Polynomial &p, const Integer &last) {
       if (!isSigned)
         return;
-      auto bounds = range(p, last);
+      auto bounds = p.bounds(last);
       rangesProven &= fitsSigned(bounds.first) && fitsSigned(bounds.second);
     };
     while (result.integerLifts.size() < system.size()) {

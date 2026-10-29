@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace systolic::polynomial {
@@ -42,6 +43,9 @@ public:
   bool isIntegerValued() const;
   Rational evaluate(const Integer &t) const;
   std::vector<Rational> toMonomial() const;
+  // Sound enclosure for every integer iteration in [0,last], last >= 0.
+  // Exposed for IR clients that must also check non-state intermediates.
+  std::pair<Rational, Rational> bounds(const Integer &last) const;
 
   Polynomial operator+(const Polynomial &other) const;
   Polynomial operator-(const Polynomial &other) const;
