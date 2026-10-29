@@ -23,6 +23,14 @@ void mock_ftdi_fail_at_call(long n);         /* the n-th write call (from 1) fai
 void mock_ftdi_zero_at_call(long n);         /* the n-th write call returns 0; 0: never */
 void mock_ftdi_fail_at_size(int size, long nth); /* the nth write call asking for exactly `size` bytes fails; 0: never */
 void mock_ftdi_fail_at_byte(long n);        /* the write call that would carry accepted byte n (from 1) fails, accepting nothing; 0: never */
+/* Phase T3: the read side. read_max caps the bytes one ftdi_read_data()
+ * returns (0: as many as fit), to fragment the completion stream whatever
+ * the runtime asks for; fail_read_at fails the n-th read call (from 1) as a
+ * broken link would. read_calls / read_empty observe the reads. */
+void mock_ftdi_set_read_max_per_call(int bytes);
+void mock_ftdi_fail_read_at_call(long n);
+long mock_ftdi_read_calls(void);
+long mock_ftdi_read_empty(void);
 long mock_ftdi_call_start(long i);           /* accepted bytes before call i (from 0): its position in the stream */
 void mock_ftdi_set_responder(int on);        /* answer submits with records (default on) */
 

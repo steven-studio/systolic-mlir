@@ -354,6 +354,12 @@ struct ScheduledRuntime {
      * T1: 16 per invocation, 3 with descriptor coalescing). Reset with the
      * stats. */
     unsigned long long    write_calls = 0;
+
+    /* Transport reads of the invocations (Phase T3 instrumentation:
+     * dpti_ftdi_read_stats), and those that made a USB transfer. Reset with
+     * the stats. */
+    unsigned long long    read_calls = 0;
+    unsigned long long    read_usb = 0;
 };
 
 /*
@@ -742,6 +748,9 @@ int fpga_matmul_tiled_auto_scheduled(
         rt.session ? dpti_ftdi_bytes_read(rt.session) : 0;
     const unsigned long long calls_before =
         rt.session ? dpti_ftdi_write_calls(rt.session) : 0;
+    dpti_ftdi_read_stats_t reads_before{};
+    if (rt.session)
+        dpti_ftdi_read_stats(rt.session, &reads_before);
 
     const int rc =
         scheduled_invocation(
@@ -755,6 +764,10 @@ int fpga_matmul_tiled_auto_scheduled(
             dpti_ftdi_bytes_read(rt.session) - read_before;
         rt.write_calls +=
             dpti_ftdi_write_calls(rt.session) - calls_before;
+        dpti_ftdi_read_stats_t reads_after{};
+        dpti_ftdi_read_stats(rt.session, &reads_after);
+        rt.read_calls += reads_after.calls - reads_before.calls;
+        rt.read_usb   += reads_after.usb - reads_before.usb;
     }
 
     if (rc != 0) {
@@ -793,6 +806,8 @@ void fpga_runtime_reset_stats(void) {
     runtime_state().stats = fpga_runtime_stats_t{};
     runtime_state().invocation_us.clear();
     runtime_state().write_calls = 0;
+    runtime_state().read_calls = 0;
+    runtime_state().read_usb = 0;
 }
 
 namespace {
@@ -828,7 +843,7 @@ void report_timing(ScheduledRuntime &rt) {
         "median_us=%llu p95_us=%llu max_us=%llu mem_write_us=%llu "
         "settle_us=%llu submit_us=%llu read_us=%llu settle_cfg_us=%u "
         "bytes_to_fpga=%llu bytes_from_fpga=%llu write_calls=%llu coalesce=%d "
-        "coalesce_mem=%d\n",
+        "coalesce_mem=%d read_calls=%llu read_usb=%llu\n",
         s.invocations,
         s.ns_total / 1000,
         s.ns_min / 1000,
@@ -844,7 +859,9 @@ void report_timing(ScheduledRuntime &rt) {
         s.bytes_from_fpga,
         rt.write_calls,
         rt.session ? dpti_ftdi_descriptor_coalescing(rt.session) : 0,
-        rt.session ? dpti_ftdi_mem_write_coalescing(rt.session) : 0);
+        rt.session ? dpti_ftdi_mem_write_coalescing(rt.session) : 0,
+        rt.read_calls,
+        rt.read_usb);
 }
 
 } // namespace

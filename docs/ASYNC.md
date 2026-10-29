@@ -750,6 +750,36 @@ PE 層的重疊因此只在 `eval/pipeline_overlap/run.sh`（internal job port�
   timing line 多了 `coalesce_mem=`。測試：`dpti-coalesce-test` 的 T2 情境（長度 16 B 到協定上限
   1,048,064 B、邊界長度、位址編碼、部分寫入、0-byte write、部分接受後失敗、連續多筆、與 descriptor
   交錯、四種組合下的同步／非同步 runtime）。
+
+### 13. Completion read：依 record 大小讀取（Phase T3，2026-10-29）
+
+- **問題。** T1／T2 把 host→FPGA 的 write 呼叫數從每筆 invocation 16 降到 2；剩下的瓶頸在
+  FPGA→host 的 completion read。非同步 runtime 的 transfer thread 原本每次 `dpti_ftdi_read_some_session`
+  都要整個 receive buffer（room，預設 64 KiB）；libftdi 為了湊滿這個要求會持續發 USB bulk IN，
+  直到有一個空包回來——在 FT2232H 上那是一個 latency-timer 週期（`SYSTOLIC_DPTI_LATENCY_MS`），
+  這段時間 thread 什麼都沒寫。板上量到：T1+T2、1 ms timer、64³ k≤i（451 invocation／呼叫）每次
+  呼叫 link_read ≈ 199 ms（整體 ≈ 99 ms／呼叫）。
+- **開關。** `SYSTOLIC_ASYNC_SIZED_READS=1`（session 開啟時讀，預設關閉，與 T1／T2 的開關獨立；
+  只影響非同步 runtime，同步 runtime 本來就按已知長度 `read_exact`）：transfer thread 改成只要
+  正在組裝的 completion record 還缺的 byte 數——它的 16 byte header，或接著的 payload——而不是整個
+  buffer。libftdi 一湊滿就回，USB 包剩下的留給下一次呼叫；問到的 byte 數到了就不會再等一個空包。
+- **位元組流不變。** 送出去的 byte、順序、record 都一樣，`parse_rx` 看到的是同一條 stream，只是被
+  切成不同的 read 呼叫。四種 T1／T2 組合下，開與不開都算出相同的 C（板上逐位元驗證、mock 與 co-sim
+  都比對過）。
+- **失敗處理。** read 失敗（`dpti_ftdi_read_some_session` 回 -3）照舊 `fail_link(-7)`：鏈路標成失敗、
+  在飛與排隊的 tile 全部失敗、每個 submit 過的 tile 剛好算一次（completed 或 failed，不重不漏）、
+  close 後新 session 正常。timing line 多了 `sized_reads=`、`read_calls=`、`read_usb=`（transport
+  read 次數，及其中真的發了 USB transfer 的次數）。
+- **效果（板上，1 ms timer，T1+T2 之上）。** 每次呼叫 link_read ≈ 199 ms → ≈ 36 ms（−82 %），
+  端到端 ≈ 99 ms → ≈ 54 ms（−45 %）。timer 愈大省得愈多（2 ms：195→83 ms；16 ms：1129→605 ms），
+  因為省掉的正是空讀的 timer 等待。read_usb 幾乎不變（≈ 148），多出來的 read 呼叫大多由 libftdi 已
+  收的 buffer 直接供應。T3 只動 read，與 T1／T2 疊加；單開 T3（無 T1／T2）只省 read（link_read
+  227→46 ms），write 仍是瓶頸。
+- **測試。** `dpti-coalesce-test` 的 T3 情境：四種 T1／T2 組合下 blocked 與 sized read 各自完成 64
+  tile、C 不變、結果 byte 數相同；transport 每次只回 1／7／9／16／17／80／272／4096 byte（header 跨讀、
+  payload 跨讀、一次多筆 record、中間空讀）仍正確；read 中途失敗兩條路都 fail-closed、每個 tile 算
+  一次、close 後復原。co-sim：三種組合（baseline／T1+T2／T1+T2+T3）＋單開 T3 的 async quick 全 26／26，
+  modef／negoffset regression 不變。
 - **故障注入與合併（T2 gate，2026-10-29）。** 既有的檢查以 write **呼叫**的編號注入故障
   （run_e2e 第 3 步與 mode F 的 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`、cosim regressions 的 negoffset
   write 3／40），都以預設的逐封包組合為準、原樣保留：開啟合併後第 n 次呼叫是別的命令（T1 下第 7 次是

@@ -150,6 +150,7 @@ struct Settings {
     uint32_t   poll_max_us = 1000;            // SYSTOLIC_ASYNC_POLL_MAX_US
     bool       trace = false;
     bool       timing = false;
+    bool       sized_reads = false;           // SYSTOLIC_ASYNC_SIZED_READS (Phase T3)
 };
 
 bool env_flag(const char *name) {
@@ -185,6 +186,7 @@ Settings read_settings() {
     s.violate       = env_flag("SYSTOLIC_ASYNC_VIOLATE");
     s.trace         = env_flag("SYSTOLIC_RUNTIME_TRACE");
     s.timing        = env_flag("SYSTOLIC_RUNTIME_TIMING");
+    s.sized_reads   = env_flag("SYSTOLIC_ASYNC_SIZED_READS");
     if (const char *p = std::getenv("SYSTOLIC_ASYNC_READ_POLICY")) {
         if (!std::strcmp(p, "always"))       s.policy = ReadPolicy::Always;
         else if (!std::strcmp(p, "wait"))    s.policy = ReadPolicy::Wait;
@@ -272,6 +274,10 @@ struct Runtime {
     unsigned long long    write_calls = 0, write_calls_base = 0;
     bool                  coalesce = false;
     bool                  coalesce_mem = false;   // Phase T2
+    // Phase T3: the transport's reads of the session (dpti_ftdi_read_stats),
+    // accumulated like the write calls.
+    dpti_ftdi_read_stats_t read_base{};
+    unsigned long long    read_calls = 0, read_usb = 0;
 
     std::vector<std::unique_ptr<Gemm>> gemms;  // open GEMMs
 
@@ -426,6 +432,11 @@ void account_bytes(Runtime &r) {
     const unsigned long long c = dpti_ftdi_write_calls(r.session);
     r.write_calls += c - r.write_calls_base;
     r.write_calls_base = c;
+    dpti_ftdi_read_stats_t rs{};
+    dpti_ftdi_read_stats(r.session, &rs);
+    r.read_calls += rs.calls - r.read_base.calls;
+    r.read_usb   += rs.usb - r.read_base.usb;
+    r.read_base = rs;
 }
 
 /* ---- per-tile state, as fpga_gemm_poll / fpga_tile_poll see it ---------- */
@@ -987,9 +998,27 @@ bool read_step(Runtime &r, std::unique_lock<std::mutex> &lk) {
     unsigned char *at = r.rx.data() + r.rx_len;
     const uint32_t room = static_cast<uint32_t>(r.rx.size() - r.rx_len);
 
+    // Phase T3 (SYSTOLIC_ASYNC_SIZED_READS): ask for what the record being
+    // assembled still needs -- the rest of its 16-byte header, or of its
+    // payload -- instead of for the whole buffer. libftdi returns as soon as
+    // that many bytes are in and keeps the rest of the USB packet for the
+    // next call; asked for more than is pending it keeps issuing bulk
+    // transfers until one comes back empty, which on the FT2232H is a
+    // latency-timer period (SYSTOLIC_DPTI_LATENCY_MS) during which this
+    // thread writes nothing. The bytes and their order are the same either
+    // way: parse_rx sees one stream, cut differently.
+    uint32_t want = room;
+    if (r.set.sized_reads) {
+        const size_t need = r.rx_in_payload ? r.rx_payload_bytes : FPGA_COMPLETION_BYTES;
+        want = need > r.rx_len ? static_cast<uint32_t>(need - r.rx_len)
+                               : static_cast<uint32_t>(FPGA_COMPLETION_BYTES);
+        if (want > room)
+            want = room;
+    }
+
     lk.unlock();
     const clock_t_::time_point t0 = clock_t_::now();
-    const int n = dpti_ftdi_read_some_session(session, at, room);
+    const int n = dpti_ftdi_read_some_session(session, at, want);
     const clock_t_::time_point t1 = clock_t_::now();
     lk.lock();
 
@@ -1122,6 +1151,7 @@ bool open_session(Runtime &r) {
     r.write_calls_base = dpti_ftdi_write_calls(r.session);
     r.coalesce = dpti_ftdi_descriptor_coalescing(r.session) != 0;
     r.coalesce_mem = dpti_ftdi_mem_write_coalescing(r.session) != 0;
+    dpti_ftdi_read_stats(r.session, &r.read_base);
     r.last_activity = clock_t_::now();
     r.t_last_submit = r.last_activity;
     r.seen_completion = false;
@@ -1134,9 +1164,9 @@ bool open_session(Runtime &r) {
         r.dev[d].credit_blocked = false;
         r.dev[d].last_freed_job = 0;
     }
-    trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s, transfer thread",
+    trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s, sized_reads=%d, transfer thread",
           r.epoch, r.depth, r.depth_source, r.set.stage ? 1 : 0, r.set.burst ? 1 : 0,
-          r.set.queue_limit, policy_name(r.set.policy));
+          r.set.queue_limit, policy_name(r.set.policy), r.set.sized_reads ? 1 : 0);
     start_worker(r);
     return true;
 }
@@ -1182,7 +1212,8 @@ void report_timing(Runtime &r) {
                  "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
                  "submits_blocked=%llu blocked_us=%llu "
                  "link_write_us=%llu link_read_us=%llu collect_us=%llu polls=%llu "
-                 "waits_timed_out=%llu write_calls=%llu coalesce=%d coalesce_mem=%d\n",
+                 "waits_timed_out=%llu write_calls=%llu coalesce=%d coalesce_mem=%d "
+                 "sized_reads=%d read_calls=%llu read_usb=%llu\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -1198,7 +1229,8 @@ void report_timing(Runtime &r) {
                  s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000,
                  s.ns_link_write / 1000, s.ns_link_read / 1000, s.ns_collect / 1000,
                  s.polls, s.waits_timed_out, r.write_calls, r.coalesce ? 1 : 0,
-                 r.coalesce_mem ? 1 : 0);
+                 r.coalesce_mem ? 1 : 0, r.set.sized_reads ? 1 : 0, r.read_calls,
+                 r.read_usb);
 }
 
 /* Everything of the session, after the transfer thread has stopped. */
@@ -1592,6 +1624,8 @@ void fpga_async_runtime_reset_stats(void) {
     r.stats = fpga_async_stats_t{};
     r.span_started = false;
     r.write_calls = 0;
+    r.read_calls = 0;
+    r.read_usb = 0;
 }
 
 void fpga_async_runtime_close(void) {

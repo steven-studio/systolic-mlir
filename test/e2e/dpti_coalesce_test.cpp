@@ -481,10 +481,12 @@ struct AsyncRun {
   bool per_device_ascending = true;
   long first_descriptor_call = -1; // 1-based
   bool c_unchanged = true;
+  long read_calls = 0, read_empty = 0; // Phase T3: the mock's read calls
 };
 
 AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
-                   bool fail_first_mem_write = false, long fail_byte = 0) {
+                   bool fail_first_mem_write = false, long fail_byte = 0,
+                   bool sized = false, int read_max = 0, long fail_read = 0) {
   AsyncRun r;
   mock_ftdi_reset();
   if (fail_first_descriptor)
@@ -493,8 +495,16 @@ AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
     mock_ftdi_fail_at_size(static_cast<int>(DPTI_MEM_WRITE_HEADER_BYTES) + 1024, 1);
   if (fail_byte > 0)
     mock_ftdi_fail_at_byte(fail_byte);
+  if (read_max > 0)
+    mock_ftdi_set_read_max_per_call(read_max);
+  if (fail_read > 0)
+    mock_ftdi_fail_read_at_call(fail_read);
   set_coalesce(coalesce);
   set_coalesce_mem(mem);
+  if (sized)
+    setenv("SYSTOLIC_ASYNC_SIZED_READS", "1", 1);
+  else
+    unsetenv("SYSTOLIC_ASYNC_SIZED_READS");
   fpga_async_runtime_reset_stats();
   std::vector<float> A(64 * 16), B(16 * 64), C(64 * 64), C0;
   fill(A, 4);
@@ -522,6 +532,8 @@ AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
   r.stream = stream();
   r.calls = mock_ftdi_call_count();
   r.submits = mock_ftdi_submit_count();
+  r.read_calls = mock_ftdi_read_calls();
+  r.read_empty = mock_ftdi_read_empty();
   r.c_unchanged = C == C0;
   unsigned last[4] = {0, 0, 0, 0};
   for (long i = 0; i < r.submits; ++i) {
@@ -1075,6 +1087,105 @@ void scenario_fault_by_position() {
   set_coalesce_mem(false);
 }
 
+// ---- Phase T3: sized completion reads -------------------------------------
+//
+// SYSTOLIC_ASYNC_SIZED_READS makes the async runtime's transfer thread ask
+// the transport for exactly the bytes of the completion record it is
+// assembling (its 16-byte header, then its payload) instead of for the
+// whole receive buffer. The bytes on the wire, their order and the records
+// parse_rx builds are unchanged; only how the host cuts the stream into
+// read calls differs. These scenarios prove, against the mock, that the two
+// read paths are observably identical -- the same completions, the same
+// per-device order, the same result bytes and credit accounting -- however
+// the transport fragments the stream, and that a read failure fails closed
+// the same way under both.
+
+bool async_all_ok(const AsyncRun &r) {
+  return r.rc == 0 && r.st.tiles_completed == 64 && r.st.tiles_failed == 0 &&
+         r.c_unchanged && r.submits == 64 && r.per_device_ascending &&
+         r.st.descriptors == 64 && r.st.mem_writes == 64 &&
+         r.st.bytes_from_fpga == 16ull * 272 + 48ull * 80;
+}
+
+void scenario_t3_equivalence() {
+  // Each T1/T2 combination, read side blocked (off) then sized (on): both
+  // complete all 64 tiles identically.
+  const bool combos[4][2] = {{false, false}, {true, false}, {false, true}, {true, true}};
+  for (int i = 0; i < 4; ++i) {
+    const bool t1 = combos[i][0], t2 = combos[i][1];
+    AsyncRun off = run_async(t1, false, t2, false, 0, false);
+    fpga_async_runtime_close();
+    AsyncRun on = run_async(t1, false, t2, false, 0, true);
+    fpga_async_runtime_close();
+    char what[240];
+    std::snprintf(what, sizeof what,
+                  "T3 async (T1 %s T2 %s): blocked and sized reads each complete 64 tiles, C untouched, "
+                  "64 submits in per-device order, %llu result bytes",
+                  t1 ? "on" : "off", t2 ? "on" : "off", on.st.bytes_from_fpga);
+    check(async_all_ok(off) && async_all_ok(on), what);
+  }
+  // Sized reads make one read per record header and one per payload, so
+  // more read calls than the blocked path -- the same 64 completions.
+  AsyncRun off = run_async(true, false, true, false, 0, false);
+  fpga_async_runtime_close();
+  AsyncRun on = run_async(true, false, true, false, 0, true);
+  fpga_async_runtime_close();
+  char what[240];
+  std::snprintf(what, sizeof what,
+                "T3 async: sized reads ask per record (%ld read calls vs %ld blocked), same 64 completions, same result bytes",
+                on.read_calls, off.read_calls);
+  check(on.read_calls >= off.read_calls && on.st.tiles_completed == 64 &&
+            off.st.tiles_completed == 64 && on.st.bytes_from_fpga == off.st.bytes_from_fpga,
+        what);
+}
+
+void scenario_t3_fragmented_reads() {
+  // The transport returns at most `cap` bytes per read, whatever the runtime
+  // asked for: a header split across reads (cap < 16), a payload split (cap
+  // between a header and a tile), several records in one read (cap large),
+  // with empty reads in between. Every cap, blocked and sized, completes all
+  // 64 tiles with C untouched and the same result bytes.
+  const int caps[] = {1, 7, 9, 16, 17, 80, 272, 4096};
+  for (int cap : caps)
+    for (int s = 0; s < 2; ++s) {
+      const bool sized = s == 1;
+      AsyncRun r = run_async(true, false, true, false, 0, sized, cap);
+      fpga_async_runtime_close();
+      char what[240];
+      std::snprintf(what, sizeof what,
+                    "T3 async %s reads, transport <= %d B per read: 64 tiles complete, C untouched, "
+                    "%llu result bytes (%ld read calls, %ld empty)",
+                    sized ? "sized" : "blocked", cap, r.st.bytes_from_fpga, r.read_calls, r.read_empty);
+      check(async_all_ok(r), what);
+    }
+}
+
+void scenario_t3_read_failure() {
+  // A read that fails mid-stream (the 3rd read call), blocked and sized: the
+  // link fails closed, every submitted tile is accounted exactly once
+  // (completed or failed, none twice, none lost), nothing read after the
+  // failure is counted as a result, and a new session after close runs all
+  // 64 again.
+  for (int s = 0; s < 2; ++s) {
+    const bool sized = s == 1;
+    AsyncRun f = run_async(true, false, true, false, 0, sized, 0, /*fail_read=*/3);
+    char what[260];
+    std::snprintf(what, sizeof what,
+                  "T3 async %s reads: a failed read fails the GEMM (rc %d), %llu completed + %llu failed == %llu submitted (each tile once), C untouched",
+                  sized ? "sized" : "blocked", f.rc, f.st.tiles_completed, f.st.tiles_failed,
+                  f.st.tiles_submitted);
+    check(f.rc != 0 && f.st.tiles_submitted == 64 &&
+              f.st.tiles_completed + f.st.tiles_failed == f.st.tiles_submitted && f.c_unchanged,
+          what);
+    fpga_async_runtime_close();
+    AsyncRun again = run_async(true, false, true, false, 0, sized);
+    check(again.rc == 0 && again.st.tiles_completed == 64 && again.submits == 64,
+          sized ? "T3 async sized reads: a new session after a read failure runs 64 tiles again"
+                : "T3 async blocked reads: a new session after a read failure runs 64 tiles again");
+    fpga_async_runtime_close();
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1110,6 +1221,9 @@ int main(int argc, char **argv) {
     scenario_t2_runtimes();
     scenario_t2_async(false);
     scenario_fault_by_position();
+    scenario_t3_equivalence();
+    scenario_t3_fragmented_reads();
+    scenario_t3_read_failure();
   }
   unlink(cfg.c_str());
   std::printf("%s: %d failure(s)\n", g_failures ? "DPTI COALESCE: FAIL" : "DPTI COALESCE: PASS", g_failures);

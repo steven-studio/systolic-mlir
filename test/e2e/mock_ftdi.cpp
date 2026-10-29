@@ -40,6 +40,9 @@ struct Mock {
   int fail_size = 0;
   long fail_size_nth = 0, size_hits = 0;
   long fail_byte = 0;
+  int read_max = 0;            // Phase T3: cap bytes per ftdi_read_data (0: no cap)
+  long fail_read_at = 0;       // Phase T3: the n-th read call fails (0: never)
+  long read_calls = 0, read_empty = 0;
   bool responder = true;
   std::string error;
 
@@ -158,6 +161,10 @@ void mock_ftdi_fail_at_size(int size, long nth) {
   g.size_hits = 0;
 }
 void mock_ftdi_fail_at_byte(long n) { g.fail_byte = n; }
+void mock_ftdi_set_read_max_per_call(int bytes) { g.read_max = bytes; }
+void mock_ftdi_fail_read_at_call(long n) { g.fail_read_at = n; }
+long mock_ftdi_read_calls(void) { return g.read_calls; }
+long mock_ftdi_read_empty(void) { return g.read_empty; }
 long mock_ftdi_call_start(long i) {
   return (i >= 0 && i < static_cast<long>(g.calls.size())) ? g.calls[static_cast<size_t>(i)].start : -1;
 }
@@ -283,14 +290,25 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf, int siz
   g.calls.push_back({size, n, start});
   return n;
 }
-int ftdi_read_data(struct ftdi_context *, unsigned char *buf, int size) {
+int ftdi_read_data(struct ftdi_context *ftdi, unsigned char *buf, int size) {
   if (!g.open)
     return -666;
+  ++g.read_calls;
+  if (g.fail_read_at > 0 && g.read_calls == g.fail_read_at) {
+    g.error = "mock: injected read failure";
+    if (ftdi) ftdi->error_str = g.error.c_str();
+    return -1;
+  }
+  int cap = size;
+  if (g.read_max > 0 && cap > g.read_max)
+    cap = g.read_max;
   int n = 0;
-  while (n < size && !g.rx.empty()) {
+  while (n < cap && !g.rx.empty()) {
     buf[n++] = g.rx.front();
     g.rx.pop_front();
   }
+  if (n == 0)
+    ++g.read_empty;
   return n;
 }
 const char *ftdi_get_error_string(struct ftdi_context *ftdi) {

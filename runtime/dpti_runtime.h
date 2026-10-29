@@ -193,6 +193,25 @@ unsigned long long dpti_ftdi_write_calls(
 unsigned long long dpti_ftdi_bytes_read(
     const DptiFtdiSession *session);
 
+/*
+ * Phase T3 (2026-10-29) instrumentation: the transport's reads on this
+ * session so far. calls counts the ftdi_read_data() calls (failed ones
+ * included), empty those that returned no byte, usb those libftdi could not
+ * serve whole from the bytes it already held -- each made at least one USB
+ * bulk transfer and, on the FT2232H, waited for data or for the latency
+ * timer -- and ns the time inside all of them.
+ */
+typedef struct {
+    unsigned long long calls;
+    unsigned long long empty;
+    unsigned long long usb;
+    unsigned long long ns;
+} dpti_ftdi_read_stats_t;
+
+void dpti_ftdi_read_stats(
+    const DptiFtdiSession *session,
+    dpti_ftdi_read_stats_t *out);
+
 #ifdef __cplusplus
 }
 #endif

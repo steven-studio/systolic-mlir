@@ -142,6 +142,18 @@ extern "C" {
  *                                default off; independent of the
  *                                descriptor knob; the timing line reports
  *                                coalesce_mem=
+ *   SYSTOLIC_ASYNC_SIZED_READS=1 Phase T3: the transfer thread's reads ask
+ *                                for what the completion record being
+ *                                assembled still needs (its header, then its
+ *                                payload) instead of for the whole receive
+ *                                buffer, so libftdi returns as soon as those
+ *                                bytes are in instead of waiting for an
+ *                                empty USB packet (an FT2232H latency-timer
+ *                                period in which nothing is written). Same
+ *                                bytes, same order, same parser; default
+ *                                off. The timing line reports sized_reads=,
+ *                                read_calls= and read_usb= (transport
+ *                                reads, and those that made a USB transfer)
  *   SYSTOLIC_RUNTIME_TIMING=1    a "[fpga-async] timing ..." line at close
  *   SYSTOLIC_RUNTIME_TRACE=1     one line per link event
  */

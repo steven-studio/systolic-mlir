@@ -47,6 +47,12 @@ struct FtdiTransportState {
     // once).
     bool coalesce_mem = false;
     std::vector<unsigned char> mem_buf;
+
+    // Phase T3 instrumentation (dpti_runtime.h): the transport's reads.
+    unsigned long long read_calls = 0;
+    unsigned long long read_empty = 0;
+    unsigned long long read_usb = 0;
+    unsigned long long read_ns = 0;
 };
 
 /*
@@ -63,6 +69,46 @@ static bool dpti_trace()
     }
 
     return enabled == 1;
+}
+
+/*
+ * One ftdi_read_data(), counted and timed (Phase T3 instrumentation).
+ * libftdi serves the call whole from the bytes it already holds when it can
+ * (readbuffer_remaining >= size) and then makes no USB transfer; otherwise
+ * it issues bulk transfers until size bytes are in or one comes back with
+ * no data -- on the FT2232H, the latency timer expiring with nothing
+ * pending. Returns what ftdi_read_data() returns.
+ */
+static int transport_read(
+    FtdiTransportState *state,
+    unsigned char *buf,
+    int size)
+{
+    struct ftdi_context *ftdi = state->ftdi;
+    const bool buffered =
+        ftdi->readbuffer_remaining >= static_cast<unsigned>(size);
+    const auto t0 = std::chrono::steady_clock::now();
+    const int rc = ftdi_read_data(ftdi, buf, size);
+    const auto t1 = std::chrono::steady_clock::now();
+    const unsigned long long ns = static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+
+    state->read_calls++;
+    if (!buffered)
+        state->read_usb++;
+    if (rc == 0)
+        state->read_empty++;
+    state->read_ns += ns;
+
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] read %d of %d byte(s) in %llu us%s\n",
+            rc,
+            size,
+            ns / 1000,
+            buffered ? " (from libftdi's buffer)" : "");
+    return rc;
 }
 
 static int write_all(
@@ -617,8 +663,8 @@ extern "C" int dpti_ftdi_read_exact_session(
 
     while (off < length) {
         const int rc =
-            ftdi_read_data(
-                session->transport.ftdi,
+            transport_read(
+                &session->transport,
                 out + off,
                 static_cast<int>(length - off));
 
@@ -654,8 +700,8 @@ extern "C" int dpti_ftdi_read_exact_session(
 
             while (off < length &&
                    std::chrono::steady_clock::now() < tail_deadline) {
-                const int tail_rc = ftdi_read_data(
-                    session->transport.ftdi,
+                const int tail_rc = transport_read(
+                    &session->transport,
                     out + off,
                     static_cast<int>(length - off));
 
@@ -713,8 +759,8 @@ extern "C" int dpti_ftdi_read_some_session(
         return -2;
 
     const int rc =
-        ftdi_read_data(
-            session->transport.ftdi,
+        transport_read(
+            &session->transport,
             static_cast<unsigned char *>(data),
             static_cast<int>(max_length));
 
@@ -730,13 +776,22 @@ extern "C" int dpti_ftdi_read_some_session(
     session->transport.bytes_read +=
         static_cast<unsigned long long>(rc);
 
-    if (rc > 0 && dpti_trace())
-        std::fprintf(
-            stderr,
-            "[DPTI FTDI] read %d byte(s)\n",
-            rc);
-
     return rc;
+}
+
+extern "C" void dpti_ftdi_read_stats(
+    const DptiFtdiSession *session,
+    dpti_ftdi_read_stats_t *out)
+{
+    if (!out)
+        return;
+    *out = dpti_ftdi_read_stats_t{};
+    if (!session)
+        return;
+    out->calls = session->transport.read_calls;
+    out->empty = session->transport.read_empty;
+    out->usb   = session->transport.read_usb;
+    out->ns    = session->transport.read_ns;
 }
 
 extern "C" void dpti_ftdi_close(
