@@ -135,6 +135,13 @@ extern "C" {
  *                                order, dpti_runtime.h); default off. The
  *                                timing line reports write_calls= and
  *                                coalesce=
+ *   SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1
+ *                                Phase T2: each MEM_WRITE's header and
+ *                                payload go out in one transport write
+ *                                instead of two (same bytes, same order);
+ *                                default off; independent of the
+ *                                descriptor knob; the timing line reports
+ *                                coalesce_mem=
  *   SYSTOLIC_RUNTIME_TIMING=1    a "[fpga-async] timing ..." line at close
  *   SYSTOLIC_RUNTIME_TRACE=1     one line per link event
  */

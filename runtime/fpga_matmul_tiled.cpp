@@ -827,7 +827,8 @@ void report_timing(ScheduledRuntime &rt) {
         "[fpga-runtime] timing invocations=%llu total_us=%llu min_us=%llu "
         "median_us=%llu p95_us=%llu max_us=%llu mem_write_us=%llu "
         "settle_us=%llu submit_us=%llu read_us=%llu settle_cfg_us=%u "
-        "bytes_to_fpga=%llu bytes_from_fpga=%llu write_calls=%llu coalesce=%d\n",
+        "bytes_to_fpga=%llu bytes_from_fpga=%llu write_calls=%llu coalesce=%d "
+        "coalesce_mem=%d\n",
         s.invocations,
         s.ns_total / 1000,
         s.ns_min / 1000,
@@ -842,7 +843,8 @@ void report_timing(ScheduledRuntime &rt) {
         s.bytes_to_fpga,
         s.bytes_from_fpga,
         rt.write_calls,
-        rt.session ? dpti_ftdi_descriptor_coalescing(rt.session) : 0);
+        rt.session ? dpti_ftdi_descriptor_coalescing(rt.session) : 0,
+        rt.session ? dpti_ftdi_mem_write_coalescing(rt.session) : 0);
 }
 
 } // namespace

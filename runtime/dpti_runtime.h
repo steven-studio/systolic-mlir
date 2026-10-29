@@ -105,6 +105,27 @@ int dpti_ftdi_submit_session(
 int dpti_ftdi_descriptor_coalescing(
     const DptiFtdiSession *session);
 
+/* Bytes of the MEM_WRITE header on the wire: opcode, address, length. */
+#define DPTI_MEM_WRITE_HEADER_BYTES 9u
+
+/*
+ * Phase T2 (2026-10-29), MEM_WRITE coalescing: with
+ * SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1 in the environment when the session
+ * is opened, dpti_ftdi_mem_write_session() hands the transport the 9-byte
+ * header and the payload as ONE buffer, H || P, in one write call instead
+ * of two. The bytes and their order are exactly the two-call path's; the
+ * FPGA's front end decodes the stream byte by byte (opcode, address,
+ * length, payload) and never sees a transport call boundary, so the
+ * command it parses is the same. Independent of the descriptor knob: the
+ * four combinations give the same byte stream. Off by default. A failed
+ * write is -4 when fewer than the header's bytes went out, -5 otherwise
+ * (the two-call path's codes); nothing is retried, the caller marks the
+ * link failed as before. The staging buffer is the session's, sized to the
+ * largest payload it has carried (the bitstream's fixed slab).
+ */
+int dpti_ftdi_mem_write_coalescing(
+    const DptiFtdiSession *session);
+
 /*
  * Stage one complete operand slab into FPGA DDR.
  *
@@ -163,7 +184,8 @@ unsigned long long dpti_ftdi_bytes_written(
 /*
  * Transport write calls (ftdi_write_data) made on this session so far,
  * failed ones included: 16 per invocation on the per-packet path (2 for
- * the MEM_WRITE, 14 for the descriptor), 3 with descriptor coalescing.
+ * the MEM_WRITE, 14 for the descriptor), 3 with descriptor coalescing, 15
+ * with MEM_WRITE coalescing alone, 2 with both.
  */
 unsigned long long dpti_ftdi_write_calls(
     const DptiFtdiSession *session);

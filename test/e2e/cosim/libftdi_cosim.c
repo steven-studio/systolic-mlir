@@ -35,6 +35,15 @@ static FILE *g_capture = NULL;
 static long g_fail_write_at = 0;
 static long g_writes = 0;
 
+/* SYSTOLIC_DPTI_COSIM_FAIL_BYTE=<n>: the ftdi_write_data() that would carry
+ * the n-th byte of the session (from 1) fails before accepting anything --
+ * the same fault as FAIL_WRITE, named by the position in the byte stream
+ * instead of by the write call, so it hits the same command whatever the
+ * host's call boundaries (Phase T1/T2 descriptor and MEM_WRITE coalescing
+ * change those, not the stream). */
+static long g_fail_byte_at = 0;
+static long g_bytes_sent = 0;
+
 /* SYSTOLIC_DPTI_COSIM_CORRUPT_READ=<n>: the n-th byte the session reads (from
  * 1) comes back with its low bit flipped -- a wrong result the link does not
  * report, to check that a test fails on it.
@@ -101,6 +110,9 @@ int ftdi_usb_open(struct ftdi_context *ftdi, int vendor, int product) {
       const char *fail_at = getenv("SYSTOLIC_DPTI_COSIM_FAIL_WRITE");
       g_fail_write_at = (faults && fail_at && *fail_at) ? strtol(fail_at, NULL, 10) : 0;
       g_writes = 0;
+      const char *fail_byte = getenv("SYSTOLIC_DPTI_COSIM_FAIL_BYTE");
+      g_fail_byte_at = (faults && fail_byte && *fail_byte) ? strtol(fail_byte, NULL, 10) : 0;
+      g_bytes_sent = 0;
       const char *corrupt_at = getenv("SYSTOLIC_DPTI_COSIM_CORRUPT_READ");
       g_corrupt_read_at =
           (faults && corrupt_at && *corrupt_at) ? strtol(corrupt_at, NULL, 10) : 0;
@@ -177,6 +189,13 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf,
             g_writes, size);
     return fail(ftdi, -1, "libftdi_cosim: injected write failure");
   }
+  if (g_fail_byte_at > 0 && g_bytes_sent < g_fail_byte_at &&
+      g_bytes_sent + size >= g_fail_byte_at) {
+    fprintf(stderr, "[libftdi_cosim] injected failure of write #%ld (%d B) carrying byte %ld "
+                    "(after %ld accepted)\n",
+            g_writes, size, g_fail_byte_at, g_bytes_sent);
+    return fail(ftdi, -1, "libftdi_cosim: injected write failure");
+  }
 
   int off = 0;
   while (off < size) {
@@ -190,6 +209,7 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf,
   }
   if (g_capture)
     fwrite(buf, 1, (size_t)size, g_capture);
+  g_bytes_sent += size;
   return size;
 }
 

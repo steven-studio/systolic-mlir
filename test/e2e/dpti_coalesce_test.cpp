@@ -16,10 +16,23 @@
 // 16 write calls per invocation on the per-packet path, 3 coalesced,
 // failure propagation (-6, then -14) and recovery after close.
 //
+// Phase T2 (SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1): a MEM_WRITE's 9-byte
+// header and its payload go out in one write instead of two. The T2
+// scenarios check, against the same mock: header || payload equals the
+// two-write stream and an independent encoding, for payloads from the
+// smallest valid (16 B) to the protocol's largest (1,048,064 B) and
+// boundary lengths, at several addresses; invalid lengths refused before
+// any write; partial writes; zero-length and failed writes, also after a
+// partial acceptance (-4 / -5 as before, the device left a prefix, no
+// complete command); recovery after close; sequences of MEM_WRITEs;
+// MEM_WRITEs interleaved with descriptors under all four knob
+// combinations (16, 3, 15 and 2 write calls per invocation, one byte
+// stream); and both runtimes under the four combinations.
+//
 //   dpti-coalesce-test                 every scenario
 //   dpti-coalesce-test --queue-limit-1 the asynchronous runtime with
 //                                      SYSTOLIC_ASYNC_QUEUE_LIMIT=1 (host-queue
-//                                      backpressure), both transport modes
+//                                      backpressure), the four knob combinations
 //
 // Exit status 0 when every check passed, 1 otherwise. No board, no
 // co-simulation: the mock replaces libftdi1 at link time.
@@ -54,6 +67,14 @@ void set_coalesce(bool on) {
     setenv("SYSTOLIC_DPTI_COALESCE_DESCRIPTORS", "1", 1);
   else
     unsetenv("SYSTOLIC_DPTI_COALESCE_DESCRIPTORS");
+}
+
+// Phase T2: the MEM_WRITE knob, independent of the descriptor knob.
+void set_coalesce_mem(bool on) {
+  if (on)
+    setenv("SYSTOLIC_DPTI_COALESCE_MEM_WRITES", "1", 1);
+  else
+    unsetenv("SYSTOLIC_DPTI_COALESCE_MEM_WRITES");
 }
 
 using Bytes = std::vector<unsigned char>;
@@ -462,12 +483,18 @@ struct AsyncRun {
   bool c_unchanged = true;
 };
 
-AsyncRun run_async(bool coalesce, bool fail_first_descriptor) {
+AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
+                   bool fail_first_mem_write = false, long fail_byte = 0) {
   AsyncRun r;
   mock_ftdi_reset();
   if (fail_first_descriptor)
     mock_ftdi_fail_at_size(static_cast<int>(DPTI_DESCRIPTOR_BYTES), 1);
+  if (fail_first_mem_write)
+    mock_ftdi_fail_at_size(static_cast<int>(DPTI_MEM_WRITE_HEADER_BYTES) + 1024, 1);
+  if (fail_byte > 0)
+    mock_ftdi_fail_at_byte(fail_byte);
   set_coalesce(coalesce);
+  set_coalesce_mem(mem);
   fpga_async_runtime_reset_stats();
   std::vector<float> A(64 * 16), B(16 * 64), C(64 * 64), C0;
   fill(A, 4);
@@ -571,6 +598,483 @@ void scenario_async_runtime(bool backpressure) {
   }
 }
 
+// ---- Phase T2: MEM_WRITE coalescing ---------------------------------------
+
+Bytes pattern(size_t n, unsigned seed) {
+  Bytes b(n);
+  uint32_t x = 2463534242u ^ seed;
+  for (size_t i = 0; i < n; ++i) {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    b[i] = static_cast<unsigned char>(x);
+  }
+  return b;
+}
+
+// The MEM_WRITE as dpti_runtime.h documents it, written independently of
+// the transport: 0x02, address LE32, length LE32, payload.
+Bytes reference_mem_write(uint32_t address, const Bytes &payload) {
+  Bytes b;
+  b.push_back(0x02);
+  put32(b, address);
+  put32(b, static_cast<uint32_t>(payload.size()));
+  b.insert(b.end(), payload.begin(), payload.end());
+  return b;
+}
+
+struct MemObserved {
+  Bytes stream;
+  long calls = 0;
+  unsigned long long bytes_written = 0, write_calls = 0;
+  int rc = 0;
+  int coalescing = 0;
+  long decoded = 0, complete = 0;
+  unsigned address = 0, length = 0;
+  bool payload_matches = false;
+};
+
+MemObserved mem_write_once(uint32_t address, const Bytes &payload, bool coalesce_mem) {
+  MemObserved o;
+  mock_ftdi_reset();
+  set_coalesce_mem(coalesce_mem);
+  DptiFtdiSession *s = dpti_ftdi_open();
+  if (!s) {
+    o.rc = -999;
+    return o;
+  }
+  o.coalescing = dpti_ftdi_mem_write_coalescing(s);
+  o.rc = dpti_ftdi_mem_write_session(s, address, payload.data(), static_cast<uint32_t>(payload.size()));
+  o.stream = stream();
+  o.calls = mock_ftdi_call_count();
+  o.bytes_written = dpti_ftdi_bytes_written(s);
+  o.write_calls = dpti_ftdi_write_calls(s);
+  o.decoded = mock_ftdi_mem_writes();
+  o.complete = mock_ftdi_mem_writes_complete();
+  if (o.decoded == 1) {
+    int complete = 0;
+    const unsigned char *pl = nullptr;
+    long received = 0;
+    mock_ftdi_mem_write(0, &o.address, &o.length, &complete, &pl, &received);
+    o.payload_matches = received == static_cast<long>(payload.size()) && complete &&
+                        std::memcmp(pl, payload.data(), payload.size()) == 0;
+  }
+  dpti_ftdi_close(s);
+  return o;
+}
+
+void scenario_t2_equivalence() {
+  // 16 B is the smallest valid length (one beat); 1024 B the 16/16 slab;
+  // 32768 B the K_MAX 512 slab; 1,048,064 B the protocol's largest slab
+  // (ceil(16376 / 8) windows of 512 B); the others are window boundaries.
+  const uint32_t lengths[] = {16, 32, 512, 1008, 1024, 1040, 1536, 4096, 32768, 1048064};
+  const uint32_t addresses[] = {0x00010000u, 0x00003000u, 0x00015000u, 0x1fffff00u, 0x00000100u};
+  for (uint32_t len : lengths) {
+    const Bytes payload = pattern(len, len);
+    // Every address at the slab length; one address for the other lengths.
+    const size_t n_addr = len == 1024 ? sizeof addresses / sizeof addresses[0] : 1;
+    for (size_t a = 0; a < n_addr; ++a) {
+      const uint32_t addr = addresses[a];
+      const MemObserved off = mem_write_once(addr, payload, false);
+      const MemObserved on = mem_write_once(addr, payload, true);
+      const Bytes ref = reference_mem_write(addr, payload);
+      char what[200];
+      std::snprintf(what, sizeof what,
+                    "MEM_WRITE %u B at 0x%08x: one-write stream == two-write stream == reference encoding, decoded once, payload intact",
+                    len, addr);
+      check(off.rc == 0 && on.rc == 0 && off.stream == ref && on.stream == ref && off.coalescing == 0 &&
+                on.coalescing == 1 && off.decoded == 1 && on.decoded == 1 && off.complete == 1 &&
+                on.complete == 1 && on.address == addr && on.length == len && on.payload_matches &&
+                off.payload_matches,
+            what);
+      std::snprintf(what, sizeof what, "MEM_WRITE %u B at 0x%08x: 2 write calls become 1, %u bytes written either way",
+                    len, addr, len + 9);
+      check(off.calls == 2 && on.calls == 1 && off.write_calls == 2 && on.write_calls == 1 &&
+                off.bytes_written == len + 9 && on.bytes_written == len + 9,
+            what);
+    }
+  }
+  check(mock_ftdi_bad_opcodes() == 0, "no byte of a coalesced MEM_WRITE is read as an unknown opcode");
+}
+
+void scenario_t2_invalid() {
+  const Bytes payload = pattern(1024, 7);
+  for (int mode = 0; mode < 2; ++mode) {
+    mock_ftdi_reset();
+    set_coalesce_mem(mode == 1);
+    DptiFtdiSession *s = dpti_ftdi_open();
+    if (!check(s != nullptr, "session opens")) return;
+    const int zero = dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 0);
+    const int odd = dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1000);
+    const int beat = dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 8);
+    const int null = dpti_ftdi_mem_write_session(s, 0x10000, nullptr, 1024);
+    check(zero == -3 && odd == -3 && beat == -3 && null == -2 && mock_ftdi_call_count() == 0 &&
+              mock_ftdi_stream_size() == 0,
+          mode ? "coalesced MEM_WRITE: lengths 0, 1000, 8 are -3 and a null payload -2, before any write"
+               : "two-write MEM_WRITE: lengths 0, 1000, 8 are -3 and a null payload -2, before any write");
+    dpti_ftdi_close(s);
+  }
+}
+
+void scenario_t2_partial() {
+  const Bytes payload = pattern(1024, 11);
+  const Bytes ref = reference_mem_write(0x10000, payload);
+  mock_ftdi_reset();
+  set_coalesce_mem(true);
+  mock_ftdi_set_max_per_call(100);
+  DptiFtdiSession *s = dpti_ftdi_open();
+  int rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  bool sizes = true;
+  for (long c = 0; c < 11; ++c)
+    sizes = sizes && mock_ftdi_call_request(c) == 1033 - 100 * static_cast<int>(c) &&
+            mock_ftdi_call_accepted(c) == (c < 10 ? 100 : 33);
+  check(rc == 0 && stream() == ref && mock_ftdi_call_count() == 11 && sizes &&
+            mock_ftdi_mem_writes_complete() == 1 && dpti_ftdi_bytes_written(s) == 1033,
+        "coalesced MEM_WRITE over a transport accepting 100 B per call: 11 calls continuing from the first unaccepted byte, identical bytes, one complete command");
+  if (s) dpti_ftdi_close(s);
+  mock_ftdi_reset();
+  set_coalesce_mem(false);
+  mock_ftdi_set_max_per_call(100);
+  s = dpti_ftdi_open();
+  rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  check(rc == 0 && stream() == ref && mock_ftdi_call_count() == 12 && mock_ftdi_mem_writes_complete() == 1,
+        "two-write MEM_WRITE over the same transport: 12 calls, identical bytes");
+  if (s) dpti_ftdi_close(s);
+}
+
+void scenario_t2_failures() {
+  const Bytes payload = pattern(1024, 13);
+  // Coalesced: the one write fails outright -> -4 (not even the header), nothing sent.
+  mock_ftdi_reset();
+  set_coalesce_mem(true);
+  mock_ftdi_fail_at_call(1);
+  DptiFtdiSession *s = dpti_ftdi_open();
+  int rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  check(rc == -4 && mock_ftdi_stream_size() == 0 && mock_ftdi_mem_writes() == 0 &&
+            dpti_ftdi_bytes_written(s) == 0 && dpti_ftdi_write_calls(s) == 1,
+        "coalesced MEM_WRITE: a failed first write is -4 with nothing sent");
+  if (s) dpti_ftdi_close(s);
+  // Coalesced: a zero-length write is -4 too.
+  mock_ftdi_reset();
+  set_coalesce_mem(true);
+  mock_ftdi_zero_at_call(1);
+  s = dpti_ftdi_open();
+  rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  check(rc == -4 && mock_ftdi_stream_size() == 0, "coalesced MEM_WRITE: a write that returns 0 is -4 with nothing sent");
+  if (s) dpti_ftdi_close(s);
+  // Coalesced: failure after partial acceptance -> -5 (the header went
+  // out), the device holds a header and 391 payload bytes, no complete
+  // command, nothing resent.
+  mock_ftdi_reset();
+  set_coalesce_mem(true);
+  mock_ftdi_set_max_per_call(100);
+  mock_ftdi_fail_at_call(5);
+  s = dpti_ftdi_open();
+  rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  {
+    unsigned addr = 0, len = 0;
+    int complete = 1;
+    long received = -1;
+    const bool decoded = mock_ftdi_mem_writes() == 1 &&
+                         mock_ftdi_mem_write(0, &addr, &len, &complete, nullptr, &received) == 0;
+    check(rc == -5 && mock_ftdi_stream_size() == 400 && dpti_ftdi_bytes_written(s) == 400 &&
+              mock_ftdi_call_count() == 5 && decoded && addr == 0x10000 && len == 1024 && !complete &&
+              received == 391 && mock_ftdi_mem_writes_complete() == 0,
+          "coalesced MEM_WRITE: a failure after four partial writes is -5, a 400-byte prefix is out, the command is incomplete and never completed");
+  }
+  if (s) dpti_ftdi_close(s);
+  // Two-write path, for reference: the payload write fails -> -5, header out.
+  mock_ftdi_reset();
+  set_coalesce_mem(false);
+  mock_ftdi_fail_at_call(2);
+  s = dpti_ftdi_open();
+  rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  check(rc == -5 && mock_ftdi_stream_size() == 9 && mock_ftdi_mem_writes() == 1 &&
+            mock_ftdi_mem_writes_complete() == 0,
+        "two-write MEM_WRITE: a failed payload write is -5 with the header out (the reference behaviour)");
+  if (s) dpti_ftdi_close(s);
+  // Recovery: after a failure the session is closed by its caller; a new
+  // session (and a device reset to its opcode state) runs again.
+  mock_ftdi_reset();
+  set_coalesce_mem(true);
+  s = dpti_ftdi_open();
+  rc = s ? dpti_ftdi_mem_write_session(s, 0x10000, payload.data(), 1024) : -999;
+  check(rc == 0 && mock_ftdi_mem_writes_complete() == 1 && mock_ftdi_call_count() == 1,
+        "coalesced MEM_WRITE: a new session after a failure writes a whole command again");
+  if (s) dpti_ftdi_close(s);
+}
+
+void scenario_t2_sequence() {
+  Bytes streams[2];
+  long calls[2] = {0, 0}, complete[2] = {0, 0};
+  bool decoded_ok[2] = {true, true};
+  for (int mode = 0; mode < 2; ++mode) {
+    mock_ftdi_reset();
+    set_coalesce_mem(mode == 1);
+    DptiFtdiSession *s = dpti_ftdi_open();
+    if (!check(s != nullptr, "session opens")) return;
+    int rc = 0;
+    for (uint32_t i = 0; i < 20 && rc == 0; ++i) {
+      const Bytes payload = pattern(1024, 100 + i);
+      rc = dpti_ftdi_mem_write_session(s, 0x10000 + 1024 * i, payload.data(), 1024);
+    }
+    streams[mode] = stream();
+    calls[mode] = mock_ftdi_call_count();
+    complete[mode] = mock_ftdi_mem_writes_complete();
+    for (long i = 0; i < 20; ++i) {
+      unsigned addr = 0, len = 0;
+      int c = 0;
+      const unsigned char *pl = nullptr;
+      long received = 0;
+      const Bytes payload = pattern(1024, 100 + static_cast<unsigned>(i));
+      if (mock_ftdi_mem_write(i, &addr, &len, &c, &pl, &received) != 0 || addr != 0x10000 + 1024 * i ||
+          len != 1024 || !c || received != 1024 || std::memcmp(pl, payload.data(), 1024) != 0)
+        decoded_ok[mode] = false;
+    }
+    check(rc == 0, mode ? "20 sequential MEM_WRITEs coalesced" : "20 sequential MEM_WRITEs in two writes each");
+    dpti_ftdi_close(s);
+  }
+  check(streams[0] == streams[1] && streams[0].size() == 20 * 1033, "20 MEM_WRITEs: identical 20660-byte streams");
+  check(calls[0] == 40 && calls[1] == 20, "20 MEM_WRITEs: 40 write calls become 20");
+  check(complete[0] == 20 && complete[1] == 20 && decoded_ok[0] && decoded_ok[1],
+        "20 MEM_WRITEs: the decoder saw 20 complete commands with the right addresses and payloads either way");
+}
+
+void scenario_t2_interleaved() {
+  // The invocation pattern, MEM_WRITE then descriptor, eight times, under
+  // the four knob combinations: one byte stream, 16 / 3 / 15 / 2 calls.
+  Bytes streams[4];
+  long calls[4] = {0, 0, 0, 0}, submits[4] = {0, 0, 0, 0}, complete[4] = {0, 0, 0, 0};
+  int rc_all[4] = {0, 0, 0, 0};
+  for (int cfg = 0; cfg < 4; ++cfg) {
+    mock_ftdi_reset();
+    set_coalesce((cfg & 1) != 0);
+    set_coalesce_mem((cfg & 2) != 0);
+    DptiFtdiSession *s = dpti_ftdi_open();
+    if (!check(s != nullptr, "session opens")) return;
+    int rc = 0;
+    for (uint32_t i = 0; i < 8 && rc == 0; ++i) {
+      const Bytes payload = pattern(1024, 200 + i);
+      rc = dpti_ftdi_mem_write_session(s, 0x10000 + 1024 * (i % 5), payload.data(), 1024);
+      if (rc == 0) {
+        const dpti_job_t j = job(0x07000000u + i, i % 4, i % 4 == 0 ? 8 : 4, 16, 0x10000 + 1024 * (i % 5),
+                                 0x3000 + 256 * i, 250 * i, 120);
+        rc = dpti_ftdi_submit_session(s, &j);
+      }
+    }
+    rc_all[cfg] = rc;
+    streams[cfg] = stream();
+    calls[cfg] = mock_ftdi_call_count();
+    submits[cfg] = mock_ftdi_submit_count();
+    complete[cfg] = mock_ftdi_mem_writes_complete();
+    dpti_ftdi_close(s);
+  }
+  check(rc_all[0] == 0 && rc_all[1] == 0 && rc_all[2] == 0 && rc_all[3] == 0 && streams[0].size() == 8 * 1117 &&
+            streams[1] == streams[0] && streams[2] == streams[0] && streams[3] == streams[0],
+        "8 invocations interleaving MEM_WRITE and descriptor: one 8936-byte stream under all four knob combinations");
+  char what[160];
+  std::snprintf(what, sizeof what, "8 invocations: write calls %ld / %ld / %ld / %ld (baseline, T1, T2, T1+T2)", calls[0],
+                calls[1], calls[2], calls[3]);
+  check(calls[0] == 8 * 16 && calls[1] == 8 * 3 && calls[2] == 8 * 15 && calls[3] == 8 * 2, what);
+  bool decoded = true;
+  for (int cfg = 0; cfg < 4; ++cfg)
+    decoded = decoded && submits[cfg] == 8 && complete[cfg] == 8;
+  check(decoded, "8 invocations: the decoder saw 8 complete MEM_WRITEs and 8 submits under every combination");
+  set_coalesce(false);
+  set_coalesce_mem(false);
+}
+
+void scenario_t2_runtimes() {
+  // The synchronous runtime: two invocations under the four combinations.
+  std::vector<float> A(8 * 16), B(16 * 8), C(8 * 8), C0;
+  fill(A, 21);
+  fill(B, 22);
+  fill(C, 23);
+  C0 = C;
+  Bytes masked[4];
+  long calls[4] = {0, 0, 0, 0};
+  const long expected_calls[4] = {32, 6, 30, 4};
+  for (int cfg = 0; cfg < 4; ++cfg) {
+    mock_ftdi_reset();
+    set_coalesce((cfg & 1) != 0);
+    set_coalesce_mem((cfg & 2) != 0);
+    fpga_runtime_reset_stats();
+    C = C0;
+    const int rc = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+    const int rc2 = fpga_matmul_tiled_auto_scheduled(4, 7, 4, A.data(), B.data(), C.data(), 2, 500, 106);
+    fpga_runtime_stats_t st{};
+    fpga_runtime_get_stats(&st);
+    masked[cfg] = mask_job_ids(stream());
+    calls[cfg] = mock_ftdi_call_count();
+    char what[160];
+    std::snprintf(what, sizeof what, "sync runtime, combination %d (T1 %s, T2 %s): two invocations complete, C unchanged, %ld write calls",
+                  cfg, (cfg & 1) ? "on" : "off", (cfg & 2) ? "on" : "off", calls[cfg]);
+    check(rc == 0 && rc2 == 0 && C == C0 && st.invocations == 2 && st.bytes_to_fpga == 2 * 1117 &&
+              st.bytes_from_fpga == 272 + 80 && calls[cfg] == expected_calls[cfg],
+          what);
+    fpga_runtime_close();
+  }
+  check(masked[1] == masked[0] && masked[2] == masked[0] && masked[3] == masked[0] && masked[0].size() == 2 * 1117,
+        "sync runtime: the four combinations put the same bytes on the wire (job ids aside)");
+  // Failure propagation with T2 on: the slab's one write fails -> -4, then -14, then recovery.
+  mock_ftdi_reset();
+  set_coalesce(true);
+  set_coalesce_mem(true);
+  mock_ftdi_fail_at_call(1);
+  C = C0;
+  const int rc = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+  const int rc_after = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+  check(rc == -4 && rc_after == -14 && C == C0 && mock_ftdi_mem_writes() == 0 && mock_ftdi_submit_count() == 0,
+        "sync runtime T1+T2: a failed coalesced MEM_WRITE is -4, the next call -14, nothing on the wire, C untouched");
+  fpga_runtime_close();
+  mock_ftdi_reset();
+  const int again = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+  check(again == 0 && mock_ftdi_submit_count() == 1 && mock_ftdi_call_count() == 2,
+        "sync runtime T1+T2: a new session after close runs again with 2 write calls");
+  fpga_runtime_close();
+  set_coalesce(false);
+  set_coalesce_mem(false);
+}
+
+void scenario_t2_async(bool backpressure) {
+  const char *tag = backpressure ? " (host queue limit 1)" : "";
+  const long expected_calls[4] = {64 * 16, 64 * 3, 64 * 15, 64 * 2};
+  std::vector<Bytes> commands_of[4];
+  for (int cfg = 0; cfg < 4; ++cfg) {
+    AsyncRun r = run_async((cfg & 1) != 0, false, (cfg & 2) != 0, false);
+    fpga_async_runtime_close();
+    char what[200];
+    std::snprintf(what, sizeof what,
+                  "async runtime%s, combination %d (T1 %s, T2 %s): 64 tiles complete, C unchanged, 64 submits in per-device order, %ld write calls",
+                  tag, cfg, (cfg & 1) ? "on" : "off", (cfg & 2) ? "on" : "off", r.calls);
+    check(r.rc == 0 && r.st.tiles_completed == 64 && r.st.tiles_failed == 0 && r.c_unchanged && r.submits == 64 &&
+              r.per_device_ascending && r.st.descriptors == 64 && r.st.mem_writes == 64 &&
+              r.calls == expected_calls[cfg] && r.stream.size() == 64 * 1117,
+          what);
+    commands_of[cfg] = commands(mask_job_ids(r.stream));
+    std::sort(commands_of[cfg].begin(), commands_of[cfg].end());
+    if (backpressure) {
+      std::snprintf(what, sizeof what, "async runtime (host queue limit 1), combination %d: submits waited for room (%llu)", cfg,
+                    r.st.submits_blocked);
+      check(r.st.submits_blocked > 0, what);
+    }
+  }
+  check(commands_of[1] == commands_of[0] && commands_of[2] == commands_of[0] && commands_of[3] == commands_of[0],
+        backpressure ? "async runtime (host queue limit 1): the four combinations send the same multiset of commands"
+                     : "async runtime: the four combinations send the same multiset of commands (job ids aside)");
+  if (backpressure)
+    return;
+  // Failure propagation with T2 on: the first coalesced MEM_WRITE fails ->
+  // the GEMM fails (-4, or -14 after it), no job reaches the device, a
+  // new session after close runs.
+  AsyncRun f = run_async(true, false, true, true);
+  char what[200];
+  std::snprintf(what, sizeof what,
+                "async runtime T1+T2: a failed coalesced MEM_WRITE fails the GEMM (rc %d), %llu completed + %llu failed of %llu accepted, 0 submits reached the device, C untouched",
+                f.rc, f.st.tiles_completed, f.st.tiles_failed, f.st.tiles_submitted);
+  check((f.rc == -4 || f.rc == -14) && f.st.tiles_submitted >= 1 && f.st.tiles_completed == 0 &&
+            f.st.tiles_failed == f.st.tiles_submitted && f.submits == 0 && f.c_unchanged && mock_ftdi_mem_writes_complete() == 0,
+        what);
+  fpga_async_runtime_close();
+  AsyncRun again = run_async(true, false, true, false);
+  check(again.rc == 0 && again.st.tiles_completed == 64 && again.submits == 64 && again.calls == 64 * 2,
+        "async runtime T1+T2: a new session after the failure runs 64 tiles again with 128 write calls");
+  fpga_async_runtime_close();
+  set_coalesce(false);
+  set_coalesce_mem(false);
+}
+
+// ---- faults by accepted-byte position, under the four knob combinations ----
+//
+// The co-simulation's fault injector names the failing write by its call
+// number (SYSTOLIC_DPTI_COSIM_FAIL_WRITE), which the two coalescing knobs
+// renumber; its new SYSTOLIC_DPTI_COSIM_FAIL_BYTE and the mock's
+// fail_at_byte name the fault by the position in the byte stream instead,
+// so the same logical fault -- the 5th packet of the first descriptor, a
+// byte of the first slab's payload, the 4th slab after three staged ones --
+// lands on the same command whatever the call boundaries. What the knobs
+// may change is the granularity: the failing call carries more bytes when
+// coalesced, so the accepted prefix is shorter and the code follows the
+// command the call carried (MEM_WRITE -4 / -5, descriptor -6). What they
+// may not change: nothing of the failing call is accepted, nothing is
+// sent after it, no job is submitted without its CONTROL, C is untouched,
+// the next call is -14, and a new session after close runs.
+
+void scenario_fault_by_position() {
+  std::vector<float> A(8 * 16), B(16 * 8), C(8 * 8), C0;
+  fill(A, 31);
+  fill(B, 32);
+  fill(C, 33);
+  C0 = C;
+  for (int cfg = 0; cfg < 4; ++cfg) {
+    const bool t1 = (cfg & 1) != 0, t2 = (cfg & 2) != 0;
+    struct Fault {
+      long byte;
+      const char *where;
+    };
+    const Fault faults[] = {{1058, "the first descriptor (its 5th packet in the baseline)"},
+                            {500, "the first slab's payload"}};
+    for (const Fault &f : faults) {
+      mock_ftdi_reset();
+      set_coalesce(t1);
+      set_coalesce_mem(t2);
+      mock_ftdi_fail_at_byte(f.byte);
+      C = C0;
+      const int rc = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+      const int rc2 = fpga_matmul_tiled_auto_scheduled(4, 7, 4, A.data(), B.data(), C.data(), 2, 500, 106);
+      const long calls = mock_ftdi_call_count();
+      long failing = -1;
+      for (long i = 0; i < calls; ++i) {
+        const long start = mock_ftdi_call_start(i);
+        if (start < f.byte && start + mock_ftdi_call_request(i) >= f.byte) {
+          failing = i;
+          break;
+        }
+      }
+      const long accepted = mock_ftdi_stream_size();
+      // The runtime reports every MEM_WRITE failure as -4 (fpga_matmul_tiled.h)
+      // whatever the transport's -4 / -5 distinction, which the T2 failure
+      // scenario checks on the transport directly.
+      const int expected_rc = f.byte == 1058 ? -6 : -4;
+      char what[260];
+      std::snprintf(what, sizeof what,
+                    "sync, T1 %s T2 %s, fault at byte %ld in %s: call %ld of %ld fails whole, %ld bytes accepted before it, rc %d, next call -14, no submit, C untouched",
+                    t1 ? "on" : "off", t2 ? "on" : "off", f.byte, f.where, failing + 1, calls, accepted, rc);
+      check(failing >= 0 && failing == calls - 1 && mock_ftdi_call_accepted(failing) == 0 &&
+                accepted == mock_ftdi_call_start(failing) && rc == expected_rc && rc2 == -14 &&
+                mock_ftdi_submit_count() == 0 && mock_ftdi_mem_writes_complete() == (f.byte == 1058 ? 1 : 0) &&
+                C == C0,
+            what);
+      fpga_runtime_close();
+      mock_ftdi_reset();
+      const int again = fpga_matmul_tiled_auto_scheduled(8, 16, 8, A.data(), B.data(), C.data(), 0, 0, 110);
+      std::snprintf(what, sizeof what, "sync, T1 %s T2 %s, after the fault at byte %ld: a new session runs again", t1 ? "on" : "off",
+                    t2 ? "on" : "off", f.byte);
+      check(again == 0 && mock_ftdi_submit_count() == 1 && C == C0, what);
+      fpga_runtime_close();
+    }
+    // Asynchronous: the 4th slab fails after three were staged (byte 3100):
+    // exactly three slabs, 3099 bytes, are on the link in every combination.
+    AsyncRun r = run_async(t1, false, t2, false, 3100);
+    char what[260];
+    std::snprintf(what, sizeof what,
+                  "async, T1 %s T2 %s, fault at byte 3100 (the 4th slab): rc %d, 3099 bytes on the link, 3 complete slabs, 0 submits, %llu failed of %llu accepted, C untouched",
+                  t1 ? "on" : "off", t2 ? "on" : "off", r.rc, r.st.tiles_failed, r.st.tiles_submitted);
+    check((r.rc == -4 || r.rc == -14) && r.stream.size() == 3099 && mock_ftdi_mem_writes_complete() == 3 &&
+              r.submits == 0 && r.st.tiles_completed == 0 && r.st.tiles_submitted >= 1 &&
+              r.st.tiles_failed == r.st.tiles_submitted && r.c_unchanged && r.st.bytes_from_fpga == 0,
+          what);
+    fpga_async_runtime_close();
+    AsyncRun again = run_async(t1, false, t2, false);
+    std::snprintf(what, sizeof what, "async, T1 %s T2 %s, after the fault: a new session runs 64 tiles again", t1 ? "on" : "off",
+                  t2 ? "on" : "off");
+    check(again.rc == 0 && again.st.tiles_completed == 64 && again.submits == 64, what);
+    fpga_async_runtime_close();
+  }
+  set_coalesce(false);
+  set_coalesce_mem(false);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -586,8 +1090,10 @@ int main(int argc, char **argv) {
   setenv("SYSTOLIC_ASYNC_POLL_US", "0", 1);
   if (queue_limit_1)
     setenv("SYSTOLIC_ASYNC_QUEUE_LIMIT", "1", 1);
+  set_coalesce_mem(false);
   if (queue_limit_1) {
     scenario_async_runtime(true);
+    scenario_t2_async(true);
   } else {
     scenario_equivalence();
     scenario_many_jobs();
@@ -595,6 +1101,15 @@ int main(int argc, char **argv) {
     scenario_failures();
     scenario_sync_runtime();
     scenario_async_runtime(false);
+    scenario_t2_equivalence();
+    scenario_t2_invalid();
+    scenario_t2_partial();
+    scenario_t2_failures();
+    scenario_t2_sequence();
+    scenario_t2_interleaved();
+    scenario_t2_runtimes();
+    scenario_t2_async(false);
+    scenario_fault_by_position();
   }
   unlink(cfg.c_str());
   std::printf("%s: %d failure(s)\n", g_failures ? "DPTI COALESCE: FAIL" : "DPTI COALESCE: PASS", g_failures);

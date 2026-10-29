@@ -8,6 +8,7 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -38,6 +39,14 @@ struct FtdiTransportState {
     bool staging_overflow = false;
     unsigned desc_len = 0;
     unsigned char desc_buf[DPTI_DESCRIPTOR_BYTES];
+
+    // Phase T2: MEM_WRITE coalescing (dpti_runtime.h). `coalesce_mem` is
+    // SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1 at open; mem_buf holds header ||
+    // payload for the one write, grown to the largest MEM_WRITE of the
+    // session and reused (the bitstream fixes the slab length, so it grows
+    // once).
+    bool coalesce_mem = false;
+    std::vector<unsigned char> mem_buf;
 };
 
 /*
@@ -323,6 +332,21 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
                 : "off: one write per WRITE32");
 
     /*
+     * SYSTOLIC_DPTI_COALESCE_MEM_WRITES (Phase T2, dpti_runtime.h): "1"
+     * sends each MEM_WRITE's header and payload in one transport write.
+     */
+    if (const char *v = std::getenv("SYSTOLIC_DPTI_COALESCE_MEM_WRITES"))
+        session->transport.coalesce_mem = (*v && std::strcmp(v, "0") != 0);
+    if (session->transport.coalesce_mem || dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] MEM_WRITE coalescing: %s\n",
+            session->transport.coalesce_mem
+                ? "on (SYSTOLIC_DPTI_COALESCE_MEM_WRITES): header and payload "
+                  "in one write"
+                : "off: header, then payload");
+
+    /*
      * Purge once at session start.  Do not purge between scheduled
      * jobs because they belong to one compiler-generated timeline.
      */
@@ -512,26 +536,62 @@ extern "C" int dpti_ftdi_mem_write_session(
     header[7] = static_cast<unsigned char>(length >> 16);
     header[8] = static_cast<unsigned char>(length >> 24);
 
+    FtdiTransportState &state = session->transport;
+
     if (dpti_trace())
         std::fprintf(
             stderr,
-            "[DPTI FTDI] MEM_WRITE addr=0x%08x bytes=%u\n",
+            "[DPTI FTDI] MEM_WRITE addr=0x%08x bytes=%u%s\n",
             address,
-            length);
+            length,
+            state.coalesce_mem ? " (header and payload in one write)" : "");
 
-    if (write_all(
-            &session->transport,
-            header,
-            sizeof(header)) != 0)
-        return -4;
+    if (!state.coalesce_mem) {
+        if (write_all(
+                &state,
+                header,
+                sizeof(header)) != 0)
+            return -4;
 
+        if (write_all(
+                &state,
+                static_cast<const unsigned char *>(data),
+                static_cast<int>(length)) != 0)
+            return -5;
+
+        return 0;
+    }
+
+    /*
+     * Phase T2: header || payload as one buffer, one write. The same bytes
+     * in the same order as the two writes above; write_all continues a
+     * short write from the first unaccepted byte and stops at a failure,
+     * so a failure leaves the device a prefix exactly as before. The
+     * return code tells, as before, whether the header went out whole
+     * (then -5) or not (-4), from the bytes the transport accepted.
+     */
+    const size_t total = sizeof(header) + static_cast<size_t>(length);
+    if (state.mem_buf.size() < total)
+        state.mem_buf.resize(total);
+    std::memcpy(state.mem_buf.data(), header, sizeof(header));
+    std::memcpy(state.mem_buf.data() + sizeof(header), data, length);
+
+    const unsigned long long before = state.bytes_written;
     if (write_all(
-            &session->transport,
-            static_cast<const unsigned char *>(data),
-            static_cast<int>(length)) != 0)
-        return -5;
+            &state,
+            state.mem_buf.data(),
+            static_cast<int>(total)) != 0) {
+        const unsigned long long accepted = state.bytes_written - before;
+        return accepted < sizeof(header) ? -4 : -5;
+    }
 
     return 0;
+}
+
+extern "C" int dpti_ftdi_mem_write_coalescing(
+    const DptiFtdiSession *session)
+{
+    return (session && session->transport.coalesce_mem) ? 1 : 0;
 }
 
 extern "C" int dpti_ftdi_read_exact_session(

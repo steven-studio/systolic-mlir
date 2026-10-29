@@ -271,6 +271,7 @@ struct Runtime {
     // descriptor coalescing) and whether the session coalesces.
     unsigned long long    write_calls = 0, write_calls_base = 0;
     bool                  coalesce = false;
+    bool                  coalesce_mem = false;   // Phase T2
 
     std::vector<std::unique_ptr<Gemm>> gemms;  // open GEMMs
 
@@ -1120,6 +1121,7 @@ bool open_session(Runtime &r) {
     r.bytes_read_base = dpti_ftdi_bytes_read(r.session);
     r.write_calls_base = dpti_ftdi_write_calls(r.session);
     r.coalesce = dpti_ftdi_descriptor_coalescing(r.session) != 0;
+    r.coalesce_mem = dpti_ftdi_mem_write_coalescing(r.session) != 0;
     r.last_activity = clock_t_::now();
     r.t_last_submit = r.last_activity;
     r.seen_completion = false;
@@ -1180,7 +1182,7 @@ void report_timing(Runtime &r) {
                  "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
                  "submits_blocked=%llu blocked_us=%llu "
                  "link_write_us=%llu link_read_us=%llu collect_us=%llu polls=%llu "
-                 "waits_timed_out=%llu write_calls=%llu coalesce=%d\n",
+                 "waits_timed_out=%llu write_calls=%llu coalesce=%d coalesce_mem=%d\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -1195,7 +1197,8 @@ void report_timing(Runtime &r) {
                  s.descriptors_before_first_completion, s.descriptors_behind_inflight,
                  s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000,
                  s.ns_link_write / 1000, s.ns_link_read / 1000, s.ns_collect / 1000,
-                 s.polls, s.waits_timed_out, r.write_calls, r.coalesce ? 1 : 0);
+                 s.polls, s.waits_timed_out, r.write_calls, r.coalesce ? 1 : 0,
+                 r.coalesce_mem ? 1 : 0);
 }
 
 /* Everything of the session, after the transfer thread has stopped. */

@@ -739,4 +739,26 @@ PE 層的重疊因此只在 `eval/pipeline_overlap/run.sh`（internal job port�
   部分寫入、失敗與 0-byte write 的傳播、同步與非同步 runtime 端到端（16 對 3 次 write／invocation、
   -6 → -14 → close 後復原）、host queue 上限 1 的 backpressure。co-sim 與板子：見 T1 報告；注意
   co-sim 的 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=n` 數的是 write **呼叫**，合併後第 n 次呼叫對應的命令不同
-  （mode F 與 run_e2e 第 3 步以逐封包路徑的編號為準）。
+  （mode F 與 run_e2e 第 3 步以逐封包路徑的編號為準）；`SYSTOLIC_DPTI_COSIM_FAIL_BYTE=n` 以位元組流
+  的位置命名同一種故障，四種組合下打中同一個命令（T2 的故障注入檢查用它，見下）。
+- **T2（2026-10-29）：MEM_WRITE 的 header 與 payload 合併為一次 write。** `SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1`
+  （預設關閉，與 T1 的開關獨立；四種組合的位元組流相同）：`dpti_ftdi_mem_write_session()` 把 9 byte 的
+  header 與 payload 放進 session 的緩衝區（長度為該 session 最大的 MEM_WRITE，bitstream 固定 slab 長度
+  所以只長一次）後一次 `write_all`。RTL 的 command front end 逐 byte 解碼（opcode、address、length、
+  payload），看不到 transport 呼叫的邊界，所以命令相同。失敗時 header 未送完回 -4、否則 -5（與兩次
+  write 的路徑相同），不重送。每次 invocation 的 transport write：基準 16、T1 3、T2 15、T1+T2 2；
+  timing line 多了 `coalesce_mem=`。測試：`dpti-coalesce-test` 的 T2 情境（長度 16 B 到協定上限
+  1,048,064 B、邊界長度、位址編碼、部分寫入、0-byte write、部分接受後失敗、連續多筆、與 descriptor
+  交錯、四種組合下的同步／非同步 runtime）。
+- **故障注入與合併（T2 gate，2026-10-29）。** 既有的檢查以 write **呼叫**的編號注入故障
+  （run_e2e 第 3 步與 mode F 的 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`、cosim regressions 的 negoffset
+  write 3／40），都以預設的逐封包組合為準、原樣保留：開啟合併後第 n 次呼叫是別的命令（T1 下第 7 次是
+  第二筆 invocation 的 MEM_WRITE header；T1+T2 下每筆 job 只有 2 次 write，第 40 次不存在），這些檢查
+  在開啟合併時的 FAIL 是注入點的編號，不是 transport 的缺陷。合併下同樣的故障以**位元組位置**注入：
+  mock 的 `mock_ftdi_fail_at_byte()`（`dpti-coalesce-test` 的 fault-by-position 情境，四種組合：
+  sync 第一筆 descriptor 的第 5 個 WRITE32 → -6、slab 中段 → -4，失敗的那次 write 整筆不送、接受的
+  byte 數等於它的起點、之後 -14、close 後復原；async 第 4 個 slab → 3099 B、3 個完整 slab、0 個
+  submit、failed == submitted）與 co-sim 的 `SYSTOLIC_DPTI_COSIM_FAIL_BYTE=n`（16x8x4：sync byte 1058
+  → -6、1057 B（T1：1033 B）送出；async byte 2079 → -6、2078 B（T1：2066 B）；async 五筆 invocation
+  的 byte 3100 → -4、3099 B；negoffset byte 3298 → 其後的 call 回到 CPU、輸出與 clang 相同），四種
+  組合全部通過，每種組合送出的 byte 數正是該組合 write 邊界下故障前的前綴。

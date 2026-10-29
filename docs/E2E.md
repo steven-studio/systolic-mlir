@@ -57,6 +57,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 | `SYSTOLIC_RUNTIME_TRACE=1` | 每次 FPGA invocation 一行（device、tile、job.k、schedule） |
 | `SYSTOLIC_DPTI_TRACE=1` | 每個 DPTI 封包（MEM_WRITE、每個 WRITE32） |
 | `SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1` | 每筆 descriptor 的 14 個 WRITE32 以一次 write 送出（位元組流相同；docs/ASYNC.md 第 12 節，Phase T1）；預設關閉 |
+| `SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1` | 每筆 MEM_WRITE 的 header 與 payload 以一次 write 送出（位元組流相同；docs/ASYNC.md 第 12 節，Phase T2）；預設關閉，與 T1 獨立 |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
 | `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）。沒設時 runtime 用封存那顆的 16／16、沒有 completion record（built-in default，輸出會印出來源）；接上會送 record 的 bitstream（目前的 RTL）時第一個結果就以 -9 拒絕、說明原因，程式改在 CPU 上算；E2E harness 不接受沒設（第 3 節） |
 
@@ -359,6 +360,11 @@ test/e2e/cosim/build.sh            # -> build/cosim/Vcosim, build/cosim/libftdi_
   像 USB 寫入錯誤一樣失敗、什麼都不送（第 3 節的失敗檢查與 `runtime-async-test` 的 mode F
   用它）。只有 `libftdi_cosim.so` 讀它，runtime 與真的 libftdi1 都不讀：板子上沒有任何寫入會因
   它失敗，所以這兩項在板子上是 NOT APPLICABLE，不是 FAIL，也不是 PASS。
+  `SYSTOLIC_DPTI_COSIM_FAIL_BYTE=<n>` 注入同一種故障，但以位元組流的位置命名：會送出 session
+  第 n 個 byte 的那次 `ftdi_write_data()` 失敗、什麼都不送。T1／T2 的合併
+  （`SYSTOLIC_DPTI_COALESCE_DESCRIPTORS`、`SYSTOLIC_DPTI_COALESCE_MEM_WRITES`）改變 write 呼叫的
+  編號、不改變位元組流，所以同一個 n 在四種組合下打中同一個命令（FAIL_WRITE 的第 n 次呼叫則是
+  另一個命令，甚至不存在）；也只有 `libftdi_cosim.so` 讀它。
   `SYSTOLIC_DPTI_COSIM_CORRUPT_READ=<n>` 把 session 讀到的第 n 個 byte 的最低位元翻轉（鏈路
   不報錯的錯誤結果）；`SYSTOLIC_DPTI_COSIM_NO_FAULTS=1` 讓兩種注入都不發生，跟板子一樣——
   `test/e2e/run_cosim_regressions.sh --section modef` 用它讓 co-sim 代替板子，檢查

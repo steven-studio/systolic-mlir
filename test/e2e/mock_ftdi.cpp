@@ -21,6 +21,13 @@ struct Submit {
 struct Call {
   int requested;
   int accepted;
+  long start;   // accepted bytes before this call
+};
+
+struct MemWrite {
+  uint32_t address, length;
+  std::vector<unsigned char> payload;
+  bool complete;
 };
 
 struct Mock {
@@ -32,6 +39,7 @@ struct Mock {
   long fail_at = 0, zero_at = 0;
   int fail_size = 0;
   long fail_size_nth = 0, size_hits = 0;
+  long fail_byte = 0;
   bool responder = true;
   std::string error;
 
@@ -44,6 +52,7 @@ struct Mock {
   std::vector<Submit> submits;
   uint32_t seq = 0;
   long mem_writes = 0, mem_write_bytes = 0, bad_opcodes = 0;
+  std::vector<MemWrite> mem;   // Phase T2: every decoded MEM_WRITE
   std::deque<unsigned char> rx;
   unsigned char latency = 2;
 };
@@ -110,14 +119,23 @@ void feed(unsigned char b) {
                        (static_cast<uint32_t>(g.body[5]) << 8) |
                        (static_cast<uint32_t>(g.body[6]) << 16) |
                        (static_cast<uint32_t>(g.body[7]) << 24);
+      MemWrite mw;
+      mw.address = static_cast<uint32_t>(g.body[0]) | (static_cast<uint32_t>(g.body[1]) << 8) |
+                   (static_cast<uint32_t>(g.body[2]) << 16) | (static_cast<uint32_t>(g.body[3]) << 24);
+      mw.length = g.payload_left;
+      mw.complete = g.payload_left == 0;
+      g.mem.push_back(std::move(mw));
       ++g.mem_writes;
       g.state = g.payload_left ? 3 : 0;
     }
     return;
   case 3:
     ++g.mem_write_bytes;
-    if (--g.payload_left == 0)
+    g.mem.back().payload.push_back(b);
+    if (--g.payload_left == 0) {
+      g.mem.back().complete = true;
       g.state = 0;
+    }
     return;
   }
 }
@@ -138,6 +156,10 @@ void mock_ftdi_fail_at_size(int size, long nth) {
   g.fail_size = size;
   g.fail_size_nth = nth;
   g.size_hits = 0;
+}
+void mock_ftdi_fail_at_byte(long n) { g.fail_byte = n; }
+long mock_ftdi_call_start(long i) {
+  return (i >= 0 && i < static_cast<long>(g.calls.size())) ? g.calls[static_cast<size_t>(i)].start : -1;
 }
 void mock_ftdi_set_responder(int on) { g.responder = on != 0; }
 long mock_ftdi_call_count(void) { return static_cast<long>(g.calls.size()); }
@@ -165,6 +187,24 @@ int mock_ftdi_submit(long i, unsigned *job_id, unsigned *device, unsigned *m,
   return 0;
 }
 long mock_ftdi_mem_writes(void) { return g.mem_writes; }
+long mock_ftdi_mem_writes_complete(void) {
+  long n = 0;
+  for (const MemWrite &m : g.mem)
+    n += m.complete ? 1 : 0;
+  return n;
+}
+int mock_ftdi_mem_write(long i, unsigned *address, unsigned *length, int *complete,
+                        const unsigned char **payload, long *received) {
+  if (i < 0 || i >= static_cast<long>(g.mem.size()))
+    return -1;
+  const MemWrite &m = g.mem[static_cast<size_t>(i)];
+  if (address) *address = m.address;
+  if (length) *length = m.length;
+  if (complete) *complete = m.complete ? 1 : 0;
+  if (payload) *payload = m.payload.data();
+  if (received) *received = static_cast<long>(m.payload.size());
+  return 0;
+}
 long mock_ftdi_mem_write_bytes(void) { return g.mem_write_bytes; }
 long mock_ftdi_bad_opcodes(void) { return g.bad_opcodes; }
 long mock_ftdi_open_count(void) { return g.opens; }
@@ -210,20 +250,27 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf, int siz
     return -666;
   }
   const long call = static_cast<long>(g.calls.size()) + 1;
+  const long start = static_cast<long>(g.stream.size());
   if (call == g.fail_at) {
-    g.calls.push_back({size, 0});
+    g.calls.push_back({size, 0, start});
     g.error = "mock: injected write failure";
     if (ftdi) ftdi->error_str = g.error.c_str();
     return -1;
   }
   if (g.fail_size > 0 && size == g.fail_size && ++g.size_hits == g.fail_size_nth) {
-    g.calls.push_back({size, 0});
+    g.calls.push_back({size, 0, start});
     g.error = "mock: injected write failure (by size)";
     if (ftdi) ftdi->error_str = g.error.c_str();
     return -1;
   }
+  if (g.fail_byte > 0 && start < g.fail_byte && start + size >= g.fail_byte) {
+    g.calls.push_back({size, 0, start});
+    g.error = "mock: injected write failure (by byte position)";
+    if (ftdi) ftdi->error_str = g.error.c_str();
+    return -1;
+  }
   if (call == g.zero_at) {
-    g.calls.push_back({size, 0});
+    g.calls.push_back({size, 0, start});
     return 0;
   }
   int n = size;
@@ -233,7 +280,7 @@ int ftdi_write_data(struct ftdi_context *ftdi, const unsigned char *buf, int siz
     g.stream.push_back(buf[i]);
     feed(buf[i]);
   }
-  g.calls.push_back({size, n});
+  g.calls.push_back({size, n, start});
   return n;
 }
 int ftdi_read_data(struct ftdi_context *, unsigned char *buf, int size) {

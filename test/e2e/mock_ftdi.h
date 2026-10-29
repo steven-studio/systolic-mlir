@@ -22,6 +22,8 @@ void mock_ftdi_set_max_per_call(int bytes);  /* 0: accept every call whole */
 void mock_ftdi_fail_at_call(long n);         /* the n-th write call (from 1) fails; 0: never */
 void mock_ftdi_zero_at_call(long n);         /* the n-th write call returns 0; 0: never */
 void mock_ftdi_fail_at_size(int size, long nth); /* the nth write call asking for exactly `size` bytes fails; 0: never */
+void mock_ftdi_fail_at_byte(long n);        /* the write call that would carry accepted byte n (from 1) fails, accepting nothing; 0: never */
+long mock_ftdi_call_start(long i);           /* accepted bytes before call i (from 0): its position in the stream */
 void mock_ftdi_set_responder(int on);        /* answer submits with records (default on) */
 
 long mock_ftdi_call_count(void);             /* write calls so far, failed ones included */
@@ -33,8 +35,13 @@ const unsigned char *mock_ftdi_stream(void);
 long mock_ftdi_submit_count(void);           /* CONTROL = submit seen, in order */
 int mock_ftdi_submit(long i, unsigned *job_id, unsigned *device, unsigned *m,
                      unsigned *n, unsigned *k, unsigned *a_lo, unsigned *c_lo);
-long mock_ftdi_mem_writes(void);
-long mock_ftdi_mem_write_bytes(void);
+long mock_ftdi_mem_writes(void);             /* MEM_WRITE headers decoded */
+long mock_ftdi_mem_write_bytes(void);        /* payload bytes decoded, all MEM_WRITEs */
+/* Phase T2: the decoded MEM_WRITE commands, in order. complete is 1 once the
+ * whole payload has arrived; payload points at the bytes received so far. */
+long mock_ftdi_mem_writes_complete(void);
+int mock_ftdi_mem_write(long i, unsigned *address, unsigned *length, int *complete,
+                        const unsigned char **payload, long *received);
 long mock_ftdi_bad_opcodes(void);
 long mock_ftdi_open_count(void);
 
