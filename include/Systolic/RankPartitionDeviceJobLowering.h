@@ -73,6 +73,20 @@
 // of the fold sums, permitted by the relaxed contract. A domain with a
 // partial fiber (a K bound depending on i or j) is UNKNOWN.
 //
+// Phase 3b-8 M1 (section 29), under the pass option common-fiber-offload:
+// when the reduction fibers vary with the output coordinate, each output
+// block G_b of the box's tile plan runs its common reduction fiber
+// K_common(G_b) (RankPartitionCommonFiber.h: exact, by vertex substitution)
+// on the device -- the plan's K folds clipped to that interval, each
+// clipped invocation re-priced with the cost model -- accumulating directly
+// into C, and the remaining contributions D' minus the union of the device
+// boxes run on the host as guarded MAC nests (one per block, the Phase 3b-2
+// / 3b-3 emitters with the source statement's own fast-math flags), after
+// the device write-back. Every point of D' is in exactly one device box or
+// one remainder set; the device reads and writes only addresses the source
+// touches. The order of additions differs from the loop's (device sums,
+// then the host's terms), permitted by the relaxed contract only.
+//
 // Transactional: the jobs are emitted immediately before the source nest
 // on the source memrefs, the function is verified, and only then is the
 // source nest erased; any failure erases what was created and leaves the
@@ -125,6 +139,13 @@ struct DeviceJobPreflight {
   std::optional<::systolic::logical::SymbolicIterationPlan> maskPlan;
   std::array<int64_t, 2> maskLower{};
 
+  // Phase 3b-8: the fibers vary with the output coordinate; the device
+  // runs each output block's common fiber, the host the rest (section 29).
+  bool commonFiber = false;
+  std::array<int, 3> roles{};          // the logical coordinate of I, J, K
+  std::array<int64_t, 3> boxLower{};   // the dense box, per coordinate
+  std::array<int64_t, 3> boxExtent{};
+
   explicit DeviceJobPreflight(::systolic::logical::GuardedMacPreflight pre)
       : common(std::move(pre)) {}
 };
@@ -134,13 +155,18 @@ struct DeviceJobPreflight {
 /// "REFUSED: ".
 std::optional<DeviceJobPreflight>
 prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
-                  bool allowFpReassociation,
+                  bool allowFpReassociation, bool commonFiberOffload,
                   ::systolic::logical::GuardedMacOutcome &outcome,
                   std::string &why);
 
 struct DeviceJobReplacement {
   int64_t M = 0, N = 0, K = 0;
   bool maskedOutput = false; // Phase 3b-7: dense GEMM + exact output mask
+  // Phase 3b-8: common fibers on the device, the remainder on the host.
+  bool commonFiber = false;
+  int64_t deviceBlocks = 0;     // output blocks with device work
+  int64_t remainderNests = 0;   // guarded host nests emitted
+  std::string totalMacs, deviceMacs, hostMacs; // exact point counts
   int64_t blocks = 0;      // output blocks (1 without a fleet)
   int64_t invocations = 0; // systolic.matmul_tile operations
   std::optional<int64_t> makespan; // the plan's, with a fleet
@@ -160,7 +186,7 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
                           const SystolicFleet &fleet,
                           const SystolicOptimizerOptions &options,
                           bool assumeNoAlias, bool allowFpReassociation,
-                          int64_t &nextGemmIndex,
+                          bool commonFiberOffload, int64_t &nextGemmIndex,
                           ::systolic::logical::GuardedMacOutcome &outcome,
                           std::string &why, bool &hardError);
 

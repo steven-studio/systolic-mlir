@@ -40,6 +40,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "Systolic/RankPartitionCommonFiber.h"
+
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Diagnostics.h"
@@ -9102,7 +9104,8 @@ int main() {
       FastPath,
       GuardedMac,
       Unchanged,
-      Masked // Phase 3b-7: dense GEMM into a temporary + exact output mask
+      Masked, // Phase 3b-7: dense GEMM into a temporary + exact output mask
+      Hybrid  // Phase 3b-8: common fibers on the device, remainder on host
     };
 
     struct OffloadShape {
@@ -9112,6 +9115,11 @@ int main() {
       // False: the tiles are the fast path's for another decomposition
       // (a batched or general view), not this box's partition.
       bool checkPartition = true;
+      // Phase 3b-8 (Hybrid): the expected common reduction fiber of an
+      // output block, in logical values; null leaves the K ranges unchecked.
+      std::function<std::optional<::systolic::logical::ReductionInterval>(
+          const ::systolic::logical::OutputBlock &)>
+          expectedFiber;
     };
 
     const char *certifiedRemark =
@@ -9202,7 +9210,19 @@ int main() {
       unsigned allocations = 0;
       produced.function.walk([&](memref::AllocOp) { ++allocations; });
 
+      const bool hybrid = reported("(section 29)");
+
       switch (expectation) {
+      case OffloadExpectation::Hybrid:
+        if (tiles == 0 || guards == 0 || !certified || !hybrid ||
+            allocations != 0 || masked) {
+          std::cerr << "3b8 " << label << ": expected the hybrid lowering"
+                    << " (tiles " << tiles << ", guards " << guards
+                    << ", allocations " << allocations << ")\n"
+                    << diagnostics;
+          return false;
+        }
+        break;
       case OffloadExpectation::Masked:
         if (tiles == 0 || guards != 1 || !certified || !masked ||
             allocations != 1) {
@@ -9238,7 +9258,7 @@ int main() {
         break;
       case OffloadExpectation::Offloaded:
         if (tiles == 0 || affineOps != 0 || guards != 0 || !certified ||
-            masked) {
+            masked || hybrid) {
           std::cerr << "3b6 " << label << ": expected the certified device"
                     << " jobs (tiles " << tiles << ", affine ops "
                     << affineOps << ", guards " << guards << ")\n"
@@ -9250,6 +9270,86 @@ int main() {
 
       if (!shape.checkPartition)
         return true;
+
+      if (expectation == OffloadExpectation::Hybrid) {
+        // Phase 3b-8: every tile's output block (its C slice) runs exactly
+        // its common reduction fiber (its A slice's K range), the blocks'
+        // folds contiguous and ascending; the device MACs of the tiles
+        // equal the remark's count.
+        struct BlockRange {
+          int64_t row, column, m, n;
+          int64_t first = -1, next = -1; // K range covered so far
+        };
+        std::vector<BlockRange> ranges;
+        llvm::DenseMap<Operation *, size_t> blockOfTile;
+        int64_t deviceMacs = 0;
+        for (Operation *tile : tileOps) {
+          auto attr = [&](StringRef name) {
+            return tile->getAttrOfType<IntegerAttr>(name).getInt();
+          };
+          const int64_t m = attr("m"), n = attr("n"), k = attr("k");
+          auto aSlice =
+              tile->getOperand(0).getDefiningOp<tensor::ExtractSliceOp>();
+          if (!aSlice || aSlice.getStaticOffsets().size() != 2) {
+            std::cerr << "3b8 " << label << ": a tile's A operand is not a"
+                      << " static slice\n";
+            return false;
+          }
+          const int64_t k0 = aSlice.getStaticOffsets()[1];
+          Value cIn = tile->getOperand(2);
+          size_t index;
+          if (auto slice = cIn.getDefiningOp<tensor::ExtractSliceOp>()) {
+            auto offsets = slice.getStaticOffsets();
+            ranges.push_back({offsets[0], offsets[1], m, n, k0, k0});
+            index = ranges.size() - 1;
+          } else if (Operation *previous = cIn.getDefiningOp();
+                     previous && blockOfTile.count(previous)) {
+            index = blockOfTile[previous];
+          } else if (cIn.getDefiningOp<bufferization::ToTensorOp>()) {
+            ranges.push_back({0, 0, m, n, k0, k0});
+            index = ranges.size() - 1;
+          } else {
+            std::cerr << "3b8 " << label << ": a tile's c_in is unexpected\n";
+            return false;
+          }
+          blockOfTile[tile] = index;
+          if (ranges[index].next != k0) {
+            std::cerr << "3b8 " << label << ": a block's folds are not"
+                      << " contiguous\n";
+            return false;
+          }
+          ranges[index].next = k0 + k;
+          deviceMacs += m * n * k;
+        }
+        for (const BlockRange &r : ranges) {
+          if (!shape.expectedFiber)
+            break;
+          auto fiber = shape.expectedFiber(
+              {r.row, r.row + r.m - 1, r.column, r.column + r.n - 1});
+          if (!fiber || fiber->empty || fiber->lower != r.first ||
+              fiber->upper != r.next - 1) {
+            std::cerr << "3b8 " << label << ": the block at (" << r.row
+                      << ", " << r.column << ") runs K [" << r.first << ", "
+                      << r.next - 1 << "), not its common fiber\n";
+            return false;
+          }
+        }
+        // "(<device> of <total> MACs)" in the remark.
+        const std::string key = "on the device (";
+        const auto at = diagnostics.find(key);
+        if (at == std::string::npos) {
+          std::cerr << "3b8 " << label << ": no MAC count in the remark\n";
+          return false;
+        }
+        const int64_t reported =
+            std::stoll(diagnostics.substr(at + key.size()));
+        if (reported != deviceMacs) {
+          std::cerr << "3b8 " << label << ": the remark counts " << reported
+                    << " device MACs, the tiles " << deviceMacs << "\n";
+          return false;
+        }
+        return true;
+      }
 
       // The tiles partition the GEMM: each output block is an
       // extract_slice of C (static offsets and sizes), its K folds chain
@@ -9660,13 +9760,12 @@ int main() {
       Value memref;
       std::array<int64_t, 2> origin{0, 0};
     };
-    auto viewOf = [](Value tensor) -> std::optional<ViewRef> {
-      auto toTensor = tensor.getDefiningOp<bufferization::ToTensorOp>();
-      if (!toTensor)
-        return std::nullopt;
+    // The buffer behind a memref value: itself, or the base of a static
+    // unit-stride subview with its origin.
+    auto resolveMemref = [](Value memref) -> std::optional<ViewRef> {
       ViewRef ref;
-      ref.memref = toTensor.getBuffer();
-      if (auto view = ref.memref.getDefiningOp<memref::SubViewOp>()) {
+      ref.memref = memref;
+      if (auto view = memref.getDefiningOp<memref::SubViewOp>()) {
         auto offsets = view.getStaticOffsets();
         auto strides = view.getStaticStrides();
         if (offsets.size() != 2 || strides.size() != 2 || strides[0] != 1 ||
@@ -9676,6 +9775,26 @@ int main() {
         ref.memref = view.getSource();
       }
       return ref;
+    };
+    // The buffer behind a tensor operand: a to_tensor, possibly under static
+    // unit-stride extract_slices (Phase 3b-8: the K slices of A and B).
+    std::function<std::optional<ViewRef>(Value)> viewOf =
+        [&](Value tensor) -> std::optional<ViewRef> {
+      if (auto slice = tensor.getDefiningOp<tensor::ExtractSliceOp>()) {
+        auto inner = viewOf(slice.getSource());
+        auto offsets = slice.getStaticOffsets();
+        auto strides = slice.getStaticStrides();
+        if (!inner || offsets.size() != 2 || strides.size() != 2 ||
+            strides[0] != 1 || strides[1] != 1)
+          return std::nullopt;
+        inner->origin[0] += offsets[0];
+        inner->origin[1] += offsets[1];
+        return inner;
+      }
+      auto toTensor = tensor.getDefiningOp<bufferization::ToTensorOp>();
+      if (!toTensor)
+        return std::nullopt;
+      return resolveMemref(toTensor.getBuffer());
     };
 
     // Executes the function after the pass: affine nests with the
@@ -9715,7 +9834,7 @@ int main() {
           continue;
         }
         if (isa<arith::ConstantOp, bufferization::ToTensorOp,
-                memref::SubViewOp>(&op) ||
+                memref::SubViewOp, tensor::ExtractSliceOp>(&op) ||
             op.getName().getStringRef() == "systolic.matmul_tile")
           continue; // consumed by the write-back below
         if (auto writeBack =
@@ -9733,9 +9852,10 @@ int main() {
           auto a = viewOf(tile->getOperand(0));
           auto b = viewOf(tile->getOperand(1));
           auto c = viewOf(tile->getOperand(2));
-          Value destination = writeBack.getDest();
-          if (!a || !b || !c || destination != c->memref ||
-              c->origin != std::array<int64_t, 2>{0, 0}) {
+          auto destination = resolveMemref(writeBack.getDest());
+          if (!a || !b || !c || !destination ||
+              destination->memref != c->memref ||
+              destination->origin != c->origin) {
             std::cerr << "3b7: the tile's operands are not plain views\n";
             return false;
           }
@@ -9745,7 +9865,8 @@ int main() {
           if (!bufA || !bufB || !bufC || !bufA->isFloat || !bufB->isFloat ||
               !bufC->isFloat || bufA->shape.size() != 2 ||
               bufB->shape.size() != 2 || bufC->shape.size() != 2 ||
-              bufC->shape[0] != m || bufC->shape[1] != n ||
+              c->origin[0] + m > bufC->shape[0] ||
+              c->origin[1] + n > bufC->shape[1] ||
               a->origin[0] + m > bufA->shape[0] ||
               a->origin[1] + k > bufA->shape[1] ||
               b->origin[0] + k > bufB->shape[0] ||
@@ -9766,10 +9887,11 @@ int main() {
                 volatile float product = left * right;
                 acc = acc + product;
               }
-              volatile float prior =
-                  static_cast<float>(bufC->floatData[r * n + col]);
+              const std::size_t cIndex =
+                  (c->origin[0] + r) * bufC->shape[1] + c->origin[1] + col;
+              volatile float prior = static_cast<float>(bufC->floatData[cIndex]);
               volatile float out = prior + acc;
-              bufC->floatData[r * n + col] = out;
+              bufC->floatData[cIndex] = out;
             }
           continue;
         }
@@ -10158,6 +10280,429 @@ int main() {
       if (verify(runOffload(*r.gemm, r.options, r.next, shape, expected,
                             nullptr),
                  r.claim))
+        return 1;
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 5.4.3d-3b-8 M1 (docs section 29), under the pass option
+    // common-fiber-offload: a domain whose reduction fibers vary with the
+    // output coordinate runs each output block's common fiber on the
+    // device and the remaining contributions on the host.
+    // ------------------------------------------------------------------
+
+    // (1) The exact common-fiber arithmetic on the reference domains, with
+    // 8 x 8 output blocks (the logical partition of the design report).
+    {
+      using namespace mlir::presburger;
+      auto cube = [](int64_t n) {
+        IntegerPolyhedron d(PresburgerSpace::getSetSpace(3));
+        for (unsigned v = 0; v < 3; ++v) {
+          d.addBound(BoundType::LB, v, DynamicAPInt(0));
+          d.addBound(BoundType::UB, v, DynamicAPInt(n - 1));
+        }
+        return d;
+      };
+      auto row = [](int64_t a, int64_t b, int64_t c, int64_t d) {
+        return SmallVector<DynamicAPInt, 4>{DynamicAPInt(a), DynamicAPInt(b),
+                                           DynamicAPInt(c), DynamicAPInt(d)};
+      };
+      std::vector<::systolic::logical::OutputBlock> grid;
+      for (int64_t bi = 0; bi < 8; ++bi)
+        for (int64_t bj = 0; bj < 8; ++bj)
+          grid.push_back({8 * bi, 8 * bi + 7, 8 * bj, 8 * bj + 7});
+      const ::systolic::logical::FiberRoles roles{0, 1, 2};
+
+      IntegerPolyhedron kLeI = cube(64);
+      kLeI.addInequality(row(1, 0, -1, 0)); // i - k >= 0
+      auto counts = ::systolic::logical::countReductionFibers(
+          kLeI, roles, grid, 0, 63, 0, 63, 0, 63);
+      if (verify(counts && counts->total == 133120 &&
+                     counts->device == 118784 && counts->remainder == 14336,
+                 "3b8 common fibers: k <= i on 64^3 with 8x8 blocks counts"
+                 " 133120 = 118784 device + 14336 host MACs"))
+        return 1;
+      auto fiber = ::systolic::logical::commonReductionFiber(
+          kLeI, roles, {8, 15, 0, 7}, 0, 63);
+      if (verify(fiber && !fiber->empty && fiber->lower == 0 &&
+                     fiber->upper == 8,
+                 "3b8 common fibers: rows 8..15 of k <= i share K [0, 8]"))
+        return 1;
+
+      IntegerPolyhedron kLeIJ = cube(64);
+      kLeIJ.addInequality(row(1, 1, -1, 0)); // i + j - k >= 0
+      counts = ::systolic::logical::countReductionFibers(kLeIJ, roles, grid,
+                                                         0, 63, 0, 63, 0, 63);
+      if (verify(counts && counts->total == 218464 &&
+                     counts->device == 203008 && counts->remainder == 15456,
+                 "3b8 common fibers: k <= i + j on 64^3 counts 218464 ="
+                 " 203008 device + 15456 host MACs"))
+        return 1;
+
+      IntegerPolyhedron between = cube(64);
+      between.addInequality(row(1, 0, -1, 0));  // i - k >= 0
+      between.addInequality(row(0, -1, 1, 0));  // k - j >= 0
+      counts = ::systolic::logical::countReductionFibers(
+          between, roles, grid, 0, 63, 0, 63, 0, 63);
+      unsigned emptyBlocks = 0;
+      for (const auto &block : grid) {
+        auto f = ::systolic::logical::commonReductionFiber(between, roles,
+                                                           block, 0, 63);
+        if (!f)
+          return verify(false, "3b8 common fibers: representable") ? 1 : 1;
+        emptyBlocks += f->empty;
+      }
+      if (verify(counts && counts->total == 45760 &&
+                     counts->device == 32256 && counts->remainder == 13504 &&
+                     emptyBlocks == 36,
+                 "3b8 common fibers: j <= k <= i on 64^3 counts 45760 ="
+                 " 32256 device + 13504 host MACs, 36 blocks without a"
+                 " common fiber"))
+        return 1;
+
+      // Coefficients beyond one (floor), a negative coefficient with an
+      // offset (ceil), an equality, and a block that is one row.
+      IntegerPolyhedron halfK = cube(64);
+      halfK.addInequality(row(1, 0, -2, 0)); // i - 2k >= 0
+      fiber = ::systolic::logical::commonReductionFiber(halfK, roles,
+                                                        {8, 15, 0, 7}, 0, 63);
+      if (verify(fiber && !fiber->empty && fiber->lower == 0 &&
+                     fiber->upper == 4,
+                 "3b8 common fibers: 2k <= i over rows 8..15 is K [0, 4]"))
+        return 1;
+      IntegerPolyhedron kGeJ2 = cube(64);
+      kGeJ2.addInequality(row(0, -1, 1, -2)); // k - j - 2 >= 0
+      fiber = ::systolic::logical::commonReductionFiber(kGeJ2, roles,
+                                                        {0, 7, 8, 15}, 0, 63);
+      if (verify(fiber && !fiber->empty && fiber->lower == 17 &&
+                     fiber->upper == 63,
+                 "3b8 common fibers: k >= j + 2 over columns 8..15 is K"
+                 " [17, 63]"))
+        return 1;
+      IntegerPolyhedron kEqI = cube(64);
+      kEqI.addEquality(row(1, 0, -1, 0)); // k = i
+      auto multiRow = ::systolic::logical::commonReductionFiber(
+          kEqI, roles, {8, 15, 0, 7}, 0, 63);
+      auto oneRow = ::systolic::logical::commonReductionFiber(
+          kEqI, roles, {5, 5, 0, 7}, 0, 63);
+      if (verify(multiRow && multiRow->empty && oneRow && !oneRow->empty &&
+                     oneRow->lower == 5 && oneRow->upper == 5,
+                 "3b8 common fibers: k = i is empty over several rows and"
+                 " {5} over row 5"))
+        return 1;
+      if (verify(!::systolic::logical::commonReductionFiber(
+                     kLeI, roles, {8, 15, 0, 7}, 5, 4),
+                 "3b8 common fibers: an empty K range is refused"))
+        return 1;
+    }
+
+    // (2) Executed scenarios, no fleet: the whole output box is one block,
+    // its common fiber runs as one tile, the rest as guarded host nests;
+    // selected outputs under the relaxed contract, the others untouched.
+    const std::string hybridOptions =
+        "general-affine=true certified-offload-first=true "
+        "allow-fp-reassociation=true common-fiber-offload=true report=true";
+    auto runHybridExecution = [&](const GemmText &gemm, MaskData data,
+                                  const std::string &options) -> bool {
+      const std::string label =
+          gemm.name + "/" +
+          (data == MaskData::Integers ? "integers"
+           : data == MaskData::Special ? "special"
+                                       : "rounding") +
+          "{" + options + "}";
+      ParsedGemm original, produced;
+      if (!parseGemm(original, gemmModule(gemm), gemm.name) ||
+          !parseGemm(produced, gemmModule(gemm), gemm.name)) {
+        std::cerr << "3b8 " << label << ": parse failed\n";
+        return false;
+      }
+      std::string diagnostics;
+      if (!runPass(produced, options, diagnostics)) {
+        std::cerr << "3b8 " << label << ": the pass failed\n" << diagnostics;
+        return false;
+      }
+      if (diagnostics.find("(section 29)") == std::string::npos) {
+        std::cerr << "3b8 " << label << ": not lowered as a hybrid\n"
+                  << diagnostics;
+        return false;
+      }
+      exec::MemoryState sourceMemory, producedMemory;
+      std::array<Value, 3> sourceArgs, producedArgs;
+      for (unsigned i = 0; i < 3; ++i) {
+        sourceArgs[i] = original.function.getArgument(i);
+        producedArgs[i] = produced.function.getArgument(i);
+      }
+      const unsigned roleOf[3] = {2, 0, 1};
+      for (unsigned i = 0; i < 3; ++i) {
+        auto type = cast<MemRefType>(sourceArgs[i].getType());
+        sourceMemory.buffers[sourceArgs[i]] = maskBuffer(type, roleOf[i], data);
+        producedMemory.buffers[producedArgs[i]] =
+            maskBuffer(type, roleOf[i], data);
+      }
+      const exec::MemoryBuffer initialC = sourceMemory.buffers[sourceArgs[0]];
+      auto sourceRun = exec::interpretGuardedLoopNest(
+          original.outermost, scf::IfOp(), ValueRange{}, ValueRange{},
+          ValueRange{}, ValueRange{}, ValueRange{}, &sourceMemory);
+      if (!sourceRun) {
+        std::cerr << "3b8 " << label << ": the source nest did not execute\n";
+        return false;
+      }
+      if (!executeOffloaded(produced.function, producedMemory))
+        return false;
+      const exec::MemoryBuffer &sourceC = sourceMemory.buffers[sourceArgs[0]];
+      const exec::MemoryBuffer &producedC =
+          producedMemory.buffers[producedArgs[0]];
+      std::vector<bool> selected(initialC.floatData.size(), false);
+      for (const exec::MemoryEvent &event : sourceMemory.trace) {
+        if (!event.isStore || event.memref != sourceArgs[0])
+          continue;
+        selected[static_cast<std::size_t>(event.indices[0]) *
+                     static_cast<std::size_t>(initialC.shape[1]) +
+                 static_cast<std::size_t>(event.indices[1])] = true;
+      }
+      std::size_t selectedCount = 0;
+      for (std::size_t e = 0; e < selected.size(); ++e) {
+        const double before = initialC.floatData[e];
+        const double expected = sourceC.floatData[e];
+        const double actual = producedC.floatData[e];
+        if (!selected[e]) {
+          if (std::memcmp(&before, &actual, sizeof(double)) != 0) {
+            std::cerr << "3b8 " << label << ": unselected element " << e
+                      << " changed\n";
+            return false;
+          }
+          continue;
+        }
+        ++selectedCount;
+        if (!contractEqual(expected, actual, data)) {
+          std::cerr << "3b8 " << label << ": selected element " << e
+                    << " is " << actual << ", the source gives " << expected
+                    << "\n";
+          return false;
+        }
+      }
+      for (unsigned i = 1; i < 3; ++i) {
+        const auto &before = sourceMemory.buffers[sourceArgs[i]].floatData;
+        const auto &after = producedMemory.buffers[producedArgs[i]].floatData;
+        if (before.size() != after.size() ||
+            std::memcmp(before.data(), after.data(),
+                        before.size() * sizeof(double)) != 0) {
+          std::cerr << "3b8 " << label << ": a factor changed\n";
+          return false;
+        }
+      }
+      if (selectedCount == 0) {
+        std::cerr << "3b8 " << label << ": nothing selected\n";
+        return false;
+      }
+      return true;
+    };
+
+    GemmText caseA = plain; // 0 <= k <= i
+    caseA.name = "fiber_k_le_i";
+    caseA.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                  " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
+    GemmText caseB = plain; // 0 <= k <= i + j, k < 4
+    caseB.name = "fiber_k_le_i_plus_j";
+    caseB.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                  " affine.for %k = 0 to min affine_map<(d0, d1) -> (4, d0 + "
+                  "d1 + 1)>(%i, %j) {";
+    GemmText caseC = plain; // k >= j
+    caseC.name = "fiber_k_ge_j";
+    caseC.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                  " affine.for %k = affine_map<(d0) -> (d0)>(%j) to 4 {";
+    GemmText caseD = plain; // j <= k <= i + 3 (nonempty common fiber {3})
+    caseD.name = "fiber_j_le_k_le_i3";
+    caseD.aType = "memref<4x8xf32>";
+    caseD.bType = "memref<8x4xf32>";
+    caseD.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                  " affine.for %k = affine_map<(d0) -> (d0)>(%j) to "
+                  "affine_map<(d0) -> (d0 + 4)>(%i) {";
+    GemmText shifted{"fiber_shifted", "memref<8x8xf32>", "memref<8x8xf32>",
+                     "memref<8x8xf32>",
+                     "affine.for %i = 1 to 4 { affine.for %j = 0 to 3 {"
+                     " affine.for %k = 1 to affine_map<(d0) -> (d0 + 1)>(%i) {",
+                     3, "%i + 1, %j + 2", "%i + 1, %k", "%k, %j + 2"};
+
+    struct HybridExecuted {
+      const GemmText *gemm;
+      MaskData data;
+      const char *claim;
+    };
+    const std::vector<HybridExecuted> hybridExecuted = {
+        {&caseA, MaskData::Integers,
+         "3b8 hybrid: k <= i, exact data: selected outputs bitwise, others"
+         " untouched"},
+        {&caseA, MaskData::Special,
+         "3b8 hybrid: k <= i with NaN, -0 and zero products under the"
+         " contract"},
+        {&caseA, MaskData::Rounding,
+         "3b8 hybrid: k <= i, inexact data within the contract's tolerance"},
+        {&caseB, MaskData::Integers, "3b8 hybrid: k <= i + j, exact data"},
+        {&caseB, MaskData::Rounding, "3b8 hybrid: k <= i + j, inexact data"},
+        {&caseC, MaskData::Integers, "3b8 hybrid: k >= j, exact data"},
+        {&caseC, MaskData::Special,
+         "3b8 hybrid: k >= j with NaN and -0 in C"},
+        {&caseD, MaskData::Integers,
+         "3b8 hybrid: j <= k <= i + 3 (both bounds vary), exact data"},
+        {&caseD, MaskData::Special,
+         "3b8 hybrid: j <= k <= i + 3 with NaN and -0 in C"},
+        {&shifted, MaskData::Integers,
+         "3b8 hybrid: nonzero lower bounds and offsets, exact data"},
+        {&shifted, MaskData::Rounding,
+         "3b8 hybrid: nonzero lower bounds and offsets, inexact data"},
+    };
+    for (const HybridExecuted &e : hybridExecuted)
+      if (verify(runHybridExecution(*e.gemm, e.data, hybridOptions), e.claim))
+        return 1;
+
+    // (3) With the fleet: every tile's block runs exactly its common fiber
+    // (computed independently here), the folds contiguous, the device MACs
+    // of the tiles equal the remark's count.
+    {
+      using namespace mlir::presburger;
+      auto fiberOf = [](auto domainBuilder) {
+        return [domainBuilder](const ::systolic::logical::OutputBlock &b) {
+          IntegerPolyhedron d = domainBuilder();
+          return ::systolic::logical::commonReductionFiber(
+              d, ::systolic::logical::FiberRoles{0, 1, 2}, b, 0, 15);
+        };
+      };
+      auto cube16 = []() {
+        IntegerPolyhedron d(PresburgerSpace::getSetSpace(3));
+        for (unsigned v = 0; v < 3; ++v) {
+          d.addBound(BoundType::LB, v, DynamicAPInt(0));
+          d.addBound(BoundType::UB, v, DynamicAPInt(15));
+        }
+        return d;
+      };
+      auto row = [](int64_t a, int64_t b, int64_t c, int64_t d) {
+        return SmallVector<DynamicAPInt, 4>{DynamicAPInt(a), DynamicAPInt(b),
+                                           DynamicAPInt(c), DynamicAPInt(d)};
+      };
+      GemmText big = square(16, 16, 16, "fiber_fleet_k_le_i");
+      big.loops = "affine.for %i = 0 to 16 { affine.for %j = 0 to 16 {"
+                  " affine.for %k = 0 to affine_map<(d0) -> (d0 + 1)>(%i) {";
+      OffloadShape shape{16, 16, 16, {}};
+      shape.expectedFiber = fiberOf([&]() {
+        IntegerPolyhedron d = cube16();
+        d.addInequality(row(1, 0, -1, 0));
+        return d;
+      });
+      if (verify(runOffload(withFleet(big, "fiber_fleet_k_le_i"),
+                            hybridOptions, OffloadExpectation::Hybrid, shape,
+                            {"(section 29)"}, nullptr),
+                 "3b8 hybrid with the fleet: k <= i, every block runs its"
+                 " common fiber, the device MACs match the remark"))
+        return 1;
+      GemmText both = square(16, 16, 16, "fiber_fleet_between");
+      both.loops = "affine.for %i = 0 to 16 { affine.for %j = 0 to 16 {"
+                   " affine.for %k = affine_map<(d0) -> (d0)>(%j) to "
+                   "affine_map<(d0) -> (d0 + 1)>(%i) {";
+      shape.expectedFiber = fiberOf([&]() {
+        IntegerPolyhedron d = cube16();
+        d.addInequality(row(1, 0, -1, 0));
+        d.addInequality(row(0, -1, 1, 0));
+        return d;
+      });
+      if (verify(runOffload(withFleet(both, "fiber_fleet_between"),
+                            hybridOptions, OffloadExpectation::Hybrid, shape,
+                            {"(section 29)"}, nullptr),
+                 "3b8 hybrid with the fleet: j <= k <= i, blocks without a"
+                 " common fiber go to the host"))
+        return 1;
+    }
+
+    // (4) Permission by the flag alone: the remainder mirrors the flags.
+    {
+      GemmText flagged = caseA;
+      flagged.name = "fiber_reassoc";
+      flagged.flags = " fastmath<reassoc>";
+      ParsedGemm produced;
+      std::string diagnostics;
+      bool mirrored = false;
+      if (parseGemm(produced, gemmModule(flagged), flagged.name) &&
+          runPass(produced,
+                  "general-affine=true certified-offload-first=true "
+                  "common-fiber-offload=true report=true",
+                  diagnostics) &&
+          diagnostics.find("(section 29)") != std::string::npos) {
+        mirrored = true;
+        produced.function.walk([&](arith::AddFOp add) {
+          if (add->getParentOfType<scf::IfOp>() &&
+              !arith::bitEnumContainsAll(add.getFastmath(),
+                                          arith::FastMathFlags::reassoc))
+            mirrored = false;
+        });
+      }
+      if (verify(mirrored,
+                 "3b8 hybrid: the reassoc flag permits the offload and the"
+                 " remainder's additions carry it"))
+        return 1;
+    }
+
+    // (5) Refusals and fallbacks. Without the option the established
+    // refusal of partial fibers stands (the Phase 3b-7 scenarios above
+    // keep checking it); with it: strict semantics are never offloaded,
+    // may-alias arguments stay, a box whose single block has no common
+    // fiber (j <= k <= i, no fleet) is UNKNOWN and the guarded MAC nest
+    // follows, and a stepped reduction is not recognized.
+    {
+      GemmText between4 = plain;
+      between4.name = "fiber_between_no_fleet";
+      between4.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                       " affine.for %k = affine_map<(d0) -> (d0)>(%j) to "
+                       "affine_map<(d0) -> (d0 + 1)>(%i) {";
+      GemmText aliasA = caseA;
+      aliasA.name = "fiber_may_alias";
+      aliasA.argumentAttrs = "";
+      GemmText steppedA = caseA;
+      steppedA.name = "fiber_stepped";
+      steppedA.aType = "memref<4x8xf32>";
+      steppedA.bType = "memref<8x4xf32>";
+      steppedA.loops = "affine.for %i = 0 to 4 { affine.for %j = 0 to 4 {"
+                       " affine.for %k = 0 to affine_map<(d0) -> (2 * d0 + "
+                       "2)>(%i) step 2 {";
+      OffloadShape four{4, 4, 4, {}};
+      four.checkPartition = false;
+      if (verify(runOffload(caseA,
+                            "general-affine=true certified-offload-first=true "
+                            "common-fiber-offload=true report=true",
+                            OffloadExpectation::GuardedMac, four,
+                            {std::string(certifiedRefusal) +
+                             "UNKNOWN: strict floating-point semantics"},
+                            nullptr),
+                 "3b8 hybrid: strict semantics are never offloaded; the"
+                 " guarded MAC nest follows"))
+        return 1;
+      if (verify(runOffload(aliasA, hybridOptions,
+                            OffloadExpectation::Unchanged, four,
+                            {"UNKNOWN: A may alias C"}, nullptr),
+                 "3b8 hybrid: may-alias arguments stay unchanged"))
+        return 1;
+      if (verify(runOffload(between4, hybridOptions,
+                            OffloadExpectation::GuardedMac, four,
+                            {std::string(certifiedRefusal) +
+                             "UNKNOWN: no output block has a common reduction "
+                             "fiber"},
+                            nullptr),
+                 "3b8 hybrid: a box whose only block has no common fiber is"
+                 " UNKNOWN; the guarded MAC nest follows"))
+        return 1;
+      if (verify(runOffload(steppedA, hybridOptions,
+                            OffloadExpectation::Unchanged, four,
+                            {"UNKNOWN: not a recognized GEMM"}, nullptr),
+                 "3b8 hybrid: a stepped reduction is not recognized and"
+                 " stays unchanged"))
+        return 1;
+      // The option off: the established refusal, the guarded MAC follows.
+      if (verify(runOffload(caseA, certifiedOptions,
+                            OffloadExpectation::GuardedMac, four,
+                            {std::string(certifiedRefusal) +
+                             "UNKNOWN: the reduction fiber of an output "
+                             "coordinate is a proper part of the K range"},
+                            nullptr),
+                 "3b8 hybrid: without the option the partial-fiber refusal"
+                 " of Phase 3b-7 stands"))
         return 1;
     }
   }

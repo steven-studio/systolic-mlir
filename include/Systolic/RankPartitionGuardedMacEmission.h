@@ -104,6 +104,18 @@ struct GuardedMacSemantics {
   std::optional<mlir::arith::RoundingMode> roundingMode;
   mlir::arith::IntegerOverflowFlags integerOverflow =
       mlir::arith::IntegerOverflowFlags::none;
+
+  // Phase 3b-8 (section 29): the host remainder of a hybrid
+  // lowering runs under the program's own relaxed contract,
+  // so the source statement's fast-math flags are MIRRORED
+  // on the emitted operations (each operation its own
+  // flags) instead of refused. A rounding-mode attribute is
+  // still refused. Default false: the strict rule above.
+  bool mirrorFastMath = false;
+  mlir::arith::FastMathFlags multiplyFastMath =
+      mlir::arith::FastMathFlags::none;
+  mlir::arith::FastMathFlags addFastMath =
+      mlir::arith::FastMathFlags::none;
 };
 
 struct EmittedGuardedMultiplyAccumulate {
@@ -153,7 +165,8 @@ emitGuardedMultiplyAccumulate(
     const GuardedMemoryOperand &b,
     const GuardedMemoryOperand &c,
     const EmittedGuardedMemoryLoads &loads,
-    const GuardedMacSemantics &semantics) {
+    const GuardedMacSemantics &semantics,
+    bool partialDomain = false) {
 
   using namespace mlir;
   namespace memory = guarded_memory_detail;
@@ -173,7 +186,7 @@ emitGuardedMultiplyAccumulate(
     return std::nullopt;
 
   Block *thenBlock = memory::validateGuardedStatementContext(
-      map, plan, sourceDomain, guarded, recovery);
+      map, plan, sourceDomain, guarded, recovery, partialDomain);
 
   if (!thenBlock)
     return std::nullopt;
@@ -187,7 +200,8 @@ emitGuardedMultiplyAccumulate(
 
   for (const GuardedMemoryOperand *operand : {&a, &b, &c}) {
     if (!memory::validateOperand(
-            *operand, sourceDomain, recovery.sourceIVs, thenBlock))
+            *operand, sourceDomain, recovery.sourceIVs, thenBlock,
+            partialDomain))
       return std::nullopt;
   }
 
@@ -211,7 +225,8 @@ emitGuardedMultiplyAccumulate(
     return std::nullopt;
 
   if (*arithmetic == mac::MacArithmetic::Float &&
-      (semantics.fastMath != arith::FastMathFlags::none ||
+      ((!semantics.mirrorFastMath &&
+        semantics.fastMath != arith::FastMathFlags::none) ||
        semantics.roundingMode.has_value()))
     return std::nullopt;
 
@@ -263,6 +278,9 @@ emitGuardedMultiplyAccumulate(
   if (*arithmetic == mac::MacArithmetic::Float) {
     auto op = arith::MulFOp::create(
         builder, loc, leftFactor, rightFactor);
+    if (semantics.mirrorFastMath)
+      op.setFastmathAttr(arith::FastMathFlagsAttr::get(
+          context, semantics.multiplyFastMath));
     multiply = op.getOperation();
     product = op.getResult();
   } else {
@@ -281,6 +299,9 @@ emitGuardedMultiplyAccumulate(
   if (*arithmetic == mac::MacArithmetic::Float) {
     auto op = arith::AddFOp::create(
         builder, loc, leftAddend, rightAddend);
+    if (semantics.mirrorFastMath)
+      op.setFastmathAttr(arith::FastMathFlagsAttr::get(
+          context, semantics.addFastMath));
     add = op.getOperation();
     sum = op.getResult();
   } else {
@@ -296,7 +317,7 @@ emitGuardedMultiplyAccumulate(
 
   auto store = emitGuardedMemoryStore(
       builder, loc, map, plan, sourceDomain, guarded, recovery,
-      a, b, c, loads, sum);
+      a, b, c, loads, sum, partialDomain);
 
   if (!store) {
     add->erase();

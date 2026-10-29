@@ -1098,6 +1098,13 @@ static int compile(driver *d) {
   const char *certified_opt = certified_first && strcmp(certified_first, "1") == 0
                                   ? " certified-offload-first=true"
                                   : "";
+  /* Phase 3b-8 M1 (section 29): the common-fiber offload of reduction-
+     dependent domains, off by default until its dispatch order is approved. */
+  const char *fiber_first = getenv("SYSTOLIC_CC_TEST_COMMON_FIBER_OFFLOAD");
+  const char *fiber_opt = fiber_first && strcmp(fiber_first, "1") == 0
+                              ? " common-fiber-offload=true"
+                              : "";
+  char *test_opts = format("%s%s", certified_opt, fiber_opt);
   char *opt = format("%s/bin/systolic-opt", a->build_dir);
   char *cfront = format("%s/systolic-cfront", a->self_dir);
   char *offload_rt = format("%s/runtime/offload", SYSTOLIC_SOURCE_DIR);
@@ -1191,7 +1198,7 @@ static int compile(driver *d) {
                                a->no_reduction_batches
                                    ? " reduction-batches=false"
                                    : "",
-                               a->fp_distribute ? " fp-distribute=true" : "", general_affine, certified_opt),
+                               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts),
                         kpath(d, "10-frontend.mlir"), "-o",
                         kpath(d, "20-systolic.mlir"), NULL);
     if (run(d, &c2, "GEMM recognition / Affine Partitioning", NULL, NULL,
@@ -1407,7 +1414,7 @@ static int compile(driver *d) {
         opt, fleet,
         format("--affine-matmul-to-systolic=cost-model=%s%s%s general-affine=%s%s", a->cost_model,
                a->no_reduction_batches ? " reduction-batches=false" : "",
-               a->fp_distribute ? " fp-distribute=true" : "", general_affine, certified_opt),
+               a->fp_distribute ? " fp-distribute=true" : "", general_affine, test_opts),
                         kpath(d, "30-kernels.mlir"), "-o",
                         kpath(d, "40-systolic.mlir"), NULL);
     if (run(d, &c4, "Affine -> Systolic", NULL, NULL, &r))

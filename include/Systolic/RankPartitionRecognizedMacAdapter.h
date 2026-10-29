@@ -121,6 +121,11 @@ struct GuardedMacPreflight {
   mlir::arith::FastMathFlags addFastMath = mlir::arith::FastMathFlags::none;
   bool roundingModeAttributes = false;
 
+  // Phase 3b-8: the plan's domain is a certified subset of the source
+  // domain's image (the host remainder of a hybrid lowering, section 29);
+  // the emitters require inclusion only (V3').
+  bool partialDomain = false;
+
   GuardedMacPreflight(PartitionCoordinateMap map,
                       mlir::presburger::IntegerPolyhedron domain,
                       SymbolicIterationPlan iterationPlan)

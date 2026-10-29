@@ -3415,3 +3415,118 @@ Domains whose fibers vary with (i, j) (a K bound depending on an output coordina
 they need per-fiber jobs or a different decomposition. Non-unimodular maps, strided or transposed
 views and batch coordinates remain §27's limitations. The temporary costs M × N floats and one
 dense GEMM of the box, whatever the fraction of O in it; no cost-based decision is made.
+
+## 29. Reduction-dependent domains: common fibers on the device, the remainder on the host (Phase 5.4.3d-3b-8 M1, 2026-10-29)
+
+Section 28 lowers a non-box domain whose reduction fibers K(i, j) = {k : (i, j, k) ∈ D'} are all
+empty or the whole K range. This section lowers a domain whose fibers vary with the output
+coordinate (k ≤ i; k ≤ i + j; k ≥ j; j ≤ k ≤ i). Code: `prepareDeviceJobs` /
+`replaceGemmWithDeviceJobs` (`RankPartitionDeviceJobLowering.cpp`, `commonFiber`), the exact
+fiber arithmetic in `include/Systolic/RankPartitionCommonFiber.h`, and two small extensions of the
+Phase 3b-2/3b-3 emitters (`partialDomain`, `mirrorFastMath`). **Under the hidden pass option
+`common-fiber-offload` only** (`systolic-cc`: the test-only variable
+`SYSTOLIC_CC_TEST_COMMON_FIBER_OFFLOAD=1`); by default the pass behaves as in section 28
+(§29.5).
+
+### 29.1 Fibers and common fibers [proved]
+
+In the preflight's language -- one conjunctive polyhedron D' over the logical coordinates, no
+locals, a unimodular map -- every fiber is an integer interval: for fixed (i, j) each constraint
+is a linear bound on k. For an output block G = [i0, i1] × [j0, j1] the common fiber
+K_common(G) = ∩_{(i,j)∈G} K(i, j) = {k : ∀(i, j) ∈ G, (i, j, k) ∈ D'} is decided exactly without
+projection: a facet a_I i + a_J j + a_K k + c ≥ 0 holds on all of G iff it holds at the vertex of
+G that minimizes a_I i + a_J j (by the signs of a_I, a_J: an affine function on a box attains its
+minimum at a vertex, which is an integer point of G); that vertex gives one bound on k (ceil /
+floor division for |a_K| > 1); a facet without k must hold at its vertex, else some cell of G has
+an empty fiber and the common fiber is empty; an equality is its two facets. The arithmetic is
+exact (BigInt); nothing is sampled or approximated.
+
+### 29.2 Partition and correctness obligations [proved]
+
+With the output blocks G_b of the box's tile plan (`planSystolicMatmul`, which partitions the
+output box exactly, §27 J3), the device part is D_dev = ⨆_b G_b × K_common(G_b) and the host part
+is R = ⨆_b R_b, R_b = {(i, j, k) ∈ D' : (i, j) ∈ G_b, k ∉ K_common(G_b)} (the whole of D' over
+G_b when the common fiber is empty). Every point of D' lies in exactly one block and is either in
+its common fiber or in its remainder set: D' = D_dev ⊔ R, so every source product is accumulated
+exactly once, none twice, none outside D'. The lowering also certifies each device box
+independently: for every facet of D', the set of box points violating it is integer-empty.
+Memory: every A element the device reads, (i, k) with k ∈ K_common(G_b), is read by the source
+for every j of the block; every B element (k, j) likewise; every C cell of a block with device
+work has a nonempty fiber. The device and the host touch only addresses the source touches, so no
+bound beyond §27's J4 is needed, dynamic leading dimensions included. The remainder nests execute
+R_b under the exact Phase 2b guard; the Phase 3b-2 emitters' V3 is relaxed to inclusion
+(`partialDomain`: every disjunct of the plan inside T(D)), the exactly-once property being this
+section's partition proof. In that mode the emitters also admit a dynamic leading dimension (the
+C front end's array parameters): the remainder accesses only addresses the source accesses, so the
+dimension's upper bound is the program's own guarantee, as for the device views (§27 J4); the
+lower bound and every static dimension are still proven. The strict guarded MAC path of Phase
+3b-5 is unchanged (static shapes only).
+
+### 29.3 Device jobs and the scheduler
+
+The full box is planned once (`planSystolicMatmul`); then each block's invocations are clipped to
+its common fiber: folds outside dropped, boundary folds shortened (k0, k), every clipped
+invocation re-priced with the planner's own `estimateInvocationCost(k, array)` so `est_cycles` is
+the cost model's value for the work actually submitted; `start_cycle` keeps the planner's fold
+start (not a hardware launch time, §27). The clipped plan is re-verified: the blocks partition the
+output box (as before), each kept block's folds are contiguous and ascending and cover exactly its
+common fiber, 1 ≤ k ≤ k_max. Blocks without a common fiber leave the plan; a plan with no block
+left is UNKNOWN ("nothing for the device"). The asynchronous lowering's `systolic.k_index` /
+`k_count` follow the clipped lists. The planner's makespan belongs to the dense plan it priced and
+is not reported for the clipped one (review finding of 2026-10-29). Without a fleet the whole box
+is one block, lowered as one tile over the K slices of A and B.
+
+### 29.4 Synchronization, arithmetic, counts
+
+Device jobs accumulate directly into C's view (no temporary). The remainder nests are emitted
+after the write-back. Asynchronous lowering: `waitGemms` places `fpga_gemm_wait` before the first
+reader of the GEMM's result tensors, the `materialize_in_destination` into C, hence before the
+remainder nests (checked by the lit test); the runtime's wait holds the runtime mutex while
+`wait_locked` completes every tile, and the transfer thread adds results into C under the same
+mutex, so the host sees the device's writes when the wait returns. Synchronous runtime: each call
+returns with its result added. Software model: the pending jobs run at the wait.
+
+Arithmetic: the device adds Σ_{k ∈ K_common} per block into C (per fold, in order), the host adds
+the remaining products of each element one by one in source order. The multiset of products is
+the source's; the association differs (device sums, then the host's terms), which §6's relaxed
+contract permits; strict semantics are never offloaded. Results are bitwise the loop's when every
+partial sum is exact; otherwise rounding, the sign of a zero sum, NaN payloads and (on the board)
+flush-to-zero may differ, as in §27. The remainder's operations carry the source statement's own
+fast-math flags (`mirrorFastMath`; a rounding-mode attribute is still refused): the remainder is
+a subset of the same statement under the same permission; LLVM forms no fused multiply-add from
+`reassoc` alone. Exact counts of the three sets are computed (`countReductionFibers`) and reported
+in the remark. Reference, 64 × 64 × 64 with k ≤ i and 8 × 8 output blocks: 133120 MACs = 118784
+device + 14336 host (89.23 % / 10.77 %); the fleet's plan has 145 blocks of 8 × 8 and 4 × 4, so
+its split differs (122240 device, 10880 host, 451 invocations against the dense plan's 580).
+
+### 29.5 Dispatch order and the pending approval
+
+With the option, the guarded path's decisions are: box offload (§27), masked offload (§28), the
+hybrid of this section, the guarded MAC nest, the source. The option is off by default because
+seven existing expectations pin the Phase 3b-7 refusal of partial fibers (unit scenarios
+relaxed_partial_fibers, device_partial_fibers, mask_k_from_i, mask_k_from_j; lit `@k_from_i` of
+affine_gemm_masked_offload.mlir and `@relaxed` of affine_gemm_guarded_mac.mlir; the `k_from_i`
+kernel of masked_offload.c); they are untouched. Enabling the hybrid by default changes their
+final outcome from host to device-plus-remainder and needs that approval.
+
+### 29.6 Verification (2026-10-29; software runtime model, the board NOT RUN)
+
+Unit: the exact fiber arithmetic on the reference domains with 8 × 8 blocks (the counts above; k ≤
+i + j: 218464 = 203008 + 15456; j ≤ k ≤ i: 45760 = 32256 + 13504 with 36 blocks without a common
+fiber), floor and ceil divisions, an equality, an empty K range; executed scenarios without a
+fleet through the production pass (k ≤ i, k ≤ i + j, k ≥ j, j ≤ k ≤ i + 3, nonzero bounds with
+offsets; exact data bitwise, NaN / −0 / zero products under the contract, inexact data within
+tolerance, untouched elements bitwise); with the fleet, every tile's block runs exactly its
+independently computed common fiber and the tiles' MACs equal the remark's count (k ≤ i and
+j ≤ k ≤ i); permission by the flag with the flags mirrored on the remainder; refusals (strict,
+may-alias, no common fiber, stepped) and the option-off behaviour. Lit:
+`test/Systolic/affine_gemm_common_fiber_offload.mlir`. C: `test/SystolicCC/common_fiber_offload.c`
+(the reference kernels bitwise against the CPU reference with nonzero C; the option-off and
+strict runs). Numbers: see the phase report.
+
+### 29.7 Limitations
+
+Blocks with a cell whose fiber is empty get no device work (M3 would combine the masks of §28);
+congruence fibers (M4), batch coordinates and non-unimodular maps remain refused; no cost policy
+(M2): the hybrid is taken whenever one block has a common fiber. The host remainder is one guarded
+nest per block over the block's full K range; its cost is the guard evaluations over that range.

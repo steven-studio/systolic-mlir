@@ -545,11 +545,19 @@ inline mlir::Value viewRoot(mlir::Value memref) {
 //     these rows over the recovered source IVs;
 //   - the chain cannot overflow i64 on the exact domain;
 //   - every address lies inside the shape.
+// Phase 3b-8: `dynamicLeadingDimension` (the host remainder of a hybrid
+// lowering, section 29.2) admits a memref whose leading dimension is
+// dynamic: the remainder reads and writes only addresses the source nest
+// itself accesses (its plan is a subset of the source image, V3'), so the
+// upper bound of that dimension is the program's own guarantee, as for the
+// device views (section 27, J4); the lower bound and every static dimension
+// are still proven. Default false: the Phase 3b-2 rule, static shapes only.
 inline bool validateOperand(
     const GuardedMemoryOperand &operand,
     const mlir::presburger::IntegerPolyhedron &sourceDomain,
     llvm::ArrayRef<mlir::Value> sourceIVs,
-    mlir::Block *thenBlock) {
+    mlir::Block *thenBlock,
+    bool dynamicLeadingDimension = false) {
 
   using namespace mlir;
 
@@ -560,9 +568,13 @@ inline bool validateOperand(
 
   auto type = dyn_cast<MemRefType>(operand.memref.getType());
 
-  if (!type || !type.hasRank() || !type.hasStaticShape() ||
+  if (!type || !type.hasRank() ||
       !type.getLayout().isIdentity() || type.getRank() < 1)
     return false;
+
+  for (std::int64_t d = 0; d < type.getRank(); ++d)
+    if (type.isDynamicDim(d) && !(dynamicLeadingDimension && d == 0))
+      return false;
 
   const std::size_t rank =
       static_cast<std::size_t>(type.getRank());
@@ -639,7 +651,16 @@ inline bool validateOperand(
         return false;
     }
 
-    // Exact tensor bounds: 0 <= f_r(x) <= shape_r - 1.
+    // Exact tensor bounds: 0 <= f_r(x) <= shape_r - 1 (a dynamic leading
+    // dimension: 0 <= f_r(x), the upper bound the program's own).
+
+    if (type.isDynamicDim(static_cast<std::int64_t>(r))) {
+      if (!affineFormWithin(sourceDomain, partial,
+                            llvm::DynamicAPInt(*offset),
+                            llvm::DynamicAPInt(0), maxI64))
+        return false;
+      continue;
+    }
 
     const std::int64_t extent = type.getShape()[r];
 
@@ -658,12 +679,19 @@ inline bool validateOperand(
 
 // Structure shared by both emitters. Returns the guarded
 // then-block on success.
+// Phase 3b-8: `partialDomain` -- the plan's logical domain is a certified
+// SUBSET of the image T(D) (the remainder of a hybrid lowering, section
+// 29), possibly several disjuncts: V3 then requires every disjunct to lie
+// inside T(D) and nothing more; that every source point is executed exactly
+// once is the caller's partition proof, not this emitter's. Default false:
+// the Phase 3b-2 equality.
 inline mlir::Block *validateGuardedStatementContext(
     const PartitionCoordinateMap &map,
     const SymbolicIterationPlan &plan,
     const mlir::presburger::IntegerPolyhedron &sourceDomain,
     const EmittedGuardedAffineLoopNest &guarded,
-    const EmittedSourceIVRecovery &recovery) {
+    const EmittedSourceIVRecovery &recovery,
+    bool partialDomain = false) {
 
   using namespace mlir;
 
@@ -729,22 +757,34 @@ inline mlir::Block *validateGuardedStatementContext(
   auto projected = buildLogicalDomain(map, sourceDomain);
   auto image = buildExactLogicalImage(map, sourceDomain);
 
-  if (!projected || !image ||
-      plan.logicalDomain.getNumDisjuncts() != 1)
+  if (!projected || !image || plan.logicalDomain.getNumDisjuncts() == 0)
     return nullptr;
 
-  const presburger::IntegerRelation &certified =
-      plan.logicalDomain.getDisjunct(0);
+  if (partialDomain) {
+    // V3' (Phase 3b-8): every disjunct inside T(D).
+    for (unsigned d = 0; d < plan.logicalDomain.getNumDisjuncts(); ++d) {
+      auto inside = exactIntegerSetInclusion(
+          plan.logicalDomain.getDisjunct(d), *image);
+      if (!inside || !*inside)
+        return nullptr;
+    }
+  } else {
+    if (plan.logicalDomain.getNumDisjuncts() != 1)
+      return nullptr;
 
-  auto imageInPlan =
-      exactIntegerSetInclusion(*projected, certified);
+    const presburger::IntegerRelation &certified =
+        plan.logicalDomain.getDisjunct(0);
 
-  auto planInImage =
-      exactIntegerSetInclusion(certified, *image);
+    auto imageInPlan =
+        exactIntegerSetInclusion(*projected, certified);
 
-  if (!imageInPlan || !planInImage ||
-      !*imageInPlan || !*planInImage)
-    return nullptr;
+    auto planInImage =
+        exactIntegerSetInclusion(certified, *image);
+
+    if (!imageInPlan || !planInImage ||
+        !*imageInPlan || !*planInImage)
+      return nullptr;
+  }
 
   // V4: loop nest structure.
 
@@ -1026,7 +1066,8 @@ emitGuardedMemoryLoads(
     const EmittedSourceIVRecovery &recovery,
     const GuardedMemoryOperand &a,
     const GuardedMemoryOperand &b,
-    const GuardedMemoryOperand &c) {
+    const GuardedMemoryOperand &c,
+    bool partialDomain = false) {
 
   using namespace mlir;
   namespace detail = guarded_memory_detail;
@@ -1040,7 +1081,7 @@ emitGuardedMemoryLoads(
     return std::nullopt;
 
   Block *thenBlock = detail::validateGuardedStatementContext(
-      map, plan, sourceDomain, guarded, recovery);
+      map, plan, sourceDomain, guarded, recovery, partialDomain);
 
   if (!thenBlock)
     return std::nullopt;
@@ -1055,7 +1096,7 @@ emitGuardedMemoryLoads(
   for (const GuardedMemoryOperand *operand : {&a, &b, &c}) {
     if (!detail::validateOperand(
             *operand, sourceDomain,
-            recovery.sourceIVs, thenBlock))
+            recovery.sourceIVs, thenBlock, partialDomain))
       return std::nullopt;
   }
 
@@ -1117,7 +1158,8 @@ emitGuardedMemoryStore(
     const GuardedMemoryOperand &b,
     const GuardedMemoryOperand &c,
     const EmittedGuardedMemoryLoads &loads,
-    mlir::Value valueToStore) {
+    mlir::Value valueToStore,
+    bool partialDomain = false) {
 
   using namespace mlir;
   namespace detail = guarded_memory_detail;
@@ -1133,7 +1175,7 @@ emitGuardedMemoryStore(
     return std::nullopt;
 
   Block *thenBlock = detail::validateGuardedStatementContext(
-      map, plan, sourceDomain, guarded, recovery);
+      map, plan, sourceDomain, guarded, recovery, partialDomain);
 
   if (!thenBlock)
     return std::nullopt;
@@ -1152,7 +1194,7 @@ emitGuardedMemoryStore(
   for (const GuardedMemoryOperand *operand : {&a, &b, &c}) {
     if (!detail::validateOperand(
             *operand, sourceDomain,
-            recovery.sourceIVs, thenBlock))
+            recovery.sourceIVs, thenBlock, partialDomain))
       return std::nullopt;
   }
 

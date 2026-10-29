@@ -2535,6 +2535,17 @@ struct AffineMatmulToSystolicPass
       llvm::cl::desc("Internal test control: try the certified device-job "
                      "lowering of recognized GEMMs before the fast path"),
       llvm::cl::Hidden, llvm::cl::init(false)};
+  // Phase 5.4.3d-3b-8 M1 (docs/AFFINE_GEMM_MAPPING.md section 29): a
+  // recognized GEMM whose reduction fibers vary with the output coordinate
+  // runs each output block's common fiber on the device and the remaining
+  // contributions on the host (guarded MAC nests). Off by default: the
+  // existing refusal of partial fibers stands until the dispatch-order
+  // change is approved (section 29.5).
+  Option<bool> commonFiberOffload{
+      *this, "common-fiber-offload",
+      llvm::cl::desc("Phase 3b-8: offload each output block's common "
+                     "reduction fiber and run the remainder on the host"),
+      llvm::cl::Hidden, llvm::cl::init(false)};
 
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
@@ -3290,8 +3301,8 @@ struct AffineMatmulToSystolicPass
       }
       return replaceGemmWithDeviceJobs(builder, anchor, *fleet, deviceOptions,
                                        assumeNoAlias, allowFpReassociation,
-                                       nextGemmIndex, outcome, why,
-                                       hardError);
+                                       commonFiberOffload, nextGemmIndex,
+                                       outcome, why, hardError);
     };
     auto reportDeviceJobs = [&](const DeviceJobReplacement &replaced) {
       if (!report)
@@ -3304,6 +3315,13 @@ struct AffineMatmulToSystolicPass
       if (replaced.maskedOutput)
         remark << " with an exact output mask over the non-box domain "
                   "(section 28)";
+      if (replaced.commonFiber)
+        remark << " with the common reduction fibers of "
+               << replaced.deviceBlocks << " output block(s) on the device ("
+               << replaced.deviceMacs << " of " << replaced.totalMacs
+               << " MACs) and the remainder on the host (" << replaced.hostMacs
+               << " MACs in " << replaced.remainderNests
+               << " guarded nest(s)) (section 29)";
       if (replaced.makespan)
         remark << " on " << fleet->resources.size()
                << " accelerator(s): makespan = " << *replaced.makespan

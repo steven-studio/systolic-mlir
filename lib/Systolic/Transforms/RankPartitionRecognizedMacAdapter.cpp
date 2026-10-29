@@ -388,10 +388,13 @@ emitGuardedMacStatement(mlir::OpBuilder &builder, mlir::Location loc,
                         llvm::ArrayRef<mlir::Value> memrefs, std::string &why) {
 
   // Phase 3b-6: a preflight that recorded non-strict attributes
-  // (prepareRecognizedGemm) is not for the MAC emitters.
-  if (preflight.multiplyFastMath != mlir::arith::FastMathFlags::none ||
-      preflight.addFastMath != mlir::arith::FastMathFlags::none ||
-      preflight.roundingModeAttributes) {
+  // (prepareRecognizedGemm) is not for the MAC emitters -- unless the
+  // caller asks for the flags to be mirrored (Phase 3b-8, the relaxed
+  // remainder; a rounding-mode attribute is never mirrored).
+  if (preflight.roundingModeAttributes ||
+      (!preflight.semantics.mirrorFastMath &&
+       (preflight.multiplyFastMath != mlir::arith::FastMathFlags::none ||
+        preflight.addFastMath != mlir::arith::FastMathFlags::none))) {
     why = "REFUSED: the preflight recorded non-strict arithmetic attributes";
     return std::nullopt;
   }
@@ -437,14 +440,14 @@ emitGuardedMacStatement(mlir::OpBuilder &builder, mlir::Location loc,
   auto loads = emitGuardedMemoryLoads(
       builder, loc, preflight.coordinateMap, preflight.plan,
       preflight.sourceDomain, *nest, *recovery, operands[0], operands[1],
-      operands[2]);
+      operands[2], preflight.partialDomain);
   if (!loads)
     return failNest("guarded memory loads emission");
 
   auto mac = emitGuardedMultiplyAccumulate(
       builder, loc, preflight.coordinateMap, preflight.plan,
       preflight.sourceDomain, *nest, *recovery, operands[0], operands[1],
-      operands[2], *loads, preflight.semantics);
+      operands[2], *loads, preflight.semantics, preflight.partialDomain);
   if (!mac)
     return failNest("guarded multiply-accumulate emission");
 

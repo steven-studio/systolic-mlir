@@ -7,6 +7,8 @@
 
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 
+#include "Systolic/CostModel.h"
+#include "Systolic/RankPartitionCommonFiber.h"
 #include "Systolic/RankPartitionExactInclusion.h"
 #include "Systolic/RankPartitionGuardedLoopNestEmission.h"
 #include "Systolic/SystolicOps.h"
@@ -17,6 +19,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -99,8 +102,8 @@ bool planPartitionsBox(const SystolicTilePlan &plan, int64_t M, int64_t N,
 
 std::optional<DeviceJobPreflight>
 prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
-                  bool allowFpReassociation, GuardedMacOutcome &outcome,
-                  std::string &why) {
+                  bool allowFpReassociation, bool commonFiberOffload,
+                  GuardedMacOutcome &outcome, std::string &why) {
   using namespace mlir::presburger;
 
   auto unknown = [&](const Twine &message) -> std::optional<DeviceJobPreflight> {
@@ -322,19 +325,34 @@ prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
       witness.addInequality(facet);
       return !witness.isIntegerEmpty();
     };
-    for (unsigned r = 0; r < logical.getNumInequalities(); ++r)
+    const char *partialFibers = nullptr;
+    for (unsigned r = 0; r < logical.getNumInequalities() && !partialFibers;
+         ++r)
       if (violated(logical.getInequality(r), false))
-        return unknown("the reduction fiber of an output coordinate is a "
-                       "proper part of the K range (a K bound depends on i "
-                       "or j): the output mask would skip contributions; "
-                       "not lowered");
-    for (unsigned r = 0; r < logical.getNumEqualities(); ++r)
+        partialFibers = "the reduction fiber of an output coordinate is a "
+                        "proper part of the K range (a K bound depends on i "
+                        "or j): the output mask would skip contributions; "
+                        "not lowered";
+    for (unsigned r = 0; r < logical.getNumEqualities() && !partialFibers;
+         ++r)
       if (violated(logical.getEquality(r), false) ||
           violated(logical.getEquality(r), true))
-        return unknown("the reduction fiber of an output coordinate is a "
-                       "proper part of the K range (an equality constrains "
-                       "K): not lowered");
+        partialFibers = "the reduction fiber of an output coordinate is a "
+                        "proper part of the K range (an equality constrains "
+                        "K): not lowered";
+    if (partialFibers) {
+      // Phase 3b-8 (section 29): under the option, the common fibers of the
+      // output blocks go to the device and the rest to the host; the
+      // blocks are the tile plan's, known at emission.
+      if (!commonFiberOffload)
+        return unknown(partialFibers);
+      result.commonFiber = true;
+    }
+  }
 
+  if (!isBox && !result.commonFiber) {
+    const int64_t kLower = lower[roleK];
+    const int64_t kUpper = lower[roleK] + extent[roleK] - 1;
     // Memory safety of the dense reads with a dynamic leading dimension
     // (J4 takes its upper bound as the program's own): the dense GEMM reads
     // every row of the box, so the box's last row must be a row the nest
@@ -397,6 +415,9 @@ prepareDeviceJobs(Operation *anchor, bool assumeNoAlias,
   result.M = extent[roleI];
   result.N = extent[roleJ];
   result.K = extent[roleK];
+  result.roles = {roleI, roleJ, roleK};
+  result.boxLower = lower;
+  result.boxExtent = extent;
 
   // ------------------------------------------------------------------
   // J3 / J4 the views and their bounds, in checked arithmetic.
@@ -445,11 +466,13 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
                           const SystolicFleet &fleet,
                           const SystolicOptimizerOptions &options,
                           bool assumeNoAlias, bool allowFpReassociation,
-                          int64_t &nextGemmIndex, GuardedMacOutcome &outcome,
-                          std::string &why, bool &hardError) {
+                          bool commonFiberOffload, int64_t &nextGemmIndex,
+                          GuardedMacOutcome &outcome, std::string &why,
+                          bool &hardError) {
+  using namespace mlir::presburger;
   hardError = false;
   auto pre = prepareDeviceJobs(anchor, assumeNoAlias, allowFpReassociation,
-                               outcome, why);
+                               commonFiberOffload, outcome, why);
   if (!pre)
     return std::nullopt;
 
@@ -457,6 +480,12 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
       [&](const Twine &message) -> std::optional<DeviceJobReplacement> {
     outcome = GuardedMacOutcome::Unsupported;
     why = ("REFUSED: " + message).str();
+    return std::nullopt;
+  };
+  auto unknown =
+      [&](const Twine &message) -> std::optional<DeviceJobReplacement> {
+    outcome = GuardedMacOutcome::Unknown;
+    why = ("UNKNOWN: " + message).str();
     return std::nullopt;
   };
 
@@ -481,6 +510,151 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
       return unsupported("the tile plan does not partition the logical "
                          "box: " + partitionWhy);
     plan = std::move(*planned);
+  }
+
+  // ------------------------------------------------------------------
+  // Phase 3b-8: the common reduction fiber of every output block, the
+  // device plan clipped to it, the exact counts, and the remainder sets.
+  // Nothing is created yet.
+  // ------------------------------------------------------------------
+  struct FiberBlock {
+    ::systolic::logical::OutputBlock block;       // logical I / J values
+    ::systolic::logical::ReductionInterval fiber; // common fiber, or empty
+  };
+  std::vector<FiberBlock> fiberBlocks;
+  std::optional<SystolicTilePlan> trimmed; // the device plan (with a fleet)
+  ::systolic::logical::FiberCounts counts;
+  int64_t kLowerAbs = 0, kUpperAbs = -1;
+  ::systolic::logical::FiberRoles roles;
+  if (pre->commonFiber) {
+    const IntegerRelation &logical =
+        pre->common.plan.logicalDomain.getDisjunct(0);
+    roles.i = static_cast<unsigned>(pre->roles[0]);
+    roles.j = static_cast<unsigned>(pre->roles[1]);
+    roles.k = static_cast<unsigned>(pre->roles[2]);
+    const int64_t iLower = pre->boxLower[pre->roles[0]];
+    const int64_t jLower = pre->boxLower[pre->roles[1]];
+    kLowerAbs = pre->boxLower[pre->roles[2]];
+    kUpperAbs = kLowerAbs + pre->K - 1;
+    std::vector<::systolic::logical::OutputBlock> blocks;
+    if (plan) {
+      for (const SystolicTileBlock &block : plan->blocks)
+        blocks.push_back({iLower + block.row, iLower + block.row + block.m - 1,
+                          jLower + block.column,
+                          jLower + block.column + block.n - 1});
+    } else {
+      blocks.push_back({iLower, iLower + pre->M - 1, jLower,
+                        jLower + pre->N - 1});
+    }
+    // Every device box inside the source domain: for each facet of D' the
+    // box points violating it form an empty set.
+    auto insideDomain = [&](const ::systolic::logical::OutputBlock &block,
+                            const ::systolic::logical::ReductionInterval &k) {
+      for (unsigned r = 0; r < logical.getNumInequalities() +
+                                   2 * logical.getNumEqualities();
+           ++r) {
+        IntegerPolyhedron box(PresburgerSpace::getSetSpace(3));
+        box.addBound(BoundType::LB, roles.i, DynamicAPInt(block.rowLower));
+        box.addBound(BoundType::UB, roles.i, DynamicAPInt(block.rowUpper));
+        box.addBound(BoundType::LB, roles.j, DynamicAPInt(block.columnLower));
+        box.addBound(BoundType::UB, roles.j,
+                     DynamicAPInt(block.columnUpper));
+        box.addBound(BoundType::LB, roles.k, DynamicAPInt(k.lower));
+        box.addBound(BoundType::UB, roles.k, DynamicAPInt(k.upper));
+        ArrayRef<DynamicAPInt> row;
+        bool negate = false;
+        if (r < logical.getNumInequalities()) {
+          row = logical.getInequality(r);
+        } else {
+          const unsigned e = (r - logical.getNumInequalities()) / 2;
+          negate = (r - logical.getNumInequalities()) % 2 == 1;
+          row = logical.getEquality(e);
+        }
+        // violated: a . z + c <= -1  <=>  -(a . z) - c - 1 >= 0
+        SmallVector<DynamicAPInt, 4> facet(4, DynamicAPInt(0));
+        for (unsigned v = 0; v < 3; ++v)
+          facet[v] = negate ? row[v] : -row[v];
+        facet[3] = (negate ? row[3] : -row[3]) - 1;
+        box.addInequality(facet);
+        if (!box.isIntegerEmpty())
+          return false;
+      }
+      return true;
+    };
+    for (const auto &block : blocks) {
+      auto fiber = ::systolic::logical::commonReductionFiber(
+          logical, roles, block, kLowerAbs, kUpperAbs);
+      if (!fiber)
+        return unknown("a common reduction fiber is not representable");
+      if (!fiber->empty && !insideDomain(block, *fiber))
+        return unsupported("a device box is not inside the source domain "
+                           "(the common fiber certificate failed)");
+      fiberBlocks.push_back({block, *fiber});
+    }
+    auto counted = ::systolic::logical::countReductionFibers(
+        logical, roles, blocks, iLower, iLower + pre->M - 1, jLower,
+        jLower + pre->N - 1, kLowerAbs, kUpperAbs);
+    if (!counted)
+      return unknown("the reduction fibers cannot be counted exactly");
+    counts = *counted;
+    if (counts.device == 0)
+      return unknown("no output block has a common reduction fiber: "
+                     "nothing for the device");
+    if (plan) {
+      // The device plan: each block's folds clipped to its common fiber
+      // (folds outside dropped, boundary folds shortened), every clipped
+      // invocation re-priced with the cost model it was priced with;
+      // blocks without a fiber leave the plan (their cells are the host's).
+      trimmed = *plan;
+      trimmed->blocks.clear();
+      for (size_t b = 0; b < plan->blocks.size(); ++b) {
+        const SystolicTileBlock &block = plan->blocks[b];
+        const auto &fiber = fiberBlocks[b].fiber;
+        if (fiber.empty)
+          continue;
+        const int64_t first = fiber.lower - kLowerAbs; // relative to the box
+        const int64_t last = fiber.upper - kLowerAbs;
+        SystolicTileBlock clipped = block;
+        clipped.invocations.clear();
+        if (block.acceleratorId < 0 ||
+            static_cast<size_t>(block.acceleratorId) >=
+                fleet.resources.size())
+          return unsupported("a block names no accelerator of the fleet");
+        const ::systolic::ArrayConfig &config =
+            fleet.resources[block.acceleratorId].config;
+        int64_t next = first;
+        for (const SystolicTileInvocation &inv : block.invocations) {
+          const int64_t begin = std::max(inv.k0, first);
+          const int64_t end = std::min(inv.k0 + inv.k - 1, last);
+          if (begin > end)
+            continue;
+          if (begin != next)
+            return unsupported("the clipped folds of a block are not "
+                               "contiguous");
+          SystolicTileInvocation cut = inv;
+          cut.k0 = begin;
+          cut.k = end - begin + 1;
+          if (config.kMax > 0 && cut.k > config.kMax)
+            return unsupported("a clipped invocation exceeds the "
+                               "accelerator's k_max");
+          const ::systolic::InvocationCost cost =
+              ::systolic::estimateInvocationCost(cut.k, config);
+          if (!cost.ok || cost.compute <= 0)
+            return unsupported("the cost model cannot price a clipped "
+                               "invocation");
+          cut.estCycles = cost.compute;
+          clipped.invocations.push_back(cut);
+          next = end + 1;
+        }
+        if (next != last + 1 || clipped.invocations.empty())
+          return unsupported("the clipped folds of a block do not cover "
+                             "its common fiber");
+        trimmed->blocks.push_back(std::move(clipped));
+      }
+      if (trimmed->blocks.empty())
+        return unknown("no output block has a common reduction fiber: "
+                       "nothing for the device");
+    }
   }
 
   // ------------------------------------------------------------------
@@ -556,7 +730,34 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
 
   const int64_t gemmIndex = nextGemmIndex;
   Value result;
-  if (plan) {
+  if (pre->commonFiber && trimmed) {
+    result = emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor,
+                                  *trimmed, fleet, gemmIndex);
+  } else if (pre->commonFiber) {
+    // No fleet: one tile over the whole box's common fiber, on the K slices
+    // of A and B.
+    const auto &fiber = fiberBlocks.front().fiber;
+    const int64_t first = fiber.lower - kLowerAbs;
+    const int64_t length = fiber.length();
+    SmallVector<OpFoldResult> unit(2, builder.getIndexAttr(1));
+    SmallVector<OpFoldResult> aOffsets{builder.getIndexAttr(0),
+                                       builder.getIndexAttr(first)};
+    SmallVector<OpFoldResult> aSizes{builder.getIndexAttr(pre->M),
+                                     builder.getIndexAttr(length)};
+    Value aSlice = tensor::ExtractSliceOp::create(builder, loc, aTensor,
+                                                  aOffsets, aSizes, unit);
+    SmallVector<OpFoldResult> bOffsets{builder.getIndexAttr(first),
+                                       builder.getIndexAttr(0)};
+    SmallVector<OpFoldResult> bSizes{builder.getIndexAttr(length),
+                                     builder.getIndexAttr(pre->N)};
+    Value bSlice = tensor::ExtractSliceOp::create(builder, loc, bTensor,
+                                                  bOffsets, bSizes, unit);
+    result = MatmulTileOp::create(
+        builder, loc, cTensor.getType(), aSlice, bSlice, cTensor,
+        builder.getI64IntegerAttr(pre->M), builder.getI64IntegerAttr(pre->N),
+        builder.getI64IntegerAttr(length), /*device=*/FlatSymbolRefAttr(),
+        /*est_cycles=*/IntegerAttr(), /*start_cycle=*/IntegerAttr());
+  } else if (plan) {
     result = emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor,
                                   *plan, fleet, gemmIndex);
   } else {
@@ -606,6 +807,77 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
                                   nest->logicalIVs);
   }
 
+  // Phase 3b-8: the host remainder, after the device write-back: per block
+  // the contributions outside its common fiber (or the whole block when it
+  // has none), a guarded MAC nest over the block and the K range whose
+  // exact guard is D' intersected with that set, with the source's own
+  // fast-math flags.
+  int64_t remainderNests = 0;
+  if (pre->commonFiber) {
+    const IntegerRelation &logical =
+        pre->common.plan.logicalDomain.getDisjunct(0);
+    for (const FiberBlock &fb : fiberBlocks) {
+      PresburgerSet remainder =
+          PresburgerSet::getEmpty(PresburgerSpace::getSetSpace(3));
+      auto part = [&](std::optional<int64_t> kBelow,
+                      std::optional<int64_t> kAbove) {
+        IntegerPolyhedron piece(logical);
+        piece.addBound(BoundType::LB, roles.i, DynamicAPInt(fb.block.rowLower));
+        piece.addBound(BoundType::UB, roles.i, DynamicAPInt(fb.block.rowUpper));
+        piece.addBound(BoundType::LB, roles.j,
+                       DynamicAPInt(fb.block.columnLower));
+        piece.addBound(BoundType::UB, roles.j,
+                       DynamicAPInt(fb.block.columnUpper));
+        piece.addBound(BoundType::LB, roles.k, DynamicAPInt(kLowerAbs));
+        piece.addBound(BoundType::UB, roles.k, DynamicAPInt(kUpperAbs));
+        if (kBelow)
+          piece.addBound(BoundType::UB, roles.k, DynamicAPInt(*kBelow));
+        if (kAbove)
+          piece.addBound(BoundType::LB, roles.k, DynamicAPInt(*kAbove));
+        if (!piece.isIntegerEmpty())
+          remainder.unionInPlace(piece);
+      };
+      if (fb.fiber.empty) {
+        part(std::nullopt, std::nullopt);
+      } else {
+        if (fb.fiber.lower > kLowerAbs)
+          part(fb.fiber.lower - 1, std::nullopt);
+        if (fb.fiber.upper < kUpperAbs)
+          part(std::nullopt, fb.fiber.upper + 1);
+      }
+      if (remainder.isIntegerEmpty())
+        continue;
+      std::vector<::systolic::logical::ClosedIntegerInterval> bounds(3);
+      bounds[roles.i] = {fb.block.rowLower, fb.block.rowUpper};
+      bounds[roles.j] = {fb.block.columnLower, fb.block.columnUpper};
+      bounds[roles.k] = {kLowerAbs, kUpperAbs};
+      auto remainderPlan =
+          ::systolic::logical::buildSymbolicIterationPlan(remainder, bounds);
+      if (!remainderPlan ||
+          !::systolic::logical::buildExactGuardPlan(*remainderPlan)) {
+        rollback();
+        return unsupported("the host remainder of an output block is not "
+                           "representable");
+      }
+      ::systolic::logical::GuardedMacPreflight remainderPreflight = pre->common;
+      remainderPreflight.plan = *remainderPlan;
+      remainderPreflight.partialDomain = true;
+      remainderPreflight.semantics.mirrorFastMath = true;
+      remainderPreflight.semantics.multiplyFastMath =
+          pre->common.multiplyFastMath;
+      remainderPreflight.semantics.addFastMath = pre->common.addFastMath;
+      std::string nestWhy;
+      auto statement = ::systolic::logical::emitGuardedMacStatement(
+          builder, loc, remainderPreflight, pre->common.memrefs, nestWhy);
+      if (!statement) {
+        rollback();
+        return unsupported("the host remainder nest of an output block: " +
+                           nestWhy);
+      }
+      ++remainderNests;
+    }
+  }
+
   // Verify before the source goes.
   if (failed(mlir::verify(parent))) {
     rollback();
@@ -617,15 +889,28 @@ replaceGemmWithDeviceJobs(OpBuilder &builder, Operation *anchor,
   replacement.N = pre->N;
   replacement.K = pre->K;
   replacement.maskedOutput = pre->maskedOutput;
-  if (plan) {
-    replacement.blocks = static_cast<int64_t>(plan->blocks.size());
-    for (const SystolicTileBlock &b : plan->blocks)
+  replacement.commonFiber = pre->commonFiber;
+  const SystolicTilePlan *emitted =
+      trimmed ? &*trimmed : (plan ? &*plan : nullptr);
+  if (emitted) {
+    replacement.blocks = static_cast<int64_t>(emitted->blocks.size());
+    for (const SystolicTileBlock &b : emitted->blocks)
       replacement.invocations += static_cast<int64_t>(b.invocations.size());
-    replacement.makespan =
-        static_cast<int64_t>(plan->optimization.makespan);
+    // The makespan is the planner's for the plan it priced; a clipped plan
+    // (Phase 3b-8) has none of its own, and the dense one is not reported.
+    if (!pre->commonFiber)
+      replacement.makespan =
+          static_cast<int64_t>(emitted->optimization.makespan);
   } else {
     replacement.blocks = 1;
     replacement.invocations = 1;
+  }
+  if (pre->commonFiber) {
+    replacement.deviceBlocks = replacement.blocks;
+    replacement.remainderNests = remainderNests;
+    replacement.totalMacs = counts.total.str();
+    replacement.deviceMacs = counts.device.str();
+    replacement.hostMacs = counts.remainder.str();
   }
   replacement.firstEmitted = before ? before->getNextNode() : &block->front();
   replacement.diagnostic = pre->common.diagnostic;
