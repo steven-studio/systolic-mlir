@@ -48,6 +48,12 @@ struct FtdiTransportState {
     bool coalesce_mem = false;
     std::vector<unsigned char> mem_buf;
 
+    // Phase T4: adaptive multi-job batching (dpti_runtime.h). While
+    // `batching` is set, submit/mem_write append their bytes to batch_buf
+    // instead of writing; flush writes the whole buffer in one write_all.
+    bool batching = false;
+    std::vector<unsigned char> batch_buf;
+
     // Phase T3 instrumentation (dpti_runtime.h): the transport's reads.
     unsigned long long read_calls = 0;
     unsigned long long read_empty = 0;
@@ -440,6 +446,28 @@ extern "C" int dpti_ftdi_submit_session(
     FtdiTransportState &state = session->transport;
     state.write32_failed = false;
 
+    if (state.batching) {
+        // Build the 84-byte descriptor through the staging path (the same
+        // 14 WRITE32 packets dpti_submit() emits, in order), then append it
+        // to the batch buffer. Independent of the coalesce flag.
+        state.staging = true;
+        state.staging_overflow = false;
+        state.desc_len = 0;
+        const int rc = dpti_submit(job, ftdi_write32, &state);
+        state.staging = false;
+        if (rc != 0) {
+            std::fprintf(stderr, "[DPTI FTDI] dpti_submit failed rc=%d (nothing batched)\n", rc);
+            return rc;
+        }
+        if (state.staging_overflow || state.desc_len != DPTI_DESCRIPTOR_BYTES) {
+            state.write32_failed = true;
+            return -6;
+        }
+        state.batch_buf.insert(state.batch_buf.end(),
+                               state.desc_buf, state.desc_buf + state.desc_len);
+        return 0;
+    }
+
     if (!state.coalesce) {
         const int rc =
             dpti_submit(
@@ -539,6 +567,44 @@ extern "C" int dpti_ftdi_descriptor_coalescing(
     return (session && session->transport.coalesce) ? 1 : 0;
 }
 
+extern "C" void dpti_ftdi_begin_batch(DptiFtdiSession *session)
+{
+    if (!session)
+        return;
+    session->transport.batching = true;
+    session->transport.batch_buf.clear();
+}
+
+extern "C" int dpti_ftdi_flush_batch(DptiFtdiSession *session)
+{
+    if (!session || !session->transport.ftdi)
+        return -1;
+    FtdiTransportState &state = session->transport;
+    state.batching = false;
+    if (state.batch_buf.empty())
+        return 0;
+    if (dpti_trace())
+        std::fprintf(stderr, "[DPTI FTDI] batch flush: %zu bytes in one write\n",
+                     state.batch_buf.size());
+    const int rc = write_all(&state, state.batch_buf.data(),
+                             static_cast<int>(state.batch_buf.size()));
+    state.batch_buf.clear();
+    return rc;  // 0, or -1 when the batch did not all go out
+}
+
+extern "C" void dpti_ftdi_abort_batch(DptiFtdiSession *session)
+{
+    if (!session)
+        return;
+    session->transport.batching = false;
+    session->transport.batch_buf.clear();
+}
+
+extern "C" int dpti_ftdi_batching(const DptiFtdiSession *session)
+{
+    return (session && session->transport.batching) ? 1 : 0;
+}
+
 extern "C" unsigned long long dpti_ftdi_write_calls(
     const DptiFtdiSession *session)
 {
@@ -583,6 +649,15 @@ extern "C" int dpti_ftdi_mem_write_session(
     header[8] = static_cast<unsigned char>(length >> 24);
 
     FtdiTransportState &state = session->transport;
+
+    if (state.batching) {
+        // Append header || payload to the batch buffer, in one piece, the
+        // same bytes the two-write and coalesced paths put on the wire.
+        state.batch_buf.insert(state.batch_buf.end(), header, header + sizeof(header));
+        const unsigned char *p = static_cast<const unsigned char *>(data);
+        state.batch_buf.insert(state.batch_buf.end(), p, p + length);
+        return 0;
+    }
 
     if (dpti_trace())
         std::fprintf(

@@ -151,6 +151,7 @@ struct Settings {
     bool       trace = false;
     bool       timing = false;
     bool       sized_reads = false;           // SYSTOLIC_ASYNC_SIZED_READS (Phase T3)
+    bool       batch = false;                 // SYSTOLIC_ASYNC_BATCH (Phase T4)
 };
 
 bool env_flag(const char *name) {
@@ -187,6 +188,7 @@ Settings read_settings() {
     s.trace         = env_flag("SYSTOLIC_RUNTIME_TRACE");
     s.timing        = env_flag("SYSTOLIC_RUNTIME_TIMING");
     s.sized_reads   = env_flag("SYSTOLIC_ASYNC_SIZED_READS");
+    s.batch         = env_flag("SYSTOLIC_ASYNC_BATCH");
     if (const char *p = std::getenv("SYSTOLIC_ASYNC_READ_POLICY")) {
         if (!std::strcmp(p, "always"))       s.policy = ReadPolicy::Always;
         else if (!std::strcmp(p, "wait"))    s.policy = ReadPolicy::Wait;
@@ -278,6 +280,11 @@ struct Runtime {
     // accumulated like the write calls.
     dpti_ftdi_read_stats_t read_base{};
     unsigned long long    read_calls = 0, read_usb = 0;
+    // Phase T4: adaptive multi-job transport batching. batch_enabled is the
+    // SYSTOLIC_ASYNC_BATCH request after the T4a safety gate; the counters
+    // describe the write bursts actually batched.
+    bool                  batch_enabled = false;
+    unsigned long long    batches = 0, batch_cmds = 0, batch_cmds_max = 0;
 
     std::vector<std::unique_ptr<Gemm>> gemms;  // open GEMMs
 
@@ -1052,6 +1059,56 @@ bool read_allowed(const Runtime &r) {
     }
 }
 
+/* Phase T4 (SYSTOLIC_ASYNC_BATCH): one write burst -- every legal write_step
+ * action the admission logic would emit before it returns false -- built into
+ * one transport batch and sent in a single write_all. The admission
+ * predicates, slot and credit reservations, device-selection order and the
+ * committed state transitions are exactly write_step's; only the transport
+ * call boundary moves, so the FPGA sees the identical command byte stream.
+ * The blocking flush runs with the lock released. true when the batch carried
+ * at least one command (whether it then flushed cleanly or the link failed).
+ * The burst is finite: each step consumes an operand slot or a descriptor
+ * credit, both bounded per device, so write_step returns false within
+ * DEVICES * (operand_slots + depth) steps. */
+bool write_burst_batched(Runtime &r, std::unique_lock<std::mutex> &lk) {
+    if (r.link_failed || r.stop || !r.session)
+        return false;
+    dpti_ftdi_begin_batch(r.session);
+    unsigned n = 0;
+    while (!r.stop && write_step(r, lk))   // each step appends its bytes and commits its state
+        ++n;
+    if (n == 0) {
+        dpti_ftdi_abort_batch(r.session);
+        return false;
+    }
+    DptiFtdiSession *session = r.session;
+    lk.unlock();
+    const clock_t_::time_point t0 = clock_t_::now();
+    const int frc = dpti_ftdi_flush_batch(session);
+    const clock_t_::time_point t1 = clock_t_::now();
+    lk.lock();
+    r.stats.ns_link_write += ns_between(t0, t1);
+    account_bytes(r);
+    ++r.batches;
+    r.batch_cmds += n;
+    if (n > r.batch_cmds_max)
+        r.batch_cmds_max = n;
+    if (frc != 0) {
+        // The batch did not all go out: the device holds at most a prefix of
+        // complete commands and CONTROL is a descriptor's last packet, so no
+        // partial job submits. Fail closed exactly as a single failed write
+        // would -- every queued / staged / in-flight tile (the batch's among
+        // them) fails, nothing more is sent, the next session purges. Not
+        // retried; no accepted prefix replayed.
+        fail_link(r, -6);
+        return true;
+    }
+    r.last_activity = t1;
+    r.t_last_descriptor = t1;
+    r.poll_backoff_us = r.set.poll_us;
+    return true;
+}
+
 /* The transfer thread. */
 void worker_main(Runtime *rp) {
     Runtime &r = *rp;
@@ -1068,7 +1125,13 @@ void worker_main(Runtime *rp) {
             r.hold_expired = true;
             trace("burst hold expired: releasing staged descriptors");
         }
-        if (write_step(r, lk)) {
+        if (r.batch_enabled) {
+            if (write_burst_batched(r, lk)) {
+                if (r.set.policy == ReadPolicy::Always && r.inflight_total > 0 && !r.stop)
+                    read_step(r, lk);
+                continue;
+            }
+        } else if (write_step(r, lk)) {
             if (r.set.policy == ReadPolicy::Always && r.inflight_total > 0 && !r.stop)
                 read_step(r, lk);
             continue;
@@ -1152,6 +1215,30 @@ bool open_session(Runtime &r) {
     r.coalesce = dpti_ftdi_descriptor_coalescing(r.session) != 0;
     r.coalesce_mem = dpti_ftdi_mem_write_coalescing(r.session) != 0;
     dpti_ftdi_read_stats(r.session, &r.read_base);
+    // Phase T4 safety gate (T4a): batch only when the configuration records
+    // the hardware queue depths and the host pipeline depth is <= each, so
+    // a full per-device burst fits the FPGA descriptor queue and its
+    // reserved readback slots -- the FPGA then drains the burst by executing
+    // it, without a host read, and no batched write can deadlock. Otherwise
+    // fall back to the per-job path and say why.
+    r.batch_enabled = false;
+    if (r.set.batch) {
+        const unsigned jq = r.cfg.job_queue_depth;
+        const unsigned rb = r.cfg.rb_depth;
+        if (jq == 0 || rb == 0)
+            std::fprintf(stderr,
+                         "[fpga-async] SYSTOLIC_ASYNC_BATCH ignored: %s records no "
+                         "JOB_QUEUE_DEPTH / RB_DEPTH, so depth <= queue cannot be "
+                         "established; per-job transport used\n",
+                         r.cfg.source);
+        else if (r.depth > jq || r.depth > rb)
+            std::fprintf(stderr,
+                         "[fpga-async] SYSTOLIC_ASYNC_BATCH ignored: host depth %u exceeds "
+                         "JOB_QUEUE_DEPTH %u or RB_DEPTH %u; per-job transport used\n",
+                         r.depth, jq, rb);
+        else
+            r.batch_enabled = true;
+    }
     r.last_activity = clock_t_::now();
     r.t_last_submit = r.last_activity;
     r.seen_completion = false;
@@ -1164,9 +1251,10 @@ bool open_session(Runtime &r) {
         r.dev[d].credit_blocked = false;
         r.dev[d].last_freed_job = 0;
     }
-    trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s, sized_reads=%d, transfer thread",
+    trace("session opened: epoch %u, depth=%u (%s), stage=%d, burst=%d, queue_limit=%u, read_policy=%s, sized_reads=%d, batch=%d, transfer thread",
           r.epoch, r.depth, r.depth_source, r.set.stage ? 1 : 0, r.set.burst ? 1 : 0,
-          r.set.queue_limit, policy_name(r.set.policy), r.set.sized_reads ? 1 : 0);
+          r.set.queue_limit, policy_name(r.set.policy), r.set.sized_reads ? 1 : 0,
+          r.batch_enabled ? 1 : 0);
     start_worker(r);
     return true;
 }
@@ -1213,7 +1301,8 @@ void report_timing(Runtime &r) {
                  "submits_blocked=%llu blocked_us=%llu "
                  "link_write_us=%llu link_read_us=%llu collect_us=%llu polls=%llu "
                  "waits_timed_out=%llu write_calls=%llu coalesce=%d coalesce_mem=%d "
-                 "sized_reads=%d read_calls=%llu read_usb=%llu\n",
+                 "sized_reads=%d read_calls=%llu read_usb=%llu "
+                 "batch=%d batches=%llu batch_cmds=%llu batch_cmds_max=%llu\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -1230,7 +1319,8 @@ void report_timing(Runtime &r) {
                  s.ns_link_write / 1000, s.ns_link_read / 1000, s.ns_collect / 1000,
                  s.polls, s.waits_timed_out, r.write_calls, r.coalesce ? 1 : 0,
                  r.coalesce_mem ? 1 : 0, r.set.sized_reads ? 1 : 0, r.read_calls,
-                 r.read_usb);
+                 r.read_usb, r.batch_enabled ? 1 : 0, r.batches, r.batch_cmds,
+                 r.batch_cmds_max);
 }
 
 /* Everything of the session, after the transfer thread has stopped. */
@@ -1626,6 +1716,9 @@ void fpga_async_runtime_reset_stats(void) {
     r.write_calls = 0;
     r.read_calls = 0;
     r.read_usb = 0;
+    r.batches = 0;
+    r.batch_cmds = 0;
+    r.batch_cmds_max = 0;
 }
 
 void fpga_async_runtime_close(void) {

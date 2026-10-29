@@ -154,6 +154,19 @@ extern "C" {
  *                                off. The timing line reports sized_reads=,
  *                                read_calls= and read_usb= (transport
  *                                reads, and those that made a USB transfer)
+ *   SYSTOLIC_ASYNC_BATCH=1      Phase T4: adaptive multi-job transport
+ *                                batching. The transfer thread builds every
+ *                                legal write action of a burst (the same
+ *                                admission decisions and order as the
+ *                                per-job path) into one buffer and sends it
+ *                                in a single write_all, cutting USB write
+ *                                calls. Same device-visible byte stream;
+ *                                default off; enabled only when the
+ *                                configuration records JOB_QUEUE_DEPTH and
+ *                                RB_DEPTH and the host depth is <= each
+ *                                (else the per-job path is used). The timing
+ *                                line reports batch=, batches=,
+ *                                batch_cmds= and batch_cmds_max=
  *   SYSTOLIC_RUNTIME_TIMING=1    a "[fpga-async] timing ..." line at close
  *   SYSTOLIC_RUNTIME_TRACE=1     one line per link event
  */

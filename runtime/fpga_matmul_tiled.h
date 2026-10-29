@@ -138,6 +138,14 @@ typedef struct {
      * arrives anyway (the bitstream sends them) is refused with -9 at the
      * first result instead of being read as tile data. */
     unsigned completion_header;
+    /* Phase T4 (optional keys JOB_QUEUE_DEPTH, RB_DEPTH): the deployed
+     * bitstream's per-context descriptor-queue depth and result-readback
+     * depth. 0 = not recorded. The asynchronous runtime enables
+     * SYSTOLIC_ASYNC_BATCH only when both are recorded and the host pipeline
+     * depth is <= each (the T4a safety condition); otherwise it falls back
+     * to the per-job transport path. */
+    unsigned job_queue_depth;
+    unsigned rb_depth;
 } fpga_runtime_config_t;
 
 /* The completion record, as the host reads it off the link (little-endian

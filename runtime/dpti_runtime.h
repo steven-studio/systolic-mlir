@@ -105,6 +105,29 @@ int dpti_ftdi_submit_session(
 int dpti_ftdi_descriptor_coalescing(
     const DptiFtdiSession *session);
 
+/*
+ * Phase T4 (2026-10-30), adaptive multi-job transport batching. The runtime
+ * (never the transport) decides which commands may batch. Between
+ * dpti_ftdi_begin_batch() and dpti_ftdi_flush_batch(), dpti_ftdi_submit_session()
+ * and dpti_ftdi_mem_write_session() append their fully-built DPTI bytes --
+ * the same bytes, in the same order, the per-command path would have put on
+ * the wire -- to a session buffer instead of writing them, and return 0.
+ * dpti_ftdi_flush_batch() then hands that buffer to the transport in ONE
+ * write_all call. The FPGA parses the byte stream the same either way; only
+ * the host's write-call boundaries move. A failed flush is -1 (the bytes did
+ * not all go out): like any write failure the caller marks the link failed
+ * and fails every job the batch carried; nothing is retried and no accepted
+ * prefix is replayed (CONTROL is a descriptor's last packet, so no partial
+ * job submits). dpti_ftdi_abort_batch() discards a built-but-unsent batch
+ * (used when a burst turned out empty). Only the transfer thread calls these.
+ * Independent of the T1/T2 per-command coalescing knobs: in a batch the whole
+ * burst is one write, so the canonical bytes are appended regardless.
+ */
+void dpti_ftdi_begin_batch(DptiFtdiSession *session);
+int  dpti_ftdi_flush_batch(DptiFtdiSession *session);
+void dpti_ftdi_abort_batch(DptiFtdiSession *session);
+int  dpti_ftdi_batching(const DptiFtdiSession *session);
+
 /* Bytes of the MEM_WRITE header on the wire: opcode, address, length. */
 #define DPTI_MEM_WRITE_HEADER_BYTES 9u
 

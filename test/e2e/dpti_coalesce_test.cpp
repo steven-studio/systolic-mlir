@@ -70,6 +70,13 @@ void set_coalesce(bool on) {
 }
 
 // Phase T2: the MEM_WRITE knob, independent of the descriptor knob.
+void set_batch(bool on) {
+  if (on)
+    setenv("SYSTOLIC_ASYNC_BATCH", "1", 1);
+  else
+    unsetenv("SYSTOLIC_ASYNC_BATCH");
+}
+
 void set_coalesce_mem(bool on) {
   if (on)
     setenv("SYSTOLIC_DPTI_COALESCE_MEM_WRITES", "1", 1);
@@ -408,7 +415,8 @@ std::string write_config() {
   if (fd < 0)
     return "";
   const char *text = "K_MAX_8X8=16\nK_MAX_4X4=16\nN=8\nNUM_8X8=1\nNUM_4X4=3\nHOST_SLAB_BYTES=1024\n"
-                     "COMPLETION_HEADER=1\nDDR_BYTES=1048576\nPIPELINE_DEPTH=4\n";
+                     "COMPLETION_HEADER=1\nDDR_BYTES=1048576\nPIPELINE_DEPTH=4\n"
+                     "JOB_QUEUE_DEPTH=4\nRB_DEPTH=8\n";
   if (write(fd, text, std::strlen(text)) < 0) {
     close(fd);
     return "";
@@ -486,7 +494,8 @@ struct AsyncRun {
 
 AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
                    bool fail_first_mem_write = false, long fail_byte = 0,
-                   bool sized = false, int read_max = 0, long fail_read = 0) {
+                   bool sized = false, int read_max = 0, long fail_read = 0,
+                   bool batch = false, int write_max = 0) {
   AsyncRun r;
   mock_ftdi_reset();
   if (fail_first_descriptor)
@@ -499,8 +508,11 @@ AsyncRun run_async(bool coalesce, bool fail_first_descriptor, bool mem = false,
     mock_ftdi_set_read_max_per_call(read_max);
   if (fail_read > 0)
     mock_ftdi_fail_read_at_call(fail_read);
+  if (write_max > 0)
+    mock_ftdi_set_max_per_call(write_max);
   set_coalesce(coalesce);
   set_coalesce_mem(mem);
+  set_batch(batch);
   if (sized)
     setenv("SYSTOLIC_ASYNC_SIZED_READS", "1", 1);
   else
@@ -1186,6 +1198,80 @@ void scenario_t3_read_failure() {
   }
 }
 
+// ---- Phase T4: adaptive multi-job transport batching -----------------------
+//
+// SYSTOLIC_ASYNC_BATCH builds every legal write action of a burst -- the same
+// admission decisions, order, slots and credits as the per-job path -- into
+// one buffer and sends it in a single write_all. These scenarios prove,
+// against the mock, that batching produces the identical device-visible
+// command multiset and the identical completions as the per-job path, with
+// fewer transport write calls; that a failed batch write fails closed with
+// every tile accounted once and C untouched; and that batching makes forward
+// progress under host-queue backpressure.
+
+void scenario_t4_equivalence() {
+  const bool combos[4][2] = {{false, false}, {true, false}, {false, true}, {true, true}};
+  for (int i = 0; i < 4; ++i) {
+    const bool t1 = combos[i][0], t2 = combos[i][1];
+    AsyncRun off = run_async(t1, false, t2, false, 0, false, 0, 0, /*batch=*/false);
+    fpga_async_runtime_close();
+    AsyncRun on = run_async(t1, false, t2, false, 0, false, 0, 0, /*batch=*/true);
+    fpga_async_runtime_close();
+    std::vector<Bytes> a = commands(mask_job_ids(off.stream));
+    std::vector<Bytes> b = commands(mask_job_ids(on.stream));
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    char what[240];
+    std::snprintf(what, sizeof what,
+                  "T4 async (T1 %s T2 %s): batched stream == per-job stream (job ids aside), "
+                  "64 tiles complete, C untouched, %ld write calls batched vs %ld per-job",
+                  t1 ? "on" : "off", t2 ? "on" : "off", on.calls, off.calls);
+    check(a == b && off.stream.size() == on.stream.size() && async_all_ok(off) &&
+              async_all_ok(on) && on.calls < off.calls,
+          what);
+  }
+}
+
+void scenario_t4_fault() {
+  // A batched write that fails after a prefix of accepted bytes: within the
+  // first MEM_WRITE header, within a payload, at a command boundary, inside a
+  // descriptor, and after several complete jobs. The 64-byte write cap makes
+  // the prefix land before the failing call. Every case: the link fails
+  // closed, every submitted tile is accounted exactly once (completed +
+  // failed == submitted, none twice), C untouched, and a new session runs.
+  const long positions[] = {1, 5, 100, 1033, 1040, 2066, 3099, 5000};
+  for (long pos : positions) {
+    AsyncRun r = run_async(true, false, true, false, /*fail_byte=*/pos, false, 0, 0,
+                           /*batch=*/true, /*write_max=*/64);
+    char what[240];
+    std::snprintf(what, sizeof what,
+                  "T4 async batch, write fails carrying byte %ld: link down (rc %d), %llu completed + "
+                  "%llu failed == %llu submitted (each once), C untouched",
+                  pos, r.rc, r.st.tiles_completed, r.st.tiles_failed, r.st.tiles_submitted);
+    check(r.rc != 0 && r.st.tiles_submitted >= 1 && r.st.tiles_completed == 0 &&
+              r.st.tiles_completed + r.st.tiles_failed == r.st.tiles_submitted && r.c_unchanged,
+          what);
+    fpga_async_runtime_close();
+    AsyncRun again = run_async(true, false, true, false, 0, false, 0, 0, /*batch=*/true);
+    check(again.rc == 0 && again.st.tiles_completed == 64 && again.submits == 64,
+          "T4 async batch: a new session after a batched write failure runs 64 tiles again");
+    fpga_async_runtime_close();
+  }
+}
+
+void scenario_t4_saturation(bool backpressure) {
+  // Batching under full in-flight depth, and (backpressure) a host queue of
+  // one: the burst saturates the per-device credits, the batch flushes, the
+  // GEMM still completes -- forward progress, no deadlock.
+  AsyncRun on = run_async(true, false, true, false, 0, false, 0, 0, /*batch=*/true);
+  fpga_async_runtime_close();
+  char what[220];
+  std::snprintf(what, sizeof what,
+                "T4 async batch%s: 64 tiles complete, C untouched, max %u in flight per device honoured",
+                backpressure ? " (host queue limit 1)" : "", 4u);
+  check(async_all_ok(on), what);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1205,6 +1291,7 @@ int main(int argc, char **argv) {
   if (queue_limit_1) {
     scenario_async_runtime(true);
     scenario_t2_async(true);
+    scenario_t4_saturation(true);
   } else {
     scenario_equivalence();
     scenario_many_jobs();
@@ -1224,6 +1311,9 @@ int main(int argc, char **argv) {
     scenario_t3_equivalence();
     scenario_t3_fragmented_reads();
     scenario_t3_read_failure();
+    scenario_t4_equivalence();
+    scenario_t4_fault();
+    scenario_t4_saturation(false);
   }
   unlink(cfg.c_str());
   std::printf("%s: %d failure(s)\n", g_failures ? "DPTI COALESCE: FAIL" : "DPTI COALESCE: PASS", g_failures);

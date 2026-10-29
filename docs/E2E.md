@@ -59,6 +59,8 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 | `SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1` | 每筆 descriptor 的 14 個 WRITE32 以一次 write 送出（位元組流相同；docs/ASYNC.md 第 12 節，Phase T1）；預設關閉 |
 | `SYSTOLIC_DPTI_COALESCE_MEM_WRITES=1` | 每筆 MEM_WRITE 的 header 與 payload 以一次 write 送出（位元組流相同；docs/ASYNC.md 第 12 節，Phase T2）；預設關閉，與 T1 獨立 |
 | `SYSTOLIC_ASYNC_SIZED_READS=1` | 非同步 runtime 的 transfer thread 依正在組裝的 completion record 所缺的 byte 數讀取，而非整個 buffer（位元組流與結果相同；docs/ASYNC.md 第 13 節，Phase T3）；預設關閉，與 T1／T2 獨立，只影響非同步 runtime |
+| `SYSTOLIC_ASYNC_BATCH=1` | 非同步 runtime 把一個 write burst 的所有 command 併成一次 `write_all`（相同的 admission、順序、位元組流；docs/ASYNC.md 第 14 節，Phase T4）；預設關閉，與 T1／T2／T3 獨立，只影響非同步 runtime；只有設定檔有 `JOB_QUEUE_DEPTH`／`RB_DEPTH` 且 host depth ≤ 兩者時才啟用，否則退回逐 job |
+| `JOB_QUEUE_DEPTH`／`RB_DEPTH`（設定檔） | 選用：部署 bitstream 每個 context 的 descriptor queue 深度與 readback FIFO 深度；T4 的安全閘用它們確認 depth ≤ queue |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
 | `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）。沒設時 runtime 用封存那顆的 16／16、沒有 completion record（built-in default，輸出會印出來源）；接上會送 record 的 bitstream（目前的 RTL）時第一個結果就以 -9 拒絕、說明原因，程式改在 CPU 上算；E2E harness 不接受沒設（第 3 節） |
 

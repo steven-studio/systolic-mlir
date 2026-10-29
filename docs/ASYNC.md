@@ -780,6 +780,42 @@ PE 層的重疊因此只在 `eval/pipeline_overlap/run.sh`（internal job port�
   payload 跨讀、一次多筆 record、中間空讀）仍正確；read 中途失敗兩條路都 fail-closed、每個 tile 算
   一次、close 後復原。co-sim：三種組合（baseline／T1+T2／T1+T2+T3）＋單開 T3 的 async quick 全 26／26，
   modef／negoffset regression 不變。
+
+### 14. Multi-job 傳輸批次化（Phase T4b，Policy D，2026-10-30）
+
+- **問題。** T1／T2／T3 之後，host→FPGA 還剩每個 write 呼叫 ~40 µs 的固定成本。非同步 runtime 的
+  transfer thread 在預設（read policy blocked）下本來就把一個 burst 的 write action 連續發出、中間不讀
+  （write_step 一直做到回 false 才讀），每次 action 一個 `ftdi_write_data`。T4 把這一個 burst 的所有
+  command 併成一次 write。
+- **Policy D（T4a 建議）。** 不新增排程：沿用既有的 `write_step`／`stageable_device`／`sendable_device`／
+  `can_stage`／`can_send`／`stage_slab`／`send_descriptor`。批次就是這些函式在回 false 前會合法發出的那串
+  action，順序、operand slot、descriptor credit、slabs-staged-ahead 行為全部不變。
+- **兩階段。** Phase A（持鎖）：`dpti_ftdi_begin_batch()` 後，`write_step` 每一步照常保留 slot／credit、
+  建出該 command 的 DPTI bytes 並 append 到 session 的 batch buffer、提交狀態轉移；transport 的 append 不做
+  I/O。Phase B（放鎖）：`dpti_ftdi_flush_batch()` 把整個 buffer 以一次 `write_all` 送出。成功就是那串 job
+  真的在飛；失敗走既有 `fail_link`（fail-closed）：batch 帶的每個 queued／staged／in-flight tile 失敗、不重送、
+  不重播已接受的前綴（CONTROL 是 descriptor 最後一個 packet，前綴不會提交 job）、下個 session 以 epoch／purge
+  丟掉遲到的 completion。
+- **位元組流不變。** batch buffer 是逐 command 正規 bytes（MEM_WRITE 9-byte header‖payload、descriptor 14 個
+  WRITE32＝84 B）依 write_step 的順序串接，與逐 job 路徑送出的 bytes、順序、job_id、device_id、slab 位址、
+  descriptor 值完全相同；只有 write 呼叫邊界改變。與 T1／T2 的 per-command 合併獨立（batch 下整個 burst 一次
+  write，所以 append 正規 bytes 即可，T1／T2 開不開都一樣）。
+- **開關與安全閘。** `SYSTOLIC_ASYNC_BATCH=1`（session 開啟時讀，預設關閉，獨立於 T1／T2／T3，只影響非同步
+  runtime）。只有在設定檔記錄了 `JOB_QUEUE_DEPTH` 與 `RB_DEPTH`，且 host pipeline depth ≤ 兩者（T4a 的
+  admission／no-deadlock 條件）時才啟用；否則印出原因、退回逐 job 路徑。depth ≤ JOB_QUEUE_DEPTH 使一個 device
+  的整個 burst 放得進 FPGA 的 descriptor queue，depth ≤ RB_DEPTH 使 FPGA 為每個接受的 job 預留了 readback
+  slot，所以 FPGA 不靠 host 讀就能把 burst 執行掉、鏈路的 backpressure 一定會解開，批次 write 不會 deadlock。
+- **效果（板上，1 ms timer，T1+T2+T3 之上）。** write 呼叫 3608 → 1756（每次呼叫 2 個 call；−51 %），
+  端到端 ~53 → ~49 ms／呼叫（−7.5 %）。板上一個 burst 平均只有 ~2 個 command（T3 的頻繁讀把 burst 切短），
+  所以批次小、且 link_write 省下的（~46 ms/span）有一部分被 link_read 上升（~30 ms/span）抵消。單開 T4（無
+  T1／T2／T3）：write 呼叫 28864 → 151（burst 大、max 32），但讀側無 T3 仍是瓶頸，~88 ms。T4 主要目標是
+  減少 write 呼叫，不是端到端按批次大小等比例加速。板上逐位元驗證（checksum 297836、每次 4096 元素）開關皆
+  相同。
+- **測試。** `dpti-coalesce-test` 的 T4 情境：四種 T1／T2 組合下 batch 與逐 job 的 command 多重集相同、完成
+  相同、write 呼叫更少（64 tile：4 vs 1024／192／960／128）；批次 write 在 byte 1/5/100/1033/1040/2066/3099/5000
+  失敗都 fail-closed、每個 tile 剛好算一次、C 不變、close 後復原；在 in-flight 滿載與 host queue 上限 1 下仍完成。
+  co-sim：A（全關）／B（T1+T2+T3）／C（T1+T2+T3+T4）／D（只 T4）async quick 全 26／26。安全閘：設定檔沒有
+  JOB_QUEUE_DEPTH／RB_DEPTH、或 depth 超過 queue，一律退回逐 job 並說明。
 - **故障注入與合併（T2 gate，2026-10-29）。** 既有的檢查以 write **呼叫**的編號注入故障
   （run_e2e 第 3 步與 mode F 的 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=7`、cosim regressions 的 negoffset
   write 3／40），都以預設的逐封包組合為準、原樣保留：開啟合併後第 n 次呼叫是別的命令（T1 下第 7 次是

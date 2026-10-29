@@ -288,6 +288,24 @@ int load_config(fpga_runtime_config_t &cfg) {
                 return fail(key + " = '" + val + "' is not a decimal integer in 1..64 "
                             "(no sign, no leading zeros)");
             cfg.pipeline_depth = v;
+        } else if (key == "JOB_QUEUE_DEPTH") {
+            // Phase T4: the context's actual descriptor-queue depth in the
+            // RTL. The host never sends more than this many descriptors in
+            // flight per device; recording it lets the batching path prove
+            // the T4a admission bound instead of assuming it.
+            if (!parse_count(val, 1024u, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1..1024 "
+                            "(no sign, no leading zeros)");
+            cfg.job_queue_depth = v;
+        } else if (key == "RB_DEPTH") {
+            // Phase T4: the result-readback FIFO depth per context. The RTL
+            // reserves a slot per accepted job, so with the host bounded to
+            // this many in flight the FPGA never stalls execution on a host
+            // read -- the T4a no-deadlock condition.
+            if (!parse_count(val, 1024u, v))
+                return fail(key + " = '" + val + "' is not a decimal integer in 1..1024 "
+                            "(no sign, no leading zeros)");
+            cfg.rb_depth = v;
         } else if (key == "N" || key == "NUM_8X8" || key == "NUM_4X4") {
             // This runtime drives the 1x8x8 + 3x4x4 device map; a bitstream
             // built with another fleet is not something it can address.
