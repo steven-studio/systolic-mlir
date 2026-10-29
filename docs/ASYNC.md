@@ -716,3 +716,27 @@ PE 層的重疊因此只在 `eval/pipeline_overlap/run.sh`（internal job port�
 時 fill／write-back／readback 與下一個 job 重疊。
 
 **板子**：Vivado 合成、新 bitstream、`run_e2e.sh --backend board`：**NOT RUN**。
+
+## 12. 描述子合併：每筆 descriptor 一次 transport write（Phase T1，2026-10-29）
+
+板上量測（2026-10-29，bitstream 75f982b4、K_MAX 16/16）：每一次 libftdi 的 write 呼叫固定約
+40 µs，與長度無關（6 byte 的 WRITE32 與 1033 byte 的 MEM_WRITE 一樣），所以一次 invocation 的 16
+次 write（slab 2 次、descriptor 14 次）約 650 µs，其中 descriptor 佔 14 次。T1 把一筆 descriptor
+的 14 個 WRITE32 封包先排進一個 84 byte 的緩衝區，再以**一次** write 送出；MEM_WRITE 不變。
+
+- **位元組流不變。** `dpti_submit()` 走同一條路發出同樣的 (register, value) 序列，同一個封包編碼器
+  產生同樣的 6 byte 封包；合併後送出的是 B_0‖B_1‖…‖B_13 的串接，CONTROL 仍是最後一個。FPGA 看到的
+  register write 序列、順序、值、endianness、framing 全部相同，只有 host 的 write 呼叫邊界改變。
+- **開關。** `SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1`，在 session 開啟時讀取；預設關閉（逐封包路徑仍是
+  參考路徑）。`runtime/dpti_runtime.h`：`dpti_ftdi_descriptor_coalescing()`、
+  `dpti_ftdi_write_calls()`；兩條 runtime 的 timing line 多了 `write_calls=`、`coalesce=`。
+- **失敗處理。** 合併後的 write 失敗回 -6（與 WRITE32 失敗相同），不重送（裝置可能已收到前綴，重送會重複
+  register write）；因為 CONTROL 在最後，任何前綴都不會提交 job。runtime 照舊把鏈路標成失敗（-14）直到
+  close。部分寫入由既有的 `write_all` 從第一個未被接受的 byte 續寫。
+- **測試。** `build/bin/dpti-coalesce-test`（`cmake --build build --target check-dpti-coalesce`）：
+  mock libftdi（`test/e2e/mock_ftdi.cpp`，會像 FPGA 一樣解碼位元組流並回 completion record）上比對兩條
+  路徑的位元組流與獨立編碼的參考值、register 順序、兩種幾何與四個 device、24 筆連續 job 的順序、
+  部分寫入、失敗與 0-byte write 的傳播、同步與非同步 runtime 端到端（16 對 3 次 write／invocation、
+  -6 → -14 → close 後復原）、host queue 上限 1 的 backpressure。co-sim 與板子：見 T1 報告；注意
+  co-sim 的 `SYSTOLIC_DPTI_COSIM_FAIL_WRITE=n` 數的是 write **呼叫**，合併後第 n 次呼叫對應的命令不同
+  （mode F 與 run_e2e 第 3 步以逐封包路徑的編號為準）。

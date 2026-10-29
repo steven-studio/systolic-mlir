@@ -349,6 +349,11 @@ struct ScheduledRuntime {
      * for the median / p95 of the SYSTOLIC_RUNTIME_TIMING summary. Reset
      * with the stats. */
     std::vector<uint32_t> invocation_us;
+
+    /* Transport write calls of the successful and failed invocations (Phase
+     * T1: 16 per invocation, 3 with descriptor coalescing). Reset with the
+     * stats. */
+    unsigned long long    write_calls = 0;
 };
 
 /*
@@ -735,6 +740,8 @@ int fpga_matmul_tiled_auto_scheduled(
         rt.session ? dpti_ftdi_bytes_written(rt.session) : 0;
     const unsigned long long read_before =
         rt.session ? dpti_ftdi_bytes_read(rt.session) : 0;
+    const unsigned long long calls_before =
+        rt.session ? dpti_ftdi_write_calls(rt.session) : 0;
 
     const int rc =
         scheduled_invocation(
@@ -746,6 +753,8 @@ int fpga_matmul_tiled_auto_scheduled(
             dpti_ftdi_bytes_written(rt.session) - written_before;
         rt.stats.bytes_from_fpga +=
             dpti_ftdi_bytes_read(rt.session) - read_before;
+        rt.write_calls +=
+            dpti_ftdi_write_calls(rt.session) - calls_before;
     }
 
     if (rc != 0) {
@@ -783,6 +792,7 @@ void fpga_runtime_get_stats(fpga_runtime_stats_t *out) {
 void fpga_runtime_reset_stats(void) {
     runtime_state().stats = fpga_runtime_stats_t{};
     runtime_state().invocation_us.clear();
+    runtime_state().write_calls = 0;
 }
 
 namespace {
@@ -817,7 +827,7 @@ void report_timing(ScheduledRuntime &rt) {
         "[fpga-runtime] timing invocations=%llu total_us=%llu min_us=%llu "
         "median_us=%llu p95_us=%llu max_us=%llu mem_write_us=%llu "
         "settle_us=%llu submit_us=%llu read_us=%llu settle_cfg_us=%u "
-        "bytes_to_fpga=%llu bytes_from_fpga=%llu\n",
+        "bytes_to_fpga=%llu bytes_from_fpga=%llu write_calls=%llu coalesce=%d\n",
         s.invocations,
         s.ns_total / 1000,
         s.ns_min / 1000,
@@ -830,7 +840,9 @@ void report_timing(ScheduledRuntime &rt) {
         s.ns_read / 1000,
         settle_us(),
         s.bytes_to_fpga,
-        s.bytes_from_fpga);
+        s.bytes_from_fpga,
+        rt.write_calls,
+        rt.session ? dpti_ftdi_descriptor_coalescing(rt.session) : 0);
 }
 
 } // namespace

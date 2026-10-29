@@ -267,6 +267,10 @@ struct Runtime {
     bool                  span_started = false;
     clock_t_::time_point  t_first_submit, t_last_wait;
     unsigned long long    bytes_written_base = 0, bytes_read_base = 0;
+    // Phase T1: transport write calls of the session (16 per tile, 3 with
+    // descriptor coalescing) and whether the session coalesces.
+    unsigned long long    write_calls = 0, write_calls_base = 0;
+    bool                  coalesce = false;
 
     std::vector<std::unique_ptr<Gemm>> gemms;  // open GEMMs
 
@@ -418,6 +422,9 @@ void account_bytes(Runtime &r) {
     r.stats.bytes_from_fpga += rd - r.bytes_read_base;
     r.bytes_written_base = w;
     r.bytes_read_base = rd;
+    const unsigned long long c = dpti_ftdi_write_calls(r.session);
+    r.write_calls += c - r.write_calls_base;
+    r.write_calls_base = c;
 }
 
 /* ---- per-tile state, as fpga_gemm_poll / fpga_tile_poll see it ---------- */
@@ -1111,6 +1118,8 @@ bool open_session(Runtime &r) {
     r.next_seq = 0;
     r.bytes_written_base = dpti_ftdi_bytes_written(r.session);
     r.bytes_read_base = dpti_ftdi_bytes_read(r.session);
+    r.write_calls_base = dpti_ftdi_write_calls(r.session);
+    r.coalesce = dpti_ftdi_descriptor_coalescing(r.session) != 0;
     r.last_activity = clock_t_::now();
     r.t_last_submit = r.last_activity;
     r.seen_completion = false;
@@ -1171,7 +1180,7 @@ void report_timing(Runtime &r) {
                  "before_first_completion=%llu behind_inflight=%llu credit_waits=%llu "
                  "submits_blocked=%llu blocked_us=%llu "
                  "link_write_us=%llu link_read_us=%llu collect_us=%llu polls=%llu "
-                 "waits_timed_out=%llu\n",
+                 "waits_timed_out=%llu write_calls=%llu coalesce=%d\n",
                  s.tiles_submitted, s.tiles_completed, s.tiles_failed, s.gemms_waited,
                  s.ns_span / 1000, s.ns_submit / 1000, s.ns_wait / 1000, s.reads,
                  s.empty_reads, s.mem_writes, s.descriptors, s.bytes_to_fpga,
@@ -1186,7 +1195,7 @@ void report_timing(Runtime &r) {
                  s.descriptors_before_first_completion, s.descriptors_behind_inflight,
                  s.credit_waits, s.submits_blocked, s.ns_submit_blocked / 1000,
                  s.ns_link_write / 1000, s.ns_link_read / 1000, s.ns_collect / 1000,
-                 s.polls, s.waits_timed_out);
+                 s.polls, s.waits_timed_out, r.write_calls, r.coalesce ? 1 : 0);
 }
 
 /* Everything of the session, after the transfer thread has stopped. */
@@ -1579,6 +1588,7 @@ void fpga_async_runtime_reset_stats(void) {
     std::lock_guard<std::mutex> lk(r.mu);
     r.stats = fpga_async_stats_t{};
     r.span_started = false;
+    r.write_calls = 0;
 }
 
 void fpga_async_runtime_close(void) {

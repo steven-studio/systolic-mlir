@@ -128,6 +128,13 @@ extern "C" {
  *                                refusal path only)
  *   SYSTOLIC_DPTI_TIMEOUT_MS     no byte from the link for this long while
  *                                a descriptor is in flight: -8 (default 5000)
+ *   SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1
+ *                                Phase T1: each descriptor's 14 WRITE32
+ *                                packets go out in one transport write
+ *                                instead of 14 (the same bytes in the same
+ *                                order, dpti_runtime.h); default off. The
+ *                                timing line reports write_calls= and
+ *                                coalesce=
  *   SYSTOLIC_RUNTIME_TIMING=1    a "[fpga-async] timing ..." line at close
  *   SYSTOLIC_RUNTIME_TRACE=1     one line per link event
  */

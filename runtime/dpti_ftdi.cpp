@@ -18,11 +18,26 @@ struct FtdiTransportState {
     unsigned long long bytes_written = 0;
     unsigned long long bytes_read = 0;
 
+    // Every ftdi_write_data call, failed ones included (Phase T1: the
+    // quantity descriptor coalescing reduces).
+    unsigned long long write_calls = 0;
+
     // Set by the first WRITE32 of a descriptor that did not go out. The
     // write32 callback cannot return an error to dpti_submit(), so the
     // rest of that descriptor -- CONTROL = submit above all -- is skipped
     // and dpti_ftdi_submit_session() reports the failure.
     bool write32_failed = false;
+
+    // Phase T1: descriptor coalescing (dpti_runtime.h). `coalesce` is
+    // SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1 at open. While `staging` is set,
+    // the write32 callback appends its 6-byte packet to desc_buf instead of
+    // writing it, and dpti_ftdi_submit_session() writes the whole buffer
+    // once, so the bytes on the wire are the per-packet path's, in order.
+    bool coalesce = false;
+    bool staging = false;
+    bool staging_overflow = false;
+    unsigned desc_len = 0;
+    unsigned char desc_buf[DPTI_DESCRIPTOR_BYTES];
 };
 
 /*
@@ -50,6 +65,7 @@ static int write_all(
     int off = 0;
 
     while (off < len) {
+        state->write_calls++;
         int rc = ftdi_write_data(
             ftdi,
             const_cast<unsigned char *>(buf + off),
@@ -111,9 +127,24 @@ static void ftdi_write32(
     if (dpti_trace())
         std::fprintf(
             stderr,
-            "[DPTI FTDI] WRITE32 addr=0x%02x data=0x%08x\n",
+            "[DPTI FTDI] WRITE32 addr=0x%02x data=0x%08x%s\n",
             addr,
-            data);
+            data,
+            state->staging ? " (staged)" : "");
+
+    if (state->staging) {
+        // Phase T1: the packet joins the descriptor batch, in emission
+        // order; nothing is written here. A batch longer than a descriptor
+        // cannot be produced by dpti_submit(), so an overflow is refused
+        // rather than truncated.
+        if (state->desc_len + sizeof(packet) > sizeof(state->desc_buf)) {
+            state->staging_overflow = true;
+            return;
+        }
+        std::memcpy(state->desc_buf + state->desc_len, packet, sizeof(packet));
+        state->desc_len += static_cast<unsigned>(sizeof(packet));
+        return;
+    }
 
     if (write_all(
             state,
@@ -276,6 +307,22 @@ extern "C" DptiFtdiSession *dpti_ftdi_open(void)
     }
 
     /*
+     * SYSTOLIC_DPTI_COALESCE_DESCRIPTORS (Phase T1, dpti_runtime.h): "1"
+     * sends each descriptor's 14 WRITE32 packets in one transport write.
+     * Read once per session, so a process can compare both paths.
+     */
+    if (const char *v = std::getenv("SYSTOLIC_DPTI_COALESCE_DESCRIPTORS"))
+        session->transport.coalesce = (*v && std::strcmp(v, "0") != 0);
+    if (session->transport.coalesce || dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] descriptor coalescing: %s\n",
+            session->transport.coalesce
+                ? "on (SYSTOLIC_DPTI_COALESCE_DESCRIPTORS): 14 WRITE32 per "
+                  "descriptor in one write"
+                : "off: one write per WRITE32");
+
+    /*
      * Purge once at session start.  Do not purge between scheduled
      * jobs because they belong to one compiler-generated timeline.
      */
@@ -320,32 +367,112 @@ extern "C" int dpti_ftdi_submit_session(
     if (validate_rc != 0)
         return -3;
 
-    session->transport.write32_failed = false;
+    FtdiTransportState &state = session->transport;
+    state.write32_failed = false;
+
+    if (!state.coalesce) {
+        const int rc =
+            dpti_submit(
+                job,
+                ftdi_write32,
+                &state);
+
+        if (rc != 0) {
+            std::fprintf(
+                stderr,
+                "[DPTI FTDI] dpti_submit failed rc=%d\n",
+                rc);
+            return rc;
+        }
+
+        if (state.write32_failed) {
+            std::fprintf(
+                stderr,
+                "[DPTI FTDI] job %u not submitted: a descriptor WRITE32 "
+                "failed\n",
+                job->job_id);
+            return -6;
+        }
+
+        return 0;
+    }
+
+    /*
+     * Phase T1: stage the 14 packets dpti_submit() emits, in its order,
+     * then write them as one buffer. Until the write, nothing has left the
+     * host, so a staging failure sends nothing at all.
+     */
+    state.staging = true;
+    state.staging_overflow = false;
+    state.desc_len = 0;
 
     const int rc =
         dpti_submit(
             job,
             ftdi_write32,
-            &session->transport);
+            &state);
+
+    state.staging = false;
 
     if (rc != 0) {
         std::fprintf(
             stderr,
-            "[DPTI FTDI] dpti_submit failed rc=%d\n",
+            "[DPTI FTDI] dpti_submit failed rc=%d (nothing sent)\n",
             rc);
         return rc;
     }
 
-    if (session->transport.write32_failed) {
+    if (state.staging_overflow || state.desc_len != DPTI_DESCRIPTOR_BYTES) {
         std::fprintf(
             stderr,
-            "[DPTI FTDI] job %u not submitted: a descriptor WRITE32 "
-            "failed\n",
+            "[DPTI FTDI] job %u not submitted: the descriptor batch holds "
+            "%u bytes, not %u (nothing sent)\n",
+            job->job_id,
+            state.desc_len,
+            static_cast<unsigned>(DPTI_DESCRIPTOR_BYTES));
+        state.write32_failed = true;
+        return -6;
+    }
+
+    if (dpti_trace())
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] descriptor batch job=%u: %u WRITE32, %u bytes, "
+            "one write\n",
+            job->job_id,
+            static_cast<unsigned>(DPTI_DESCRIPTOR_WRITES),
+            state.desc_len);
+
+    if (write_all(
+            &state,
+            state.desc_buf,
+            static_cast<int>(state.desc_len)) != 0) {
+        // Not retried: a prefix of the batch may already be in the device
+        // (write_all counts what went out in bytes_written), and resending
+        // could duplicate register writes. CONTROL is the batch's last
+        // packet, so no prefix submits a job.
+        state.write32_failed = true;
+        std::fprintf(
+            stderr,
+            "[DPTI FTDI] job %u not submitted: the coalesced descriptor "
+            "write failed\n",
             job->job_id);
         return -6;
     }
 
     return 0;
+}
+
+extern "C" int dpti_ftdi_descriptor_coalescing(
+    const DptiFtdiSession *session)
+{
+    return (session && session->transport.coalesce) ? 1 : 0;
+}
+
+extern "C" unsigned long long dpti_ftdi_write_calls(
+    const DptiFtdiSession *session)
+{
+    return session ? session->transport.write_calls : 0;
 }
 
 extern "C" int dpti_ftdi_mem_write_session(

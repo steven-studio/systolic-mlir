@@ -56,6 +56,7 @@ runtime 需要 `libftdi1`（`pkg-config libftdi1`）。
 |---|---|
 | `SYSTOLIC_RUNTIME_TRACE=1` | 每次 FPGA invocation 一行（device、tile、job.k、schedule） |
 | `SYSTOLIC_DPTI_TRACE=1` | 每個 DPTI 封包（MEM_WRITE、每個 WRITE32） |
+| `SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1` | 每筆 descriptor 的 14 個 WRITE32 以一次 write 送出（位元組流相同；docs/ASYNC.md 第 12 節，Phase T1）；預設關閉 |
 | `SYSTOLIC_DPTI_TIMEOUT_MS` | 等結果的上限，預設 5000 |
 | `SYSTOLIC_FPGA_CONFIG` | 板上 bitstream 的 `fpga_config.txt`（`K_MAX_8X8`、`K_MAX_4X4`，見第 7 節）。沒設時 runtime 用封存那顆的 16／16、沒有 completion record（built-in default，輸出會印出來源）；接上會送 record 的 bitstream（目前的 RTL）時第一個結果就以 -9 拒絕、說明原因，程式改在 CPU 上算；E2E harness 不接受沒設（第 3 節） |
 

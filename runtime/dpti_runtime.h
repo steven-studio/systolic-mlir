@@ -76,10 +76,34 @@ DptiFtdiSession *dpti_ftdi_open(void);
  * Write one descriptor, CONTROL = submit last. Returns 0, -1 no session,
  * -2 no job, -3 invalid job, or -6 when a WRITE32 did not go out (the rest
  * of the descriptor, the submit included, is then not sent).
+ *
+ * Phase T1 (2026-10-29), descriptor coalescing: with
+ * SYSTOLIC_DPTI_COALESCE_DESCRIPTORS=1 in the environment when the session
+ * is opened, the 14 WRITE32 packets of a descriptor (6 bytes each: opcode
+ * 0x01, register, 32-bit value little-endian) are built into one 84-byte
+ * buffer and handed to the transport in ONE write call instead of 14. The
+ * bytes, their order and therefore the register writes the FPGA decodes
+ * are identical: dpti_submit() emits the same (register, value) sequence
+ * through the same packet encoder either way, and the batch is the
+ * concatenation B_0 || B_1 || ... || B_13 of the packets it would have
+ * written one by one. Only the host's write-call boundaries change. Off by
+ * default (the per-packet path stays the reference). A failed batch write
+ * is -6 like a failed WRITE32: nothing is retried, the session's caller
+ * marks the link failed; the device may hold a prefix of the register
+ * writes, which cannot submit a job because CONTROL is the last packet.
+ * The MEM_WRITE path is not touched.
  */
 int dpti_ftdi_submit_session(
     DptiFtdiSession *session,
     const dpti_job_t *job);
+
+/* Bytes of one descriptor on the wire: 14 WRITE32 packets of 6 bytes. */
+#define DPTI_DESCRIPTOR_WRITES 14u
+#define DPTI_DESCRIPTOR_BYTES  (DPTI_DESCRIPTOR_WRITES * 6u)
+
+/* 1 when this session coalesces descriptors (see above), else 0. */
+int dpti_ftdi_descriptor_coalescing(
+    const DptiFtdiSession *session);
 
 /*
  * Stage one complete operand slab into FPGA DDR.
@@ -134,6 +158,14 @@ void dpti_ftdi_close(
  * Bytes written to / read from the FT2232H on this session so far.
  */
 unsigned long long dpti_ftdi_bytes_written(
+    const DptiFtdiSession *session);
+
+/*
+ * Transport write calls (ftdi_write_data) made on this session so far,
+ * failed ones included: 16 per invocation on the per-packet path (2 for
+ * the MEM_WRITE, 14 for the descriptor), 3 with descriptor coalescing.
+ */
+unsigned long long dpti_ftdi_write_calls(
     const DptiFtdiSession *session);
 
 unsigned long long dpti_ftdi_bytes_read(

@@ -28,3 +28,28 @@ add_custom_target(check-e2e-cosim-regressions
           systolic-cfront systolic-opt systolic_fpga_runtime
   USES_TERMINAL
   COMMENT "E2E co-simulation regressions (needs build/cosim)")
+
+# Phase T1 (descriptor coalescing): the DPTI transport and both runtimes
+# against a mock libftdi, on the host only -- no board, no co-simulation.
+# The runtime sources are compiled in directly so that the mock's ftdi_*
+# definitions take libftdi1's place at link time (the static library would
+# pull the real one in). cmake --build build --target check-dpti-coalesce
+find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBFTDI1_HEADERS REQUIRED libftdi1)
+add_executable(dpti-coalesce-test
+  dpti_coalesce_test.cpp
+  mock_ftdi.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/dpti_runtime.c
+  ${CMAKE_SOURCE_DIR}/runtime/dpti_ftdi.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/fpga_matmul_tiled.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/fpga_async_runtime.cpp)
+target_include_directories(dpti-coalesce-test PRIVATE
+  ${CMAKE_SOURCE_DIR}/runtime ${LIBFTDI1_HEADERS_INCLUDE_DIRS})
+target_link_libraries(dpti-coalesce-test PRIVATE Threads::Threads)
+add_custom_target(check-dpti-coalesce
+  COMMAND dpti-coalesce-test
+  COMMAND dpti-coalesce-test --queue-limit-1
+  DEPENDS dpti-coalesce-test
+  USES_TERMINAL
+  COMMENT "DPTI descriptor coalescing against the mock transport (host only)")
