@@ -21,6 +21,11 @@ static llvm::cl::opt<std::string> assumption("assume-no-overflow", llvm::cl::ini
 static llvm::cl::opt<std::string> selectedFunction("function", llvm::cl::init(""));
 static llvm::cl::opt<std::string> evaluateAt("evaluate", llvm::cl::init(""));
 static llvm::cl::opt<bool> printIR("print-ir", llvm::cl::init(false));
+static llvm::cl::opt<bool> symbolic("symbolic", llvm::cl::init(false));
+static llvm::cl::list<std::string> parameterRanges("parameter-range",
+    llvm::cl::desc("P2a argument:lower:upper (signed representatives)"));
+static llvm::cl::list<std::string> parameterValues("parameter-value",
+    llvm::cl::desc("P2a parameter:value for --evaluate"));
 
 static std::string snapshot(mlir::Operation *op) {
   std::string text;
@@ -39,6 +44,29 @@ int main(int argc, char **argv) {
     else throw std::invalid_argument("mode must be modular, signed, or mathematical");
     if (!horizon.empty()) options.maxIterations = Integer(horizon.getValue());
     options.noOverflowAssumption = assumption;
+    cfg::SymbolicOptions symbolicOptions;
+    symbolicOptions.integers = options;
+    SymbolicPolynomial::Assignment assignments;
+    if (!symbolic && (!parameterRanges.empty() || !parameterValues.empty()))
+      throw std::invalid_argument("parameter options require --symbolic");
+    for (const std::string &range : parameterRanges) {
+      auto a = range.find(':'), b = range.find(':', a == std::string::npos ? 0 : a+1);
+      if (a == std::string::npos || b == std::string::npos)
+        throw std::invalid_argument("expected argument:lower:upper");
+      std::string index = range.substr(0,a);
+      if (index.empty() || index.find_first_not_of("0123456789") != std::string::npos)
+        throw std::invalid_argument("invalid parameter argument number");
+      unsigned long number = std::stoul(index);
+      if (number > 4096 || !symbolicOptions.parameterRanges.emplace(static_cast<unsigned>(number),
+          std::make_pair(Integer(range.substr(a+1,b-a-1)), Integer(range.substr(b+1)))).second)
+        throw std::invalid_argument("duplicate or excessive parameter argument number");
+    }
+    for (const std::string &binding : parameterValues) {
+      auto colon = binding.find(':');
+      if (colon == std::string::npos ||
+          !assignments.emplace(binding.substr(0,colon), Integer(binding.substr(colon+1))).second)
+        throw std::invalid_argument("expected unique parameter:value");
+    }
     mlir::DialectRegistry registry;
     registry.insert<mlir::arith::ArithDialect, mlir::cf::ControlFlowDialect,
                     mlir::func::FuncDialect, mlir::memref::MemRefDialect, mlir::scf::SCFDialect>();
@@ -54,20 +82,37 @@ int main(int argc, char **argv) {
     for (auto function : module->getOps<mlir::func::FuncOp>()) {
       if (!selectedFunction.empty() && function.getSymName() != selectedFunction.getValue())
         continue;
-      auto result = cfg::analyze(function, options);
-      std::string report = cfg::formatResult(result);
-      if (report != cfg::formatResult(cfg::analyze(function, options)))
-        throw std::logic_error("analysis report is not deterministic");
+      std::string report;
+      llvm::json::Array values;
+      bool evaluated = false;
+      if (symbolic) {
+        auto result = cfg::analyzeSymbolic(function, symbolicOptions);
+        report = cfg::formatResult(result);
+        if (report != cfg::formatResult(cfg::analyzeSymbolic(function, symbolicOptions)))
+          throw std::logic_error("symbolic analysis report is not deterministic");
+        if (!evaluateAt.empty() && result.status != Status::Unknown) {
+          for (const auto &state : result.states)
+            values.push_back(result.valueAt(state.name, Integer(evaluateAt.getValue()), assignments).convert_to<std::string>());
+          evaluated = true;
+        }
+      } else {
+        auto result = cfg::analyze(function, options);
+        report = cfg::formatResult(result);
+        if (report != cfg::formatResult(cfg::analyze(function, options)))
+          throw std::logic_error("analysis report is not deterministic");
+        if (!evaluateAt.empty() && result.status != Status::Unknown) {
+          for (const auto &state : result.states)
+            values.push_back(result.solution.valueAt(state.name, Integer(evaluateAt.getValue())).convert_to<std::string>());
+          evaluated = true;
+        }
+      }
       auto parsed = llvm::json::parse(report);
       if (!parsed) throw std::logic_error("internal JSON report is invalid");
       llvm::json::Object item;
       item["function"] = function.getSymName().str();
       item["analysis"] = std::move(*parsed);
-      if (!evaluateAt.empty() && result.status != Status::Unknown) {
+      if (evaluated) {
         Integer t(evaluateAt.getValue());
-        llvm::json::Array values;
-        for (const auto &state : result.states)
-          values.push_back(result.solution.valueAt(state.name, t).convert_to<std::string>());
         item["header_iteration"] = t.convert_to<std::string>();
         item["values"] = std::move(values);
       }

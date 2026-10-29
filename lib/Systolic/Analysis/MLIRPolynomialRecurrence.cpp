@@ -137,11 +137,15 @@ Polynomial substitute(const Expression &expression,
 
 struct Extractor {
   Options options;
+  bool symbolic = false;
+  Block *entry = nullptr;
+  std::set<unsigned> parameters;
   Block *header = nullptr;
   unsigned bits = 0;
   llvm::DenseSet<Block *> reachable, loopBlocks, prelude;
   llvm::DenseMap<Block *, std::vector<Edge>> incoming;
   llvm::DenseMap<Value, Expression> expressions;
+  llvm::DenseMap<Value, Expression> invariants;
   llvm::DenseMap<Value, llvm::APInt> constants, castConstants;
 
   Value forwarded(BlockArgument argument) {
@@ -204,6 +208,48 @@ struct Extractor {
     return result;
   }
 
+  // Invariance follows from verified dominance and the unconditional prelude,
+  // recursively ending at constants or entry arguments. Header states are
+  // never promoted to parameters, even when their increments happen to be 0.
+  Expression invariant(Value value, unsigned depth = 0) {
+    if (depth > 128) throw Unsupported("invariant expression exceeds depth 128");
+    if (auto it = invariants.find(value); it != invariants.end()) return it->second;
+    if (width(value.getType()) != bits)
+      throw Unsupported("mixed-width symbolic invariant is unsupported");
+    Expression result;
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+      if (arg.getOwner() == entry) {
+        parameters.insert(arg.getArgNumber());
+        if (parameters.size() > SymbolicPolynomial::MaxParameters)
+          throw Unsupported("symbolic parameter count exceeds limit");
+        result = Expression::variable("p" + std::to_string(arg.getArgNumber()));
+      } else {
+        if (!prelude.count(arg.getOwner()))
+          throw Unsupported("initial expression is not a proven loop invariant");
+        result = invariant(forwarded(arg), depth+1);
+      }
+    } else {
+      Operation *op = value.getDefiningOp();
+      if (isa<arith::ConstantOp, arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op)) {
+        // Symbolic casts remain unsupported. Preserve source-width poison
+        // checks and exact constant cast semantics, including extui nneg.
+        result = Expression(Rational(signedInteger(constant(value, true))));
+      } else {
+        if (!prelude.count(op->getBlock()))
+          throw Unsupported("initial arithmetic is not in the invariant prelude");
+        if (isa<arith::AddIOp>(op))
+          result = invariant(op->getOperand(0), depth+1) + invariant(op->getOperand(1), depth+1);
+        else if (isa<arith::SubIOp>(op))
+          result = invariant(op->getOperand(0), depth+1) - invariant(op->getOperand(1), depth+1);
+        else if (isa<arith::MulIOp>(op))
+          result = invariant(op->getOperand(0), depth+1) * invariant(op->getOperand(1), depth+1);
+        else throw Unsupported("unsupported invariant operation");
+      }
+    }
+    invariants.try_emplace(value, result);
+    return result;
+  }
+
   Expression expression(Value value, unsigned depth = 0) {
     if (depth > 128)
       throw Unsupported("SSA expression exceeds depth 128");
@@ -215,11 +261,15 @@ struct Extractor {
     if (auto arg = dyn_cast<BlockArgument>(value)) {
       if (arg.getOwner() == header)
         result = Expression::variable("s" + std::to_string(arg.getArgNumber()));
+      else if (symbolic && prelude.count(arg.getOwner()))
+        result = invariant(value, depth+1);
       else
         result = expression(forwarded(arg), depth + 1);
     } else {
       Operation *op = value.getDefiningOp();
-      if (prelude.count(op->getBlock()) ||
+      if (symbolic && prelude.count(op->getBlock())) {
+        result = invariant(value, depth+1);
+      } else if (prelude.count(op->getBlock()) ||
           isa<arith::ConstantOp, arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op)) {
         bool cast = isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op);
         result = Expression(Rational(signedInteger(constant(value, cast))));
@@ -264,7 +314,8 @@ std::string rationalString(const Rational &q) {
 }
 } // namespace
 
-Result analyze(mlir::func::FuncOp function, const Options &options) {
+static Result analyzeImpl(mlir::func::FuncOp function, const Options &options,
+                          SymbolicResult *symbolic = nullptr) {
   Result result;
   result.options = options;
   auto unknown = [&](const std::string &reason) {
@@ -273,6 +324,12 @@ Result analyze(mlir::func::FuncOp function, const Options &options) {
     result.header = nullptr;
     result.states.clear();
     result.solution = {};
+    if (symbolic) {
+      auto savedOptions = symbolic->options;
+      *symbolic = {};
+      symbolic->options = std::move(savedOptions);
+      symbolic->reason = reason;
+    }
     return result;
   };
   if (!function || failed(mlir::verify(function.getOperation())))
@@ -299,6 +356,8 @@ Result analyze(mlir::func::FuncOp function, const Options &options) {
       throw Unsupported("no supported CFG loop");
     Extractor extractor;
     extractor.options = options;
+    extractor.symbolic = symbolic != nullptr;
+    extractor.entry = &region.front();
     unsigned operationCount = 0, blockCount = 0;
     std::vector<Edge> edges;
     for (Block &block : region) {
@@ -439,7 +498,13 @@ Result analyze(mlir::func::FuncOp function, const Options &options) {
       State state;
       state.argument = i;
       state.name = "s" + std::to_string(i);
-      state.initial = Rational(signedInteger(extractor.constant(entries.front().argument(i))));
+      Expression initial;
+      if (symbolic) {
+        initial = extractor.invariant(entries.front().argument(i));
+        (void)formatExpression(initial);
+      } else {
+        state.initial = Rational(signedInteger(extractor.constant(entries.front().argument(i))));
+      }
       state.next = extractor.expression(backedges.front().argument(i));
       // Bound expansion of shared SSA DAGs before solving or reporting them.
       (void)formatExpression(state.next);
@@ -449,13 +514,113 @@ Result analyze(mlir::func::FuncOp function, const Options &options) {
       std::set<const Node *> seen;
       std::function<void(const Node *)> collect = [&](const Node *n) {
         if (!seen.insert(n).second) return;
-        if (n->kind == Kind::Variable) deps.insert(std::stoul(n->name.substr(1)));
+        if (n->kind == Kind::Variable && n->name.front() == 's')
+          deps.insert(std::stoul(n->name.substr(1)));
         if (n->left) { collect(n->left.get()); collect(n->right.get()); }
       };
       collect(state.increment.root().get());
       state.dependencies.assign(deps.begin(), deps.end());
       system.push_back({state.name, state.initial, state.increment});
+      if (symbolic)
+        symbolic->states.push_back({state.argument, state.name, initial,
+                                   state.next, state.increment, state.dependencies});
       result.states.push_back(std::move(state));
+    }
+    if (symbolic) {
+      // Collect all original source expressions before solving, including
+      // unused and canceled arithmetic. This also discovers their parameters.
+      std::vector<std::pair<Expression, bool>> sources;
+      for (Block &block : region) {
+        if (!extractor.reachable.count(&block)) continue;
+        for (Operation &op : block) {
+          if (isa<arith::ConstantOp, arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(op))
+            (void)extractor.constant(op.getResult(0), true);
+          else if (isa<arith::AddIOp, arith::SubIOp, arith::MulIOp>(op)) {
+            Expression source = extractor.expression(op.getResult(0));
+            (void)formatExpression(source);
+            Flags flags = Flags::none;
+            if (auto a = dyn_cast<arith::AddIOp>(op)) flags = a.getOverflowFlags();
+            if (auto a = dyn_cast<arith::SubIOp>(op)) flags = a.getOverflowFlags();
+            if (auto a = dyn_cast<arith::MulIOp>(op)) flags = a.getOverflowFlags();
+            sources.emplace_back(source, flags != Flags::none);
+          }
+        }
+      }
+      SymbolicPolynomial::Ranges ranges;
+      std::map<std::string, SymbolicPolynomial> forms;
+      Integer half = Integer(1) << (extractor.bits-1);
+      for (const auto &[argument, range] : symbolic->options.parameterRanges) {
+        if (!extractor.parameters.count(argument))
+          throw Unsupported("parameter range names an unused or unsupported argument");
+        if (range.first > range.second || range.first < -half || range.second >= half)
+          throw Unsupported("parameter range outside signed source-width domain");
+      }
+      for (unsigned arg : extractor.parameters) {
+        std::string name = "p" + std::to_string(arg);
+        auto range = std::make_pair(Integer(-half), Integer(half-1));
+        if (auto it = symbolic->options.parameterRanges.find(arg);
+            it != symbolic->options.parameterRanges.end()) range = it->second;
+        symbolic->parameters.push_back({arg, name, extractor.bits, range.first, range.second});
+        ranges.emplace(name, range);
+        forms.emplace(name, SymbolicPolynomial::parameter(name));
+      }
+      while (symbolic->integerLifts.size() < symbolic->states.size()) {
+        bool progress = false;
+        for (const auto &state : symbolic->states) {
+          if (symbolic->integerLifts.count(state.name)) continue;
+          if (!std::all_of(state.dependencies.begin(), state.dependencies.end(),
+              [&](unsigned d) { return symbolic->integerLifts.count("s"+std::to_string(d)); })) continue;
+          auto initial = substituteSymbolic(state.initial, forms);
+          auto step = substituteSymbolic(state.increment, forms);
+          auto form = step.integrate() + initial;
+          if (initial.iterationDegree() > 0 || !form.isIntegerValued())
+            throw Unsupported("non-invariant initial or nonintegral symbolic sequence");
+          forms.emplace(state.name, form);
+          symbolic->integerLifts.emplace(state.name, std::move(form));
+          progress = true;
+        }
+        if (!progress) throw Unsupported("cyclic or self-dependent symbolic increment");
+      }
+      for (const auto &state : symbolic->states) {
+        const auto &p = forms.at(state.name);
+        if (p.atIteration(0) != substituteSymbolic(state.initial, forms) ||
+            p.difference() != substituteSymbolic(state.increment, forms) ||
+            p.shift(1) != substituteSymbolic(state.next, forms))
+          throw Unsupported("symbolic initial or transition identity failed");
+      }
+      auto fits = [&](const SymbolicPolynomial &p) {
+        auto range = p.bounds(*options.maxIterations, ranges);
+        return range.first >= Rational(-half) && range.second < Rational(half);
+      };
+      bool proven = true;
+      bool hasOverflowFlags = false;
+      if (checkSigned) {
+        for (const auto &[source, flagged] : sources) {
+          hasOverflowFlags |= flagged;
+          bool safe = fits(substituteSymbolic(source, forms));
+          // Caller assumptions do NOT discharge poison flags in P2a.
+          if (flagged && !safe) throw Unsupported("symbolic overflow flag precondition unproven");
+          proven &= safe;
+        }
+        for (const auto &[name, form] : symbolic->integerLifts) proven &= fits(form);
+        // A flagged result's range alone does not prove its operands have
+        // their lifted values: an earlier unflagged operation may have wrapped.
+        // Keep all flagged functions on the fully proved path in P2a.
+        if (hasOverflowFlags && !proven)
+          throw Unsupported("symbolic overflow flag operand/state precondition unproven");
+        if (!proven && options.noOverflowAssumption.empty())
+          throw Unsupported("symbolic original-source no-overflow proof inconclusive");
+      }
+      symbolic->status = proven ? Status::Proven : Status::Conditional;
+      symbolic->reason = proven ? "exact symbolic identities under reported parameter domains"
+          : "conditional on original MLIR no-overflow assumption: " + options.noOverflowAssumption;
+      symbolic->bitWidth = extractor.bits;
+      symbolic->header = header;
+      for (Block &block : region) {
+        if (&block == header) break;
+        ++symbolic->headerBlock;
+      }
+      return result; // P1 result is internal and unused on the symbolic path.
     }
     AnalysisOptions solveOptions;
     solveOptions.mode = checkSigned ? IntegerMode::Mathematical : IntegerMode::Modular;
@@ -521,6 +686,17 @@ Result analyze(mlir::func::FuncOp function, const Options &options) {
   return result;
 }
 
+Result analyze(mlir::func::FuncOp function, const Options &options) {
+  return analyzeImpl(function, options);
+}
+
+SymbolicResult analyzeSymbolic(mlir::func::FuncOp function, const SymbolicOptions &options) {
+  SymbolicResult result;
+  result.options = options;
+  (void)analyzeImpl(function, options.integers, &result);
+  return result;
+}
+
 std::string formatExpression(const Expression &expression) {
   std::map<const Node *, std::string> memo;
   std::function<std::string(const Node *, unsigned)> print = [&](const Node *n, unsigned depth) -> std::string {
@@ -570,6 +746,86 @@ std::string formatResult(const Result &result) {
       states.push_back(std::move(item));
     }
   }
+  object["states"] = std::move(states);
+  std::string output;
+  llvm::raw_string_ostream stream(output);
+  stream << llvm::json::Value(std::move(object));
+  return output;
+}
+
+Integer SymbolicResult::valueAt(const std::string &state, const Integer &iteration,
+                               const SymbolicPolynomial::Assignment &values) const {
+  if (status == Status::Unknown) throw std::logic_error("cannot evaluate UNKNOWN symbolic analysis");
+  if (iteration < 0 || (options.integers.maxIterations && iteration > *options.integers.maxIterations))
+    throw std::out_of_range("iteration outside symbolic contract");
+  if (values.size() != parameters.size()) throw std::invalid_argument("expected exactly reported parameters");
+  for (const auto &p : parameters) {
+    auto it = values.find(p.name);
+    if (it == values.end() || it->second < p.lower || it->second > p.upper)
+      throw std::out_of_range("parameter outside declared domain: " + p.name);
+  }
+  Rational exact = integerLifts.at(state).evaluate(iteration, values);
+  if (exact.denominator() != 1) throw std::logic_error("nonintegral symbolic state");
+  Integer value = exact.numerator();
+  if (options.integers.mode == IntegerMode::Modular) {
+    Integer modulus = Integer(1) << bitWidth;
+    value %= modulus;
+    if (value < 0) value += modulus;
+  } else {
+    Integer half = Integer(1) << (bitWidth-1);
+    if (value < -half || value >= half)
+      throw std::overflow_error("symbolic state contradicts no-overflow contract");
+  }
+  return value;
+}
+
+std::string formatResult(const SymbolicResult &result) {
+  llvm::json::Object object;
+  object["status"] = statusName(result.status);
+  object["reason"] = result.reason;
+  object["mode"] = modeName(result.options.integers.mode);
+  object["scope"] = "symbolic header visits; no trip-count or exit-value claim";
+  if (result.options.integers.maxIterations)
+    object["horizon"] = result.options.integers.maxIterations->convert_to<std::string>();
+  if (!result.options.integers.noOverflowAssumption.empty())
+    object["assumption"] = result.options.integers.noOverflowAssumption;
+  llvm::json::Array parameters, states;
+  if (result.status != Status::Unknown) {
+    object["header_block"] = result.headerBlock;
+    object["bit_width"] = result.bitWidth;
+    for (const auto &p : result.parameters) {
+      llvm::json::Object param;
+      param["name"] = p.name;
+      param["argument"] = p.argument;
+      param["bit_width"] = p.bitWidth;
+      param["lower"] = p.lower.convert_to<std::string>();
+      param["upper"] = p.upper.convert_to<std::string>();
+      parameters.push_back(std::move(param));
+    }
+    for (const auto &s : result.states) {
+      llvm::json::Object state;
+      state["name"] = s.name;
+      state["argument"] = s.argument;
+      state["initial"] = formatExpression(s.initial);
+      state["next"] = formatExpression(s.next);
+      state["increment"] = formatExpression(s.increment);
+      llvm::json::Array dependencies, terms;
+      for (unsigned d : s.dependencies) dependencies.push_back(d);
+      state["dependencies"] = std::move(dependencies);
+      for (const auto &[monomial, polynomial] : result.integerLifts.at(s.name).terms()) {
+        llvm::json::Object term, powers;
+        llvm::json::Array coefficients;
+        for (const auto &[name, degree] : monomial) powers[name] = degree;
+        for (const auto &coefficient : polynomial.coefficients()) coefficients.push_back(rationalString(coefficient));
+        term["powers"] = std::move(powers);
+        term["binomial_coefficients"] = std::move(coefficients);
+        terms.push_back(std::move(term));
+      }
+      state["terms"] = std::move(terms);
+      states.push_back(std::move(state));
+    }
+  }
+  object["parameters"] = std::move(parameters);
   object["states"] = std::move(states);
   std::string output;
   llvm::raw_string_ostream stream(output);

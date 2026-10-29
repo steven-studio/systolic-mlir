@@ -13,7 +13,8 @@ enable_testing()
 add_subdirectory("${P1_ROOT}/research/polynomial-summation" p0)
 
 add_library(polynomial-cfg STATIC
-  "${P1_ROOT}/lib/Systolic/Analysis/MLIRPolynomialRecurrence.cpp")
+  "${P1_ROOT}/lib/Systolic/Analysis/MLIRPolynomialRecurrence.cpp"
+  "${P1_ROOT}/lib/Systolic/Analysis/SymbolicPolynomial.cpp")
 target_include_directories(polynomial-cfg PUBLIC "${P1_ROOT}/include")
 target_include_directories(polynomial-cfg SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 target_compile_options(polynomial-cfg PRIVATE -Wall -Wextra -Wpedantic)
@@ -41,6 +42,12 @@ add_test(NAME polynomial-cfg-extui-nneg
   COMMAND polynomial-cfg-extui-nneg-test
     "${P1_ROOT}/test/polynomial-summation-mlir/Inputs/extui-nneg.mlir")
 
+add_executable(polynomial-cfg-symbolic-test "${P1_ROOT}/test/polynomial-summation-p2a/SymbolicCFGTest.cpp")
+target_link_libraries(polynomial-cfg-symbolic-test PRIVATE polynomial-cfg MLIRParser MLIRMemRefDialect)
+add_test(NAME polynomial-cfg-symbolic
+  COMMAND polynomial-cfg-symbolic-test "${P1_ROOT}/test/polynomial-summation-p2a/Inputs"
+    "${P1_ROOT}/test/polynomial-summation-mlir/Inputs/extui-nneg.mlir")
+
 find_program(P1_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(P1_FILECHECK FileCheck HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(P1_LIT llvm-lit HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
@@ -51,7 +58,13 @@ add_test(NAME polynomial-cfg-independent-oracle
     --driver $<TARGET_FILE:polynomial-cfg-report> --mlir-opt "${P1_MLIR_OPT}")
 configure_file(lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME polynomial-cfg-lit COMMAND "${P1_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
+add_test(NAME polynomial-cfg-symbolic-oracle
+  COMMAND "${Python3_EXECUTABLE}" "${P1_ROOT}/test/polynomial-summation-p2a/differential.py"
+    --driver $<TARGET_FILE:polynomial-cfg-report> --mlir-opt "${P1_MLIR_OPT}")
+configure_file(p2a-lit.site.cfg.py.in p2a-lit/lit.site.cfg.py @ONLY)
+add_test(NAME polynomial-cfg-symbolic-lit COMMAND "${P1_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/p2a-lit")
 add_custom_target(check-polynomial-cfg
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
   DEPENDS polynomial-cfg-report polynomial-cfg-test polynomial-cfg-extui-nneg-test
+    polynomial-cfg-symbolic-test
     polynomial-summation-test polynomial-summation-driver)
