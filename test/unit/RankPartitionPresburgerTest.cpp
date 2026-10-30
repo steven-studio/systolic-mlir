@@ -42,6 +42,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "Systolic/RankPartitionCommonFiber.h"
+#include "Systolic/RankPartitionSymbolicContraction.h"
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -11485,6 +11486,153 @@ int main() {
     }
 
     std::cout << "Phase C1 symbolic domain foundation tests passed.\n";
+  }
+
+  // --------------------------------------------------------
+  // Phase C2 (Option C): symbolic contraction recovery. buildSymbolicContraction
+  // recovers the logical M/N/K frame, the exact N-local image, and the A/B/C
+  // access maps over [z, q] -- no source-point enumeration. Validated by a
+  // differential: the recovered logical access maps, evaluated at the image
+  // point of each source iteration, must equal the independently evaluated
+  // source access maps. (The source box is enumerated here, in the test
+  // oracle only; the production path is symbolic.)
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    // Evaluate buildSymbolicContraction on a case, then differentially check
+    // its logical access maps against the source access maps over [0,hi]^rank.
+    auto runContraction =
+        [&](const char *name, const std::array<IntMatrix, 3> &F,
+            const std::array<IntRow, 3> &off, unsigned rank, int hi,
+            unsigned wantM, unsigned wantN, unsigned wantK,
+            unsigned wantLocals) -> bool {
+      IntegerPolyhedron src(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<llvm::DynamicAPInt> lo(rank + 1, llvm::DynamicAPInt(0));
+        llvm::SmallVector<llvm::DynamicAPInt> up(rank + 1, llvm::DynamicAPInt(0));
+        lo[a] = llvm::DynamicAPInt(1);                 //  x_a >= 0
+        up[a] = llvm::DynamicAPInt(-1);                // -x_a + hi >= 0
+        up[rank] = llvm::DynamicAPInt(hi);
+        src.addInequality(lo);
+        src.addInequality(up);
+      }
+      std::string why;
+      auto c = buildSymbolicContraction(
+          F, off, src, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string base = name;
+      if (verify(c.has_value(), (base + ": symbolic contraction recovered").c_str()))
+        return false;
+      if (verify(c->frame.mDims == wantM && c->frame.nDims == wantN &&
+                     c->frame.kDims == wantK && c->frame.batchDims == 0,
+                 (base + ": frame M/N/K counts").c_str()))
+        return false;
+      if (verify(c->congruenceLocals == wantLocals,
+                 (base + ": congruence-local count").c_str()))
+        return false;
+
+      // Independent oracle: recover T and the congruence rows via public APIs.
+      auto part = analyzeRankPartition(F[0], F[1], F[2], rank);
+      if (verify(part.has_value(), (base + ": oracle rank partition").c_str()))
+        return false;
+      auto exp = expandRankPartition(*part);
+      if (verify(exp.has_value(), (base + ": oracle expansion").c_str()))
+        return false;
+      auto map = buildPartitionCoordinateMap(*exp);
+      if (verify(map.has_value(), (base + ": oracle coordinate map").c_str()))
+        return false;
+      AffineIntegerDomain unc;
+      unc.sourceDimension = rank;
+      auto sym = transformToSymbolicDomain(*map, unc);
+      if (verify(sym.has_value(), (base + ": oracle symbolic transform").c_str()))
+        return false;
+      const BigInt &d = sym->denominator;
+      const IntMatrix &Mi = sym->inverseNumerator;
+      std::vector<unsigned> cr;
+      for (unsigned i = 0; i < rank; ++i)
+        for (const BigInt &x : Mi[i])
+          if (x % d != 0) { cr.push_back(i); break; }
+      if (verify(cr.size() == wantLocals,
+                 (base + ": oracle congruence-row count").c_str()))
+        return false;
+
+      // Differential over the whole source box (test oracle enumeration).
+      std::vector<int> x(rank, 0);
+      std::function<bool(unsigned)> sweep = [&](unsigned dim) -> bool {
+        if (dim == rank) {
+          IntRow z(rank, BigInt(0));
+          for (unsigned a = 0; a < rank; ++a)
+            for (unsigned b = 0; b < rank; ++b)
+              z[a] += map->sourceToLogical[a][b] * BigInt(x[b]);
+          IntRow q(cr.size(), BigInt(0));
+          for (unsigned l = 0; l < cr.size(); ++l)
+            q[l] = BigInt(x[cr[l]]);
+          for (unsigned op = 0; op < 3; ++op)
+            for (unsigned r = 0; r < c->access[op].rows.size(); ++r) {
+              BigInt logical = c->access[op].offsets[r];
+              for (unsigned a = 0; a < rank; ++a)
+                logical += c->access[op].rows[r][a] * z[a];
+              for (unsigned l = 0; l < cr.size(); ++l)
+                logical += c->access[op].rows[r][rank + l] * q[l];
+              BigInt source = off[op][r];
+              for (unsigned a = 0; a < rank; ++a)
+                source += F[op][r][a] * BigInt(x[a]);
+              if (logical != source)
+                return false;
+            }
+          return true;
+        }
+        for (x[dim] = 0; x[dim] <= hi; ++x[dim])
+          if (!sweep(dim + 1))
+            return false;
+        return true;
+      };
+      if (verify(sweep(0),
+                 (base + ": logical access maps reproduce source addresses "
+                         "(differential over the box, A/B/C)").c_str()))
+        return false;
+      return true;
+    };
+
+    // CASE 1: C[i+j-2k+6][i-2j+k+6] += A[i+j-2k+6][i+j+k] * B[i+j+k][i-2j+k+6].
+    // det(T) = -9, denominator d = 3; all three inverse rows are non-divisible,
+    // refuses (3b-4 det9) -- recovered here through the tile-path foundation.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(-2)},
+                    {BigInt(1), BigInt(1), BigInt(1)}}, // A rows
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(1)},
+                    {BigInt(1), BigInt(-2), BigInt(1)}}, // B rows
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(-2)},
+                    {BigInt(1), BigInt(-2), BigInt(1)}}, // C rows
+      };
+      std::array<IntRow, 3> off = {IntRow{BigInt(6), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(6)},
+                                   IntRow{BigInt(6), BigInt(6)}};
+      if (!runContraction("C2 CASE1", F, off, 3, 3, 1, 1, 1, 3))
+        return 1;
+    }
+
+    // Plain GEMM: C[i][j] += A[i][k] * B[k][j]. Unimodular (T = I), no locals.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1)}}, // A[i][k]
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}, // B[k][j]
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}, // C[i][j]
+      };
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      if (!runContraction("C2 plain", F, off, 3, 3, 1, 1, 1, 0))
+        return 1;
+    }
+
+    std::cout << "Phase C2 symbolic contraction tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
