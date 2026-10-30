@@ -1,0 +1,7 @@
+config.p2b_driver = r"@CMAKE_CURRENT_BINARY_DIR@/polynomial-termination-report"
+config.p2b_opt = r"@P2B_MLIR_OPT@"
+config.p2b_filecheck = r"@P2B_FILECHECK@"
+config.p2b_not = r"@P2B_NOT@"
+config.p2b_inputs = r"@P2B_ROOT@/test/polynomial-termination/Inputs"
+config.p2b_exec_root = r"@CMAKE_CURRENT_BINARY_DIR@/lit"
+lit_config.load_config(config, r"@CMAKE_CURRENT_SOURCE_DIR@/lit/lit.cfg.py")
