@@ -320,31 +320,47 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
       return std::nullopt;
     return static_cast<std::int64_t>(v);
   };
+  // Projects `elim` out of `src` (a local-free polyhedron over the n logical
+  // dims) and reads `axis`'s bounding faces -- affine in the surviving dims.
+  // Exact over the integers because every eliminated axis is unit-coefficient.
+  // Used on D for the congruence-free path and on the gcd-normalized pure-z
+  // convex hull (convexZ) for the congruence (M4-tri) path.
   auto extractAxisFaces =
-      [&](unsigned axis, const std::vector<unsigned> &elim,
+      [&](const IntegerPolyhedron &src, unsigned axis,
+          const std::vector<unsigned> &elim,
           std::vector<OuterBoundFace> &lower,
           std::vector<OuterBoundFace> &upper) -> bool {
-    // Eliminated axes must be unit-coefficient and not equality-pinned in D.
-    for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri)
+    // Eliminated axes must be unit-coefficient and not equality-pinned in src.
+    for (unsigned ri = 0; ri < src.getNumInequalities(); ++ri)
       for (unsigned ec : elim) {
-        auto c = rd(D.getInequality(ri)[ec]);
+        auto c = rd(src.getInequality(ri)[ec]);
         if (!c) { why = "UNKNOWN: inner coefficient overflows i64"; return false; }
         if (*c < -1 || *c > 1) {
           why = "UNKNOWN: non-unit inner reduction coefficient (projection not exact)";
           return false;
         }
       }
-    for (unsigned re = 0; re < D.getNumEqualities(); ++re)
+    for (unsigned re = 0; re < src.getNumEqualities(); ++re)
       for (unsigned ec : elim)
-        if (D.getEquality(re)[ec] != llvm::DynamicAPInt(0)) {
+        if (src.getEquality(re)[ec] != llvm::DynamicAPInt(0)) {
           why = "UNKNOWN: inner reduction axis is equality-constrained";
           return false;
         }
-    IntegerPolyhedron P = D;
-    // elim is ascending (strictly-inner cols); project in descending order so
-    // not-yet-projected columns keep their indices.
-    for (int qi = static_cast<int>(elim.size()) - 1; qi >= 0; --qi)
-      P.projectOut(elim[static_cast<unsigned>(qi)], 1);
+    IntegerPolyhedron P = src;
+    // Project the eliminated columns in DESCENDING index order so that
+    // not-yet-projected columns keep their indices. The caller's `elim` is not
+    // necessarily sorted (for the congruence path the tiled inner axis may sit
+    // before a peeled axis), so sort a copy ascending first.
+    std::vector<unsigned> elimS(elim);
+    for (std::size_t a = 0; a < elimS.size(); ++a)
+      for (std::size_t b = a + 1; b < elimS.size(); ++b)
+        if (elimS[b] < elimS[a]) {
+          unsigned t = elimS[a];
+          elimS[a] = elimS[b];
+          elimS[b] = t;
+        }
+    for (int qi = static_cast<int>(elimS.size()) - 1; qi >= 0; --qi)
+      P.projectOut(elimS[static_cast<unsigned>(qi)], 1);
     if (P.getNumLocalVars() != 0) {
       why = "UNKNOWN: outer-bound projection is not affine (introduced locals)";
       return false;
@@ -412,40 +428,54 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
       elim.push_back(innerCol); // the tiled axis is strictly inner of every peel
       ReductionPeelLevel level;
       level.col = peelCols[p];
-      if (!extractAxisFaces(peelCols[p], elim, level.lowerFaces,
+      if (!extractAxisFaces(D, peelCols[p], elim, level.lowerFaces,
                             level.upperFaces))
         return std::nullopt;
       out.peelLevels.push_back(std::move(level));
     }
   } else {
-    // M4-box: every peeled axis is congruence-free, so its exact range is
-    // read directly from D's PURE-Z inequalities -- never projecting D, whose
-    // congruence locals (discharged by the inner stride-g tiling) would
-    // otherwise be introduced into the projection. Each peeled axis must be
-    // bounded on both sides by STANDALONE unit faces (nonzero on that axis
-    // alone). That proves the range is a CONSTANT independent of the output,
-    // the coupled inner axis, and the other peeled axes; any coupling (an
-    // output-dependent or coupled-inner-dependent bound) or a pin by a pure-z
-    // equality is refused conservatively. Exactness of the MAC multiset never
-    // rests on these bounds being tight: MAC emission is gated by the inner
-    // anchor pieces (which encode the exact image, congruence included), so a
-    // peeled value whose inner fiber is empty contributes zero MACs regardless.
-    auto i64 = [](const llvm::DynamicAPInt &v) -> std::optional<std::int64_t> {
+    // M4-tri: the peeled axes are congruence-free, but their exact ranges may
+    // depend on the OUTPUT and on more-significant clean peel axes (triangular,
+    // simplex, banded, trapezoidal). D's inequalities are pure-z (checked in the
+    // routing above); its congruence (local) equalities are the lattice, which
+    // the inner stride-g tiling discharges. Build the pure-z CONVEX HULL and
+    // gcd-normalize each inequality -- `a.z + c >= 0` with g = gcd(a) becomes
+    // `(a/g).z + floor(c/g) >= 0`, exact over the integers -- so every clean
+    // axis is unit-coefficient (the hull writes a clean box face as (M z)_a >= 0
+    // with coefficient d). Then reuse the exact M2/M3 nested projection on this
+    // LOCAL-FREE hull. A face coupling the congruence-coupled inner axis with a
+    // peeled axis is refused: that is a coupled-inner-dependent bound or a
+    // congruence-skewed output bound (the skewed output drags the coupled column
+    // in), neither of which projects exactly here. MAC exactness never rests on
+    // these bounds being tight: emission stays anchor-gated, so a peeled value
+    // whose inner fiber is empty contributes zero MACs regardless.
+    auto rd64 = [](const llvm::DynamicAPInt &v) -> std::optional<std::int64_t> {
       if (v < llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::min()) ||
           v > llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::max()))
         return std::nullopt;
       return static_cast<std::int64_t>(v);
     };
-    // Exact floor/ceil of p/q with q > 0 (round toward -inf / +inf).
     auto floorDiv = [](std::int64_t p, std::int64_t q) -> std::int64_t {
       std::int64_t d = p / q, rr = p % q;
       if (rr != 0 && ((rr < 0) != (q < 0)))
         --d;
       return d;
     };
-    auto ceilDiv = [&](std::int64_t p, std::int64_t q) -> std::int64_t {
-      return -floorDiv(-p, q);
+    auto gcd64 = [](std::int64_t a, std::int64_t b) -> std::int64_t {
+      a = a < 0 ? -a : a;
+      b = b < 0 ? -b : b;
+      while (b) {
+        std::int64_t t = a % b;
+        a = b;
+        b = t;
+      }
+      return a;
     };
+
+    IntegerPolyhedron convexZ(PresburgerSpace::getSetSpace(n, 0, 0));
+    // Pure-z equalities: drop the congruence (local) ones; a pure-z equality
+    // may not pin a clean peel axis (degenerate). The rest (output/inner only)
+    // are kept so the projection sees the full convex shape.
     for (unsigned re = 0; re < D.getNumEqualities(); ++re) {
       auto row = D.getEquality(re);
       bool referencesLocal = false;
@@ -461,66 +491,74 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
           why = "UNKNOWN: a congruence-free peeled axis is equality-constrained";
           return std::nullopt;
         }
+      llvm::SmallVector<std::int64_t> e(n + 1, 0);
+      for (unsigned j = 0; j < n; ++j) {
+        auto v = rd64(row[j]);
+        if (!v) { why = "UNKNOWN: convex-hull coefficient overflows i64"; return std::nullopt; }
+        e[j] = *v;
+      }
+      auto cc = rd64(row[n + added]);
+      if (!cc) { why = "UNKNOWN: convex-hull constant overflows i64"; return std::nullopt; }
+      e[n] = *cc;
+      convexZ.addEquality(e);
     }
-    for (unsigned c : peelCols) {
-      std::optional<std::int64_t> lo, hi;
-      for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri) {
-        auto row = D.getInequality(ri);
-        auto ac = i64(row[c]);
-        if (!ac) {
-          why = "UNKNOWN: peeled-axis coefficient overflows i64";
-          return std::nullopt;
-        }
-        if (*ac == 0)
-          continue; // not a bound on this axis.
+    // gcd-normalized pure-z inequalities; reject coupled-inner/peel coupling.
+    for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri) {
+      auto row = D.getInequality(ri); // pure-z (verified in the routing above)
+      llvm::SmallVector<std::int64_t> e(n + 1, 0);
+      std::int64_t g = 0;
+      for (unsigned j = 0; j < n; ++j) {
+        auto v = rd64(row[j]);
+        if (!v) { why = "UNKNOWN: convex-hull coefficient overflows i64"; return std::nullopt; }
+        e[j] = *v;
+        g = gcd64(g, *v);
+      }
+      auto cc = rd64(row[n + added]);
+      if (!cc) { why = "UNKNOWN: convex-hull constant overflows i64"; return std::nullopt; }
+      e[n] = *cc;
+      if (g > 1) {
         for (unsigned j = 0; j < n; ++j)
-          if (j != c && row[j] != llvm::DynamicAPInt(0)) {
-            why = "UNKNOWN: peeled reduction axis bound depends on another axis "
-                  "(non-constant peel range)";
+          e[j] /= g;
+        e[n] = floorDiv(e[n], g); // exact for `a.z + c >= 0`, a a multiple of g.
+      }
+      if (e[innerCol] != 0)
+        for (unsigned c : peelCols)
+          if (e[c] != 0) {
+            why = "UNKNOWN: peeled reduction axis bound depends on the "
+                  "congruence-coupled inner axis (or a congruence-skewed output)";
             return std::nullopt;
           }
-        auto cc = i64(row[n + added]); // constant term
-        if (!cc) {
-          why = "UNKNOWN: peeled-axis constant overflows i64";
-          return std::nullopt;
-        }
-        // Standalone face a*c + cc >= 0 (a != 0) gives an EXACT integer bound:
-        //   a > 0 : c >= ceil(-cc / a)        (lower);
-        //   a < 0 : c <= floor(cc / (-a))     (upper).
-        // The convex image writes a clean-axis box face as (M z)_a >= 0, whose
-        // coefficient is the lattice denominator d (e.g. 3 for CASE1), so a is
-        // not generally +-1; the integer division keeps the bound exact.
-        if (*ac > 0) {
-          std::int64_t v = ceilDiv(-*cc, *ac);
-          lo = lo ? std::max(*lo, v) : v;
-        } else {
-          std::int64_t v = floorDiv(*cc, -*ac);
-          hi = hi ? std::min(*hi, v) : v;
-        }
-      }
-      if (!lo || !hi) {
-        why = "UNKNOWN: peeled reduction axis unbounded on a side";
-        return std::nullopt;
-      }
-      if (*lo > *hi) {
-        why = "UNKNOWN: empty peeled reduction axis range";
-        return std::nullopt;
-      }
+      convexZ.addInequality(e);
+    }
+
+    // Exact nested peel bounds over the local-free hull (M2/M3 projection).
+    for (unsigned p = 0; p < peelCols.size(); ++p) {
+      std::vector<unsigned> elim;
+      for (unsigned q = p + 1; q < peelCols.size(); ++q)
+        elim.push_back(peelCols[q]);
+      elim.push_back(innerCol); // the tiled axis is strictly inner of every peel
       ReductionPeelLevel level;
-      level.col = c;
-      OuterBoundFace lf;
-      lf.coeffs.assign(n, BigInt(0));
-      lf.constant = BigInt(*lo);
-      OuterBoundFace uf;
-      uf.coeffs.assign(n, BigInt(0));
-      uf.constant = BigInt(*hi);
-      level.lowerFaces.push_back(std::move(lf));
-      level.upperFaces.push_back(std::move(uf));
+      level.col = peelCols[p];
+      if (!extractAxisFaces(convexZ, peelCols[p], elim, level.lowerFaces,
+                            level.upperFaces))
+        return std::nullopt;
       out.peelLevels.push_back(std::move(level));
     }
+    // Constant envelope of the outermost peel axis, read from the local-free
+    // hull (getConstantBound64 is safe here -- convexZ carries no locals).
+    auto oLo = convexZ.getConstantBound64(BoundType::LB, outerCol);
+    auto oHi = convexZ.getConstantBound64(BoundType::UB, outerCol);
+    if (!oLo || !oHi) {
+      why = "UNKNOWN: peeled outer reduction axis is unbounded";
+      return std::nullopt;
+    }
+    out.outerLo = *oLo;
+    out.outerHi = *oHi;
   }
 
-  // Compatibility mirror (outermost level) and the constant envelope.
+  // Compatibility mirror (outermost level) and the constant envelope. For the
+  // congruence case (added > 0) out.outerLo/outerHi were already read from the
+  // local-free convex hull; the congruence-free path reads them from D here.
   out.outerLowerFaces = out.peelLevels.front().lowerFaces;
   out.outerUpperFaces = out.peelLevels.front().upperFaces;
   if (added == 0) {
@@ -532,14 +570,6 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
     }
     out.outerLo = *oLo;
     out.outerHi = *oHi;
-  } else {
-    // M4-box: the outermost peel level already carries the exact, i64-checked
-    // constant range as its single lower/upper face. Avoid getConstantBound64
-    // on a domain that carries congruence locals.
-    out.outerLo =
-        out.peelLevels.front().lowerFaces.front().constant.convert_to<std::int64_t>();
-    out.outerHi =
-        out.peelLevels.front().upperFaces.front().constant.convert_to<std::int64_t>();
   }
   bool constant = true;
   for (const auto &lvl : out.peelLevels) {

@@ -13464,9 +13464,23 @@ int main() {
         return false;
       if (expEmpty)
         return true;
-      if (verify(plan->outerRangeIsConstant,
-                 (b + ": peel ranges constant").c_str()))
-        return false;
+      // The outerRangeIsConstant flag must agree with the actual peel faces
+      // (constant iff every face has zero coefficients) -- it may be false for
+      // triangular/simplex/banded/trapezoidal clean dependencies.
+      {
+        bool allConst = true;
+        for (const auto &lvl : plan->peelLevels) {
+          for (const auto &f : lvl.lowerFaces)
+            for (const BigInt &c : f.coeffs)
+              if (c != 0) allConst = false;
+          for (const auto &f : lvl.upperFaces)
+            for (const BigInt &c : f.coeffs)
+              if (c != 0) allConst = false;
+        }
+        if (verify(plan->outerRangeIsConstant == allConst,
+                   (b + ": outer-range constancy flag consistent").c_str()))
+          return false;
+      }
       if (verify(plan->peelLevels.size() == expR - 1,
                  (b + ": peel-level count").c_str()))
         return false;
@@ -13505,12 +13519,17 @@ int main() {
         isRed[c] = true;
       isRed[inner] = true;
 
-      // Accumulation (same original output -> same real C address), per-peel
-      // [min,max], and the set of (output, clean) combos actually present.
+      // Accumulation (same original output -> same real C address) and the full
+      // set of enumerated logical points (for the exact nested peel-bound check).
+      auto faceVal = [&](const systolic::logical::OuterBoundFace &f,
+                         const std::vector<std::int64_t> &z) -> long {
+        BigInt v = f.constant;
+        for (unsigned c = 0; c < n; ++c)
+          v += f.coeffs[c] * BigInt(z[c]);
+        return v.convert_to<long>();
+      };
       std::map<std::vector<std::int64_t>, std::vector<BigInt>> realC;
-      std::vector<std::pair<long, long>> peelMinMax(
-          peel.size(), {std::numeric_limits<long>::max(),
-                        std::numeric_limits<long>::min()});
+      std::vector<std::vector<std::int64_t>> zpts;
       bool accOk = true;
       long srcMacs = 0;
       std::vector<int> x(n, 0);
@@ -13536,11 +13555,7 @@ int main() {
             realC[o] = c;
           else if (it->second != c)
             accOk = false;
-          for (std::size_t p = 0; p < peel.size(); ++p) {
-            long v = z[peel[p]];
-            peelMinMax[p].first = std::min(peelMinMax[p].first, v);
-            peelMinMax[p].second = std::max(peelMinMax[p].second, v);
-          }
+          zpts.push_back(z);
           return;
         }
         for (x[d] = 0; x[d] <= hi; ++x[d])
@@ -13551,19 +13566,45 @@ int main() {
                              "accumulates into one physical C element")
                             .c_str()))
         return false;
+      // Exact nested peel bounds: at each level, grouping by the output and the
+      // enclosing (more-significant) peel values, the plan's faces evaluate to
+      // the enumerated [min,max] of that axis -- affine (triangular/simplex/
+      // banded) or constant.
       bool peelOk = true;
-      for (std::size_t p = 0; p < peel.size(); ++p) {
-        long lo = plan->peelLevels[p]
-                      .lowerFaces.front()
-                      .constant.convert_to<long>();
-        long upr = plan->peelLevels[p]
-                       .upperFaces.front()
-                       .constant.convert_to<long>();
-        peelOk &=
-            (lo == peelMinMax[p].first && upr == peelMinMax[p].second);
+      for (std::size_t p = 0; p < peel.size() && peelOk; ++p) {
+        std::map<std::vector<std::int64_t>,
+                 std::pair<std::pair<long, long>, std::vector<std::int64_t>>>
+            grp;
+        for (const auto &z : zpts) {
+          std::vector<std::int64_t> key;
+          for (unsigned a = 0; a < n; ++a)
+            if (!isRed[a])
+              key.push_back(z[a]);
+          for (std::size_t q = 0; q < p; ++q)
+            key.push_back(z[peel[q]]);
+          long v = z[peel[p]];
+          auto it = grp.find(key);
+          if (it == grp.end())
+            grp[key] = {{v, v}, z};
+          else {
+            it->second.first.first = std::min(it->second.first.first, v);
+            it->second.first.second = std::max(it->second.first.second, v);
+          }
+        }
+        for (auto &kv : grp) {
+          long planLo = std::numeric_limits<long>::min(),
+               planHi = std::numeric_limits<long>::max();
+          for (auto &f : plan->peelLevels[p].lowerFaces)
+            planLo = std::max(planLo, faceVal(f, kv.second.second));
+          for (auto &f : plan->peelLevels[p].upperFaces)
+            planHi = std::min(planHi, faceVal(f, kv.second.second));
+          peelOk &= (planLo == kv.second.first.first &&
+                     planHi == kv.second.first.second);
+        }
       }
       if (verify(peelOk,
-                 (b + ": constant peel ranges equal enumerated extents").c_str()))
+                 (b + ": exact nested peel bounds equal enumerated extents")
+                     .c_str()))
         return false;
 
       // Inner MAC exactness via the proven C3 coverage oracle on the SYNTHETIC
@@ -13928,6 +13969,64 @@ int main() {
         return 1;
     }
 
+    // ---- M4-tri: non-rectangular, clean-axis-dependent peel bounds, with one
+    //      congruence-coupled inner axis (stride 3). The clean dependency shapes
+    //      the peel ranges (triangular/simplex/banded/trapezoidal) while the
+    //      inner CASE 1 fiber structure is unchanged (lengths {1,2,3,4}). ----
+    // Reusable r=3 accesses: CASE1(i,j,k1 coupled) + clean k2 (col3), k3 (col4).
+    auto triF = []() {
+      return std::array<IntMatrix, 3>{
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)}}};
+    };
+    std::array<IntRow, 3> triO = {IntRow{BigInt(6),BigInt(0),BigInt(0),BigInt(0)},
+                                  IntRow{BigInt(0),BigInt(6),BigInt(0),BigInt(0)},
+                                  IntRow{BigInt(6),BigInt(6)}};
+    // Triangular: k3 <= k2.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 0, 1, -1, 0}); // k2 - k3 >= 0
+      if (!runScanM4("C3c3m4 tri-triangular", triF(), triO, 5, dom, 3, 3, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+    // Banded: k2 - 1 <= k3 <= k2.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 0, 1, -1, 0});  // k2 - k3 >= 0
+      dom.addInequality({0, 0, 0, -1, 1, 1});  // k3 - k2 + 1 >= 0
+      if (!runScanM4("C3c3m4 tri-banded", triF(), triO, 5, dom, 3, 3, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+    // Trapezoidal: k3 <= min(k2, 2).
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 0, 1, -1, 0});  // k2 - k3 >= 0
+      dom.addInequality({0, 0, 0, 0, -1, 2});  // 2 - k3 >= 0
+      if (!runScanM4("C3c3m4 tri-trapezoidal", triF(), triO, 5, dom, 3, 3, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+    // Simplex over THREE clean axes (r=4): 0 <= k4 <= k3 <= k2 <= 3, with the
+    // congruence-coupled k1 tiled. source (i,j,k1,k2,k3,k4).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      IntegerPolyhedron dom = box(6, 3);
+      dom.addInequality({0, 0, 0, 1, -1, 0, 0}); // k2 - k3 >= 0
+      dom.addInequality({0, 0, 0, 0, 1, -1, 0}); // k3 - k4 >= 0
+      if (!runScanM4("C3c3m4 tri-simplex-3clean", F, O, 6, dom, 3, 4, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+
     // ---- Negative tests: conservative UNKNOWN (safety must not weaken) ----
     auto caseF = []() {
       return std::array<IntMatrix, 3>{
@@ -13996,8 +14095,24 @@ int main() {
       if (!runScanM4Unknown("C3c3m4 neg output-aliasing", FA, OA, 5, box(5, 3)))
         return 1;
     }
+    // (N6) M4-tri must still refuse a peel bound coupled to the inner congruence
+    //      axis (k2 <= k1) -- an outer-depends-on-inner inversion.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 1, -1, 0, 0}); // k1 - k2 >= 0
+      if (!runScanM4Unknown("C3c3m4 neg tri-coupled-inner", triF(), triO, 5, dom))
+        return 1;
+    }
+    // (N7) M4-tri must still refuse a congruence-skewed output-dependent peel
+    //      bound (k2 <= i): the skewed output drags the coupled column in.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({1, 0, 0, -1, 0, 0}); // i - k2 >= 0
+      if (!runScanM4Unknown("C3c3m4 neg tri-output-skew", triF(), triO, 5, dom))
+        return 1;
+    }
 
-    std::cout << "Phase C3c-3 M4-box reduction scan tests passed.\n";
+    std::cout << "Phase C3c-3 M4-box/M4-tri reduction scan tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
