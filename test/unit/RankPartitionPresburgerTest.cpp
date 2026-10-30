@@ -11344,6 +11344,149 @@ int main() {
     }
   }
 
+  // --------------------------------------------------------
+  // Phase C1 (Option C): the symbolic tile-path domain foundation. The exact
+  // N-local logical image is reconstructed by buildExactLogicalImage (the
+  // same function the coverage check already uses) -- NOT by the guarded-MAC
+  // one-local buildRecoverableLogicalDomain, which stays as it is. Validated
+  // here against an independent brute-force membership oracle over small
+  // bounded domains (test only; the production reconstruction is symbolic).
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    // A source box [0,hi]^2 as an IntegerPolyhedron over (x0, x1).
+    auto box2 = [](int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(2, 0, 0));
+      s.addInequality({1, 0, 0});    //  x0 >= 0
+      s.addInequality({-1, 0, hi});  //  hi - x0 >= 0
+      s.addInequality({0, 1, 0});    //  x1 >= 0
+      s.addInequality({0, -1, hi});  //  hi - x1 >= 0
+      return s;
+    };
+
+    // Integer membership of (z0, z1) in a 2-D image with existential locals:
+    // pin the two dims by equalities and test integer-feasibility. This is the
+    // sound local-handling path (isIntegerEmpty projects the existentials); it
+    // never subtracts two local-bearing sets.
+    auto contains = [](const IntegerPolyhedron &img, int64_t z0, int64_t z1) {
+      IntegerPolyhedron p = img;
+      const unsigned cols = p.getNumCols();
+      llvm::SmallVector<llvm::DynamicAPInt> e0(cols, llvm::DynamicAPInt(0));
+      llvm::SmallVector<llvm::DynamicAPInt> e1(cols, llvm::DynamicAPInt(0));
+      e0[0] = llvm::DynamicAPInt(1);
+      e0[cols - 1] = llvm::DynamicAPInt(-z0);
+      e1[1] = llvm::DynamicAPInt(1);
+      e1[cols - 1] = llvm::DynamicAPInt(-z1);
+      p.addEquality(e0);
+      p.addEquality(e1);
+      return !p.isIntegerEmpty();
+    };
+
+    // Brute-force image of [0,hi]^2 under an integer 2x2 T (test oracle only).
+    auto imageOf = [](int64_t t00, int64_t t01, int64_t t10, int64_t t11,
+                      int hi) {
+      std::set<std::pair<int64_t, int64_t>> image;
+      for (int x0 = 0; x0 <= hi; ++x0)
+        for (int x1 = 0; x1 <= hi; ++x1)
+          image.insert({t00 * x0 + t01 * x1, t10 * x0 + t11 * x1});
+      return image;
+    };
+
+    // Every image point is in, every other lattice point in the box is out.
+    auto matchesImage = [&](const IntegerPolyhedron &img,
+                            const std::set<std::pair<int64_t, int64_t>> &image,
+                            int64_t lo0, int64_t hi0, int64_t lo1, int64_t hi1) {
+      for (int64_t z0 = lo0; z0 <= hi0; ++z0)
+        for (int64_t z1 = lo1; z1 <= hi1; ++z1)
+          if (contains(img, z0, z1) != (image.count({z0, z1}) != 0))
+            return false;
+      return true;
+    };
+
+    // (1) CASE 1's shape: T = [[1,1],[1,-1]], det = -2. Both inverse rows are
+    // odd, so d = 2 and BOTH rows are non-automatic -> two existential locals.
+    // This is the multi-local domain the guarded-MAC path refuses (3b-4 det9),
+    // reconstructed here on the tile-path function instead.
+    {
+      PartitionCoordinateMap map;
+      map.sourceToLogical = {{BigInt(1), BigInt(1)}, {BigInt(1), BigInt(-1)}};
+      map.logicalToSource = {{Rat(1, 2), Rat(1, 2)}, {Rat(1, 2), Rat(-1, 2)}};
+      auto img = buildExactLogicalImage(map, box2(3));
+      if (verify(img.has_value(),
+                 "C1: two-local non-unimodular image reconstructed"))
+        return 1;
+      if (verify(img->getNumLocalVars() == 2,
+                 "C1: exactly two existential congruence locals"))
+        return 1;
+      // z0 = x0+x1 in [0,6], z1 = x0-x1 in [-3,3].
+      if (verify(matchesImage(*img, imageOf(1, 1, 1, -1, 3), 0, 6, -3, 3),
+                 "C1: two-local image equals the exact T-image (oracle)"))
+        return 1;
+    }
+
+    // (2) One congruence local: T = [[1,0],[0,2]]. Row 0 is automatic, row 1
+    // is not -> one local.
+    {
+      PartitionCoordinateMap map;
+      map.sourceToLogical = {{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(2)}};
+      map.logicalToSource = {{Rat(1), Rat(0)}, {Rat(0), Rat(1, 2)}};
+      auto img = buildExactLogicalImage(map, box2(3));
+      if (verify(img.has_value() && img->getNumLocalVars() == 1,
+                 "C1: one congruence local image reconstructed"))
+        return 1;
+      // z0 in [0,3], z1 in {0,2,4,6}.
+      if (verify(matchesImage(*img, imageOf(1, 0, 0, 2, 3), 0, 3, 0, 6),
+                 "C1: one-local image equals the exact T-image (oracle)"))
+        return 1;
+    }
+
+    // (3) Unimodular map: T = [[0,1],[1,0]] -> no local.
+    {
+      PartitionCoordinateMap map;
+      map.sourceToLogical = {{BigInt(0), BigInt(1)}, {BigInt(1), BigInt(0)}};
+      map.logicalToSource = {{Rat(0), Rat(1)}, {Rat(1), Rat(0)}};
+      auto img = buildExactLogicalImage(map, box2(3));
+      if (verify(img.has_value() && img->getNumLocalVars() == 0,
+                 "C1: unimodular image has no local"))
+        return 1;
+      if (verify(matchesImage(*img, imageOf(0, 1, 1, 0, 3), 0, 3, 0, 3),
+                 "C1: unimodular image equals the exact T-image (oracle)"))
+        return 1;
+    }
+
+    // (4) Empty source domain -> integer-empty image.
+    {
+      PartitionCoordinateMap map;
+      map.sourceToLogical = {{BigInt(1), BigInt(1)}, {BigInt(1), BigInt(-1)}};
+      map.logicalToSource = {{Rat(1, 2), Rat(1, 2)}, {Rat(1, 2), Rat(-1, 2)}};
+      IntegerPolyhedron empty(PresburgerSpace::getSetSpace(2, 0, 0));
+      empty.addInequality({-1, 0, 3}); //  x0 <= 3
+      empty.addInequality({1, 0, -5}); //  x0 >= 5  (contradiction)
+      empty.addInequality({0, 1, 0});
+      empty.addInequality({0, -1, 3});
+      auto img = buildExactLogicalImage(map, empty);
+      if (verify(img.has_value() && img->isIntegerEmpty(),
+                 "C1: empty source domain reconstructs integer-empty"))
+        return 1;
+    }
+
+    // (5) Unrepresentable coefficient -> conservative refusal (nullopt).
+    {
+      const BigInt large = BigInt(std::numeric_limits<std::int64_t>::max()) + 1;
+      PartitionCoordinateMap map;
+      map.sourceToLogical = {{large, BigInt(0)}, {BigInt(0), BigInt(1)}};
+      map.logicalToSource = {{Rat(1, large), Rat(0)}, {Rat(0), Rat(1)}};
+      auto img = buildExactLogicalImage(map, box2(3));
+      if (verify(!img.has_value(),
+                 "C1: unrepresentable transform refused (nullopt)"))
+        return 1;
+    }
+
+    std::cout << "Phase C1 symbolic domain foundation tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
