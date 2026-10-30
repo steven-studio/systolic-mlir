@@ -221,6 +221,28 @@ inline std::optional<SymbolicTilePartition> buildSymbolicTilePartition(
     why = "rank partition expansion failed";
     return std::nullopt;
   }
+
+  // Multi-dimensional reduction detection (C3c). expandRankPartition keeps only
+  // ONE active reduction axis (k.front()) and pushes every further reduction
+  // axis into `partitions` flagged requiresReduction. Those partitions are a
+  // GENUINE multi-axis reduction K = (k1, k2, ...), NOT batch -- the recognizer
+  // keeps the distinction in requiresReduction, which C2's frame.batchDims
+  // (counting all partitions alike) drops. Count the true reduction rank from
+  // the flag. Only a single reduction axis is tiled today; a genuine
+  // multi-dimensional reduction requires exact flattening into one device K
+  // dimension (a later stage), so refuse it conservatively here -- distinctly
+  // from batch and from output aliasing -- rather than silently reinterpret a
+  // reduction axis as a parallel axis.
+  unsigned reductionAxes = static_cast<unsigned>(expanded->k.size());
+  for (const auto &axis : expanded->partitions)
+    if (axis.requiresReduction)
+      ++reductionAxes;
+  if (reductionAxes > 1) {
+    why = "UNKNOWN: multi-dimensional reduction (K spans multiple axes); exact "
+          "flattening into a single device K dimension is not yet implemented";
+    return std::nullopt;
+  }
+
   const auto coordinateMap = buildPartitionCoordinateMap(*expanded);
   if (!coordinateMap) {
     why = "coordinate map construction failed";

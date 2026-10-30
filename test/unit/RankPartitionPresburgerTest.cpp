@@ -12064,6 +12064,73 @@ int main() {
         return 1;
     }
 
+    // Phase C3c (classification). The recognizer keeps genuine extra reduction
+    // axes as requiresReduction partitions, NOT batch. buildSymbolicTilePartition
+    // now counts the true reduction rank and refuses a genuine multi-dimensional
+    // reduction with a distinct UNKNOWN (flattening into one device K is a later
+    // stage), never conflating it with batch or with output aliasing. The
+    // reduction rank is detected even when a real batch is also present. The
+    // two-dimensional reduction above is now reported as a multi-dimensional
+    // reduction; the cases below add higher reduction rank, a batched second
+    // reduction, and a single-reduction output-aliasing control.
+    auto expectUnknown = [&](const char *name, const std::array<IntMatrix, 3> &F,
+                             const std::array<IntRow, 3> &off, unsigned rank,
+                             const char *needle) -> bool {
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          F, off, box(rank, 3), rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string base = name;
+      if (verify(!part.has_value(), (base + ": refused (UNKNOWN)").c_str()))
+        return false;
+      if (verify(why.find("UNKNOWN") != std::string::npos &&
+                     why.find(needle) != std::string::npos,
+                 (base + ": reason is correct").c_str()))
+        return false;
+      return true;
+    };
+
+    // Two-dimensional reduction, now checked for the precise reason.
+    if (!expectUnknown("C3c 2D-reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          4, "multi-dimensional reduction"))
+      return 1;
+
+    // Three-dimensional reduction: C[i][j] += A[i][k1][k2][k3]*B[k1][k2][k3][j].
+    if (!expectUnknown("C3c 3D-reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          5, "multi-dimensional reduction"))
+      return 1;
+
+    // Genuine batch AND a genuine second reduction: C[b][i][j] +=
+    // A[b][i][k1][k2]*B[b][k1][k2][j]. Reduction rank 2 is detected even though a
+    // real batch b is present -> UNKNOWN (reduction), never reinterpreted as batch.
+    if (!expectUnknown("C3c batched-2reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}},
+          5, "multi-dimensional reduction"))
+      return 1;
+
+    // Output aliasing with a SINGLE reduction: C[i][j] += A[i][k]*B[k][j][p];
+    // p (in B only) is batch-classified but C does not index it, so distinct
+    // logical outputs alias one C element. Reduction rank is 1, so this reaches
+    // the aliasing gate (not the multi-dimensional gate) -> UNKNOWN (aliasing).
+    if (!expectUnknown("C3c output-aliasing",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          4, "aliases"))
+      return 1;
+
     // Overflow / unrepresentable: a coefficient outside i64 is refused.
     {
       const BigInt big = BigInt(std::numeric_limits<std::int64_t>::max()) + 1;
