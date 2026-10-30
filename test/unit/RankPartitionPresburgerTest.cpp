@@ -44,6 +44,7 @@
 #include "Systolic/RankPartitionCommonFiber.h"
 #include "Systolic/RankPartitionSymbolicContraction.h"
 #include "Systolic/RankPartitionSymbolicTilePartition.h"
+#include "Systolic/RankPartitionReductionFlattening.h"
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -12153,6 +12154,323 @@ int main() {
     }
 
     std::cout << "Phase C3 symbolic tile partition tests passed.\n";
+  }
+
+  // --------------------------------------------------------
+  // Phase C3c-2 (Option C): exact multi-dimensional reduction flattening.
+  // buildFlattenedReduction certifies a mixed-radix flattening of a genuine
+  // rectangular multi-axis reduction into one ordinal, reusing C2/C3. Validated
+  // by a brute-force oracle over the bounded domain (enumeration is test-only):
+  // every output's reduction set is the exact product box (output-independent),
+  // the mixed-radix map is a bijection onto [0, L) whose inverse recovers the
+  // exact source reduction coordinates (so C4 reads the exact operand element),
+  // the flattened order is the lexicographic most-significant-axis-first order,
+  // the MAC multiplicity is exact, and batch axes are excluded from K. No tile
+  // is emitted (that is C4); genuine multi-index operands are reported Case B
+  // (floor/mod -> needs collapse/packing at emission).
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    auto box = [](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo);
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up);
+      }
+      return s;
+    };
+    auto inDomain = [](const IntegerPolyhedron &dom,
+                       const std::vector<int> &x) -> bool {
+      IntegerPolyhedron P = dom;
+      const unsigned cols = P.getNumCols();
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        llvm::SmallVector<std::int64_t> eq(cols, 0);
+        eq[j] = 1;
+        eq[cols - 1] = -static_cast<std::int64_t>(x[j]);
+        P.addEquality(eq);
+      }
+      return !P.isIntegerEmpty();
+    };
+
+    auto runFlatten = [&](const char *name, const std::array<IntMatrix, 3> &F,
+                          const std::array<IntRow, 3> &off, unsigned rank,
+                          const IntegerPolyhedron &dom, int hi, unsigned expR,
+                          long expLen, bool expEmpty, bool expCaseA,
+                          bool expCaseB) -> bool {
+      std::string why;
+      auto f = buildFlattenedReduction(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(f.has_value(), (b + ": certified").c_str()))
+        return false;
+      if (verify(f->reductionRank == expR, (b + ": reduction rank").c_str()))
+        return false;
+      if (verify(f->length.convert_to<long>() == expLen,
+                 (b + ": flattened length").c_str()))
+        return false;
+      if (verify(f->empty == expEmpty, (b + ": emptiness").c_str()))
+        return false;
+      if (verify(f->operandAffineStridedInT[0] == expCaseA &&
+                     f->operandAffineStridedInT[1] == expCaseB,
+                 (b + ": operand addressability class").c_str()))
+        return false;
+      if (verify(!f->orderMatchesSourceForStrictFP,
+                 (b + ": strict-FP source order not claimed").c_str()))
+        return false;
+
+      auto p2 = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e2 = p2 ? expandRankPartition(*p2) : std::nullopt;
+      auto m2 = e2 ? buildPartitionCoordinateMap(*e2) : std::nullopt;
+      if (verify(p2 && e2 && m2, (b + ": oracle coordinate map").c_str()))
+        return false;
+      const unsigned n = rank;
+      auto zOf = [&](const std::vector<int> &x) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += m2->sourceToLogical[a][c] * BigInt(x[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      std::vector<bool> isRed(n, false);
+      for (unsigned c : f->reductionCols)
+        isRed[c] = true;
+
+      std::map<std::vector<std::int64_t>, std::set<std::vector<std::int64_t>>>
+          byOut;
+      long macs = 0;
+      std::vector<int> x(n, 0);
+      std::function<void(unsigned)> sweep = [&](unsigned dim) {
+        if (dim == n) {
+          if (!inDomain(dom, x))
+            return;
+          auto z = zOf(x);
+          std::vector<std::int64_t> okey, tup;
+          for (unsigned a = 0; a < n; ++a)
+            (isRed[a] ? tup : okey).push_back(z[a]);
+          byOut[okey].insert(tup);
+          ++macs;
+          return;
+        }
+        for (x[dim] = 0; x[dim] <= hi; ++x[dim])
+          sweep(dim + 1);
+      };
+      sweep(0);
+
+      if (expEmpty) {
+        if (verify(macs == 0 && byOut.empty(),
+                   (b + ": empty domain has no MACs").c_str()))
+          return false;
+        return true;
+      }
+
+      // The product box the certificate claims.
+      std::set<std::vector<std::int64_t>> boxSet;
+      std::function<void(unsigned, std::vector<std::int64_t> &)> grow =
+          [&](unsigned p, std::vector<std::int64_t> &cur) {
+            if (p == expR) {
+              boxSet.insert(cur);
+              return;
+            }
+            for (std::int64_t v = 0; v < f->extents[p]; ++v) {
+              cur.push_back(f->lowerBounds[p] + v);
+              grow(p + 1, cur);
+              cur.pop_back();
+            }
+          };
+      {
+        std::vector<std::int64_t> cur;
+        grow(0, cur);
+      }
+
+      bool ok = (long)boxSet.size() == expLen &&
+                (long)byOut.size() * (long)boxSet.size() == macs;
+      // every output's reduction set equals the box (output-independent)
+      for (auto &kv : byOut)
+        ok &= (kv.second == boxSet);
+
+      // mixed-radix bijection, exact inverse, lexicographic order
+      std::map<long, std::vector<std::int64_t>> byT;
+      for (auto &tup : boxSet) {
+        BigInt t = 0;
+        for (unsigned p = 0; p < expR; ++p)
+          t += BigInt(tup[p] - f->lowerBounds[p]) * f->radixWeights[p];
+        long tv = t.convert_to<long>();
+        ok &= (tv >= 0 && tv < expLen);
+        for (unsigned p = 0; p < expR; ++p) {
+          long kp = f->lowerBounds[p] +
+                    (tv / f->radixWeights[p].convert_to<long>()) % f->extents[p];
+          ok &= (kp == tup[p]);
+        }
+        byT[tv] = tup;
+      }
+      ok &= ((long)byT.size() == expLen);
+      {
+        std::vector<std::vector<std::int64_t>> lex(boxSet.begin(), boxSet.end());
+        long t = 0;
+        for (auto &kv : byT) {
+          ok &= (kv.first == t) && (kv.second == lex[t]);
+          ++t;
+        }
+      }
+      if (verify(ok, (b + ": reduction box = product, mixed-radix bijection, "
+                          "exact inverse, lexicographic order, MAC multiplicity")
+                         .c_str()))
+        return false;
+      return true;
+    };
+
+    auto runFlattenUnknown = [&](const char *name,
+                                 const std::array<IntMatrix, 3> &F,
+                                 const std::array<IntRow, 3> &off, unsigned rank,
+                                 const IntegerPolyhedron &dom) -> bool {
+      std::string why;
+      auto f = buildFlattenedReduction(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(!f.has_value(), (b + ": UNKNOWN (conservative refusal)").c_str()))
+        return false;
+      return true;
+    };
+
+    // 2-D rectangular reduction: C[i][j] += A[i][k1][k2]*B[k1][k2][j].
+    if (!runFlatten("C3c2 2D",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          4, box(4,3), 3, 2, 16, false, false, false))
+      return 1;
+
+    // 3-D rectangular reduction.
+    if (!runFlatten("C3c2 3D",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          5, box(5,2), 2, 3, 27, false, false, false))
+      return 1;
+
+    // Batched GEMM with two reduction dims: C[b][i][j] += A[b][i][k1][k2]*B[b][k1][k2][j].
+    if (!runFlatten("C3c2 batched-2reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}},
+          5, box(5,2), 2, 2, 9, false, false, false))
+      return 1;
+
+    // Batched GEMM with three reduction dims: C[b][i][j] += A[b][i][k1][k2][k3]*B[b][k1][k2][k3][j].
+    if (!runFlatten("C3c2 batched-3reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}},
+          6, box(6,1), 1, 3, 8, false, false, false))
+      return 1;
+
+    // Nonzero reduction lower bound: k1 >= 1 over the 2-D reduction.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, 0, -1}); // x2 - 1 >= 0  (k1 >= 1)
+      if (!runFlatten("C3c2 nonzero-lb",
+            {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+             IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+             IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+            {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+            4, dom, 3, 2, 12, false, false, false))
+        return 1;
+    }
+
+    // Empty reduction domain: no MACs invented.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, 0, -5}); // k1 >= 5 contradicts k1 <= 3
+      if (!runFlatten("C3c2 empty",
+            {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+             IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+             IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+            {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+            4, dom, 3, 2, 0, true, false, false))
+        return 1;
+    }
+
+    // Non-rectangular reduction domain: k1 + k2 <= 3 couples the axes -> UNKNOWN.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, -1, -1, 3}); // 3 - k1 - k2 >= 0
+      if (!runFlattenUnknown("C3c2 nonrectangular",
+            {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+             IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+             IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+            {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+            4, dom))
+        return 1;
+    }
+
+    // Congruence/equality-restricted reduction: k1 == k2 -> UNKNOWN.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addEquality({0, 0, 1, -1, 0}); // k1 - k2 == 0
+      if (!runFlattenUnknown("C3c2 congruence-restricted",
+            {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+             IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+             IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+            {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+            4, dom))
+        return 1;
+    }
+
+    // Mixed-radix overflow: huge reduction extents -> UNKNOWN.
+    {
+      const std::int64_t BIG = std::int64_t(1) << 40;
+      IntegerPolyhedron dom(PresburgerSpace::getSetSpace(4, 0, 0));
+      dom.addInequality({1, 0, 0, 0, 0});
+      dom.addInequality({-1, 0, 0, 0, 1}); // i in [0,1]
+      dom.addInequality({0, 1, 0, 0, 0});
+      dom.addInequality({0, -1, 0, 0, 1}); // j in [0,1]
+      dom.addInequality({0, 0, 1, 0, 0});
+      dom.addInequality({0, 0, -1, 0, BIG}); // k1 in [0,BIG]
+      dom.addInequality({0, 0, 0, 1, 0});
+      dom.addInequality({0, 0, 0, -1, BIG}); // k2 in [0,BIG]
+      if (!runFlattenUnknown("C3c2 overflow",
+            {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+             IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+             IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}},
+            {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+            4, dom))
+        return 1;
+    }
+
+    // Output aliasing: 2-D reduction with p in B only (not indexed by C) -> UNKNOWN.
+    if (!runFlattenUnknown("C3c2 output-aliasing",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          5, box(5,2)))
+      return 1;
+
+    // Single-axis reduction (plain GEMM): not this helper's job -> UNKNOWN.
+    if (!runFlattenUnknown("C3c2 single-reduction",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          3, box(3,3)))
+      return 1;
+
+    std::cout << "Phase C3c-2 reduction flattening tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
