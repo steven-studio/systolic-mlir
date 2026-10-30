@@ -165,19 +165,70 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
     return std::nullopt;
   }
   const unsigned r = static_cast<unsigned>(reductionCols.size());
-  const unsigned outerCol = reductionCols[0];     // outermost peeled axis
-  const unsigned innerCol = reductionCols[r - 1]; // innermost, device-tiled axis
   for (unsigned c : reductionCols)
     if (c >= n) {
       why = "reduction column out of range";
       return std::nullopt;
     }
-  // The exact nested projection below requires a congruence-free (unit-stride)
-  // lattice; a congruence-restricted reduction axis is refused conservatively.
-  if (contraction->congruenceLocals != 0) {
-    why = "UNKNOWN: congruence-restricted reduction axes";
-    return std::nullopt;
+
+  // ---- M4-box routing: classify congruence-coupled vs clean reduction axes --
+  // Any congruence is carried entirely in D's EQUALITIES, as lattice relations
+  // [z] = g*q over the congruence locals q; D's inequalities are pure-z (the
+  // convex hull), exactly as C3 requires. A reduction axis is CONGRUENCE-COUPLED
+  // iff it appears in such a congruence equality.
+  //
+  //  * congruence-free (locals == 0): peel reductionCols[0..r-2], tile
+  //    reductionCols[r-1] -- the exact M1/M2/M3 routing, unchanged.
+  //  * congruence-restricted (locals > 0, M4-box): require EXACTLY ONE coupled
+  //    reduction axis; route it to the innermost tiled position (C3's stride-g
+  //    partitioner discharges the congruence there) and peel the remaining
+  //    congruence-free axes, whose exact ranges are constant and independent.
+  // More than one coupled axis -- or none -- is refused conservatively.
+  const unsigned added = contraction->congruenceLocals;
+  std::vector<unsigned> peelCols; // outer peeled axes, outermost first
+  unsigned innerCol = 0;          // innermost, device-tiled axis
+  if (added == 0) {
+    for (unsigned p = 0; p + 1 < r; ++p)
+      peelCols.push_back(reductionCols[p]);
+    innerCol = reductionCols[r - 1];
+  } else {
+    // Inequalities must be pure-z (congruence confined to the equalities).
+    for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri)
+      for (unsigned l = 0; l < added; ++l)
+        if (D.getInequality(ri)[n + l] != llvm::DynamicAPInt(0)) {
+          why = "UNKNOWN: image inequality references a congruence local";
+          return std::nullopt;
+        }
+    std::vector<bool> coupledMark(n, false);
+    for (unsigned re = 0; re < D.getNumEqualities(); ++re) {
+      auto row = D.getEquality(re);
+      bool referencesLocal = false;
+      for (unsigned l = 0; l < added; ++l)
+        if (row[n + l] != llvm::DynamicAPInt(0)) {
+          referencesLocal = true;
+          break;
+        }
+      if (!referencesLocal)
+        continue; // pure-z equality: part of the convex hull, not a congruence.
+      for (unsigned c : reductionCols)
+        if (row[c] != llvm::DynamicAPInt(0))
+          coupledMark[c] = true;
+    }
+    std::vector<unsigned> coupled;
+    for (unsigned c : reductionCols)
+      if (coupledMark[c])
+        coupled.push_back(c);
+    if (coupled.size() != 1) {
+      why = "UNKNOWN: congruence couples " + std::to_string(coupled.size()) +
+            " reduction axes (M4-box supports exactly one)";
+      return std::nullopt;
+    }
+    innerCol = coupled[0];
+    for (unsigned c : reductionCols)
+      if (c != innerCol)
+        peelCols.push_back(c);
   }
+  const unsigned outerCol = peelCols[0]; // outermost peeled axis (compat field)
 
   // 3. Real M = d*T^{-1} for the accumulation obligations.
   AffineIntegerDomain unconstrained;
@@ -238,8 +289,8 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
   }
   std::array<IntMatrix, 3> synthF = accessMatrices;
   std::array<IntRow, 3> synthOff = offsets;
-  for (unsigned q = 0; q + 1 < r; ++q) { // append every outer reduction axis
-    synthF[2].push_back(coordinateMap->sourceToLogical[reductionCols[q]]);
+  for (unsigned c : peelCols) { // append every peeled (outer) reduction axis
+    synthF[2].push_back(coordinateMap->sourceToLogical[c]);
     synthOff[2].push_back(BigInt(0));
   }
   std::string innerWhy;
@@ -353,22 +404,126 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
     return true;
   };
 
-  for (unsigned p = 0; p + 1 < r; ++p) {
-    std::vector<unsigned> elim;
-    for (unsigned q = p + 1; q < r; ++q)
-      elim.push_back(reductionCols[q]);
-    ReductionPeelLevel level;
-    level.col = reductionCols[p];
-    if (!extractAxisFaces(reductionCols[p], elim, level.lowerFaces,
-                          level.upperFaces))
-      return std::nullopt;
-    out.peelLevels.push_back(std::move(level));
+  if (added == 0) {
+    for (unsigned p = 0; p < peelCols.size(); ++p) {
+      std::vector<unsigned> elim;
+      for (unsigned q = p + 1; q < peelCols.size(); ++q)
+        elim.push_back(peelCols[q]);
+      elim.push_back(innerCol); // the tiled axis is strictly inner of every peel
+      ReductionPeelLevel level;
+      level.col = peelCols[p];
+      if (!extractAxisFaces(peelCols[p], elim, level.lowerFaces,
+                            level.upperFaces))
+        return std::nullopt;
+      out.peelLevels.push_back(std::move(level));
+    }
+  } else {
+    // M4-box: every peeled axis is congruence-free, so its exact range is
+    // read directly from D's PURE-Z inequalities -- never projecting D, whose
+    // congruence locals (discharged by the inner stride-g tiling) would
+    // otherwise be introduced into the projection. Each peeled axis must be
+    // bounded on both sides by STANDALONE unit faces (nonzero on that axis
+    // alone). That proves the range is a CONSTANT independent of the output,
+    // the coupled inner axis, and the other peeled axes; any coupling (an
+    // output-dependent or coupled-inner-dependent bound) or a pin by a pure-z
+    // equality is refused conservatively. Exactness of the MAC multiset never
+    // rests on these bounds being tight: MAC emission is gated by the inner
+    // anchor pieces (which encode the exact image, congruence included), so a
+    // peeled value whose inner fiber is empty contributes zero MACs regardless.
+    auto i64 = [](const llvm::DynamicAPInt &v) -> std::optional<std::int64_t> {
+      if (v < llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::min()) ||
+          v > llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::max()))
+        return std::nullopt;
+      return static_cast<std::int64_t>(v);
+    };
+    // Exact floor/ceil of p/q with q > 0 (round toward -inf / +inf).
+    auto floorDiv = [](std::int64_t p, std::int64_t q) -> std::int64_t {
+      std::int64_t d = p / q, rr = p % q;
+      if (rr != 0 && ((rr < 0) != (q < 0)))
+        --d;
+      return d;
+    };
+    auto ceilDiv = [&](std::int64_t p, std::int64_t q) -> std::int64_t {
+      return -floorDiv(-p, q);
+    };
+    for (unsigned re = 0; re < D.getNumEqualities(); ++re) {
+      auto row = D.getEquality(re);
+      bool referencesLocal = false;
+      for (unsigned l = 0; l < added; ++l)
+        if (row[n + l] != llvm::DynamicAPInt(0)) {
+          referencesLocal = true;
+          break;
+        }
+      if (referencesLocal)
+        continue; // congruence equality: lattice only, discharged by C3.
+      for (unsigned c : peelCols)
+        if (row[c] != llvm::DynamicAPInt(0)) {
+          why = "UNKNOWN: a congruence-free peeled axis is equality-constrained";
+          return std::nullopt;
+        }
+    }
+    for (unsigned c : peelCols) {
+      std::optional<std::int64_t> lo, hi;
+      for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri) {
+        auto row = D.getInequality(ri);
+        auto ac = i64(row[c]);
+        if (!ac) {
+          why = "UNKNOWN: peeled-axis coefficient overflows i64";
+          return std::nullopt;
+        }
+        if (*ac == 0)
+          continue; // not a bound on this axis.
+        for (unsigned j = 0; j < n; ++j)
+          if (j != c && row[j] != llvm::DynamicAPInt(0)) {
+            why = "UNKNOWN: peeled reduction axis bound depends on another axis "
+                  "(non-constant peel range)";
+            return std::nullopt;
+          }
+        auto cc = i64(row[n + added]); // constant term
+        if (!cc) {
+          why = "UNKNOWN: peeled-axis constant overflows i64";
+          return std::nullopt;
+        }
+        // Standalone face a*c + cc >= 0 (a != 0) gives an EXACT integer bound:
+        //   a > 0 : c >= ceil(-cc / a)        (lower);
+        //   a < 0 : c <= floor(cc / (-a))     (upper).
+        // The convex image writes a clean-axis box face as (M z)_a >= 0, whose
+        // coefficient is the lattice denominator d (e.g. 3 for CASE1), so a is
+        // not generally +-1; the integer division keeps the bound exact.
+        if (*ac > 0) {
+          std::int64_t v = ceilDiv(-*cc, *ac);
+          lo = lo ? std::max(*lo, v) : v;
+        } else {
+          std::int64_t v = floorDiv(*cc, -*ac);
+          hi = hi ? std::min(*hi, v) : v;
+        }
+      }
+      if (!lo || !hi) {
+        why = "UNKNOWN: peeled reduction axis unbounded on a side";
+        return std::nullopt;
+      }
+      if (*lo > *hi) {
+        why = "UNKNOWN: empty peeled reduction axis range";
+        return std::nullopt;
+      }
+      ReductionPeelLevel level;
+      level.col = c;
+      OuterBoundFace lf;
+      lf.coeffs.assign(n, BigInt(0));
+      lf.constant = BigInt(*lo);
+      OuterBoundFace uf;
+      uf.coeffs.assign(n, BigInt(0));
+      uf.constant = BigInt(*hi);
+      level.lowerFaces.push_back(std::move(lf));
+      level.upperFaces.push_back(std::move(uf));
+      out.peelLevels.push_back(std::move(level));
+    }
   }
 
   // Compatibility mirror (outermost level) and the constant envelope.
   out.outerLowerFaces = out.peelLevels.front().lowerFaces;
   out.outerUpperFaces = out.peelLevels.front().upperFaces;
-  {
+  if (added == 0) {
     auto oLo = D.getConstantBound64(BoundType::LB, outerCol);
     auto oHi = D.getConstantBound64(BoundType::UB, outerCol);
     if (!oLo || !oHi) {
@@ -377,6 +532,14 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
     }
     out.outerLo = *oLo;
     out.outerHi = *oHi;
+  } else {
+    // M4-box: the outermost peel level already carries the exact, i64-checked
+    // constant range as its single lower/upper face. Avoid getConstantBound64
+    // on a domain that carries congruence locals.
+    out.outerLo =
+        out.peelLevels.front().lowerFaces.front().constant.convert_to<std::int64_t>();
+    out.outerHi =
+        out.peelLevels.front().upperFaces.front().constant.convert_to<std::int64_t>();
   }
   bool constant = true;
   for (const auto &lvl : out.peelLevels) {

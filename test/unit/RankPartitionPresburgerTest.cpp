@@ -13370,6 +13370,636 @@ int main() {
     std::cout << "Phase C3c-3 M3 reduction scan tests passed.\n";
   }
 
+  // --------------------------------------------------------
+  // Phase C3c-3 M4-box (Option C): CONGRUENCE-RESTRICTED multi-dimensional
+  // reductions. A genuine reduction of rank >= 2 may carry exactly one
+  // congruence-coupled axis (a stride-g, sublattice-punctured fiber, as in
+  // CASE 1 / det-9); buildReductionScanPlan routes that axis to the innermost
+  // tiled position (C3's stride-g partitioner discharges the congruence) and
+  // peels the remaining congruence-free axes with constant, independent ranges.
+  //
+  // Each accepted case is validated by an independent brute-force oracle over
+  // the bounded source domain (enumeration lives in the TEST only; production
+  // is symbolic). The oracle establishes D_generated == D_original as a MULTISET
+  // of source MACs -- not merely equal counts -- by running the proven C3
+  // coverage oracle on the SYNTHETIC inner problem (the plan's peeled axes
+  // appended to C): every source MAC is a stride-g fiber point under a UNIQUE
+  // min-anchor of the correct length (coverage + multiplicity), operand/output
+  // addresses advance by the reported t-stride, anchor pieces are disjoint, and
+  // the generated MAC count equals the enumerated source count. Independently,
+  // in the original frame, the constant peel ranges equal the enumerated axis
+  // extents and every genuine reduction (coupled AND clean) accumulates into one
+  // physical C element. Because MAC emission is anchor-gated, a convex-hull
+  // outer coordinate with an EMPTY inner fiber contributes zero MACs -- shown
+  // directly by the empty-fiber case. Strict-FP order is not claimed.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    auto box = [](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo);
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up);
+      }
+      return s;
+    };
+    auto inDomain = [](const IntegerPolyhedron &dom,
+                       const std::vector<int> &x) -> bool {
+      IntegerPolyhedron P = dom;
+      const unsigned cols = P.getNumCols();
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        llvm::SmallVector<std::int64_t> eq(cols, 0);
+        eq[j] = 1;
+        eq[cols - 1] = -static_cast<std::int64_t>(x[j]);
+        P.addEquality(eq);
+      }
+      return !P.isIntegerEmpty();
+    };
+    auto inGroup = [](const systolic::logical::TileFiberGroup &grp,
+                      const std::vector<std::int64_t> &za) -> bool {
+      for (const auto &piece : grp.anchorPieces) {
+        IntegerPolyhedron P = piece;
+        const unsigned cols = P.getNumCols();
+        for (std::size_t j = 0; j < za.size(); ++j) {
+          llvm::SmallVector<std::int64_t> eq(cols, 0);
+          eq[j] = 1;
+          eq[cols - 1] = -za[j];
+          P.addEquality(eq);
+        }
+        if (!P.isIntegerEmpty())
+          return true;
+      }
+      return false;
+    };
+
+    // Comprehensive M4 oracle. expR: reduction rank; expStride: inner fiber
+    // stride g; expInnerLengths: constant-K group lengths; expEmpty: empty plan.
+    // wantEmptyFiberWitness: assert the convex envelope contains >= 1
+    // (output,clean) combo with an EMPTY coupled fiber (so the generated set is
+    // strictly anchor-gated, never the envelope product).
+    auto runScanM4 = [&](const char *name, const std::array<IntMatrix, 3> &F,
+                         const std::array<IntRow, 3> &off, unsigned rank,
+                         const IntegerPolyhedron &dom, int hi, unsigned expR,
+                         std::int64_t expStride, std::set<long> expInnerLengths,
+                         bool expEmpty, bool wantEmptyFiberWitness) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(plan.has_value(), (b + ": scan plan built").c_str()))
+        return false;
+      if (verify(plan->reductionRank == expR, (b + ": reduction rank").c_str()))
+        return false;
+      if (verify(plan->empty == expEmpty, (b + ": emptiness").c_str()))
+        return false;
+      if (verify(plan->outerIsAccumulation &&
+                     !plan->orderMatchesSourceForStrictFP,
+                 (b + ": accumulation and strict-FP order flags").c_str()))
+        return false;
+      if (expEmpty)
+        return true;
+      if (verify(plan->outerRangeIsConstant,
+                 (b + ": peel ranges constant").c_str()))
+        return false;
+      if (verify(plan->peelLevels.size() == expR - 1,
+                 (b + ": peel-level count").c_str()))
+        return false;
+      if (verify((long)plan->innerStride == (long)expStride,
+                 (b + ": inner stride g").c_str()))
+        return false;
+      std::set<long> planLens(plan->innerConstantTileLengths.begin(),
+                              plan->innerConstantTileLengths.end());
+      if (verify(planLens == expInnerLengths,
+                 (b + ": inner constant-K group lengths").c_str()))
+        return false;
+
+      // Original-frame coordinate map + enumeration.
+      auto p2 = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e2 = p2 ? expandRankPartition(*p2) : std::nullopt;
+      auto m2 = e2 ? buildPartitionCoordinateMap(*e2) : std::nullopt;
+      if (verify(p2 && e2 && m2, (b + ": oracle coordinate map").c_str()))
+        return false;
+      const unsigned n = rank;
+      auto zOf = [&](const std::vector<int> &x) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += m2->sourceToLogical[a][c] * BigInt(x[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      std::vector<unsigned> peel;
+      for (const auto &l : plan->peelLevels)
+        peel.push_back(l.col);
+      const unsigned inner = plan->innerCol;
+      std::vector<bool> isRed(n, false);
+      for (unsigned c : peel)
+        isRed[c] = true;
+      isRed[inner] = true;
+
+      // Accumulation (same original output -> same real C address), per-peel
+      // [min,max], and the set of (output, clean) combos actually present.
+      std::map<std::vector<std::int64_t>, std::vector<BigInt>> realC;
+      std::vector<std::pair<long, long>> peelMinMax(
+          peel.size(), {std::numeric_limits<long>::max(),
+                        std::numeric_limits<long>::min()});
+      bool accOk = true;
+      long srcMacs = 0;
+      std::vector<int> x(n, 0);
+      std::function<void(unsigned)> sweep = [&](unsigned d) {
+        if (d == n) {
+          if (!inDomain(dom, x))
+            return;
+          auto z = zOf(x);
+          ++srcMacs;
+          std::vector<std::int64_t> o;
+          for (unsigned a = 0; a < n; ++a)
+            if (!isRed[a])
+              o.push_back(z[a]);
+          std::vector<BigInt> c;
+          for (std::size_t r = 0; r < F[2].size(); ++r) {
+            BigInt v = off[2][r];
+            for (unsigned cc = 0; cc < n; ++cc)
+              v += F[2][r][cc] * BigInt(x[cc]);
+            c.push_back(v);
+          }
+          auto it = realC.find(o);
+          if (it == realC.end())
+            realC[o] = c;
+          else if (it->second != c)
+            accOk = false;
+          for (std::size_t p = 0; p < peel.size(); ++p) {
+            long v = z[peel[p]];
+            peelMinMax[p].first = std::min(peelMinMax[p].first, v);
+            peelMinMax[p].second = std::max(peelMinMax[p].second, v);
+          }
+          return;
+        }
+        for (x[d] = 0; x[d] <= hi; ++x[d])
+          sweep(d + 1);
+      };
+      sweep(0);
+      if (verify(accOk, (b + ": every genuine reduction (coupled and clean) "
+                             "accumulates into one physical C element")
+                            .c_str()))
+        return false;
+      bool peelOk = true;
+      for (std::size_t p = 0; p < peel.size(); ++p) {
+        long lo = plan->peelLevels[p]
+                      .lowerFaces.front()
+                      .constant.convert_to<long>();
+        long upr = plan->peelLevels[p]
+                       .upperFaces.front()
+                       .constant.convert_to<long>();
+        peelOk &=
+            (lo == peelMinMax[p].first && upr == peelMinMax[p].second);
+      }
+      if (verify(peelOk,
+                 (b + ": constant peel ranges equal enumerated extents").c_str()))
+        return false;
+
+      // Inner MAC exactness via the proven C3 coverage oracle on the SYNTHETIC
+      // problem (peeled axes appended to C). This is D_generated == D_original.
+      std::array<IntMatrix, 3> sF = F;
+      std::array<IntRow, 3> sOff = off;
+      for (unsigned c : peel) {
+        sF[2].push_back(m2->sourceToLogical[c]);
+        sOff[2].push_back(BigInt(0));
+      }
+      std::string sWhy;
+      auto part = buildSymbolicTilePartition(
+          sF, sOff, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, sWhy);
+      if (verify(part.has_value(),
+                 (b + ": synthetic inner partition built").c_str()))
+        return false;
+      if (verify((long)part->stride == (long)expStride,
+                 (b + ": synthetic inner stride").c_str()))
+        return false;
+      auto sp2 = analyzeRankPartition(sF[0], sF[1], sF[2], rank);
+      auto se2 = sp2 ? expandRankPartition(*sp2) : std::nullopt;
+      auto sm2 = se2 ? buildPartitionCoordinateMap(*se2) : std::nullopt;
+      if (verify(sp2 && se2 && sm2,
+                 (b + ": synthetic coordinate map").c_str()))
+        return false;
+      const unsigned kIdx = part->kIndex;
+      auto zOfS = [&](const std::vector<int> &xx) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += sm2->sourceToLogical[a][c] * BigInt(xx[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      auto okeyOfS = [&](const std::vector<std::int64_t> &z) {
+        std::vector<std::int64_t> o;
+        for (unsigned a = 0; a < n; ++a)
+          if (a != kIdx)
+            o.push_back(z[a]);
+        return o;
+      };
+      auto zFromOkeyS = [&](const std::vector<std::int64_t> &o,
+                            std::int64_t k) {
+        std::vector<std::int64_t> z(n, 0);
+        unsigned oi = 0;
+        for (unsigned a = 0; a < n; ++a)
+          z[a] = (a == kIdx) ? k : o[oi++];
+        return z;
+      };
+      std::map<std::vector<std::int64_t>, std::map<std::int64_t, std::vector<int>>>
+          fibers;
+      std::fill(x.begin(), x.end(), 0);
+      std::function<void(unsigned)> sweep2 = [&](unsigned d) {
+        if (d == n) {
+          if (!inDomain(dom, x))
+            return;
+          auto z = zOfS(x);
+          fibers[okeyOfS(z)].emplace(z[kIdx], x);
+          return;
+        }
+        for (x[d] = 0; x[d] <= hi; ++x[d])
+          sweep2(d + 1);
+      };
+      sweep2(0);
+      const std::int64_t g = part->stride;
+      long genMacs = 0;
+      std::set<long> lensSeen;
+      bool good = true;
+      for (const auto &kv : fibers) {
+        std::vector<std::int64_t> ks;
+        for (const auto &e : kv.second)
+          ks.push_back(e.first);
+        const std::int64_t L = (std::int64_t)ks.size();
+        genMacs += L;
+        lensSeen.insert((long)L);
+        for (std::size_t t = 1; t < ks.size(); ++t)
+          good &= (ks[t] - ks[t - 1] == g);
+        auto za = zFromOkeyS(kv.first, ks.front());
+        int hits = 0;
+        std::int64_t hl = -1;
+        for (const auto &grp : part->groups)
+          if (inGroup(grp, za)) {
+            ++hits;
+            hl = grp.length;
+          }
+        good &= (hits == 1) && (hl == L);
+        if (ks.size() >= 2) {
+          auto zb = zFromOkeyS(kv.first, ks.front() + g);
+          for (const auto &grp : part->groups)
+            good &= !inGroup(grp, zb);
+        }
+        for (std::size_t t = 0; t + 1 < ks.size(); ++t) {
+          const auto &xa = kv.second.at(ks[t]);
+          const auto &xb = kv.second.at(ks[t + 1]);
+          for (unsigned op = 0; op < 3; ++op)
+            for (std::size_t r = 0; r < sF[op].size(); ++r) {
+              BigInt aa = sOff[op][r], bb = sOff[op][r];
+              for (unsigned c = 0; c < n; ++c) {
+                aa += sF[op][r][c] * BigInt(xa[c]);
+                bb += sF[op][r][c] * BigInt(xb[c]);
+              }
+              good &= ((bb - aa) == part->tStride[op][r]);
+            }
+        }
+      }
+      if (verify(good,
+                 (b + ": inner fibers stride-g; unique min-anchor of correct "
+                      "length; multiplicity and operand/output t-stride exact "
+                      "(D_generated == D_original)")
+                     .c_str()))
+        return false;
+      if (verify(genMacs == srcMacs,
+                 (b + ": generated MAC count equals enumerated source count")
+                     .c_str()))
+        return false;
+      if (verify(lensSeen == expInnerLengths,
+                 (b + ": enumerated inner fiber lengths match plan").c_str()))
+        return false;
+      // Anchor pieces pairwise disjoint within each group.
+      bool disjoint = true;
+      for (const auto &grp : part->groups)
+        for (std::size_t a = 0; a < grp.anchorPieces.size(); ++a)
+          for (std::size_t c = a + 1; c < grp.anchorPieces.size(); ++c) {
+            IntegerPolyhedron inter = grp.anchorPieces[a];
+            const auto &pc = grp.anchorPieces[c];
+            for (unsigned r = 0; r < pc.getNumInequalities(); ++r)
+              inter.addInequality(pc.getInequality(r));
+            for (unsigned r = 0; r < pc.getNumEqualities(); ++r)
+              inter.addEquality(pc.getEquality(r));
+            disjoint &= inter.isIntegerEmpty();
+          }
+      if (verify(disjoint, (b + ": anchor pieces pairwise disjoint").c_str()))
+        return false;
+      // Empty-fiber witness: the convex hull of the logical image strictly
+      // contains the image (CASE 1's det-9 sublattice leaves lattice holes), so
+      // there EXIST convex-hull coordinates with an empty inner reduction fiber.
+      // Since the generated MAC count equals the source count (checked above),
+      // the plan emits ZERO at every such hole -- convex-hull overshoot never
+      // introduces a MAC. Build the pure-z convex hull from the synthetic image
+      // (dropping the congruence equalities) and count its integer points over
+      // the hull's own tight per-dimension bounds.
+      if (wantEmptyFiberWitness) {
+        std::string cWhy;
+        auto con = buildSymbolicContraction(
+            sF, sOff, dom, rank,
+            systolic::logical::ReductionOrderDecision::PreserveSourceOrder,
+            cWhy);
+        bool witnessOk = con.has_value();
+        long hull = 0;
+        if (con) {
+          const auto &DD = con->domain;
+          const unsigned add2 = con->congruenceLocals;
+          IntegerPolyhedron cz(PresburgerSpace::getSetSpace(n, 0, 0));
+          auto pureZ = [&](llvm::ArrayRef<llvm::DynamicAPInt> row,
+                           llvm::SmallVector<std::int64_t> &out) -> bool {
+            for (unsigned l = 0; l < add2; ++l)
+              if (row[n + l] != llvm::DynamicAPInt(0))
+                return false;
+            out.assign(n + 1, 0);
+            for (unsigned j = 0; j < n; ++j)
+              out[j] = static_cast<std::int64_t>(row[j]);
+            out[n] = static_cast<std::int64_t>(row[n + add2]);
+            return true;
+          };
+          for (unsigned r = 0; r < DD.getNumInequalities(); ++r) {
+            llvm::SmallVector<std::int64_t> e;
+            if (pureZ(DD.getInequality(r), e))
+              cz.addInequality(e);
+          }
+          for (unsigned r = 0; r < DD.getNumEqualities(); ++r) {
+            llvm::SmallVector<std::int64_t> e;
+            if (pureZ(DD.getEquality(r), e))
+              cz.addEquality(e);
+          }
+          std::vector<std::int64_t> lo(n), up(n);
+          bool bounded = true;
+          for (unsigned d = 0; d < n && bounded; ++d) {
+            auto a = cz.getConstantBound64(
+                mlir::presburger::BoundType::LB, d);
+            auto bb = cz.getConstantBound64(
+                mlir::presburger::BoundType::UB, d);
+            if (!a || !bb)
+              bounded = false;
+            else {
+              lo[d] = *a;
+              up[d] = *bb;
+            }
+          }
+          witnessOk = bounded;
+          if (bounded) {
+            std::vector<std::int64_t> z(n, 0);
+            std::function<void(unsigned)> cw = [&](unsigned d) {
+              if (d == n) {
+                IntegerPolyhedron P = cz;
+                const unsigned cols = P.getNumCols();
+                for (unsigned j = 0; j < n; ++j) {
+                  llvm::SmallVector<std::int64_t> e(cols, 0);
+                  e[j] = 1;
+                  e[cols - 1] = -z[j];
+                  P.addEquality(e);
+                }
+                if (!P.isIntegerEmpty())
+                  ++hull;
+                return;
+              }
+              for (z[d] = lo[d]; z[d] <= up[d]; ++z[d])
+                cw(d + 1);
+            };
+            cw(0);
+          }
+        }
+        if (verify(witnessOk && hull > srcMacs,
+                   (b + ": convex hull strictly contains the image -- "
+                        "empty-fiber coordinates exist and emit zero MACs")
+                       .c_str()))
+          return false;
+      }
+      return true;
+    };
+
+    auto runScanM4Unknown = [&](const char *name,
+                                const std::array<IntMatrix, 3> &F,
+                                const std::array<IntRow, 3> &off, unsigned rank,
+                                const IntegerPolyhedron &dom) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(!plan.has_value(),
+                 (b + ": UNKNOWN (conservative refusal)").c_str()))
+        return false;
+      return true;
+    };
+
+    // CASE 1 (det-9, d=3, stride-3) over source (i,j,k1): C[i+j-2k1+6][i-2j+k1+6]
+    // += A[i+j-2k1+6][i+j+k1] * B[i+j+k1][i-2j+k1+6]. The congruence-coupled
+    // reduction axis is k1; clean reduction axes are appended as k2, k3.
+
+    // (A) Two-dimensional reduction, one congruence-coupled axis (probe A).
+    //     source (i,j,k1,k2); k2 clean.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      if (!runScanM4("C3c3m4 2D-one-coupled", F, O, 4, box(4, 3), 3, 2, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+
+    // (B) Three-dimensional reduction, one congruence-coupled axis (probe E).
+    //     source (i,j,k1,k2,k3); k2,k3 clean (multiple clean peels, case D too).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      if (!runScanM4("C3c3m4 3D-one-coupled", F, O, 5, box(5, 3), 3, 3, 3,
+                     {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+
+    // Case C of the spec (congruence stride of 3, reduction ordinals and
+    // operand addresses) is discharged inside every runScanM4 call above: the
+    // "inner stride g" assertion fixes g == 3 and the "operand/output t-stride
+    // exact" assertion checks A/B/C addresses advance correctly along the
+    // stride-3 fiber. Case D (multiple clean peeled axes with constant bounds)
+    // is the 3D-one-coupled case above (two clean peels k2, k3).
+
+    // (E) Genuine batched GEMM combined with a congruence-restricted reduction:
+    //     source (bt,i,j,k1,k2); bt genuine batch, k1 coupled, k2 clean.
+    //     C[bt][i+j-2k1+6][i-2j+k1+6] += A[bt][i+j-2k1+6][i+j+k1][k2]
+    //                                   * B[bt][i+j+k1][i-2j+k1+6][k2].
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(0),BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(0),BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(6)}};
+      if (!runScanM4("C3c3m4 batch+congruence", F, O, 5, box(5, 2), 2, 2, 3,
+                     {1, 2, 3}, false, false))
+        return 1;
+    }
+
+    // (F) Nonzero reduction lower bound: the clean peeled axis k2 lies in [1,3].
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 0, 1, -1}); // k2 >= 1 (nonzero lower bound)
+      if (!runScanM4("C3c3m4 nonzero-lb", F, O, 4, dom, 3, 2, 3, {1, 2, 3, 4},
+                     false, false))
+        return 1;
+    }
+
+    // (G) Empty inner fiber: CASE 1's det-9 sublattice leaves lattice holes, so
+    //     the convex hull of the logical image strictly contains the image --
+    //     there exist convex-hull coordinates whose inner reduction fiber is
+    //     empty. The oracle's generated-count == source-count assertion proves
+    //     the plan emits ZERO MACs for those coordinates, and the empty-fiber
+    //     witness confirms such coordinates exist (convex hull > image).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      if (!runScanM4("C3c3m4 empty-inner-fiber", F, O, 4, box(4, 3), 3, 2, 3,
+                     {1, 2, 3, 4}, false, /*wantEmptyFiberWitness=*/true))
+        return 1;
+    }
+
+    // (H) Empty reduction domain: contradictory constraint -> empty plan.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, 0, -5}); // k1 >= 5 contradicts k1 <= 3
+      if (!runScanM4("C3c3m4 empty-domain", F, O, 4, dom, 3, 2, 3, {}, true,
+                     false))
+        return 1;
+    }
+
+    // (I) Regression control: a congruence-FREE multi-reduction still flows
+    //     through the same oracle (locals == 0 path, stride 1), confirming the
+    //     M4-box changes did not disturb the M1/M2/M3 behaviour. The full
+    //     M1/M2/M3 blocks above remain the primary regression controls.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> O = {IntRow{BigInt(0),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(0),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(0)}};
+      if (!runScanM4("C3c3m4 congruence-free-control", F, O, 4, box(4, 3), 3, 2,
+                     1, {4}, false, false))
+        return 1;
+    }
+
+    // ---- Negative tests: conservative UNKNOWN (safety must not weaken) ----
+    auto caseF = []() {
+      return std::array<IntMatrix, 3>{
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0)}}};
+    };
+    std::array<IntRow, 3> caseFO = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                    IntRow{BigInt(0),BigInt(6),BigInt(0)},
+                                    IntRow{BigInt(6),BigInt(6)}};
+    // (N1) Clean peel coupled to the inner congruence axis (k2 <= k1).
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, -1, 0}); // k1 - k2 >= 0
+      if (!runScanM4Unknown("C3c3m4 neg coupled-inner-dependence", caseF(),
+                            caseFO, 4, dom))
+        return 1;
+    }
+    // (N2) Output-dependent clean peel range (k2 <= i).
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({1, 0, 0, -1, 0}); // i - k2 >= 0
+      if (!runScanM4Unknown("C3c3m4 neg output-dependent-peel", caseF(), caseFO,
+                            4, dom))
+        return 1;
+    }
+    // (N3) Zero congruence-coupled reduction axes (output-only skew, det-2,
+    //      clean reductions) -> congruence couples != 1 -> UNKNOWN.
+    {
+      std::array<IntMatrix, 3> FZ = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(1),BigInt(-1),BigInt(0),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-1),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> OZ = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                  IntRow{BigInt(0),BigInt(0),BigInt(6)},
+                                  IntRow{BigInt(6),BigInt(6)}};
+      if (!runScanM4Unknown("C3c3m4 neg zero-coupled-axes", FZ, OZ, 4,
+                            box(4, 3)))
+        return 1;
+    }
+    // (N4) Overflow: an enormous coupled-axis extent -> UNKNOWN.
+    {
+      const std::int64_t BIG = std::int64_t(1) << 40;
+      IntegerPolyhedron dom(PresburgerSpace::getSetSpace(4, 0, 0));
+      dom.addInequality({1, 0, 0, 0, 0});
+      dom.addInequality({-1, 0, 0, 0, 3});
+      dom.addInequality({0, 1, 0, 0, 0});
+      dom.addInequality({0, -1, 0, 0, 3});
+      dom.addInequality({0, 0, 1, 0, 0});
+      dom.addInequality({0, 0, -1, 0, BIG});
+      dom.addInequality({0, 0, 0, 1, 0});
+      dom.addInequality({0, 0, 0, -1, 3});
+      if (!runScanM4Unknown("C3c3m4 neg overflow", caseF(), caseFO, 4, dom))
+        return 1;
+    }
+    // (N5) Output aliasing with a congruence: an extra axis p indexes B only
+    //      (not C). source (i,j,k1,k2,p).
+    {
+      std::array<IntMatrix, 3> FA = {
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(1),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(-2),BigInt(0),BigInt(0)},{BigInt(1),BigInt(-2),BigInt(1),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> OA = {IntRow{BigInt(6),BigInt(0),BigInt(0)},
+                                  IntRow{BigInt(0),BigInt(6),BigInt(0),BigInt(0)},
+                                  IntRow{BigInt(6),BigInt(6)}};
+      if (!runScanM4Unknown("C3c3m4 neg output-aliasing", FA, OA, 5, box(5, 3)))
+        return 1;
+    }
+
+    std::cout << "Phase C3c-3 M4-box reduction scan tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
