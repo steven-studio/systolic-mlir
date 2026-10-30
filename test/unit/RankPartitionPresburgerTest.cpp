@@ -12715,14 +12715,28 @@ int main() {
         return 1;
     }
 
-    // Unsupported: three reduction axes exceed the M1 two-axis scope -> UNKNOWN.
+    // Former M1 feature boundary: a third reduction axis was UNSUPPORTED by the
+    // two-axis M1 scan and returned UNKNOWN. Phase C3c-3 M3 generalizes the peel
+    // to r >= 3, so this exact rectangular three-reduction input is now
+    // SUPPORTED. The former UNKNOWN expectation is therefore obsolete; the input
+    // and its regression coverage are preserved and the expectation is replaced
+    // with a positive correctness assertion. The full brute-force oracle
+    // verification of this same input (coverage, nested bounds, MAC
+    // multiplicity, operand/output addresses, accumulation) is the
+    // "C3c3m3 former-M1-boundary" case in the C3c-3 M3 block below.
     {
       std::array<IntMatrix, 3> F3 = {
           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}};
       std::array<IntRow, 3> O3 = {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}};
-      if (!runScanUnknown("C3c3 three-reduction", F3, O3, 5, box(5, 2)))
+      std::string why3;
+      auto plan3 = buildReductionScanPlan(
+          F3, O3, box(5, 2), 5,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why3);
+      if (verify(plan3.has_value() && plan3->reductionRank == 3 &&
+                     !plan3->empty,
+                 "C3c3 three-reduction: now supported (reduction rank 3)"))
         return 1;
     }
 
@@ -13034,6 +13048,326 @@ int main() {
     }
 
     std::cout << "Phase C3c-3 M2 reduction scan tests passed.\n";
+  }
+
+  // --------------------------------------------------------
+  // Phase C3c-3 M3 (Option C): exact peel-and-tile for three (or more) genuine
+  // reduction dimensions over convex Presburger domains. buildReductionScanPlan
+  // peels r-1 nested outer reduction axes (each with piecewise-affine bounds
+  // over the output and the enclosing outer axes) and tiles the innermost.
+  // Validated by a self-contained brute-force oracle: at every nesting level
+  // the plan's faces evaluate to the exact [min,max] of that axis given the
+  // enclosing coordinates; the innermost axis is a stride-g contiguous interval
+  // grouped by constant-K lengths; each MAC is covered exactly once and
+  // accumulates into one physical C element. No tile is emitted. Strict-FP
+  // order not claimed.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    auto box = [](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo);
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up);
+      }
+      return s;
+    };
+    auto inDomain = [](const IntegerPolyhedron &dom,
+                       const std::vector<int> &x) -> bool {
+      IntegerPolyhedron P = dom;
+      const unsigned cols = P.getNumCols();
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        llvm::SmallVector<std::int64_t> eq(cols, 0);
+        eq[j] = 1;
+        eq[cols - 1] = -static_cast<std::int64_t>(x[j]);
+        P.addEquality(eq);
+      }
+      return !P.isIntegerEmpty();
+    };
+
+    auto runScanM3 = [&](const char *name, const std::array<IntMatrix, 3> &F,
+                         const std::array<IntRow, 3> &off, unsigned rank,
+                         const IntegerPolyhedron &dom, int hi, unsigned expR,
+                         std::set<long> expInnerLengths, bool expConstant,
+                         bool expEmpty) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(plan.has_value(), (b + ": scan plan built").c_str()))
+        return false;
+      if (verify(plan->reductionRank == expR, (b + ": reduction rank").c_str()))
+        return false;
+      if (verify(plan->empty == expEmpty, (b + ": emptiness").c_str()))
+        return false;
+      if (verify(plan->outerIsAccumulation &&
+                     !plan->orderMatchesSourceForStrictFP,
+                 (b + ": accumulation and strict-FP order flags").c_str()))
+        return false;
+      if (expEmpty)
+        return true;
+      if (verify(plan->outerRangeIsConstant == expConstant,
+                 (b + ": outer-range constancy").c_str()))
+        return false;
+      if (verify(plan->peelLevels.size() == expR - 1,
+                 (b + ": peel-level count").c_str()))
+        return false;
+
+      auto p2 = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e2 = p2 ? expandRankPartition(*p2) : std::nullopt;
+      auto m2 = e2 ? buildPartitionCoordinateMap(*e2) : std::nullopt;
+      if (verify(p2 && e2 && m2, (b + ": oracle coordinate map").c_str()))
+        return false;
+      const unsigned n = rank;
+      auto zOf = [&](const std::vector<int> &x) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += m2->sourceToLogical[a][c] * BigInt(x[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      auto faceVal = [&](const systolic::logical::OuterBoundFace &f,
+                         const std::vector<std::int64_t> &z) -> long {
+        BigInt v = f.constant;
+        for (unsigned c = 0; c < n; ++c)
+          v += f.coeffs[c] * BigInt(z[c]);
+        return v.convert_to<long>();
+      };
+      // reduction columns in peel order, innermost last.
+      std::vector<unsigned> rc;
+      for (const auto &lvl : plan->peelLevels)
+        rc.push_back(lvl.col);
+      rc.push_back(plan->innerCol);
+      std::vector<bool> isRed(n, false);
+      for (unsigned c : rc)
+        isRed[c] = true;
+
+      struct Pt {
+        std::vector<std::int64_t> o;
+        std::vector<std::int64_t> rt; // reduction values in peel order + inner
+        std::vector<std::int64_t> z;
+      };
+      std::vector<Pt> pts;
+      std::map<std::vector<std::int64_t>, std::vector<BigInt>> realC;
+      std::set<std::pair<std::vector<std::int64_t>, std::vector<std::int64_t>>> seen;
+      bool accOk = true, dupOk = true;
+      std::vector<int> x(n, 0);
+      std::function<void(unsigned)> sweep = [&](unsigned dim) {
+        if (dim == n) {
+          if (!inDomain(dom, x))
+            return;
+          auto z = zOf(x);
+          Pt pt;
+          pt.z = z;
+          for (unsigned a = 0; a < n; ++a)
+            if (!isRed[a])
+              pt.o.push_back(z[a]);
+          for (unsigned c : rc)
+            pt.rt.push_back(z[c]);
+          std::vector<BigInt> caddr;
+          for (std::size_t r = 0; r < F[2].size(); ++r) {
+            BigInt v = off[2][r];
+            for (unsigned c = 0; c < n; ++c)
+              v += F[2][r][c] * BigInt(x[c]);
+            caddr.push_back(v);
+          }
+          auto it = realC.find(pt.o);
+          if (it == realC.end())
+            realC[pt.o] = caddr;
+          else if (it->second != caddr)
+            accOk = false;
+          if (!seen.insert({pt.o, pt.rt}).second)
+            dupOk = false;
+          pts.push_back(std::move(pt));
+          return;
+        }
+        for (x[dim] = 0; x[dim] <= hi; ++x[dim])
+          sweep(dim + 1);
+      };
+      sweep(0);
+
+      bool ok = accOk && dupOk;
+      // Per-level nested bounds: for each level p, grouping by the output and
+      // the more-significant reduction values, the faces give exact [min,max].
+      for (unsigned p = 0; p + 1 < expR && ok; ++p) {
+        std::map<std::vector<std::int64_t>,
+                 std::pair<std::pair<long, long>, std::vector<std::int64_t>>>
+            grp;
+        for (const auto &pt : pts) {
+          std::vector<std::int64_t> key = pt.o;
+          for (unsigned q = 0; q < p; ++q)
+            key.push_back(pt.rt[q]);
+          long v = pt.rt[p];
+          auto it = grp.find(key);
+          if (it == grp.end())
+            grp[key] = {{v, v}, pt.z};
+          else {
+            it->second.first.first = std::min(it->second.first.first, v);
+            it->second.first.second = std::max(it->second.first.second, v);
+          }
+        }
+        for (auto &kv : grp) {
+          long planLo = std::numeric_limits<long>::min(),
+               planHi = std::numeric_limits<long>::max();
+          for (auto &f : plan->peelLevels[p].lowerFaces)
+            planLo = std::max(planLo, faceVal(f, kv.second.second));
+          for (auto &f : plan->peelLevels[p].upperFaces)
+            planHi = std::min(planHi, faceVal(f, kv.second.second));
+          ok &= (planLo == kv.second.first.first &&
+                 planHi == kv.second.first.second);
+        }
+      }
+      // Innermost: stride-g contiguous grouped by constant-K lengths.
+      std::set<long> lensSeen;
+      {
+        std::map<std::vector<std::int64_t>, std::set<std::int64_t>> gi;
+        for (const auto &pt : pts) {
+          std::vector<std::int64_t> key = pt.o;
+          for (unsigned q = 0; q + 1 < expR; ++q)
+            key.push_back(pt.rt[q]);
+          gi[key].insert(pt.rt[expR - 1]);
+        }
+        for (auto &kv : gi) {
+          std::vector<std::int64_t> ks(kv.second.begin(), kv.second.end());
+          for (std::size_t t = 1; t < ks.size(); ++t)
+            ok &= (ks[t] - ks[t - 1] == plan->innerStride);
+          lensSeen.insert((long)ks.size());
+        }
+      }
+      std::set<long> planLens(plan->innerConstantTileLengths.begin(),
+                              plan->innerConstantTileLengths.end());
+      ok &= (planLens == lensSeen);
+      if (verify(ok, (b + ": nested per-level faces give exact [min,max]; inner "
+                          "stride-g contiguous grouped by constant-K lengths; "
+                          "single-C accumulation; exact MAC multiplicity")
+                         .c_str()))
+        return false;
+      if (verify(planLens == expInnerLengths,
+                 (b + ": inner constant-K group lengths").c_str()))
+        return false;
+      return true;
+    };
+
+    auto runScanM3Unknown = [&](const char *name,
+                                const std::array<IntMatrix, 3> &F,
+                                const std::array<IntRow, 3> &off, unsigned rank,
+                                const IntegerPolyhedron &dom) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(!plan.has_value(), (b + ": UNKNOWN (conservative refusal)").c_str()))
+        return false;
+      return true;
+    };
+
+    // 3-reduction access without batch: C[i][j] += A[i][k1][k2][k3]*B[k1][k2][k3][j];
+    // source x = (i,j,k1,k2,k3).
+    std::array<IntMatrix, 3> F3 = {
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+        IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}};
+    std::array<IntRow, 3> O3 = {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0)}};
+
+    // 3-D simplex: 0 <= k3 <= k2 <= k1 <= 3.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 1, -1, 0, 0}); // k1 - k2 >= 0
+      dom.addInequality({0, 0, 0, 1, -1, 0}); // k2 - k3 >= 0
+      if (!runScanM3("C3c3m3 simplex", F3, O3, 5, dom, 3, 3, {1, 2, 3, 4}, false, false))
+        return 1;
+    }
+    // 3-D triangular: k2 <= k1, k3 free (rectangular in k3).
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 1, -1, 0, 0}); // k1 - k2 >= 0
+      if (!runScanM3("C3c3m3 triangular", F3, O3, 5, dom, 3, 3, {4}, false, false))
+        return 1;
+    }
+    // Rectangular 3-D regression (box only): all levels constant.
+    if (!runScanM3("C3c3m3 rectangular", F3, O3, 5, box(5, 3), 3, 3, {4}, true, false))
+      return 1;
+    // The exact former-M1-boundary input (rectangular three-reduction over
+    // box extent 2), now fully oracle-verified as supported instead of UNKNOWN.
+    if (!runScanM3("C3c3m3 former-M1-boundary", F3, O3, 5, box(5, 2), 2, 3, {3}, true, false))
+      return 1;
+
+    // Batched GEMM with three reduction dims: C[b][i][j] += A[b][i][k1][k2][k3]*
+    // B[b][k1][k2][k3][j]; source x = (b,i,j,k1,k2,k3).
+    {
+      std::array<IntMatrix, 3> FB3 = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> OB3 = {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}};
+      if (!runScanM3("C3c3m3 batched-3reduction", FB3, OB3, 6, box(6, 1), 1, 3, {2}, true, false))
+        return 1;
+    }
+
+    // Empty reduction domain.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({0, 0, 1, 0, 0, -5}); // k1 >= 5 contradicts k1 <= 3
+      if (!runScanM3("C3c3m3 empty", F3, O3, 5, dom, 3, 3, {}, true, true))
+        return 1;
+    }
+
+    // Overflow: huge reduction extents -> UNKNOWN.
+    {
+      const std::int64_t BIG = std::int64_t(1) << 40;
+      IntegerPolyhedron dom(PresburgerSpace::getSetSpace(5, 0, 0));
+      dom.addInequality({1, 0, 0, 0, 0, 0});
+      dom.addInequality({-1, 0, 0, 0, 0, 1}); // i in [0,1]
+      dom.addInequality({0, 1, 0, 0, 0, 0});
+      dom.addInequality({0, -1, 0, 0, 0, 1}); // j in [0,1]
+      dom.addInequality({0, 0, 1, 0, 0, 0});
+      dom.addInequality({0, 0, -1, 0, 0, BIG}); // k1 in [0,BIG]
+      dom.addInequality({0, 0, 0, 1, 0, 0});
+      dom.addInequality({0, 0, 0, -1, 0, BIG}); // k2 in [0,BIG]
+      dom.addInequality({0, 0, 0, 0, 1, 0});
+      dom.addInequality({0, 0, 0, 0, -1, BIG}); // k3 in [0,BIG]
+      if (!runScanM3Unknown("C3c3m3 overflow", F3, O3, 5, dom))
+        return 1;
+    }
+    // Output aliasing: p in B only, not indexed by C -> UNKNOWN. Source
+    // x = (i,j,k1,k2,k3,p); A[i][k1][k2][k3], B[k1][k2][k3][j][p], C[i][j].
+    if (!runScanM3Unknown("C3c3m3 output-aliasing",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          6, box(6, 1)))
+      return 1;
+    // Congruence/coupling-restricted reduction: an equality couples two
+    // reduction axes (k1 == k2) -> UNKNOWN. (Genuine lattice congruence on a
+    // reduction axis is normalized to a primitive basis by the recognizer, so
+    // it does not arise as such; a coupled/equality-restricted reduction is the
+    // representable restricted case and is refused.)
+    {
+      std::array<IntMatrix, 3> FC = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}};
+      std::array<IntRow, 3> OC = {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}};
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addEquality({0, 0, 1, -1, 0}); // k1 - k2 == 0
+      if (!runScanM3Unknown("C3c3m3 coupled-reduction", FC, OC, 4, dom))
+        return 1;
+    }
+
+    std::cout << "Phase C3c-3 M3 reduction scan tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
