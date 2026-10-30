@@ -12738,6 +12738,304 @@ int main() {
     std::cout << "Phase C3c-3 M1 reduction scan tests passed.\n";
   }
 
+  // --------------------------------------------------------
+  // Phase C3c-3 M2 (Option C): exact output-dependent outer reduction bounds.
+  // buildReductionScanPlan now derives tight piecewise-affine outer bounds over
+  // the output coordinates (including batch) by exact projection of the inner
+  // axis. Validated by a self-contained brute-force oracle: for every output,
+  // the plan's outer faces evaluate to the exact [min,max] of the true outer
+  // range, the inner is a stride-g contiguous interval grouped by constant-K
+  // lengths, every iteration accumulates into one physical C element, and the
+  // MAC multiset is exact. No tile is emitted. Strict-FP order not claimed.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    auto box = [](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo);
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up);
+      }
+      return s;
+    };
+    auto inDomain = [](const IntegerPolyhedron &dom,
+                       const std::vector<int> &x) -> bool {
+      IntegerPolyhedron P = dom;
+      const unsigned cols = P.getNumCols();
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        llvm::SmallVector<std::int64_t> eq(cols, 0);
+        eq[j] = 1;
+        eq[cols - 1] = -static_cast<std::int64_t>(x[j]);
+        P.addEquality(eq);
+      }
+      return !P.isIntegerEmpty();
+    };
+
+    auto runScanM2 = [&](const char *name, const std::array<IntMatrix, 3> &F,
+                         const std::array<IntRow, 3> &off, unsigned rank,
+                         const IntegerPolyhedron &dom, int hi, bool expConstant,
+                         std::set<long> expInnerLengths, long expStride,
+                         bool expEmpty) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(plan.has_value(), (b + ": scan plan built").c_str()))
+        return false;
+      if (verify(plan->empty == expEmpty, (b + ": emptiness").c_str()))
+        return false;
+      if (verify(plan->outerRangeIsConstant == expConstant,
+                 (b + ": outer-range constancy classification").c_str()))
+        return false;
+      if (verify(plan->outerIsAccumulation &&
+                     !plan->orderMatchesSourceForStrictFP,
+                 (b + ": accumulation and strict-FP order flags").c_str()))
+        return false;
+      if (expEmpty)
+        return true;
+
+      auto p2 = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e2 = p2 ? expandRankPartition(*p2) : std::nullopt;
+      auto m2 = e2 ? buildPartitionCoordinateMap(*e2) : std::nullopt;
+      if (verify(p2 && e2 && m2, (b + ": oracle coordinate map").c_str()))
+        return false;
+      const unsigned n = rank;
+      auto zOf = [&](const std::vector<int> &x) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += m2->sourceToLogical[a][c] * BigInt(x[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      const unsigned oc = plan->outerCol, ic = plan->innerCol;
+      auto faceVal = [&](const systolic::logical::OuterBoundFace &f,
+                         const std::vector<std::int64_t> &z) -> long {
+        BigInt v = f.constant;
+        for (unsigned c = 0; c < n; ++c)
+          v += f.coeffs[c] * BigInt(z[c]);
+        return v.convert_to<long>();
+      };
+
+      std::map<std::vector<std::int64_t>, std::vector<std::int64_t>> repZ;
+      std::map<std::vector<std::int64_t>,
+               std::map<std::int64_t, std::set<std::int64_t>>>
+          fib;
+      std::map<std::vector<std::int64_t>, std::vector<BigInt>> realC;
+      long macs = 0;
+      bool accOk = true;
+      std::vector<int> x(n, 0);
+      std::function<void(unsigned)> sweep = [&](unsigned dim) {
+        if (dim == n) {
+          if (!inDomain(dom, x))
+            return;
+          auto z = zOf(x);
+          std::vector<std::int64_t> ro;
+          for (unsigned a = 0; a < n; ++a)
+            if (a != oc && a != ic)
+              ro.push_back(z[a]);
+          if (!repZ.count(ro))
+            repZ[ro] = z;
+          std::vector<BigInt> caddr;
+          for (std::size_t rr = 0; rr < F[2].size(); ++rr) {
+            BigInt v = off[2][rr];
+            for (unsigned c = 0; c < n; ++c)
+              v += F[2][rr][c] * BigInt(x[c]);
+            caddr.push_back(v);
+          }
+          auto it = realC.find(ro);
+          if (it == realC.end())
+            realC[ro] = caddr;
+          else if (it->second != caddr)
+            accOk = false;
+          fib[ro][z[oc]].insert(z[ic]);
+          ++macs;
+          return;
+        }
+        for (x[dim] = 0; x[dim] <= hi; ++x[dim])
+          sweep(dim + 1);
+      };
+      sweep(0);
+
+      bool ok = true;
+      long total = 0;
+      std::set<long> lensSeen;
+      for (auto &kv : fib) {
+        const auto &z = repZ[kv.first];
+        // tight outer bounds: plan faces give exactly the true [min,max]
+        long planLo = std::numeric_limits<long>::min(),
+             planHi = std::numeric_limits<long>::max();
+        for (auto &f : plan->outerLowerFaces)
+          planLo = std::max(planLo, faceVal(f, z));
+        for (auto &f : plan->outerUpperFaces)
+          planHi = std::min(planHi, faceVal(f, z));
+        long trueMin = kv.second.begin()->first;
+        long trueMax = kv.second.rbegin()->first;
+        ok &= (planLo == trueMin && planHi == trueMax);
+        for (auto &ov : kv.second) {
+          std::vector<std::int64_t> ks(ov.second.begin(), ov.second.end());
+          for (std::size_t t = 1; t < ks.size(); ++t)
+            ok &= (ks[t] - ks[t - 1] == plan->innerStride);
+          lensSeen.insert((long)ks.size());
+          total += (long)ks.size();
+        }
+      }
+      ok &= (total == macs);
+      ok &= accOk;
+      std::set<long> planLens(plan->innerConstantTileLengths.begin(),
+                              plan->innerConstantTileLengths.end());
+      ok &= (planLens == lensSeen);
+      if (verify(ok, (b + ": outer faces give exact per-output [min,max]; inner "
+                          "stride-g contiguous grouped by constant-K lengths; "
+                          "single-C accumulation; exact MAC multiplicity")
+                         .c_str()))
+        return false;
+      if (verify(planLens == expInnerLengths,
+                 (b + ": inner constant-K group lengths").c_str()))
+        return false;
+      if (verify(plan->innerStride == expStride, (b + ": inner stride").c_str()))
+        return false;
+      return true;
+    };
+
+    auto runScanM2Unknown = [&](const char *name,
+                                const std::array<IntMatrix, 3> &F,
+                                const std::array<IntRow, 3> &off, unsigned rank,
+                                const IntegerPolyhedron &dom) -> bool {
+      std::string why;
+      auto plan = buildReductionScanPlan(
+          F, off, dom, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(!plan.has_value(), (b + ": UNKNOWN (conservative refusal)").c_str()))
+        return false;
+      return true;
+    };
+
+    // Batched 2-axis access: C[b][i][j] += A[b][i][k1][k2]*B[b][k1][k2][j];
+    // source x = (b,i,j,k1,k2).
+    std::array<IntMatrix, 3> FB = {
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}};
+    std::array<IntRow, 3> OB = {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0),BigInt(0)}};
+
+    // Batch-dependent triangular: k1 <= b, k2 <= k1.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({1, 0, 0, -1, 0, 0}); // b - k1 >= 0
+      dom.addInequality({0, 0, 0, 1, -1, 0}); // k1 - k2 >= 0
+      if (!runScanM2("C3c3m2 batch-triangular", FB, OB, 5, dom, 3, false, {1, 2, 3, 4}, 1, false))
+        return 1;
+    }
+    // Batch-dependent banded: k1 <= b, |k1 - k2| <= 1.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({1, 0, 0, -1, 0, 0});  // k1 <= b
+      dom.addInequality({0, 0, 0, 1, -1, 1});  // k1 - k2 >= -1
+      dom.addInequality({0, 0, 0, -1, 1, 1});  // k1 - k2 <= 1
+      if (!runScanM2("C3c3m2 batch-banded", FB, OB, 5, dom, 3, false, {2, 3}, 1, false))
+        return 1;
+    }
+    // Batch-dependent trapezoidal: k1 <= b, k1 <= k2 <= k1 + 1.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({1, 0, 0, -1, 0, 0});  // k1 <= b
+      dom.addInequality({0, 0, 0, -1, 1, 0});  // k2 - k1 >= 0
+      dom.addInequality({0, 0, 0, 1, -1, 1});  // k2 <= k1 + 1
+      if (!runScanM2("C3c3m2 batch-trapezoidal", FB, OB, 5, dom, 3, false, {1, 2}, 1, false))
+        return 1;
+    }
+
+    // 2-axis access without batch: C[i][j] += A[i][k1][k2]*B[k1][k2][j];
+    // source x = (i,j,k1,k2).
+    std::array<IntMatrix, 3> FN = {
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+        IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}},
+        IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)}}};
+    std::array<IntRow, 3> ON = {IntRow{BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0),BigInt(0)},
+                                IntRow{BigInt(0),BigInt(0)}};
+
+    // Output-dependent on i: k1 <= i, k2 <= k1.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({1, 0, -1, 0, 0}); // i - k1 >= 0
+      dom.addInequality({0, 0, 1, -1, 0}); // k1 - k2 >= 0
+      if (!runScanM2("C3c3m2 output-dependent-i", FN, ON, 4, dom, 3, false, {1, 2, 3, 4}, 1, false))
+        return 1;
+    }
+    // Constant-bound M1 regression: plain triangular, outer constant [0,3].
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, -1, 0}); // k2 <= k1
+      if (!runScanM2("C3c3m2 constant-triangular", FN, ON, 4, dom, 3, true, {1, 2, 3, 4}, 1, false))
+        return 1;
+    }
+    // Nonzero lower bound, output-dependent: 1 <= k1 <= i, k2 <= k1.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, 0, -1}); // k1 >= 1
+      dom.addInequality({1, 0, -1, 0, 0}); // k1 <= i
+      dom.addInequality({0, 0, 1, -1, 0}); // k2 <= k1
+      if (!runScanM2("C3c3m2 nonzero-lb", FN, ON, 4, dom, 3, false, {2, 3, 4}, 1, false))
+        return 1;
+    }
+    // Empty.
+    {
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({0, 0, 1, 0, -5}); // k1 >= 5 contradicts k1 <= 3
+      if (!runScanM2("C3c3m2 empty", FN, ON, 4, dom, 3, true, {}, 1, true))
+        return 1;
+    }
+
+    // Non-unit outer coefficient: 2*k1 <= b -> UNKNOWN.
+    {
+      IntegerPolyhedron dom = box(5, 3);
+      dom.addInequality({1, 0, 0, -2, 0, 0}); // b - 2*k1 >= 0
+      dom.addInequality({0, 0, 0, 1, -1, 0}); // k2 <= k1
+      if (!runScanM2Unknown("C3c3m2 non-unit-coefficient", FB, OB, 5, dom))
+        return 1;
+    }
+    // Output aliasing: p in B only, not indexed by C -> UNKNOWN.
+    if (!runScanM2Unknown("C3c3m2 output-aliasing",
+          {IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+           IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+           IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)}}},
+          {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0)}},
+          5, box(5, 2)))
+      return 1;
+    // Integer overflow: huge reduction extents -> UNKNOWN.
+    {
+      const std::int64_t BIG = std::int64_t(1) << 40;
+      IntegerPolyhedron dom(PresburgerSpace::getSetSpace(5, 0, 0));
+      dom.addInequality({1, 0, 0, 0, 0, 0});
+      dom.addInequality({-1, 0, 0, 0, 0, 3});   // b in [0,3]
+      dom.addInequality({0, 1, 0, 0, 0, 0});
+      dom.addInequality({0, -1, 0, 0, 0, 1});   // i in [0,1]
+      dom.addInequality({0, 0, 1, 0, 0, 0});
+      dom.addInequality({0, 0, -1, 0, 0, 1});   // j in [0,1]
+      dom.addInequality({0, 0, 0, 1, 0, 0});
+      dom.addInequality({0, 0, 0, -1, 0, BIG}); // k1 in [0,BIG]
+      dom.addInequality({0, 0, 0, 0, 1, 0});
+      dom.addInequality({0, 0, 0, 0, -1, BIG}); // k2 in [0,BIG]
+      if (!runScanM2Unknown("C3c3m2 overflow", FB, OB, 5, dom))
+        return 1;
+    }
+
+    std::cout << "Phase C3c-3 M2 reduction scan tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }

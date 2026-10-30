@@ -71,11 +71,27 @@ namespace systolic::logical {
 /// `realOutputAccess` is the physical C access, which excludes the reduction
 /// axes; `outerIsAccumulation` records that k_outer is summed into C, not a
 /// physical output.
+/// One affine bound on the peeled outer reduction axis, over the OUTPUT
+/// coordinates: the bound value is `coeffs . z + constant`, with `coeffs` an
+/// integer row over the logical coordinates that is zero on the two reduction
+/// columns (so the value depends only on the output). A lower face means
+/// k_outer >= value; an upper face means k_outer <= value. The exact per-output
+/// outer range is [ max over lowerFaces, min over upperFaces ].
+struct OuterBoundFace {
+  IntRow coeffs; // length logicalRank; zero on outerCol and innerCol
+  BigInt constant = 0;
+};
+
 struct ReductionScanPlan {
   unsigned outerCol = 0;
   unsigned innerCol = 0;
-  std::int64_t outerLo = 0;
+  std::int64_t outerLo = 0; // constant envelope (always a valid superset range)
   std::int64_t outerHi = 0;
+  // Exact tight bounds (M2): piecewise-affine in the output. When
+  // `outerRangeIsConstant`, the faces are constants equal to [outerLo, outerHi].
+  bool outerRangeIsConstant = true;
+  std::vector<OuterBoundFace> outerLowerFaces;
+  std::vector<OuterBoundFace> outerUpperFaces;
   std::int64_t innerStride = 1;
   std::vector<std::int64_t> innerConstantTileLengths;
   bool empty = false;
@@ -229,6 +245,101 @@ inline std::optional<ReductionScanPlan> buildReductionScanPlan(
   }
   out.outerLo = *oLo;
   out.outerHi = *oHi;
+
+  // 8. (M2) Tight, output-dependent outer bounds. Default to the constant
+  //    envelope (always a valid superset). When there are no congruence locals,
+  //    project the inner axis out of the domain EXACTLY -- Fourier-Motzkin
+  //    elimination of a unit-coefficient variable is exact over the integers --
+  //    and read the outer-bounding faces, which are affine in the output.
+  {
+    OuterBoundFace lo, hi;
+    lo.coeffs.assign(n, BigInt(0));
+    lo.constant = BigInt(out.outerLo);
+    hi.coeffs.assign(n, BigInt(0));
+    hi.constant = BigInt(out.outerHi);
+    out.outerLowerFaces = {lo};
+    out.outerUpperFaces = {hi};
+    out.outerRangeIsConstant = true;
+  }
+  if (contraction->congruenceLocals == 0) {
+    auto rd = [](const llvm::DynamicAPInt &v) -> std::optional<std::int64_t> {
+      if (v < llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::min()) ||
+          v > llvm::DynamicAPInt(std::numeric_limits<std::int64_t>::max()))
+        return std::nullopt;
+      return static_cast<std::int64_t>(v);
+    };
+    // The inner axis must have unit coefficient everywhere (exact projection)
+    // and must not be pinned by an equality.
+    for (unsigned ri = 0; ri < D.getNumInequalities(); ++ri) {
+      auto c = rd(D.getInequality(ri)[innerCol]);
+      if (!c) { why = "UNKNOWN: inner coefficient overflows i64"; return std::nullopt; }
+      if (*c < -1 || *c > 1) {
+        why = "UNKNOWN: non-unit inner reduction coefficient (projection not exact)";
+        return std::nullopt;
+      }
+    }
+    for (unsigned re = 0; re < D.getNumEqualities(); ++re)
+      if (D.getEquality(re)[innerCol] != llvm::DynamicAPInt(0)) {
+        why = "UNKNOWN: inner reduction axis is equality-constrained";
+        return std::nullopt;
+      }
+
+    IntegerPolyhedron P = D;
+    P.projectOut(innerCol, 1);
+    if (P.getNumLocalVars() != 0) {
+      why = "UNKNOWN: outer-bound projection is not affine (introduced locals)";
+      return std::nullopt;
+    }
+    const unsigned pdims = n - 1; // P has the inner dimension removed
+    if (P.getNumDimVars() != pdims || P.getNumSymbolVars() != 0) {
+      why = "UNKNOWN: unexpected projected shape";
+      return std::nullopt;
+    }
+    for (unsigned re = 0; re < P.getNumEqualities(); ++re)
+      if (P.getEquality(re)[outerCol] != llvm::DynamicAPInt(0)) {
+        why = "UNKNOWN: projected outer axis is equality-constrained";
+        return std::nullopt;
+      }
+
+    std::vector<OuterBoundFace> los, his;
+    for (unsigned ri = 0; ri < P.getNumInequalities(); ++ri) {
+      auto row = P.getInequality(ri);
+      auto ao = rd(row[outerCol]);
+      if (!ao) { why = "UNKNOWN: outer coefficient overflows i64"; return std::nullopt; }
+      if (*ao == 0)
+        continue; // not an outer bound
+      if (*ao < -1 || *ao > 1) {
+        why = "UNKNOWN: non-unit outer reduction coefficient";
+        return std::nullopt;
+      }
+      OuterBoundFace f;
+      f.coeffs.assign(n, BigInt(0));
+      for (unsigned p = 0; p < pdims; ++p) {
+        if (p == outerCol)
+          continue; // the outer coefficient itself
+        unsigned fullcol = (p < innerCol) ? p : p + 1;
+        auto cp = rd(row[p]);
+        if (!cp) { why = "UNKNOWN: outer-face coefficient overflows i64"; return std::nullopt; }
+        f.coeffs[fullcol] = (*ao == 1) ? -BigInt(*cp) : BigInt(*cp);
+      }
+      auto cc = rd(row[pdims]);
+      if (!cc) { why = "UNKNOWN: outer-face constant overflows i64"; return std::nullopt; }
+      f.constant = (*ao == 1) ? -BigInt(*cc) : BigInt(*cc);
+      ((*ao == 1) ? los : his).push_back(std::move(f));
+    }
+    if (!los.empty() && !his.empty()) {
+      bool constant = true;
+      for (const auto &f : los)
+        for (const BigInt &c : f.coeffs)
+          if (c != 0) constant = false;
+      for (const auto &f : his)
+        for (const BigInt &c : f.coeffs)
+          if (c != 0) constant = false;
+      out.outerLowerFaces = std::move(los);
+      out.outerUpperFaces = std::move(his);
+      out.outerRangeIsConstant = constant;
+    }
+  }
 
   why = "reduction scan plan built";
   return out;
