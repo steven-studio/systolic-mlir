@@ -43,6 +43,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "Systolic/RankPartitionCommonFiber.h"
 #include "Systolic/RankPartitionSymbolicContraction.h"
+#include "Systolic/RankPartitionSymbolicTilePartition.h"
 
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -11633,6 +11634,458 @@ int main() {
     }
 
     std::cout << "Phase C2 symbolic contraction tests passed.\n";
+  }
+
+  // --------------------------------------------------------
+  // Phase C3 (Option C): symbolic tile partition. buildSymbolicTilePartition
+  // partitions the exact logical domain into disjoint reduction tiles grouped
+  // by constant length L with a single proven stride g (g == 1 contiguous,
+  // g > 1 sublattice-punctured / non-contiguous). Validated by a brute-force
+  // oracle over the bounded source domain: the enumeration lives in the test
+  // oracle only -- the production partitioner is symbolic. The oracle checks
+  // that every fiber is an arithmetic progression with the global stride g,
+  // that the minimum anchor of each fiber lies in exactly one group of the
+  // right length (coverage + cross-length disjointness + the min-anchor graph
+  // property), that non-minimum fiber points are never anchors (multiplicity),
+  // and that each operand/output address advances by the reported t-stride.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+
+    auto box = [](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo); // x_a >= 0
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up); // hi - x_a >= 0
+      }
+      return s;
+    };
+
+    auto inDomain = [](const IntegerPolyhedron &dom,
+                       const std::vector<int> &x) -> bool {
+      IntegerPolyhedron P = dom;
+      const unsigned cols = P.getNumCols();
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        llvm::SmallVector<std::int64_t> eq(cols, 0);
+        eq[j] = 1;
+        eq[cols - 1] = -static_cast<std::int64_t>(x[j]);
+        P.addEquality(eq);
+      }
+      return !P.isIntegerEmpty();
+    };
+
+    auto inGroup = [](const systolic::logical::TileFiberGroup &grp,
+                      const std::vector<std::int64_t> &za) -> bool {
+      for (const auto &piece : grp.anchorPieces) {
+        IntegerPolyhedron P = piece;
+        const unsigned cols = P.getNumCols();
+        for (std::size_t j = 0; j < za.size(); ++j) {
+          llvm::SmallVector<std::int64_t> eq(cols, 0);
+          eq[j] = 1;
+          eq[cols - 1] = -za[j];
+          P.addEquality(eq);
+        }
+        if (!P.isIntegerEmpty())
+          return true;
+      }
+      return false;
+    };
+
+    auto runPartition =
+        [&](const char *name, const std::array<IntMatrix, 3> &F,
+            const std::array<IntRow, 3> &off, unsigned rank,
+            const IntegerPolyhedron &domain, int hi, long expStride,
+            long expGroups, long expFibers, long expMacs,
+            std::map<std::int64_t, long> &lenHist) -> bool {
+      lenHist.clear();
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          F, off, domain, rank,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      std::string b = name;
+      if (verify(part.has_value(), (b + ": partition built").c_str()))
+        return false;
+      if (expStride >= 0 &&
+          verify(part->stride == expStride, (b + ": stride g").c_str()))
+        return false;
+
+      auto p2 = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e2 = p2 ? expandRankPartition(*p2) : std::nullopt;
+      auto m2 = e2 ? buildPartitionCoordinateMap(*e2) : std::nullopt;
+      if (verify(p2 && e2 && m2, (b + ": oracle coordinate map").c_str()))
+        return false;
+      const unsigned n = rank;
+      const unsigned kIdx = part->kIndex;
+
+      auto zOf = [&](const std::vector<int> &x) {
+        std::vector<std::int64_t> z(n, 0);
+        for (unsigned a = 0; a < n; ++a) {
+          BigInt acc = 0;
+          for (unsigned c = 0; c < n; ++c)
+            acc += m2->sourceToLogical[a][c] * BigInt(x[c]);
+          z[a] = acc.convert_to<std::int64_t>();
+        }
+        return z;
+      };
+      auto okeyOf = [&](const std::vector<std::int64_t> &z) {
+        std::vector<std::int64_t> o;
+        for (unsigned a = 0; a < n; ++a)
+          if (a != kIdx)
+            o.push_back(z[a]);
+        return o;
+      };
+      auto zFromOkey = [&](const std::vector<std::int64_t> &o, std::int64_t k) {
+        std::vector<std::int64_t> z(n, 0);
+        unsigned oi = 0;
+        for (unsigned a = 0; a < n; ++a)
+          z[a] = (a == kIdx) ? k : o[oi++];
+        return z;
+      };
+
+      std::map<std::vector<std::int64_t>, std::map<std::int64_t, std::vector<int>>>
+          fibers;
+      std::vector<int> x(n, 0);
+      std::function<void(unsigned)> sweep = [&](unsigned dim) {
+        if (dim == n) {
+          if (!inDomain(domain, x))
+            return;
+          auto z = zOf(x);
+          fibers[okeyOf(z)].emplace(z[kIdx], x);
+          return;
+        }
+        for (x[dim] = 0; x[dim] <= hi; ++x[dim])
+          sweep(dim + 1);
+      };
+      sweep(0);
+
+      const std::int64_t g = part->stride;
+      long macs = 0;
+      std::set<std::int64_t> distinctLens;
+      bool good = true;
+
+      for (const auto &kv : fibers) {
+        std::vector<std::int64_t> ks;
+        for (const auto &e : kv.second)
+          ks.push_back(e.first);
+        const std::int64_t L = (std::int64_t)ks.size();
+        macs += L;
+        distinctLens.insert(L);
+        ++lenHist[L];
+        for (std::size_t t = 1; t < ks.size(); ++t)
+          good &= (ks[t] - ks[t - 1] == g);
+        const std::int64_t k0 = ks.front();
+        auto za = zFromOkey(kv.first, k0);
+
+        int hits = 0;
+        std::int64_t hitLen = -1;
+        for (const auto &grp : part->groups)
+          if (inGroup(grp, za)) {
+            ++hits;
+            hitLen = grp.length;
+          }
+        good &= (hits == 1) && (hitLen == L);
+
+        if (ks.size() >= 2) {
+          auto zb = zFromOkey(kv.first, k0 + g);
+          for (const auto &grp : part->groups)
+            good &= !inGroup(grp, zb);
+        }
+
+        for (std::size_t t = 0; t + 1 < ks.size(); ++t) {
+          const auto &xa = kv.second.at(ks[t]);
+          const auto &xb = kv.second.at(ks[t + 1]);
+          for (unsigned op = 0; op < 3; ++op)
+            for (std::size_t r = 0; r < F[op].size(); ++r) {
+              BigInt aa = off[op][r], bb = off[op][r];
+              for (unsigned c = 0; c < n; ++c) {
+                aa += F[op][r][c] * BigInt(xa[c]);
+                bb += F[op][r][c] * BigInt(xb[c]);
+              }
+              good &= ((bb - aa) == part->tStride[op][r]);
+            }
+        }
+      }
+
+      if (verify(good,
+                 (b + ": fibers are stride-g APs; min-anchor unique and "
+                      "correct length; multiplicity and address/t-stride exact")
+                     .c_str()))
+        return false;
+
+      // Within each group the anchor pieces are pairwise disjoint (both share
+      // the same congruence-local definition from D, so adding one piece's
+      // constraints to the other tests z-projection overlap exactly).
+      bool disjoint = true;
+      for (const auto &grp : part->groups)
+        for (std::size_t a = 0; a < grp.anchorPieces.size(); ++a)
+          for (std::size_t c = a + 1; c < grp.anchorPieces.size(); ++c) {
+            IntegerPolyhedron inter = grp.anchorPieces[a];
+            const auto &pc = grp.anchorPieces[c];
+            for (unsigned r = 0; r < pc.getNumInequalities(); ++r)
+              inter.addInequality(pc.getInequality(r));
+            for (unsigned r = 0; r < pc.getNumEqualities(); ++r)
+              inter.addEquality(pc.getEquality(r));
+            disjoint &= inter.isIntegerEmpty();
+          }
+      if (verify(disjoint, (b + ": anchor pieces pairwise disjoint").c_str()))
+        return false;
+
+      // Absolute access equivalence: the stored logical access maps over [z,u]
+      // reproduce every source operand/output address, including the
+      // batch-dependent terms (u_l = x[congruenceRow_l]).
+      {
+        AffineIntegerDomain unc;
+        unc.sourceDimension = n;
+        auto sym = transformToSymbolicDomain(*m2, unc);
+        std::vector<unsigned> cr;
+        if (sym)
+          for (unsigned i = 0; i < n; ++i)
+            for (const BigInt &v : sym->inverseNumerator[i])
+              if (v % sym->denominator != 0) { cr.push_back(i); break; }
+        bool addrOk = sym.has_value() && cr.size() == part->congruenceLocals;
+        for (const auto &kv : fibers)
+          for (const auto &e : kv.second) {
+            const auto &xx = e.second;
+            std::vector<std::int64_t> z = zOf(xx);
+            for (unsigned op = 0; op < 3 && addrOk; ++op)
+              for (std::size_t r = 0; r < part->access[op].rows.size(); ++r) {
+                BigInt pred = part->access[op].offsets[r];
+                for (unsigned c = 0; c < n; ++c)
+                  pred += part->access[op].rows[r][c] * BigInt(z[c]);
+                for (unsigned l = 0; l < cr.size(); ++l)
+                  pred += part->access[op].rows[r][n + l] * BigInt(xx[cr[l]]);
+                BigInt src = off[op][r];
+                for (unsigned c = 0; c < n; ++c)
+                  src += F[op][r][c] * BigInt(xx[c]);
+                if (pred != src)
+                  addrOk = false;
+              }
+          }
+        if (verify(addrOk, (b + ": logical access maps reproduce "
+                                "batch-dependent source addresses").c_str()))
+          return false;
+      }
+
+      if (verify(part->groups.size() == distinctLens.size(),
+                 (b + ": one group per realised length").c_str()))
+        return false;
+      for (const auto &grp : part->groups)
+        if (verify(distinctLens.count(grp.length) == 1,
+                   (b + ": group length is realised").c_str()))
+          return false;
+      if (expGroups >= 0 &&
+          verify((long)part->groups.size() == expGroups,
+                 (b + ": group count").c_str()))
+        return false;
+      if (expFibers >= 0 &&
+          verify((long)fibers.size() == expFibers,
+                 (b + ": output fiber count").c_str()))
+        return false;
+      if (expMacs >= 0 &&
+          verify(macs == expMacs, (b + ": source MAC count").c_str()))
+        return false;
+      return true;
+    };
+
+    std::map<std::int64_t, long> hist;
+
+    // Plain GEMM C[i][j] += A[i][k]*B[k][j]: contiguous (g == 1), one length.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1)}},
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0)}},
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      if (!runPartition("C3 plain", F, off, 3, box(3, 3), 3, 1, 1, 16, 64, hist))
+        return 1;
+    }
+
+    // CASE 1: det(T) == -9, stride g == 3, non-contiguous fibers. 37 output
+    // fibers, 64 source MACs, length histogram {1:18, 2:12, 3:6, 4:1}.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(-2)},
+                    {BigInt(1), BigInt(1), BigInt(1)}},
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(1)},
+                    {BigInt(1), BigInt(-2), BigInt(1)}},
+          IntMatrix{{BigInt(1), BigInt(1), BigInt(-2)},
+                    {BigInt(1), BigInt(-2), BigInt(1)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(6), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(6)},
+                                   IntRow{BigInt(6), BigInt(6)}};
+      if (!runPartition("C3 CASE1", F, off, 3, box(3, 3), 3, 3, 4, 37, 64, hist))
+        return 1;
+      bool distOk = hist.size() == 4 && hist[1] == 18 && hist[2] == 12 &&
+                    hist[3] == 6 && hist[4] == 1;
+      if (verify(distOk, "C3 CASE1: fiber-length histogram {1:18,2:12,3:6,4:1}"))
+        return 1;
+    }
+
+    // Piecewise-affine bounds / variable fiber lengths: plain GEMM over a
+    // banded source domain i + k <= 3, so L(i) = 4 - i (lengths 4,3,2,1).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1)}},
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0)}},
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      IntegerPolyhedron tri = box(3, 3);
+      tri.addInequality({-1, 0, -1, 3}); // 3 - x0 - x2 >= 0  (i + k <= 3)
+      if (!runPartition("C3 banded", F, off, 3, tri, 3, 1, 4, 16, 40, hist))
+        return 1;
+    }
+
+    // Empty source domain: a valid partition with no fibers.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1)}},
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0)}},
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      IntegerPolyhedron empty = box(3, 3);
+      empty.addInequality({1, 0, 0, -5}); // x0 >= 5 contradicts x0 <= 3
+      if (!runPartition("C3 empty", F, off, 3, empty, 3, 1, 0, 0, 0, hist))
+        return 1;
+    }
+
+    // Standard batched GEMM, one batch dim: C[b][i][j] += A[b][i][k]*B[b][k][j];
+    // source x = (b,i,j,k). Genuine parallel batch (C indexed by b): operand and
+    // output addresses depend on b, g == 1, one length group.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}};
+      if (!runPartition("C3 batched1", F, off, 4, box(4,3), 3, 1, 1, 64, 256, hist))
+        return 1;
+    }
+
+    // Batched GEMM, two batch dims: C[b0][b1][i][j] += A[b0][b1][i][k]*B[b0][b1][k][j];
+    // source x = (b0,b1,i,j,k).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0),BigInt(0)}};
+      if (!runPartition("C3 batched2", F, off, 5, box(5,2), 2, 1, 1, 81, 243, hist))
+        return 1;
+    }
+
+    // Batch-dependent K bounds: batched GEMM over k <= b, so L(b) = b + 1
+    // (lengths 1,2,3,4 across the batch coordinate).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}};
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({1, 0, 0, -1, 0}); // b - k >= 0  (k <= b)
+      if (!runPartition("C3 batchK", F, off, 4, dom, 3, 1, 4, 64, 160, hist))
+        return 1;
+    }
+
+    // Batched + stride-3 non-contiguous skew: batched CASE 1. Genuine batch,
+    // batch-dependent skewed operand/output addresses, g == 3, variable length.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0),BigInt(6),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(6)},IntRow{BigInt(0),BigInt(6),BigInt(6)}};
+      if (!runPartition("C3 batchedCase1", F, off, 4, box(4,3), 3, 3, 4, 148, 256, hist))
+        return 1;
+    }
+
+    // Empty batched domain: a valid partition with no fibers.
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(0),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(0),BigInt(0)},{BigInt(0),BigInt(1),BigInt(0),BigInt(0)},{BigInt(0),BigInt(0),BigInt(1),BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)},IntRow{BigInt(0),BigInt(0),BigInt(0)}};
+      IntegerPolyhedron dom = box(4, 3);
+      dom.addInequality({1, 0, 0, 0, -5}); // b >= 5 contradicts b <= 3
+      if (!runPartition("C3 batchEmpty", F, off, 4, dom, 3, 1, 0, 0, 0, hist))
+        return 1;
+    }
+
+    // Batch coordinates do NOT distinguish physical output addresses: a double
+    // reduction C[i][j] += A[i][k1][k2]*B[k1][k2][j]. The recognizer demotes the
+    // extra contraction axis to "batch", but C is not indexed by it, so distinct
+    // logical outputs alias one physical C element. Reductions are not
+    // independent -> refuse conservatively with UNKNOWN (requirement 10).
+    {
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(0), BigInt(1)}},
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0), BigInt(0)}},
+          IntMatrix{{BigInt(1), BigInt(0), BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0), BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          F, off, box(4, 3), 4,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(!part.has_value(),
+                 "C3 multi-axis contraction: refused (UNKNOWN)"))
+        return 1;
+      if (verify(why.find("UNKNOWN") != std::string::npos &&
+                     (why.find("batch") != std::string::npos ||
+                      why.find("reduction") != std::string::npos),
+                 "C3 multi-axis contraction: reason names the unsupported axis"))
+        return 1;
+    }
+
+    // Overflow / unrepresentable: a coefficient outside i64 is refused.
+    {
+      const BigInt big = BigInt(std::numeric_limits<std::int64_t>::max()) + 1;
+      std::array<IntMatrix, 3> F = {
+          IntMatrix{{big, BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(0), BigInt(1)}},
+          IntMatrix{{BigInt(0), BigInt(0), BigInt(1)},
+                    {BigInt(0), BigInt(1), BigInt(0)}},
+          IntMatrix{{big, BigInt(0), BigInt(0)},
+                    {BigInt(0), BigInt(1), BigInt(0)}}};
+      std::array<IntRow, 3> off = {IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)},
+                                   IntRow{BigInt(0), BigInt(0)}};
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          F, off, box(3, 3), 3,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(!part.has_value(), "C3 overflow: refused (UNKNOWN)"))
+        return 1;
+    }
+
+    std::cout << "Phase C3 symbolic tile partition tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
