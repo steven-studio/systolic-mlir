@@ -14347,12 +14347,66 @@ int main() {
         return 1;
     }
 
-    // Coverage boundary at the PARTITION level: a pure replication loop (an IV
-    // in no access) makes buildSymbolicTilePartition refuse (output aliases),
-    // so there are no certified pieces to count -> the symbolic counter is not
-    // reached. Documented as an UNKNOWN-at-partition case (needs a partition
-    // extension, not a counting extension). source (p,i,j,k), p a replication.
+    // C4a-sym.0a: a pure replication loop (an IV in NO access) is now CERTIFIED
+    // by buildSymbolicTilePartition as an additional reduction MULTIPLICITY --
+    // not refused. The replication axis folds into every fiber: the physical
+    // output-fiber count is unchanged (the axis does not index C), each fiber's
+    // length is multiplied by the axis extent, and the source-MAC multiplicity
+    // is preserved. Cross-checked against an independent brute oracle that groups
+    // the source box by PHYSICAL C address (enumeration confined to the test).
+    //
+    // (This block replaces the former replication-refusal feature-boundary test.
+    // Its RF/RO/dom input is identical; only the expected verdict is stronger --
+    // from "refused" to the exact certified counts.)
     {
+      using systolic::logical::countPartitionBlocks;
+      using systolic::logical::ReductionOrderDecision;
+      // Independent brute oracle: distinct physical C addresses (fibers) and the
+      // total source-MAC count over a box domain, grouped by physical C.
+      auto bruteByC = [](const std::array<IntMatrix, 3> &F,
+                         const std::array<IntRow, 3> &O,
+                         const std::vector<std::pair<long, long>> &boxr, long N,
+                         long &fibers, long &macs) {
+        const unsigned r = static_cast<unsigned>(boxr.size());
+        std::vector<long> x(r);
+        std::map<long, long> perC;
+        long total = 0;
+        std::function<void(unsigned)> rec = [&](unsigned d) {
+          if (d == r) {
+            long c0 = (long)O[2][0].convert_to<std::int64_t>();
+            long c1 = (long)O[2][1].convert_to<std::int64_t>();
+            for (unsigned s = 0; s < r; ++s) {
+              c0 += (long)F[2][0][s].convert_to<std::int64_t>() * x[s];
+              c1 += (long)F[2][1][s].convert_to<std::int64_t>() * x[s];
+            }
+            perC[c0 * N + c1]++;
+            ++total;
+            return;
+          }
+          for (x[d] = boxr[d].first; x[d] <= boxr[d].second; ++x[d])
+            rec(d + 1);
+        };
+        rec(0);
+        fibers = (long)perC.size();
+        macs = total;
+      };
+      // Build a box domain over `boxr` (rank = boxr.size()).
+      auto boxDom = [](const std::vector<std::pair<long, long>> &boxr) {
+        const unsigned r = static_cast<unsigned>(boxr.size());
+        IntegerPolyhedron d(PresburgerSpace::getSetSpace(r, 0, 0));
+        for (unsigned a = 0; a < r; ++a) {
+          llvm::SmallVector<std::int64_t> lo(r + 1, 0), up(r + 1, 0);
+          lo[a] = 1;
+          lo[r] = -boxr[a].first;
+          d.addInequality(lo);
+          up[a] = -1;
+          up[r] = boxr[a].second;
+          d.addInequality(up);
+        }
+        return d;
+      };
+
+      // --- Converted test: identical RF/RO/dom (p = source axis 0, extent 2). ---
       std::array<IntMatrix, 3> RF = {
           IntMatrix{{BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1)}},
           IntMatrix{{BigInt(0),BigInt(1),BigInt(1),BigInt(1)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}},
@@ -14371,13 +14425,111 @@ int main() {
         up[4] = 3;
         dom.addInequality(up);
       }
-      std::string why;
-      auto part = buildSymbolicTilePartition(
-          RF, RO, dom, 4,
-          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
-      if (verify(!part.has_value(),
-                 "M-count replication refused at the partition (no pieces)"))
-        return 1;
+      {
+        auto T = sourceToLogicalMatrix(RF, 4);
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            RF, RO, dom, 4, ReductionOrderDecision::PreserveSourceOrder, why);
+        if (verify(T.has_value() && part.has_value(),
+                   "C4a-sym.0a replication certified (was the refusal test)"))
+          return 1;
+        if (verify(part->replicationSourceAxes.size() == 1 &&
+                       part->replicationSourceAxes[0] == 0 &&
+                       part->replicationExtent == 2,
+                   "C4a-sym.0a replication axis 0 folded, extent 2"))
+          return 1;
+        long bf, bm;
+        bruteByC(RF, RO, {{0,1},{0,3},{0,3},{0,3}}, 16, bf, bm);
+        auto counts = countPartitionBlocks(*part, *T, 4);
+        if (verify(counts.has_value() && counts->outputFibers == BigInt(37) &&
+                       counts->sourceMACs == BigInt(128),
+                   "C4a-sym.0a replication R=2: 37 fibers / 128 MACs"))
+          return 1;
+        if (verify(counts->outputFibers == BigInt(bf) &&
+                       counts->sourceMACs == BigInt(bm),
+                   "C4a-sym.0a replication R=2 matches brute-by-physical-C"))
+          return 1;
+      }
+
+      // --- Replication extent 3 (same axis, same frame). ---
+      {
+        IntegerPolyhedron dom3 = boxDom({{0,2},{0,3},{0,3},{0,3}});
+        auto T = sourceToLogicalMatrix(RF, 4);
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            RF, RO, dom3, 4, ReductionOrderDecision::PreserveSourceOrder, why);
+        long bf, bm;
+        bruteByC(RF, RO, {{0,2},{0,3},{0,3},{0,3}}, 16, bf, bm);
+        auto counts = part ? countPartitionBlocks(*part, *T, 4) : std::nullopt;
+        if (verify(part.has_value() && part->replicationExtent == 3 &&
+                       counts.has_value() &&
+                       counts->outputFibers == BigInt(37) &&
+                       counts->sourceMACs == BigInt(192) &&
+                       counts->outputFibers == BigInt(bf) &&
+                       counts->sourceMACs == BigInt(bm),
+                   "C4a-sym.0a replication R=3: 37/192 == brute"))
+          return 1;
+      }
+
+      // --- Replication axis in a NON-outermost position (source axis 1). ---
+      // source (i, p, j, k): zero column at index 1.
+      std::array<IntMatrix, 3> PF = {
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(1),BigInt(-2)},{BigInt(1),BigInt(0),BigInt(1),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(1),BigInt(1)},{BigInt(1),BigInt(0),BigInt(-2),BigInt(1)}},
+          IntMatrix{{BigInt(1),BigInt(0),BigInt(1),BigInt(-2)},{BigInt(1),BigInt(0),BigInt(-2),BigInt(1)}}};
+      IntegerPolyhedron pdom = boxDom({{0,3},{0,1},{0,3},{0,3}});
+      {
+        // Strict FP (PreserveSourceOrder): order not source-equivalent -> UNKNOWN.
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            PF, RO, pdom, 4, ReductionOrderDecision::PreserveSourceOrder, why);
+        if (verify(!part.has_value(),
+                   "C4a-sym.0a non-outermost replication refused under strict FP"))
+          return 1;
+      }
+      {
+        // Reassociation permitted: accepted, counts exact.
+        auto T = sourceToLogicalMatrix(PF, 4);
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            PF, RO, pdom, 4, ReductionOrderDecision::ReassociationCandidate, why);
+        long bf, bm;
+        bruteByC(PF, RO, {{0,3},{0,1},{0,3},{0,3}}, 16, bf, bm);
+        auto counts = part ? countPartitionBlocks(*part, *T, 4) : std::nullopt;
+        if (verify(part.has_value() && counts.has_value() &&
+                       counts->outputFibers == BigInt(37) &&
+                       counts->sourceMACs == BigInt(128) &&
+                       counts->outputFibers == BigInt(bf) &&
+                       counts->sourceMACs == BigInt(bm),
+                   "C4a-sym.0a non-outermost replication under reassoc: 37/128 "
+                   "== brute"))
+          return 1;
+      }
+
+      // --- Two independent replication axes (source axes 0,1), R = 4. ---
+      std::array<IntMatrix, 3> TF = {
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(1)},{BigInt(0),BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}}};
+      {
+        IntegerPolyhedron tdom = boxDom({{0,1},{0,1},{0,3},{0,3},{0,3}});
+        auto T = sourceToLogicalMatrix(TF, 5);
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            TF, RO, tdom, 5, ReductionOrderDecision::PreserveSourceOrder, why);
+        long bf, bm;
+        bruteByC(TF, RO, {{0,1},{0,1},{0,3},{0,3},{0,3}}, 16, bf, bm);
+        auto counts = part ? countPartitionBlocks(*part, *T, 5) : std::nullopt;
+        if (verify(part.has_value() && part->replicationSourceAxes.size() == 2 &&
+                       part->replicationExtent == 4 && counts.has_value() &&
+                       counts->outputFibers == BigInt(37) &&
+                       counts->sourceMACs == BigInt(256) &&
+                       counts->outputFibers == BigInt(bf) &&
+                       counts->sourceMACs == BigInt(bm),
+                   "C4a-sym.0a two replication axes R=4: 37/256 == brute"))
+          return 1;
+      }
+      std::cout << "C4a-sym.0a replication partition tests passed.\n";
     }
 
     // ========================================================

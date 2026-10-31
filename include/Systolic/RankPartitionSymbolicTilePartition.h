@@ -93,6 +93,18 @@ struct SymbolicTilePartition {
   ReductionOrderDecision reductionOrder =
       ReductionOrderDecision::PreserveSourceOrder;
   std::vector<TileFiberGroup> groups;
+
+  // C4a-sym.0a: unused source iteration (replication) axes -- source axes in NO
+  // operand access -- folded into the reduction. Empty for a clean partition.
+  // Each group's `length` ALREADY includes the replication multiplicity
+  // `replicationExtent` (= product of those axes' extents); the anchor pieces
+  // pin each replication batch coordinate to its lower bound, so every anchor is
+  // one physical output fiber. These axes are the outermost source dimensions
+  // (certified at build time) so a replication-outer gather reproduces the
+  // source accumulation order; otherwise the partition is refused under
+  // PreserveSourceOrder.
+  std::vector<unsigned> replicationSourceAxes;
+  std::int64_t replicationExtent = 1;
 };
 
 namespace symbolic_tile_detail {
@@ -287,10 +299,63 @@ inline std::optional<SymbolicTilePartition> buildSymbolicTilePartition(
   // "batch" (e.g. C[i][j] with a second contraction axis) leaves C
   // rank-deficient over the outputs, so distinct outputs alias and tiling them
   // as independent reductions would change semantics -> UNKNOWN.
-  if (rankOf(accessMatrices[2], n) != outputDims) {
-    why = "UNKNOWN: output access aliases distinct logical outputs "
-          "(a batch/extra axis does not index C -- reductions not independent)";
-    return std::nullopt;
+  // Output injectivity. A clean single-reduction GEMM has C injective on the
+  // output logical coordinates: rank(C_rows) == outputDims. C4a-sym.0a admits
+  // ONE generalization -- UNUSED source iteration dimensions (replication): a
+  // source axis in NO operand access. Such an axis becomes a batch logical
+  // coordinate that C does not index; because every physical address is
+  // independent of it, it introduces no distinct physical output, only a
+  // reduction multiplicity. Any OTHER rank deficiency (a singular output map --
+  // a real output axis C fails to index) is C4a-sym.0b and is refused here.
+  std::vector<unsigned> replicationSourceAxes; // source axes in no access
+  for (unsigned s = 0; s < sourceRank; ++s) {
+    bool used = false;
+    for (unsigned op = 0; op < 3 && !used; ++op)
+      for (const IntRow &row : accessMatrices[op])
+        if (s < row.size() && row[s] != 0) {
+          used = true;
+          break;
+        }
+    if (!used)
+      replicationSourceAxes.push_back(s);
+  }
+  const unsigned rankC = rankOf(accessMatrices[2], n);
+  const unsigned replCount = static_cast<unsigned>(replicationSourceAxes.size());
+  if (rankC != outputDims) {
+    // The deficiency must be EXACTLY the replication axes -- nothing else. A
+    // singular output (rankC + replCount < outputDims) fails closed.
+    if (replCount == 0 || rankC + replCount != outputDims) {
+      why = "UNKNOWN: output access aliases distinct logical outputs "
+            "(a batch/extra axis does not index C -- reductions not independent)";
+      return std::nullopt;
+    }
+    // Strict-FP source-order obligation. A replication axis repeats every MAC
+    // once per outer iteration; the fiber's source order equals "base fiber,
+    // repeated per replication tuple" EXACTLY when every replication axis is
+    // lexicographically outer to every reduction/output axis -- i.e. the
+    // replication axes are the outermost source prefix {0,...,replCount-1}.
+    // Then a replication-outer gather reproduces the source order. Otherwise
+    // the summation order interleaves and is not proven source-equivalent, so
+    // PreserveSourceOrder refuses (fail closed); reassociation accepts.
+    bool outermostPrefix = true;
+    for (unsigned t = 0; t < replCount; ++t)
+      if (replicationSourceAxes[t] != t) {
+        outermostPrefix = false;
+        break;
+      }
+    // Fail closed: when the order is NOT proven source-equivalent (replication
+    // not an outermost prefix), accept only if reassociation is explicitly
+    // permitted; PreserveSourceOrder and the weaker NoOutputWriteCollision both
+    // refuse.
+    if (!outermostPrefix &&
+        reductionOrder != ReductionOrderDecision::ReassociationCandidate) {
+      why = "UNKNOWN: replication axis is not an outermost source dimension; the "
+            "summation order is not proven source-equivalent without "
+            "reassociation";
+      return std::nullopt;
+    }
+  } else {
+    replicationSourceAxes.clear(); // clean partition: nothing to fold.
   }
   // The output must also be constant along the reduction (C does not vary with
   // k): C_source_rows . (reduction direction M[:,kIdx]) == 0. Together with the
@@ -319,6 +384,92 @@ inline std::optional<SymbolicTilePartition> buildSymbolicTilePartition(
   out.kIndex = kIdx;
   out.hasReduction = (frame.kDims == 1);
 
+  // C4a-sym.0a replication fold. Pin each replication batch logical coordinate
+  // (a batch column no operand indexes) to its lower bound -- selecting ONE
+  // anchor per physical output fiber -- and multiply every realised fiber
+  // length by R = product of those axes' extents. No-op for a clean partition
+  // (replicationSourceAxes empty). Returns false (UNKNOWN) when the replication
+  // extent is not a constant finite interval (coupled or unbounded), so the
+  // multiplicity would not be identical across fibers.
+  auto foldReplication = [&]() -> bool {
+    if (replicationSourceAxes.empty())
+      return true;
+    std::vector<unsigned> replCols;
+    for (unsigned col = frame.batchBegin(); col < n; ++col) {
+      bool anyNonzero = false;
+      for (unsigned op = 0; op < 3 && !anyNonzero; ++op)
+        for (const auto &row : contraction->access[op].rows)
+          if (col < row.size() && row[col] != 0) {
+            anyNonzero = true;
+            break;
+          }
+      if (!anyNonzero)
+        replCols.push_back(col);
+    }
+    if (replCols.size() != replicationSourceAxes.size()) {
+      why = "UNKNOWN: replication source/logical axis-count mismatch";
+      return false;
+    }
+    BigInt R(1);
+    std::vector<std::int64_t> pinLo(replCols.size());
+    for (std::size_t idx = 0; idx < replCols.size(); ++idx) {
+      const unsigned col = replCols[idx];
+      auto lb = D.getConstantBound64(BoundType::LB, col);
+      auto ub = D.getConstantBound64(BoundType::UB, col);
+      if (!lb || !ub || *ub < *lb) {
+        why = "UNKNOWN: replication axis extent not a constant finite interval";
+        return false;
+      }
+      // Box-separability: no image constraint couples this column with another
+      // variable, so its extent is identical for every fiber.
+      auto coupled = [&](llvm::ArrayRef<llvm::DynamicAPInt> row) -> bool {
+        if (row[col] == llvm::DynamicAPInt(0))
+          return false;
+        for (unsigned j = 0; j < n + added; ++j)
+          if (j != col && row[j] != llvm::DynamicAPInt(0))
+            return true;
+        return false;
+      };
+      for (unsigned r = 0; r < D.getNumInequalities(); ++r)
+        if (coupled(D.getInequality(r))) {
+          why = "UNKNOWN: replication axis coupled in the image (non-constant "
+                "extent)";
+          return false;
+        }
+      for (unsigned r = 0; r < D.getNumEqualities(); ++r)
+        if (coupled(D.getEquality(r))) {
+          why = "UNKNOWN: replication axis coupled in the image";
+          return false;
+        }
+      pinLo[idx] = *lb;
+      R *= BigInt(*ub - *lb + 1);
+    }
+    auto R64 = toI64(R);
+    if (!R64 || *R64 <= 0) {
+      why = "UNKNOWN: replication multiplicity overflows i64";
+      return false;
+    }
+    for (auto &group : out.groups) {
+      BigInt scaled = BigInt(group.length) * R;
+      auto s64 = toI64(scaled);
+      if (!s64) {
+        why = "UNKNOWN: folded fiber length overflows i64";
+        return false;
+      }
+      group.length = *s64;
+      for (auto &P : group.anchorPieces)
+        for (std::size_t idx = 0; idx < replCols.size(); ++idx) {
+          llvm::SmallVector<std::int64_t> eq(P.getNumCols(), 0);
+          eq[replCols[idx]] = 1;
+          eq[P.getNumCols() - 1] = -pinLo[idx];
+          P.addEquality(eq);
+        }
+    }
+    out.replicationSourceAxes = replicationSourceAxes;
+    out.replicationExtent = *R64;
+    return true;
+  };
+
   // Empty domain: a valid partition with no fibers.
   if (D.isIntegerEmpty()) {
     out.stride = 1;
@@ -337,6 +488,8 @@ inline std::optional<SymbolicTilePartition> buildSymbolicTilePartition(
     grp.length = 1;
     grp.anchorPieces.push_back(D);
     out.groups.push_back(std::move(grp));
+    if (!foldReplication())
+      return std::nullopt;
     return out;
   }
 
@@ -621,6 +774,8 @@ inline std::optional<SymbolicTilePartition> buildSymbolicTilePartition(
       out.groups.push_back(std::move(group));
   }
 
+  if (!foldReplication())
+    return std::nullopt;
   why = "symbolic tile partition built";
   return out;
 }
