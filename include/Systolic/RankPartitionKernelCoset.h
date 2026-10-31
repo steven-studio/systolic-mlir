@@ -36,6 +36,7 @@
 
 #include "mlir/Analysis/Presburger/IntegerRelation.h"
 #include "mlir/Analysis/Presburger/Matrix.h"
+#include "mlir/Analysis/Presburger/PresburgerSpace.h"
 
 #include <algorithm>
 #include <optional>
@@ -80,9 +81,11 @@ inline std::optional<BigInt> fromAPInt(const llvm::DynamicAPInt &v) {
 /// ker_Z(C_rows). outputRank = rank(C_rows), kernelRank = n - outputRank.
 struct IntegerKernelBasis {
   IntMatrix U;                                    // n x n, systolic BigInt
+  IntMatrix Uinv;                                 // n x n, exact integer inverse
   unsigned outputRank = 0;                        // r = rank(C_rows)
   unsigned kernelRank = 0;                        // kappa = n - r
   std::vector<std::vector<BigInt>> kernelColumns; // kappa columns, each length n
+  std::vector<unsigned> kernelColIndices;         // columns of U that span K_C
 };
 
 inline std::optional<IntegerKernelBasis>
@@ -127,9 +130,28 @@ buildIntegerKernelBasis(const IntMatrix &Crows, unsigned n) {
 
   // Certificate 2: U unimodular (det +/-1) -> its columns are a Z-basis of Z^n,
   // so the kernel columns are a COMPLETE integer basis of K_C (not rational).
-  llvm::DynamicAPInt det = U.determinant(nullptr);
+  // determinant(&adj) stores the ADJUGATE (U*adj = det*I); for det = +/-1 the
+  // exact integer inverse is U^{-1} = det * adj (since 1/det == det).
+  mlir::presburger::IntMatrix adj(n, n);
+  llvm::DynamicAPInt det = U.determinant(&adj);
   if (det != llvm::DynamicAPInt(1) && det != llvm::DynamicAPInt(-1))
     return std::nullopt;
+  mlir::presburger::IntMatrix Uinv(n, n);
+  for (unsigned i = 0; i < n; ++i)
+    for (unsigned j = 0; j < n; ++j)
+      Uinv.at(i, j) = det * adj.at(i, j);
+  // Certificate 2b: U * Uinv == I and Uinv * U == I (exact integer inverse).
+  for (unsigned i = 0; i < n; ++i)
+    for (unsigned j = 0; j < n; ++j) {
+      llvm::DynamicAPInt a(0), b(0);
+      for (unsigned t = 0; t < n; ++t) {
+        a += U.at(i, t) * Uinv.at(t, j);
+        b += Uinv.at(i, t) * U.at(t, j);
+      }
+      llvm::DynamicAPInt want(i == j ? 1 : 0);
+      if (a != want || b != want)
+        return std::nullopt;
+    }
 
   // Kernel columns = the all-zero columns of H (C * U_col = 0); the rest count
   // toward the rank. H is a column HNF, so its nonzero columns are the rank.
@@ -154,15 +176,19 @@ buildIntegerKernelBasis(const IntMatrix &Crows, unsigned n) {
   if (static_cast<unsigned>(kernelCols.size()) != out.kernelRank)
     return std::nullopt;
 
-  // Convert U to systolic BigInt (i64-overflow checked).
+  // Convert U and Uinv to systolic BigInt (i64-overflow checked).
   out.U.assign(n, IntRow(n, BigInt(0)));
+  out.Uinv.assign(n, IntRow(n, BigInt(0)));
   for (unsigned i = 0; i < n; ++i)
     for (unsigned j = 0; j < n; ++j) {
       auto v = fromAPInt(U.at(i, j));
-      if (!v)
+      auto w = fromAPInt(Uinv.at(i, j));
+      if (!v || !w)
         return std::nullopt;
       out.U[i][j] = *v;
+      out.Uinv[i][j] = *w;
     }
+  out.kernelColIndices = kernelCols;
   for (unsigned col : kernelCols) {
     std::vector<BigInt> v(n, BigInt(0));
     for (unsigned i = 0; i < n; ++i)
@@ -290,6 +316,152 @@ countKernelCosetCounts(const IntMatrix &Crows,
     return out;
   }
   return std::nullopt; // rank >= 2 image: out of M1 scope -> UNKNOWN.
+}
+
+//===----------------------------------------------------------------------===//
+// M2a: exact symbolic kernel-coset fiber representation (analysis-only).
+//===----------------------------------------------------------------------===//
+
+/// Exact reduced domain D' = { y | U*y in D }. Every constraint of D over x is
+/// composed with x = U*y (a_x . x -> (a_x^T U) . y), preserving all equalities,
+/// inequalities and existential locals. Because U is unimodular the integer
+/// points of D' map bijectively to those of D (no lattice points gained/lost).
+/// No enumeration and no bounding-box/convex-shadow approximation. nullopt on
+/// i64 overflow or an arity mismatch.
+inline std::optional<mlir::presburger::IntegerPolyhedron>
+buildReducedDomain(const IntMatrix &U,
+                   const mlir::presburger::IntegerPolyhedron &D, unsigned n) {
+  if (U.size() != n || D.getNumDimVars() != n || D.getNumSymbolVars() != 0)
+    return std::nullopt;
+  const unsigned locals = D.getNumLocalVars();
+  for (unsigned s = 0; s < n; ++s)
+    if (U[s].size() != n)
+      return std::nullopt;
+  mlir::presburger::IntegerPolyhedron Dp(
+      mlir::presburger::PresburgerSpace::getSetSpace(n, 0, locals));
+  const unsigned cols = n + locals + 1;
+  auto compose = [&](llvm::ArrayRef<llvm::DynamicAPInt> row,
+                     llvm::SmallVector<std::int64_t> &out) -> bool {
+    out.assign(cols, 0);
+    for (unsigned t = 0; t < n; ++t) {
+      BigInt acc = 0;
+      for (unsigned s = 0; s < n; ++s) {
+        auto a = lattice_count_detail::toI64(row[s]);
+        if (!a)
+          return false;
+        acc += BigInt(*a) * U[s][t];
+      }
+      auto v = lattice_count_detail::toI64(acc);
+      if (!v)
+        return false;
+      out[t] = *v;
+    }
+    for (unsigned l = 0; l < locals + 1; ++l) { // locals + constant pass through
+      auto a = lattice_count_detail::toI64(row[n + l]);
+      if (!a)
+        return false;
+      out[n + l] = *a;
+    }
+    return true;
+  };
+  for (unsigned r = 0; r < D.getNumInequalities(); ++r) {
+    llvm::SmallVector<std::int64_t> row;
+    if (!compose(D.getInequality(r), row))
+      return std::nullopt;
+    Dp.addInequality(row);
+  }
+  for (unsigned r = 0; r < D.getNumEqualities(); ++r) {
+    llvm::SmallVector<std::int64_t> row;
+    if (!compose(D.getEquality(r), row))
+      return std::nullopt;
+    Dp.addEquality(row);
+  }
+  return Dp;
+}
+
+/// Source-order certificate status. M2a records Unverified; M3 discharges or
+/// rejects it. An Unverified plan is a symbolic REPRESENTATION only -- never a
+/// license to reorder a strict-FP reduction.
+enum class SourceOrderStatus {
+  Unverified,
+  SourceLexEquivalent,
+  ReassociationRequired
+};
+
+/// M2a: an exact symbolic representation of the integer kernel-coset fibers.
+/// Holds NO array of source points or materialized fibers; a fiber is produced
+/// on demand as the Presburger slice of `reducedDomain` at a fixed output
+/// coordinate (fiberSlice). `outputCols`/`reductionCols` index the reduced
+/// coordinates y (x = U*y); in y the kernel is axis-aligned, and the ragged
+/// fiber boundary is carried by the output-dependent faces of `reducedDomain`.
+struct KernelCosetFiberPlan {
+  IntMatrix U, Uinv;
+  unsigned outputRank = 0, kernelRank = 0;
+  mlir::presburger::IntegerPolyhedron reducedDomain; // D'
+  std::vector<unsigned> outputCols;                  // r output y-columns
+  std::vector<unsigned> reductionCols;               // kappa reduction y-columns
+  BigInt sourceMACs = 0;
+  BigInt outputFibers = 0;
+  SourceOrderStatus sourceOrder = SourceOrderStatus::Unverified;
+
+  explicit KernelCosetFiberPlan(mlir::presburger::IntegerPolyhedron d)
+      : reducedDomain(std::move(d)) {}
+};
+
+/// Build the M2a fiber plan from a physical-C access matrix and source domain.
+/// Reuses M0 (kernel + unimodular U/Uinv) and M1 (exact counts). nullopt
+/// (UNKNOWN) when M0 or M1 is UNKNOWN, or on overflow. The reduced domain is
+/// exact; source order is left Unverified for M3. No enumeration.
+inline std::optional<KernelCosetFiberPlan>
+buildKernelCosetFiberPlan(const IntMatrix &Crows,
+                          const mlir::presburger::IntegerPolyhedron &D,
+                          unsigned n) {
+  auto kb = buildIntegerKernelBasis(Crows, n);
+  if (!kb)
+    return std::nullopt;
+  auto counts = countKernelCosetCounts(Crows, D, n);
+  if (!counts)
+    return std::nullopt;
+  auto dp = buildReducedDomain(kb->U, D, n);
+  if (!dp)
+    return std::nullopt;
+  KernelCosetFiberPlan plan(std::move(*dp));
+  plan.U = kb->U;
+  plan.Uinv = kb->Uinv;
+  plan.outputRank = kb->outputRank;
+  plan.kernelRank = kb->kernelRank;
+  plan.reductionCols = kb->kernelColIndices;
+  std::vector<bool> isKernel(n, false);
+  for (unsigned c : kb->kernelColIndices)
+    if (c < n)
+      isKernel[c] = true;
+  for (unsigned j = 0; j < n; ++j)
+    if (!isKernel[j])
+      plan.outputCols.push_back(j);
+  plan.sourceMACs = counts->sourceMACs;
+  plan.outputFibers = counts->outputFibers;
+  plan.sourceOrder = SourceOrderStatus::Unverified;
+  return plan;
+}
+
+/// One fiber as the exact Presburger slice of `reducedDomain` with each output
+/// coordinate pinned to `yOut[i]`. Its integer points are the reduced
+/// coordinates y of that fiber; x = U*y recovers the source iterations of one
+/// physical-C address. Exact -- a sub-polytope, never a bounding box. nullopt
+/// on an arity mismatch. No enumeration: the slice is symbolic.
+inline std::optional<mlir::presburger::IntegerPolyhedron>
+fiberSlice(const KernelCosetFiberPlan &plan, llvm::ArrayRef<std::int64_t> yOut) {
+  if (yOut.size() != plan.outputCols.size())
+    return std::nullopt;
+  mlir::presburger::IntegerPolyhedron slice = plan.reducedDomain;
+  const unsigned cols = slice.getNumCols();
+  for (std::size_t i = 0; i < plan.outputCols.size(); ++i) {
+    llvm::SmallVector<std::int64_t> eq(cols, 0);
+    eq[plan.outputCols[i]] = 1;
+    eq[cols - 1] = -yOut[i];
+    slice.addEquality(eq);
+  }
+  return slice;
 }
 
 } // namespace systolic::logical

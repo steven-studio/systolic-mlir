@@ -15034,6 +15034,235 @@ int main() {
     std::cout << "C4a-sym kernel-coset M0/M1 tests passed.\n";
   }
 
+  // ========================================================
+  // C4a-sym Kernel-Coset Partition M2a: exact symbolic fiber representation
+  // (KernelCosetFiberPlan over the reduced domain D' = {y | U*y in D}).
+  // Analysis-only; no source-point enumeration in production. The brute-by-
+  // physical-C oracle here is TEST ONLY. Target: C[i+j-2k] += A[i][k]*B[k][j],
+  // 0<=i,j,k<4 -> 64 MACs / 13 fibers, kernel rank 2, ragged fibers.
+  // ========================================================
+  {
+    using mlir::presburger::BoundType;
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetFiberPlan;
+    using systolic::logical::countKernelCosetCounts;
+    using systolic::logical::fiberSlice;
+    using systolic::logical::SourceOrderStatus;
+
+    auto box3 = []() {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(3, 0, 0));
+      for (unsigned a = 0; a < 3; ++a) {
+        llvm::SmallVector<std::int64_t> lo(4, 0), up(4, 0);
+        lo[a] = 1;
+        D.addInequality(lo);
+        up[a] = -1;
+        up[3] = 3;
+        D.addInequality(up);
+      }
+      return D;
+    };
+    // map x = U*y (row i of U dotted with y).
+    auto Ux = [](const IntMatrix &U, unsigned i, const std::vector<long> &y) {
+      long s = 0;
+      for (unsigned t = 0; t < y.size(); ++t)
+        s += (long)U[i][t].convert_to<std::int64_t>() * y[t];
+      return s;
+    };
+    // membership of an integer assignment in a 0-local polyhedron.
+    auto inPoly = [](const IntegerPolyhedron &P, const std::vector<long> &y) {
+      unsigned nd = P.getNumDimVars();
+      if (P.getNumLocalVars())
+        return false;
+      for (unsigned r = 0; r < P.getNumInequalities(); ++r) {
+        auto row = P.getInequality(r);
+        long s = (long)(std::int64_t)row[nd];
+        for (unsigned j = 0; j < nd; ++j)
+          s += (long)(std::int64_t)row[j] * y[j];
+        if (s < 0)
+          return false;
+      }
+      for (unsigned r = 0; r < P.getNumEqualities(); ++r) {
+        auto row = P.getEquality(r);
+        long s = (long)(std::int64_t)row[nd];
+        for (unsigned j = 0; j < nd; ++j)
+          s += (long)(std::int64_t)row[j] * y[j];
+        if (s != 0)
+          return false;
+      }
+      return true;
+    };
+
+    IntMatrix C = {{BigInt(1), BigInt(1), BigInt(-2)}};
+    IntegerPolyhedron D = box3();
+
+    // independent brute oracle: group box points by physical C = i+j-2k.
+    std::map<long, std::set<std::vector<long>>> bruteFib;
+    long bruteMac = 0;
+    for (long i = 0; i < 4; ++i)
+      for (long j = 0; j < 4; ++j)
+        for (long k = 0; k < 4; ++k) {
+          bruteFib[i + j - 2 * k].insert({i, j, k});
+          ++bruteMac;
+        }
+
+    auto plan = buildKernelCosetFiberPlan(C, D, 3);
+    if (verify(plan.has_value() && plan->outputRank == 1 &&
+                   plan->kernelRank == 2 &&
+                   plan->sourceMACs == BigInt(64) &&
+                   plan->outputFibers == BigInt(13) &&
+                   plan->sourceOrder == SourceOrderStatus::Unverified,
+               "M2a plan: rank 1 / kappa 2 / 64 MACs / 13 fibers / order "
+               "Unverified"))
+      return 1;
+    if (verify(plan->outputCols.size() == 1 && plan->outputCols[0] == 0 &&
+                   plan->reductionCols.size() == 2 &&
+                   plan->reductionCols[0] == 1 && plan->reductionCols[1] == 2,
+               "M2a plan output/reduction column split"))
+      return 1;
+    // U * Uinv == I (exact integer inverse).
+    {
+      bool ok = true;
+      for (unsigned i = 0; i < 3 && ok; ++i)
+        for (unsigned j = 0; j < 3; ++j) {
+          long s = 0;
+          for (unsigned t = 0; t < 3; ++t)
+            s += (long)plan->U[i][t].convert_to<std::int64_t>() *
+                 (long)plan->Uinv[t][j].convert_to<std::int64_t>();
+          if (s != (i == j ? 1 : 0))
+            ok = false;
+        }
+      if (verify(ok, "M2a U * Uinv == I"))
+        return 1;
+    }
+
+    // y-bounding box of D'.
+    const IntegerPolyhedron &Dp = plan->reducedDomain;
+    std::vector<long> ylo(3), yhi(3);
+    {
+      bool bounded = true;
+      for (unsigned d = 0; d < 3; ++d) {
+        auto l = Dp.getConstantBound64(BoundType::LB, d);
+        auto h = Dp.getConstantBound64(BoundType::UB, d);
+        if (!l || !h)
+          bounded = false;
+        else {
+          ylo[d] = *l;
+          yhi[d] = *h;
+        }
+      }
+      if (verify(bounded, "M2a reduced domain D' is bounded"))
+        return 1;
+    }
+
+    // D' bijection + physical-C grouping == brute (coverage/disjointness/
+    // multiplicity of the whole partition).
+    {
+      std::map<long, std::set<std::vector<long>>> symFib;
+      long symMac = 0;
+      std::vector<long> y(3);
+      for (y[0] = ylo[0]; y[0] <= yhi[0]; ++y[0])
+        for (y[1] = ylo[1]; y[1] <= yhi[1]; ++y[1])
+          for (y[2] = ylo[2]; y[2] <= yhi[2]; ++y[2]) {
+            if (!inPoly(Dp, y))
+              continue;
+            std::vector<long> x = {Ux(plan->U, 0, y), Ux(plan->U, 1, y),
+                                   Ux(plan->U, 2, y)};
+            symFib[x[0] + x[1] - 2 * x[2]].insert(x);
+            ++symMac;
+          }
+      if (verify(symMac == bruteMac && symFib == bruteFib,
+                 "M2a D' bijection + physical-C grouping == brute (64/13)"))
+        return 1;
+    }
+
+    // fiberSlice: each pinned output coordinate reconstructs exactly one brute
+    // fiber (per-fiber cardinality, reconstruction, unique physical-C owner).
+    {
+      long nonEmpty = 0;
+      bool sliceOk = true;
+      auto y0l = Dp.getConstantBound64(BoundType::LB, plan->outputCols[0]);
+      auto y0h = Dp.getConstantBound64(BoundType::UB, plan->outputCols[0]);
+      for (long y0 = *y0l; y0 <= *y0h && sliceOk; ++y0) {
+        std::int64_t yo[1] = {(std::int64_t)y0};
+        auto sl = fiberSlice(*plan, llvm::ArrayRef<std::int64_t>(yo, 1));
+        if (!sl) {
+          sliceOk = false;
+          break;
+        }
+        std::set<std::vector<long>> pts;
+        long cphys = 0;
+        bool any = false;
+        std::vector<long> yy(3);
+        for (yy[0] = ylo[0]; yy[0] <= yhi[0]; ++yy[0])
+          for (yy[1] = ylo[1]; yy[1] <= yhi[1]; ++yy[1])
+            for (yy[2] = ylo[2]; yy[2] <= yhi[2]; ++yy[2]) {
+              if (!inPoly(*sl, yy))
+                continue;
+              std::vector<long> x = {Ux(plan->U, 0, yy), Ux(plan->U, 1, yy),
+                                     Ux(plan->U, 2, yy)};
+              cphys = x[0] + x[1] - 2 * x[2];
+              pts.insert(x);
+              any = true;
+            }
+        if (!any)
+          continue;
+        ++nonEmpty;
+        if (bruteFib.find(cphys) == bruteFib.end() || bruteFib[cphys] != pts)
+          sliceOk = false;
+      }
+      if (verify(sliceOk && nonEmpty == 13,
+                 "M2a fiberSlice reconstructs all 13 fibers exactly == brute"))
+        return 1;
+    }
+
+    // Negatives: fail closed to UNKNOWN (no plan).
+    {
+      // holey image [1,3] over [0,1]^2 -> M1 image UNKNOWN -> no plan.
+      IntegerPolyhedron H(PresburgerSpace::getSetSpace(2, 0, 0));
+      H.addInequality({1, 0, 0});
+      H.addInequality({-1, 0, 1});
+      H.addInequality({0, 1, 0});
+      H.addInequality({0, -1, 1});
+      if (verify(!buildKernelCosetFiberPlan({{BigInt(1), BigInt(3)}}, H, 2)
+                      .has_value(),
+                 "M2a holey image -> UNKNOWN (no plan)"))
+        return 1;
+    }
+    {
+      // rank-2 output image -> UNKNOWN.
+      IntegerPolyhedron b = box3();
+      if (verify(!buildKernelCosetFiberPlan({{BigInt(1), BigInt(0), BigInt(0)},
+                                             {BigInt(0), BigInt(1), BigInt(0)}},
+                                            b, 3)
+                      .has_value(),
+                 "M2a rank-2 image -> UNKNOWN (no plan)"))
+        return 1;
+    }
+    {
+      // non-box (triangular) domain -> M1 image certificate UNKNOWN -> no plan.
+      IntegerPolyhedron T(PresburgerSpace::getSetSpace(2, 0, 0));
+      T.addInequality({1, 0, 0});
+      T.addInequality({0, 1, 0});
+      T.addInequality({-1, -1, 3});
+      if (verify(
+              !buildKernelCosetFiberPlan({{BigInt(1), BigInt(1)}}, T, 2)
+                   .has_value(),
+              "M2a non-box domain -> UNKNOWN (no plan)"))
+        return 1;
+    }
+    {
+      // i64-overflow coefficient -> UNKNOWN (kernel/inverse rejected).
+      BigInt huge = BigInt(1000000000) * BigInt(1000000000) * BigInt(1000000000);
+      IntegerPolyhedron b = box3();
+      if (verify(!buildKernelCosetFiberPlan({{huge, BigInt(1), BigInt(-2)}}, b, 3)
+                      .has_value(),
+                 "M2a overflow coefficient -> UNKNOWN (no plan)"))
+        return 1;
+    }
+    std::cout << "C4a-sym kernel-coset M2a fiber-representation tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
