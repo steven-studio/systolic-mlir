@@ -416,6 +416,7 @@ New tests/documentation:
 - `test/polynomial-termination/Inputs/loops.mlir`
 - `test/polynomial-termination/TerminationTest.cpp`
 - `test/polynomial-termination/differential.py`
+- `test/polynomial-termination/exhaustive_fuzz.py`
 - `docs/POLYNOMIAL_SUMMATION_P2B.md`
 
 Milestone 1 is ready for review within this documented subset. No unresolved
@@ -423,5 +424,32 @@ soundness defect was found in the final validation. Z3, the semantic encoder,
 and MLIR remain explicit trusted components; tests alone do not prove their
 correctness. No lexicographic, multiphase, or polynomial ranking synthesis,
 general invariant synthesis, symbolic-step extension, or later milestone work
-is included. Merging the verified checkpoint additionally requires a clean main
-worktree; unrelated local work must not be discarded or overwritten.
+is included.
+
+## Integration into main
+
+The checkpoint was merged into `main` on 2026-10-31 as a `--no-ff` merge that
+keeps the branch history. Everything remains research-only: the merge adds no
+production CMake target, pass, lowering, RTL, or runtime dependency. Build and
+run the suites with the commands under "Reproducible validation".
+
+`test/lit.cfg.py` excludes the `test/polynomial-*` directories. Its `.c` suffix
+would otherwise report `polynomial-summation/llvm/recurrences.c`, which has no
+RUN line, as Unresolved. Those directories belong to the standalone projects.
+
+`exhaustive_fuzz.py` is a deterministic CTest soundness test. It executes every
+input of random loops at widths 1..4, including two-state accumulators, block
+shuffles, self-loops, latches, prelude forwarding, and restricted domains.
+Deleting the `strict_descent` obligation makes it fail, which confirms that it
+can detect an unsound verifier. UNKNOWN always passes because the test measures
+soundness, not completeness.
+
+The sanitizers option in `research/polynomial-summation` covers only P0. To
+sanitize every phase, configure this project with:
+
+```sh
+-DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined"
+-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+```
+
+`-fno-sanitize=vptr` is required because the LLVM package disables RTTI.

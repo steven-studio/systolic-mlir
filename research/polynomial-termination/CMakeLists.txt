@@ -32,13 +32,17 @@ find_program(P2B_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" 
 find_program(P2B_CLANG clang HINTS "${LLVM_TOOLS_BINARY_DIR}" "$ENV{HOME}/work/clang24-build/bin" REQUIRED)
 find_program(P2B_LIT llvm-lit HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(P2B_FILECHECK FileCheck HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
-find_program(P2B_NOT not HINTS "${LLVM_TOOLS_BINARY_DIR}" "/usr/lib/llvm-18/bin" REQUIRED)
+find_program(P2B_NOT not HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 add_test(NAME polynomial-termination-independent COMMAND "${Python3_EXECUTABLE}"
   "${P2B_ROOT}/test/polynomial-termination/differential.py"
   --driver $<TARGET_FILE:polynomial-termination-report> --mlir-opt "${P2B_MLIR_OPT}"
   --mlir-translate "${P2B_MLIR_TRANSLATE}" --clang "${P2B_CLANG}"
   --z3-library "${P2B_Z3_LIBRARY}")
 set_tests_properties(polynomial-termination-independent PROPERTIES TIMEOUT 300)
+add_test(NAME polynomial-termination-exhaustive-fuzz COMMAND "${Python3_EXECUTABLE}"
+  "${P2B_ROOT}/test/polynomial-termination/exhaustive_fuzz.py"
+  --driver $<TARGET_FILE:polynomial-termination-report> --mlir-opt "${P2B_MLIR_OPT}")
+set_tests_properties(polynomial-termination-exhaustive-fuzz PROPERTIES TIMEOUT 300)
 configure_file(lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME polynomial-termination-lit COMMAND "${P2B_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(polynomial-termination-lit PROPERTIES TIMEOUT 90)

@@ -51,7 +51,7 @@ add_test(NAME polynomial-cfg-symbolic
 find_program(P1_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(P1_FILECHECK FileCheck HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 find_program(P1_LIT llvm-lit HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
-find_program(P1_NOT not HINTS "${LLVM_TOOLS_BINARY_DIR}" "/usr/lib/llvm-18/bin" REQUIRED)
+find_program(P1_NOT not HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 add_test(NAME polynomial-cfg-independent-oracle
   COMMAND "${Python3_EXECUTABLE}"
     "${P1_ROOT}/test/polynomial-summation-mlir/differential.py"
