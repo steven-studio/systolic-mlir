@@ -1,0 +1,11 @@
+import os
+import lit.formats
+config.name = "generalized-gemm"
+config.test_format = lit.formats.ShTest(execute_external=False)
+config.suffixes = [".mlir"]
+config.test_source_root = "@CMAKE_CURRENT_SOURCE_DIR@/test/lit"
+config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/lit"
+config.excludes = ["Inputs"]
+config.substitutions.append(("%report", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-report"))
+config.substitutions.append(("FileCheck", "@GG_FILECHECK@"))
+config.substitutions.append((" not ", " @GG_NOT@ "))
