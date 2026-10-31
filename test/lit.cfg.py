@@ -50,6 +50,13 @@ config.excludes = [
     "e2e",
     # Inputs other tests' RUN lines read (%S/Inputs/...); not tests.
     "Inputs",
+    # The polynomial analyses have their own standalone CMake and lit projects
+    # (research/polynomial-*). Their sources here are test programs and C
+    # fixtures such as polynomial-summation/llvm/recurrences.c, not lit tests.
+    "polynomial-summation",
+    "polynomial-summation-mlir",
+    "polynomial-summation-p2a",
+    "polynomial-termination",
 ]
 
 
