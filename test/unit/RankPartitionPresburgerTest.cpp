@@ -15,6 +15,7 @@
 #include "Systolic/RankPartitionGuardGeneration.h"
 #include "Systolic/RankPartitionGuardEmission.h"
 #include "Systolic/RankPartitionLatticeCount.h"
+#include "Systolic/RankPartitionKernelCoset.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -14801,6 +14802,236 @@ int main() {
     }
 
     std::cout << "M-count symbolic lattice-count tests passed.\n";
+  }
+
+  // ========================================================
+  // C4a-sym General Kernel-Coset Partition, M0 (exact integer kernel) + M1
+  // (exact sourceMACs = |D| and outputFibers = |C_rows(D)|). Analysis-only; no
+  // source-point enumeration in the counters. The brute oracles here are TEST
+  // ONLY. Target: C[i+j-2k] += A[i][k]*B[k][j], 0<=i,j,k<4 -> 64 MACs/13 fibers.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildIntegerKernelBasis;
+    using systolic::logical::countKernelCosetCounts;
+    auto box = [](std::vector<std::pair<long, long>> b) {
+      unsigned r = static_cast<unsigned>(b.size());
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(r, 0, 0));
+      for (unsigned a = 0; a < r; ++a) {
+        llvm::SmallVector<std::int64_t> lo(r + 1, 0), up(r + 1, 0);
+        lo[a] = 1;
+        lo[r] = -b[a].first;
+        D.addInequality(lo);
+        up[a] = -1;
+        up[r] = b[a].second;
+        D.addInequality(up);
+      }
+      return D;
+    };
+    // brute: distinct physical-C vectors (fibers) + total points (MACs).
+    auto bruteCounts = [](const IntMatrix &C,
+                          const std::vector<std::pair<long, long>> &b, long &fib,
+                          long &mac) {
+      unsigned r = static_cast<unsigned>(b.size());
+      std::map<std::vector<long>, long> cs;
+      long tot = 0;
+      std::vector<long> x(r);
+      std::function<void(unsigned)> rec = [&](unsigned d) {
+        if (d == r) {
+          std::vector<long> cv;
+          for (const auto &row : C) {
+            long s = 0;
+            for (unsigned t = 0; t < r; ++t)
+              s += (long)row[t].convert_to<std::int64_t>() * x[t];
+            cv.push_back(s);
+          }
+          cs[cv]++;
+          ++tot;
+          return;
+        }
+        for (x[d] = b[d].first; x[d] <= b[d].second; ++x[d])
+          rec(d + 1);
+      };
+      rec(0);
+      fib = (long)cs.size();
+      mac = tot;
+    };
+    // brute: the kernel columns generate the COMPLETE integer kernel over a box
+    // (every integer v with C*v==0 is an integer combination of the basis).
+    auto kernelComplete = [](const IntMatrix &C,
+                             const std::vector<std::vector<BigInt>> &basis,
+                             unsigned n) -> bool {
+      long N = 4, M = 10;
+      std::vector<long> v(n);
+      std::function<bool(unsigned)> rec = [&](unsigned d) -> bool {
+        if (d == n) {
+          for (const auto &row : C) {
+            long s = 0;
+            for (unsigned t = 0; t < n; ++t)
+              s += (long)row[t].convert_to<std::int64_t>() * v[t];
+            if (s != 0)
+              return true; // not a kernel vector: nothing to represent.
+          }
+          if (basis.empty()) {
+            for (unsigned t = 0; t < n; ++t)
+              if (v[t] != 0)
+                return false;
+            return true;
+          }
+          if (basis.size() == 1) {
+            for (long a = -M; a <= M; ++a) {
+              bool ok = true;
+              for (unsigned t = 0; t < n; ++t)
+                if ((long)basis[0][t].convert_to<std::int64_t>() * a != v[t])
+                  ok = false;
+              if (ok)
+                return true;
+            }
+            return false;
+          }
+          if (basis.size() == 2) {
+            for (long a = -M; a <= M; ++a)
+              for (long c = -M; c <= M; ++c) {
+                bool ok = true;
+                for (unsigned t = 0; t < n; ++t) {
+                  long s = (long)basis[0][t].convert_to<std::int64_t>() * a +
+                           (long)basis[1][t].convert_to<std::int64_t>() * c;
+                  if (s != v[t])
+                    ok = false;
+                }
+                if (ok)
+                  return true;
+              }
+            return false;
+          }
+          return true; // >2 basis columns not exercised here.
+        }
+        for (v[d] = -N; v[d] <= N; ++v[d])
+          if (!rec(d + 1))
+            return false;
+        return true;
+      };
+      return rec(0);
+    };
+
+    // ---- M0: exact integer kernel foundation ----
+    {
+      IntMatrix C = {{BigInt(1), BigInt(1), BigInt(-2)}};
+      auto kb = buildIntegerKernelBasis(C, 3);
+      if (verify(kb.has_value() && kb->outputRank == 1 && kb->kernelRank == 2 &&
+                     kb->kernelColumns.size() == 2,
+                 "M0 kernel of [1,1,-2]: rank 1, kappa 2"))
+        return 1;
+      if (verify(kernelComplete(C, kb->kernelColumns, 3),
+                 "M0 kernel basis is the COMPLETE integer kernel (brute)"))
+        return 1;
+    }
+    {
+      IntMatrix C = {{BigInt(1), BigInt(0), BigInt(0)},
+                     {BigInt(0), BigInt(1), BigInt(0)}};
+      auto kb = buildIntegerKernelBasis(C, 3);
+      if (verify(kb.has_value() && kb->outputRank == 2 && kb->kernelRank == 1 &&
+                     kernelComplete(C, kb->kernelColumns, 3),
+                 "M0 rank-2 map: rank 2, kappa 1, complete"))
+        return 1;
+    }
+    {
+      IntMatrix C = {{BigInt(0), BigInt(0), BigInt(0)}};
+      auto kb = buildIntegerKernelBasis(C, 3);
+      if (verify(kb.has_value() && kb->outputRank == 0 && kb->kernelRank == 3,
+                 "M0 zero map: rank 0, kappa 3"))
+        return 1;
+    }
+    {
+      BigInt huge = BigInt(1000000000) * BigInt(1000000000) * BigInt(1000000000);
+      IntMatrix C = {{huge, BigInt(1), BigInt(-2)}};
+      if (verify(!buildIntegerKernelBasis(C, 3).has_value(),
+                 "M0 i64-overflow coefficient -> UNKNOWN"))
+        return 1;
+    }
+
+    // ---- M1: exact counts vs brute-by-physical-C ----
+    auto check = [&](const char *nm, IntMatrix C,
+                     std::vector<std::pair<long, long>> b, long expMac,
+                     long expFib) -> int {
+      auto D = box(b);
+      auto c = countKernelCosetCounts(C, D, static_cast<unsigned>(b.size()));
+      long bf, bm;
+      bruteCounts(C, b, bf, bm);
+      return verify(c.has_value() && c->sourceMACs == BigInt(expMac) &&
+                        c->outputFibers == BigInt(expFib) &&
+                        c->sourceMACs == BigInt(bm) &&
+                        c->outputFibers == BigInt(bf),
+                    nm);
+    };
+    if (check("M1 target C[i+j-2k]: 64 MACs / 13 fibers == brute",
+              {{BigInt(1), BigInt(1), BigInt(-2)}}, {{0, 3}, {0, 3}, {0, 3}}, 64,
+              13))
+      return 1;
+    if (check("M1 singular 2-row C: 64 / 13 == brute",
+              {{BigInt(1), BigInt(1), BigInt(-2)},
+               {BigInt(0), BigInt(0), BigInt(0)}},
+              {{0, 3}, {0, 3}, {0, 3}}, 64, 13))
+      return 1;
+    if (check("M1 nonprimitive 2*[1,1,-2]: 64 / 13 == brute",
+              {{BigInt(2), BigInt(2), BigInt(-4)}}, {{0, 3}, {0, 3}, {0, 3}}, 64,
+              13))
+      return 1;
+    if (check("M1 rank-0 constant C: 64 / 1 == brute",
+              {{BigInt(0), BigInt(0), BigInt(0)}}, {{0, 3}, {0, 3}, {0, 3}}, 64,
+              1))
+      return 1;
+
+    // ---- M1 negative cases: UNKNOWN / fail closed ----
+    {
+      auto D = box({{0, 1}, {0, 1}}); // image of [1,3] = {0,1,3,4}: hole at 2.
+      if (verify(
+              !countKernelCosetCounts({{BigInt(1), BigInt(3)}}, D, 2).has_value(),
+              "M1 holey image [1,3] -> UNKNOWN (not the convex length 5)"))
+        return 1;
+    }
+    {
+      auto D = box({{0, 3}, {0, 3}, {0, 3}});
+      if (verify(!countKernelCosetCounts({{BigInt(1), BigInt(0), BigInt(0)},
+                                          {BigInt(0), BigInt(1), BigInt(0)}},
+                                         D, 3)
+                      .has_value(),
+                 "M1 rank-2 image -> UNKNOWN"))
+        return 1;
+    }
+    {
+      // non-box (triangular) domain -> image certificate fails closed.
+      IntegerPolyhedron T(PresburgerSpace::getSetSpace(2, 0, 0));
+      T.addInequality({1, 0, 0});
+      T.addInequality({0, 1, 0});
+      T.addInequality({-1, -1, 3});
+      if (verify(
+              !countKernelCosetCounts({{BigInt(1), BigInt(1)}}, T, 2).has_value(),
+              "M1 non-box (triangular) domain -> UNKNOWN"))
+        return 1;
+    }
+    {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 0));
+      D.addInequality({1, 0, -5}); // x >= 5
+      D.addInequality({-1, 0, 0}); // x <= 0  -> empty
+      D.addInequality({0, 1, 0});
+      D.addInequality({0, -1, 3});
+      auto c = countKernelCosetCounts({{BigInt(1), BigInt(1)}}, D, 2);
+      if (verify(c.has_value() && c->sourceMACs == BigInt(0) &&
+                     c->outputFibers == BigInt(0),
+                 "M1 empty domain -> 0 / 0"))
+        return 1;
+    }
+    {
+      BigInt huge = BigInt(1000000000) * BigInt(1000000000) * BigInt(1000000000);
+      auto D = box({{0, 3}, {0, 3}, {0, 3}});
+      if (verify(!countKernelCosetCounts({{huge, BigInt(1), BigInt(-2)}}, D, 3)
+                      .has_value(),
+                 "M1 overflow coefficient -> UNKNOWN"))
+        return 1;
+    }
+    std::cout << "C4a-sym kernel-coset M0/M1 tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
