@@ -14380,6 +14380,274 @@ int main() {
         return 1;
     }
 
+    // ========================================================
+    // M-count-2: EXACT, SYMBOLIC counting of certified NON-RECTANGULAR pieces
+    // (triangular / trapezoidal / banded / simplicial) via the block-separable
+    // counter -- countBlockSeparable / countAnchorPieceFibersBlocks /
+    // countPartitionBlocks. The counter never enumerates a lattice point; the
+    // brute oracle above is TEST ONLY. The box-only entry points keep their
+    // prior semantics (the guard -> UNKNOWN assertion above still holds).
+    // ========================================================
+    {
+      using systolic::logical::countBlockSeparable;
+      using systolic::logical::countAnchorPieceFibersBlocks;
+      using systolic::logical::countPartitionBlocks;
+      auto cntB = [&](const IntegerPolyhedron &P) -> long {
+        auto c = countBlockSeparable(P);
+        return c ? (long)c->template convert_to<std::int64_t>() : -1;
+      };
+
+      // (A) Triangular 0<=y<=x<=4 == 15.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({0, 1, 0});  // y >= 0
+        t.addInequality({1, -1, 0}); // y <= x
+        t.addInequality({-1, 0, 4}); // x <= 4
+        t.addInequality({1, 0, 0});  // x >= 0
+        if (verify(cntB(t) == 15 && brute(t) == 15,
+                   "M-count-2 triangular 0<=y<=x<=4 == 15"))
+          return 1;
+      }
+      // (B) Trapezoidal 0<=y<=min(x,2), 0<=x<=4 == 12.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({0, 1, 0});
+        t.addInequality({1, -1, 0});
+        t.addInequality({0, -1, 2});
+        t.addInequality({1, 0, 0});
+        t.addInequality({-1, 0, 4});
+        if (verify(cntB(t) == 12 && brute(t) == 12,
+                   "M-count-2 trapezoid min(x,2) == 12"))
+          return 1;
+      }
+      // (C) Banded |x-y|<=1, 0<=x,y<=4 == 13.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({1, 0, 0});
+        t.addInequality({-1, 0, 4});
+        t.addInequality({0, 1, 0});
+        t.addInequality({0, -1, 4});
+        t.addInequality({1, -1, 1});
+        t.addInequality({-1, 1, 1});
+        if (verify(cntB(t) == 13 && brute(t) == 13,
+                   "M-count-2 banded |x-y|<=1 == 13"))
+          return 1;
+      }
+      // (D) 3D simplex x,y,z>=0, x+y+z<=3 == C(6,3) == 20.
+      {
+        IntegerPolyhedron s(PresburgerSpace::getSetSpace(3, 0, 0));
+        s.addInequality({1, 0, 0, 0});
+        s.addInequality({0, 1, 0, 0});
+        s.addInequality({0, 0, 1, 0});
+        s.addInequality({-1, -1, -1, 3});
+        if (verify(cntB(s) == 20 && brute(s) == 20,
+                   "M-count-2 3D simplex sum<=3 == 20"))
+          return 1;
+      }
+      // (D) 4D simplex sum<=2 == C(6,4) == 15.
+      {
+        IntegerPolyhedron s(PresburgerSpace::getSetSpace(4, 0, 0));
+        for (unsigned a = 0; a < 4; ++a) {
+          llvm::SmallVector<std::int64_t> lo(5, 0);
+          lo[a] = 1;
+          s.addInequality(lo);
+        }
+        s.addInequality({-1, -1, -1, -1, 2});
+        if (verify(cntB(s) == 15 && brute(s) == 15,
+                   "M-count-2 4D simplex sum<=2 == 15"))
+          return 1;
+      }
+      // 2D simplex with NO explicit x upper bound -> simplex-form fallback == 10.
+      {
+        IntegerPolyhedron s(PresburgerSpace::getSetSpace(2, 0, 0));
+        s.addInequality({1, 0, 0});
+        s.addInequality({0, 1, 0});
+        s.addInequality({-1, -1, 3});
+        if (verify(cntB(s) == 10 && brute(s) == 10,
+                   "M-count-2 2D simplex sum<=3 == 10"))
+          return 1;
+      }
+      // Nonzero lower bounds across independent blocks: x in [2,5], y in [0,3].
+      // (Exercises the block-local feasibility rule: an other-block lower bound
+      // with a negative constant must NOT be read as global emptiness.)
+      {
+        IntegerPolyhedron b(PresburgerSpace::getSetSpace(2, 0, 0));
+        b.addInequality({1, 0, -2}); // x >= 2
+        b.addInequality({-1, 0, 5}); // x <= 5
+        b.addInequality({0, 1, 0});  // y >= 0
+        b.addInequality({0, -1, 3}); // y <= 3
+        if (verify(cntB(b) == 16 && brute(b) == 16,
+                   "M-count-2 nonzero-lb box x[2,5]y[0,3] == 16"))
+          return 1;
+      }
+      // Separable-box regression: the block counter agrees with countSeparableBox.
+      {
+        IntegerPolyhedron b(PresburgerSpace::getSetSpace(3, 0, 0));
+        for (unsigned a = 0; a < 3; ++a) {
+          llvm::SmallVector<std::int64_t> lo(4, 0), up(4, 0);
+          lo[a] = 1;
+          b.addInequality(lo);
+          up[a] = -1;
+          up[3] = 3;
+          b.addInequality(up);
+        }
+        if (verify(cntB(b) == 64 &&
+                       countBlockSeparable(b) == countSeparableBox(b),
+                   "M-count-2 box regression (blocks == separable-box)"))
+          return 1;
+      }
+      // Empty triangular region (x>=0 and x<=-1) -> 0.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({0, 1, 0});   // y >= 0
+        t.addInequality({1, -1, 0});  // y <= x
+        t.addInequality({-1, 0, -1}); // x <= -1
+        t.addInequality({1, 0, 0});   // x >= 0
+        if (verify(cntB(t) == 0, "M-count-2 empty coupled region == 0"))
+          return 1;
+      }
+      // Degenerate pinned axis x==2 inside 0<=y<=x -> y in {0,1,2} == 3.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addEquality({1, 0, -2}); // x == 2
+        t.addInequality({0, 1, 0});
+        t.addInequality({1, -1, 0});
+        if (verify(cntB(t) == 3 && brute(t) == 3,
+                   "M-count-2 degenerate pinned x==2, 0<=y<=x == 3"))
+          return 1;
+      }
+      // Negative-orthant triangular -2<=y<=x<=0 (negative coefficients/coords).
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({-1, 0, 0}); // x <= 0
+        t.addInequality({1, 0, 2});  // x >= -2
+        t.addInequality({1, -1, 0}); // y <= x
+        t.addInequality({0, 1, 2});  // y >= -2
+        if (verify(cntB(t) == brute(t) && brute(t) == 6,
+                   "M-count-2 negative-orthant triangular == 6"))
+          return 1;
+      }
+      // Large bounds vs CLOSED-FORM identity (no brute): triangular N=1e6.
+      {
+        long N = 1000000;
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({0, 1, 0});
+        t.addInequality({1, -1, 0});
+        t.addInequality({-1, 0, N});
+        t.addInequality({1, 0, 0});
+        BigInt ident = (BigInt(N) + 1) * (BigInt(N) + 2) / 2;
+        if (verify(countBlockSeparable(t) == ident,
+                   "M-count-2 large triangular N=1e6 == (N+1)(N+2)/2"))
+          return 1;
+      }
+      // Large simplex vs binomial identity (no brute): 3D sum<=1000 == C(1003,3).
+      {
+        long M = 1000;
+        IntegerPolyhedron s(PresburgerSpace::getSetSpace(3, 0, 0));
+        s.addInequality({1, 0, 0, 0});
+        s.addInequality({0, 1, 0, 0});
+        s.addInequality({0, 0, 1, 0});
+        s.addInequality({-1, -1, -1, M});
+        BigInt ident = (BigInt(M) + 1) * (BigInt(M) + 2) * (BigInt(M) + 3) / 6;
+        if (verify(countBlockSeparable(s) == ident,
+                   "M-count-2 large 3D simplex sum<=1000 == C(1003,3)"))
+          return 1;
+      }
+      // Overflow: a coefficient exceeding i64 -> UNKNOWN (never a wrong count).
+      {
+        IntegerPolyhedron b(PresburgerSpace::getSetSpace(1, 0, 0));
+        llvm::DynamicAPInt huge(1000000000);
+        huge = huge * huge * huge; // 1e27 > i64 max
+        llvm::SmallVector<llvm::DynamicAPInt> row;
+        row.push_back(huge);  // huge * x
+        row.push_back(-huge); // - huge  (=> x >= 1)
+        b.addInequality(row);
+        b.addInequality({-1, 100}); // x <= 100
+        if (verify(!countBlockSeparable(b).has_value(),
+                   "M-count-2 i64-overflow coefficient -> UNKNOWN"))
+          return 1;
+      }
+      // Non-unit coupling (|b|=2) -> outside the class -> UNKNOWN.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+        t.addInequality({1, 0, 0});  // x >= 0
+        t.addInequality({-1, 0, 8}); // x <= 8
+        t.addInequality({0, 1, 0});  // y >= 0
+        t.addInequality({1, -2, 0}); // x - 2y >= 0  (non-unit coupling)
+        if (verify(!countBlockSeparable(t).has_value(),
+                   "M-count-2 non-unit coupling x-2y>=0 -> UNKNOWN"))
+          return 1;
+      }
+      // 3-variable coupled block that is NOT a simplex -> UNKNOWN.
+      {
+        IntegerPolyhedron t(PresburgerSpace::getSetSpace(3, 0, 0));
+        t.addInequality({1, 0, 0, 0});
+        t.addInequality({0, 1, 0, 0});
+        t.addInequality({0, 0, 1, 0});
+        t.addInequality({-1, -1, 0, 3}); // x+y<=3 (couples x,y)
+        t.addInequality({0, -1, -1, 3}); // y+z<=3 (couples y,z) -> not a simplex
+        if (verify(!countBlockSeparable(t).has_value(),
+                   "M-count-2 3-var non-simplex coupled block -> UNKNOWN"))
+          return 1;
+      }
+      // Congruence-restricted guard partition: counted EXACTLY by the block
+      // counter (box-only countPartition above returns UNKNOWN), cross-checked
+      // against the brute-per-piece oracle.
+      {
+        auto Tm = sourceToLogicalMatrix(C1F, 3);
+        IntegerPolyhedron dom = box(3, 3);
+        dom.addInequality({-1, -1, 0, 3}); // i + j <= 3
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            C1F, C1O, dom, 3,
+            systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+        if (verify(Tm.has_value() && part.has_value(),
+                   "M-count-2 guard partition built"))
+          return 1;
+        long bruteFibers = 0, bruteMacs = 0;
+        bool pieceOk = true;
+        for (const auto &g : part->groups)
+          for (const auto &P : g.anchorPieces) {
+            auto c =
+                countAnchorPieceFibersBlocks(P, *Tm, 3, part->congruenceLocals);
+            long bb = brute(P);
+            pieceOk &=
+                (c.has_value() && (long)c->convert_to<std::int64_t>() == bb);
+            bruteFibers += bb;
+            bruteMacs += (long)g.length * bb;
+          }
+        if (verify(pieceOk,
+                   "M-count-2 guard per-piece counter matches brute oracle"))
+          return 1;
+        auto counts = countPartitionBlocks(*part, *Tm, 3);
+        if (verify(counts.has_value() &&
+                       counts->outputFibers == BigInt(bruteFibers) &&
+                       counts->sourceMACs == BigInt(bruteMacs),
+                   "M-count-2 guard partition counted exactly (== brute)"))
+          return 1;
+        std::cout << "  M-count-2 guard: fibers=" << bruteFibers
+                  << " macs=" << bruteMacs << "\n";
+      }
+      // Regression: on the CASE1 BOX partition the block path agrees with the
+      // old box-only path (37 fibers / 64 MACs).
+      {
+        auto Tm = sourceToLogicalMatrix(C1F, 3);
+        std::string why;
+        auto part = buildSymbolicTilePartition(
+            C1F, C1O, box(3, 3), 3,
+            systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+        if (verify(Tm.has_value() && part.has_value(),
+                   "M-count-2 CASE1 partition built"))
+          return 1;
+        auto counts = countPartitionBlocks(*part, *Tm, 3);
+        if (verify(counts.has_value() && counts->outputFibers == BigInt(37) &&
+                       counts->sourceMACs == BigInt(64),
+                   "M-count-2 CASE1 blocks path == 37/64 (box regression)"))
+          return 1;
+      }
+      std::cout << "M-count-2 non-rectangular lattice-count tests passed.\n";
+    }
+
     std::cout << "M-count symbolic lattice-count tests passed.\n";
   }
 
