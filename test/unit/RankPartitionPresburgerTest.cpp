@@ -15488,6 +15488,194 @@ int main() {
     std::cout << "C4a-sym kernel-coset M3 source-order tests passed.\n";
   }
 
+  // ========================================================
+  // C4a-sym Kernel-Coset Partition M4a: symbolic peel-and-tile scan plan.
+  // Analysis-only; no IR emission. The ragged convex fiber is represented via
+  // D' + the peel/tile ordering, and a TILE is the slice of D' with the output
+  // and peel coordinates pinned (the tile axis free -> a contiguous interval).
+  // Validated vs a brute peel-and-tile reconstruction (TEST ONLY). Target
+  // C[i+j-2k]: 13 fibers / 64 MACs, kernel rank 2, static-K tileable, source
+  // order NotSourceLexEquivalent (recorded, never used to reorder).
+  // ========================================================
+  {
+    using mlir::presburger::BoundType;
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetScanPlan;
+    using systolic::logical::fiberSlice;
+    using systolic::logical::OrderVerdict;
+    using systolic::logical::scanTileSlice;
+    using systolic::logical::TileLegality;
+
+    auto boxR = [](int r, int hi) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(r, 0, 0));
+      for (int a = 0; a < r; ++a) {
+        llvm::SmallVector<std::int64_t> l(r + 1, 0), u(r + 1, 0);
+        l[a] = 1;
+        D.addInequality(l);
+        u[a] = -1;
+        u[r] = hi;
+        D.addInequality(u);
+      }
+      return D;
+    };
+    auto Ux = [](const IntMatrix &U, unsigned i, const std::vector<long> &y) {
+      long s = 0;
+      for (unsigned t = 0; t < y.size(); ++t)
+        s += (long)U[i][t].convert_to<std::int64_t>() * y[t];
+      return s;
+    };
+    auto inPoly = [](const IntegerPolyhedron &P, const std::vector<long> &y) {
+      unsigned nd = P.getNumDimVars();
+      if (P.getNumLocalVars())
+        return false;
+      for (unsigned r = 0; r < P.getNumInequalities(); ++r) {
+        auto row = P.getInequality(r);
+        long s = (long)(std::int64_t)row[nd];
+        for (unsigned j = 0; j < nd; ++j)
+          s += (long)(std::int64_t)row[j] * y[j];
+        if (s < 0)
+          return false;
+      }
+      for (unsigned r = 0; r < P.getNumEqualities(); ++r) {
+        auto row = P.getEquality(r);
+        long s = (long)(std::int64_t)row[nd];
+        for (unsigned j = 0; j < nd; ++j)
+          s += (long)(std::int64_t)row[j] * y[j];
+        if (s != 0)
+          return false;
+      }
+      return true;
+    };
+
+    IntMatrix C = {{BigInt(1), BigInt(1), BigInt(-2)}};
+    auto plan = buildKernelCosetScanPlan(C, boxR(3, 3), 3);
+    if (verify(plan.has_value() && plan->fiber.kernelRank == 2 &&
+                   plan->peelOrder.size() == 2 && plan->peelOrder[0] == 1 &&
+                   plan->peelOrder[1] == 2 && plan->innerStride == 1 &&
+                   plan->sourceOrder == OrderVerdict::NotSourceLexEquivalent &&
+                   plan->tileLegality == TileLegality::StaticKTileable &&
+                   plan->fiber.sourceMACs == BigInt(64) &&
+                   plan->fiber.outputFibers == BigInt(13),
+               "M4a scan plan: kappa 2, peel/tile [1,2], static-K, NotSourceLex, "
+               "64/13"))
+      return 1;
+
+    // Independent brute fibers (box grouped by physical C = i+j-2k).
+    std::map<long, std::set<std::vector<long>>> brute;
+    for (long i = 0; i < 4; ++i)
+      for (long j = 0; j < 4; ++j)
+        for (long k = 0; k < 4; ++k)
+          brute[i + j - 2 * k].insert({i, j, k});
+
+    const IntegerPolyhedron &Dp = plan->fiber.reducedDomain;
+    std::vector<long> ylo(3), yhi(3);
+    {
+      bool bounded = true;
+      for (unsigned d = 0; d < 3; ++d) {
+        auto l = Dp.getConstantBound64(BoundType::LB, d);
+        auto h = Dp.getConstantBound64(BoundType::UB, d);
+        if (!l || !h)
+          bounded = false;
+        else {
+          ylo[d] = *l;
+          yhi[d] = *h;
+        }
+      }
+      if (verify(bounded, "M4a reduced domain bounded"))
+        return 1;
+    }
+    unsigned oc = plan->fiber.outputCols[0];
+    unsigned peel = plan->peelOrder[0];
+    unsigned tile = plan->peelOrder[1];
+
+    // Peel-and-tile reconstruction: iterate output, peel; the tile axis is the
+    // free interval of scanTileSlice. Verify tiles are contiguous intervals,
+    // pairwise disjoint, and reconstruct every brute fiber exactly.
+    std::map<long, std::set<std::vector<long>>> rebuilt;
+    std::set<std::vector<long>> seen;
+    long rebuiltMac = 0;
+    bool intervals = true, disjoint = true, sliceOk = true;
+    for (long c = ylo[oc]; c <= yhi[oc] && sliceOk; ++c) {
+      std::int64_t ov[1] = {(std::int64_t)c};
+      auto fib = fiberSlice(plan->fiber, llvm::ArrayRef<std::int64_t>(ov, 1));
+      if (!fib) {
+        sliceOk = false;
+        break;
+      }
+      auto pl = fib->getConstantBound64(BoundType::LB, peel);
+      auto ph = fib->getConstantBound64(BoundType::UB, peel);
+      if (!pl || !ph)
+        continue;
+      for (long p = *pl; p <= *ph; ++p) {
+        std::int64_t pv[1] = {(std::int64_t)p};
+        auto ts = scanTileSlice(*plan, llvm::ArrayRef<std::int64_t>(ov, 1),
+                                llvm::ArrayRef<std::int64_t>(pv, 1));
+        if (!ts) {
+          sliceOk = false;
+          break;
+        }
+        auto tl = ts->getConstantBound64(BoundType::LB, tile);
+        auto th = ts->getConstantBound64(BoundType::UB, tile);
+        if (!tl || !th || *th < *tl)
+          continue;
+        for (long t = *tl; t <= *th; ++t) {
+          std::vector<long> y(3, 0);
+          y[oc] = c;
+          y[peel] = p;
+          y[tile] = t;
+          if (!inPoly(*ts, y)) {
+            intervals = false; // a gap inside the tile interval
+            continue;
+          }
+          std::vector<long> x = {Ux(plan->fiber.U, 0, y), Ux(plan->fiber.U, 1, y),
+                                 Ux(plan->fiber.U, 2, y)};
+          if (seen.count(x))
+            disjoint = false;
+          seen.insert(x);
+          rebuilt[x[0] + x[1] - 2 * x[2]].insert(x);
+          ++rebuiltMac;
+        }
+      }
+    }
+    if (verify(sliceOk && intervals && disjoint && rebuilt == brute &&
+                   rebuiltMac == 64 && rebuilt.size() == 13,
+               "M4a peel-and-tile reconstructs 13 fibers / 64 MACs exactly == "
+               "brute (contiguous disjoint tiles)"))
+      return 1;
+
+    // Negatives -> no scan plan (UNKNOWN / fail closed).
+    if (verify(!buildKernelCosetScanPlan(
+                    {{BigInt(1), BigInt(0), BigInt(0), BigInt(0)}}, boxR(4, 3), 4)
+                    .has_value(),
+               "M4a kappa>2 (rank-1 C over 4D) -> UNKNOWN"))
+      return 1;
+    if (verify(!buildKernelCosetScanPlan({{BigInt(1), BigInt(3)}}, boxR(2, 1), 2)
+                    .has_value(),
+               "M4a holey image -> UNKNOWN"))
+      return 1;
+    if (verify(!buildKernelCosetScanPlan({{BigInt(1), BigInt(0), BigInt(0)},
+                                          {BigInt(0), BigInt(1), BigInt(0)}},
+                                         boxR(3, 3), 3)
+                    .has_value(),
+               "M4a rank-2 image -> UNKNOWN"))
+      return 1;
+
+    // A lex-compatible kernel (identity [1,0,0]) yields a scan plan whose
+    // recorded source order IS SourceLexEquivalent (so M4 could offload it under
+    // strict FP); the skew target above stays NotSourceLexEquivalent.
+    {
+      auto id = buildKernelCosetScanPlan({{BigInt(1), BigInt(0), BigInt(0)}},
+                                         boxR(3, 3), 3);
+      if (verify(id.has_value() &&
+                     id->sourceOrder == OrderVerdict::SourceLexEquivalent &&
+                     id->tileLegality == TileLegality::StaticKTileable,
+                 "M4a identity kernel: SourceLexEquivalent + static-K"))
+        return 1;
+    }
+    std::cout << "C4a-sym kernel-coset M4a scan-plan tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }

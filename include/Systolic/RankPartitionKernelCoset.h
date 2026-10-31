@@ -649,6 +649,90 @@ certifyKernelCosetSourceOrder(const KernelCosetFiberPlan &plan) {
   return cert;
 }
 
+//===----------------------------------------------------------------------===//
+// M4a: symbolic peel-and-tile scan plan (analysis-only; no IR emission).
+//
+// A physical-C fiber is the slice of D' at a fixed output coordinate -- a
+// kappa-dimensional convex polytope over the reduction coordinates y_red. The
+// scan plan orders those coordinates outer->inner (peel ... tile); pinning the
+// output and the peel coordinates leaves the single tile axis, whose feasible
+// values are ALWAYS a contiguous integer interval (one variable cut by linear
+// inequalities). So a <=2-axis ragged convex fiber decomposes into a finite set
+// of constant-K tiles (one per output+peel chamber) -- static-K legal -- with
+// no per-point or per-fiber object. The plan carries the M3 source-order verdict
+// unchanged; it never reorders a reduction.
+//===----------------------------------------------------------------------===//
+
+enum class TileLegality {
+  StaticKTileable,    // ragged fiber decomposes into finite constant-K tiles
+  NotStaticKTileable, // tiles cannot be given a compile-time-constant K
+  Unknown
+};
+
+/// Symbolic scan plan over a KernelCosetFiberPlan. Describes fibers only through
+/// the plan's reduced domain D' and the peel/tile column ordering -- it holds no
+/// array of source points or materialized fibers.
+struct KernelCosetScanPlan {
+  KernelCosetFiberPlan fiber;      // U, Uinv, D', output/reduction cols, counts
+  std::vector<unsigned> peelOrder; // reduction cols, outer -> inner (len kappa)
+  std::int64_t innerStride = 1;    // tile-axis stride in the reduced coordinates
+  OrderVerdict sourceOrder = OrderVerdict::Unknown; // from M3 (recorded, not used
+                                                    // to reorder)
+  TileLegality tileLegality = TileLegality::Unknown;
+
+  explicit KernelCosetScanPlan(KernelCosetFiberPlan f) : fiber(std::move(f)) {}
+};
+
+/// Build the M4a scan plan from a physical-C access matrix and source domain.
+/// Reuses M0-M2a (fiber plan) and M3 (source-order verdict). M4a scope: at most
+/// two reduction axes (kappa <= 2). nullopt (UNKNOWN) when the fiber plan is
+/// UNKNOWN or kappa > 2. No enumeration.
+inline std::optional<KernelCosetScanPlan>
+buildKernelCosetScanPlan(const IntMatrix &Crows,
+                         const mlir::presburger::IntegerPolyhedron &D,
+                         unsigned n) {
+  auto fp = buildKernelCosetFiberPlan(Crows, D, n);
+  if (!fp)
+    return std::nullopt;
+  if (fp->kernelRank > 2)
+    return std::nullopt; // M4a scope: <= 2 reduction axes.
+  auto cert = certifyKernelCosetSourceOrder(*fp);
+  KernelCosetScanPlan plan(std::move(*fp));
+  plan.peelOrder = plan.fiber.reductionCols; // outermost first.
+  plan.innerStride = 1;
+  plan.sourceOrder = cert.verdict;
+  // One reduction axis given the others pinned is a contiguous integer interval,
+  // so a <=2-axis ragged convex fiber is static-K tileable by chambers.
+  plan.tileLegality = TileLegality::StaticKTileable;
+  return plan;
+}
+
+/// The symbolic TILE at a fixed output coordinate `outputVals` and peel
+/// coordinates `peelVals` (all reduction coordinates except the innermost): the
+/// slice of D' with those coordinates pinned, leaving the single tile axis free.
+/// Its integer points are the tile's reduction coordinates; x = U*y recovers the
+/// source iterations. Exact (a sub-polytope), on demand, no enumeration. nullopt
+/// on an arity mismatch. `peelVals` must pin exactly kappa-1 coordinates.
+inline std::optional<mlir::presburger::IntegerPolyhedron>
+scanTileSlice(const KernelCosetScanPlan &plan,
+              llvm::ArrayRef<std::int64_t> outputVals,
+              llvm::ArrayRef<std::int64_t> peelVals) {
+  const unsigned kappa = static_cast<unsigned>(plan.peelOrder.size());
+  if (kappa == 0 ? !peelVals.empty() : peelVals.size() != kappa - 1)
+    return std::nullopt;
+  auto sl = fiberSlice(plan.fiber, outputVals); // pins the output coordinates
+  if (!sl)
+    return std::nullopt;
+  const unsigned cols = sl->getNumCols();
+  for (unsigned i = 0; i + 1 < kappa; ++i) { // pin all peel (non-tile) axes
+    llvm::SmallVector<std::int64_t> eq(cols, 0);
+    eq[plan.peelOrder[i]] = 1;
+    eq[cols - 1] = -peelVals[i];
+    sl->addEquality(eq);
+  }
+  return sl;
+}
+
 } // namespace systolic::logical
 
 #endif // SYSTOLIC_RANK_PARTITION_KERNEL_COSET_H
