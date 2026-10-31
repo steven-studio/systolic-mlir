@@ -14,6 +14,7 @@
 #include "Systolic/RankPartitionIterationPlan.h"
 #include "Systolic/RankPartitionGuardGeneration.h"
 #include "Systolic/RankPartitionGuardEmission.h"
+#include "Systolic/RankPartitionLatticeCount.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -14113,6 +14114,273 @@ int main() {
     }
 
     std::cout << "Phase C3c-3 M4-box/M4-tri reduction scan tests passed.\n";
+  }
+
+  // --------------------------------------------------------
+  // M-count (Option C): EXACT, SYMBOLIC lattice-point counting of the C3 anchor
+  // pieces for the general-affine lowering diagnostic, with NO source-point
+  // enumeration in the counter. Validated against an independent brute-force
+  // oracle (enumeration confined to this test). countSeparableBox counts an
+  // axis-parallel source polytope as a product of per-axis integer intervals;
+  // countAnchorPieceFibers composes a piece's pure-z faces with z = T*x into the
+  // dense source space; countPartition sums fibers and MACs over the certified
+  // groups. Non-box pieces (triangular/simplicial/coupling, e.g. a guarded
+  // domain) return UNKNOWN -- never an approximation.
+  // --------------------------------------------------------
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::countSeparableBox;
+    using systolic::logical::countAnchorPieceFibers;
+    using systolic::logical::countPartition;
+
+    // Independent brute-force oracle: integer points of P over its DIM vars
+    // (congruence locals existential). TEST ONLY.
+    auto brute = [](const IntegerPolyhedron &P) -> long {
+      unsigned nd = P.getNumDimVars();
+      std::vector<long> lo(nd), hi(nd);
+      for (unsigned d = 0; d < nd; ++d) {
+        auto a = P.getConstantBound64(mlir::presburger::BoundType::LB, d);
+        auto b = P.getConstantBound64(mlir::presburger::BoundType::UB, d);
+        if (!a || !b)
+          return -1;
+        lo[d] = *a;
+        hi[d] = *b;
+      }
+      long cnt = 0;
+      std::vector<long> x(nd);
+      std::function<void(unsigned)> rec = [&](unsigned d) {
+        if (d == nd) {
+          IntegerPolyhedron Q = P;
+          unsigned cols = Q.getNumCols();
+          for (unsigned j = 0; j < nd; ++j) {
+            llvm::SmallVector<std::int64_t> e(cols, 0);
+            e[j] = 1;
+            e[cols - 1] = -x[j];
+            Q.addEquality(e);
+          }
+          if (!Q.isIntegerEmpty())
+            ++cnt;
+          return;
+        }
+        for (x[d] = lo[d]; x[d] <= hi[d]; ++x[d])
+          rec(d + 1);
+      };
+      rec(0);
+      return cnt;
+    };
+    auto asLong = [](const std::optional<systolic::logical::BigInt> &c) -> long {
+      return c ? (long)c->template convert_to<std::int64_t>() : -1;
+    };
+
+    // Synthetic separable-box primitives.
+    {
+      // [0,4) x [0,4) x [0,4) -> 64.
+      IntegerPolyhedron b(PresburgerSpace::getSetSpace(3, 0, 0));
+      for (unsigned a = 0; a < 3; ++a) {
+        llvm::SmallVector<std::int64_t> lo(4, 0), up(4, 0);
+        lo[a] = 1;
+        b.addInequality(lo);
+        up[a] = -1;
+        up[3] = 3;
+        b.addInequality(up);
+      }
+      if (verify(asLong(countSeparableBox(b)) == 64,
+                 "M-count box [0,4)^3 == 64"))
+        return 1;
+    }
+    {
+      // [1,3] x [0,5] = 3 * 6 = 18.
+      IntegerPolyhedron b(PresburgerSpace::getSetSpace(2, 0, 0));
+      b.addInequality({1, 0, -1});   // x0 >= 1
+      b.addInequality({-1, 0, 3});   // x0 <= 3
+      b.addInequality({0, 1, 0});    // x1 >= 0
+      b.addInequality({0, -1, 5});   // x1 <= 5
+      if (verify(asLong(countSeparableBox(b)) == 18,
+                 "M-count box [1,3]x[0,5] == 18"))
+        return 1;
+    }
+    {
+      // Empty box: x0 >= 2 and x0 <= 1 -> 0.
+      IntegerPolyhedron b(PresburgerSpace::getSetSpace(1, 0, 0));
+      b.addInequality({1, -2});
+      b.addInequality({-1, 1});
+      if (verify(asLong(countSeparableBox(b)) == 0, "M-count empty box == 0"))
+        return 1;
+    }
+    {
+      // Coupling face x0 + x1 <= 3 (triangular) -> UNKNOWN (not a separable box).
+      IntegerPolyhedron t(PresburgerSpace::getSetSpace(2, 0, 0));
+      t.addInequality({1, 0, 0});
+      t.addInequality({0, 1, 0});
+      t.addInequality({-1, -1, 3});
+      if (verify(!countSeparableBox(t).has_value(),
+                 "M-count triangular/coupling -> UNKNOWN"))
+        return 1;
+    }
+    {
+      // Unbounded axis -> UNKNOWN.
+      IntegerPolyhedron u(PresburgerSpace::getSetSpace(1, 0, 0));
+      u.addInequality({1, 0}); // x0 >= 0, no upper bound
+      if (verify(!countSeparableBox(u).has_value(),
+                 "M-count unbounded axis -> UNKNOWN"))
+        return 1;
+    }
+
+    // CASE 1 partition: exact fiber/MAC counts via the certified anchor pieces.
+    auto sourceToLogicalMatrix =
+        [&](const std::array<IntMatrix, 3> &F,
+            unsigned rank) -> std::optional<IntMatrix> {
+      auto p = analyzeRankPartition(F[0], F[1], F[2], rank);
+      auto e = p ? expandRankPartition(*p) : std::nullopt;
+      auto m = e ? buildPartitionCoordinateMap(*e) : std::nullopt;
+      if (!m || m->sourceToLogical.size() != rank)
+        return std::nullopt;
+      IntMatrix T(rank, IntRow(rank, BigInt(0)));
+      for (unsigned j = 0; j < rank; ++j) {
+        if (m->sourceToLogical[j].size() != rank)
+          return std::nullopt;
+        for (unsigned s = 0; s < rank; ++s)
+          T[j][s] = m->sourceToLogical[j][s];
+      }
+      return T;
+    };
+    auto box = [&](unsigned rank, int hi) {
+      IntegerPolyhedron s(PresburgerSpace::getSetSpace(rank, 0, 0));
+      for (unsigned a = 0; a < rank; ++a) {
+        llvm::SmallVector<std::int64_t> lo(rank + 1, 0), up(rank + 1, 0);
+        lo[a] = 1;
+        s.addInequality(lo);
+        up[a] = -1;
+        up[rank] = hi;
+        s.addInequality(up);
+      }
+      return s;
+    };
+    std::array<IntMatrix, 3> C1F = {
+        IntMatrix{{BigInt(1),BigInt(1),BigInt(-2)},{BigInt(1),BigInt(1),BigInt(1)}},
+        IntMatrix{{BigInt(1),BigInt(1),BigInt(1)},{BigInt(1),BigInt(-2),BigInt(1)}},
+        IntMatrix{{BigInt(1),BigInt(1),BigInt(-2)},{BigInt(1),BigInt(-2),BigInt(1)}}};
+    std::array<IntRow, 3> C1O = {IntRow{BigInt(6),BigInt(0)},
+                                 IntRow{BigInt(0),BigInt(6)},
+                                 IntRow{BigInt(6),BigInt(6)}};
+    {
+      auto T = sourceToLogicalMatrix(C1F, 3);
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          C1F, C1O, box(3, 3), 3,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(T.has_value() && part.has_value(),
+                 "M-count CASE1 partition + coordinate map"))
+        return 1;
+      auto counts = countPartition(*part, *T, 3);
+      if (verify(counts.has_value(), "M-count CASE1 counted exactly"))
+        return 1;
+      if (verify(counts->outputFibers == BigInt(37),
+                 "M-count CASE1 outputFibers == 37"))
+        return 1;
+      if (verify(counts->sourceMACs == BigInt(64),
+                 "M-count CASE1 sourceMACs == 64"))
+        return 1;
+      // Per-group histogram 18/12/6/1, cross-checked against brute per piece.
+      std::map<long, long> hist;
+      bool pieceOk = true;
+      for (const auto &g : part->groups) {
+        long gf = 0;
+        for (const auto &P : g.anchorPieces) {
+          auto c = countAnchorPieceFibers(P, *T, 3, part->congruenceLocals);
+          long b = brute(P);
+          pieceOk &= (c.has_value() && (long)c->convert_to<std::int64_t>() == b);
+          gf += b;
+        }
+        hist[(long)g.length] += gf;
+      }
+      if (verify(pieceOk,
+                 "M-count CASE1 per-piece counter matches brute oracle"))
+        return 1;
+      if (verify(hist[1] == 18 && hist[2] == 12 && hist[3] == 6 && hist[4] == 1,
+                 "M-count CASE1 length histogram 18/12/6/1"))
+        return 1;
+    }
+
+    // Guarded domain (box intersect i+j<=3): pieces are trapezoidal -> the
+    // separable-box counter returns UNKNOWN (never an approximation). The
+    // brute oracle records the true answer (not yet produced symbolically).
+    {
+      auto T = sourceToLogicalMatrix(C1F, 3);
+      IntegerPolyhedron dom = box(3, 3);
+      dom.addInequality({-1, -1, 0, 3}); // i + j <= 3
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          C1F, C1O, dom, 3,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(T.has_value() && part.has_value(),
+                 "M-count guard partition built"))
+        return 1;
+      if (verify(!countPartition(*part, *T, 3).has_value(),
+                 "M-count guard (trapezoidal pieces) -> UNKNOWN (conservative)"))
+        return 1;
+    }
+
+    // A different non-unimodular frame (det T = -14), box domain: the counter
+    // is not CASE 1-specific. Output map injective -> 64 length-1 fibers.
+    {
+      std::array<IntMatrix, 3> FF = {
+          IntMatrix{{BigInt(2),BigInt(1),BigInt(-1)},{BigInt(1),BigInt(1),BigInt(2)}},
+          IntMatrix{{BigInt(1),BigInt(1),BigInt(2)},{BigInt(1),BigInt(-2),BigInt(1)}},
+          IntMatrix{{BigInt(2),BigInt(1),BigInt(-1)},{BigInt(1),BigInt(-2),BigInt(1)}}};
+      std::array<IntRow, 3> FO = {IntRow{BigInt(13),BigInt(12)},
+                                  IntRow{BigInt(14),BigInt(15)},
+                                  IntRow{BigInt(12),BigInt(12)}};
+      auto T = sourceToLogicalMatrix(FF, 3);
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          FF, FO, box(3, 3), 3,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(T.has_value() && part.has_value(),
+                 "M-count frame-0 partition + map"))
+        return 1;
+      auto counts = countPartition(*part, *T, 3);
+      if (verify(counts.has_value() && counts->outputFibers == BigInt(64) &&
+                     counts->sourceMACs == BigInt(64),
+                 "M-count frame-0 fibers=64 macs=64"))
+        return 1;
+    }
+
+    // Coverage boundary at the PARTITION level: a pure replication loop (an IV
+    // in no access) makes buildSymbolicTilePartition refuse (output aliases),
+    // so there are no certified pieces to count -> the symbolic counter is not
+    // reached. Documented as an UNKNOWN-at-partition case (needs a partition
+    // extension, not a counting extension). source (p,i,j,k), p a replication.
+    {
+      std::array<IntMatrix, 3> RF = {
+          IntMatrix{{BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(1),BigInt(1),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(1),BigInt(1),BigInt(1)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}},
+          IntMatrix{{BigInt(0),BigInt(1),BigInt(1),BigInt(-2)},{BigInt(0),BigInt(1),BigInt(-2),BigInt(1)}}};
+      std::array<IntRow, 3> RO = {IntRow{BigInt(6),BigInt(0)},
+                                  IntRow{BigInt(0),BigInt(6)},
+                                  IntRow{BigInt(6),BigInt(6)}};
+      IntegerPolyhedron dom(PresburgerSpace::getSetSpace(4, 0, 0));
+      dom.addInequality({1, 0, 0, 0, 0});   // p >= 0
+      dom.addInequality({-1, 0, 0, 0, 1});  // p <= 1
+      for (unsigned a = 1; a < 4; ++a) {
+        llvm::SmallVector<std::int64_t> lo(5, 0), up(5, 0);
+        lo[a] = 1;
+        dom.addInequality(lo);
+        up[a] = -1;
+        up[4] = 3;
+        dom.addInequality(up);
+      }
+      std::string why;
+      auto part = buildSymbolicTilePartition(
+          RF, RO, dom, 4,
+          systolic::logical::ReductionOrderDecision::PreserveSourceOrder, why);
+      if (verify(!part.has_value(),
+                 "M-count replication refused at the partition (no pieces)"))
+        return 1;
+    }
+
+    std::cout << "M-count symbolic lattice-count tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
