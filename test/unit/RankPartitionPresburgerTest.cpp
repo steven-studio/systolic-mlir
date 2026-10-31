@@ -15263,6 +15263,231 @@ int main() {
     std::cout << "C4a-sym kernel-coset M2a fiber-representation tests passed.\n";
   }
 
+  // ========================================================
+  // C4a-sym Kernel-Coset Partition M3: exact source-order certification.
+  // Certifies whether the plan's y_red-lex traversal accumulates every
+  // physical-C fiber in the original source (x-lex) order. Analysis-only; the
+  // brute same-fiber reversal oracle here is TEST ONLY. The certificate never
+  // consults fastmath, so NotSourceLexEquivalent is strict-FP-illegal and is
+  // never silently reassociated.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetFiberPlan;
+    using systolic::logical::certifyKernelCosetSourceOrder;
+    using systolic::logical::KernelCosetFiberPlan;
+    using systolic::logical::OrderVerdict;
+
+    auto boxR = [](int r, int hi) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(r, 0, 0));
+      for (int a = 0; a < r; ++a) {
+        llvm::SmallVector<std::int64_t> l(r + 1, 0), u(r + 1, 0);
+        l[a] = 1;
+        D.addInequality(l);
+        u[a] = -1;
+        u[r] = hi;
+        D.addInequality(u);
+      }
+      return D;
+    };
+    // physical-C key of x (full C vector).
+    auto ckey = [](const IntMatrix &C, const std::vector<long> &x) {
+      std::vector<long> k;
+      for (const auto &row : C) {
+        long s = 0;
+        for (size_t t = 0; t < x.size(); ++t)
+          s += (long)row[t].convert_to<std::int64_t>() * x[t];
+        k.push_back(s);
+      }
+      return k;
+    };
+    // y_red-lex comparison of a vs b: -1/0/1.
+    auto ylex = [](const IntMatrix &Uinv, const std::vector<unsigned> &rc,
+                   const std::vector<long> &a, const std::vector<long> &b) {
+      for (unsigned k : rc) {
+        long ya = 0, yb = 0;
+        for (size_t t = 0; t < a.size(); ++t) {
+          ya += (long)Uinv[k][t].convert_to<std::int64_t>() * a[t];
+          yb += (long)Uinv[k][t].convert_to<std::int64_t>() * b[t];
+        }
+        if (ya < yb)
+          return -1;
+        if (ya > yb)
+          return 1;
+      }
+      return 0;
+    };
+    auto xlex = [](const std::vector<long> &a, const std::vector<long> &b) {
+      for (size_t t = 0; t < a.size(); ++t) {
+        if (a[t] < b[t])
+          return -1;
+        if (a[t] > b[t])
+          return 1;
+      }
+      return 0;
+    };
+    // brute: does a SAME-fiber pair reverse (x-lex before, y_red-lex after)?
+    auto bruteSameFiberReversal =
+        [&](const IntMatrix &C, const IntMatrix &Uinv,
+            const std::vector<unsigned> &rc, int r, int hi) {
+          std::map<std::vector<long>, std::vector<std::vector<long>>> fib;
+          std::vector<long> x(r);
+          std::function<void(int)> rec = [&](int d) {
+            if (d == r) {
+              fib[ckey(C, x)].push_back(x);
+              return;
+            }
+            for (x[d] = 0; x[d] <= hi; ++x[d])
+              rec(d + 1);
+          };
+          rec(0);
+          for (auto &kv : fib)
+            for (auto &a : kv.second)
+              for (auto &b : kv.second)
+                if (xlex(a, b) < 0 && ylex(Uinv, rc, a, b) > 0)
+                  return true;
+          return false;
+        };
+
+    // Verify a plan's certificate matches the brute same-fiber reversal oracle,
+    // and (when NotEquivalent) that the witness is a genuine same-fiber reversal.
+    auto checkC = [&](const char *nm, IntMatrix C, OrderVerdict expect) -> int {
+      int r = (int)C[0].size();
+      IntegerPolyhedron D = boxR(r, 3);
+      auto plan = buildKernelCosetFiberPlan(C, D, r);
+      if (verify(plan.has_value(), nm))
+        return 1;
+      auto cert = certifyKernelCosetSourceOrder(*plan);
+      bool rev =
+          bruteSameFiberReversal(C, plan->Uinv, plan->reductionCols, r, 3);
+      bool verdictOk =
+          (cert.verdict == OrderVerdict::SourceLexEquivalent && !rev) ||
+          (cert.verdict == OrderVerdict::NotSourceLexEquivalent && rev);
+      if (verify(verdictOk && cert.verdict == expect, nm))
+        return 1;
+      if (cert.verdict == OrderVerdict::NotSourceLexEquivalent) {
+        // witness: distinct, same physical C, source-earlier, traversal-later.
+        bool w = !cert.earlier.empty() && !cert.later.empty() &&
+                 cert.earlier != cert.later &&
+                 ckey(C, cert.earlier) == ckey(C, cert.later) &&
+                 xlex(cert.earlier, cert.later) < 0 &&
+                 ylex(plan->Uinv, plan->reductionCols, cert.earlier,
+                      cert.later) > 0;
+        if (verify(w, nm))
+          return 1;
+      }
+      return 0;
+    };
+
+    // Identity transformation preserves source order.
+    if (checkC("M3 identity [1,0,0] -> SourceLexEquivalent",
+               {{BigInt(1), BigInt(0), BigInt(0)}},
+               OrderVerdict::SourceLexEquivalent))
+      return 1;
+    // A lexicographically compatible NON-identity unimodular U preserves order.
+    if (checkC("M3 lex-compatible non-identity [0,1,0] -> SourceLexEquivalent",
+               {{BigInt(0), BigInt(1), BigInt(0)}},
+               OrderVerdict::SourceLexEquivalent))
+      return 1;
+    // A unimodular U that reverses source order is rejected (with a witness).
+    if (checkC("M3 order-reversing [1,-1] -> NotSourceLexEquivalent",
+               {{BigInt(1), BigInt(-1)}},
+               OrderVerdict::NotSourceLexEquivalent))
+      return 1;
+    // The skew singular-output target against its exact fiber traversal.
+    if (checkC("M3 skew target [1,1,-2] -> NotSourceLexEquivalent + witness",
+               {{BigInt(1), BigInt(1), BigInt(-2)}},
+               OrderVerdict::NotSourceLexEquivalent))
+      return 1;
+
+    // Distinct physical-C fibers are not incorrectly constrained against one
+    // another: identity [1,0,0] has CROSS-fiber reversals, yet the certificate
+    // (same-fiber only) is SourceLexEquivalent.
+    {
+      IntMatrix C = {{BigInt(1), BigInt(0), BigInt(0)}};
+      auto plan = buildKernelCosetFiberPlan(C, boxR(3, 3), 3);
+      // brute cross-fiber reversal: a pair in DIFFERENT fibers, x-lex vs y_red.
+      bool crossRev = false;
+      std::vector<std::vector<long>> all;
+      for (long i = 0; i < 4; ++i)
+        for (long j = 0; j < 4; ++j)
+          for (long k = 0; k < 4; ++k)
+            all.push_back({i, j, k});
+      for (auto &a : all)
+        for (auto &b : all)
+          if (ckey(C, a) != ckey(C, b) && xlex(a, b) < 0 &&
+              ylex(plan->Uinv, plan->reductionCols, a, b) > 0)
+            crossRev = true;
+      auto cert = certifyKernelCosetSourceOrder(*plan);
+      if (verify(crossRev &&
+                     cert.verdict == OrderVerdict::SourceLexEquivalent,
+                 "M3 distinct fibers not cross-constrained (cross-reversal "
+                 "exists but same-fiber is clean)"))
+        return 1;
+    }
+
+    // Congruence-restricted domain handled exactly: D' has a congruence local
+    // (y1 even). The traversal (y1-lex) matches source order -> Equivalent, and
+    // the violation system carries the locals through isIntegerEmpty.
+    {
+      IntegerPolyhedron Dp(PresburgerSpace::getSetSpace(2, 0, 1)); // +1 local q
+      Dp.addInequality({1, 0, 0, 0});  // y0 >= 0
+      Dp.addInequality({-1, 0, 0, 3}); // y0 <= 3
+      Dp.addInequality({0, 1, 0, 0});  // y1 >= 0
+      Dp.addInequality({0, -1, 0, 5}); // y1 <= 5
+      Dp.addEquality({0, 1, -2, 0});   // y1 == 2q  (y1 even)
+      KernelCosetFiberPlan plan(std::move(Dp));
+      plan.U = {{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}};
+      plan.Uinv = {{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}};
+      plan.outputRank = 1;
+      plan.kernelRank = 1;
+      plan.outputCols = {0};
+      plan.reductionCols = {1};
+      auto cert = certifyKernelCosetSourceOrder(plan);
+      // brute: y0 in [0,3], y1 in {0,2,4}, fiber = y0; (y0,y1)-lex vs y1-lex.
+      bool rev = false;
+      for (int y0 = 0; y0 <= 3; ++y0)
+        for (int a = 0; a <= 5; a += 2)
+          for (int b = 0; b <= 5; b += 2)
+            if (std::make_pair(y0, a) < std::make_pair(y0, b) && a > b)
+              rev = true;
+      if (verify(cert.verdict == OrderVerdict::SourceLexEquivalent && !rev,
+                 "M3 congruence-restricted domain (y1 even) -> Equivalent"))
+        return 1;
+    }
+
+    // Unprovable/overflow -> UNKNOWN (legality never inferred).
+    {
+      BigInt huge = BigInt(1000000000) * BigInt(1000000000) * BigInt(1000000000);
+      IntegerPolyhedron Dp = boxR(2, 3);
+      KernelCosetFiberPlan plan(std::move(Dp));
+      plan.U = {{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}};
+      plan.Uinv = {{huge, BigInt(0)}, {BigInt(0), BigInt(1)}};
+      plan.outputRank = 1;
+      plan.kernelRank = 1;
+      plan.outputCols = {0};
+      plan.reductionCols = {1};
+      if (verify(certifyKernelCosetSourceOrder(plan).verdict ==
+                     OrderVerdict::Unknown,
+                 "M3 i64-overflow -> UNKNOWN (never inferred legal)"))
+        return 1;
+    }
+
+    // Strict FP is never silently reassociated: the skew target's verdict is
+    // NotSourceLexEquivalent regardless of any flag (the certificate consults
+    // no fastmath), so a strict-FP reordered reduction stays illegal.
+    {
+      auto plan = buildKernelCosetFiberPlan(
+          {{BigInt(1), BigInt(1), BigInt(-2)}}, boxR(3, 3), 3);
+      if (verify(certifyKernelCosetSourceOrder(*plan).verdict ==
+                     OrderVerdict::NotSourceLexEquivalent,
+                 "M3 strict-FP: skew target stays NotSourceLexEquivalent"))
+        return 1;
+    }
+    std::cout << "C4a-sym kernel-coset M3 source-order tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
