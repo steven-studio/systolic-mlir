@@ -249,20 +249,33 @@ def _kc_split_results(s):
 
 def kernel_coset_macs(text):
     """Interpret the kernel-coset emission; return (static matmul_tile ops,
-    [(A_addr, B_addr, C_addr)] expanded over every loop iteration)."""
+    [(A_addr, B_addr, C_addr)] expanded over every loop iteration).
+
+    Handles both the Kdev==1 (M4b.2a) and the Kdev>1 (M4b.2b) IR: affine.for
+    with an optional `step`, affine.if over an integer set (full-block vs
+    remainder), rank-generic memref load/store, and position-keyed 1xK / Kx1
+    gather slabs so a matmul_tile(1,1,K) reads the right K physical points."""
     maps = {}
     for m in re.finditer(r'(#\w+) = affine_map<\(([^)]*)\) -> \((.*)\)>', text):
         maps[m[1]] = _kc_split_results(m[3])
+    # affine_set definitions: name -> [(expr, is_equality)].
+    sets = {}
+    for m in re.finditer(r'(#\w+) = affine_set<\(([^)]*)\) : \((.*)\)>', text):
+        cons = []
+        for c in _kc_split_results(m[3]):
+            if c.endswith('== 0'):
+                cons.append((c[:-4], True))
+            else:
+                assert c.endswith('>= 0'), c
+                cons.append((c[:-4], False))
+        sets[m[1]] = cons
 
     # Source memref operands, in signature order: arg0 = C (output), 1 = A, 2 = B.
     src = {}
     for i, (nm, dims) in enumerate(
             re.findall(r'(%arg\d+): memref<([0-9x]+)xf32>', text)):
         shape = tuple(int(d) for d in dims.split('x'))
-        strides = [1] * len(shape)
-        for d in range(len(shape) - 2, -1, -1):
-            strides[d] = strides[d + 1] * shape[d + 1]
-        src[nm] = (i, shape, tuple(strides))
+        src[nm] = (i, shape)
 
     env, scalars, packed, views, macs, jobs = {}, {}, {}, {}, [], [0]
 
@@ -270,11 +283,21 @@ def kernel_coset_macs(text):
         tok = tok.strip()
         return env[tok] if tok.startswith('%') else int(tok)
 
+    def lin(idxs, shape):
+        assert len(idxs) == len(shape), (idxs, shape)
+        a, stride = 0, 1
+        for v, sz in zip(reversed(idxs), reversed(shape)):
+            assert 0 <= v < sz, (idxs, shape)
+            a += v * stride; stride *= sz
+        return a
+
+    def denv_of(argstr):
+        args = [a for a in argstr.split(',') if a.strip()]
+        return {'d' + str(i): integer(a) for i, a in enumerate(args)}
+
     def apply_map(app):
         mm = re.match(r'(#\w+)\((.*)\)', app.strip())
-        args = [a for a in mm[2].split(',') if a.strip()]
-        denv = {'d' + str(i): integer(a) for i, a in enumerate(args)}
-        return [aff_eval(r, denv) for r in maps[mm[1]]]
+        return [aff_eval(r, denv_of(mm[2])) for r in maps[mm[1]]]
 
     def bound(s):
         s = s.strip()
@@ -288,35 +311,71 @@ def kernel_coset_macs(text):
 
     def addr(view, idxs):
         if view[0] == 'slab':
-            return packed[view[1]]
-        role, shape, strides = src[view[1]]
-        assert len(idxs) == len(shape), (view, idxs)
-        a = 0
-        for v, st, sz in zip(idxs, strides, shape):
-            assert 0 <= v < sz, (view, idxs, shape)
-            a += v * st
-        return (role, a)
+            _, name, off, strides = view
+            assert len(idxs) == len(strides), (view, idxs)
+            return packed[(name, off + sum(i * s for i, s in zip(idxs, strides)))]
+        role, shape = src[view[1]]
+        return (role, lin(idxs, shape))
 
     lines = text.splitlines()
+
+    def close(p):
+        """Index of the '}' closing the block whose body starts at line p.
+        `} else {` is depth-neutral (closes one block, opens the next)."""
+        depth, q = 1, p
+        while depth:
+            s = lines[q].strip()
+            if s == '} else {':
+                pass
+            elif s.endswith('{'):
+                depth += 1
+            elif s == '}':
+                depth -= 1
+            q += 1
+        return q - 1
+
+    def else_line(p, final):
+        """The `} else {` line of the if whose body starts at p, or None."""
+        depth, q = 1, p
+        while q < final:
+            s = lines[q].strip()
+            if s == '} else {':
+                if depth == 1:
+                    return q
+            elif s.endswith('{'):
+                depth += 1
+            elif s == '}':
+                depth -= 1
+            q += 1
+        return None
 
     def run(start, end):
         p = start
         while p < end:
             line = lines[p].strip(); p += 1
-            m = re.match(r'affine\.for (%\w+) = (.+?) to (.+?) \{', line)
+            if not line or line in ('}', '} else {', 'return') or line.startswith(
+                    ('module', 'func.func', 'systolic.device', '#', '//')):
+                continue
+            m = re.match(r'affine\.for (%\w+) = (.+?) to (.+?)(?: step (\d+))? \{$',
+                         line)
             if m:
-                q, depth = p, 1
-                while depth:
-                    t = lines[q].strip()
-                    if t.endswith('{'):
-                        depth += 1
-                    if t == '}':
-                        depth -= 1
-                    q += 1
-                for x in range(bound(m[2]), bound(m[3])):
+                end_ = close(p); step = int(m[4]) if m[4] else 1
+                for x in range(bound(m[2]), bound(m[3]), step):
                     env[m[1]] = x
-                    run(p, q - 1)
-                p = q
+                    run(p, end_)
+                p = end_ + 1
+                continue
+            m = re.match(r'affine\.if (#\w+)\((.*?)\) \{$', line)
+            if m:
+                final = close(p); els = else_line(p, final)
+                d = denv_of(m[2])
+                taken = all((aff_eval(e, d) == 0) if iseq else (aff_eval(e, d) >= 0)
+                            for e, iseq in sets[m[1]])
+                if taken:
+                    run(p, els if els is not None else final)
+                elif els is not None:
+                    run(els + 1, final)
+                p = final + 1
                 continue
             m = re.match(r'(%\w+) = arith.constant (-?\d+) : index', line)
             if m:
@@ -324,9 +383,14 @@ def kernel_coset_macs(text):
             m = re.match(r'(%\w+) = affine.apply (#\w+\(.*?\))', line)
             if m:
                 env[m[1]] = apply_map(m[2])[0]; continue
-            m = re.match(r'(%\w+) = memref.alloca\(\) : memref<', line)
+            m = re.match(r'(%\w+) = memref.alloca\(\) : memref<([0-9x]+)xf32>', line)
             if m:
-                views[m[1]] = ('slab', m[1]); continue
+                shape = [int(d) for d in m[2].split('x')]
+                strides = [1] * len(shape)
+                for d in range(len(shape) - 2, -1, -1):
+                    strides[d] = strides[d + 1] * shape[d + 1]
+                views[m[1]] = ('slab', m[1], 0, tuple(strides))
+                continue
             m = re.match(r'(%\w+) = memref.load (%\w+)\[(.*?)\] :', line)
             if m:
                 idxs = [integer(x) for x in m[3].split(',')] if m[3].strip() else []
@@ -336,14 +400,27 @@ def kernel_coset_macs(text):
             if m:
                 tgt = views.get(m[2], ('src', m[2]))
                 if tgt[0] == 'slab':
-                    packed[tgt[1]] = scalars[m[1]]
+                    _, name, off, strides = tgt
+                    idxs = [integer(x) for x in m[3].split(',')]
+                    packed[(name, off + sum(i * s for i, s in zip(idxs, strides)))] \
+                        = scalars[m[1]]
                 continue
             m = re.match(r'(%\w+) = bufferization.to_tensor (%\w+)', line)
             if m:
                 views[m[1]] = views[m[2]]; continue
-            m = re.match(r'(%\w+) = tensor.extract_slice (%\w+)\[', line)
+            # extract_slice carries the slab, shifting its offset/strides so a
+            # k_max fold (a [1,16] slice of a [1,Kdev] gather slab) reads the
+            # right physical points.
+            m = re.match(r'(%\w+) = tensor.extract_slice (%\w+)\[(.*?)\] '
+                         r'\[(.*?)\] \[(.*?)\]', line)
             if m:
-                views[m[1]] = views[m[2]]; continue
+                _, name, off, strides = views[m[2]]
+                offs = [int(x) for x in m[3].split(',')]
+                steps = [int(x) for x in m[5].split(',')]
+                views[m[1]] = ('slab', name,
+                               off + sum(o * s for o, s in zip(offs, strides)),
+                               tuple(s * st for s, st in zip(strides, steps)))
+                continue
             m = re.match(r'(%\w+) = tensor.insert_slice .*? into (%\w+)\[', line)
             if m:
                 views[m[1]] = views[m[2]]; continue
@@ -362,10 +439,7 @@ def kernel_coset_macs(text):
                 continue
             if line.startswith('bufferization.materialize_in_destination'):
                 continue
-            if line in ('}', 'return', '') or line.startswith(
-                    ('module', 'func.func', 'systolic.device', '#', '//')):
-                continue
-            if '=' in line or line.startswith('affine.'):
+            if '=' in line or line.startswith(('affine.', 'scf.')):
                 raise AssertionError('uninterpreted emitted op: ' + line)
         return jobs[0], macs
 
@@ -382,4 +456,14 @@ def skew_source():
     pts = []
     for i, j, k in product(range(4), repeat=3):
         pts.append((i * 16 + k, k * 16 + j, i + j - 2 * k + 6))
+    return pts
+
+
+def skew_macs(hi, coff, abdim):
+    """Brute-force MACs of C[i+j-2k+coff] += A[i,k]*B[k,j], 0<=i,j,k<hi, with A
+    and B abdim x abdim row-major and C 1-D. Generalizes skew_source for the
+    wider M4b.2b domains that produce several full Kdev blocks per fiber."""
+    pts = []
+    for i, j, k in product(range(hi), repeat=3):
+        pts.append((i * abdim + k, k * abdim + j, i + j - 2 * k + coff))
     return pts

@@ -54,15 +54,23 @@ namespace systolic {
 /// aliasing helper is pass-local). `allowFpReassociation` is the pass option of
 /// the same name. `options` are the fleet cost-model options for the device
 /// planner. `nextGemmIndex` is accepted for signature parity with the fast path
-/// but M4b.2a emits synchronous tiles (no async FPGA attributes on a looped
-/// tile), so it is left unchanged.
+/// but the emission is synchronous (no async FPGA attributes on a looped tile),
+/// so it is left unchanged.
+///
+/// Phase M4b.2b-1: `kdev` is the static device reduction-tile width. `kdev == 1`
+/// is the original M4b.2a emission (one 1x1x1 tile per reduction point).
+/// `kdev > 1` blocks the contiguous innermost tile axis into full `kdev`-wide
+/// `matmul_tile(1,1,kdev)` tiles plus a `k == 1` remainder loop of exactly
+/// `L mod kdev` points, where `L` is the (runtime) tile-interval length; the
+/// device must admit the 1x1xkdev tile or the offload declines. The peel axes,
+/// physical addresses, coverage and C-accumulation are unchanged.
 LogicalResult lowerKernelCosetOffload(const RecognizedMacStatement &stmt,
                                       const SystolicFleet &fleet,
                                       const SystolicOptimizerOptions &options,
                                       bool allowFpReassociation,
                                       bool operandsDisjointFromOutput,
-                                      int64_t &nextGemmIndex, bool report,
-                                      std::string &why);
+                                      unsigned kdev, int64_t &nextGemmIndex,
+                                      bool report, std::string &why);
 
 } // namespace systolic
 } // namespace mlir

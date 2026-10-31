@@ -17,6 +17,7 @@
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/IntegerSet.h"
 
 #include <optional>
 
@@ -60,8 +61,8 @@ klogical::IntMatrix composeWithU(const klogical::IntMatrix &rows,
 LogicalResult mlir::systolic::lowerKernelCosetOffload(
     const RecognizedMacStatement &stmt, const SystolicFleet &fleet,
     const SystolicOptimizerOptions &options, bool allowFpReassociation,
-    bool operandsDisjointFromOutput, int64_t & /*nextGemmIndex*/, bool report,
-    std::string &why) {
+    bool operandsDisjointFromOutput, unsigned kdev,
+    int64_t & /*nextGemmIndex*/, bool report, std::string &why) {
   // MLIR op handles are value types with non-const accessors; copy them out of
   // the const statement before use.
   std::array<affine::AffineLoadOp, 3> loads = stmt.loads;
@@ -179,12 +180,45 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
         return failure();
       }
 
-  // ---- Device tile: one static 1x1x1 reduction tile, reused per point ----
+  // Validate every operand-address coefficient and offset up front (fail
+  // closed on i64 overflow) so no IR is emitted before legality is decided.
+  for (unsigned op = 0; op < 3; ++op) {
+    for (const auto &row : MU[op])
+      for (const BigInt &v : row)
+        if (!bigToI64(v)) {
+          why = "integer overflow in operand address coefficient";
+          return failure();
+        }
+    for (const BigInt &v : offset[op])
+      if (!bigToI64(v)) {
+        why = "integer overflow in operand address offset";
+        return failure();
+      }
+  }
+
+  // ---- Device tiles ----------------------------------------------------
+  // A static 1x1x1 tile is always needed (kdev == 1, and the kdev > 1
+  // remainder); a 1x1xkdev tile is needed for the full blocks. Both must be
+  // admitted by the fleet or the offload declines.
+  if (kdev < 1) {
+    why = "kernel-coset Kdev must be >= 1";
+    return failure();
+  }
   Operation *anchor = outerLoop.getOperation();
   auto plan = planSystolicMatmul(anchor, 1, 1, 1, fleet, options);
   if (failed(plan)) {
     why = "device does not admit the 1x1x1 reduction tile";
     return failure();
+  }
+  std::optional<SystolicTilePlan> planKdev;
+  if (kdev > 1) {
+    auto p = planSystolicMatmul(anchor, 1, 1, static_cast<int64_t>(kdev), fleet,
+                                options);
+    if (failed(p)) {
+      why = "device does not admit the 1x1xKdev reduction tile";
+      return failure();
+    }
+    planKdev = std::move(*p);
   }
 
   // ---- Build the affine nest -------------------------------------------
@@ -216,6 +250,54 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
 
   // y-column -> its induction variable, filled as loops are created.
   SmallVector<Value> yiv(n, Value());
+
+  // Exact M4b.1 tile-axis bound faces, built up front so a face i64 overflow
+  // declines before any IR is emitted (dim i <-> paramCols[i]). lbMap/ubMap are
+  // the max/min affine.for bounds (ubMap half-open, floor + 1); they serve the
+  // kdev==1 tile loop and the kdev>1 step-Kdev block-start loop alike. The raw
+  // upper faces (tb->upperFloor) drive the kdev>1 full-block predicate and
+  // remainder count directly.
+  const unsigned numParams = tb->paramCols.size();
+  SmallVector<unsigned> faceCols(numParams);
+  for (unsigned i = 0; i < numParams; ++i)
+    faceCols[i] = i;
+  SmallVector<AffineExpr> lbExprs, ubExprs;
+  for (const auto &f : tb->lowerCeil) {
+    auto d = bigToI64(f.divisor);
+    AffineExpr e;
+    if (!d || *d <= 0 ||
+        failed(affineRow(f.params, faceCols, f.constant, numParams, e))) {
+      why = "integer overflow in tile lower bound";
+      return failure();
+    }
+    lbExprs.push_back(e.ceilDiv(static_cast<uint64_t>(*d)));
+  }
+  for (const auto &f : tb->upperFloor) {
+    auto d = bigToI64(f.divisor);
+    AffineExpr e;
+    if (!d || *d <= 0 ||
+        failed(affineRow(f.params, faceCols, f.constant, numParams, e))) {
+      why = "integer overflow in tile upper bound";
+      return failure();
+    }
+    ubExprs.push_back(e.floorDiv(static_cast<uint64_t>(*d)) + 1);
+  }
+  AffineMap lbMap = AffineMap::get(numParams, 0, lbExprs, ctx);
+  AffineMap ubMap = AffineMap::get(numParams, 0, ubExprs, ctx);
+
+  // Pre-build the A and B physical-address maps over all n reduced coordinates
+  // (dim j <-> y-column j), from the pre-validated access*U rows. Both emission
+  // paths reuse them, so no address arithmetic can fail during emission.
+  SmallVector<unsigned> allCols(n);
+  for (unsigned i = 0; i < n; ++i)
+    allCols[i] = i;
+  std::array<SmallVector<AffineMap>, 2> abMaps;
+  for (unsigned op = 0; op < 2; ++op)
+    for (auto [r, row] : llvm::enumerate(MU[op])) {
+      AffineExpr e;
+      (void)affineRow(row, allCols, offset[op][r], n, e); // pre-validated above
+      abMaps[op].push_back(AffineMap::get(n, 0, e, ctx));
+    }
 
   // Output loops (paramCols[0 .. outputRank-1], constant box bounds).
   for (unsigned i = 0; i < outputRank; ++i) {
@@ -259,94 +341,152 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
     builder.setInsertionPointToStart(lp.getBody());
   }
 
-  // Tile loop bound maps over the param columns (dim i <-> paramCols[i]). The
-  // face parameters are already indexed over paramCols, so the coefficient
-  // columns are the identity 0..numParams-1.
-  const unsigned numParams = tb->paramCols.size();
-  SmallVector<unsigned> faceCols(numParams);
-  for (unsigned i = 0; i < numParams; ++i)
-    faceCols[i] = i;
-  SmallVector<AffineExpr> lbExprs, ubExprs;
-  for (const auto &f : tb->lowerCeil) {
-    auto d = bigToI64(f.divisor);
-    AffineExpr e;
-    if (!d || *d <= 0 ||
-        failed(affineRow(f.params, faceCols, f.constant, numParams, e))) {
-      why = "integer overflow in tile lower bound";
-      return failure();
-    }
-    lbExprs.push_back(e.ceilDiv(static_cast<uint64_t>(*d)));
-  }
-  for (const auto &f : tb->upperFloor) {
-    auto d = bigToI64(f.divisor);
-    AffineExpr e;
-    if (!d || *d <= 0 ||
-        failed(affineRow(f.params, faceCols, f.constant, numParams, e))) {
-      why = "integer overflow in tile upper bound";
-      return failure();
-    }
-    // Half-open: affine.for upper bound is exclusive, so floor(.) + 1.
-    ubExprs.push_back(e.floorDiv(static_cast<uint64_t>(*d)) + 1);
-  }
-  AffineMap lbMap = AffineMap::get(numParams, 0, lbExprs, ctx);
-  AffineMap ubMap = AffineMap::get(numParams, 0, ubExprs, ctx);
-  // All output and peel induction variables now exist (the tile bound maps bind
-  // dim i to paramCols[i]).
+  // The tile bound maps bind dim i to paramCols[i].
   SmallVector<Value> paramIVs;
   for (unsigned c : tb->paramCols)
     paramIVs.push_back(yiv[c]);
-  auto tileLoop = affine::AffineForOp::create(builder, loc, paramIVs, lbMap,
-                                              paramIVs, ubMap, 1);
-  if (!redOuter)
-    redOuter = tileLoop; // kappa == 1: the tile loop is the outer reduction.
-  yiv[tb->tileCol] = tileLoop.getInductionVar();
-  builder.setInsertionPointToStart(tileLoop.getBody());
-
-  // All induction variables are now in scope: reconstruct the A/B addresses,
-  // gather the scalars into 1x1 slabs and run one 1x1x1 device tile that
-  // accumulates into the C slab.
-  SmallVector<unsigned> allCols(n);
-  for (unsigned i = 0; i < n; ++i)
-    allCols[i] = i;
-  SmallVector<Value> allIVs;
-  for (unsigned i = 0; i < n; ++i)
-    allIVs.push_back(yiv[i]);
-
-  auto gather = [&](unsigned op) -> std::optional<Value> {
-    SmallVector<Value> idx;
-    for (auto [r, row] : llvm::enumerate(MU[op])) {
-      AffineExpr e;
-      if (failed(affineRow(row, allCols, offset[op][r], n, e)))
-        return std::nullopt;
-      auto m = AffineMap::get(n, 0, e, ctx);
-      idx.push_back(
-          affine::AffineApplyOp::create(builder, loc, m, allIVs).getResult());
-    }
-    Value v = memref::LoadOp::create(builder, loc, loads[op].getMemRef(), idx);
-    Value slab =
-        memref::AllocaOp::create(builder, loc, MemRefType::get({1, 1}, f32));
-    memref::StoreOp::create(builder, loc, v, slab, ValueRange{zero, zero});
-    return slab;
-  };
-  auto aSlab = gather(0);
-  auto bSlab = gather(1);
-  if (!aSlab || !bSlab) {
-    why = "integer overflow in A/B address";
-    return failure();
-  }
-  auto toTensor = [&](Value buffer, bool writable) -> Value {
+  auto toTensor = [&](Value buffer, ArrayRef<int64_t> shape,
+                      bool writable) -> Value {
     return bufferization::ToTensorOp::create(
-        builder, loc, RankedTensorType::get({1, 1}, f32), buffer,
+        builder, loc, RankedTensorType::get(shape, f32), buffer,
         /*restrict=*/true, writable);
   };
-  Value result = emitSystolicTilePlan(builder, loc, toTensor(*aSlab, false),
-                                      toTensor(*bSlab, false),
-                                      toTensor(cSlab, true), *plan, fleet,
-                                      /*gemmIndex=*/-1);
-  auto copy = bufferization::MaterializeInDestinationOp::create(builder, loc,
-                                                                result, cSlab);
-  copy.setRestrict(true);
-  copy.setWritable(true);
+
+  if (kdev == 1) {
+    // ----- Phase M4b.2a: one static 1x1x1 device tile per reduction point. --
+    auto tileLoop = affine::AffineForOp::create(builder, loc, paramIVs, lbMap,
+                                                paramIVs, ubMap, 1);
+    if (!redOuter)
+      redOuter = tileLoop; // kappa == 1: the tile loop is the outer reduction.
+    yiv[tb->tileCol] = tileLoop.getInductionVar();
+    builder.setInsertionPointToStart(tileLoop.getBody());
+    SmallVector<Value> allIVs(yiv.begin(), yiv.end());
+    auto gather = [&](unsigned op) -> Value {
+      SmallVector<Value> idx;
+      for (AffineMap m : abMaps[op])
+        idx.push_back(
+            affine::AffineApplyOp::create(builder, loc, m, allIVs).getResult());
+      Value v = memref::LoadOp::create(builder, loc, loads[op].getMemRef(), idx);
+      Value slab =
+          memref::AllocaOp::create(builder, loc, MemRefType::get({1, 1}, f32));
+      memref::StoreOp::create(builder, loc, v, slab, ValueRange{zero, zero});
+      return slab;
+    };
+    Value aSlab = gather(0);
+    Value bSlab = gather(1);
+    Value result = emitSystolicTilePlan(
+        builder, loc, toTensor(aSlab, {1, 1}, false),
+        toTensor(bSlab, {1, 1}, false), toTensor(cSlab, {1, 1}, true), *plan,
+        fleet, /*gemmIndex=*/-1);
+    auto copy = bufferization::MaterializeInDestinationOp::create(builder, loc,
+                                                                  result, cSlab);
+    copy.setRestrict(true);
+    copy.setWritable(true);
+  } else {
+    // ----- Phase M4b.2b-1: block the contiguous tile axis by Kdev, exact K=1
+    // remainder. Gather K consecutive points from tile coordinate `base`
+    // (base .. base+K-1) into 1xK / Kx1 slabs and accumulate one static
+    // matmul_tile(1,1,K) into the single C slab.
+    const int64_t K = static_cast<int64_t>(kdev);
+    auto emitTile = [&](Value base, int64_t tileK, const SystolicTilePlan &pl) {
+      Value aSlab = memref::AllocaOp::create(builder, loc,
+                                             MemRefType::get({1, tileK}, f32));
+      Value bSlab = memref::AllocaOp::create(builder, loc,
+                                             MemRefType::get({tileK, 1}, f32));
+      for (int64_t d = 0; d < tileK; ++d) {
+        Value t = base;
+        if (d != 0)
+          t = affine::AffineApplyOp::create(
+                  builder, loc,
+                  AffineMap::get(1, 0, getAffineDimExpr(0, ctx) + d, ctx),
+                  ValueRange{base});
+        SmallVector<Value> ivs(yiv.begin(), yiv.end());
+        ivs[tb->tileCol] = t;
+        Value dIdx = arith::ConstantIndexOp::create(builder, loc, d);
+        SmallVector<Value> aIdx, bIdx;
+        for (AffineMap m : abMaps[0])
+          aIdx.push_back(
+              affine::AffineApplyOp::create(builder, loc, m, ivs).getResult());
+        for (AffineMap m : abMaps[1])
+          bIdx.push_back(
+              affine::AffineApplyOp::create(builder, loc, m, ivs).getResult());
+        Value av =
+            memref::LoadOp::create(builder, loc, loads[0].getMemRef(), aIdx);
+        Value bv =
+            memref::LoadOp::create(builder, loc, loads[1].getMemRef(), bIdx);
+        memref::StoreOp::create(builder, loc, av, aSlab, ValueRange{zero, dIdx});
+        memref::StoreOp::create(builder, loc, bv, bSlab, ValueRange{dIdx, zero});
+      }
+      Value result = emitSystolicTilePlan(
+          builder, loc, toTensor(aSlab, {1, tileK}, false),
+          toTensor(bSlab, {tileK, 1}, false), toTensor(cSlab, {1, 1}, true), pl,
+          fleet, /*gemmIndex=*/-1);
+      auto copy = bufferization::MaterializeInDestinationOp::create(
+          builder, loc, result, cSlab);
+      copy.setRestrict(true);
+      copy.setWritable(true);
+    };
+
+    // Step-Kdev loop over block starts %t in [max(lb), min(ub)) step Kdev --
+    // the same bound maps as the kdev==1 tile loop (ubMap is the half-open
+    // hi+1). An empty interval makes this loop run zero times (no MACs).
+    auto blockLoop = affine::AffineForOp::create(builder, loc, paramIVs, lbMap,
+                                                 paramIVs, ubMap, K);
+    if (!redOuter)
+      redOuter = blockLoop; // kappa == 1: C store after the step loop.
+    OpBuilder::InsertionGuard g(builder);
+    builder.setInsertionPointToStart(blockLoop.getBody());
+    Value t = blockLoop.getInductionVar();
+
+    // Build the "whole Kdev block fits" predicate and the remainder count, both
+    // over the params (dims 0..numParams-1) and %t (dim numParams). For each
+    // upper floor face tile <= floor(num_i/div_i): a full block needs
+    //   floor(num_i/div_i) >= %t + Kdev - 1  <=>  num_i - div_i*%t - div_i*(Kdev-1) >= 0
+    // (an exact affine inequality, no floordiv); the remainder covers
+    //   [%t, hi] -> hi - %t + 1 = min_i(floor(num_i/div_i) - %t + 1) points.
+    AffineExpr tDim = getAffineDimExpr(numParams, ctx);
+    SmallVector<AffineExpr> fullConstraints, remResults;
+    for (const auto &f : tb->upperFloor) {
+      int64_t div = *bigToI64(f.divisor); // pre-validated above
+      AffineExpr num = getAffineConstantExpr(*bigToI64(f.constant), ctx);
+      for (unsigned j = 0; j < numParams; ++j)
+        num = num + getAffineDimExpr(j, ctx) * (*bigToI64(f.params[j]));
+      fullConstraints.push_back(num - tDim * div -
+                                getAffineConstantExpr(div * (K - 1), ctx));
+      remResults.push_back(num.floorDiv(static_cast<uint64_t>(div)) - tDim + 1);
+    }
+    SmallVector<bool> eqFlags(fullConstraints.size(), false); // all >= 0
+    IntegerSet fullSet =
+        IntegerSet::get(numParams + 1, 0, fullConstraints, eqFlags);
+    SmallVector<Value> ifArgs(paramIVs.begin(), paramIVs.end());
+    ifArgs.push_back(t);
+    auto ifOp = affine::AffineIfOp::create(builder, loc, fullSet, ifArgs,
+                                           /*withElseRegion=*/true);
+    {
+      // Full block: one static matmul_tile(1,1,Kdev) over [%t, %t+Kdev-1].
+      OpBuilder::InsertionGuard g2(builder);
+      builder.setInsertionPointToStart(ifOp.getThenBlock());
+      emitTile(t, K, *planKdev);
+    }
+    {
+      // Final partial block: a K=1 remainder loop over the remaining points.
+      OpBuilder::InsertionGuard g2(builder);
+      builder.setInsertionPointToStart(ifOp.getElseBlock());
+      AffineMap remUbMap = AffineMap::get(numParams + 1, 0, remResults, ctx);
+      AffineMap zeroMap = AffineMap::getConstantMap(0, ctx);
+      auto remLoop = affine::AffineForOp::create(builder, loc, ValueRange{},
+                                                 zeroMap, ifArgs, remUbMap, 1);
+      OpBuilder::InsertionGuard g3(builder);
+      builder.setInsertionPointToStart(remLoop.getBody());
+      Value base = affine::AffineApplyOp::create(
+          builder, loc,
+          AffineMap::get(2, 0,
+                         getAffineDimExpr(0, ctx) + getAffineDimExpr(1, ctx),
+                         ctx),
+          ValueRange{t, remLoop.getInductionVar()});
+      emitTile(base, 1, *plan);
+    }
+  }
 
   // Write the accumulated fiber back to C, after the reduction nest.
   builder.setInsertionPointAfter(redOuter);
@@ -357,11 +497,12 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   if (report)
     anchor->emitRemark()
         << "affine GEMM lowered by the experimental symbolic kernel-coset "
-           "offload (Phase M4b.2a): source MACs="
+           "offload (Phase M4b.2): source MACs="
         << scan->fiber.sourceMACs.str()
         << "; output fibers=" << scan->fiber.outputFibers.str()
-        << "; static K=1 device tiles over exact affine tile bounds; no "
-           "source enumeration";
+        << "; static K=" << kdev
+        << " device tiles over exact affine tile bounds (K=1 remainder when "
+           "K>1); no source enumeration";
 
   anchor->erase();
   return success();

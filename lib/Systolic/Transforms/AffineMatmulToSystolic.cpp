@@ -2557,6 +2557,15 @@ struct AffineMatmulToSystolicPass
                      "declines is left to the existing paths"),
       llvm::cl::Hidden, llvm::cl::init(false)};
 
+  Option<unsigned> kernelCosetKdev{
+      *this, "kernel-coset-kdev",
+      llvm::cl::desc("Phase M4b.2b-1 (EXPERIMENTAL): static device reduction "
+                     "tile width for the kernel-coset offload. 1 (default) is "
+                     "the M4b.2a per-point emission; K>1 blocks the contiguous "
+                     "tile axis into matmul_tile(1,1,K) tiles plus a K=1 "
+                     "remainder. Ignored unless kernel-coset-offload is set"),
+      llvm::cl::Hidden, llvm::cl::init(1)};
+
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
       llvm::cl::desc("Assume that A and B never overlap C. Without it, the "
@@ -3182,7 +3191,7 @@ struct AffineMatmulToSystolicPass
                                            assumeNoAlias);
             if (succeeded(lowerKernelCosetOffload(
                     stmt, *fleet, kcOptions, allowFpReassociation, disjoint,
-                    nextGemmIndex, report, why)))
+                    kernelCosetKdev, nextGemmIndex, report, why)))
               continue; // claimed and erased; drop from the candidate list.
             if (report)
               candidate.anchor->emitRemark()
