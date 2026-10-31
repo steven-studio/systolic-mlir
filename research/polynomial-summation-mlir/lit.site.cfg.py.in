@@ -1,0 +1,8 @@
+config.p1_driver = r"@CMAKE_CURRENT_BINARY_DIR@/polynomial-cfg-report"
+config.p1_mlir_opt = r"@P1_MLIR_OPT@"
+config.p1_filecheck = r"@P1_FILECHECK@"
+config.p1_not = r"@P1_NOT@"
+config.p1_python = r"@Python3_EXECUTABLE@"
+config.p1_inputs = r"@P1_ROOT@/test/polynomial-summation-mlir/Inputs"
+config.p1_exec_root = r"@CMAKE_CURRENT_BINARY_DIR@/lit"
+lit_config.load_config(config, r"@CMAKE_CURRENT_SOURCE_DIR@/lit/lit.cfg.py")

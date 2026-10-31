@@ -1,0 +1,461 @@
+{
+  "llvm_source_commit": "7615da10b75c57286a4032eac8bb43c1b8d2ba46",
+  "llvm_source_status_porcelain": "",
+  "opt_build_revision_header": "#define LLVM_REVISION R\"(7615da10b75c57286a4032eac8bb43c1b8d2ba46)\"\n#define LLVM_REPOSITORY R\"(https://github.com/llvm/llvm-project.git)\"\n",
+  "versions": {
+    "clang": "clang version 24.0.0git (https://github.com/llvm/llvm-project.git 7615da10b75c57286a4032eac8bb43c1b8d2ba46)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/steven-studio/work/clang24-build/bin\n",
+    "opt": "LLVM (http://llvm.org/):\n  LLVM version 24.0.0git\n  Optimized build with assertions.\n  Default target: x86_64-unknown-linux-gnu\n  Host CPU: skylake\n"
+  },
+  "sha256": {
+    "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/recurrences.c": "bc5b264271a249db8705c8c0363467e0596d4807a8bf1af814b730bfcca143c6",
+    "/home/steven-studio/work/clang24-build/bin/clang-24": "3514d2174c30564202f02f00ae537b5516d438619e909416640cf38372436528",
+    "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt": "a76abc141f98f6b80ff8a792293bc4cd31263fe6c0dca5611f8ffb024fd7ca8f",
+    "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll": "ac4318f9fd5eddb0c53c6cb933ab1dd589a2e958d4315238eb419aa8dc0aa550",
+    "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized.ll": "cfb230bbac00d91b682e70bfdb668cc92cff9df95cf24af6d7aa9c1a0b2c2e71",
+    "/home/steven-studio/work/llvm-project/llvm/lib/Analysis/ScalarEvolution.cpp": "ad45a800c942e04033ad7e9239665437b830db3092ee3e4f57ac1acbbb17f34e",
+    "/home/steven-studio/work/llvm-project/llvm/include/llvm/Analysis/ScalarEvolutionExpressions.h": "4d4365308b44d7a1699f632639a24a1994985871fc7cf41bcfa45ea8a5528644"
+  },
+  "commands": [
+    [
+      "/home/steven-studio/work/clang24-build/bin/clang",
+      "--version"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "--version"
+    ],
+    [
+      "git",
+      "-C",
+      "/home/steven-studio/work/llvm-project",
+      "rev-parse",
+      "HEAD"
+    ],
+    [
+      "git",
+      "-C",
+      "/home/steven-studio/work/llvm-project",
+      "status",
+      "--porcelain"
+    ],
+    [
+      "/home/steven-studio/work/clang24-build/bin/clang",
+      "-O0",
+      "-Xclang",
+      "-disable-O0-optnone",
+      "-fno-discard-value-names",
+      "-S",
+      "-emit-llvm",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/recurrences.c",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/frontend.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-S",
+      "-passes=mem2reg,loop-simplify,lcssa",
+      "-verify-each",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/frontend.ll",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-passes=print<scalar-evolution>,print<loops>",
+      "-disable-output",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-S",
+      "-passes=default<O2>",
+      "-verify-each",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-passes=print<scalar-evolution>,print<loops>",
+      "-disable-output",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-scalar-evolution-max-add-rec-size=16",
+      "-passes=print<scalar-evolution>,print<loops>",
+      "-disable-output",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-scalar-evolution-max-add-rec-size=16",
+      "-S",
+      "-passes=default<O2>",
+      "-verify-each",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/canonical.ll",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized-size16.ll"
+    ],
+    [
+      "/home/steven-studio/work/polly24-build/opt-asserts/bin/opt",
+      "-scalar-evolution-max-add-rec-size=16",
+      "-passes=print<scalar-evolution>,print<loops>",
+      "-disable-output",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized-size16.ll"
+    ],
+    [
+      "/home/steven-studio/work/clang24-build/bin/clang",
+      "-O0",
+      "-shared",
+      "-fPIC",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized.ll",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/llvm-runtime-bh_3wtam/recurrences.so"
+    ],
+    [
+      "/home/steven-studio/work/clang24-build/bin/clang",
+      "-O0",
+      "-shared",
+      "-fPIC",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/optimized-size16.ll",
+      "-o",
+      "/home/steven-studio/work/systolic-mlir-polynomial-summation/test/polynomial-summation/llvm/observed/llvm-runtime-bh_3wtam/recurrences-size16.so"
+    ]
+  ],
+  "before": {
+    "sum_p1": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,1}<%for.cond> U: full-set S: full-set\t\tExits: ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p2": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set\t\tExits: ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p3": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,7,+,12,+,6}<%for.cond> U: full-set S: full-set\t\tExits: ((2 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (4 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p4": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,15,+,50,+,60,+,24}<%for.cond> U: full-set S: full-set\t\tExits: ((15 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (20 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517222 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p5": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,31,+,180,+,390,+,360,+,120}<%for.cond> U: full-set S: full-set\t\tExits: ((24 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (31 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (60 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (130 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p6": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,63,+,602,+,2100,+,3360,+,2520,+,720}<%for.cond> U: full-set S: full-set\t\tExits: ((56 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (63 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (224 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (700 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (6148914691236517406 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2635249153387078800 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p7": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,127,+,1932,+,10206,+,25200,+,31920,+,20160,+,5040}<%for.cond> U: full-set S: full-set\t\tExits: ((16 * (trunc i71 (((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (64 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (127 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (644 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (1680 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (3402 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236516496 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "sum_p8": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "%s.0 U: full-set S: full-set\t\tExits: <<Unknown>>\t\tLoopDispositions: { %for.cond: Variant }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "general_cubic": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,-2,+,51,+,78,+,42}<%for.cond> U: full-set S: full-set\t\tExits: ((14 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (26 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (51 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (-2 * %n))\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "shifted_square": {
+      "loops": 1,
+      "header_phis": {
+        "i.0": "{%start,+,%step}<%for.cond> U: full-set S: full-set\t\tExits: ((%n * %step) + %start)\t\tLoopDispositions: { %for.cond: Computable }",
+        "s.0": "{%initial,+,(%start * %start),+,(((2 * %start) + %step) * %step),+,(2 * %step * %step)}<%for.cond> U: full-set S: full-set\t\tExits: (((((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * ((2 * %start) + %step)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) * %step)) * %step) + (%n * %start * %start) + %initial)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "triangular": {
+      "loops": 1,
+      "header_phis": {
+        "z.0": "{0,+,0,+,0,+,1,+,2}<%for.cond> U: full-set S: full-set\t\tExits: ((6148914691236517206 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (-6148914691236517205 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))\t\tLoopDispositions: { %for.cond: Computable }",
+        "y.0": "{0,+,0,+,1,+,2}<%for.cond> U: full-set S: full-set\t\tExits: ((trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)))\t\tLoopDispositions: { %for.cond: Computable }",
+        "x.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "nonlinear_self": {
+      "loops": 1,
+      "header_phis": {
+        "x.0": "%x.0 U: full-set S: full-set\t\tExits: <<Unknown>>\t\tLoopDispositions: { %for.cond: Variant }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "exponential": {
+      "loops": 1,
+      "header_phis": {
+        "x.0": "%x.0 U: full-set S: full-set\t\tExits: <<Unknown>>\t\tLoopDispositions: { %for.cond: Variant }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "unknown_exit": {
+      "loops": 1,
+      "header_phis": {
+        "x.0": "%x.0 U: full-set S: full-set\t\tExits: <<Unknown>>\t\tLoopDispositions: { %while.cond: Variant }"
+      },
+      "backedge_counts": [
+        "Loop %while.cond: Unpredictable backedge-taken count.",
+        "Loop %while.cond: Unpredictable constant max backedge-taken count. ",
+        "Loop %while.cond: Unpredictable symbolic max backedge-taken count. "
+      ]
+    },
+    "fixed_square": {
+      "loops": 1,
+      "header_phis": {
+        "i.0": "{1,+,1}<nuw><nsw><%for.cond> U: [1,12) S: [1,12)\t\tExits: 11\t\tLoopDispositions: { %for.cond: Computable }",
+        "s.0": "{0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set\t\tExits: 385\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is i64 10",
+        "Loop %for.cond: constant max backedge-taken count is i64 10",
+        "Loop %for.cond: symbolic max backedge-taken count is i64 10"
+      ]
+    },
+    "observable_square": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,3,+,2}<%for.cond> U: full-set S: full-set\t\tExits: ((3 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    }
+  },
+  "after": {
+    "sum_p1": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p2": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p3": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p4": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p5": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p6": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p7": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "sum_p8": {
+      "loops": 2,
+      "header_phis": {},
+      "backedge_counts": [
+        "Loop %for.body.epil: backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>",
+        "Loop %for.body.epil: constant max backedge-taken count is i64 2",
+        "Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>",
+        "Loop %for.body: backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)",
+        "Loop %for.body: constant max backedge-taken count is i64 4611686018427387902",
+        "Loop %for.body: symbolic max backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)"
+      ]
+    },
+    "general_cubic": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "shifted_square": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "triangular": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "nonlinear_self": {
+      "loops": 2,
+      "header_phis": {},
+      "backedge_counts": [
+        "Loop %for.body.epil: backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>",
+        "Loop %for.body.epil: constant max backedge-taken count is i64 6",
+        "Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>",
+        "Loop %for.body: backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)",
+        "Loop %for.body: constant max backedge-taken count is i64 2305843009213693950",
+        "Loop %for.body: symbolic max backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)"
+      ]
+    },
+    "exponential": {
+      "loops": 2,
+      "header_phis": {},
+      "backedge_counts": [
+        "Loop %for.body.epil: backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>",
+        "Loop %for.body.epil: constant max backedge-taken count is i64 6",
+        "Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>",
+        "Loop %for.body: backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)",
+        "Loop %for.body: constant max backedge-taken count is i64 2305843009213693950",
+        "Loop %for.body: symbolic max backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)"
+      ]
+    },
+    "unknown_exit": {
+      "loops": 1,
+      "header_phis": {},
+      "backedge_counts": [
+        "Loop %while.body: Unpredictable backedge-taken count.",
+        "Loop %while.body: Unpredictable constant max backedge-taken count. ",
+        "Loop %while.body: Unpredictable symbolic max backedge-taken count. "
+      ]
+    },
+    "fixed_square": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "observable_square": {
+      "loops": 2,
+      "header_phis": {},
+      "backedge_counts": [
+        "Loop %for.body.epil: backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>",
+        "Loop %for.body.epil: constant max backedge-taken count is i64 2",
+        "Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>",
+        "Loop %for.body: backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)",
+        "Loop %for.body: constant max backedge-taken count is i64 4611686018427387902",
+        "Loop %for.body: symbolic max backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)"
+      ]
+    }
+  },
+  "optimized_runtime_oracle_comparisons": 1814,
+  "max_add_rec_size_16": {
+    "before_sum_p8": {
+      "loops": 1,
+      "header_phis": {
+        "s.0": "{0,+,1,+,255,+,6050,+,46620,+,166824,+,317520,+,332640,+,181440,+,40320}<%for.cond> U: full-set S: full-set\t\tExits: ((255 * (trunc i65 (((zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (576 * (trunc i71 (((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (1056 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (7056 * (trunc i68 (((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68) * (zext i64 %n to i68)) /u 16) to i64)) + (15540 * (trunc i67 (((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + (2049638230412172416 * (trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71) * (zext i64 %n to i71)) /u 128) to i64)) + (6148914691236519222 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65) * (zext i64 %n to i65)) /u 2) to i64)) + (7378697629483831768 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67) * (zext i64 %n to i67)) /u 8) to i64)) + %n)\t\tLoopDispositions: { %for.cond: Computable }",
+        "t.0": "{0,+,1}<nuw><%for.cond> U: full-set S: full-set\t\tExits: %n\t\tLoopDispositions: { %for.cond: Computable }"
+      },
+      "backedge_counts": [
+        "Loop %for.cond: backedge-taken count is %n",
+        "Loop %for.cond: constant max backedge-taken count is i64 -1",
+        "Loop %for.cond: symbolic max backedge-taken count is %n"
+      ]
+    },
+    "after_sum_p8": {
+      "loops": 0,
+      "header_phis": {},
+      "backedge_counts": []
+    },
+    "optimized_runtime_oracle_comparisons": 1814,
+    "optimized_ir_sha256": "53d25275e20681135832ad864ace12c732c62b0c1c11d30e5b1f9e0cc703067c"
+  },
+  "not_executed": [
+    "unknown_exit (no termination guarantee)"
+  ]
+}

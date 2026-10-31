@@ -1,0 +1,1088 @@
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p1':
+Classifying expressions for: @sum_p1
+  %0 = shl i64 %n, 1
+  -->  (2 * %n) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %1 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %2 = zext i64 %1 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %3 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %4 = zext i64 %3 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %5 = mul i65 %2, %4
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %6 = lshr i65 %5, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %7 = trunc nuw i65 %6 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %8 = add i64 %0, %7
+  -->  ((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) + (2 * %n)) U: full-set S: full-set
+  %9 = add i64 %8, -1
+  -->  (-1 + (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) + (2 * %n)) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %9, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p1
+Loop info for function 'sum_p1':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p2':
+Classifying expressions for: @sum_p2
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %4 = mul i65 %1, %3
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %7 = mul i65 %4, %6
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %8 = lshr i65 %7, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %9 = trunc nuw i65 %8 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %10 = mul i64 %9, 6148914691236517206
+  -->  (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %11 = lshr i65 %4, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %12 = trunc nuw i65 %11 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %13 = mul i64 %12, 5
+  -->  (5 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %14 = add i64 %10, %13
+  -->  ((5 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %15 = shl i64 %n, 2
+  -->  (4 * %n) U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %16 = add i64 %14, %15
+  -->  ((4 * %n) + (5 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %17 = add i64 %16, -3
+  -->  (-3 + (4 * %n) + (5 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %17, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p2
+Loop info for function 'sum_p2':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p3':
+Classifying expressions for: @sum_p3
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %4 = mul i65 %1, %3
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %5 = lshr i65 %4, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %6 = trunc nuw i65 %5 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %7 = mul i64 %6, 19
+  -->  (19 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %8 = shl i64 %n, 3
+  -->  (8 * %n) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %9 = add i64 %7, %8
+  -->  ((8 * %n) + (19 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %10 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %11 = zext i64 %10 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %12 = mul i65 %4, %11
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %13 = lshr i65 %12, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %14 = trunc nuw i65 %13 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %15 = mul i64 %14, 6
+  -->  (6 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %16 = add i64 %9, %15
+  -->  ((6 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (8 * %n) + (19 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %17 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %18 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %19 = mul i67 %17, %18
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %20 = zext i64 %10 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %21 = mul i67 %19, %20
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %22 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %23 = zext i64 %22 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %24 = mul i67 %21, %23
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %sh.diff = lshr i67 %24, 2
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 4) U: [0,36893488147419103232) S: [0,36893488147419103232)
+  %tr.sh.diff = trunc i67 %sh.diff to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 4) to i64) U: full-set S: full-set
+  %25 = and i64 %tr.sh.diff, -2
+  -->  (2 * ((trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 4) to i64) /u 2))<nuw> U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %26 = add i64 %16, %25
+  -->  ((2 * ((trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 4) to i64) /u 2))<nuw> + (6 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (8 * %n) + (19 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %27 = add i64 %26, -7
+  -->  (-7 + (2 * ((trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 4) to i64) /u 2))<nuw> + (6 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (8 * %n) + (19 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %27, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p3
+Loop info for function 'sum_p3':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p4':
+Classifying expressions for: @sum_p4
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %4 = mul i67 %1, %3
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %7 = mul i67 %4, %6
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %8 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %9 = zext i64 %8 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %10 = mul i67 %7, %9
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %11 = add i64 %n, -5
+  -->  (-5 + %n) U: full-set S: full-set
+  %12 = zext i64 %11 to i67
+  -->  (zext i64 (-5 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %13 = mul i67 %10, %12
+  -->  ((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %14 = lshr i67 %13, 3
+  -->  (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %15 = trunc nuw i67 %14 to i64
+  -->  (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %16 = mul i64 %15, 7378697629483820648
+  -->  (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %17 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %18 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %19 = mul i65 %17, %18
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %20 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %21 = mul i65 %19, %20
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %22 = lshr i65 %21, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %23 = trunc nuw i65 %22 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %24 = mul i64 %23, 6148914691236517242
+  -->  (6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %25 = add i64 %16, %24
+  -->  ((6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %26 = lshr i65 %19, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %27 = trunc nuw i65 %26 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %28 = mul i64 %27, 65
+  -->  (65 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %29 = add i64 %25, %28
+  -->  ((65 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %30 = lshr i67 %10, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %31 = trunc nuw i67 %30 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %32 = mul i64 %31, 28
+  -->  (28 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %33 = add i64 %29, %32
+  -->  ((28 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (65 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %34 = shl i64 %n, 4
+  -->  (16 * %n) U: [0,-15) S: [-9223372036854775808,9223372036854775793)
+  %35 = add i64 %33, %34
+  -->  ((16 * %n) + (28 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (65 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %36 = add i64 %35, -15
+  -->  (-15 + (16 * %n) + (28 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (65 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (6148914691236517242 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (7378697629483820648 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %36, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p4
+Loop info for function 'sum_p4':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p5':
+Classifying expressions for: @sum_p5
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i68
+  -->  (zext i64 (-1 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i68
+  -->  (zext i64 (-2 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %4 = mul i68 %1, %3
+  -->  ((zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i68
+  -->  (zext i64 (-3 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %7 = mul i68 %4, %6
+  -->  ((zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %8 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %9 = zext i64 %8 to i68
+  -->  (zext i64 (-4 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %10 = mul i68 %7, %9
+  -->  ((zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %11 = add i64 %n, -5
+  -->  (-5 + %n) U: full-set S: full-set
+  %12 = zext i64 %11 to i68
+  -->  (zext i64 (-5 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %13 = mul i68 %10, %12
+  -->  ((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %14 = add i64 %n, -6
+  -->  (-6 + %n) U: full-set S: full-set
+  %15 = zext i64 %14 to i68
+  -->  (zext i64 (-6 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %16 = mul i68 %13, %15
+  -->  ((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %17 = lshr i68 %16, 4
+  -->  (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %18 = trunc nuw i68 %17 to i64
+  -->  (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64) U: full-set S: full-set
+  %19 = mul i64 %18, 6148914691236517208
+  -->  (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %20 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %21 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %22 = mul i67 %20, %21
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %23 = zext i64 %5 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %24 = mul i67 %22, %23
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %25 = zext i64 %8 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %26 = mul i67 %24, %25
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %27 = lshr i67 %26, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %28 = trunc nuw i67 %27 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %29 = mul i64 %28, 250
+  -->  (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %30 = add i64 %19, %29
+  -->  ((250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %31 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %32 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %33 = mul i65 %31, %32
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %34 = lshr i65 %33, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %35 = trunc nuw i65 %34 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %36 = mul i64 %35, 211
+  -->  (211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %37 = add i64 %30, %36
+  -->  ((211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %38 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %39 = mul i65 %33, %38
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %40 = lshr i65 %39, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %41 = trunc nuw i65 %40 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %42 = mul i64 %41, 190
+  -->  (190 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %43 = add i64 %37, %42
+  -->  ((190 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %44 = shl i64 %n, 5
+  -->  (32 * %n) U: [0,-31) S: [-9223372036854775808,9223372036854775777)
+  %45 = add i64 %43, %44
+  -->  ((32 * %n) + (190 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %46 = trunc i67 %26 to i64
+  -->  ((-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) U: full-set S: full-set
+  %47 = mul i64 %11, %46
+  -->  ((-5 + %n) * (-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) U: full-set S: full-set
+  %48 = shl i64 %47, 2
+  -->  (4 * (-5 + %n) * (-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %49 = and i64 %48, -32
+  -->  (32 * (zext i59 (trunc i64 (((-5 + %n) * (-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) /u 8) to i59) to i64))<nuw> U: [0,-31) S: [-9223372036854775808,9223372036854775777)
+  %50 = add i64 %45, %49
+  -->  ((32 * (zext i59 (trunc i64 (((-5 + %n) * (-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) /u 8) to i59) to i64))<nuw> + (32 * %n) + (190 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %51 = add i64 %50, -31
+  -->  (-31 + (32 * (zext i59 (trunc i64 (((-5 + %n) * (-4 + %n) * (-3 + %n) * (-2 + %n) * (-1 + %n)) /u 8) to i59) to i64))<nuw> + (32 * %n) + (190 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (211 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (250 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236517208 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %51, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p5
+Loop info for function 'sum_p5':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p6':
+Classifying expressions for: @sum_p6
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %4 = mul i65 %1, %3
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %7 = mul i65 %4, %6
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %8 = lshr i65 %7, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %9 = trunc nuw i65 %8 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %10 = mul i64 %9, 6148914691236518106
+  -->  (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %11 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %12 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %13 = mul i67 %11, %12
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %14 = zext i64 %5 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %15 = mul i67 %13, %14
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %16 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %17 = zext i64 %16 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %18 = mul i67 %15, %17
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %19 = lshr i67 %18, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %20 = trunc nuw i67 %19 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %21 = mul i64 %20, 1820
+  -->  (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %22 = add i64 %10, %21
+  -->  ((1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %23 = lshr i65 %4, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %24 = trunc nuw i65 %23 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %25 = mul i64 %24, 665
+  -->  (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %26 = add i64 %22, %25
+  -->  ((665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %27 = add i64 %n, -5
+  -->  (-5 + %n) U: full-set S: full-set
+  %28 = zext i64 %27 to i67
+  -->  (zext i64 (-5 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %29 = mul i67 %18, %28
+  -->  ((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %30 = lshr i67 %29, 3
+  -->  (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %31 = trunc nuw i67 %30 to i64
+  -->  (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %32 = mul i64 %31, 392
+  -->  (392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %33 = add i64 %26, %32
+  -->  ((392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %34 = zext i64 %0 to i68
+  -->  (zext i64 (-1 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %35 = zext i64 %2 to i68
+  -->  (zext i64 (-2 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %36 = mul i68 %34, %35
+  -->  ((zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %37 = zext i64 %5 to i68
+  -->  (zext i64 (-3 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %38 = mul i68 %36, %37
+  -->  ((zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %39 = zext i64 %16 to i68
+  -->  (zext i64 (-4 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %40 = mul i68 %38, %39
+  -->  ((zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %41 = zext i64 %27 to i68
+  -->  (zext i64 (-5 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %42 = mul i68 %40, %41
+  -->  ((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %43 = add i64 %n, -6
+  -->  (-6 + %n) U: full-set S: full-set
+  %44 = zext i64 %43 to i68
+  -->  (zext i64 (-6 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %45 = mul i68 %42, %44
+  -->  ((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %46 = lshr i68 %45, 4
+  -->  (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %47 = trunc nuw i68 %46 to i64
+  -->  (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64) U: full-set S: full-set
+  %48 = mul i64 %47, 72
+  -->  (72 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %49 = add i64 %33, %48
+  -->  ((72 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %50 = shl i64 %n, 6
+  -->  (64 * %n) U: [0,-63) S: [-9223372036854775808,9223372036854775745)
+  %51 = add i64 %49, %50
+  -->  ((64 * %n) + (72 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %52 = add i64 %51, -63
+  -->  (-63 + (64 * %n) + (72 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %53 = add i64 %n, -7
+  -->  (-7 + %n) U: full-set S: full-set
+  %54 = zext i64 %53 to i68
+  -->  (zext i64 (-7 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %55 = mul i68 %45, %54
+  -->  ((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %56 = lshr i68 %55, 4
+  -->  (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %57 = trunc nuw i68 %56 to i64
+  -->  (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64) U: full-set S: full-set
+  %.neg = mul i64 %57, -2635249153387078800
+  -->  (-2635249153387078800 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) U: [0,-15) S: [-9223372036854775808,9223372036854775793)
+  %58 = add i64 %.neg, %52
+  -->  (-63 + (64 * %n) + (72 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (392 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (665 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (1820 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (6148914691236518106 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (-2635249153387078800 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %58, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p6
+Loop info for function 'sum_p6':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p7':
+Classifying expressions for: @sum_p7
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %4 = mul i67 %1, %3
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %7 = mul i67 %4, %6
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %8 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %9 = zext i64 %8 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %10 = mul i67 %7, %9
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %11 = lshr i67 %10, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %12 = trunc nuw i67 %11 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %13 = mul i64 %12, 11802
+  -->  (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %14 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %15 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %16 = mul i65 %14, %15
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %17 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %18 = mul i65 %16, %17
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %19 = lshr i65 %18, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %20 = trunc nuw i65 %19 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %21 = mul i64 %20, 4046
+  -->  (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %22 = add i64 %13, %21
+  -->  ((4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %23 = add i64 %n, -5
+  -->  (-5 + %n) U: full-set S: full-set
+  %24 = zext i64 %23 to i67
+  -->  (zext i64 (-5 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %25 = mul i67 %10, %24
+  -->  ((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %26 = lshr i67 %25, 3
+  -->  (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %27 = trunc nuw i67 %26 to i64
+  -->  (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %28 = mul i64 %27, 3808
+  -->  (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-31) S: [-9223372036854775808,9223372036854775777)
+  %29 = add i64 %22, %28
+  -->  ((3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %30 = lshr i65 %16, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %31 = trunc nuw i65 %30 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %32 = mul i64 %31, 2059
+  -->  (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %33 = add i64 %29, %32
+  -->  ((2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %34 = shl i64 %n, 7
+  -->  (128 * %n) U: [0,-127) S: [-9223372036854775808,9223372036854775681)
+  %35 = add i64 %33, %34
+  -->  ((128 * %n) + (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %36 = zext i64 %0 to i68
+  -->  (zext i64 (-1 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %37 = zext i64 %2 to i68
+  -->  (zext i64 (-2 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %38 = mul i68 %36, %37
+  -->  ((zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %39 = zext i64 %5 to i68
+  -->  (zext i64 (-3 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %40 = mul i68 %38, %39
+  -->  ((zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %41 = zext i64 %8 to i68
+  -->  (zext i64 (-4 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %42 = mul i68 %40, %41
+  -->  ((zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %43 = zext i64 %23 to i68
+  -->  (zext i64 (-5 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %44 = mul i68 %42, %43
+  -->  ((zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %45 = add i64 %n, -6
+  -->  (-6 + %n) U: full-set S: full-set
+  %46 = zext i64 %45 to i68
+  -->  (zext i64 (-6 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %47 = mul i68 %44, %46
+  -->  ((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %48 = add i64 %n, -7
+  -->  (-7 + %n) U: full-set S: full-set
+  %49 = zext i64 %48 to i68
+  -->  (zext i64 (-7 + %n) to i68) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %50 = mul i68 %47, %49
+  -->  ((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) U: full-set S: full-set
+  %51 = lshr i68 %50, 4
+  -->  (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %52 = trunc nuw i68 %51 to i64
+  -->  (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64) U: full-set S: full-set
+  %53 = mul i64 %52, 80
+  -->  (80 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) U: [0,-15) S: [-9223372036854775808,9223372036854775793)
+  %54 = add i64 %35, %53
+  -->  ((80 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (128 * %n) + (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %55 = zext i64 %0 to i71
+  -->  (zext i64 (-1 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %56 = zext i64 %2 to i71
+  -->  (zext i64 (-2 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %57 = mul i71 %55, %56
+  -->  ((zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %58 = zext i64 %5 to i71
+  -->  (zext i64 (-3 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %59 = mul i71 %57, %58
+  -->  ((zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %60 = zext i64 %8 to i71
+  -->  (zext i64 (-4 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %61 = mul i71 %59, %60
+  -->  ((zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %62 = zext i64 %23 to i71
+  -->  (zext i64 (-5 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %63 = mul i71 %61, %62
+  -->  ((zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %64 = zext i64 %45 to i71
+  -->  (zext i64 (-6 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %65 = mul i71 %63, %64
+  -->  ((zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %66 = zext i64 %48 to i71
+  -->  (zext i64 (-7 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %67 = mul i71 %65, %66
+  -->  ((zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %68 = add i64 %n, -8
+  -->  (-8 + %n) U: full-set S: full-set
+  %69 = zext i64 %68 to i71
+  -->  (zext i64 (-8 + %n) to i71) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %70 = mul i71 %67, %69
+  -->  ((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) U: full-set S: full-set
+  %sh.diff = lshr i71 %70, 3
+  -->  (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) U: [0,295147905179352825856) S: [0,295147905179352825856)
+  %tr.sh.diff = trunc i71 %sh.diff to i64
+  -->  (trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) to i64) U: full-set S: full-set
+  %71 = and i64 %tr.sh.diff, -16
+  -->  (16 * ((trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) to i64) /u 16))<nuw> U: [0,-15) S: [-9223372036854775808,9223372036854775793)
+  %72 = add i64 %54, %71
+  -->  ((16 * ((trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) to i64) /u 16))<nuw> + (80 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (128 * %n) + (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %73 = add i64 %72, -127
+  -->  (-127 + (16 * ((trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) to i64) /u 16))<nuw> + (80 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (128 * %n) + (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %74 = lshr i68 %47, 4
+  -->  (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %75 = trunc nuw i68 %74 to i64
+  -->  (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64) U: full-set S: full-set
+  %.neg = mul i64 %75, -6148914691236516048
+  -->  (-6148914691236516048 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) U: [0,-15) S: [-9223372036854775808,9223372036854775793)
+  %76 = add i64 %.neg, %73
+  -->  (-127 + (16 * ((trunc i71 (((zext i64 (-8 + %n) to i71) * (zext i64 (-7 + %n) to i71) * (zext i64 (-6 + %n) to i71) * (zext i64 (-5 + %n) to i71) * (zext i64 (-4 + %n) to i71) * (zext i64 (-3 + %n) to i71) * (zext i64 (-2 + %n) to i71) * (zext i64 (-1 + %n) to i71)) /u 8) to i64) /u 16))<nuw> + (80 * (trunc i68 (((zext i64 (-7 + %n) to i68) * (zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64)) + (128 * %n) + (2059 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (3808 * (trunc i67 (((zext i64 (-5 + %n) to i67) * (zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (4046 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (11802 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (-6148914691236516048 * (trunc i68 (((zext i64 (-6 + %n) to i68) * (zext i64 (-5 + %n) to i68) * (zext i64 (-4 + %n) to i68) * (zext i64 (-3 + %n) to i68) * (zext i64 (-2 + %n) to i68) * (zext i64 (-1 + %n) to i68)) /u 16) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %76, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p7
+Loop info for function 'sum_p7':
+Printing analysis 'Scalar Evolution Analysis' for function 'sum_p8':
+Classifying expressions for: @sum_p8
+  %xtraiter = and i64 %n, 3
+  -->  (zext i2 (trunc i64 %n to i2) to i64) U: [0,4) S: [0,4)
+  %unroll_iter = and i64 %n, -4
+  -->  (4 * (%n /u 4))<nuw> U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %t.03 = phi i64 [ 0, %for.body.preheader.new ], [ %add.3, %for.body ]
+  -->  {0,+,4}<nuw><%for.body> U: [0,-7) S: [-9223372036854775808,9223372036854775805)		Exits: (-4 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %s.02 = phi i64 [ 0, %for.body.preheader.new ], [ %add7.3, %for.body ]
+  -->  %s.02 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter = phi i64 [ 0, %for.body.preheader.new ], [ %niter.next.3, %for.body ]
+  -->  {0,+,4}<nuw><%for.body> U: [0,-7) S: [-9223372036854775808,9223372036854775805)		Exits: (-4 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %add = or disjoint i64 %t.03, 1
+  -->  {1,+,4}<nuw><%for.body> U: [1,-6) S: [1,-6)		Exits: (-3 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %1 = mul i64 %add, %add
+  -->  {1,+,24,+,32}<%for.body> U: full-set S: full-set		Exits: (1 + (24 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %2 = mul i64 %1, %1
+  -->  {1,+,624,+,5312,+,10752,+,6144}<%for.body> U: full-set S: full-set		Exits: (1 + (624 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3584 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (5312 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %3 = mul i64 %2, %2
+  -->  ({1,+,624,+,5312,+,10752,+,6144}<%for.body> * {1,+,624,+,5312,+,10752,+,6144}<%for.body>) U: full-set S: full-set		Exits: ((1 + (624 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3584 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (5312 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))) * (1 + (624 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3584 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (5312 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))))		LoopDispositions: { %for.body: Computable }
+  %add7 = add i64 %3, %s.02
+  -->  (({1,+,624,+,5312,+,10752,+,6144}<%for.body> * {1,+,624,+,5312,+,10752,+,6144}<%for.body>) + %s.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.1 = or disjoint i64 %t.03, 2
+  -->  {2,+,4}<nuw><%for.body> U: [2,-5) S: [-9223372036854775808,9223372036854775807)		Exits: (-2 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %4 = mul i64 %add.1, %add.1
+  -->  {4,+,32,+,32}<%for.body> U: [0,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (32 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %5 = mul i64 %4, %4
+  -->  {16,+,1280,+,7424,+,12288,+,6144}<%for.body> U: [0,-15) S: [-9223372036854775808,9223372036854775793)		Exits: (16 + (1280 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (4096 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (7424 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %6 = mul i64 %5, %5
+  -->  ({16,+,1280,+,7424,+,12288,+,6144}<%for.body> * {16,+,1280,+,7424,+,12288,+,6144}<%for.body>) U: [0,-255) S: [-9223372036854775808,9223372036854775553)		Exits: ((16 + (1280 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (4096 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (7424 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))) * (16 + (1280 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (4096 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (7424 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))))		LoopDispositions: { %for.body: Computable }
+  %add7.1 = add i64 %6, %add7
+  -->  (({1,+,624,+,5312,+,10752,+,6144}<%for.body> * {1,+,624,+,5312,+,10752,+,6144}<%for.body>) + ({16,+,1280,+,7424,+,12288,+,6144}<%for.body> * {16,+,1280,+,7424,+,12288,+,6144}<%for.body>) + %s.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.2 = or disjoint i64 %t.03, 3
+  -->  {3,+,4}<nuw><%for.body> U: [3,-4) S: [3,-4)		Exits: (-1 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %7 = mul i64 %add.2, %add.2
+  -->  {9,+,40,+,32}<%for.body> U: full-set S: full-set		Exits: (9 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (40 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %8 = mul i64 %7, %7
+  -->  {81,+,2320,+,9920,+,13824,+,6144}<%for.body> U: full-set S: full-set		Exits: (81 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (2320 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (4608 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (9920 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %9 = mul i64 %8, %8
+  -->  ({81,+,2320,+,9920,+,13824,+,6144}<%for.body> * {81,+,2320,+,9920,+,13824,+,6144}<%for.body>) U: full-set S: full-set		Exits: ((81 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (2320 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (4608 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (9920 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))) * (81 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (2320 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (4608 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (9920 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))))		LoopDispositions: { %for.body: Computable }
+  %add7.2 = add i64 %9, %add7.1
+  -->  (({1,+,624,+,5312,+,10752,+,6144}<%for.body> * {1,+,624,+,5312,+,10752,+,6144}<%for.body>) + ({16,+,1280,+,7424,+,12288,+,6144}<%for.body> * {16,+,1280,+,7424,+,12288,+,6144}<%for.body>) + ({81,+,2320,+,9920,+,13824,+,6144}<%for.body> * {81,+,2320,+,9920,+,13824,+,6144}<%for.body>) + %s.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.3 = add nuw i64 %t.03, 4
+  -->  {4,+,4}<nuw><%for.body> U: [4,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 * (%n /u 4))<nuw>		LoopDispositions: { %for.body: Computable }
+  %10 = mul i64 %add.3, %add.3
+  -->  {16,+,48,+,32}<%for.body> U: [0,-15) S: [-9223372036854775808,9223372036854775793)		Exits: (16 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (48 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %11 = mul i64 %10, %10
+  -->  {256,+,3840,+,12800,+,15360,+,6144}<%for.body> U: [0,-255) S: [-9223372036854775808,9223372036854775553)		Exits: (256 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3840 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (5120 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (12800 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %12 = mul i64 %11, %11
+  -->  ({256,+,3840,+,12800,+,15360,+,6144}<%for.body> * {256,+,3840,+,12800,+,15360,+,6144}<%for.body>) U: [0,-65535) S: [-9223372036854775808,9223372036854710273)		Exits: ((256 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3840 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (5120 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (12800 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))) * (256 + (2048 * (trunc i67 (((zext i64 (-3 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i67) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i67) /u 4)) /u 8) to i64)) + (3840 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (5120 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (12800 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64))))		LoopDispositions: { %for.body: Computable }
+  %add7.3 = add i64 %12, %add7.2
+  -->  (({1,+,624,+,5312,+,10752,+,6144}<%for.body> * {1,+,624,+,5312,+,10752,+,6144}<%for.body>) + ({16,+,1280,+,7424,+,12288,+,6144}<%for.body> * {16,+,1280,+,7424,+,12288,+,6144}<%for.body>) + ({81,+,2320,+,9920,+,13824,+,6144}<%for.body> * {81,+,2320,+,9920,+,13824,+,6144}<%for.body>) + ({256,+,3840,+,12800,+,15360,+,6144}<%for.body> * {256,+,3840,+,12800,+,15360,+,6144}<%for.body>) + %s.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter.next.3 = add nuw i64 %niter, 4
+  -->  {4,+,4}<nuw><%for.body> U: [4,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 * (%n /u 4))<nuw>		LoopDispositions: { %for.body: Computable }
+  %t.03.epil.init = phi i64 [ 0, %for.body.preheader ], [ %add.3, %for.end.loopexit.unr-lcssa ]
+  -->  %t.03.epil.init U: [4,1) S: [-9223372036854775808,9223372036854775805)
+  %s.02.epil.init = phi i64 [ 0, %for.body.preheader ], [ %add7.3, %for.end.loopexit.unr-lcssa ]
+  -->  %s.02.epil.init U: full-set S: full-set
+  %t.03.epil = phi i64 [ %add.epil, %for.body.epil ], [ %t.03.epil.init, %for.body.epil.preheader ]
+  -->  {%t.03.epil.init,+,1}<nuw><nsw><%for.body.epil> U: [4,3) S: [4,3)		Exits: (-1 + (zext i2 (trunc i64 %n to i2) to i64) + %t.03.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %s.02.epil = phi i64 [ %add7.epil, %for.body.epil ], [ %s.02.epil.init, %for.body.epil.preheader ]
+  -->  %s.02.epil U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter = phi i64 [ %epil.iter.next, %for.body.epil ], [ 0, %for.body.epil.preheader ]
+  -->  {0,+,1}<nuw><nsw><%for.body.epil> U: [0,3) S: [0,3)		Exits: (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>		LoopDispositions: { %for.body.epil: Computable }
+  %add.epil = add nuw i64 %t.03.epil, 1
+  -->  {(1 + %t.03.epil.init)<nsw>,+,1}<nw><%for.body.epil> U: [5,4) S: [-9223372036854775807,-9223372036854775808)		Exits: ((zext i2 (trunc i64 %n to i2) to i64) + %t.03.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %13 = mul i64 %add.epil, %add.epil
+  -->  {((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,(3 + (2 * %t.03.epil.init)),+,2}<%for.body.epil> U: full-set S: full-set		Exits: ((2 * (trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64)) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>) + ((3 + (2 * %t.03.epil.init)) * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>))		LoopDispositions: { %for.body.epil: Computable }
+  %14 = mul i64 %13, %13
+  -->  {((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,((3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))),+,(28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(60 + (24 * %t.03.epil.init)),+,24}<%for.body.epil> U: full-set S: full-set		Exits: ((8 * (trunc i67 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (18446744073709551612 + (zext i2 (trunc i64 %n to i2) to i67))<nuw><nsw>) /u 8) to i64)) + ((trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + (-6148914691236517205 * (trunc i65 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (60 + (24 * %t.03.epil.init))) + ((3 + (2 * %t.03.epil.init)) * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))		LoopDispositions: { %for.body.epil: Computable }
+  %15 = mul i64 %14, %14
+  -->  ({((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,((3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))),+,(28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(60 + (24 * %t.03.epil.init)),+,24}<%for.body.epil> * {((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,((3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))),+,(28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(60 + (24 * %t.03.epil.init)),+,24}<%for.body.epil>) U: full-set S: full-set		Exits: (((8 * (trunc i67 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (18446744073709551612 + (zext i2 (trunc i64 %n to i2) to i67))<nuw><nsw>) /u 8) to i64)) + ((trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + (-6148914691236517205 * (trunc i65 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (60 + (24 * %t.03.epil.init))) + ((3 + (2 * %t.03.epil.init)) * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)) * ((8 * (trunc i67 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i67) * (18446744073709551612 + (zext i2 (trunc i64 %n to i2) to i67))<nuw><nsw>) /u 8) to i64)) + ((trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + (-6148914691236517205 * (trunc i65 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (60 + (24 * %t.03.epil.init))) + ((3 + (2 * %t.03.epil.init)) * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)))		LoopDispositions: { %for.body.epil: Computable }
+  %add7.epil = add i64 %15, %s.02.epil
+  -->  (({((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,((3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))),+,(28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(60 + (24 * %t.03.epil.init)),+,24}<%for.body.epil> * {((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,((3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init) + (2 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))),+,(28 + (16 * %t.03.epil.init) + (2 * (3 + (2 * %t.03.epil.init)) * (3 + (2 * %t.03.epil.init))) + (4 * (1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(60 + (24 * %t.03.epil.init)),+,24}<%for.body.epil>) + %s.02.epil) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter.next = add i64 %epil.iter, 1
+  -->  {1,+,1}<nuw><nsw><%for.body.epil> U: [1,4) S: [1,4)		Exits: (zext i2 (trunc i64 %n to i2) to i64)		LoopDispositions: { %for.body.epil: Computable }
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %add7.3, %for.end.loopexit.unr-lcssa ], [ %add7.epil, %for.body.epil ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @sum_p8
+Loop %for.body.epil: backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>
+Loop %for.body.epil: constant max backedge-taken count is i64 2
+Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>
+Loop %for.body.epil: Trip multiple is 1
+Loop %for.body: backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)
+Loop %for.body: constant max backedge-taken count is i64 4611686018427387902
+Loop %for.body: symbolic max backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)
+Loop %for.body: Trip multiple is 1
+Loop info for function 'sum_p8':
+Parallel Loop at depth 1 containing: %for.body.epil<header><latch><exiting>
+Parallel Loop at depth 1 containing: %for.body<header><latch><exiting>
+Printing analysis 'Scalar Evolution Analysis' for function 'general_cubic':
+Classifying expressions for: @general_cubic
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %4 = mul i65 %1, %3
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %5 = lshr i65 %4, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %6 = trunc nuw i65 %5 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %7 = mul i64 %6, 129
+  -->  (129 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: full-set S: full-set
+  %8 = mul i64 %n, 49
+  -->  (49 * %n) U: full-set S: full-set
+  %9 = add i64 %7, %8
+  -->  ((49 * %n) + (129 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %10 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %11 = zext i64 %10 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %12 = mul i65 %4, %11
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %13 = lshr i65 %12, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %14 = trunc nuw i65 %13 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %15 = mul i64 %14, 40
+  -->  (40 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %16 = add i64 %9, %15
+  -->  ((40 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (49 * %n) + (129 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %17 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %18 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %19 = mul i67 %17, %18
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %20 = zext i64 %10 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %21 = mul i67 %19, %20
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %22 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %23 = zext i64 %22 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %24 = mul i67 %21, %23
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %25 = lshr i67 %24, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %26 = trunc nuw i67 %25 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %27 = mul i64 %26, 14
+  -->  (14 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %28 = add i64 %16, %27
+  -->  ((14 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (40 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (49 * %n) + (129 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %29 = add i64 %28, -51
+  -->  (-51 + (14 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) + (40 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64)) + (49 * %n) + (129 * (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64))) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %29, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @general_cubic
+Loop info for function 'general_cubic':
+Printing analysis 'Scalar Evolution Analysis' for function 'shifted_square':
+Classifying expressions for: @shifted_square
+  %0 = mul i64 %start, %start
+  -->  (%start * %start) U: full-set S: full-set
+  %1 = add i64 %initial, %0
+  -->  ((%start * %start) + %initial) U: full-set S: full-set
+  %2 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %4 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %5 = zext i64 %4 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %6 = mul i65 %3, %5
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %7 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %8 = zext i64 %7 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %9 = mul i65 %6, %8
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %10 = lshr i65 %9, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %11 = trunc nuw i65 %10 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %12 = mul i64 %step, %11
+  -->  ((trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step) U: full-set S: full-set
+  %13 = mul i64 %12, 6148914691236517206
+  -->  (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %14 = mul i64 %step, 3
+  -->  (3 * %step) U: full-set S: full-set
+  %15 = shl i64 %start, 1
+  -->  (2 * %start) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %16 = add i64 %14, %15
+  -->  ((2 * %start) + (3 * %step)) U: full-set S: full-set
+  %17 = lshr i65 %6, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %18 = trunc nuw i65 %17 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %19 = mul i64 %16, %18
+  -->  ((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) U: full-set S: full-set
+  %20 = add i64 %13, %19
+  -->  (((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step)) U: full-set S: full-set
+  %21 = mul i64 %step, %20
+  -->  ((((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step)) * %step) U: full-set S: full-set
+  %22 = add i64 %1, %21
+  -->  (((((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step)) * %step) + (%start * %start) + %initial) U: full-set S: full-set
+  %23 = add i64 %step, %15
+  -->  ((2 * %start) + %step) U: full-set S: full-set
+  %24 = mul i64 %step, %23
+  -->  (((2 * %start) + %step) * %step) U: full-set S: full-set
+  %25 = add i64 %0, %24
+  -->  ((((2 * %start) + %step) * %step) + (%start * %start)) U: full-set S: full-set
+  %26 = mul i64 %25, %2
+  -->  ((-1 + %n) * ((((2 * %start) + %step) * %step) + (%start * %start))) U: full-set S: full-set
+  %27 = add i64 %22, %26
+  -->  (((-1 + %n) * ((((2 * %start) + %step) * %step) + (%start * %start))) + ((((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * ((2 * %start) + (3 * %step))) + (6148914691236517206 * (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) * %step)) * %step) + (%start * %start) + %initial) U: full-set S: full-set
+  %s.0.lcssa = phi i64 [ %initial, %entry ], [ %27, %for.body.preheader ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @shifted_square
+Loop info for function 'shifted_square':
+Printing analysis 'Scalar Evolution Analysis' for function 'triangular':
+Classifying expressions for: @triangular
+  %0 = add i64 %n, -1
+  -->  (-1 + %n) U: full-set S: full-set
+  %1 = zext i64 %0 to i67
+  -->  (zext i64 (-1 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %2 = add i64 %n, -2
+  -->  (-2 + %n) U: full-set S: full-set
+  %3 = zext i64 %2 to i67
+  -->  (zext i64 (-2 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %4 = mul i67 %1, %3
+  -->  ((zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %5 = add i64 %n, -3
+  -->  (-3 + %n) U: full-set S: full-set
+  %6 = zext i64 %5 to i67
+  -->  (zext i64 (-3 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %7 = mul i67 %4, %6
+  -->  ((zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %8 = add i64 %n, -4
+  -->  (-4 + %n) U: full-set S: full-set
+  %9 = zext i64 %8 to i67
+  -->  (zext i64 (-4 + %n) to i67) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %10 = mul i67 %7, %9
+  -->  ((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) U: full-set S: full-set
+  %11 = lshr i67 %10, 3
+  -->  (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) U: [0,18446744073709551616) S: [0,18446744073709551616)
+  %12 = trunc nuw i67 %11 to i64
+  -->  (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64) U: full-set S: full-set
+  %13 = mul i64 %12, 6148914691236517206
+  -->  (6148914691236517206 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64)) U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %14 = zext i64 %0 to i65
+  -->  (zext i64 (-1 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %15 = zext i64 %2 to i65
+  -->  (zext i64 (-2 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %16 = mul i65 %14, %15
+  -->  ((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %17 = zext i64 %5 to i65
+  -->  (zext i64 (-3 + %n) to i65) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %18 = mul i65 %16, %17
+  -->  ((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) U: full-set S: full-set
+  %19 = lshr i65 %18, 1
+  -->  (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %20 = trunc nuw i65 %19 to i64
+  -->  (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %21 = add i64 %13, %20
+  -->  ((trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) + (6148914691236517206 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %22 = lshr i65 %16, 1
+  -->  (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) U: [0,-18446744073709551616) S: [0,-18446744073709551616)
+  %23 = trunc nuw i65 %22 to i64
+  -->  (trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) U: full-set S: full-set
+  %24 = add i64 %21, %23
+  -->  ((trunc i65 (((zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) + (trunc i65 (((zext i64 (-3 + %n) to i65) * (zext i64 (-2 + %n) to i65) * (zext i64 (-1 + %n) to i65)) /u 2) to i64) + (6148914691236517206 * (trunc i67 (((zext i64 (-4 + %n) to i67) * (zext i64 (-3 + %n) to i67) * (zext i64 (-2 + %n) to i67) * (zext i64 (-1 + %n) to i67)) /u 8) to i64))) U: full-set S: full-set
+  %z.0.lcssa = phi i64 [ 0, %entry ], [ %24, %for.body.preheader ]
+  -->  %z.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @triangular
+Loop info for function 'triangular':
+Printing analysis 'Scalar Evolution Analysis' for function 'nonlinear_self':
+Classifying expressions for: @nonlinear_self
+  %xtraiter = and i64 %n, 7
+  -->  (zext i3 (trunc i64 %n to i3) to i64) U: [0,8) S: [0,8)
+  %unroll_iter = and i64 %n, -8
+  -->  (8 * (%n /u 8))<nuw> U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %x.02 = phi i64 [ 2, %for.body.preheader.new ], [ %add.7, %for.body ]
+  -->  %x.02 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter = phi i64 [ 0, %for.body.preheader.new ], [ %niter.next.7, %for.body ]
+  -->  {0,+,8}<nuw><%for.body> U: [0,-15) S: [-9223372036854775808,9223372036854775801)		Exits: (-8 + (8 * (%n /u 8))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %mul = mul i64 %x.02, %x.02
+  -->  (%x.02 * %x.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add = add i64 %mul, 1
+  -->  (1 + (%x.02 * %x.02)) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.1 = mul i64 %add, %add
+  -->  ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.1 = add i64 %mul.1, 1
+  -->  (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.2 = mul i64 %add.1, %add.1
+  -->  ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.2 = add i64 %mul.2, 1
+  -->  (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.3 = mul i64 %add.2, %add.2
+  -->  ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.3 = add i64 %mul.3, 1
+  -->  (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.4 = mul i64 %add.3, %add.3
+  -->  ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.4 = add i64 %mul.4, 1
+  -->  (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.5 = mul i64 %add.4, %add.4
+  -->  ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.5 = add i64 %mul.5, 1
+  -->  (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.6 = mul i64 %add.5, %add.5
+  -->  ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.6 = add i64 %mul.6, 1
+  -->  (1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %mul.7 = mul i64 %add.6, %add.6
+  -->  ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02))))))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %add.7 = add i64 %mul.7, 1
+  -->  (1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))) * (1 + ((1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))) * (1 + ((1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))) * (1 + ((1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))) * (1 + ((1 + (%x.02 * %x.02)) * (1 + (%x.02 * %x.02)))))))))))))))) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter.next.7 = add nuw i64 %niter, 8
+  -->  {8,+,8}<nuw><%for.body> U: [8,-7) S: [-9223372036854775808,9223372036854775801)		Exits: (8 * (%n /u 8))<nuw>		LoopDispositions: { %for.body: Computable }
+  %x.02.epil.init = phi i64 [ 2, %for.body.preheader ], [ %add.7, %for.end.loopexit.unr-lcssa ]
+  -->  %x.02.epil.init U: full-set S: full-set
+  %x.02.epil = phi i64 [ %add.epil, %for.body.epil ], [ %x.02.epil.init, %for.body.epil.preheader ]
+  -->  %x.02.epil U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter = phi i64 [ %epil.iter.next, %for.body.epil ], [ 0, %for.body.epil.preheader ]
+  -->  {0,+,1}<nuw><nsw><%for.body.epil> U: [0,7) S: [0,7)		Exits: (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>		LoopDispositions: { %for.body.epil: Computable }
+  %mul.epil = mul i64 %x.02.epil, %x.02.epil
+  -->  (%x.02.epil * %x.02.epil) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %add.epil = add i64 %mul.epil, 1
+  -->  (1 + (%x.02.epil * %x.02.epil)) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter.next = add i64 %epil.iter, 1
+  -->  {1,+,1}<nuw><nsw><%for.body.epil> U: [1,8) S: [1,8)		Exits: (zext i3 (trunc i64 %n to i3) to i64)		LoopDispositions: { %for.body.epil: Computable }
+  %x.0.lcssa = phi i64 [ 2, %entry ], [ %add.7, %for.end.loopexit.unr-lcssa ], [ %add.epil, %for.body.epil ]
+  -->  %x.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @nonlinear_self
+Loop %for.body.epil: backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>
+Loop %for.body.epil: constant max backedge-taken count is i64 6
+Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>
+Loop %for.body.epil: Trip multiple is 1
+Loop %for.body: backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)
+Loop %for.body: constant max backedge-taken count is i64 2305843009213693950
+Loop %for.body: symbolic max backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)
+Loop %for.body: Trip multiple is 1
+Loop info for function 'nonlinear_self':
+Parallel Loop at depth 1 containing: %for.body.epil<header><latch><exiting>
+Parallel Loop at depth 1 containing: %for.body<header><latch><exiting>
+Printing analysis 'Scalar Evolution Analysis' for function 'exponential':
+Classifying expressions for: @exponential
+  %xtraiter = and i64 %n, 7
+  -->  (zext i3 (trunc i64 %n to i3) to i64) U: [0,8) S: [0,8)
+  %unroll_iter = and i64 %n, -8
+  -->  (8 * (%n /u 8))<nuw> U: [0,-7) S: [-9223372036854775808,9223372036854775801)
+  %x.02 = phi i64 [ 1, %for.body.preheader.new ], [ %mul, %for.body ]
+  -->  %x.02 U: [0,-254) S: [0,-254)		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter = phi i64 [ 0, %for.body.preheader.new ], [ %niter.next.7, %for.body ]
+  -->  {0,+,8}<nuw><%for.body> U: [0,-15) S: [-9223372036854775808,9223372036854775801)		Exits: (-8 + (8 * (%n /u 8))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %mul = shl i64 %x.02, 8
+  -->  (256 * %x.02) U: [0,-255) S: [-9223372036854775808,9223372036854775553)		Exits: <<Unknown>>		LoopDispositions: { %for.body: Variant }
+  %niter.next.7 = add nuw i64 %niter, 8
+  -->  {8,+,8}<nuw><%for.body> U: [8,-7) S: [-9223372036854775808,9223372036854775801)		Exits: (8 * (%n /u 8))<nuw>		LoopDispositions: { %for.body: Computable }
+  %x.02.epil.init = phi i64 [ 1, %for.body.preheader ], [ %mul, %for.end.loopexit.unr-lcssa ]
+  -->  %x.02.epil.init U: [0,-255) S: [-9223372036854775808,9223372036854775553)
+  %x.02.epil = phi i64 [ %mul.epil, %for.body.epil ], [ %x.02.epil.init, %for.body.epil.preheader ]
+  -->  %x.02.epil U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter = phi i64 [ %epil.iter.next, %for.body.epil ], [ 0, %for.body.epil.preheader ]
+  -->  {0,+,1}<nuw><nsw><%for.body.epil> U: [0,7) S: [0,7)		Exits: (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>		LoopDispositions: { %for.body.epil: Computable }
+  %mul.epil = shl i64 %x.02.epil, 1
+  -->  (2 * %x.02.epil) U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: <<Unknown>>		LoopDispositions: { %for.body.epil: Variant }
+  %epil.iter.next = add i64 %epil.iter, 1
+  -->  {1,+,1}<nuw><nsw><%for.body.epil> U: [1,8) S: [1,8)		Exits: (zext i3 (trunc i64 %n to i3) to i64)		LoopDispositions: { %for.body.epil: Computable }
+  %x.0.lcssa = phi i64 [ 1, %entry ], [ %mul, %for.end.loopexit.unr-lcssa ], [ %mul.epil, %for.body.epil ]
+  -->  %x.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @exponential
+Loop %for.body.epil: backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>
+Loop %for.body.epil: constant max backedge-taken count is i64 6
+Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i3 (trunc i64 %n to i3) to i64))<nsw>
+Loop %for.body.epil: Trip multiple is 1
+Loop %for.body: backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)
+Loop %for.body: constant max backedge-taken count is i64 2305843009213693950
+Loop %for.body: symbolic max backedge-taken count is ((-8 + (8 * (%n /u 8))<nuw>) /u 8)
+Loop %for.body: Trip multiple is 1
+Loop info for function 'exponential':
+Parallel Loop at depth 1 containing: %for.body.epil<header><latch><exiting>
+Parallel Loop at depth 1 containing: %for.body<header><latch><exiting>
+Printing analysis 'Scalar Evolution Analysis' for function 'unknown_exit':
+Classifying expressions for: @unknown_exit
+  %x.02 = phi i64 [ %add, %while.body ], [ 2, %entry ]
+  -->  %x.02 U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.body: Variant }
+  %mul = mul i64 %x.02, %x.02
+  -->  (%x.02 * %x.02) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.body: Variant }
+  %add = add i64 %mul, 1
+  -->  (1 + (%x.02 * %x.02)) U: full-set S: full-set		Exits: <<Unknown>>		LoopDispositions: { %while.body: Variant }
+  %x.0.lcssa = phi i64 [ 2, %entry ], [ %add, %while.body ]
+  -->  %x.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @unknown_exit
+Loop %while.body: Unpredictable backedge-taken count.
+Loop %while.body: Unpredictable constant max backedge-taken count. 
+Loop %while.body: Unpredictable symbolic max backedge-taken count. 
+Loop info for function 'unknown_exit':
+Parallel Loop at depth 1 containing: %while.body<header><latch><exiting>
+Printing analysis 'Scalar Evolution Analysis' for function 'fixed_square':
+Classifying expressions for: @fixed_square
+Determining loop execution counts for: @fixed_square
+Loop info for function 'fixed_square':
+Printing analysis 'Scalar Evolution Analysis' for function 'observable_square':
+Classifying expressions for: @observable_square
+  %xtraiter = and i64 %n, 3
+  -->  (zext i2 (trunc i64 %n to i2) to i64) U: [0,4) S: [0,4)
+  %unroll_iter = and i64 %n, -4
+  -->  (4 * (%n /u 4))<nuw> U: [0,-3) S: [-9223372036854775808,9223372036854775805)
+  %t.03 = phi i64 [ 0, %for.body.preheader.new ], [ %add.3, %for.body ]
+  -->  {0,+,4}<nuw><%for.body> U: [0,-7) S: [-9223372036854775808,9223372036854775805)		Exits: (-4 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %s.02 = phi i64 [ 0, %for.body.preheader.new ], [ %add1.3, %for.body ]
+  -->  {0,+,30,+,144,+,128}<%for.body> U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: ((30 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (144 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (6148914691236517248 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %niter = phi i64 [ 0, %for.body.preheader.new ], [ %niter.next.3, %for.body ]
+  -->  {0,+,4}<nuw><%for.body> U: [0,-7) S: [-9223372036854775808,9223372036854775805)		Exits: (-4 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %add = or disjoint i64 %t.03, 1
+  -->  {1,+,4}<nuw><%for.body> U: [1,-6) S: [1,-6)		Exits: (-3 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %mul = mul i64 %add, %add
+  -->  {1,+,24,+,32}<%for.body> U: full-set S: full-set		Exits: (1 + (24 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %add1 = add i64 %mul, %s.02
+  -->  {1,+,54,+,176,+,128}<%for.body> U: full-set S: full-set		Exits: (1 + (54 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (176 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (6148914691236517248 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %add.1 = or disjoint i64 %t.03, 2
+  -->  {2,+,4}<nuw><%for.body> U: [2,-5) S: [-9223372036854775808,9223372036854775807)		Exits: (-2 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %mul.1 = mul i64 %add.1, %add.1
+  -->  {4,+,32,+,32}<%for.body> U: [0,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (32 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %add1.1 = add i64 %mul.1, %add1
+  -->  {5,+,86,+,208,+,128}<%for.body> U: full-set S: full-set		Exits: (5 + (86 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (208 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (6148914691236517248 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %add.2 = or disjoint i64 %t.03, 3
+  -->  {3,+,4}<nuw><%for.body> U: [3,-4) S: [3,-4)		Exits: (-1 + (4 * (%n /u 4))<nuw>)		LoopDispositions: { %for.body: Computable }
+  %mul.2 = mul i64 %add.2, %add.2
+  -->  {9,+,40,+,32}<%for.body> U: full-set S: full-set		Exits: (9 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (40 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %add1.2 = add i64 %mul.2, %add1.1
+  -->  {14,+,126,+,240,+,128}<%for.body> U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: (14 + (126 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (240 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (6148914691236517248 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %add.3 = add nuw i64 %t.03, 4
+  -->  {4,+,4}<nuw><%for.body> U: [4,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 * (%n /u 4))<nuw>		LoopDispositions: { %for.body: Computable }
+  %mul.3 = mul i64 %add.3, %add.3
+  -->  {16,+,48,+,32}<%for.body> U: [0,-15) S: [-9223372036854775808,9223372036854775793)		Exits: (16 + (32 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (48 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)))		LoopDispositions: { %for.body: Computable }
+  %add1.3 = add i64 %mul.3, %add1.2
+  -->  {30,+,174,+,272,+,128}<%for.body> U: [0,-1) S: [-9223372036854775808,9223372036854775807)		Exits: (30 + (174 * ((-4 + (4 * (%n /u 4))<nuw>) /u 4)) + (272 * (trunc i65 (((zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)) + (6148914691236517248 * (trunc i65 (((zext i64 (-2 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * (zext i64 (-1 + ((-4 + (4 * (%n /u 4))<nuw>) /u 4))<nsw> to i65) * ((zext i64 (-4 + (4 * (%n /u 4))<nuw>) to i65) /u 4)) /u 2) to i64)))		LoopDispositions: { %for.body: Computable }
+  %niter.next.3 = add nuw i64 %niter, 4
+  -->  {4,+,4}<nuw><%for.body> U: [4,-3) S: [-9223372036854775808,9223372036854775805)		Exits: (4 * (%n /u 4))<nuw>		LoopDispositions: { %for.body: Computable }
+  %t.03.epil.init = phi i64 [ 0, %for.body.preheader ], [ %add.3, %for.end.loopexit.unr-lcssa ]
+  -->  %t.03.epil.init U: [4,1) S: [-9223372036854775808,9223372036854775805)
+  %s.02.epil.init = phi i64 [ 0, %for.body.preheader ], [ %add1.3, %for.end.loopexit.unr-lcssa ]
+  -->  %s.02.epil.init U: [0,-1) S: [-9223372036854775808,9223372036854775807)
+  %t.03.epil = phi i64 [ %add.epil, %for.body.epil ], [ %t.03.epil.init, %for.body.epil.preheader ]
+  -->  {%t.03.epil.init,+,1}<nuw><nsw><%for.body.epil> U: [4,3) S: [4,3)		Exits: (-1 + (zext i2 (trunc i64 %n to i2) to i64) + %t.03.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %s.02.epil = phi i64 [ %add1.epil, %for.body.epil ], [ %s.02.epil.init, %for.body.epil.preheader ]
+  -->  {%s.02.epil.init,+,((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,(3 + (2 * %t.03.epil.init)),+,2}<%for.body.epil> U: full-set S: full-set		Exits: ((6148914691236517206 * (trunc i65 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64)) + ((trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (3 + (2 * %t.03.epil.init))) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw> * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>) + %s.02.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %epil.iter = phi i64 [ %epil.iter.next, %for.body.epil ], [ 0, %for.body.epil.preheader ]
+  -->  {0,+,1}<nuw><nsw><%for.body.epil> U: [0,3) S: [0,3)		Exits: (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>		LoopDispositions: { %for.body.epil: Computable }
+  %add.epil = add nuw i64 %t.03.epil, 1
+  -->  {(1 + %t.03.epil.init)<nsw>,+,1}<nw><%for.body.epil> U: [5,4) S: [-9223372036854775807,-9223372036854775808)		Exits: ((zext i2 (trunc i64 %n to i2) to i64) + %t.03.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %mul.epil = mul i64 %add.epil, %add.epil
+  -->  {((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>),+,(3 + (2 * %t.03.epil.init)),+,2}<%for.body.epil> U: full-set S: full-set		Exits: ((2 * (trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64)) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>) + ((3 + (2 * %t.03.epil.init)) * (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>))		LoopDispositions: { %for.body.epil: Computable }
+  %add1.epil = add i64 %mul.epil, %s.02.epil
+  -->  {(((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>) + %s.02.epil.init),+,(3 + (2 * %t.03.epil.init) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>)),+,(5 + (2 * %t.03.epil.init)),+,2}<%for.body.epil> U: full-set S: full-set		Exits: ((6148914691236517206 * (trunc i65 (((zext i64 (-3 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64)) + ((trunc i65 (((zext i64 (-2 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65) * (zext i64 (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> to i65)) /u 2) to i64) * (5 + (2 * %t.03.epil.init))) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>) + ((-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw> * (3 + (2 * %t.03.epil.init) + ((1 + %t.03.epil.init)<nsw> * (1 + %t.03.epil.init)<nsw>))) + %s.02.epil.init)		LoopDispositions: { %for.body.epil: Computable }
+  %epil.iter.next = add i64 %epil.iter, 1
+  -->  {1,+,1}<nuw><nsw><%for.body.epil> U: [1,4) S: [1,4)		Exits: (zext i2 (trunc i64 %n to i2) to i64)		LoopDispositions: { %for.body.epil: Computable }
+  %s.0.lcssa = phi i64 [ 0, %entry ], [ %add1.3, %for.end.loopexit.unr-lcssa ], [ %add1.epil, %for.body.epil ]
+  -->  %s.0.lcssa U: full-set S: full-set
+Determining loop execution counts for: @observable_square
+Loop %for.body.epil: backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>
+Loop %for.body.epil: constant max backedge-taken count is i64 2
+Loop %for.body.epil: symbolic max backedge-taken count is (-1 + (zext i2 (trunc i64 %n to i2) to i64))<nsw>
+Loop %for.body.epil: Trip multiple is 1
+Loop %for.body: backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)
+Loop %for.body: constant max backedge-taken count is i64 4611686018427387902
+Loop %for.body: symbolic max backedge-taken count is ((-4 + (4 * (%n /u 4))<nuw>) /u 4)
+Loop %for.body: Trip multiple is 1
+Loop info for function 'observable_square':
+Loop at depth 1 containing: %for.body.epil<header><latch><exiting>
+Loop at depth 1 containing: %for.body<header><latch><exiting>
