@@ -55,6 +55,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
+#include "Systolic/KernelCosetLowering.h"
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
 #include "Systolic/Passes.h"
@@ -2547,6 +2548,15 @@ struct AffineMatmulToSystolicPass
                      "reduction fiber and run the remainder on the host"),
       llvm::cl::Hidden, llvm::cl::init(false)};
 
+  Option<bool> kernelCosetOffload{
+      *this, "kernel-coset-offload",
+      llvm::cl::desc("Phase M4b.2a (EXPERIMENTAL): lower a recognized affine "
+                     "MAC through the symbolic kernel-coset emission (static "
+                     "K=1 device tiles over exact affine tile bounds, no source "
+                     "enumeration). Off by default; a recognized nest it "
+                     "declines is left to the existing paths"),
+      llvm::cl::Hidden, llvm::cl::init(false)};
+
   Option<bool> assumeNoAlias{
       *this, "assume-no-alias",
       llvm::cl::desc("Assume that A and B never overlap C. Without it, the "
@@ -3136,6 +3146,53 @@ struct AffineMatmulToSystolicPass
 
     SmallVector<AffineMatmulCandidate> candidates;
     collectAffineMatmulCandidates(module.getOperation(), candidates);
+
+    // Phase M4b.2a (EXPERIMENTAL, off by default): attempt the symbolic
+    // kernel-coset emission first, only on candidates isolated from every other
+    // candidate (so claiming one can erase its nest without dangling another).
+    // A claimed anchor is dropped from `candidates` and never reaches the paths
+    // below; a declined one is kept and handled exactly as before.
+    if (kernelCosetOffload) {
+      SystolicOptimizerOptions kcOptions;
+      kcOptions.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+      const bool kcOptionsValid =
+          parseCostModelVersion(costModel, kcOptions.costModel) &&
+          (operandPath == "v1" || operandPath == "v2");
+      kcOptions.beatWideOperandPath = operandPath == "v2";
+      auto isolated = [&](Operation *a) {
+        for (const AffineMatmulCandidate &o : candidates)
+          if (o.anchor != a &&
+              (a->isAncestor(o.anchor) || o.anchor->isAncestor(a)))
+            return false;
+        return true;
+      };
+      SmallVector<AffineMatmulCandidate> kept;
+      for (const AffineMatmulCandidate &candidate : candidates) {
+        std::string why;
+        if (kcOptionsValid && isolated(candidate.anchor)) {
+          auto sym = analyzeSymbolicRankPartition(candidate.anchor, why);
+          if (sym && sym->statement) {
+            const RecognizedMacStatement &stmt = *sym->statement;
+            affine::AffineLoadOp la = stmt.loads[0], lb = stmt.loads[1];
+            affine::AffineStoreOp sc = stmt.store;
+            bool disjoint =
+                provablyDisjointFromOutput(la.getMemRef(), sc.getMemRef(),
+                                           assumeNoAlias) &&
+                provablyDisjointFromOutput(lb.getMemRef(), sc.getMemRef(),
+                                           assumeNoAlias);
+            if (succeeded(lowerKernelCosetOffload(
+                    stmt, *fleet, kcOptions, allowFpReassociation, disjoint,
+                    nextGemmIndex, report, why)))
+              continue; // claimed and erased; drop from the candidate list.
+            if (report)
+              candidate.anchor->emitRemark()
+                  << "kernel-coset offload not applied: " << why << " [UNKNOWN]";
+          }
+        }
+        kept.push_back(candidate);
+      }
+      candidates = std::move(kept);
+    }
 
     SmallVector<LogicalMatmul, 1> matmuls;
     struct NotRecognized {

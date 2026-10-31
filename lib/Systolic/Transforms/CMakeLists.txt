@@ -3,6 +3,7 @@ add_mlir_dialect_library(MLIRSystolicTransforms
   AffineMatmulAnalysis.cpp
   AffineMatmulPartitioning.cpp
   GeneralAffineMatmul.cpp
+  KernelCosetLowering.cpp
   RankPartitionExactInclusion.cpp
   RankPartitionRecognizedMacAdapter.cpp
   RankPartitionDeviceJobLowering.cpp
