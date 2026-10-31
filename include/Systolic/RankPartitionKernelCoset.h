@@ -733,6 +733,162 @@ scanTileSlice(const KernelCosetScanPlan &plan,
   return sl;
 }
 
+//===----------------------------------------------------------------------===//
+// M4b.1: exact symbolic tile bound faces (the "equivalent exact min/max
+// representation" of the chambers; analysis-only, no IR).
+//
+// The innermost (tile) reduction axis, with the output and peel coordinates as
+// parameters, is bounded by the inequalities of D' that carry a nonzero tile
+// coefficient. Each such inequality a*tile + b.params + c >= 0 gives, for a>0, a
+// LOWER bound tile >= ceil((-b.params - c)/a), and for a<0, an UPPER bound
+// tile <= floor((b.params + c)/|a|). The exact integer interval at any
+// (output,peel) is [ max over lower faces, min over upper faces ] -- the
+// parametric form of count2DChamber's envelope, with the chambers being the
+// regions where a single (lower,upper) face pair is active. The faces are read
+// directly from D' (no projection, no enumeration) and use exact floor/ceil
+// division (correct for negative coefficients). Param-only inequalities are
+// captured by the outer box bounds; a tile-coefficient EQUALITY (pinned/
+// congruence tile) or a local in D' returns UNKNOWN (fail closed) in M4b.1.
+//===----------------------------------------------------------------------===//
+
+/// One parametric tile bound: value = ceil((params.p + constant)/divisor) for a
+/// lower face, floor(...) for an upper face. divisor > 0.
+struct TileBoundFace {
+  std::vector<BigInt> params; // coefficients over KernelCosetTileBounds.paramCols
+  BigInt constant;
+  BigInt divisor;
+};
+
+/// Exact symbolic bounds of the tile axis over the (output ++ peel) parameters.
+struct KernelCosetTileBounds {
+  std::vector<unsigned> paramCols;         // output ++ peel columns (parameters)
+  unsigned tileCol = 0;
+  std::vector<TileBoundFace> lowerCeil;    // tile >= ceil(.); active = max
+  std::vector<TileBoundFace> upperFloor;   // tile <= floor(.); active = min
+  std::int64_t innerStride = 1;
+  std::vector<unsigned> outerCols;         // loop columns = paramCols
+  std::vector<std::int64_t> outerLo, outerHi; // exact box bounds of the params
+  bool exact = false;
+};
+
+/// Evaluate one tile face at parameter values. `lower` selects ceil (a lower
+/// bound) vs floor (an upper bound). Exact BigInt; nullopt on arity mismatch.
+inline std::optional<BigInt> evalTileFace(const TileBoundFace &f,
+                                          llvm::ArrayRef<std::int64_t> params,
+                                          bool lower) {
+  if (f.params.size() != params.size())
+    return std::nullopt;
+  BigInt num = f.constant;
+  for (std::size_t i = 0; i < params.size(); ++i)
+    num += f.params[i] * BigInt(params[i]);
+  return lower ? lattice_count_detail::bCeilDiv(num, f.divisor)
+               : lattice_count_detail::bFloorDiv(num, f.divisor);
+}
+
+/// The exact integer tile interval [lo, hi] at the given parameter values:
+/// lo = max over lower faces of ceil(.), hi = min over upper faces of floor(.).
+/// lo > hi means the tile (and this output+peel chamber) is empty. nullopt on an
+/// arity mismatch or missing bounds.
+inline std::optional<std::pair<BigInt, BigInt>>
+tileInterval(const KernelCosetTileBounds &tb,
+             llvm::ArrayRef<std::int64_t> params) {
+  if (tb.lowerCeil.empty() || tb.upperFloor.empty())
+    return std::nullopt;
+  std::optional<BigInt> lo, hi;
+  for (const auto &f : tb.lowerCeil) {
+    auto v = evalTileFace(f, params, /*lower=*/true);
+    if (!v)
+      return std::nullopt;
+    lo = lo ? std::max(*lo, *v) : *v;
+  }
+  for (const auto &f : tb.upperFloor) {
+    auto v = evalTileFace(f, params, /*lower=*/false);
+    if (!v)
+      return std::nullopt;
+    hi = hi ? std::min(*hi, *v) : *v;
+  }
+  return std::make_pair(*lo, *hi);
+}
+
+/// Extract the exact tile bound faces from a scan plan (M4b.1). nullopt
+/// (UNKNOWN) when kappa == 0, D' carries symbols/locals (e.g. an unhandled
+/// congruence), a tile-coefficient equality pins the tile, an outer axis is
+/// unbounded, the tile is unbounded on a side, or i64 overflow. No enumeration;
+/// O(#inequalities * #params) integer operations.
+inline std::optional<KernelCosetTileBounds>
+buildKernelCosetTileBounds(const KernelCosetScanPlan &scan) {
+  using lattice_count_detail::toI64;
+  using mlir::presburger::BoundType;
+  const unsigned kappa = static_cast<unsigned>(scan.peelOrder.size());
+  if (kappa == 0)
+    return std::nullopt;
+  const auto &Dp = scan.fiber.reducedDomain;
+  const unsigned n = static_cast<unsigned>(scan.fiber.U.size());
+  if (Dp.getNumDimVars() != n || Dp.getNumSymbolVars() != 0 ||
+      Dp.getNumLocalVars() != 0)
+    return std::nullopt; // locals/symbols (congruence) -> UNKNOWN in M4b.1.
+
+  KernelCosetTileBounds tb;
+  tb.tileCol = scan.peelOrder.back();
+  tb.innerStride = scan.innerStride;
+  for (unsigned c : scan.fiber.outputCols)
+    tb.paramCols.push_back(c);
+  for (unsigned i = 0; i + 1 < kappa; ++i)
+    tb.paramCols.push_back(scan.peelOrder[i]);
+  tb.outerCols = tb.paramCols;
+  for (unsigned c : tb.outerCols) {
+    auto lo = Dp.getConstantBound64(BoundType::LB, c);
+    auto hi = Dp.getConstantBound64(BoundType::UB, c);
+    if (!lo || !hi)
+      return std::nullopt; // unbounded parameter axis.
+    tb.outerLo.push_back(*lo);
+    tb.outerHi.push_back(*hi);
+  }
+  // A tile-coefficient equality would pin the tile (degenerate/congruence) ->
+  // out of M4b.1 scope. Param-only equalities are allowed (outer domain).
+  for (unsigned r = 0; r < Dp.getNumEqualities(); ++r) {
+    auto a = toI64(Dp.getEquality(r)[tb.tileCol]);
+    if (!a)
+      return std::nullopt;
+    if (*a != 0)
+      return std::nullopt;
+  }
+  for (unsigned r = 0; r < Dp.getNumInequalities(); ++r) {
+    auto row = Dp.getInequality(r);
+    auto a = toI64(row[tb.tileCol]);
+    if (!a)
+      return std::nullopt;
+    if (*a == 0)
+      continue; // param-only inequality -> captured by the outer box bounds.
+    TileBoundFace f;
+    f.params.assign(tb.paramCols.size(), BigInt(0));
+    for (std::size_t i = 0; i < tb.paramCols.size(); ++i) {
+      auto v = toI64(row[tb.paramCols[i]]);
+      if (!v)
+        return std::nullopt;
+      f.params[i] = BigInt(*v);
+    }
+    auto c = toI64(row[n]); // constant (0 locals, so col n is the constant)
+    if (!c)
+      return std::nullopt;
+    if (*a > 0) { // a*tile + b.p + c >= 0 -> tile >= ceil((-b.p - c)/a)
+      for (auto &p : f.params)
+        p = -p;
+      f.constant = BigInt(-*c);
+      f.divisor = BigInt(*a);
+      tb.lowerCeil.push_back(std::move(f));
+    } else { // tile <= floor((b.p + c)/|a|)
+      f.constant = BigInt(*c);
+      f.divisor = BigInt(-*a);
+      tb.upperFloor.push_back(std::move(f));
+    }
+  }
+  if (tb.lowerCeil.empty() || tb.upperFloor.empty())
+    return std::nullopt; // tile unbounded on a side.
+  tb.exact = true;
+  return tb;
+}
+
 } // namespace systolic::logical
 
 #endif // SYSTOLIC_RANK_PARTITION_KERNEL_COSET_H

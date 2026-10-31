@@ -15676,6 +15676,162 @@ int main() {
     std::cout << "C4a-sym kernel-coset M4a scan-plan tests passed.\n";
   }
 
+  // ========================================================
+  // C4a-sym Kernel-Coset Partition M4b.1: exact symbolic tile bound faces.
+  // The tile axis is bounded by ceil/floor affine faces over (output, peel);
+  // the exact integer interval is [max(lower ceil faces), min(upper floor
+  // faces)]. Validated vs the true D' tile range AND a brute reconstruction
+  // (TEST ONLY). Analysis-only; no IR emission.
+  // ========================================================
+  {
+    using mlir::presburger::BoundType;
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetScanPlan;
+    using systolic::logical::buildKernelCosetTileBounds;
+    using systolic::logical::scanTileSlice;
+    using systolic::logical::tileInterval;
+
+    auto boxR = [](int r, long hi) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(r, 0, 0));
+      for (int a = 0; a < r; ++a) {
+        llvm::SmallVector<std::int64_t> l(r + 1, 0), u(r + 1, 0);
+        l[a] = 1;
+        D.addInequality(l);
+        u[a] = -1;
+        u[r] = hi;
+        D.addInequality(u);
+      }
+      return D;
+    };
+    auto Ux = [](const IntMatrix &U, unsigned i, const std::vector<long> &y) {
+      long s = 0;
+      for (unsigned t = 0; t < y.size(); ++t)
+        s += (long)U[i][t].convert_to<std::int64_t>() * y[t];
+      return s;
+    };
+    auto fdiv = [](long p, long q) { long d = p / q, r = p % q; if (r && ((r < 0) != (q < 0))) --d; return d; };
+    auto cdiv = [&](long p, long q) { return -fdiv(-p, q); };
+
+    IntMatrix C = {{BigInt(1), BigInt(1), BigInt(-2)}};
+    auto scan = buildKernelCosetScanPlan(C, boxR(3, 3), 3);
+    auto tb = scan ? buildKernelCosetTileBounds(*scan) : std::nullopt;
+    if (verify(tb.has_value() && tb->exact && tb->tileCol == 2 &&
+                   tb->paramCols.size() == 2 && tb->paramCols[0] == 0 &&
+                   tb->paramCols[1] == 1 && tb->lowerCeil.size() == 2 &&
+                   tb->upperFloor.size() == 2 && tb->innerStride == 1 &&
+                   tb->outerLo.size() == 2 && tb->outerLo[0] == -6 &&
+                   tb->outerHi[0] == 6 && tb->outerLo[1] == 0 &&
+                   tb->outerHi[1] == 3,
+               "M4b.1 tile bounds: tileCol 2, params [0,1], 2 lower/2 upper "
+               "faces, outer [-6,6]x[0,3]"))
+      return 1;
+
+    std::map<long, std::set<std::vector<long>>> brute;
+    for (long i = 0; i < 4; ++i)
+      for (long j = 0; j < 4; ++j)
+        for (long k = 0; k < 4; ++k)
+          brute[i + j - 2 * k].insert({i, j, k});
+
+    // Symbolic tile interval == true D' tile range for every (output, peel);
+    // reconstruct every fiber exactly (coverage / disjointness / multiplicity).
+    bool boundsExact = true, disjoint = true;
+    long nonEmpty = 0, reMac = 0;
+    std::map<long, std::set<std::vector<long>>> rebuilt;
+    std::set<std::vector<long>> seen;
+    unsigned y0c = tb->outerCols[0], y1c = tb->outerCols[1], tc = tb->tileCol;
+    for (long c = tb->outerLo[0]; c <= tb->outerHi[0]; ++c)
+      for (long p = tb->outerLo[1]; p <= tb->outerHi[1]; ++p) {
+        std::int64_t pv[2] = {(std::int64_t)c, (std::int64_t)p};
+        auto iv = tileInterval(*tb, llvm::ArrayRef<std::int64_t>(pv, 2));
+        if (!iv) {
+          boundsExact = false;
+          continue;
+        }
+        long lo = (long)iv->first.convert_to<std::int64_t>();
+        long hi = (long)iv->second.convert_to<std::int64_t>();
+        std::int64_t ov[1] = {(std::int64_t)c}, p1[1] = {(std::int64_t)p};
+        auto ts = scanTileSlice(*scan, llvm::ArrayRef<std::int64_t>(ov, 1),
+                                llvm::ArrayRef<std::int64_t>(p1, 1));
+        long tlo = 1, thi = 0;
+        if (ts) {
+          auto a = ts->getConstantBound64(BoundType::LB, tc);
+          auto b = ts->getConstantBound64(BoundType::UB, tc);
+          if (a && b) {
+            tlo = *a;
+            thi = *b;
+          }
+        }
+        bool symE = (lo > hi), trueE = (thi < tlo);
+        if (symE != trueE || (!symE && (lo != tlo || hi != thi)))
+          boundsExact = false;
+        if (!symE) {
+          ++nonEmpty;
+          for (long t = lo; t <= hi; ++t) {
+            std::vector<long> y(3, 0);
+            y[y0c] = c;
+            y[y1c] = p;
+            y[tc] = t;
+            std::vector<long> x = {Ux(scan->fiber.U, 0, y), Ux(scan->fiber.U, 1, y),
+                                   Ux(scan->fiber.U, 2, y)};
+            if (seen.count(x))
+              disjoint = false;
+            seen.insert(x);
+            rebuilt[x[0] + x[1] - 2 * x[2]].insert(x);
+            ++reMac;
+          }
+        }
+      }
+    if (verify(boundsExact && disjoint && nonEmpty == 40 && reMac == 64 &&
+                   rebuilt == brute,
+               "M4b.1 faces exact == true D' ranges; 40 tiles / 13 fibers / 64 "
+               "MACs == brute"))
+      return 1;
+
+    // Large symbolic bounds: extraction is O(faces) (cardinality-independent);
+    // the face evaluation is exact at a large sample (no enumeration).
+    {
+      long B = 1000000;
+      auto big = buildKernelCosetScanPlan(C, boxR(3, B), 3);
+      auto bt = big ? buildKernelCosetTileBounds(*big) : std::nullopt;
+      long c = 123456, p = 7890;
+      std::int64_t pv[2] = {(std::int64_t)c, (std::int64_t)p};
+      auto iv = bt ? tileInterval(*bt, llvm::ArrayRef<std::int64_t>(pv, 2))
+                   : std::nullopt;
+      long expLo = std::max<long>(-B, cdiv(c - p - B, 2));
+      long expHi = std::min<long>(0, fdiv(c - p, 2));
+      if (verify(bt.has_value() && bt->exact && iv.has_value() &&
+                     (long)iv->first.convert_to<std::int64_t>() == expLo &&
+                     (long)iv->second.convert_to<std::int64_t>() == expHi,
+                 "M4b.1 large bounds (box 0..1e6): exact face eval, no "
+                 "enumeration"))
+        return 1;
+    }
+
+    // identity kernel -> exact tile bounds.
+    {
+      auto s = buildKernelCosetScanPlan({{BigInt(1), BigInt(0), BigInt(0)}},
+                                        boxR(3, 3), 3);
+      auto t = s ? buildKernelCosetTileBounds(*s) : std::nullopt;
+      if (verify(t.has_value() && t->exact,
+                 "M4b.1 identity kernel: exact tile bounds"))
+        return 1;
+    }
+    // Negatives -> UNKNOWN (no scan plan / out of scope).
+    {
+      auto s = buildKernelCosetScanPlan(
+          {{BigInt(1), BigInt(0), BigInt(0), BigInt(0)}}, boxR(4, 3), 4);
+      if (verify(!s.has_value(), "M4b.1 kappa>2 -> UNKNOWN (no scan plan)"))
+        return 1;
+    }
+    {
+      auto s = buildKernelCosetScanPlan({{BigInt(1), BigInt(3)}}, boxR(2, 1), 2);
+      if (verify(!s.has_value(), "M4b.1 holey image -> UNKNOWN (no scan plan)"))
+        return 1;
+    }
+    std::cout << "C4a-sym kernel-coset M4b.1 tile-bound tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
