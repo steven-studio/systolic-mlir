@@ -73,6 +73,29 @@ add_executable(generalized-gemm-termination-report TerminationReport.cpp)
 target_link_libraries(generalized-gemm-termination-report PRIVATE
   generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
+# G3a. The checker links neither the proposer nor union-find, and holds the only
+# constructor of a found status. The analysis layer is what connects them.
+add_library(generalized-gemm-coordinate-model STATIC "${GG_LIB_DIR}/CoordinateModel.cpp")
+target_link_libraries(generalized-gemm-coordinate-model PUBLIC generalized-gemm)
+add_library(generalized-gemm-candidate-checker STATIC "${GG_LIB_DIR}/CandidateChecker.cpp")
+target_link_libraries(generalized-gemm-candidate-checker PUBLIC generalized-gemm-coordinate-model)
+add_library(generalized-gemm-canonical-recovery STATIC "${GG_LIB_DIR}/CanonicalRecovery.cpp")
+target_link_libraries(generalized-gemm-canonical-recovery PUBLIC generalized-gemm-coordinate-model)
+add_library(generalized-gemm-coordinates STATIC
+  "${GG_LIB_DIR}/FiniteDomain.cpp"
+  "${GG_LIB_DIR}/CoordinateAnalysis.cpp")
+target_link_libraries(generalized-gemm-coordinates PUBLIC
+  generalized-gemm-candidate-checker generalized-gemm-canonical-recovery
+  generalized-gemm-checker)
+foreach(target generalized-gemm-coordinate-model generalized-gemm-candidate-checker
+        generalized-gemm-canonical-recovery generalized-gemm-coordinates)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()
+
+add_executable(generalized-gemm-coordinate-report CoordinateReport.cpp)
+target_link_libraries(generalized-gemm-coordinate-report PRIVATE
+  generalized-gemm-coordinates generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -104,6 +127,12 @@ add_test(NAME generalized-gemm-termination COMMAND generalized-gemm-termination-
   "${CMAKE_CURRENT_BINARY_DIR}/loops4.mlir" "${CMAKE_CURRENT_BINARY_DIR}/loops8.mlir")
 set_tests_properties(generalized-gemm-termination PROPERTIES TIMEOUT 600)
 
+add_executable(generalized-gemm-coordinate-test test/unit/CoordinateRecoveryTest.cpp)
+target_link_libraries(generalized-gemm-coordinate-test PRIVATE
+  generalized-gemm-coordinates generalized-gemm-termination generalized-gemm-z3)
+add_test(NAME generalized-gemm-coordinates COMMAND generalized-gemm-coordinate-test)
+set_tests_properties(generalized-gemm-coordinates PROPERTIES TIMEOUT 300)
+
 find_program(GG_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_CLANG clang HINTS "$ENV{HOME}/work/clang24-build/bin" NO_DEFAULT_PATH REQUIRED)
@@ -131,6 +160,15 @@ add_test(NAME generalized-gemm-termination-replay COMMAND "${Python3_EXECUTABLE}
   --catalogue "${GG_LOOPS}" --z3-library "${GG_Z3_LIBRARY}")
 set_tests_properties(generalized-gemm-termination-replay PROPERTIES TIMEOUT 600)
 
+add_test(NAME generalized-gemm-coordinate-tables COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/coordinate_bruteforce.py" --driver $<TARGET_FILE:generalized-gemm-coordinate-report>
+  --random 20000 --hidden 2000 --subsets 5000 --seed 1)
+set_tests_properties(generalized-gemm-coordinate-tables PROPERTIES TIMEOUT 600)
+add_test(NAME generalized-gemm-coordinate-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/coordinate_oracle.py" --driver $<TARGET_FILE:generalized-gemm-coordinate-report>
+  --programs 120 --seed 1 --jobs 6)
+set_tests_properties(generalized-gemm-coordinate-programs PROPERTIES TIMEOUT 1200)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
@@ -138,4 +176,5 @@ set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
 add_custom_target(check-generalized-gemm
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"
   DEPENDS generalized-gemm-report generalized-gemm-unit generalized-gemm-relational
-    generalized-gemm-termination-report generalized-gemm-termination-test)
+    generalized-gemm-termination-report generalized-gemm-termination-test
+    generalized-gemm-coordinate-report generalized-gemm-coordinate-test)

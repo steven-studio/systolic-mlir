@@ -195,6 +195,16 @@ the same code.
   invisible to it. A C-level claim needs the front end to preserve that.
 - Replay fuel limits refutation, never a proof. A long cycle gives `UNKNOWN`.
 
+## Left for G2b
+
+G2b is deferred. These limits stay as they are until it is designed:
+
+- `c_wrap` and `j_step_wrap` are `UNKNOWN` although they terminate. Multiphase and
+  disjunctive ranks, and richer invariants, are the likely route.
+- Polynomial and memory-reading ranks are not proposed.
+- Houdini can keep an invariant no rank needs. If its consecution reads memory, the
+  proof gains the separation premise. A lone `s += a*b` over three roots shows this.
+
 ## Validation (2026-11-01, LLVM 24.0.0git, Z3 4.8.12, base b0f0814)
 
 | Check | Result |
