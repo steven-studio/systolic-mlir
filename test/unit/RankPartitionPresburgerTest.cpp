@@ -16626,6 +16626,514 @@ int main() {
     std::cout << "Phase M5b-1 exact symbolic output scan tests passed.\n";
   }
 
+  // ========================================================
+  // Phase M5b-3a: exact shadow projection + integer existence guard
+  // (buildKernelCosetGuardedOutputScan, analysis only). The committed
+  // buildKernelCosetOutputScan is untouched: for every case it accepts the
+  // guarded builder returns its result unchanged. New acceptances scan the
+  // RATIONAL kernel shadow and decide membership with the exact guard
+  //   G(y_out) <=> AND_{i,j} floor(U_i/b_i) - ceil(L_j/a_j) >= 0,
+  // or (kernel elimination certified) scan the shadow ranges with exact faces
+  // (E1 lemma). Oracle: brute enumeration of the SOURCE (direct evaluation of
+  // D's rows; TEST ONLY), compared as exact sets/multisets:
+  //   output set == h(D); one visit per output; per-output fiber set ==
+  //   source fiber; physical (A,B,C) MAC multiset == source; every x in D;
+  //   every shadow candidate rejected by the guard is NOT an output.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetGuardedOutputScan;
+    using systolic::logical::buildKernelCosetOutputScan;
+    using systolic::logical::existenceGuardHolds;
+    using systolic::logical::KernelCosetOutputScan;
+    using systolic::logical::scanLevelInterval;
+    using systolic::logical::tileInterval;
+
+    struct Stmt {
+      unsigned n;
+      std::array<IntMatrix, 3> access;
+      std::array<std::vector<long>, 3> offsets;
+      IntegerPolyhedron D;
+      long lo, hi;
+    };
+    auto rows = [](std::vector<std::vector<long>> r) {
+      IntMatrix m;
+      for (auto &row : r) {
+        IntRow x;
+        for (long v : row)
+          x.push_back(BigInt(v));
+        m.push_back(x);
+      }
+      return m;
+    };
+    auto domain = [](unsigned n, std::vector<std::vector<std::int64_t>> ineqs,
+                     std::vector<std::vector<std::int64_t>> eqs) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(n, 0, 0));
+      for (auto &r : ineqs)
+        D.addInequality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      for (auto &r : eqs)
+        D.addEquality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      return D;
+    };
+    auto boxRows = [](unsigned n, std::int64_t hi) {
+      std::vector<std::vector<std::int64_t>> r;
+      for (unsigned a = 0; a < n; ++a) {
+        std::vector<std::int64_t> lo(n + 1, 0), up(n + 1, 0);
+        lo[a] = 1;
+        up[a] = -1;
+        up[n] = hi;
+        r.push_back(lo);
+        r.push_back(up);
+      }
+      return r;
+    };
+    auto inDomain = [](const IntegerPolyhedron &D, const std::vector<long> &x) {
+      const unsigned n = D.getNumDimVars();
+      auto eval = [&](llvm::ArrayRef<llvm::DynamicAPInt> row) {
+        long s = (long)llvm::int64fromDynamicAPInt(row[n]);
+        for (unsigned d = 0; d < n; ++d)
+          s += (long)llvm::int64fromDynamicAPInt(row[d]) * x[d];
+        return s;
+      };
+      for (unsigned r = 0; r < D.getNumInequalities(); ++r)
+        if (eval(D.getInequality(r)) < 0)
+          return false;
+      for (unsigned r = 0; r < D.getNumEqualities(); ++r)
+        if (eval(D.getEquality(r)) != 0)
+          return false;
+      return true;
+    };
+    auto address = [](const IntMatrix &acc, const std::vector<long> &off,
+                      const std::vector<long> &x) {
+      std::vector<long> a(acc.size(), 0);
+      for (std::size_t r = 0; r < acc.size(); ++r) {
+        a[r] = off[r];
+        for (std::size_t s = 0; s < x.size(); ++s)
+          a[r] += (long)acc[r][s].convert_to<std::int64_t>() * x[s];
+      }
+      return a;
+    };
+    auto macKey = [](const std::vector<long> &a, const std::vector<long> &b,
+                     const std::vector<long> &c) {
+      std::vector<long> k(a);
+      k.push_back(-999999);
+      k.insert(k.end(), b.begin(), b.end());
+      k.push_back(-999999);
+      k.insert(k.end(), c.begin(), c.end());
+      return k;
+    };
+    struct Enum {
+      std::vector<std::vector<long>> visited;
+      std::set<std::vector<long>> outputs, rejected, xs;
+      std::map<std::vector<long>, std::set<std::vector<long>>> fibers;
+      std::map<std::vector<long>, long> macs;
+      long count = 0, candidates = 0;
+      bool allInDomain = true, duplicateX = false, evalFailed = false;
+    };
+    auto brute = [&](const Stmt &st) {
+      Enum b;
+      std::vector<long> x(st.n, 0);
+      std::function<void(unsigned)> rec = [&](unsigned d) {
+        if (d == st.n) {
+          if (!inDomain(st.D, x))
+            return;
+          auto a = address(st.access[0], st.offsets[0], x);
+          auto bb = address(st.access[1], st.offsets[1], x);
+          auto c = address(st.access[2], st.offsets[2], x);
+          b.outputs.insert(c);
+          b.fibers[c].insert(x);
+          b.macs[macKey(a, bb, c)] += 1;
+          ++b.count;
+          return;
+        }
+        for (long v = st.lo; v <= st.hi; ++v) {
+          x[d] = v;
+          rec(d + 1);
+        }
+      };
+      rec(0);
+      return b;
+    };
+    // The symbolic nest evaluated (test-only enumeration of the analysis'
+    // intervals): output levels (shadow ranges), the existence guard at every
+    // candidate, then peel level and exact tile interval; x = U*y.
+    auto generate = [&](const Stmt &st, const KernelCosetOutputScan &res) {
+      Enum g;
+      const unsigned n = st.n;
+      std::vector<std::int64_t> y(n, 0);
+      auto paramsOf = [&](const std::vector<unsigned> &cols) {
+        std::vector<std::int64_t> p;
+        for (unsigned c : cols)
+          p.push_back(y[c]);
+        return p;
+      };
+      auto xOf = [&]() {
+        std::vector<long> x(n, 0);
+        for (unsigned s = 0; s < n; ++s)
+          for (unsigned t = 0; t < n; ++t)
+            x[s] += (long)res.scan.fiber.U[s][t].convert_to<std::int64_t>() * y[t];
+        return x;
+      };
+      auto cOf = [&]() {
+        std::vector<long> c(res.H.size(), 0);
+        for (std::size_t r = 0; r < res.H.size(); ++r) {
+          c[r] = st.offsets[2][r];
+          for (unsigned t = 0; t < n; ++t)
+            c[r] += (long)res.H[r][t].convert_to<std::int64_t>() * y[t];
+        }
+        return c;
+      };
+      auto runTile = [&](const std::vector<long> &c) {
+        auto p = paramsOf(res.tile.paramCols);
+        auto iv = tileInterval(res.tile, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt t = iv->first; t <= iv->second; ++t) {
+          y[res.tile.tileCol] = t.convert_to<std::int64_t>();
+          auto x = xOf();
+          if (!inDomain(st.D, x))
+            g.allInDomain = false;
+          if (!g.xs.insert(x).second)
+            g.duplicateX = true;
+          auto a = address(st.access[0], st.offsets[0], x);
+          auto bb = address(st.access[1], st.offsets[1], x);
+          auto cc = address(st.access[2], st.offsets[2], x);
+          if (cc != c)
+            g.allInDomain = false;
+          g.fibers[c].insert(x);
+          g.macs[macKey(a, bb, cc)] += 1;
+          ++g.count;
+        }
+      };
+      auto fiber = [&](const std::vector<long> &c) {
+        if (res.peelLevels.empty()) {
+          runTile(c);
+          return;
+        }
+        const auto &lvl = res.peelLevels[0];
+        auto p = paramsOf(lvl.paramCols);
+        auto iv = scanLevelInterval(lvl, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt v = iv->first; v <= iv->second; ++v) {
+          y[lvl.col] = v.convert_to<std::int64_t>();
+          runTile(c);
+        }
+      };
+      std::function<void(unsigned)> rec = [&](unsigned level) {
+        if (level == res.outputLevels.size()) {
+          ++g.candidates;
+          if (res.guard) {
+            auto p = paramsOf(res.guard->paramCols);
+            auto ok = existenceGuardHolds(*res.guard, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+            if (!ok) {
+              g.evalFailed = true;
+              return;
+            }
+            if (!*ok) {
+              g.rejected.insert(cOf());
+              return;
+            }
+          }
+          auto c = cOf();
+          g.visited.push_back(c);
+          g.outputs.insert(c);
+          fiber(c);
+          return;
+        }
+        const auto &lvl = res.outputLevels[level];
+        auto p = paramsOf(lvl.paramCols);
+        auto iv = scanLevelInterval(lvl, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt v = iv->first; v <= iv->second; ++v) {
+          y[lvl.col] = v.convert_to<std::int64_t>();
+          rec(level + 1);
+        }
+      };
+      rec(0);
+      return g;
+    };
+    // Accept + exact. expOutputs/expMacs/expRejected = -1 skips the count check.
+    auto exactScan = [&](const char *name, const Stmt &st, const char *certificate,
+                         long expOutputs, long expMacs, long expRejected,
+                         std::optional<KernelCosetOutputScan> *keep = nullptr) {
+      std::string why;
+      auto res = buildKernelCosetGuardedOutputScan(st.access, st.D, st.n, why);
+      if (!res) {
+        std::cout << "M5b-3a " << name << ": UNKNOWN: " << why << "\n";
+        return false;
+      }
+      Enum b = brute(st), g = generate(st, *res);
+      bool outputsEq = g.outputs == b.outputs;
+      bool once = g.visited.size() == g.outputs.size();
+      bool fibersEq = g.fibers == b.fibers;
+      bool macsEq = g.macs == b.macs && g.count == b.count;
+      bool rejectedSound = true;
+      for (const auto &c : g.rejected)
+        if (b.outputs.count(c))
+          rejectedSound = false;
+      bool guardConsistent = res->kernelProjectionExact ? !res->guard.has_value()
+                                                        : res->guard.has_value();
+      std::cout << "M5b-3a " << name << ": certificate " << res->outputCertificate
+                << ", kernelProjectionExact " << res->kernelProjectionExact
+                << ", shadowLevels " << res->outputLevelsAreShadow
+                << ", eqSplit " << res->tileEqualitiesSplit
+                << ", fiberScanExact " << res->fiberScanExact
+                << "; candidates " << g.candidates << ", rejected by guard "
+                << g.rejected.size() << ", visits " << g.visited.size()
+                << ", outputs " << g.outputs.size() << " (brute " << b.outputs.size()
+                << "), MACs " << g.count << " (brute " << b.count
+                << "); outputs==brute " << outputsEq << " once " << once
+                << " fibers==brute " << fibersEq << " MACs==brute " << macsEq
+                << " rejected-sound " << rejectedSound << "\n";
+      if (keep)
+        *keep = res;
+      return outputsEq && once && fibersEq && macsEq && rejectedSound &&
+             guardConsistent && g.allInDomain && !g.duplicateX && !g.evalFailed &&
+             (long)(g.candidates - g.visited.size()) == (long)g.rejected.size() &&
+             std::string(res->outputCertificate) == certificate &&
+             (expOutputs < 0 || (long)g.outputs.size() == expOutputs) &&
+             (expMacs < 0 || g.count == expMacs) &&
+             (expRejected < 0 || (long)g.rejected.size() == expRejected);
+    };
+    auto declines = [&](const char *name, const Stmt &st, const char *needle) {
+      std::string why;
+      auto res = buildKernelCosetGuardedOutputScan(st.access, st.D, st.n, why);
+      std::cout << "M5b-3a " << name << ": " << (res ? "ACCEPTED (unexpected)" : why)
+                << "\n";
+      return !res && why.find(needle) != std::string::npos;
+    };
+    // The committed builder and the guarded builder agree where the former
+    // accepts (same evaluated outputs and MACs, no guard).
+    auto sameAsCommitted = [&](const char *name, const Stmt &st) {
+      std::string w1, w2;
+      auto a = buildKernelCosetOutputScan(st.access, st.D, st.n, w1);
+      auto b = buildKernelCosetGuardedOutputScan(st.access, st.D, st.n, w2);
+      if (!a || !b)
+        return false;
+      Enum ea = generate(st, *a), eb = generate(st, *b);
+      bool same = ea.outputs == eb.outputs && ea.macs == eb.macs &&
+                  ea.visited.size() == eb.visited.size() && !b->guard &&
+                  b->kernelProjectionExact && !b->outputLevelsAreShadow &&
+                  std::string(a->outputCertificate) == b->outputCertificate;
+      std::cout << "M5b-3a " << name << ": committed == guarded builder: " << same
+                << " (" << a->outputCertificate << ")\n";
+      return same;
+    };
+
+    const IntMatrix Aik = rows({{1, 0, 0}, {0, 0, 1}});
+    const IntMatrix Bkj = rows({{0, 0, 1}, {0, 1, 0}});
+    const IntMatrix Cij = rows({{1, 0, 0}, {0, 1, 0}});
+    const std::array<std::vector<long>, 3> zero2 = {
+        std::vector<long>{0, 0}, std::vector<long>{0, 0}, std::vector<long>{0, 0}};
+    const std::array<std::vector<long>, 3> zero21 = {
+        std::vector<long>{0, 0}, std::vector<long>{0, 0}, std::vector<long>{0}};
+    auto box3 = [&](std::int64_t hi) { return domain(3, boxRows(3, hi), {}); };
+
+    // ---- Committed acceptances are returned unchanged ----------------------
+    {
+      auto tri = boxRows(3, 3);
+      tri.push_back({1, -1, 0, 0});
+      auto dep = boxRows(3, 3);
+      dep.push_back({1, 1, -1, 0});
+      const IntMatrix A9 = rows({{1, 1, -2}, {1, 1, 1}});
+      const IntMatrix B9 = rows({{1, 1, 1}, {1, -2, 1}});
+      const IntMatrix C9 = rows({{1, 1, -2}, {1, -2, 1}});
+      std::array<std::vector<long>, 3> off9 = {std::vector<long>{6, 0},
+                                               std::vector<long>{0, 6},
+                                               std::vector<long>{6, 6}};
+      if (verify(sameAsCommitted("C[2i][j] box", {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2, box3(3), -2, 5}) &&
+                     sameAsCommitted("C[i+j][i-j] box", {3, {Aik, Bkj, rows({{1, 1, 0}, {1, -1, 0}})}, zero2, box3(3), -2, 5}) &&
+                     sameAsCommitted("C[2i][3j] box", {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 3, 0}})}, zero2, box3(3), -2, 5}) &&
+                     sameAsCommitted("tri j<=i", {3, {Aik, Bkj, Cij}, zero2, domain(3, tri, {}), -2, 5}) &&
+                     sameAsCommitted("k<=i+j", {3, {Aik, Bkj, Cij}, zero2, domain(3, dep, {}), -2, 5}) &&
+                     sameAsCommitted("det-9 box4", {3, {A9, B9, C9}, off9, box3(3), -2, 5}),
+                 "M5b-3a committed acceptances (C[2i][j], C[i+j][i-j], C[2i][3j], "
+                 "triangle, k<=i+j, det-9) unchanged through the guarded builder"))
+        return 1;
+    }
+
+    // ---- 2i + j - k = c (rank-1, contiguous): committed contiguity path, and
+    // the existence guard cross-checked against it on the same D'.
+    {
+      std::array<std::vector<long>, 3> off = {std::vector<long>{0, 0},
+                                              std::vector<long>{0, 0},
+                                              std::vector<long>{3}};
+      Stmt st{3, {Aik, Bkj, rows({{2, 1, -1}})}, off, box3(3), -2, 5};
+      if (verify(exactScan("2i+j-k (rank-1 contiguous)", st, "contiguity", 13, 64, 0),
+                 "M5b-3a 2i+j-k: committed contiguity result (13 outputs / 64 MACs)"))
+        return 1;
+      // Direct guard: eliminate the unit kernel column exactly, guard on the
+      // other; the guard-defined set over the rational shadow == brute image.
+      using systolic::logical::kernel_coset_image_detail::buildExistenceGuard;
+      using systolic::logical::kernel_coset_image_detail::eliminateExact;
+      using systolic::logical::kernel_coset_image_detail::eliminateShadow;
+      using systolic::logical::kernel_coset_image_detail::Projected;
+      using systolic::logical::kernel_coset_image_detail::unitEverywhere;
+      auto kb = systolic::logical::buildIntegerKernelBasis(st.access[2], 3);
+      auto Dp = systolic::logical::buildReducedDomain(kb->U, st.D, 3);
+      Projected pr{*Dp, {0, 1, 2}};
+      unsigned unitCol = 0, otherCol = 0;
+      for (unsigned c : kb->kernelColIndices)
+        (unitEverywhere(pr, c) ? unitCol : otherCol) = c;
+      std::string w;
+      systolic::logical::KernelCosetExistenceGuard g;
+      bool built = eliminateExact(pr, unitCol, w) && buildExistenceGuard(pr, otherCol, {0}, g, w) &&
+                   eliminateShadow(pr, otherCol, w);
+      long agree = 0, total = 0, accepted = 0;
+      if (built) {
+        auto lo = pr.P.getConstantBound64(mlir::presburger::BoundType::LB, 0);
+        auto hi = pr.P.getConstantBound64(mlir::presburger::BoundType::UB, 0);
+        Enum b = brute(st);
+        for (long y0 = *lo; y0 <= *hi; ++y0) {
+          std::int64_t p[1] = {y0};
+          auto ok = existenceGuardHolds(g, llvm::ArrayRef<std::int64_t>(p, 1));
+          bool inImg = b.outputs.count({y0 + 3}) > 0; // H = [1,0,0], offset 3
+          ++total;
+          accepted += ok && *ok;
+          agree += (ok && *ok == inImg);
+        }
+      }
+      std::cout << "M5b-3a 2i+j-k guard cross-check: shadow " << total
+                << " candidates, guard accepts " << accepted << ", agrees with brute "
+                << agree << "/" << total << "\n";
+      if (verify(built && total == 13 && accepted == 13 && agree == total,
+                 "M5b-3a 2i+j-k: existence guard == contiguity certificate on [-3, 9]"))
+        return 1;
+    }
+
+    // ---- 2i + 3j = c over the box: a holey rank-1 image (holes 1 and 14).
+    {
+      std::array<std::vector<long>, 3> off = {std::vector<long>{0, 0},
+                                              std::vector<long>{0, 0},
+                                              std::vector<long>{0}};
+      std::optional<KernelCosetOutputScan> res;
+      if (verify(exactScan("C[2i+3j] box4 (holey rank-1)", {3, {Aik, Bkj, rows({{2, 3, 0}})}, off, box3(3), -2, 5},
+                           "shadow+guard", 14, 64, 2, &res) &&
+                     res && res->guard && !res->kernelProjectionExact,
+                 "M5b-3a C[2i+3j]: shadow [0,15] guarded to the 14 attained values "
+                 "(1 and 14 rejected), 64 MACs exact"))
+        return 1;
+    }
+    // ---- C[2i+3j][i-j] over the triangle j<=i<=5, k<=3 (index-5 lattice):
+    // kernel elimination exact, output levels from shadows (E1), no guard.
+    {
+      auto r = boxRows(3, 5);
+      r[5][3] = 3;
+      r.push_back({1, -1, 0, 0});
+      if (verify(exactScan("C[2i+3j][i-j] triangle", {3, {Aik, Bkj, rows({{2, 3, 0}, {1, -1, 0}})}, zero2, domain(3, r, {}), -1, 6},
+                           "scan", 21, 84, 0),
+                 "M5b-3a C[2i+3j][i-j]: exact 21 outputs / 84 MACs with shadow "
+                 "output levels (committed builder: UNKNOWN)"))
+        return 1;
+    }
+    // ---- Equality i == 2k (congruence i even): tile equality split into
+    // the face pair; rational shadow {0,1,2} x j, guard rejects i == 1.
+    {
+      auto r = boxRows(3, 3);
+      r[5][3] = 1; // k <= 1
+      std::optional<KernelCosetOutputScan> res;
+      if (verify(exactScan("C[i][j], i == 2k", {3, {Aik, Bkj, Cij}, zero2, domain(3, r, {{1, 0, -2, 0}}), -1, 4},
+                           "shadow+guard", 8, 8, 4, &res) &&
+                     res && res->tileEqualitiesSplit,
+                 "M5b-3a i == 2k: equality as ceil/floor pair, 8 outputs / 8 MACs, "
+                 "4 odd-row candidates rejected"))
+        return 1;
+    }
+    // ---- Gate 1 <= 2k <= i (identity frame, non-unit kernel coefficient).
+    {
+      auto r = boxRows(3, 3);
+      r.push_back({0, 0, 2, -1});
+      r.push_back({1, 0, -2, 0});
+      if (verify(exactScan("C[i][j], 1<=2k<=i", {3, {Aik, Bkj, Cij}, zero2, domain(3, r, {}), -1, 4},
+                           "shadow+guard", 8, 8, 0),
+                 "M5b-3a 1<=2k<=i: guarded, 8 outputs / 8 MACs (shadow already tight)"))
+        return 1;
+    }
+    // ---- 2i + 3j - k >= 0 over the box: unit k, non-unit output rows.
+    {
+      auto r = boxRows(3, 3);
+      r.push_back({2, 3, -1, 0});
+      if (verify(exactScan("C[i][j], 2i+3j-k>=0", {3, {Aik, Bkj, Cij}, zero2, domain(3, r, {}), -1, 4},
+                           "scan", 16, 60, 0),
+                 "M5b-3a 2i+3j-k>=0: exact 16 outputs / 60 MACs with shadow levels"))
+        return 1;
+    }
+    // ---- det-9 base with a non-unit coupled reduction bound 2k <= i-j+3.
+    {
+      const IntMatrix A9 = rows({{1, 1, -2}, {1, 1, 1}});
+      const IntMatrix B9 = rows({{1, 1, 1}, {1, -2, 1}});
+      const IntMatrix C9 = rows({{1, 1, -2}, {1, -2, 1}});
+      std::array<std::vector<long>, 3> off9 = {std::vector<long>{6, 0},
+                                               std::vector<long>{0, 6},
+                                               std::vector<long>{6, 6}};
+      auto r = boxRows(3, 3);
+      r.push_back({1, -1, -2, 3});
+      if (verify(exactScan("det-9 with 2k<=i-j+3", {3, {A9, B9, C9}, off9, domain(3, r, {}), -2, 5},
+                           "shadow+guard", -1, -1, -1),
+                 "M5b-3a det-9 + non-unit coupled reduction bound: guarded, exact"))
+        return 1;
+    }
+    // ---- Negative numerators and coordinates: C[2i+3j] over -2<=i<=1,
+    // -1<=j<=2, 0<=k<=2 (holes at -6 and 7).
+    {
+      std::array<std::vector<long>, 3> off = {std::vector<long>{2, 0},
+                                              std::vector<long>{0, 1},
+                                              std::vector<long>{7}};
+      auto D = domain(3, {{1, 0, 0, 2}, {-1, 0, 0, 1}, {0, 1, 0, 1}, {0, -1, 0, 2},
+                          {0, 0, 1, 0}, {0, 0, -1, 2}}, {});
+      if (verify(exactScan("C[2i+3j] negative ranges", {3, {Aik, Bkj, rows({{2, 3, 0}})}, off, D, -3, 3},
+                           "shadow+guard", 14, 48, 2),
+                 "M5b-3a negative numerators: 14 outputs / 48 MACs, 2 holes rejected"))
+        return 1;
+    }
+
+    // ---- UNKNOWN / declined -----------------------------------------------
+    {
+      auto r = boxRows(3, 5); // C[2i+3j] with 1 <= 2k <= i: two non-unit kernel eliminations
+      r.push_back({0, 0, 2, -1});
+      r.push_back({1, 0, -2, 0});
+      if (verify(declines("C[2i+3j] with 1<=2k<=i", {3, {Aik, Bkj, rows({{2, 3, 0}})}, zero21, domain(3, r, {}), -1, 6},
+                          "one existence guard at most"),
+                 "M5b-3a two non-unit kernel eliminations: UNKNOWN"))
+        return 1;
+      IntegerPolyhedron Dl(PresburgerSpace::getSetSpace(3, 0, 1));
+      for (auto &rr : boxRows(3, 3)) {
+        std::vector<std::int64_t> row = {rr[0], rr[1], rr[2], 0, rr[3]};
+        Dl.addInequality(llvm::ArrayRef<std::int64_t>(row.data(), row.size()));
+      }
+      Dl.addEquality(llvm::ArrayRef<std::int64_t>({1, 0, 0, -2, 0}));
+      if (verify(declines("local (congruence) in D", {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2, Dl, -2, 5},
+                          "symbols or locals"),
+                 "M5b-3a congruence local: UNKNOWN"))
+        return 1;
+      const IntMatrix A4 = rows({{1, 0, 0, 0}, {0, 0, 1, 0}});
+      const IntMatrix Bp = rows({{0, 0, 1, 0}, {0, 1, 0, 1}});
+      if (verify(declines("kappa>2", {4, {A4, Bp, rows({{2, 0, 0, 0}})}, zero21, domain(4, boxRows(4, 3), {}), -2, 5},
+                          "kappa > 2"),
+                 "M5b-3a kappa > 2: UNKNOWN"))
+        return 1;
+      if (verify(declines("box GEMM", {3, {Aik, Bkj, Cij}, zero2, box3(3), -2, 5}, "pure box GEMM"),
+                 "M5b-3a pure box GEMM: declined"))
+        return 1;
+      auto empty = boxRows(3, 3);
+      empty.push_back({1, 0, 0, -5});
+      if (verify(declines("empty domain", {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2, domain(3, empty, {}), -2, 5},
+                          "empty"),
+                 "M5b-3a empty domain: UNKNOWN"))
+        return 1;
+    }
+    std::cout << "Phase M5b-3a shadow projection + existence guard tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }
