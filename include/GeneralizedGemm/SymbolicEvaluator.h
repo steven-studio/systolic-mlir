@@ -43,5 +43,12 @@ struct SymbolicRegion {
 SymbolicRegion summarizeAcyclic(const SemanticProgram &program, unsigned from,
                                 const SymbolicLimits &limits = {});
 
+/// The composition step behind summarizeAcyclic, for callers that choose their
+/// own stopping locations. An empty path at `from`, and `path` followed by one
+/// transition out of path.end. `stop` is set only for a step to the exit.
+SymbolicPath startSymbolicPath(const SemanticProgram &program, unsigned from);
+SymbolicPath extendSymbolicPath(const SemanticProgram &program,
+                                const SymbolicPath &path, unsigned transition);
+
 } // namespace mlir::generalized_gemm
 #endif

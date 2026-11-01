@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(generalized-gemm-g1 LANGUAGES C CXX)
+project(generalized-gemm LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -36,6 +36,43 @@ target_link_libraries(generalized-gemm PUBLIC
   MLIRArithDialect MLIRControlFlowDialect MLIRFuncDialect MLIRMemRefDialect
   MLIRSCFDialect MLIRPass MLIRIR MLIRSupport MLIRParser MLIRLLVMDialect)
 
+# G2a. The checker links neither the proposers nor a solver: the only authority
+# for a verdict cannot call the code that guesses, and a proposer that needs the
+# checker's verdict constructors would not link.
+add_library(generalized-gemm-checker STATIC
+  "${GG_LIB_DIR}/ControlStructure.cpp"
+  "${GG_LIB_DIR}/CutPaths.cpp"
+  "${GG_LIB_DIR}/TerminationObligations.cpp"
+  "${GG_LIB_DIR}/TerminationCertificate.cpp")
+target_link_libraries(generalized-gemm-checker PUBLIC generalized-gemm)
+target_compile_options(generalized-gemm-checker PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(generalized-gemm-termination STATIC
+  "${GG_LIB_DIR}/TerminationProposers.cpp"
+  "${GG_LIB_DIR}/TerminationAnalysis.cpp")
+target_link_libraries(generalized-gemm-termination PUBLIC generalized-gemm-checker)
+target_compile_options(generalized-gemm-termination PRIVATE -Wall -Wextra -Wpedantic)
+
+add_library(generalized-gemm-z3 STATIC "${GG_LIB_DIR}/Z3Backend.cpp")
+target_include_directories(generalized-gemm-z3 SYSTEM PRIVATE "${GG_Z3_INCLUDE}")
+target_link_libraries(generalized-gemm-z3 PUBLIC generalized-gemm-checker "${GG_Z3_LIBRARY}")
+target_compile_options(generalized-gemm-z3 PRIVATE -Wall -Wextra -Wpedantic)
+
+# P2b as a source of hints only. Its CMake project stays untouched.
+add_subdirectory("${GG_ROOT}/research/polynomial-summation-mlir" polynomial-recurrence EXCLUDE_FROM_ALL)
+add_library(generalized-gemm-p2b-candidates STATIC
+  "${GG_ROOT}/lib/Systolic/Analysis/MLIRPolynomialTermination.cpp"
+  "${GG_ROOT}/lib/Systolic/Analysis/PolynomialTerminationProof.cpp")
+target_include_directories(generalized-gemm-p2b-candidates PRIVATE "${GG_Z3_INCLUDE}")
+target_link_libraries(generalized-gemm-p2b-candidates PUBLIC polynomial-cfg PRIVATE "${GG_Z3_LIBRARY}")
+add_library(generalized-gemm-polynomial-adapter STATIC "${GG_LIB_DIR}/PolynomialAdapter.cpp")
+target_link_libraries(generalized-gemm-polynomial-adapter
+  PUBLIC generalized-gemm-termination PRIVATE generalized-gemm-p2b-candidates)
+
+add_executable(generalized-gemm-termination-report TerminationReport.cpp)
+target_link_libraries(generalized-gemm-termination-report PRIVATE
+  generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -48,6 +85,24 @@ add_executable(generalized-gemm-relational test/unit/RelationalAgreementTest.cpp
 target_include_directories(generalized-gemm-relational SYSTEM PRIVATE "${GG_Z3_INCLUDE}")
 target_link_libraries(generalized-gemm-relational PRIVATE generalized-gemm "${GG_Z3_LIBRARY}")
 add_test(NAME generalized-gemm-relational COMMAND generalized-gemm-relational)
+
+# The loop catalogue, printed at the widths the tests use.
+set(GG_LOOPS "${CMAKE_CURRENT_SOURCE_DIR}/test/lit/Inputs/gen_loops.py")
+foreach(width 4 8)
+  add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/loops${width}.mlir"
+    COMMAND "${Python3_EXECUTABLE}" "${GG_LOOPS}" ${width} > "${CMAKE_CURRENT_BINARY_DIR}/loops${width}.mlir"
+    DEPENDS "${GG_LOOPS}")
+endforeach()
+add_custom_target(generalized-gemm-loops DEPENDS
+  "${CMAKE_CURRENT_BINARY_DIR}/loops4.mlir" "${CMAKE_CURRENT_BINARY_DIR}/loops8.mlir")
+
+add_executable(generalized-gemm-termination-test test/unit/TerminationTest.cpp)
+target_link_libraries(generalized-gemm-termination-test PRIVATE
+  generalized-gemm-termination generalized-gemm-z3)
+add_dependencies(generalized-gemm-termination-test generalized-gemm-loops)
+add_test(NAME generalized-gemm-termination COMMAND generalized-gemm-termination-test
+  "${CMAKE_CURRENT_BINARY_DIR}/loops4.mlir" "${CMAKE_CURRENT_BINARY_DIR}/loops8.mlir")
+set_tests_properties(generalized-gemm-termination PROPERTIES TIMEOUT 600)
 
 find_program(GG_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
@@ -67,10 +122,20 @@ add_test(NAME generalized-gemm-native-differential COMMAND "${Python3_EXECUTABLE
   --mlir-translate "${GG_MLIR_TRANSLATE}" --clang "${GG_CLANG}")
 set_tests_properties(generalized-gemm-native-differential PROPERTIES TIMEOUT 600)
 
+add_test(NAME generalized-gemm-termination-oracle COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/termination_exhaustive.py" --driver $<TARGET_FILE:generalized-gemm-termination-report>
+  --programs 600 --seed 1 --jobs 4 --catalogue "${GG_LOOPS}")
+set_tests_properties(generalized-gemm-termination-oracle PROPERTIES TIMEOUT 1200)
+add_test(NAME generalized-gemm-termination-replay COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/replay_obligations.py" --driver $<TARGET_FILE:generalized-gemm-termination-report>
+  --catalogue "${GG_LOOPS}" --z3-library "${GG_Z3_LIBRARY}")
+set_tests_properties(generalized-gemm-termination-replay PROPERTIES TIMEOUT 600)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
 
 add_custom_target(check-generalized-gemm
-  COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
-  DEPENDS generalized-gemm-report generalized-gemm-unit generalized-gemm-relational)
+  COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"
+  DEPENDS generalized-gemm-report generalized-gemm-unit generalized-gemm-relational
+    generalized-gemm-termination-report generalized-gemm-termination-test)

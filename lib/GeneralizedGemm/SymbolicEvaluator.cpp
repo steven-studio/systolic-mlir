@@ -7,6 +7,62 @@ using namespace mlir::generalized_gemm;
 
 namespace mlir::generalized_gemm {
 
+SymbolicPath startSymbolicPath(const SemanticProgram &program, unsigned from) {
+  SymbolicPath start;
+  start.end = from;
+  start.condition = program.terms->boolean(true);
+  start.state.assign(program.state.size(), nullptr);
+  start.shadow.assign(program.state.size(), nullptr);
+  start.memory.assign(program.roots.size(), nullptr);
+  return start;
+}
+
+SymbolicPath extendSymbolicPath(const SemanticProgram &program,
+                                const SymbolicPath &path, unsigned transition) {
+  TermContext &terms = *program.terms;
+  const Transition &t = program.transitions[transition];
+  // All of t reads the configuration at t.from: the path so far.
+  auto leaf = [&](Term n) -> Term {
+    if (n->op == TermOp::State)
+      return path.state[n->index];
+    if (n->op == TermOp::Shadow)
+      return path.shadow[n->index];
+    if (n->op == TermOp::MemVar)
+      return path.memory[n->index];
+    return nullptr;
+  };
+  auto apply = [&](Term term) { return terms.substitute(term, leaf); };
+
+  SymbolicPath next = path;
+  next.transitions.push_back(transition);
+  next.condition = terms.logicalAnd(path.condition, apply(t.guard));
+  for (SideCondition side : t.sideConditions) {
+    side.violated = apply(side.violated);
+    next.sideConditions.push_back(side);
+  }
+  for (MemoryEffect effect : t.effects) {
+    for (Term &i : effect.index)
+      i = apply(i);
+    effect.value = apply(effect.value);
+    next.effects.push_back(effect);
+  }
+  for (const auto &[id, term] : t.assignments)
+    next.state[id] = apply(term);
+  for (const auto &[id, term] : t.shadowAssignments)
+    next.shadow[id] = apply(term);
+  for (const auto &[root, term] : t.memoryUpdates)
+    next.memory[root] = apply(term);
+  next.end = t.to;
+  if (t.to == program.exitLocation()) {
+    next.stop = SymbolicPath::ReachedExit;
+    for (Term term : t.returns)
+      next.returns.push_back(apply(term));
+    for (Term term : t.returnPoison)
+      next.returnPoison.push_back(apply(term));
+  }
+  return next;
+}
+
 SymbolicRegion summarizeAcyclic(const SemanticProgram &program, unsigned from,
                                 const SymbolicLimits &limits) {
   SymbolicRegion region;
@@ -35,45 +91,9 @@ SymbolicRegion summarizeAcyclic(const SemanticProgram &program, unsigned from,
             continue;
           if (terms.size() - startTerms > limits.maxNewTerms)
             throw LimitReached{"term limit"};
-          // All of t reads the configuration at t.from: the path so far.
-          auto leaf = [&](Term n) -> Term {
-            if (n->op == TermOp::State)
-              return path.state[n->index];
-            if (n->op == TermOp::Shadow)
-              return path.shadow[n->index];
-            if (n->op == TermOp::MemVar)
-              return path.memory[n->index];
-            return nullptr;
-          };
-          auto apply = [&](Term term) { return terms.substitute(term, leaf); };
-
-          SymbolicPath next = path;
-          next.transitions.push_back(index);
-          next.condition = terms.logicalAnd(path.condition, apply(t.guard));
-          for (SideCondition side : t.sideConditions) {
-            side.violated = apply(side.violated);
-            next.sideConditions.push_back(side);
-          }
-          for (MemoryEffect effect : t.effects) {
-            for (Term &i : effect.index)
-              i = apply(i);
-            effect.value = apply(effect.value);
-            next.effects.push_back(effect);
-          }
-          for (const auto &[id, term] : t.assignments)
-            next.state[id] = apply(term);
-          for (const auto &[id, term] : t.shadowAssignments)
-            next.shadow[id] = apply(term);
-          for (const auto &[root, term] : t.memoryUpdates)
-            next.memory[root] = apply(term);
-          next.end = t.to;
+          SymbolicPath next = extendSymbolicPath(program, path, index);
 
           if (t.to == program.exitLocation()) {
-            next.stop = SymbolicPath::ReachedExit;
-            for (Term term : t.returns)
-              next.returns.push_back(apply(term));
-            for (Term term : t.returnPoison)
-              next.returnPoison.push_back(apply(term));
             region.paths.push_back(std::move(next));
           } else if (llvm::is_contained(visited, t.to)) {
             next.stop = SymbolicPath::ReachedRevisit;
@@ -88,14 +108,8 @@ SymbolicRegion summarizeAcyclic(const SemanticProgram &program, unsigned from,
         }
       };
 
-  SymbolicPath start;
-  start.end = from;
-  start.condition = terms.boolean(true);
-  start.state.assign(program.state.size(), nullptr);
-  start.shadow.assign(program.state.size(), nullptr);
-  start.memory.assign(program.roots.size(), nullptr);
   try {
-    walk(std::move(start), {from});
+    walk(startSymbolicPath(program, from), {from});
   } catch (const LimitReached &limit) {
     region.paths.clear();
     region.reason = limit.reason;

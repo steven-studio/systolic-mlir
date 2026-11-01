@@ -23,6 +23,14 @@ namespace mlir::generalized_gemm {
 
 std::string encodeTransitionRelation(const SemanticProgram &program);
 
+/// The sort and the bound name of a term, as the definitions below print them.
+std::string smtSortText(const Sort &sort);
+std::string smtTermName(Term term);
+
+/// Declarations of the free leaves below `roots`, then a define-fun per node in
+/// id order, using the same text as encodeTransitionRelation. Asserts nothing.
+std::string encodeTerms(llvm::ArrayRef<Term> roots);
+
 enum class StepQuery {
   // sat iff T admits pre -> post.
   AdmitsStep,

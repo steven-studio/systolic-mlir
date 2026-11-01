@@ -144,9 +144,41 @@ std::string disjunction(const std::vector<std::string> &terms) {
 }
 std::string isTrue(Term t) { return "(= " + name(t) + " #b1)"; }
 
+void collectNodes(Term t, std::map<unsigned, Term> &used) {
+  if (!used.emplace(t->id, t).second)
+    return;
+  for (Term a : t->args)
+    collectNodes(a, used);
+}
+
+// Children have smaller ids, so id order is a definition order.
+std::string defineNodes(const std::map<unsigned, Term> &used) {
+  std::string out;
+  for (const auto &[id, term] : used)
+    out += "(define-fun " + name(term) + " () " + smtSort(term->sort) + " " +
+           expression(term) + ")\n";
+  return out;
+}
+
 } // namespace
 
 namespace mlir::generalized_gemm {
+
+std::string smtSortText(const Sort &sort) { return smtSort(sort); }
+std::string smtTermName(Term term) { return name(term); }
+
+std::string encodeTerms(llvm::ArrayRef<Term> roots) {
+  std::map<unsigned, Term> used;
+  for (Term root : roots)
+    collectNodes(root, used);
+  std::string out;
+  for (const auto &[id, term] : used)
+    if (term->op == TermOp::Param || term->op == TermOp::State ||
+        term->op == TermOp::Shadow || term->op == TermOp::MemVar)
+      out += "(declare-const " + expression(term) + " " + smtSort(term->sort) +
+             ")\n";
+  return out + defineNodes(used);
+}
 
 std::string encodeTransitionRelation(const SemanticProgram &program) {
   if (!program.isSupported())
@@ -178,26 +210,18 @@ std::string encodeTransitionRelation(const SemanticProgram &program) {
     declare("rp" + std::to_string(i), "(_ BitVec 1)");
   }
 
-  // Children have smaller ids, so id order is a definition order.
   std::map<unsigned, Term> used;
-  std::function<void(Term)> collect = [&](Term t) {
-    if (!used.emplace(t->id, t).second)
-      return;
-    for (Term a : t->args)
-      collect(a);
-  };
   for (const Transition &t : program.transitions) {
-    collect(t.guard);
-    for (const auto &[id, term] : t.assignments) collect(term);
-    for (const auto &[id, term] : t.shadowAssignments) collect(term);
-    for (const auto &[id, term] : t.memoryUpdates) collect(term);
-    for (const SideCondition &side : t.sideConditions) collect(side.violated);
-    for (Term term : t.returns) collect(term);
-    for (Term term : t.returnPoison) collect(term);
+    collectNodes(t.guard, used);
+    for (const auto &[id, term] : t.assignments) collectNodes(term, used);
+    for (const auto &[id, term] : t.shadowAssignments) collectNodes(term, used);
+    for (const auto &[id, term] : t.memoryUpdates) collectNodes(term, used);
+    for (const SideCondition &side : t.sideConditions)
+      collectNodes(side.violated, used);
+    for (Term term : t.returns) collectNodes(term, used);
+    for (Term term : t.returnPoison) collectNodes(term, used);
   }
-  for (const auto &[id, term] : used)
-    out += "(define-fun " + name(term) + " () " + smtSort(term->sort) + " " +
-           expression(term) + ")\n";
+  out += defineNodes(used);
 
   std::vector<std::string> stuckUB, stuckOther, edges;
   std::map<unsigned, std::string> notStuck;
