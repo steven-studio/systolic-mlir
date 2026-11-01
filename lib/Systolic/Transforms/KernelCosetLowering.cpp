@@ -9,6 +9,7 @@
 #include "Systolic/RankPartitionKernelCoset.h"
 #include "Systolic/RankPartitionKernelCosetBounds.h"
 #include "Systolic/RankPartitionKernelCosetImage.h"
+#include "Systolic/RankPartitionKernelCosetRanges.h"
 #include "Systolic/SystolicTilePlan.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -500,6 +501,50 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   } else if (image && !image->kernelProjectionExact) {
     why = "shadow-projected output scan without an existence guard (unexpected)";
     return failure();
+  }
+
+  // ---- Phase F-KC-5b-0: every value the nest computes fits in 64 bits ----
+  // The checks above fit each coefficient in 64 bits. The product of a
+  // coefficient and a loop variable exists only at run time, as `mul nsw`, and
+  // elimination multiplies coefficients, so a correct bound could wrap and lose
+  // its MACs (RankPartitionKernelCosetRanges.h). The proof runs over the exact
+  // loops about to be emitted, before any IR exists; what it cannot establish
+  // is refused here, source IR untouched.
+  {
+    klogical::KernelCosetEmittedProgram program;
+    program.numCols = n;
+    if (image) {
+      for (const auto *levels : {&image->outputLevels, &image->peelLevels})
+        for (const klogical::KernelCosetScanLevel &lvl : *levels)
+          program.levels.push_back(
+              {lvl.col, lvl.paramCols, lvl.lowerCeil, lvl.upperFloor});
+      if (image->guard)
+        program.guard = &*image->guard;
+    } else {
+      // Constant box loops over the output and peel coordinates.
+      for (auto [i, col] : llvm::enumerate(tb->paramCols)) {
+        klogical::TileBoundFace lo, hi;
+        lo.constant = BigInt(tb->outerLo[i]);
+        lo.divisor = BigInt(1);
+        hi.constant = BigInt(tb->outerHi[i]);
+        hi.divisor = BigInt(1);
+        program.levels.push_back({col, {}, {lo}, {hi}});
+      }
+    }
+    program.levels.push_back(
+        {tb->tileCol, tb->paramCols, tb->lowerCeil, tb->upperFloor});
+    program.blockK = kdev;
+    for (unsigned op = 0; op < 3; ++op)
+      for (auto [r, row] : llvm::enumerate(MU[op]))
+        program.addresses.emplace_back(row, offset[op][r]);
+    klogical::EmittedRangeResult ranges =
+        klogical::checkKernelCosetEmittedRanges(program);
+    if (ranges.verdict != klogical::EmittedRangeVerdict::Representable) {
+      why = "emitted arithmetic not proven to fit in 64 bits (Phase "
+            "F-KC-5b-0): " +
+            ranges.why;
+      return failure();
+    }
   }
 
   // Pre-build the A and B physical-address maps over all n reduced coordinates

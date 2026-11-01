@@ -18,6 +18,7 @@
 #include "Systolic/RankPartitionKernelCoset.h"
 #include "Systolic/RankPartitionKernelCosetImage.h"
 #include "Systolic/RankPartitionKernelCosetBounds.h"
+#include "Systolic/RankPartitionKernelCosetRanges.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -17267,6 +17268,248 @@ int main() {
         return 1;
     }
     std::cout << "Phase F-KC-1 static memref bounds tests passed.\n";
+  }
+
+  // ========================================================
+  // Phase F-KC-5b-0: every value the kernel-coset emission computes at run time
+  // fits in 64 bits (checkKernelCosetEmittedRanges). Each emitted linear form
+  // must satisfy |c_0| + sum |c_j| * M_j <= 2^61, M_j being the exact largest
+  // |v_j| over the rational polytope of the emitted faces. The boundaries below
+  // are exact to one unit, the arithmetic runs far past 2^64, and whatever the
+  // proof cannot establish must be Unknown, never Representable.
+  // ========================================================
+  {
+    using EV = EmittedRangeVerdict;
+    using Level = KernelCosetEmittedLevel;
+    const BigInt one(1);
+    auto pow2 = [&](unsigned e) { return BigInt(one << e); };
+    auto face = [](std::vector<BigInt> params, BigInt constant,
+                   BigInt divisor = BigInt(1)) {
+      TileBoundFace f;
+      f.params = std::move(params);
+      f.constant = std::move(constant);
+      f.divisor = std::move(divisor);
+      return f;
+    };
+    auto box = [&](unsigned col, BigInt lo, BigInt hi) {
+      Level l;
+      l.col = col;
+      l.lowerCeil = {face({}, std::move(lo))};
+      l.upperFloor = {face({}, std::move(hi))};
+      return l;
+    };
+    auto level = [](unsigned col, std::vector<unsigned> params,
+                    std::vector<TileBoundFace> lo,
+                    std::vector<TileBoundFace> hi) {
+      Level l;
+      l.col = col;
+      l.paramCols = std::move(params);
+      l.lowerCeil = std::move(lo);
+      l.upperFloor = std::move(hi);
+      return l;
+    };
+    auto program = [](unsigned n, std::vector<Level> levels) {
+      KernelCosetEmittedProgram p;
+      p.numCols = n;
+      p.levels = std::move(levels);
+      return p;
+    };
+    auto expect = [&](const KernelCosetEmittedProgram &p, EV want,
+                      const char *name) {
+      EmittedRangeResult r = checkKernelCosetEmittedRanges(p);
+      const std::string text = std::string("F-KC-5b-0 ") + name +
+                               (r.why.empty() ? "" : " -- " + r.why);
+      return verify(r.verdict == want, text.c_str());
+    };
+
+    if (verify(BigInt(kKernelCosetValueLimit) == pow2(61),
+               "F-KC-5b-0 the limit is 2^61"))
+      return 1;
+    if (expect(program(2, {box(0, 0, 9), box(1, -4, 4)}), EV::Representable,
+               "constant boxes"))
+      return 1;
+
+    // v1 <= floor(2^31 * v0 + c), v0 up to 2^30: 2^61 + |c| against the limit.
+    auto scaled = [&](BigInt c) {
+      return program(2, {box(0, 0, pow2(30)),
+                         level(1, {0}, {face({BigInt(0)}, 0)},
+                               {face({pow2(31)}, std::move(c))})});
+    };
+    if (expect(scaled(0), EV::Representable, "a face exactly at the limit"))
+      return 1;
+    if (expect(scaled(1), EV::Exceeded, "a face one above the limit"))
+      return 1;
+
+    // The same at negative coordinates and with a negative coefficient: ceil and
+    // floor round differently there, but the magnitude is what counts.
+    auto negative = [&](BigInt c) {
+      return program(2, {box(0, -pow2(30), 0),
+                         level(1, {0}, {face({pow2(31)}, std::move(c))},
+                               {face({BigInt(0)}, 1)})});
+    };
+    if (expect(negative(0), EV::Representable, "negative coordinates, at the limit"))
+      return 1;
+    if (expect(negative(-1), EV::Exceeded, "negative coordinates, one past it"))
+      return 1;
+    if (expect(program(2, {box(0, 0, pow2(31)),
+                           level(1, {0}, {face({BigInt(0)}, 0)},
+                                 {face({-pow2(31)}, pow2(61))})}),
+               EV::Exceeded, "a negative coefficient counts by magnitude"))
+      return 1;
+
+    // The checker's own arithmetic must not wrap: 2^62 * 2^40 is 2^102.
+    {
+      KernelCosetEmittedProgram p =
+          program(2, {box(0, 0, pow2(40)),
+                      level(1, {0}, {face({BigInt(0)}, 0)}, {face({pow2(62)}, 0)})});
+      EmittedRangeResult r = checkKernelCosetEmittedRanges(p);
+      const std::string text = "F-KC-5b-0 2^102 is reported exactly -- " + r.why;
+      if (verify(r.verdict == EV::Exceeded &&
+                     r.why.find(pow2(102).str()) != std::string::npos,
+                 text.c_str()))
+        return 1;
+    }
+
+    // A constant is an emitted value too.
+    if (expect(program(1, {box(0, 0, pow2(61))}), EV::Representable,
+               "a constant at the limit"))
+      return 1;
+    if (expect(program(1, {box(0, 0, pow2(61) + 1)}), EV::Exceeded,
+               "a constant one past it"))
+      return 1;
+    if (expect(program(1, {box(0, -pow2(61) - 1, 0)}), EV::Exceeded,
+               "a negative constant one past it"))
+      return 1;
+
+    // M_j is the exact optimum over the nest, not interval arithmetic: v2 <=
+    // v0 + v1 with v1 <= 100 - v0 reaches 100, where intervals say 200, and
+    // 200 * 2^54 is over the limit while 100 * 2^54 is not.
+    {
+      std::vector<Level> levels = {
+          box(0, 0, 100),
+          level(1, {0}, {face({BigInt(0)}, 0)}, {face({BigInt(-1)}, 100)}),
+          level(2, {0, 1}, {face({BigInt(0), BigInt(0)}, 0)},
+                {face({BigInt(1), BigInt(1)}, 0)}),
+          level(3, {2}, {face({BigInt(0)}, 0)}, {face({pow2(54)}, 0)})};
+      if (expect(program(4, levels), EV::Representable,
+                 "the optimum over the nest is tighter than intervals"))
+        return 1;
+    }
+
+    // A rational bound rounds outward: v1 <= floor(7 / 2) has rational optimum
+    // 3.5, so M = 4 although the loop stops at 3. Conservative, and exact to one.
+    auto afterRational = [&](BigInt c) {
+      return program(2, {level(0, {}, {face({}, 0)}, {face({}, 7, 2)}),
+                         level(1, {0}, {face({BigInt(0)}, 0)},
+                               {face({std::move(c)}, 0)})});
+    };
+    if (expect(afterRational(pow2(59)), EV::Representable,
+               "a rational optimum rounds out to the limit"))
+      return 1;
+    if (expect(afterRational(pow2(59) + 1), EV::Exceeded,
+               "and one coefficient unit past it"))
+      return 1;
+
+    // A level scanned over a box: the proof reads the emitted faces, so a prefix
+    // outside any source domain is covered.
+    if (expect(program(3, {box(0, 0, pow2(40)), box(1, 0, pow2(40)),
+                           level(2, {0, 1}, {face({BigInt(0), BigInt(0)}, 0)},
+                                 {face({pow2(20), pow2(20)}, 0)})}),
+               EV::Representable, "box levels, at the limit"))
+      return 1;
+
+    // The guard, the block test and the addresses are forms like any other.
+    {
+      KernelCosetExistenceGuard g;
+      g.paramCols = {0};
+      g.lowerCeil = {face({pow2(31)}, 0)};
+      g.upperFloor = {face({BigInt(0)}, 9)};
+      KernelCosetEmittedProgram p = program(1, {box(0, 0, pow2(30))});
+      p.guard = &g;
+      if (expect(p, EV::Representable, "a guard at the limit"))
+        return 1;
+      g.lowerCeil = {face({pow2(31)}, 1)};
+      if (expect(p, EV::Exceeded, "a guard one past it"))
+        return 1;
+      g.paramCols = {1};
+      if (expect(p, EV::Unknown, "a guard over a column with no bound"))
+        return 1;
+    }
+    // The tile t <= floor(m / d), m = 2^60 - 2^31, d = 2^30, so M_t = 2^30 - 2. The
+    // test costs m + d * M_t + d * (K - 1) = 2^61 - 2^32 + (K - 1) * 2^30, which
+    // reaches the limit exactly at K = 5.
+    auto tile = [&](std::int64_t K) {
+      KernelCosetEmittedProgram p = program(
+          1, {level(0, {}, {face({}, 0)}, {face({}, pow2(60) - pow2(31), pow2(30))})});
+      p.blockK = K;
+      return p;
+    };
+    if (expect(tile(1), EV::Representable, "no block test at Kdev 1"))
+      return 1;
+    if (expect(tile(2), EV::Representable, "the block test within the limit"))
+      return 1;
+    if (expect(tile(5), EV::Representable, "the block test at the limit"))
+      return 1;
+    if (expect(tile(6), EV::Exceeded, "the block test one block past it"))
+      return 1;
+    if (expect(tile(0), EV::Unknown, "a block size of zero"))
+      return 1;
+
+    auto addressed = [&](BigInt a, BigInt b, BigInt c) {
+      KernelCosetEmittedProgram p =
+          program(2, {box(0, 0, pow2(30)), box(1, 0, pow2(30))});
+      p.addresses.emplace_back(IntRow{std::move(a), std::move(b)}, std::move(c));
+      return p;
+    };
+    if (expect(addressed(pow2(30), pow2(30), 0), EV::Representable,
+               "an address at the limit"))
+      return 1;
+    if (expect(addressed(pow2(30), pow2(30), 1), EV::Exceeded,
+               "an address one past it"))
+      return 1;
+    // v0 == v1 would make this zero, but each product still overflows a `mul nsw`.
+    if (expect(addressed(pow2(33), -pow2(33), 0), EV::Exceeded,
+               "products count even when they cancel"))
+      return 1;
+
+    // Whatever the proof cannot establish is Unknown.
+    if (expect(program(1, {}), EV::Unknown, "an empty nest"))
+      return 1;
+    if (expect(program(2, {box(0, 0, 1),
+                           level(1, {0}, {face({BigInt(1)}, 5)},
+                                 {face({BigInt(1)}, -5)})}),
+               EV::Unknown, "no iteration reaches a level"))
+      return 1;
+    if (expect(program(2, {level(0, {1}, {face({BigInt(1)}, 0)},
+                                 {face({BigInt(1)}, 0)}),
+                           box(1, 0, 1)}),
+               EV::Unknown, "a face over a column not yet bounded"))
+      return 1;
+    if (expect(program(1, {box(0, 0, 1), box(0, 0, 1)}), EV::Unknown,
+               "a column bounded twice"))
+      return 1;
+    if (expect(program(1, {box(1, 0, 1)}), EV::Unknown, "a column out of range"))
+      return 1;
+    {
+      Level noUpper = box(0, 0, 1);
+      noUpper.upperFloor.clear();
+      if (expect(program(1, {noUpper}), EV::Unknown, "a level missing a side"))
+        return 1;
+    }
+    if (expect(program(1, {level(0, {}, {face({}, 0, 0)}, {face({}, 1)})}),
+               EV::Unknown, "a zero divisor"))
+      return 1;
+    if (expect(program(2, {box(0, 0, 1),
+                           level(1, {0}, {face({BigInt(0)}, 0)},
+                                 {face({pow2(70)}, 0)})}),
+               EV::Unknown, "a coefficient beyond 64 bits"))
+      return 1;
+    if (expect(program(2, {box(0, 0, 1),
+                           level(1, {0, 0}, {face({BigInt(0)}, 0)},
+                                 {face({BigInt(0)}, 1)})}),
+               EV::Unknown, "a face arity mismatch"))
+      return 1;
+    std::cout << "Phase F-KC-5b-0 emitted range proof tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
