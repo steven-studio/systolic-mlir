@@ -3583,9 +3583,20 @@ struct AffineMatmulToSystolicPass
             return false;
         return true;
       };
-      for (const AffineMatmulCandidate &candidate : survivors) {
-        if (!kcOptionsValid || !isolated(candidate.anchor))
-          continue;
+      // Isolation is decided here, once, over the complete list. A successful
+      // lowering below erases the loop chain of its statement, so from the first
+      // success on `survivors` can hold dangling anchors and must not be walked
+      // (finding F-KC-5: re-testing isolation per iteration read erased
+      // operations). The selection stays valid throughout: the selected anchors
+      // are pairwise unnested, and the lowering requires the whole nest to be a
+      // single chain (analyzeSymbolicRankPartition), so the chain it erases holds
+      // no other selected anchor.
+      SmallVector<AffineMatmulCandidate> isolatedSurvivors;
+      if (kcOptionsValid)
+        for (const AffineMatmulCandidate &candidate : survivors)
+          if (isolated(candidate.anchor))
+            isolatedSurvivors.push_back(candidate);
+      for (const AffineMatmulCandidate &candidate : isolatedSurvivors) {
         std::string why;
         auto sym = analyzeSymbolicRankPartition(candidate.anchor, why);
         if (!sym || !sym->statement)
