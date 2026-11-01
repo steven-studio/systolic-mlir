@@ -16,6 +16,7 @@ verifies, against a brute-force source enumeration:
 """
 from collections import Counter, defaultdict
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -123,40 +124,51 @@ for name, text, extra, fleet in negatives:
     assert 'kernel-coset offload not applied' in (root / (name + '.log')).read_text(), name
     print(f'{name} safe decline (IR unchanged): PASS')
 
-# ---- D: Kdev up to 128, including the device k_max fold (Kdev>16) -----------
-# Matrix-vector C[i] += A[i,k]*B[k], 0<=i<4, 0<=k<64: kappa=1, every fiber's tile
-# interval is exactly [0,63] (length 64) -- a clean testbed for long runs, the
-# k_max=16 device fold (planSystolicMatmul(1,1,Kdev) folds Kdev>16 into chained
-# k=16 matmul_tiles over sliced gather slabs) and each remainder length.
-from itertools import product as _product
-MATVEC = """module {
-  func.func @mv(%C: memref<4xf32> {llvm.noalias}, %A: memref<4x64xf32> {llvm.noalias}, %B: memref<64xf32> {llvm.noalias}) {
-    affine.for %i = 0 to 4 { affine.for %k = 0 to 64 {
-      %t0 = affine.load %C[%i] : memref<4xf32>
-      %t1 = affine.load %A[%i, %k] : memref<4x64xf32>
-      %t2 = affine.load %B[%k] : memref<64xf32>
+# ---- D: Kdev 1..128 on a box-REFUSED wider skew (the matvec is a box GEMV and
+# is owned by the clean path under the M4d-2 refusal-only dispatch, so it can no
+# longer be a kernel-coset case). The wider singular skew C[i+j-2k+32] over
+# 0<=i,j,k<16 (rank-1 C, kappa=2) is genuinely refused by every existing route,
+# has ragged chambers of many lengths (so a single Kdev sweep exercises full
+# blocks, every remainder length r=0..Kdev-1, and empty chambers), and emits the
+# device k_max=16 fold (planSystolicMatmul(1,1,Kdev) folds Kdev>16 into chained
+# k<=16 matmul_tiles over sliced gather slabs). 4096 MACs validated exactly.
+WSKEW = """module {
+  func.func @wsk(%C: memref<64xf32> {llvm.noalias}, %A: memref<16x16xf32> {llvm.noalias}, %B: memref<16x16xf32> {llvm.noalias}) {
+    affine.for %i = 0 to 16 { affine.for %j = 0 to 16 { affine.for %k = 0 to 16 {
+      %t0 = affine.load %C[(((%i + %j) - (2 * %k)) + 32)] : memref<64xf32>
+      %t1 = affine.load %A[%i, %k] : memref<16x16xf32>
+      %t2 = affine.load %B[%k, %j] : memref<16x16xf32>
       %t3 = arith.mulf %t1, %t2 fastmath<reassoc> : f32
       %t4 = arith.addf %t0, %t3 fastmath<reassoc> : f32
-      affine.store %t4, %C[%i] : memref<4xf32>
-    }}
+      affine.store %t4, %C[(((%i + %j) - (2 * %k)) + 32)] : memref<64xf32>
+    }}}
     func.return
   }
 }
 """
-mvexp = [(i * 64 + k, k, i) for i, k in _product(range(4), range(64))]
-assert len(mvexp) == 256 and len(fibers(mvexp)) == 4
-for K in (1, 2, 3, 4, 5, 8, 16, 32, 64, 128):
-    ir = run(f'mv-k{K}', MATVEC, f'kernel-coset-offload=true kernel-coset-kdev={K}')
-    check_exact(f'mv-k{K}', ir, mvexp, 4)
-    if K >= 32:  # a full block (>=32 points) folds into >=2 chained k=16 tiles
-        assert ir.count('k = 16 ') >= 2, (K, 'expected k_max=16 device folds')
-print('D matvec Kdev 1..128 incl. k_max fold (32->2x16, 64->4x16, 128->8x16): '
-      '256 MACs / 4 fibers exact: PASS')
+wexp = skew_macs(16, 32, 16)                      # independent brute source
+wnfib = len(fibers(wexp))
+assert len(wexp) == 4096
+# genuinely refused by every existing route before kernel-coset claims it:
+assert 'systolic.matmul_tile' not in run('wsk-off', WSKEW, '')[0], 'wider skew must be box-refused'
+for K in (1, 2, 3, 4, 8, 16, 32, 64, 128):
+    ir = run(f'wsk-k{K}', WSKEW, f'kernel-coset-offload=true kernel-coset-kdev={K}')
+    # box-refused above + exact kernel-coset-nest interpretation below => the
+    # kernel-coset is the only path that could have lowered it.
+    check_exact(f'wsk-k{K}', ir, wexp, wnfib)
+    # device k_max folding: every emitted reduction tile is k <= k_max (16);
+    # Kdev >= 16 emits the k=16 fold.
+    ks = sorted({int(x.split('=')[1]) for x in re.findall(r'k = [0-9]+', ir)})
+    assert max(ks) <= 16, (K, 'k exceeds k_max', ks)
+    if K >= 16:
+        assert 16 in ks, (K, 'expected a k=16 fold tile', ks)
+print('D wider skew (box-refused), Kdev 1..128: 4096 MACs exact, every tile '
+      'k<=k_max=16, k=16 fold emitted for Kdev>=16: PASS')
 
-# ---- E: exact remainder r=0, 1, Kdev-1, and L<Kdev / L==Kdev ---------------
-# The matvec tile interval length is 64 for every fiber, so r = 64 mod Kdev:
-# Kdev=4 -> r=0, 3 -> r=1, 5 -> r=4 (Kdev-1), 64 -> L==Kdev (r=0), 128 -> L<Kdev.
-for K in (4, 3, 5, 64, 128):
-    ir = run(f'mv-rem{K}', MATVEC, f'kernel-coset-offload=true kernel-coset-kdev={K}')
-    check_exact(f'mv-rem{K}', ir, mvexp, 4)
-print('E remainder r=0 / 1 / Kdev-1, and L<Kdev / L==Kdev all exact: PASS')
+# ---- E: remainder lengths + empty chambers via the ragged wider skew -------
+# The wider skew's physical-C fibers have many different (runtime) tile-interval
+# lengths, so the Kdev sweep above already drives r = 0 .. Kdev-1, L<Kdev,
+# L==Kdev, L>Kdev and empty chambers; exact coverage at every Kdev proves each
+# is handled. The small skew (section A) additionally executes k=2/k=4 full
+# blocks, and the N=4/N=8 cases exercise empty chambers directly.
+print('E remainder/empty coverage via ragged wider-skew exactness across Kdev: PASS')

@@ -3156,52 +3156,10 @@ struct AffineMatmulToSystolicPass
     SmallVector<AffineMatmulCandidate> candidates;
     collectAffineMatmulCandidates(module.getOperation(), candidates);
 
-    // Phase M4b.2a (EXPERIMENTAL, off by default): attempt the symbolic
-    // kernel-coset emission first, only on candidates isolated from every other
-    // candidate (so claiming one can erase its nest without dangling another).
-    // A claimed anchor is dropped from `candidates` and never reaches the paths
-    // below; a declined one is kept and handled exactly as before.
-    if (kernelCosetOffload) {
-      SystolicOptimizerOptions kcOptions;
-      kcOptions.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
-      const bool kcOptionsValid =
-          parseCostModelVersion(costModel, kcOptions.costModel) &&
-          (operandPath == "v1" || operandPath == "v2");
-      kcOptions.beatWideOperandPath = operandPath == "v2";
-      auto isolated = [&](Operation *a) {
-        for (const AffineMatmulCandidate &o : candidates)
-          if (o.anchor != a &&
-              (a->isAncestor(o.anchor) || o.anchor->isAncestor(a)))
-            return false;
-        return true;
-      };
-      SmallVector<AffineMatmulCandidate> kept;
-      for (const AffineMatmulCandidate &candidate : candidates) {
-        std::string why;
-        if (kcOptionsValid && isolated(candidate.anchor)) {
-          auto sym = analyzeSymbolicRankPartition(candidate.anchor, why);
-          if (sym && sym->statement) {
-            const RecognizedMacStatement &stmt = *sym->statement;
-            affine::AffineLoadOp la = stmt.loads[0], lb = stmt.loads[1];
-            affine::AffineStoreOp sc = stmt.store;
-            bool disjoint =
-                provablyDisjointFromOutput(la.getMemRef(), sc.getMemRef(),
-                                           assumeNoAlias) &&
-                provablyDisjointFromOutput(lb.getMemRef(), sc.getMemRef(),
-                                           assumeNoAlias);
-            if (succeeded(lowerKernelCosetOffload(
-                    stmt, *fleet, kcOptions, allowFpReassociation, disjoint,
-                    kernelCosetKdev, nextGemmIndex, report, why)))
-              continue; // claimed and erased; drop from the candidate list.
-            if (report)
-              candidate.anchor->emitRemark()
-                  << "kernel-coset offload not applied: " << why << " [UNKNOWN]";
-          }
-        }
-        kept.push_back(candidate);
-      }
-      candidates = std::move(kept);
-    }
+    // Phase M4d-2 (EXPERIMENTAL, off by default): the symbolic kernel-coset
+    // path now runs LAST and REFUSAL-ONLY (see the end of runOnOperation). The
+    // clean/guarded/enumeration routes below are entirely unchanged; kernel-coset
+    // only ever sees candidates every one of them declined.
 
     SmallVector<LogicalMatmul, 1> matmuls;
     struct NotRecognized {
@@ -3561,6 +3519,61 @@ struct AffineMatmulToSystolicPass
         matmul.anchor->emitRemark()
             << "general affine MAC recognized but not lowered: " << why
             << " [VALID_BUT_LOWERING_UNSUPPORTED]";
+    }
+
+    // Phase M4d-2 (EXPERIMENTAL, off by default): refusal-only symbolic
+    // kernel-coset dispatch. Every clean/replication/guarded/enumeration route
+    // above has now run and erased the candidates it owns; the recognized MAC
+    // nests still present in the module are exactly the ones every existing
+    // route refused. Re-collect them with the SAME recognizer used above
+    // (collectAffineMatmulCandidates -- a non-mutating ownership decision, not a
+    // speculative enumeration or cardinality preflight, and not a second
+    // recognition algorithm) and attempt the certified kernel-coset lowering on
+    // each isolated survivor. A candidate an existing route lowered is gone, so
+    // it can never be re-claimed (no double ownership, no ownership steal from a
+    // successful route); a candidate the kernel-coset declines stays exactly as
+    // the existing routes left it (original IR preserved). No previously
+    // successful candidate changes ownership; a candidate is lowered here only
+    // after a complete, legality-checked symbolic emission.
+    if (kernelCosetOffload) {
+      SmallVector<AffineMatmulCandidate> survivors;
+      collectAffineMatmulCandidates(module.getOperation(), survivors);
+      SystolicOptimizerOptions kcOptions;
+      kcOptions.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+      const bool kcOptionsValid =
+          parseCostModelVersion(costModel, kcOptions.costModel) &&
+          (operandPath == "v1" || operandPath == "v2");
+      kcOptions.beatWideOperandPath = operandPath == "v2";
+      auto isolated = [&](Operation *a) {
+        for (const AffineMatmulCandidate &o : survivors)
+          if (o.anchor != a &&
+              (a->isAncestor(o.anchor) || o.anchor->isAncestor(a)))
+            return false;
+        return true;
+      };
+      for (const AffineMatmulCandidate &candidate : survivors) {
+        if (!kcOptionsValid || !isolated(candidate.anchor))
+          continue;
+        std::string why;
+        auto sym = analyzeSymbolicRankPartition(candidate.anchor, why);
+        if (!sym || !sym->statement)
+          continue;
+        const RecognizedMacStatement &stmt = *sym->statement;
+        affine::AffineLoadOp la = stmt.loads[0], lb = stmt.loads[1];
+        affine::AffineStoreOp sc = stmt.store;
+        bool disjoint = provablyDisjointFromOutput(la.getMemRef(),
+                                                   sc.getMemRef(), assumeNoAlias) &&
+                        provablyDisjointFromOutput(lb.getMemRef(),
+                                                   sc.getMemRef(), assumeNoAlias);
+        if (succeeded(lowerKernelCosetOffload(stmt, *fleet, kcOptions,
+                                              allowFpReassociation, disjoint,
+                                              kernelCosetKdev, nextGemmIndex,
+                                              report, why)))
+          continue;
+        if (report)
+          candidate.anchor->emitRemark()
+              << "kernel-coset offload not applied: " << why << " [UNKNOWN]";
+      }
     }
   }
 };
