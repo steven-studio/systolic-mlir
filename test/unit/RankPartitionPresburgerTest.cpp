@@ -16,6 +16,7 @@
 #include "Systolic/RankPartitionGuardEmission.h"
 #include "Systolic/RankPartitionLatticeCount.h"
 #include "Systolic/RankPartitionKernelCoset.h"
+#include "Systolic/RankPartitionKernelCosetImage.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -16180,6 +16181,449 @@ int main() {
         return 1;
     }
     std::cout << "Phase M5b-0 parameter-only feasibility tests passed.\n";
+  }
+
+  // ========================================================
+  // Phase M5b-1: exact symbolic output scan of a rank >= 1 physical-C image
+  // (RankPartitionKernelCosetImage.h, Architecture D of the M5a review).
+  // Analysis-only. The oracle is a brute enumeration of the SOURCE (direct
+  // evaluation of D's rows, physical addresses from the access rows; TEST
+  // ONLY). The symbolic nest -- output levels, peel level, tile interval -- is
+  // EVALUATED here (test-only enumeration of the analysis' intervals) and
+  // compared as exact sets and multisets:
+  //   soundness/completeness  generated output set == h(D);
+  //   uniqueness              one visit per distinct output;
+  //   fiber completeness      per output, the generated x set == source fiber;
+  //   multiplicity            physical (A, B, C) MAC multiset == source;
+  //   integer exactness       every generated x lies in D, none twice.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetOutputScan;
+    using systolic::logical::KernelCosetOutputScan;
+    using systolic::logical::scanLevelInterval;
+    using systolic::logical::tileInterval;
+
+    struct Stmt {
+      unsigned n;
+      std::array<IntMatrix, 3> access;          // A, B, C rows over the loops
+      std::array<std::vector<long>, 3> offsets; // per index of A, B, C
+      IntegerPolyhedron D;
+      long lo, hi; // brute enumeration range per source coordinate (holds D)
+    };
+    auto rows = [](std::vector<std::vector<long>> r) {
+      IntMatrix m;
+      for (auto &row : r) {
+        IntRow x;
+        for (long v : row)
+          x.push_back(BigInt(v));
+        m.push_back(x);
+      }
+      return m;
+    };
+    auto domain = [](unsigned n, std::vector<std::vector<std::int64_t>> ineqs,
+                     std::vector<std::vector<std::int64_t>> eqs) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(n, 0, 0));
+      for (auto &r : ineqs)
+        D.addInequality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      for (auto &r : eqs)
+        D.addEquality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      return D;
+    };
+    auto boxRows = [](unsigned n, std::int64_t hi) {
+      std::vector<std::vector<std::int64_t>> r;
+      for (unsigned a = 0; a < n; ++a) {
+        std::vector<std::int64_t> lo(n + 1, 0), up(n + 1, 0);
+        lo[a] = 1;
+        up[a] = -1;
+        up[n] = hi;
+        r.push_back(lo);
+        r.push_back(up);
+      }
+      return r;
+    };
+    // Direct evaluation of D's rows at x (independent of every analysis call).
+    auto inDomain = [](const IntegerPolyhedron &D, const std::vector<long> &x) {
+      const unsigned n = D.getNumDimVars();
+      auto eval = [&](llvm::ArrayRef<llvm::DynamicAPInt> row) {
+        long s = (long)llvm::int64fromDynamicAPInt(row[n]);
+        for (unsigned d = 0; d < n; ++d)
+          s += (long)llvm::int64fromDynamicAPInt(row[d]) * x[d];
+        return s;
+      };
+      for (unsigned r = 0; r < D.getNumInequalities(); ++r)
+        if (eval(D.getInequality(r)) < 0)
+          return false;
+      for (unsigned r = 0; r < D.getNumEqualities(); ++r)
+        if (eval(D.getEquality(r)) != 0)
+          return false;
+      return true;
+    };
+    auto address = [](const IntMatrix &acc, const std::vector<long> &off,
+                      const std::vector<long> &x) {
+      std::vector<long> a(acc.size(), 0);
+      for (std::size_t r = 0; r < acc.size(); ++r) {
+        a[r] = off[r];
+        for (std::size_t s = 0; s < x.size(); ++s)
+          a[r] += (long)acc[r][s].convert_to<std::int64_t>() * x[s];
+      }
+      return a;
+    };
+    auto macKey = [](const std::vector<long> &a, const std::vector<long> &b,
+                     const std::vector<long> &c) {
+      std::vector<long> k(a);
+      k.push_back(-999999);
+      k.insert(k.end(), b.begin(), b.end());
+      k.push_back(-999999);
+      k.insert(k.end(), c.begin(), c.end());
+      return k;
+    };
+    struct Enum {
+      std::vector<std::vector<long>> visited; // outputs in visit order
+      std::set<std::vector<long>> outputs;
+      std::map<std::vector<long>, std::set<std::vector<long>>> fibers;
+      std::map<std::vector<long>, long> macs;
+      std::set<std::vector<long>> xs;
+      long count = 0;
+      bool allInDomain = true, duplicateX = false, evalFailed = false;
+    };
+    auto brute = [&](const Stmt &st) {
+      Enum b;
+      std::vector<long> x(st.n, 0);
+      std::function<void(unsigned)> rec = [&](unsigned d) {
+        if (d == st.n) {
+          if (!inDomain(st.D, x))
+            return;
+          auto a = address(st.access[0], st.offsets[0], x);
+          auto bb = address(st.access[1], st.offsets[1], x);
+          auto c = address(st.access[2], st.offsets[2], x);
+          b.outputs.insert(c);
+          b.fibers[c].insert(x);
+          b.macs[macKey(a, bb, c)] += 1;
+          ++b.count;
+          return;
+        }
+        for (long v = st.lo; v <= st.hi; ++v) {
+          x[d] = v;
+          rec(d + 1);
+        }
+      };
+      rec(0);
+      return b;
+    };
+    // The symbolic nest evaluated: output levels (outermost first), then the
+    // peel level, then the exact tile interval; x = U*y for the addresses.
+    auto generate = [&](const Stmt &st, const KernelCosetOutputScan &res) {
+      Enum g;
+      const unsigned n = st.n;
+      std::vector<std::int64_t> y(n, 0);
+      auto paramsOf = [&](const std::vector<unsigned> &cols) {
+        std::vector<std::int64_t> p;
+        for (unsigned c : cols)
+          p.push_back(y[c]);
+        return p;
+      };
+      auto xOf = [&]() {
+        std::vector<long> x(n, 0);
+        for (unsigned s = 0; s < n; ++s)
+          for (unsigned t = 0; t < n; ++t)
+            x[s] += (long)res.scan.fiber.U[s][t].convert_to<std::int64_t>() * y[t];
+        return x;
+      };
+      auto runTile = [&](const std::vector<long> &c) {
+        auto p = paramsOf(res.tile.paramCols);
+        auto iv = tileInterval(res.tile, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt t = iv->first; t <= iv->second; ++t) {
+          y[res.tile.tileCol] = t.convert_to<std::int64_t>();
+          auto x = xOf();
+          if (!inDomain(st.D, x))
+            g.allInDomain = false;
+          if (!g.xs.insert(x).second)
+            g.duplicateX = true;
+          auto a = address(st.access[0], st.offsets[0], x);
+          auto bb = address(st.access[1], st.offsets[1], x);
+          auto cc = address(st.access[2], st.offsets[2], x);
+          if (cc != c)
+            g.allInDomain = false; // the fiber point must write THIS output
+          g.fibers[c].insert(x);
+          g.macs[macKey(a, bb, cc)] += 1;
+          ++g.count;
+        }
+      };
+      auto fiber = [&](const std::vector<long> &c) {
+        if (res.peelLevels.empty()) {
+          runTile(c);
+          return;
+        }
+        const auto &lvl = res.peelLevels[0];
+        auto p = paramsOf(lvl.paramCols);
+        auto iv = scanLevelInterval(lvl, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt v = iv->first; v <= iv->second; ++v) {
+          y[lvl.col] = v.convert_to<std::int64_t>();
+          runTile(c);
+        }
+      };
+      std::function<void(unsigned)> rec = [&](unsigned level) {
+        if (level == res.outputLevels.size()) {
+          std::vector<long> c(res.H.size(), 0);
+          for (std::size_t r = 0; r < res.H.size(); ++r) {
+            c[r] = st.offsets[2][r];
+            for (unsigned t = 0; t < n; ++t)
+              c[r] += (long)res.H[r][t].convert_to<std::int64_t>() * y[t];
+          }
+          g.visited.push_back(c);
+          g.outputs.insert(c);
+          fiber(c);
+          return;
+        }
+        const auto &lvl = res.outputLevels[level];
+        auto p = paramsOf(lvl.paramCols);
+        auto iv = scanLevelInterval(lvl, llvm::ArrayRef<std::int64_t>(p.data(), p.size()));
+        if (!iv) {
+          g.evalFailed = true;
+          return;
+        }
+        for (BigInt v = iv->first; v <= iv->second; ++v) {
+          y[lvl.col] = v.convert_to<std::int64_t>();
+          rec(level + 1);
+        }
+      };
+      rec(0);
+      return g;
+    };
+    // Accept + exact: expOutputs / expMacs = -1 skips the fixed-count check.
+    auto exactScan = [&](const char *name, const Stmt &st, long expOutputs,
+                         long expMacs, const char *certificate,
+                         std::optional<KernelCosetOutputScan> *keep = nullptr) {
+      std::string why;
+      auto res = buildKernelCosetOutputScan(st.access, st.D, st.n, why);
+      if (!res) {
+        std::cout << "M5b-1 " << name << ": UNKNOWN: " << why << "\n";
+        return false;
+      }
+      Enum b = brute(st), g = generate(st, *res);
+      bool outputsEq = g.outputs == b.outputs;
+      bool once = g.visited.size() == g.outputs.size();
+      bool fibersEq = g.fibers == b.fibers;
+      bool macsEq = g.macs == b.macs && g.count == b.count;
+      bool levelsExact = true;
+      for (const auto &l : res->outputLevels)
+        levelsExact = levelsExact && l.exact;
+      std::cout << "M5b-1 " << name << ": visits " << g.visited.size()
+                << ", distinct outputs " << g.outputs.size() << " (brute "
+                << b.outputs.size() << "), MACs " << g.count << " (brute "
+                << b.count << "), outputs==brute " << outputsEq
+                << ", once " << once << ", fibers==brute " << fibersEq
+                << ", MAC multiset==brute " << macsEq << ", all x in D "
+                << g.allInDomain << ", certificate " << res->outputCertificate
+                << ", peelExact " << res->peelExact << ", fiberScanExact "
+                << res->fiberScanExact << "\n";
+      if (keep)
+        *keep = res;
+      return outputsEq && once && fibersEq && macsEq && g.allInDomain &&
+             !g.duplicateX && !g.evalFailed && levelsExact &&
+             std::string(res->outputCertificate) == certificate &&
+             (expOutputs < 0 || (long)g.outputs.size() == expOutputs) &&
+             (expMacs < 0 || g.count == expMacs);
+    };
+    auto declines = [&](const char *name, const Stmt &st, const char *needle) {
+      std::string why;
+      auto res = buildKernelCosetOutputScan(st.access, st.D, st.n, why);
+      std::cout << "M5b-1 " << name << ": "
+                << (res ? "ACCEPTED (unexpected)" : why) << "\n";
+      return !res && why.find(needle) != std::string::npos;
+    };
+    auto dependentLevel = [](const KernelCosetOutputScan &res, unsigned level) {
+      if (level >= res.outputLevels.size())
+        return false;
+      for (const auto &faces :
+           {res.outputLevels[level].lowerCeil, res.outputLevels[level].upperFloor})
+        for (const auto &f : faces)
+          for (const BigInt &v : f.params)
+            if (v != 0)
+              return true;
+      return false;
+    };
+
+    // Standard GEMM views over (i, j, k).
+    const IntMatrix Aik = rows({{1, 0, 0}, {0, 0, 1}});
+    const IntMatrix Bkj = rows({{0, 0, 1}, {0, 1, 0}});
+    const IntMatrix Cij = rows({{1, 0, 0}, {0, 1, 0}});
+    const std::array<std::vector<long>, 3> zero2 = {
+        std::vector<long>{0, 0}, std::vector<long>{0, 0}, std::vector<long>{0, 0}};
+    auto box3 = [&](std::int64_t hi) { return domain(3, boxRows(3, hi), {}); };
+
+    // Case 1: the pure box GEMM is declined (owned by the clean box path).
+    if (verify(declines("case1 box GEMM C[i][j]",
+                        {3, {Aik, Bkj, Cij}, zero2, box3(3), -2, 5},
+                        "pure box GEMM"),
+               "M5b-1 case 1 (box GEMM) declined: owned by the clean box path"))
+      return 1;
+
+    // Case 2: triangular output domain 0 <= j <= i < 4 (dependent inner level).
+    {
+      auto tri = boxRows(3, 3);
+      tri.push_back({1, -1, 0, 0});
+      std::optional<KernelCosetOutputScan> res;
+      if (verify(exactScan("case2 tri C[i][j], j<=i",
+                           {3, {Aik, Bkj, Cij}, zero2, domain(3, tri, {}), -2, 5},
+                           10, 40, "projection", &res) &&
+                     res && res->outputLevels.size() == 2 && dependentLevel(*res, 1),
+                 "M5b-1 case 2 (0<=j<=i<4): exact 10 outputs / 40 MACs, inner "
+                 "output bound depends on the outer"))
+        return 1;
+    }
+    // Case 3: C[2i][j] over the box -- lattice holes never generated.
+    if (verify(exactScan("case3 C[2i][j] box",
+                         {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2, box3(3), -2, 5},
+                         16, 64, "projection"),
+               "M5b-1 case 3 (C[2i][j]): exact 16 outputs / 64 MACs, no spurious "
+               "odd rows"))
+      return 1;
+    // Case 4: C[i+j][i-j] -- parity congruence, non-box reduced projection.
+    {
+      std::optional<KernelCosetOutputScan> res;
+      if (verify(exactScan("case4 C[i+j][i-j] box",
+                           {3, {Aik, Bkj, rows({{1, 1, 0}, {1, -1, 0}})}, zero2, box3(3), -2, 5},
+                           16, 64, "projection", &res) &&
+                     res && dependentLevel(*res, 1),
+                 "M5b-1 case 4 (C[i+j][i-j]): exact 16 outputs / 64 MACs, "
+                 "parity automatic, dependent inner level"))
+        return 1;
+    }
+    // Case 5: output-dependent reduction bound 0 <= k <= min(i+j, 3).
+    {
+      auto dep = boxRows(3, 3);
+      dep.push_back({1, 1, -1, 0});
+      if (verify(exactScan("case5 C[i][j], 0<=k<=i+j",
+                           {3, {Aik, Bkj, Cij}, zero2, domain(3, dep, {}), -2, 5},
+                           16, 54, "projection"),
+                 "M5b-1 case 5 (k <= i+j): exact 16 outputs / 54 MACs"))
+        return 1;
+    }
+    // Case 6: the committed rank-one skew C[i+j-2k+6] (regression reference):
+    // accepted through the M1 contiguity certificate, 13 outputs / 64 MACs.
+    {
+      std::optional<KernelCosetOutputScan> res;
+      std::array<std::vector<long>, 3> off = {std::vector<long>{0, 0},
+                                              std::vector<long>{0, 0},
+                                              std::vector<long>{6}};
+      if (verify(exactScan("case6 skew C[i+j-2k+6] rank-1",
+                           {3, {Aik, Bkj, rows({{1, 1, -2}})}, off, box3(3), -2, 5},
+                           13, 64, "contiguity", &res) &&
+                     res && res->fiberScanExact && res->tile.feasibilityBoxImplied,
+                 "M5b-1 case 6 (rank-1 skew): exact 13 outputs / 64 MACs via "
+                 "the contiguity certificate; fiber scan exact (box-implied)"))
+        return 1;
+    }
+    // Case 7: C[2i][3j] -- a holey image of lattice index 6.
+    if (verify(exactScan("case7 C[2i][3j] box",
+                         {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 3, 0}})}, zero2, box3(3), -2, 5},
+                         16, 64, "projection"),
+               "M5b-1 case 7 (C[2i][3j]): exact 16 outputs / 64 MACs, holes "
+               "never generated"))
+      return 1;
+    // det-9 rank-2 base C[i+j-2k+6][i-2j+k+6] (index-3 image lattice).
+    {
+      const IntMatrix A9 = rows({{1, 1, -2}, {1, 1, 1}});
+      const IntMatrix B9 = rows({{1, 1, 1}, {1, -2, 1}});
+      const IntMatrix C9 = rows({{1, 1, -2}, {1, -2, 1}});
+      std::array<std::vector<long>, 3> off = {std::vector<long>{6, 0},
+                                              std::vector<long>{0, 6},
+                                              std::vector<long>{6, 6}};
+      std::optional<KernelCosetOutputScan> res;
+      if (verify(exactScan("det9 base box4", {3, {A9, B9, C9}, off, box3(3), -2, 5},
+                           37, 64, "projection", &res) &&
+                     res && res->outputLevels.size() == 2,
+                 "M5b-1 det-9 base: exact 37 outputs / 64 MACs (index-3 "
+                 "lattice, non-box projection)"))
+        return 1;
+      // Cardinality independence: the same analysis at 16^3 = 4096 MACs (the
+      // oracle enumerates; the analysis does not).
+      if (verify(exactScan("det9 base box16", {3, {A9, B9, C9}, off, box3(15), -1, 16},
+                           -1, 4096, "projection"),
+                 "M5b-1 det-9 base at 16^3: exact 4096 MACs, outputs == brute"))
+        return 1;
+    }
+
+    // ---- Declines (UNKNOWN / policy), each with the exact reason ----------
+    {
+      auto gate = boxRows(3, 3); // 1 <= 2k <= i: non-unit kernel coefficient
+      gate.push_back({0, 0, 2, -1});
+      gate.push_back({1, 0, -2, 0});
+      if (verify(declines("extraA 1<=2k<=i",
+                          {3, {Aik, Bkj, Cij}, zero2, domain(3, gate, {}), -2, 5},
+                          "non-unit coefficient"),
+                 "M5b-1 extra A (1<=2k<=i): UNKNOWN, projection not certified"))
+        return 1;
+    }
+    {
+      // replication axis p (column 3) in no access, over a 4-D box.
+      const IntMatrix A4 = rows({{1, 0, 0, 0}, {0, 0, 1, 0}});
+      const IntMatrix B4 = rows({{0, 0, 1, 0}, {0, 1, 0, 0}});
+      const IntMatrix C4 = rows({{2, 0, 0, 0}, {0, 1, 0, 0}});
+      if (verify(declines("replication axis p",
+                          {4, {A4, B4, C4}, zero2, domain(4, boxRows(4, 3), {}), -2, 5},
+                          "replication"),
+                 "M5b-1 replication (unused) axis: declined"))
+        return 1;
+      // kappa > 2: C[2i] over 4 loops, p used by B.
+      const IntMatrix Bp = rows({{0, 0, 1, 0}, {0, 1, 0, 1}});
+      if (verify(declines("kappa>2 C[2i] 4 loops",
+                          {4, {A4, Bp, rows({{2, 0, 0, 0}})}, zero2,
+                           domain(4, boxRows(4, 3), {}), -2, 5},
+                          "kappa > 2"),
+                 "M5b-1 kappa > 2: UNKNOWN"))
+        return 1;
+    }
+    {
+      // kappa == 0: C[2i][j][k] (injective output, no reduction).
+      if (verify(declines("kappa==0 C[2i][j][k]",
+                          {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}, {0, 0, 1}})}, zero2,
+                           box3(3), -2, 5},
+                          "kappa == 0"),
+                 "M5b-1 kappa == 0: UNKNOWN"))
+        return 1;
+      // a local (congruence) in D.
+      IntegerPolyhedron Dl(PresburgerSpace::getSetSpace(3, 0, 1));
+      for (auto &r : boxRows(3, 3)) {
+        std::vector<std::int64_t> row = {r[0], r[1], r[2], 0, r[3]};
+        Dl.addInequality(llvm::ArrayRef<std::int64_t>(row.data(), row.size()));
+      }
+      Dl.addEquality(llvm::ArrayRef<std::int64_t>({1, 0, 0, -2, 0}));
+      if (verify(declines("local in D", {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2, Dl, -2, 5},
+                          "symbols or locals"),
+                 "M5b-1 local in D: UNKNOWN"))
+        return 1;
+      // empty domain (i >= 5 inside 0..3).
+      auto empty = boxRows(3, 3);
+      empty.push_back({1, 0, 0, -5});
+      if (verify(declines("empty domain",
+                          {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2,
+                           domain(3, empty, {}), -2, 5},
+                          "empty"),
+                 "M5b-1 empty domain: UNKNOWN"))
+        return 1;
+      // unbounded reduction axis (no upper bound on k).
+      auto unb = boxRows(3, 3);
+      unb.erase(unb.begin() + 5);
+      if (verify(declines("unbounded k",
+                          {3, {Aik, Bkj, rows({{2, 0, 0}, {0, 1, 0}})}, zero2,
+                           domain(3, unb, {}), -2, 5},
+                          "tile bounds"),
+                 "M5b-1 unbounded reduction axis: UNKNOWN"))
+        return 1;
+    }
+    std::cout << "Phase M5b-1 exact symbolic output scan tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
