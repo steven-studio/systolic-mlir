@@ -165,7 +165,7 @@ F16 = det9_stmt('F-det9-16', module('f16', '64x64', '64x64', '64x64', L16, C16,
                                     '%i + %j + %k, %i - 2 * %j + %k + 32'), 16, 32, 64)
 
 
-def check_exact(stmt, kdevs, expect_outputs=None, expect_macs=None):
+def check_exact(stmt, kdevs, expect_outputs=None, expect_macs=None, phase=M5B2):
     off_ir, _ = run(stmt.name + '-off', stmt.text, flag=False)
     assert 'systolic.matmul_tile' not in off_ir, (stmt.name, 'an existing route owns it')
     bm, bf, bo = stmt.brute()
@@ -176,7 +176,7 @@ def check_exact(stmt, kdevs, expect_outputs=None, expect_macs=None):
     headers = None
     for kdev in kdevs:
         ir, log = run(f'{stmt.name}-k{kdev}', stmt.text, flag=True, kdev=kdev)
-        assert KC in log and M5B2 in log, (stmt.name, kdev, 'M5b-2 remark')
+        assert KC in log and phase in log, (stmt.name, kdev, 'remark', log)
         assert 'systolic.matmul_tile' in ir and 'arith.mulf' not in ir, (stmt.name, kdev, 'body')
         trace = {}
         jobs, macs = kernel_coset_macs(ir, trace)
@@ -293,7 +293,30 @@ gate = module('gate', '16x16', '9x16', '9x16',
               LG.replace('affine.for %k = 0 to 9 {',
                          'affine.for %k = 0 to 9 { affine.if affine_set<(d0, d1) : (d0 - 2 * d1 >= 0, 2 * d1 - 1 >= 0)>(%i, %k) {'),
               CG + '}', '%i, %j', '%k, %i', '%k, %j')
-refused('H-nonunit-gate', gate, 'exact output scan (Phase M5b-2): UNKNOWN: non-unit coefficient')
+# Phase M5b-3b: this identity-frame gate (coefficient 2 on the single reduction
+# coordinate) is now lowered through the exact integer existence guard -- the
+# shadow output scan plus `affine.if AND floor(U_i/b_i) - ceil(L_j/a_j) >= 0` --
+# so the SAME fixture is checked positively: exact MAC multiset, per-output
+# multiplicities, one C load and one C store per output (none outside the
+# image), at Kdev 1 and 2.
+GATE = Stmt('H-nonunit-gate-lowered', gate,
+            lambda: ((i, j, k) for i in range(16) for j in range(i + 1) for k in range(9)
+                     if i - 2 * k >= 0 and 2 * k - 1 >= 0),
+            '16x16', '9x16', '9x16',
+            lambda i, j, k: (i, j), lambda i, j, k: (k, i), lambda i, j, k: (k, j))
+check_exact(GATE, (1, 2), expect_outputs=133, expect_macs=644,
+            phase='Phase M5b-3b, rank-2 exact symbolic output scan, shadow+guard certificate, '
+                  'affine.if existence guard')
+# Negative coverage retained: C[2i+3j] over the same gated triangle has TWO
+# reduction coordinates (the skew direction of 2i+3j and k) that both need a
+# non-unit elimination; a single existence guard cannot express that, so the
+# kernel-coset must stay UNKNOWN with the IR untouched.
+gate2 = module('gate2', '80', '16x9', '9x16',
+               LG.replace('affine.for %k = 0 to 9 {',
+                          'affine.for %k = 0 to 9 { affine.if affine_set<(d0, d1) : (d0 - 2 * d1 >= 0, 2 * d1 - 1 >= 0)>(%i, %k) {'),
+               CG + '}', '2 * %i + 3 * %j', '%i, %k', '%k, %j')
+refused('H-nonunit-two', gate2,
+        'exact output scan (Phase M5b-3b): UNKNOWN: both reduction coordinates need a non-unit elimination')
 mod = DET9_9.replace('affine.for %k = 0 to 9 {',
                      'affine.for %k = 0 to 9 { affine.if affine_set<(d0) : (d0 mod 2 == 0)>(%i) {')
 mod = mod.replace('        }\n      }\n    }\n    func.return', '        }}\n      }\n    }\n    func.return')
@@ -307,5 +330,5 @@ refused('H-replication', rep, '')
 # never touches (some out of bounds).
 refused('H-empty', DET9_9.replace('affine.for %k = 0 to 9 {', 'affine.for %k = 5 to 5 {'),
         DECLINE + 'empty source domain (zero-trip loop nest)')
-print('H refusals (strict FP, aliasing, no fleet, Kdev 0, non-unit reduction gate, congruence guard, '
+print('H refusals (strict FP, aliasing, no fleet, Kdev 0, two non-unit reduction coordinates, congruence guard, '
       'replication axis, empty domain): no tile, IR byte-identical to flag-off: PASS')

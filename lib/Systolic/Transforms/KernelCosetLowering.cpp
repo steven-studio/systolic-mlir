@@ -134,12 +134,15 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   }
 
   // ---- Kernel-coset plans (M0-M4b.1; no enumeration) -------------------
-  // A rank-one image takes the committed M1-counted scan plan (its emission is
-  // unchanged). Phase M5b-2: when that plan is UNKNOWN and the physical C has
-  // rank >= 2, the exact symbolic output scan (RankPartitionKernelCosetImage.h,
-  // Phase M5b-1) supplies the SAME fiber plan and tile bounds plus certified
-  // per-level output (and peel) faces; a rank-one image the M1 count cannot
-  // certify stays UNKNOWN exactly as before.
+  // A rank-one contiguous image takes the committed M1-counted scan plan (its
+  // emission is unchanged). Otherwise (Phase M5b-2/M5b-3b) the exact symbolic
+  // output scan (RankPartitionKernelCosetImage.h) supplies the SAME fiber plan
+  // and tile bounds plus the output (and peel) level faces: the committed
+  // certified-projection result when it exists (unchanged emission), else the
+  // Phase M5b-3a shadow projection whose membership is decided by the exact
+  // integer existence guard emitted below as an affine.if (a rank-one image
+  // with holes, an equality-pinned or non-unit reduction coordinate, non-unit
+  // output rows); anything the analysis cannot certify stays UNKNOWN.
   std::optional<klogical::KernelCosetScanPlan> scan =
       klogical::buildKernelCosetScanPlan(access[2], stmt.sourceDomain, n);
   std::optional<klogical::KernelCosetOutputScan> image;
@@ -148,15 +151,13 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
     tb = klogical::buildKernelCosetTileBounds(*scan);
   } else {
     std::string imageWhy;
-    if (auto kb = klogical::buildIntegerKernelBasis(access[2], n);
-        kb && kb->outputRank >= 2)
-      image = klogical::buildKernelCosetOutputScan(access, stmt.sourceDomain, n,
-                                                   imageWhy);
+    image = klogical::buildKernelCosetGuardedOutputScan(access, stmt.sourceDomain,
+                                                        n, imageWhy);
     if (!image) {
       why = "kernel-coset scan plan UNKNOWN (kappa>2, non-contiguous image, "
             "rank-deficient reduction, or unbounded)";
       if (!imageWhy.empty())
-        why += "; exact output scan (Phase M5b-2): " + imageWhy;
+        why += "; exact output scan (Phase M5b-3b): " + imageWhy;
       return failure();
     }
     scan = image->scan;
@@ -420,6 +421,57 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
     }
   }
 
+  // Phase M5b-3b: the integer existence guard of a shadow-projected output
+  // scan, prebuilt as one affine integer set over the output IVs
+  // (dim i <-> guard.paramCols[i]):
+  //   for every (upper face i, lower face j):
+  //     floor((U_i.p + c_i) / b_i) - ceil((L_j.p + c_j) / a_j) >= 0,
+  // i.e. the exact test "the reduction coordinate's integer interval at this
+  // output is non-empty" (an interval of reals holds an integer iff ceil(lo)
+  // <= floor(hi)). The C load, the whole fiber nest and the C store are
+  // emitted inside `affine.if` of this set, so no output outside the image is
+  // read or written. Declines on i64 overflow before any IR.
+  std::optional<IntegerSet> guardSet;
+  if (image && image->guard) {
+    const auto &g = *image->guard;
+    const unsigned np = static_cast<unsigned>(g.paramCols.size());
+    SmallVector<unsigned> cols(np);
+    for (unsigned i = 0; i < np; ++i)
+      cols[i] = i;
+    SmallVector<AffineExpr> lowers, uppers;
+    for (const auto &f : g.lowerCeil) {
+      auto d = bigToI64(f.divisor);
+      AffineExpr e;
+      if (!d || *d <= 0 || failed(affineRow(f.params, cols, f.constant, np, e))) {
+        why = "integer overflow in an existence-guard lower face";
+        return failure();
+      }
+      lowers.push_back(e.ceilDiv(static_cast<uint64_t>(*d)));
+    }
+    for (const auto &f : g.upperFloor) {
+      auto d = bigToI64(f.divisor);
+      AffineExpr e;
+      if (!d || *d <= 0 || failed(affineRow(f.params, cols, f.constant, np, e))) {
+        why = "integer overflow in an existence-guard upper face";
+        return failure();
+      }
+      uppers.push_back(e.floorDiv(static_cast<uint64_t>(*d)));
+    }
+    if (lowers.empty() || uppers.empty()) {
+      why = "existence guard without a lower or an upper face";
+      return failure();
+    }
+    SmallVector<AffineExpr> constraints;
+    for (const AffineExpr &u : uppers)
+      for (const AffineExpr &l : lowers)
+        constraints.push_back(u - l);
+    SmallVector<bool> eqFlags(constraints.size(), false); // all >= 0
+    guardSet = IntegerSet::get(np, 0, constraints, eqFlags);
+  } else if (image && !image->kernelProjectionExact) {
+    why = "shadow-projected output scan without an existence guard (unexpected)";
+    return failure();
+  }
+
   // Pre-build the A and B physical-address maps over all n reduced coordinates
   // (dim j <-> y-column j), from the pre-validated access*U rows. Both emission
   // paths reuse them, so no address arithmetic can fail during emission.
@@ -464,9 +516,19 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   } else {
     // Phase M5b-2: one affine.for per certified output level, in nest order;
     // the nest visits exactly proj_out(D'), so every physical C address below
-    // is an output the source writes, exactly once.
+    // is an output the source writes, exactly once. Phase M5b-3b: with a
+    // shadow projection the levels visit a superset of candidates and the
+    // existence guard admits exactly the outputs (see guardSet above).
     for (const LevelLoop &ll : outputLevelLoops)
       emitLevelLoop(ll);
+    if (guardSet) {
+      SmallVector<Value> operands;
+      for (unsigned c : image->guard->paramCols)
+        operands.push_back(yiv[c]);
+      auto guardIf = affine::AffineIfOp::create(builder, loc, *guardSet, operands,
+                                                /*withElseRegion=*/false);
+      builder.setInsertionPointToStart(guardIf.getThenBlock());
+    }
   }
 
   // Physical C address (function of the output coordinates only) and the
@@ -679,9 +741,12 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   if (report && image)
     anchor->emitRemark()
         << "affine GEMM lowered by the experimental symbolic kernel-coset "
-           "offload (Phase M5b-2, rank-"
-        << outputRank << " exact symbolic output scan, "
-        << image->outputCertificate << " certificate): source MACs="
+           "offload (Phase "
+        << (image->guard || image->outputLevelsAreShadow ? "M5b-3b" : "M5b-2")
+        << ", rank-" << outputRank << " exact symbolic output scan, "
+        << image->outputCertificate << " certificate"
+        << (image->guard ? ", affine.if existence guard" : "")
+        << "): source MACs="
         << (image->sourceMACs ? image->sourceMACs->str() : std::string("UNKNOWN"))
         << "; output fibers=UNKNOWN (rank>=2 image, not counted)"
         << "; static K=" << kdev
