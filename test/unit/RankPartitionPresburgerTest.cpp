@@ -17,6 +17,7 @@
 #include "Systolic/RankPartitionLatticeCount.h"
 #include "Systolic/RankPartitionKernelCoset.h"
 #include "Systolic/RankPartitionKernelCosetImage.h"
+#include "Systolic/RankPartitionKernelCosetBounds.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -17132,6 +17133,140 @@ int main() {
         return 1;
     }
     std::cout << "Phase M5b-3a shadow projection + existence guard tests passed.\n";
+  }
+
+  // ========================================================
+  // Phase F-KC-1: static memref bounds proof over the EXACT source domain
+  // (checkStaticAccessBounds): for every access dimension q, D ∩ {f_q <= -1}
+  // and D ∩ {f_q >= d_q} must be integer-empty. Oracle: brute enumeration of
+  // D over a bounding box (TEST ONLY), evaluating every access row against
+  // the extents; the verdict must agree on every static case. Dynamic
+  // extents, rank/arity mismatches and locals must be Unknown, never
+  // InBounds; an empty domain is vacuously InBounds.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::checkStaticAccessBounds;
+    using systolic::logical::StaticBoundsVerdict;
+    using Rows = std::vector<std::vector<int64_t>>;
+    using Vec = std::vector<int64_t>;
+
+    // D over n dims from rows [a_0..a_{n-1}, c] meaning a.x + c >= 0.
+    auto domain = [](unsigned n, const Rows &ineqs) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(n));
+      for (const auto &r : ineqs)
+        D.addInequality(r);
+      return D;
+    };
+    // Brute oracle: every integer point of the box [-2, 16]^n satisfying the
+    // inequalities must map inside [0, ext_q) for every row q.
+    auto brute = [](unsigned n, const Rows &ineqs, const Rows &rows,
+                    const Vec &offs, const Vec &ext) {
+      Vec x(n, -2);
+      bool ok = true;
+      std::size_t points = 0;
+      for (;;) {
+        bool inside = true;
+        for (const auto &r : ineqs) {
+          int64_t s = r[n];
+          for (unsigned i = 0; i < n; ++i)
+            s += r[i] * x[i];
+          if (s < 0) { inside = false; break; }
+        }
+        if (inside) {
+          ++points;
+          for (unsigned q = 0; q < rows.size(); ++q) {
+            int64_t f = offs[q];
+            for (unsigned i = 0; i < n; ++i)
+              f += rows[q][i] * x[i];
+            if (f < 0 || f >= ext[q])
+              ok = false;
+          }
+        }
+        unsigned d = 0;
+        while (d < n) {
+          if (++x[d] <= 16) break;
+          x[d] = -2; ++d;
+        }
+        if (d == n) break;
+      }
+      return std::make_pair(ok, points);
+    };
+    // 0 <= i < 8, 0 <= j < 8, 0 <= k < 9.
+    const Rows BOX = {{1, 0, 0, 0}, {-1, 0, 0, 7}, {0, 1, 0, 0}, {0, -1, 0, 7},
+                      {0, 0, 1, 0}, {0, 0, -1, 8}};
+    // i in [0, 16) but the affine guard i <= 7; j <= i (triangle); k in [0, 9).
+    const Rows GATED = {{1, 0, 0, 0}, {-1, 0, 0, 15}, {-1, 0, 0, 7}, {0, 1, 0, 0},
+                        {1, -1, 0, 0}, {0, 0, 1, 0}, {0, 0, -1, 8}};
+    // triangle 0 <= j <= i < 8, with j's loop written 0..15 (the gate j <= i).
+    const Rows TRI = {{1, 0, 0, 0}, {-1, 0, 0, 7}, {0, 1, 0, 0}, {0, -1, 0, 15},
+                      {1, -1, 0, 0}, {0, 0, 1, 0}, {0, 0, -1, 8}};
+    const Rows EMPTY = {{1, 0, 0, 0}, {-1, 0, 0, -1}};
+    const Rows A_ik = {{1, 0, 0}, {0, 0, 1}};
+    const Rows B_kj = {{0, 0, 1}, {0, 1, 0}};
+    const Rows C_2i3j = {{2, 3, 0}};
+    struct Case {
+      const char *name;
+      Rows ineqs, rows;
+      Vec offs, ext;
+      StaticBoundsVerdict expect;
+    };
+    const StaticBoundsVerdict IN = StaticBoundsVerdict::InBounds,
+                              OUT = StaticBoundsVerdict::OutOfBounds,
+                              UNK = StaticBoundsVerdict::Unknown;
+    const std::vector<Case> cases = {
+        {"A[i][k] in 8x9 over the box", BOX, A_ik, {0, 0}, {8, 9}, IN},
+        {"A[i][k] in 7x9: upper violation", BOX, A_ik, {0, 0}, {7, 9}, OUT},
+        {"A[i-1][k]: negative index", BOX, A_ik, {-1, 0}, {8, 9}, OUT},
+        {"B[k-1][j]: negative index", BOX, B_kj, {-1, 0}, {9, 8}, OUT},
+        {"B[k][j] in 9x7: upper violation", BOX, B_kj, {0, 0}, {9, 7}, OUT},
+        {"C[2i+3j] in 36 (max 35)", BOX, C_2i3j, {0}, {36}, IN},
+        {"C[2i+3j] in 35: one point violates", BOX, C_2i3j, {0}, {35}, OUT},
+        {"C[2i+3j-1]: negative at the origin", BOX, C_2i3j, {-1}, {36}, OUT},
+        {"C[2i]: 2*7 = 14 < 15", BOX, {{2, 0, 0}}, {0}, {15}, IN},
+        {"C[2i] in 14: upper violation", BOX, {{2, 0, 0}}, {0}, {14}, OUT},
+        {"2-D C[2i+3j][1] in 36x1: column violation", BOX, {{2, 3, 0}, {0, 0, 0}}, {0, 1}, {36, 1}, OUT},
+        {"2-D C[2i+3j][1] in 36x2", BOX, {{2, 3, 0}, {0, 0, 0}}, {0, 1}, {36, 2}, IN},
+        {"A[i][k] in 8x9 over i<16 gated i<=7 (box reasoning would refuse)", GATED, A_ik, {0, 0}, {8, 9}, IN},
+        {"B[k][j] in 9x8 over the triangle with j's loop 0..15", TRI, B_kj, {0, 0}, {9, 8}, IN},
+        {"B[k][j] in 9x7 over the triangle: j = 7 is reached", TRI, B_kj, {0, 0}, {9, 7}, OUT},
+        {"empty domain: vacuously in bounds", EMPTY, A_ik, {0, 0}, {1, 1}, IN},
+        {"dynamic extent: Unknown", BOX, A_ik, {0, 0}, {-1, 9}, UNK},
+        {"rank mismatch (2 rows, 1 extent): Unknown", BOX, A_ik, {0, 0}, {8}, UNK},
+        {"row arity mismatch: Unknown", BOX, {{1, 0}, {0, 1}}, {0, 0}, {8, 9}, UNK},
+    };
+    for (const Case &c : cases) {
+      IntegerPolyhedron D = domain(3, c.ineqs);
+      auto r = checkStaticAccessBounds(D, c.rows, c.offs, c.ext, "X");
+      const std::string verdictName = std::string("F-KC-1 verdict: ") + c.name + " -- " + r.why;
+      if (verify(r.verdict == c.expect, verdictName.c_str()))
+        return 1;
+      if (c.expect != UNK) {
+        auto [ok, points] = brute(3, c.ineqs, c.rows, c.offs, c.ext);
+        const std::string bruteName = std::string("F-KC-1 brute agreement (") +
+                                      std::to_string(points) + " points): " + c.name;
+        if (verify((r.verdict == IN) == ok, bruteName.c_str()))
+          return 1;
+      }
+    }
+    // Symbols or locals in D: Unknown (fail closed), whatever the extents.
+    {
+      IntegerPolyhedron withLocal(PresburgerSpace::getSetSpace(3, 0, 1));
+      withLocal.addInequality({1, 0, 0, 0, 0});
+      withLocal.addInequality({-1, 0, 0, 0, 7});
+      auto r = checkStaticAccessBounds(withLocal, A_ik, Vec{0, 0}, Vec{8, 9}, "A");
+      const std::string localName = "F-KC-1 locals in D: Unknown -- " + r.why;
+      if (verify(r.verdict == UNK, localName.c_str()))
+        return 1;
+      IntegerPolyhedron withSymbol(PresburgerSpace::getSetSpace(3, 1, 0));
+      withSymbol.addInequality({1, 0, 0, 0, 0});
+      r = checkStaticAccessBounds(withSymbol, A_ik, Vec{0, 0}, Vec{8, 9}, "A");
+      const std::string symbolName = "F-KC-1 symbol in D: Unknown -- " + r.why;
+      if (verify(r.verdict == UNK, symbolName.c_str()))
+        return 1;
+    }
+    std::cout << "Phase F-KC-1 static memref bounds tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";

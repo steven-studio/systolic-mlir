@@ -7,6 +7,7 @@
 #include "Systolic/KernelCosetLowering.h"
 
 #include "Systolic/RankPartitionKernelCoset.h"
+#include "Systolic/RankPartitionKernelCosetBounds.h"
 #include "Systolic/RankPartitionKernelCosetImage.h"
 #include "Systolic/SystolicTilePlan.h"
 
@@ -250,6 +251,35 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
         why = "integer overflow in operand address offset";
         return failure();
       }
+  }
+
+  // ---- Phase F-KC-1: static memref bounds (fail closed) -----------------
+  // Every physical access of A, B and C must be PROVEN inside its declared
+  // static extents over the exact source domain D (the loop bounds and the
+  // affine guards), before any IR exists: the exact emission reproduces the
+  // source accesses, so an out-of-bounds source access would be reproduced,
+  // and a bounded-looking generated loop or tile proves nothing about it
+  // (RankPartitionKernelCosetBounds.h: integer emptiness of D ∩ {f_q <= -1}
+  // and D ∩ {f_q >= d_q} per access dimension). A dynamic extent has no static
+  // proof in this phase: UNKNOWN, refused, source IR untouched.
+  {
+    static const char *const operandNames[3] = {"A", "B", "C"};
+    for (unsigned op = 0; op < 3; ++op) {
+      auto memTy = cast<MemRefType>(loads[op].getMemRef().getType());
+      std::vector<int64_t> extents;
+      extents.reserve(memTy.getRank());
+      for (int64_t d : memTy.getShape())
+        extents.push_back(ShapedType::isDynamic(d) ? -1 : d);
+      klogical::StaticBoundsResult bounds = klogical::checkStaticAccessBounds(
+          stmt.sourceDomain, stmt.accessRows[op], stmt.accessOffsets[op],
+          extents, operandNames[op]);
+      if (bounds.verdict != klogical::StaticBoundsVerdict::InBounds) {
+        why = "static memref bounds not proven over the source domain (Phase "
+              "F-KC-1): " +
+              bounds.why;
+        return failure();
+      }
+    }
   }
 
   // ---- Device tiles ----------------------------------------------------
