@@ -3658,6 +3658,10 @@ struct AffineMatmulToSystolicPass
     };
     if (generalAffine) {
       llvm::SmallPtrSet<Operation *, 8> seen;
+      // Nests already reported by the diagnostic-only certificate below. Kept
+      // apart from `seen` so the lowering gate of the general path is not
+      // touched by a report-only computation.
+      llvm::SmallPtrSet<Operation *, 8> certified;
       llvm::SmallPtrSet<Operation *, 8> guardedRoots;
       for (AffineMatmulCandidate candidate : candidates) {
         {
@@ -3670,6 +3674,34 @@ struct AffineMatmulToSystolicPass
             Operation *root = preflight->outermost.getOperation();
             if (guardedRoots.insert(root).second)
               guardedCandidates.push_back({root, preflight->diagnostic});
+            // The independent general certificate (the remarks below) is a
+            // DIAGNOSTIC of the nest, not a lowering decision: a nest the
+            // preflight accepts keeps its fast/guarded ownership exactly as
+            // before (nothing is added to generalMatmuls, `seen` is not
+            // touched), but under `report` the bounded exact analysis still
+            // runs, read-only, and reports its certificate when -- and only
+            // when -- it succeeds; otherwise it reports UNKNOWN, exactly like
+            // the general path below. Without `report` nothing runs here.
+            if (report) {
+              std::string certWhy;
+              auto certificate =
+                  analyzeGeneralAffineMatmul(candidate.anchor, certWhy);
+              if (failed(certificate)) {
+                candidate.anchor->emitRemark()
+                    << "general affine analysis: " << certWhy
+                    << " [UNKNOWN: bounded exact analysis did not prove the "
+                       "domain]";
+              } else if (certified.insert(certificate->anchor).second) {
+                std::string description;
+                llvm::raw_string_ostream os(description);
+                describeOperandSubspaces(certificate->spaces, os);
+                certificate->anchor->emitRemark()
+                    << "general affine subspaces: " << os.str()
+                    << "; source MACs=" << certificate->points.size()
+                    << "; output fibers=" << certificate->fibers.size()
+                    << "; Presburger exact cover verified";
+              }
+            }
             continue;
           }
           if (report)

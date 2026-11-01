@@ -52,12 +52,15 @@ for case in range(1,5):
             assert completed==37 and 'intersections AB/AC/BC/shared = 1,1,1,0' in remarks
             assert 'exact Presburger cover and source-order certificate verified' in remarks
         if case==2:assert completed==1
+        # 'output fibers' counts the distinct physical C elements of the exact
+        # source cover (CASE3: the 4x4 block; CASE4: 167 of 256 MACs land on
+        # distinct elements); it replaces the removed 'parametric partition dims'.
         if case==3:
-            assert completed==4 and 'parametric partition dims=1' in remarks
+            assert completed==4 and 'output fibers=16' in remarks
         if case==4:
             assert completed==16 and 'ranks A/B/C/AB/AC/BC/ABC = 2, 2, 2, 4, 4, 4, 4' in remarks
             assert 'intersections AB/AC/BC/shared = 0,0,0,0' in remarks
-            assert 'parametric partition dims=1' in remarks
+            assert 'output fibers=167' in remarks
         results.append(dict(case=case,submission=submission,completed=completed,failed=failed,hardware=hardware,full_output_bits=len(want),**coverage))
         if case==1:
             env=os.environ.copy();env['SOFT_RUNTIME_FAULT']='fail';env['SOFT_RUNTIME_FAULT_AT']='2'
@@ -98,8 +101,17 @@ from collections import Counter
 jobs,macs=dense_ir((keep/'20-systolic.mlir').read_text(),16)
 assert jobs==37 and Counter(macs)==Counter(source(1,16)*2)
 results.append(dict(case=1,unused_loop=True,source_MACs=128,source_executions=2,completed=37,coverage='PASS'))
-# A recognized but non-dense fast-path candidate must still get a complete
-# independent general certificate, not be discarded merely for recognizing it.
+# A recognized but non-dense fast-path candidate (C[2i+3j][0]: the logical row is
+# driven by two loops, the coordinate map is not unimodular). No default route
+# offloads it in this phase -- a conservative policy decision, not a proof that
+# no I/J/K decomposition exists. It must still get its complete independent
+# general certificate, must not be offloaded partially, and must reach the CPU
+# exactly as the frontend wrote it: the same single MAC body over the same
+# 4x4x4 domain (64 MACs, the source multiset), computing bitwise what the
+# source computes.
+opt=Path(a.cc[0]).with_name('systolic-opt')
+def kernel_nest(text):
+    m=re.search(r'^  func\.func @kernel__systolic_kernel\(.*?\n  \}\n',text,re.S|re.M);assert m,text[:400];return m.group(0)
 for submission in ('sync','async'):
     name='lowering-gap-'+submission;exe=root/name;keep=root/(name+'.ir')
     run(a.cc+['--fp-reassociation','--verify',f'--submission={submission}',
@@ -107,11 +119,23 @@ for submission in ('sync','async'):
     reference=root/(name+'.reference')
     run([a.clang,'-O0','-ffp-contract=off','-DCASE=5',a.source,'-o',reference],name+'.ref.compile')
     got=run([exe],name+'.run');want=run([reference],name+'.ref.run')
-    coverage=check(5,(keep/'20-systolic.mlir').read_text(),16)
-    assert bits(got.stdout)==bits(want.stdout) and stats(got.stderr)==(14,0,0)
-    assert coverage['actual_expanded_jobs']==14
-    assert 'not lowered to systolic.matmul_tile' in (keep/'20-remarks.txt').read_text()
-    results.append(dict(case=5,submission=submission,completed=14,**coverage))
+    plan=json.loads((keep/'25-plan.json').read_text())
+    assert plan['offloaded']==[] and plan['translated_not_offloaded']==['kernel'],plan
+    assert stats(got.stderr)==(0,0,0) and len(re.findall(r'CPU Executed: GEMM #',got.stdout))==1
+    assert bits(got.stdout)==bits(want.stdout),(submission,'full-buffer mismatch')
+    remarks=(keep/'20-remarks.txt').read_text()
+    assert 'not lowered to systolic.matmul_tile' in remarks
+    assert 'Presburger exact cover verified' in remarks and 'output fibers=14' in remarks
+    assert 'certified device offload not applied' in remarks and 'not unimodular' in remarks
+    # The nest the CPU runs is the frontend's, op for op: the frontend module
+    # re-printed by the same printer (no passes) has the identical function.
+    frontend=run([opt,keep/'10-frontend.mlir'],name+'.frontend.reprint').stdout
+    nest=kernel_nest((keep/'20-systolic.mlir').read_text())
+    assert nest==kernel_nest(frontend),'the pass changed a nest it did not lower'
+    assert nest.count('arith.mulf')==1 and nest.count('arith.addf')==1 and nest.count('affine.store')==1
+    assert len(re.findall(r'affine\.for %\w+ = 0 to 4 \{',nest))==3 and len(source(5,16))==4*4*4
+    results.append(dict(case=5,submission=submission,completed=0,offloaded=[],cpu_fallback='PASS',
+                        source_MACs=len(source(5,16)),output_elements=14,nest_unchanged=True))
 # These bounds exceed only the general limits; the original CPU remains valid.
 for name,defines in (('iv9',['-DEXTRA_IVS']),
                      ('points576',['-DREPEAT','-DREPEAT_TRIPS=9'])):
