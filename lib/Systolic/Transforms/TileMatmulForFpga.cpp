@@ -1,11 +1,13 @@
 #include "Systolic/Passes.h"
 #include "Systolic/SystolicOps.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -603,6 +605,136 @@ static SmallVector<bool> findInterleavedBlocks(ArrayRef<OutputBlock> blocks,
     }
   }
   return interleaved;
+}
+
+// -----------------------------------------------------------------------
+// Tile slabs allocated inside loops.
+//
+// The kernel-coset offload gathers scattered operands into small stack slabs
+// where it fills them, inside the loops that drive its tiles:
+//
+//   affine.for ... {                              // one output element
+//     %c = memref.alloca() : memref<1x1xf32>
+//     affine.for ... {                            // one reduction point
+//       %a = memref.alloca() : memref<1x1xf32>
+//       %b = memref.alloca() : memref<1x1xf32>
+//       ... systolic.matmul_tile ...
+//
+// memref.alloca's contract releases a slab when its iteration ends (affine.for
+// and scf.for are AutomaticAllocationScope ops), but no lowering implements
+// that: only memref.alloca_scope emits llvm.stacksave. Each execution moves
+// the stack pointer for good, so the stack grows with the number of tiles
+// until the process faults on a valid, in-bounds nest.
+//
+// The synchronous lowering therefore moves such a slab out of those loops, so
+// that one buffer serves every iteration, which holds exactly when:
+//
+//  1. the runtime is done with the slab when its call returns. This is the
+//     synchronous lowering. The asynchronous runtime keeps C until the wait,
+//     so that lowering moves nothing (it refuses these tiles anyway: they
+//     carry no systolic.gemm);
+//  2. the iterations run one at a time. Only affine.for and scf.for are
+//     crossed, with affine.if and scf.if between them. Any other enclosing op
+//     (scf.parallel, affine.parallel, scf.forall, scf.while, ...) stops the
+//     move, so its iterations keep slabs of their own;
+//  3. nothing of the slab outlives its iteration: its users are loads and
+//     stores of it and the tile chain, and no tensor view leaves through a
+//     yield (isPrivateTileSlab);
+//  4. it is the same buffer on every iteration: a static shape, no operands.
+//
+// Each alloca stays its own buffer: no two slabs are merged, so slabs live at
+// the same time stay disjoint. Reuse cannot show a defined program a stale
+// value: a fresh alloca's contents are undefined, so every read of a slab
+// follows a write in the same iteration. A slab outside these conditions stays
+// where it is.
+// -----------------------------------------------------------------------
+
+/// The memref a tile operand views: through its slices, to the to_tensor.
+/// Null for anything else (a tensor, the previous tile's result).
+static Value tileOperandBuffer(Value operand) {
+  while (auto slice = operand.getDefiningOp<tensor::ExtractSliceOp>())
+    operand = slice.getSource();
+  auto toTensor = operand.getDefiningOp<bufferization::ToTensorOp>();
+  return toTensor ? toTensor.getBuffer() : Value();
+}
+
+/// Whether a tensor view of a slab, followed through its slices and tiles,
+/// ends in nothing but a write-back into a memref: no yield, no other reader.
+static bool viewStaysInIteration(Value view) {
+  SmallVector<Value> pending{view};
+  llvm::DenseSet<Value> seen;
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    if (!seen.insert(value).second)
+      continue;
+    for (Operation *user : value.getUsers()) {
+      if (isa<bufferization::MaterializeInDestinationOp>(user) &&
+          user->getNumResults() == 0)
+        continue;
+      if (!isa<tensor::ExtractSliceOp, tensor::InsertSliceOp, MatmulTileOp>(
+              user))
+        return false;
+      pending.push_back(user->getResult(0));
+    }
+  }
+  return true;
+}
+
+/// Conditions 3 and 4 above.
+static bool isPrivateTileSlab(memref::AllocaOp alloca) {
+  if (!alloca.getType().hasStaticShape() ||
+      !alloca.getDynamicSizes().empty() || !alloca.getSymbolOperands().empty())
+    return false;
+  Value slab = alloca.getResult();
+  for (Operation *user : slab.getUsers()) {
+    if (isa<memref::LoadOp>(user))
+      continue;
+    if (auto store = dyn_cast<memref::StoreOp>(user)) {
+      if (store.getValue() == slab)
+        return false; // the slab's address is stored somewhere
+      continue;
+    }
+    if (auto write = dyn_cast<bufferization::MaterializeInDestinationOp>(user)) {
+      if (write.getDest() != slab)
+        return false;
+      continue;
+    }
+    auto view = dyn_cast<bufferization::ToTensorOp>(user);
+    if (!view || !viewStaysInIteration(view.getResult()))
+      return false;
+  }
+  return true;
+}
+
+/// Condition 2 above: the outermost sequential loop around `op`, reached
+/// through nothing but sequential loops and conditionals. Null when there is
+/// none.
+static Operation *outermostSequentialLoop(Operation *op) {
+  Operation *outermost = nullptr;
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (isa<affine::AffineForOp, scf::ForOp>(parent))
+      outermost = parent;
+    else if (!isa<affine::AffineIfOp, scf::IfOp>(parent))
+      break;
+  }
+  return outermost;
+}
+
+/// Condition 1 is the caller's: synchronous lowering only.
+static void hoistTileSlabs(ArrayRef<MatmulTileOp> tiles) {
+  llvm::DenseSet<Operation *> visited;
+  for (MatmulTileOp op : tiles)
+    for (Value operand : {op.getA(), op.getB(), op.getCIn()}) {
+      Value buffer = tileOperandBuffer(operand);
+      auto alloca =
+          buffer ? buffer.getDefiningOp<memref::AllocaOp>() : memref::AllocaOp();
+      if (!alloca || !visited.insert(alloca).second ||
+          !isPrivateTileSlab(alloca))
+        continue;
+      if (Operation *loop = outermostSequentialLoop(alloca))
+        alloca->moveBefore(loop);
+    }
 }
 
 class RuntimeCallLowering {
@@ -1383,6 +1515,10 @@ struct LowerSystolicMatmulTileToFpgaPass
 
     if (tiles.empty())
       return;
+
+    // Every tile is checked: from here the module is lowered completely.
+    if (!async)
+      hoistTileSlabs(tiles);
 
     OpBuilder builder(module.getContext());
     LLVM::LLVMFuncOp runtimeFn;
