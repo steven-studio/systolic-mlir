@@ -19,6 +19,7 @@
 #include "Systolic/RankPartitionKernelCosetImage.h"
 #include "Systolic/RankPartitionKernelCosetBounds.h"
 #include "Systolic/RankPartitionKernelCosetRanges.h"
+#include "Systolic/RankPartitionKernelCosetBudget.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -62,7 +63,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <random>
 #include <tuple>
 using namespace systolic::logical;
 // Phase 5.4.3d-3b-5: the production GEMM pass is registered through a
@@ -17510,6 +17513,1416 @@ int main() {
                EV::Unknown, "a face arity mismatch"))
       return 1;
     std::cout << "Phase F-KC-5b-0 emitted range proof tests passed.\n";
+  }
+
+  // Phase F-KC-5c-1: work limits and query gates, at any kappa. Whatever the
+  // analysis certifies is walked against an independent enumeration of the source
+  // nest, and each limit is tested on both sides of the value a nest needs.
+  {
+    using llvm::DynamicAPInt;
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using V = KernelCosetWorkVerdict;
+    using E = KernelCosetEmptiness;
+    using Limit = KernelCosetLimit;
+    using Limits = KernelCosetWorkLimits;
+    using Budget = KernelCosetWorkBudget;
+    using Row = std::vector<std::int64_t>;
+    using Point = std::vector<std::int64_t>;
+    using Mac = std::array<Point, 3>;
+
+    // A source nest. Rows are over the n loops with the constant last, read as
+    // >= 0 and == 0. Each loop variable lies in [lo[j], hi[j]].
+    struct Nest {
+      unsigned n = 0;
+      std::vector<Row> ge, eq;
+      std::vector<Row> c, a, b; // physical accesses, offset last
+      Point lo, hi;
+    };
+    auto span = [](unsigned n, std::int64_t lo, std::int64_t hi) {
+      return std::make_pair(Point(n, lo), Point(n, hi));
+    };
+    auto domainOf = [](const Nest &nest) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(nest.n, 0, 0));
+      for (const Row &r : nest.ge)
+        D.addInequality(r);
+      for (const Row &r : nest.eq)
+        D.addEquality(r);
+      return D;
+    };
+    auto linearPart = [](const std::vector<Row> &rows, unsigned n) {
+      IntMatrix m;
+      for (const Row &r : rows) {
+        IntRow row;
+        for (unsigned j = 0; j < n; ++j)
+          row.push_back(BigInt(r[j]));
+        m.push_back(std::move(row));
+      }
+      return m;
+    };
+    auto analyze = [&](const Nest &nest, Budget &budget) {
+      return analyzeKernelCosetWork(linearPart(nest.c, nest.n), domainOf(nest),
+                                    nest.n, budget);
+    };
+    auto analyzeWith = [&](const Nest &nest, const Limits &limits) {
+      Budget budget(limits);
+      return analyze(nest, budget);
+    };
+
+    // The enumeration uses plain 64-bit arithmetic on the rows of the nest, and
+    // shares nothing with the analysis.
+    auto evaluate = [](const Row &r, const Point &p) {
+      std::int64_t s = r[p.size()];
+      for (std::size_t j = 0; j < p.size(); ++j)
+        s += r[j] * p[j];
+      return s;
+    };
+    auto address = [&](const std::vector<Row> &rows, const Point &p) {
+      Point out;
+      for (const Row &r : rows)
+        out.push_back(evaluate(r, p));
+      return out;
+    };
+    auto forEachPoint = [](const Point &lo, const Point &hi, auto &&visit) {
+      Point p = lo;
+      while (true) {
+        visit(static_cast<const Point &>(p));
+        std::size_t j = 0;
+        for (; j < p.size(); ++j) {
+          if (++p[j] <= hi[j])
+            break;
+          p[j] = lo[j];
+        }
+        if (j == p.size())
+          return;
+      }
+    };
+    auto sourcePoints = [&](const Nest &nest) {
+      std::vector<Point> out;
+      forEachPoint(nest.lo, nest.hi, [&](const Point &x) {
+        for (const Row &r : nest.ge)
+          if (evaluate(r, x) < 0)
+            return;
+        for (const Row &r : nest.eq)
+          if (evaluate(r, x) != 0)
+            return;
+        out.push_back(x);
+      });
+      return out;
+    };
+
+    // Does `r` tell the truth about `nest`? Empty: the enumeration finds nothing.
+    // ExactImage: walk the claimed image and the fibers of D' in reduced coordinates
+    // over a box two wider than both on each side, and recover the very same
+    // output set, physical operand multiset and per-output MAC multiplicity.
+    auto matchesEnumeration = [&](const Nest &nest,
+                                  const KernelCosetWorkResult &r) {
+      const std::vector<Point> source = sourcePoints(nest);
+      if (r.verdict == V::Empty)
+        return source.empty() && !r.outputImage;
+      if (r.verdict != V::ExactImage || source.empty() || !r.outputImage ||
+          !r.reducedDomain || r.outputRank + r.kernelRank != nest.n ||
+          r.outputImage->getNumVars() != r.outputRank)
+        return false;
+      auto apply = [](const IntMatrix &m, const Point &p) {
+        Point q(p.size(), 0);
+        for (std::size_t i = 0; i < p.size(); ++i)
+          for (std::size_t j = 0; j < p.size(); ++j)
+            q[i] += m[i][j].convert_to<std::int64_t>() * p[j];
+        return q;
+      };
+      auto take = [](const Point &y, const std::vector<unsigned> &cols) {
+        Point out;
+        for (unsigned c : cols)
+          out.push_back(y[c]);
+        return out;
+      };
+      auto widen = [](Point &lo, Point &hi, const Point &p) {
+        if (lo.empty()) {
+          lo = hi = p;
+          return;
+        }
+        for (std::size_t j = 0; j < p.size(); ++j) {
+          lo[j] = std::min(lo[j], p[j]);
+          hi[j] = std::max(hi[j], p[j]);
+        }
+      };
+      std::map<Point, std::int64_t> outputs, byAddress;
+      std::map<Mac, std::int64_t> macs;
+      Point loO, hiO, loZ, hiZ;
+      for (const Point &x : source) {
+        // A point on the border would mean the box cuts the domain short.
+        for (unsigned j = 0; j < nest.n; ++j)
+          if (x[j] == nest.lo[j] || x[j] == nest.hi[j])
+            return false;
+        const Point y = apply(r.Uinv, x);
+        if (apply(r.U, y) != x || !r.reducedDomain->containsPoint(y))
+          return false;
+        const Point o = take(y, r.outputCols), z = take(y, r.kernelCols);
+        ++outputs[o];
+        ++byAddress[address(nest.c, x)];
+        ++macs[Mac{address(nest.c, x), address(nest.a, x), address(nest.b, x)}];
+        widen(loO, hiO, o);
+        widen(loZ, hiZ, z);
+      }
+      for (std::int64_t &v : loO)
+        v -= 2;
+      for (std::int64_t &v : hiO)
+        v += 2;
+      for (std::int64_t &v : loZ)
+        v -= 2;
+      for (std::int64_t &v : hiZ)
+        v += 2;
+      bool ok = outputs.size() == byAddress.size();
+      std::map<Point, std::int64_t> walkedByAddress;
+      std::map<Mac, std::int64_t> walkedMacs;
+      forEachPoint(loO, hiO, [&](const Point &o) {
+        const auto found = outputs.find(o);
+        const bool inImage = r.outputImage->containsPoint(o);
+        if (inImage != (found != outputs.end()))
+          ok = false;
+        std::int64_t fiber = 0;
+        Point y(nest.n, 0);
+        for (std::size_t i = 0; i < o.size(); ++i)
+          y[r.outputCols[i]] = o[i];
+        forEachPoint(loZ, hiZ, [&](const Point &z) {
+          for (std::size_t i = 0; i < z.size(); ++i)
+            y[r.kernelCols[i]] = z[i];
+          if (!r.reducedDomain->containsPoint(y))
+            return;
+          ++fiber;
+          const Point x = apply(r.U, y);
+          ++walkedByAddress[address(nest.c, x)];
+          ++walkedMacs[Mac{address(nest.c, x), address(nest.a, x),
+                           address(nest.b, x)}];
+        });
+        if (fiber != (inImage && found != outputs.end() ? found->second : 0))
+          ok = false;
+      });
+      return ok && walkedByAddress == byAddress && walkedMacs == macs;
+    };
+
+    // Loops k_1, ..., k_kappa, each k_j >= 0, with their sum at most the output
+    // loop i <= top. These n + 1 rows are the facets of a simplex, so none is
+    // redundant, and each elimination leaves exactly its predicted rows.
+    auto simplexNest = [&](unsigned kappa, std::int64_t top) {
+      const unsigned n = kappa + 1;
+      Nest nest;
+      nest.n = n;
+      Row upper(n + 1, 0), sum(n + 1, -1);
+      upper[0] = -1;
+      upper[n] = top;
+      sum[0] = 1;
+      sum[n] = 0;
+      nest.ge.push_back(upper);
+      for (unsigned j = 1; j < n; ++j) {
+        Row r(n + 1, 0);
+        r[j] = 1;
+        nest.ge.push_back(r);
+      }
+      nest.ge.push_back(sum);
+      Row c(n + 1, 0), a(n + 1, 0), b(n + 1, 0);
+      c[0] = 1;
+      a[0] = 1;
+      a[1] = 1;
+      for (unsigned j = 1; j < n; ++j)
+        b[j] = 1;
+      nest.c = {c};
+      nest.a = {a};
+      nest.b = {b};
+      std::tie(nest.lo, nest.hi) = span(n, -1, top + 1);
+      return nest;
+    };
+
+    if (verify(KernelCosetWorkLimits().maxSystemRows == 128 &&
+                   KernelCosetWorkLimits().maxEntry == kKernelCosetValueLimit &&
+                   KernelCosetWorkLimits().maxEmptinessQueries == 512 &&
+                   KernelCosetWorkLimits().maxQueryVariables == 6 &&
+                   KernelCosetWorkLimits().maxQueryCoefficient == 7 &&
+                   KernelCosetWorkLimits().maxMatrixRows == 4 &&
+                   KernelCosetWorkLimits().maxMatrixCells == 4352 &&
+                   KernelCosetWorkLimits().maxMatrixTouchedCells == 64 &&
+                   KernelCosetWorkLimits().maxMatrixBits == 24 &&
+                   KernelCosetWorkLimits().maxReductionCells == 512 &&
+                   KernelCosetWorkLimits().maxReductionCoefficient == 1 << 20,
+               "F-KC-5c-1: the default limits"))
+      return 1;
+
+    // ---- kappa 1 to 4: exact results, against the enumeration ----------------
+    struct Named {
+      const char *name;
+      Nest nest;
+      std::uint64_t queries;
+    };
+    std::vector<Named> exact;
+    exact.push_back({"kappa 1: triangle", simplexNest(1, 4), 0});
+    exact.push_back({"kappa 2: simplex", simplexNest(2, 4), 0});
+    exact.push_back({"kappa 3: simplex", simplexNest(3, 4), 0});
+    exact.push_back({"kappa 4: simplex", simplexNest(4, 3), 0});
+    {
+      // C[i][j], k + l + m <= i + j: rho 2, kappa 3. The row i + j >= 0 stays in the
+      // image, redundant but coupled, and one query proves it nonempty.
+      Nest nest;
+      nest.n = 5;
+      nest.ge = {{1, 0, 0, 0, 0, 0},  {0, 1, 0, 0, 0, 0},  {-1, 0, 0, 0, 0, 2},
+                 {0, -1, 0, 0, 0, 2}, {0, 0, 1, 0, 0, 0},  {0, 0, 0, 1, 0, 0},
+                 {0, 0, 0, 0, 1, 0},  {1, 1, -1, -1, -1, 0}};
+      nest.c = {{1, 0, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 0}};
+      nest.a = {{1, 0, 1, 0, 0, 0}};
+      nest.b = {{0, 1, 0, 1, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(5, -1, 5);
+      exact.push_back({"kappa 3: two outputs", nest, 1});
+    }
+    {
+      // C[i + j], k + l <= i: a nonidentity U, rho 1, kappa 3.
+      Nest nest;
+      nest.n = 4;
+      nest.ge = {{1, 0, 0, 0, 0},  {-1, 0, 0, 0, 2}, {0, 1, 0, 0, 0},
+                 {0, -1, 0, 0, 2}, {0, 0, 1, 0, 0},  {0, 0, 0, 1, 0},
+                 {1, 0, -1, -1, 0}};
+      nest.c = {{1, 1, 0, 0, 3}};
+      nest.a = {{1, 0, 1, 0, 0}};
+      nest.b = {{0, 1, 0, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(4, -1, 4);
+      exact.push_back({"kappa 3: diagonal output", nest, 0});
+    }
+    {
+      // C[i - j + 7] with negative loops: rho 1, kappa 2.
+      Nest nest;
+      nest.n = 3;
+      nest.ge = {{1, 0, 0, 3},  {-1, 0, 0, 1}, {0, 1, 0, 3},
+                 {0, -1, 0, 1}, {0, 0, 1, 2},  {1, -1, -1, 2}};
+      nest.c = {{1, -1, 0, 7}};
+      nest.a = {{1, 0, 0, 0}};
+      nest.b = {{0, 1, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(3, -5, 8);
+      exact.push_back({"kappa 2: negative loops and output", nest, 0});
+    }
+    {
+      // j + k + l == i: the equality substitutes one kernel column.
+      Nest nest;
+      nest.n = 4;
+      nest.ge = {{-1, 0, 0, 0, 4}, {0, 1, 0, 0, 0}, {0, 0, 1, 0, 0},
+                 {0, 0, 0, 1, 0}};
+      nest.eq = {{1, -1, -1, -1, 0}};
+      nest.c = {{1, 0, 0, 0, 0}};
+      nest.a = {{1, 1, 0, 0, 0}};
+      nest.b = {{0, 0, 1, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(4, -1, 5);
+      exact.push_back({"kappa 3: an equality pins the fiber", nest, 0});
+    }
+    {
+      // i + j + k <= 4: the image keeps the coupled row i + j <= 4, and one query
+      // proves it nonempty.
+      Nest nest;
+      nest.n = 3;
+      nest.ge = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {-1, -1, -1, 4}};
+      nest.c = {{1, 0, 0, 0}, {0, 1, 0, 0}};
+      nest.a = {{1, 0, 1, 0}};
+      nest.b = {{0, 1, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(3, -1, 5);
+      exact.push_back({"kappa 1: an image with a coupled row", nest, 1});
+    }
+    {
+      // i == j and k + l <= i: an equality between output loops stays in the image.
+      Nest nest;
+      nest.n = 4;
+      nest.ge = {{-1, 0, 0, 0, 3}, {0, 0, 1, 0, 0}, {0, 0, 0, 1, 0},
+                 {1, 0, -1, -1, 0}};
+      nest.eq = {{1, -1, 0, 0, 0}};
+      nest.c = {{1, 0, 0, 0, 0}, {0, 1, 0, 0, 0}};
+      nest.a = {{1, 0, 1, 0, 0}};
+      nest.b = {{0, 1, 0, 1, 0}};
+      std::tie(nest.lo, nest.hi) = span(4, -1, 4);
+      exact.push_back({"kappa 2: an equality stays in the image", nest, 1});
+    }
+    for (const Named &e : exact) {
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(e.nest, budget);
+      bool predicted = true;
+      std::uint64_t generated = 0;
+      for (const KernelCosetEliminationStep &s : r.eliminations) {
+        predicted = predicted && s.actualRows <= s.predictedRows;
+        generated += s.predictedRows;
+      }
+      const std::string label = std::string("F-KC-5c-1: ") + e.name;
+      if (verify(r.verdict == V::ExactImage && r.why.empty(),
+                 (label + " is certified").c_str()))
+        return 1;
+      if (verify(matchesEnumeration(e.nest, r),
+                 (label + " matches the enumeration").c_str()))
+        return 1;
+      if (verify(predicted && generated == budget.counters().generatedRows &&
+                     r.eliminations.size() == r.kernelRank &&
+                     budget.counters().eliminations == r.kernelRank,
+                 (label + ": predictions hold, each charged once").c_str()))
+        return 1;
+      if (verify(budget.counters().emptinessQueries == e.queries,
+                 (label + ": the expected number of queries").c_str()))
+        return 1;
+    }
+
+    // The simplex, by hand: each step keeps the rows of the step before, less one,
+    // so predicted and actual agree exactly.
+    {
+      const Nest nest = simplexNest(3, 4);
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(nest, budget);
+      bool steps = r.eliminations.size() == 3;
+      const std::uint64_t want[3][2] = {{1, 4}, {2, 3}, {3, 2}};
+      for (unsigned s = 0; steps && s < 3; ++s)
+        steps = r.eliminations[s].col == want[s][0] &&
+                r.eliminations[s].predictedRows == want[s][1] &&
+                r.eliminations[s].actualRows == want[s][1];
+      if (verify(steps && budget.counters().generatedRows == 9 &&
+                     budget.counters().reductions == 0,
+                 "F-KC-5c-1: predicted rows equal actual on the simplex"))
+        return 1;
+    }
+
+    // ---- Each limit, on both sides of the value the nest needs ---------------
+    auto holds = [&](const Nest &nest, auto &&set, const char *name) {
+      Limits limits;
+      set(limits);
+      const KernelCosetWorkResult r = analyzeWith(nest, limits);
+      return verify(r.verdict == V::ExactImage && matchesEnumeration(nest, r),
+                    name);
+    };
+    auto stops = [&](const Nest &nest, auto &&set, Limit which,
+                     const KernelCosetWorkCounters &work, const char *name) {
+      Limits limits;
+      set(limits);
+      Budget budget(limits);
+      const KernelCosetWorkResult r = analyze(nest, budget);
+      const KernelCosetWorkCounters &c = budget.counters();
+      return verify(r.verdict == V::LimitReached && !r.outputImage &&
+                        budget.refusedBy() == which && !r.why.empty() &&
+                        c.eliminations == work.eliminations &&
+                        c.generatedRows == work.generatedRows &&
+                        c.reductions == work.reductions &&
+                        c.emptinessQueries == work.emptinessQueries,
+                    name);
+    };
+    {
+      const Nest s = simplexNest(3, 4); // 5 rows, 5 columns, largest entry 4
+      if (holds(s, [](Limits &l) { l.maxMatrixCells = 20; },
+                "F-KC-5c-1: (1 + 4) * 4 matrix cells suffice"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxMatrixCells = 19; }, Limit::MatrixCells,
+                {}, "F-KC-5c-1: and one fewer stops before the basis"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxMatrixRows = 1; },
+                "F-KC-5c-1: one C row suffices"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxMatrixRows = 0; }, Limit::MatrixRows, {},
+                "F-KC-5c-1: and none stops before the basis"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxMatrixTouchedCells = 1; },
+                "F-KC-5c-1: one touched cell of C suffices"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxMatrixTouchedCells = 0; },
+                Limit::MatrixTouchedCells, {},
+                "F-KC-5c-1: and none stops before the basis"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxMatrixBits = 1; },
+                "F-KC-5c-1: one row of one-bit entries is admitted at 1"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxMatrixBits = 0; }, Limit::MatrixBits, {},
+                "F-KC-5c-1: and refused at 0, before the basis"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxSystemRows = 5; },
+                "F-KC-5c-1: 5 system rows suffice"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxSystemRows = 4; }, Limit::SystemRows, {},
+                "F-KC-5c-1: and 4 stop at the source domain"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxSystemCells = 25; },
+                "F-KC-5c-1: 25 system cells suffice"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxSystemCells = 24; }, Limit::SystemCells,
+                {}, "F-KC-5c-1: and 24 stop at the source domain"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxEntry = 8; },
+                "F-KC-5c-1: the predicted entry 2 * 4 fits at 8"))
+        return 1;
+      KernelCosetWorkCounters reducedOnce;
+      reducedOnce.reductions = 1;
+      if (stops(s, [](Limits &l) { l.maxEntry = 7; }, Limit::Entry, reducedOnce,
+                "F-KC-5c-1: and stops the first elimination at 7"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxEntry = 3; }, Limit::Entry, {},
+                "F-KC-5c-1: a source entry past the limit stops at once"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxEliminations = 3; },
+                "F-KC-5c-1: 3 eliminations suffice for kappa 3"))
+        return 1;
+      KernelCosetWorkCounters twoSteps;
+      twoSteps.eliminations = 2;
+      twoSteps.generatedRows = 7;
+      if (stops(s, [](Limits &l) { l.maxEliminations = 2; }, Limit::Eliminations,
+                twoSteps, "F-KC-5c-1: and 2 stop before the third"))
+        return 1;
+      if (holds(s, [](Limits &l) { l.maxGeneratedRows = 9; },
+                "F-KC-5c-1: 4 + 3 + 2 generated rows suffice"))
+        return 1;
+      if (stops(s, [](Limits &l) { l.maxGeneratedRows = 8; },
+                Limit::GeneratedRows, twoSteps,
+                "F-KC-5c-1: and 8 stop before the third"))
+        return 1;
+    }
+    {
+      // One non-box row over two variables, with coefficient 1.
+      const Nest coupled = [&] {
+        for (const Named &e : exact)
+          if (e.queries == 1 && e.nest.n == 3)
+            return e.nest;
+        return Nest();
+      }();
+      KernelCosetWorkCounters step;
+      step.eliminations = 1;
+      step.generatedRows = 3;
+      if (holds(coupled, [](Limits &l) { l.maxQueryVariables = 2; },
+                "F-KC-5c-1: a query over two variables is admitted at 2"))
+        return 1;
+      step.reductions = 1;
+      if (stops(coupled, [](Limits &l) { l.maxQueryVariables = 1; },
+                Limit::QueryVariables, step,
+                "F-KC-5c-1: and refused at 1, with no query"))
+        return 1;
+      if (holds(coupled, [](Limits &l) { l.maxQueryCoefficient = 1; },
+                "F-KC-5c-1: a coefficient of 1 is admitted at 1"))
+        return 1;
+      if (stops(coupled, [](Limits &l) { l.maxQueryCoefficient = 0; },
+                Limit::QueryCoefficient, step,
+                "F-KC-5c-1: and refused at 0, with no query"))
+        return 1;
+      step.reductions = 0;
+      if (holds(coupled, [](Limits &l) { l.maxEmptinessQueries = 1; },
+                "F-KC-5c-1: one query is admitted at 1"))
+        return 1;
+      if (stops(coupled, [](Limits &l) { l.maxEmptinessQueries = 0; },
+                Limit::EmptinessQueries, step,
+                "F-KC-5c-1: and refused at 0, before it starts"))
+        return 1;
+    }
+
+    // ---- A reduction runs only on demand, and is charged ---------------------
+    {
+      // Twenty parallel bounds on each side of k: the linear pass removes them, with
+      // no Simplex, before 400 rows are ever predicted.
+      Nest parallel;
+      parallel.n = 2;
+      parallel.ge = {{1, 0, 0}, {-1, 0, 2}};
+      for (std::int64_t t = 0; t < 20; ++t) {
+        parallel.ge.push_back({0, 1, t});
+        parallel.ge.push_back({0, -1, 3 + t});
+      }
+      parallel.c = {{1, 0, 0}};
+      parallel.a = {{1, 0, 0}};
+      parallel.b = {{0, 1, 0}};
+      std::tie(parallel.lo, parallel.hi) = span(2, -2, 5);
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(parallel, budget);
+      if (verify(r.verdict == V::ExactImage && matchesEnumeration(parallel, r) &&
+                     budget.counters().reductions == 0 &&
+                     r.eliminations.size() == 1 &&
+                     r.eliminations[0].predictedRows == 3,
+                 "F-KC-5c-1: parallel rows go before any prediction, at no cost"))
+        return 1;
+
+      // 2 * k + i <= 100 is implied by k <= 3 and i <= 2. It is the only row without
+      // a unit coefficient on k, so the certificate holds only once it has gone.
+      Nest redundant;
+      redundant.n = 2;
+      redundant.ge = {{1, 0, 0}, {-1, 0, 2}, {0, 1, 0}, {0, -1, 3}, {-1, -2, 100}};
+      redundant.c = {{1, 0, 0}};
+      redundant.a = {{1, 0, 0}};
+      redundant.b = {{0, 1, 0}};
+      std::tie(redundant.lo, redundant.hi) = span(2, -2, 5);
+      Budget second;
+      const KernelCosetWorkResult s = analyze(redundant, second);
+      if (verify(s.verdict == V::ExactImage && matchesEnumeration(redundant, s) &&
+                     second.counters().reductions == 1,
+                 "F-KC-5c-1: a redundant non-unit row does not block the proof"))
+        return 1;
+      if (stops(redundant, [](Limits &l) { l.maxReductions = 0; },
+                Limit::Reductions, {},
+                "F-KC-5c-1: and the reduction that removes it is charged"))
+        return 1;
+      if (holds(redundant, [](Limits &l) { l.maxReductionCells = 15; },
+                "F-KC-5c-1: 5 rows by 3 columns reduce at 15 cells"))
+        return 1;
+      if (stops(redundant, [](Limits &l) { l.maxReductionCells = 14; },
+                Limit::ReductionCells, {},
+                "F-KC-5c-1: and are refused at 14, before the Simplex"))
+        return 1;
+      if (holds(redundant, [](Limits &l) { l.maxReductionCoefficient = 2; },
+                "F-KC-5c-1: a coefficient of 2 reduces at 2"))
+        return 1;
+      if (stops(redundant, [](Limits &l) { l.maxReductionCoefficient = 1; },
+                Limit::ReductionCoefficient, {},
+                "F-KC-5c-1: and is refused at 1, before the Simplex"))
+        return 1;
+    }
+
+    // ---- Constraint explosion ------------------------------------------------
+    // Tangents of a parabola: 13 lowers and 13 uppers on k, none redundant. The 173
+    // predicted rows stop the analysis before the projection runs, with q already
+    // gone and p, an output, untouched.
+    auto parabola = [&](std::int64_t tangents) {
+      Nest nest;
+      nest.n = 4; // i, p, k, q
+      const std::int64_t last = tangents - 1, top = 2 * last * last + 1;
+      nest.ge = {{1, 0, 0, 0, 0},  {-1, 0, 0, 0, 1},       {0, 1, 0, 0, 0},
+                 {0, -1, 0, 0, 2 * last}, {0, 0, 0, 1, 0}, {0, 0, 0, -1, 1}};
+      for (std::int64_t t = 0; t < tangents; ++t) {
+        nest.ge.push_back({0, -t, 1, 0, t * t});        // k >= t * p - t * t
+        nest.ge.push_back({0, -t, -1, 0, t * t + top}); // k <= top - t * p + t * t
+      }
+      nest.c = {{1, 0, 0, 0, 0}, {0, 1, 0, 0, 0}};
+      nest.a = {{1, 0, 1, 0, 0}};
+      nest.b = {{0, 1, 0, 1, 0}};
+      nest.lo = {-1, -1, -2, -1};
+      nest.hi = {2, 2 * last + 1, 2 * top, 2};
+      return nest;
+    };
+    {
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(parabola(13), budget);
+      if (verify(r.verdict == V::LimitReached &&
+                     budget.refusedBy() == Limit::SystemRows && !r.outputImage &&
+                     r.eliminations.size() == 1 &&
+                     budget.counters().reductions == 1 &&
+                     budget.counters().emptinessQueries == 0,
+                 "F-KC-5c-1: constraint explosion stops before the projection"))
+        return 1;
+      // Five tangents on each side: 25 rows, plus the four that survive q, fit at
+      // 29, where the result is exact, and stop the same step at 28.
+      const Nest small = parabola(5);
+      if (holds(small, [](Limits &l) { l.maxSystemRows = 29; },
+                "F-KC-5c-1: the same shape at a size that fits is exact"))
+        return 1;
+      KernelCosetWorkCounters onlyQ;
+      onlyQ.eliminations = 1;
+      onlyQ.generatedRows = 15;
+      onlyQ.reductions = 1;
+      if (stops(small, [](Limits &l) { l.maxSystemRows = 28; }, Limit::SystemRows,
+                onlyQ, "F-KC-5c-1: and stops that step one row below it"))
+        return 1;
+    }
+
+    // ---- Certificates, and what they refuse ----------------------------------
+    auto refused = [&](const Nest &nest, V want) {
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(nest, budget);
+      return r.verdict == want && !r.outputImage && !r.why.empty() &&
+             budget.counters().emptinessQueries == 0;
+    };
+    {
+      // 2 * k <= i <= 2 * k. The rational shadow is every i, the true image only the
+      // even ones, so a shadow would invent outputs.
+      Nest parity;
+      parity.n = 2;
+      parity.ge = {{1, 0, 0}, {-1, 0, 5}, {0, 1, 0}, {0, -1, 2}, {1, -2, 0}, {-1, 2, 0}};
+      parity.c = {{1, 0, 0}};
+      parity.a = {{1, 0, 0}};
+      parity.b = {{0, 1, 0}};
+      std::tie(parity.lo, parity.hi) = span(2, -1, 6);
+      IntegerPolyhedron shadow = domainOf(parity);
+      shadow.projectOut(1, 1);
+      bool odd = false;
+      for (const Point &x : sourcePoints(parity))
+        odd = odd || x[0] % 2 != 0;
+      if (verify(shadow.containsPoint(Point{1}) && !odd,
+                 "F-KC-5c-1: the rational shadow of the parity nest is wrong"))
+        return 1;
+      if (verify(refused(parity, V::NotCertified),
+                 "F-KC-5c-1: and the analysis refuses it"))
+        return 1;
+
+      // The same congruence as an equality.
+      Nest even = parity;
+      even.ge = {{1, 0, 0}, {-1, 0, 5}, {0, 1, 0}, {0, -1, 2}};
+      even.eq = {{1, -2, 0}};
+      if (verify(refused(even, V::NotCertified),
+                 "F-KC-5c-1: a non-unit equality on a kernel column is refused"))
+        return 1;
+
+      // C[i - j], k <= i + j + 2. In the source every coefficient is 1, but over the
+      // kernel direction (1, 1, 0) the row reads 2, which only D' can show.
+      Nest rotated;
+      rotated.n = 3;
+      rotated.ge = {{1, 0, 0, 3},  {-1, 0, 0, 1}, {0, 1, 0, 3},
+                    {0, -1, 0, 1}, {0, 0, 1, 2},  {1, 1, -1, 2}};
+      rotated.c = {{1, -1, 0, 7}};
+      rotated.a = {{1, 0, 0, 0}};
+      rotated.b = {{0, 1, 1, 0}};
+      std::tie(rotated.lo, rotated.hi) = span(3, -5, 4);
+      if (verify(refused(rotated, V::NotCertified),
+                 "F-KC-5c-1: a non-unit coefficient seen only in D' is refused"))
+        return 1;
+
+      // 2 * j + k <= i: k goes, and then j has coefficient 2.
+      Nest two;
+      two.n = 3;
+      two.ge = {{-1, 0, 0, 6}, {0, 1, 0, 0}, {0, 0, 1, 0}, {1, -2, -1, 0}};
+      two.c = {{1, 0, 0, 0}};
+      two.a = {{1, 0, 0, 0}};
+      two.b = {{0, 1, 1, 0}};
+      std::tie(two.lo, two.hi) = span(3, -1, 7);
+      Budget budget;
+      const KernelCosetWorkResult r = analyze(two, budget);
+      if (verify(r.verdict == V::NotCertified && !r.outputImage &&
+                     r.eliminations.size() == 1 && r.eliminations[0].col == 2,
+                 "F-KC-5c-1: elimination stops at the first uncertified column"))
+        return 1;
+    }
+    {
+      // Unsupported input.
+      IntegerPolyhedron local(PresburgerSpace::getSetSpace(2, 0, 1));
+      local.addInequality(Row{1, 0, 0, 0});
+      local.addEquality(Row{1, 0, -2, 0}); // i == 2 * q, a congruence
+      IntegerPolyhedron symbol(PresburgerSpace::getSetSpace(2, 1, 0));
+      symbol.addInequality(Row{1, 0, 1, 0});
+      IntegerPolyhedron box(PresburgerSpace::getSetSpace(2, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0}, {-1, 0, 3}, {0, 1, 0}, {0, -1, 3}})
+        box.addInequality(r);
+      IntegerPolyhedron ray(PresburgerSpace::getSetSpace(2, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0}, {-1, 0, 3}, {0, 1, 0}})
+        ray.addInequality(r);
+      IntegerPolyhedron wrong(PresburgerSpace::getSetSpace(3, 0, 0));
+      const IntMatrix firstLoop{{BigInt(1), BigInt(0)}};
+      auto unsupported = [&](const IntMatrix &c,
+                             const IntegerPolyhedron &D, unsigned n) {
+        Budget budget;
+        const KernelCosetWorkResult r = analyzeKernelCosetWork(c, D, n, budget);
+        const KernelCosetWorkCounters &w = budget.counters();
+        return r.verdict == V::Unsupported && !r.outputImage && !r.why.empty() &&
+               w.eliminations + w.reductions + w.emptinessQueries == 0;
+      };
+      if (verify(unsupported(firstLoop, local, 2),
+                 "F-KC-5c-1: a local, a congruence, is unsupported"))
+        return 1;
+      if (verify(unsupported(firstLoop, symbol, 2),
+                 "F-KC-5c-1: a symbol is unsupported"))
+        return 1;
+      if (verify(unsupported(firstLoop, ray, 2),
+                 "F-KC-5c-1: a loop with no upper bound is unsupported"))
+        return 1;
+      if (verify(unsupported(firstLoop, wrong, 3),
+                 "F-KC-5c-1: a C row of the wrong arity is unsupported"))
+        return 1;
+      if (verify(unsupported(firstLoop, box, 3),
+                 "F-KC-5c-1: a domain of the wrong rank is unsupported"))
+        return 1;
+      if (verify(unsupported(IntMatrix{}, box, 2),
+                 "F-KC-5c-1: no C access is unsupported"))
+        return 1;
+      if (verify(unsupported(IntMatrix{{BigInt(0), BigInt(0)}}, box, 2),
+                 "F-KC-5c-1: a constant C is unsupported"))
+        return 1;
+      if (verify(unsupported(IntMatrix{{BigInt(1), BigInt(0)},
+                                       {BigInt(0), BigInt(1)}},
+                             box, 2),
+                 "F-KC-5c-1: kappa 0 is unsupported"))
+        return 1;
+      if (verify(unsupported(firstLoop, box, 0),
+                 "F-KC-5c-1: rank 0 is unsupported"))
+        return 1;
+    }
+
+    // ---- Empty domains -------------------------------------------------------
+    {
+      auto emptyWith = [&](const Nest &nest, std::uint64_t queries) {
+        Budget budget;
+        const KernelCosetWorkResult r = analyze(nest, budget);
+        return r.verdict == V::Empty && matchesEnumeration(nest, r) &&
+               budget.counters().emptinessQueries == queries;
+      };
+      Nest base;
+      base.n = 3;
+      base.ge = {{1, 0, 0, 0},  {-1, 0, 0, 3}, {0, 1, 0, 0},
+                 {0, -1, 0, 3}, {0, 0, 1, 0},  {0, 0, -1, 3}};
+      base.c = {{1, 0, 0, 0}, {0, 1, 0, 0}};
+      base.a = {{1, 0, 0, 0}};
+      base.b = {{0, 1, 1, 0}};
+      std::tie(base.lo, base.hi) = span(3, -1, 5);
+      Nest constant = base;
+      constant.ge.push_back({0, 0, 0, -1});
+      if (verify(emptyWith(constant, 0), "F-KC-5c-1: a false constant row is empty"))
+        return 1;
+      Nest interval = base;
+      interval.ge.push_back({1, 0, 0, -9});
+      if (verify(emptyWith(interval, 0), "F-KC-5c-1: an empty interval is empty"))
+        return 1;
+      Nest half = base; // 2 * k == 1 has no integer solution
+      half.eq = {{0, 0, 2, -1}};
+      if (verify(emptyWith(half, 0), "F-KC-5c-1: a half-integer equality is empty"))
+        return 1;
+      Nest gcd = base; // 2 * i + 4 * k == 1
+      gcd.eq = {{2, 0, 4, -1}};
+      if (verify(emptyWith(gcd, 0), "F-KC-5c-1: the gcd test proves emptiness"))
+        return 1;
+      Nest chain = base; // i + k >= 9 with both at most 3: only the image shows it
+      chain.ge.push_back({1, 0, 1, -9});
+      if (verify(emptyWith(chain, 0),
+                 "F-KC-5c-1: an interval of the image proves emptiness"))
+        return 1;
+      Nest thin = base; // 3 * i + 5 * j == 1 has rational points only in this box
+      thin.ge.push_back({3, 5, 0, -1});
+      thin.ge.push_back({-3, -5, 0, 1});
+      if (verify(emptyWith(thin, 1),
+                 "F-KC-5c-1: a query proves a thin image empty"))
+        return 1;
+    }
+
+    // ---- The emptiness gate, directly ----------------------------------------
+    {
+      auto system = [](unsigned vars, const std::vector<Row> &ge,
+                       const std::vector<Row> &eq = {}) {
+        IntegerPolyhedron P(PresburgerSpace::getSetSpace(vars, 0, 0));
+        for (const Row &r : ge)
+          P.addInequality(r);
+        for (const Row &r : eq)
+          P.addEquality(r);
+        return P;
+      };
+      auto answer = [&](const IntegerPolyhedron &P, E want,
+                        std::uint64_t queries) {
+        Budget budget;
+        const KernelCosetEmptinessResult r = gatedIsIntegerEmpty(P, budget);
+        return r.verdict == want && r.limit == Limit::None &&
+               budget.counters().emptinessQueries == queries;
+      };
+      if (verify(answer(system(1, {{1, 0}, {-1, 3}}), E::NonEmpty, 0),
+                 "F-KC-5c-1: a box needs no query"))
+        return 1;
+      if (verify(answer(system(1, {{2, -1}, {-2, 1}}), E::Empty, 0),
+                 "F-KC-5c-1: 2 * x == 1 as two rows is empty over the integers"))
+        return 1;
+      if (verify(answer(system(2, {}, {{2, 4, -1}}), E::Empty, 0),
+                 "F-KC-5c-1: 2 * x + 4 * y == 1 fails the gcd test, with no query"))
+        return 1;
+      if (verify(answer(system(1, {{1, 0}}, {{0, -1}}), E::Empty, 0),
+                 "F-KC-5c-1: an equality with no variable is read, not queried"))
+        return 1;
+      if (verify(answer(system(2, {{1, 0, 0}, {0, 1, 0}}), E::NonEmpty, 0),
+                 "F-KC-5c-1: a variable with no upper bound is a nonempty box"))
+        return 1;
+      if (verify(answer(system(2, {{1, 1, 0}, {-1, -1, 2}}), E::NonEmpty, 1),
+                 "F-KC-5c-1: a coupled row takes one query"))
+        return 1;
+      if (verify(answer(system(2, {{3, 5, -1}, {-3, -5, 1}, {1, 0, 0},
+                                   {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}}),
+                        E::Empty, 1),
+                 "F-KC-5c-1: 3 * x + 5 * y == 1 at the origin is empty"))
+        return 1;
+      if (verify(answer(system(3, {{1, 1, 0, -5}, {-1, -1, 0, 5}, {0, 0, 1, 2},
+                                   {0, 0, -1, -7}}),
+                        E::Empty, 0),
+                 "F-KC-5c-1: an empty independent interval decides with no query"))
+        return 1;
+
+      // The same system, with one variable left out by the restriction: x + y == 5
+      // over [0, 2] x [0, 2], and z in [0, 3].
+      const IntegerPolyhedron split =
+          system(3, {{1, 1, 0, -5}, {-1, -1, 0, 5}, {1, 0, 0, 0}, {-1, 0, 0, 2},
+                     {0, 1, 0, 0}, {0, -1, 0, 2}, {0, 0, 1, 0}, {0, 0, -1, 3}});
+      if (verify(answer(split, E::Empty, 1),
+                 "F-KC-5c-1: an independent variable does not hide emptiness"))
+        return 1;
+      const KernelCosetSystemShape shape = measureKernelCosetSystem(system(
+          4, {{1, 1, 0, 0, 0}, {0, 0, 7, 0, 3}, {0, 0, 0, 1, -30}},
+          {{0, 1, -2, 0, 0}, {0, 0, 0, 5, 0}}));
+      if (verify(shape.rows == 5 && shape.columns == 5 && shape.nonBoxRows == 2 &&
+                     shape.coupledVariables == 3 &&
+                     shape.largestCoefficient == DynamicAPInt(2) &&
+                     shape.largestEntry == DynamicAPInt(30),
+                 "F-KC-5c-1: the shape scan reads rows, variables and entries"))
+        return 1;
+
+      // A query refused on shape costs nothing and leaves the budget usable.
+      const IntegerPolyhedron four =
+          system(2, {{1, 1, 0}, {-1, -1, 9}, {1, -1, 0}, {-1, 1, 9}});
+      Limits narrow;
+      narrow.maxQueryVariables = 1;
+      Budget budget(narrow);
+      const KernelCosetEmptinessResult first = gatedIsIntegerEmpty(four, budget);
+      if (verify(first.verdict == E::Unknown &&
+                     first.limit == Limit::QueryVariables &&
+                     !budget.exhausted() &&
+                     budget.counters().emptinessQueries == 0,
+                 "F-KC-5c-1: a shape refusal starts no query, and is not sticky"))
+        return 1;
+      narrow.maxQueryVariables = 2;
+      Budget wider(narrow);
+      if (verify(gatedIsIntegerEmpty(four, wider).verdict == E::NonEmpty &&
+                     wider.counters().emptinessQueries == 1,
+                 "F-KC-5c-1: and the same query runs one variable up"))
+        return 1;
+      // Seven variables in one row are one too many, and an independent eighth does
+      // not count.
+      IntegerPolyhedron wideRow(PresburgerSpace::getSetSpace(8, 0, 0));
+      {
+        Row row(9, 1);
+        row[7] = 0;
+        row[8] = 0;
+        wideRow.addInequality(row);
+        row.assign(9, 0);
+        row[7] = 1;
+        wideRow.addInequality(row);
+      }
+      Budget gate;
+      const KernelCosetEmptinessResult seven = gatedIsIntegerEmpty(wideRow, gate);
+      if (verify(seven.verdict == E::Unknown &&
+                     seven.limit == Limit::QueryVariables &&
+                     gate.counters().emptinessQueries == 0,
+                 "F-KC-5c-1: seven coupled variables are refused at the default"))
+        return 1;
+      IntegerPolyhedron sixRow(PresburgerSpace::getSetSpace(8, 0, 0));
+      {
+        Row row(9, 1);
+        row[6] = 0;
+        row[7] = 0;
+        row[8] = 0;
+        sixRow.addInequality(row);
+      }
+      Budget gate6;
+      if (verify(gatedIsIntegerEmpty(sixRow, gate6).verdict == E::NonEmpty &&
+                     gate6.counters().emptinessQueries == 1,
+                 "F-KC-5c-1: six are admitted, whatever else the system holds"))
+        return 1;
+      IntegerPolyhedron withLocal(PresburgerSpace::getSetSpace(1, 0, 1));
+      withLocal.addEquality(Row{1, -2, 0});
+      Budget untouched;
+      const KernelCosetEmptinessResult l = gatedIsIntegerEmpty(withLocal, untouched);
+      if (verify(l.verdict == E::Unknown && l.limit == Limit::None &&
+                     !l.why.empty() &&
+                     untouched.counters().emptinessQueries == 0,
+                 "F-KC-5c-1: the gate does not measure a local, and refuses it"))
+        return 1;
+
+      // The answer agrees with an enumeration of random small systems.
+      std::mt19937 gen(20261101);
+      auto pick = [&](std::int64_t a, std::int64_t b) {
+        return a + static_cast<std::int64_t>(gen() % std::uint64_t(b - a + 1));
+      };
+      bool agrees = true;
+      unsigned empties = 0, nonempties = 0, queried = 0;
+      for (unsigned trial = 0; trial < 600; ++trial) {
+        const unsigned vars = 1 + trial % 4;
+        std::vector<Row> ge, eq;
+        for (unsigned j = 0; j < vars; ++j) {
+          Row lower(vars + 1, 0), upper(vars + 1, 0);
+          lower[j] = 1;
+          lower[vars] = pick(0, 2);
+          upper[j] = -pick(1, 2);
+          upper[vars] = pick(0, 3);
+          ge.push_back(lower);
+          ge.push_back(upper);
+        }
+        for (std::int64_t r = pick(0, 3); r > 0; --r) {
+          Row row(vars + 1, 0);
+          for (unsigned j = 0; j < vars; ++j)
+            row[j] = pick(0, 3) == 0 ? 0 : pick(-3, 3);
+          row[vars] = pick(-6, 6);
+          ge.push_back(row);
+        }
+        if (pick(0, 3) == 0) {
+          Row row(vars + 1, 0);
+          for (unsigned j = 0; j < vars; ++j)
+            row[j] = pick(-2, 2);
+          row[vars] = pick(-3, 3);
+          eq.push_back(row);
+        }
+        bool any = false;
+        forEachPoint(Point(vars, -3), Point(vars, 4), [&](const Point &p) {
+          bool in = true;
+          for (const Row &r : ge)
+            in = in && evaluate(r, p) >= 0;
+          for (const Row &r : eq)
+            in = in && evaluate(r, p) == 0;
+          any = any || in;
+        });
+        Budget budget;
+        const KernelCosetEmptinessResult r =
+            gatedIsIntegerEmpty(system(vars, ge, eq), budget);
+        agrees = agrees && r.verdict == (any ? E::NonEmpty : E::Empty);
+        (any ? nonempties : empties) += 1;
+        queried += static_cast<unsigned>(budget.counters().emptinessQueries);
+      }
+      if (verify(agrees && empties >= 50 && nonempties >= 50 && queried >= 100,
+                 "F-KC-5c-1: the gate agrees with enumeration on 600 systems"))
+        return 1;
+    }
+
+    // ---- The arithmetic of the estimates, at the 64-bit boundary ---------------
+    {
+      const std::uint64_t top = std::numeric_limits<std::uint64_t>::max();
+      const std::uint64_t half = std::uint64_t(1) << 32;
+      KernelCosetColumnRows rows;
+      rows.lowers = half - 1;
+      rows.uppers = half - 1;
+      const std::uint64_t square = (half - 1) * (half - 1);
+      rows.unrelated = top - square;
+      if (verify(predictKernelCosetEliminationRows(rows) == top,
+                 "F-KC-5c-1: a prediction of exactly 2^64 - 1 rows"))
+        return 1;
+      rows.otherEqualities = 1;
+      if (verify(!predictKernelCosetEliminationRows(rows),
+                 "F-KC-5c-1: and one row more is refused, not wrapped"))
+        return 1;
+      KernelCosetColumnRows product;
+      product.lowers = half;
+      product.uppers = half;
+      if (verify(!predictKernelCosetEliminationRows(product),
+                 "F-KC-5c-1: a product of 2^64 is refused, not wrapped"))
+        return 1;
+      KernelCosetColumnRows pinned;
+      pinned.lowers = top;
+      pinned.pinning = 1;
+      if (verify(predictKernelCosetEliminationRows(pinned) == top,
+                 "F-KC-5c-1: substitution keeps every row but its equality"))
+        return 1;
+      pinned.unrelated = 1;
+      if (verify(!predictKernelCosetEliminationRows(pinned),
+                 "F-KC-5c-1: and its count is checked too"))
+        return 1;
+
+      Limits wide;
+      wide.maxSystemRows = top;
+      wide.maxSystemCells = top;
+      wide.maxMatrixCells = top;
+      wide.maxMatrixRows = top;
+      wide.maxMatrixTouchedCells = top;
+      wide.maxMatrixBits = top;
+      wide.maxGeneratedRows = top;
+      Budget budget(wide);
+      auto matrix = [](std::uint64_t rows, std::uint64_t columns) {
+        KernelCosetMatrixShape shape;
+        shape.rows = rows;
+        shape.columns = columns;
+        return shape;
+      };
+      if (verify(budget.checkMatrix(matrix(1, half)) == Limit::Arithmetic &&
+                     budget.checkMatrix(matrix(top, 2)) == Limit::Arithmetic &&
+                     budget.checkMatrix(matrix(0, half - 1)) == Limit::None,
+                 "F-KC-5c-1: matrix cells are checked"))
+        return 1;
+      KernelCosetMatrixShape tall = matrix(half, 0);
+      tall.touchedColumns = half;
+      if (verify(budget.checkMatrix(tall) == Limit::Arithmetic,
+                 "F-KC-5c-1: touched cells are checked"))
+        return 1;
+      tall.touchedColumns = 0;
+      tall.entryBits = half;
+      if (verify(budget.checkMatrix(tall) == Limit::Arithmetic,
+                 "F-KC-5c-1: entry bits are checked"))
+        return 1;
+      if (verify(budget.checkSystem(half, half, DynamicAPInt(0)) ==
+                         Limit::Arithmetic &&
+                     budget.checkSystem(half - 1, half, DynamicAPInt(0)) ==
+                         Limit::None,
+                 "F-KC-5c-1: system cells are checked"))
+        return 1;
+      if (verify(budget.startElimination(top) &&
+                     budget.counters().generatedRows == top,
+                 "F-KC-5c-1: the rows counter reaches 2^64 - 1"))
+        return 1;
+      if (verify(!budget.startElimination(1) && budget.exhausted() &&
+                     budget.refusedBy() == Limit::Arithmetic &&
+                     budget.counters().eliminations == 1 &&
+                     budget.counters().generatedRows == top,
+                 "F-KC-5c-1: and one more is refused, not wrapped"))
+        return 1;
+
+      Limits wideReduction;
+      wideReduction.maxReductionCells = top;
+      Budget cells(wideReduction);
+      auto reduction = [](std::uint64_t rows, std::uint64_t columns) {
+        KernelCosetSystemShape shape;
+        shape.rows = rows;
+        shape.columns = columns;
+        return shape;
+      };
+      if (verify(cells.startReduction(reduction(half - 1, half)) &&
+                     !cells.startReduction(reduction(half, half)) &&
+                     cells.refusedBy() == Limit::Arithmetic &&
+                     cells.counters().reductions == 1,
+                 "F-KC-5c-1: the size of a reduction is checked"))
+        return 1;
+
+      // The first refusal stands, and nothing may start after it.
+      Limits none;
+      none.maxReductions = 0;
+      Budget sticky(none);
+      const bool stopped = !sticky.startReduction(KernelCosetSystemShape());
+      const std::string reason = sticky.why();
+      if (verify(stopped && sticky.refusedBy() == Limit::Reductions &&
+                     !sticky.startElimination(0) &&
+                     !sticky.startEmptinessQuery() &&
+                     !sticky.refuse(Limit::Entry, "a later reason") &&
+                     sticky.refusedBy() == Limit::Reductions &&
+                     sticky.why() == reason &&
+                     sticky.counters().eliminations == 0,
+                 "F-KC-5c-1: an exhausted budget stays exhausted"))
+        return 1;
+      const KernelCosetWorkResult r = analyze(simplexNest(1, 4), sticky);
+      if (verify(r.verdict == V::LimitReached && r.eliminations.empty() &&
+                     !r.outputImage,
+                 "F-KC-5c-1: the analysis does nothing on an exhausted budget"))
+        return 1;
+    }
+
+    // ---- Large values --------------------------------------------------------
+    {
+      auto pow2 = [](unsigned e) -> BigInt {
+        BigInt v = 1;
+        v <<= e;
+        return v;
+      };
+      auto big = [&](const BigInt &value) {
+        return DynamicAPInt(value.convert_to<std::int64_t>());
+      };
+      // 0 <= i, 0 <= k, i + k <= m. The elimination may double the largest entry.
+      auto sum = [&](const DynamicAPInt &m) {
+        IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 0));
+        llvm::SmallVector<DynamicAPInt, 3> upper{DynamicAPInt(-1),
+                                                 DynamicAPInt(-1), m};
+        D.addInequality(Row{1, 0, 0});
+        D.addInequality(Row{0, 1, 0});
+        D.addInequality(upper);
+        return D;
+      };
+      const IntMatrix firstLoop{{BigInt(1), BigInt(0)}};
+      auto result = [&](const IntegerPolyhedron &D, Budget &budget) {
+        return analyzeKernelCosetWork(firstLoop, D, 2, budget);
+      };
+      {
+        Budget budget;
+        const KernelCosetWorkResult r = result(sum(big(pow2(60))), budget);
+        if (verify(r.verdict == V::ExactImage &&
+                       r.outputImage->containsPoint(Point{std::int64_t(1) << 60}) &&
+                       !r.outputImage->containsPoint(
+                           Point{(std::int64_t(1) << 60) + 1}),
+                   "F-KC-5c-1: an entry of 2^60 doubles to the limit, exactly"))
+          return 1;
+      }
+      {
+        Budget budget;
+        const KernelCosetWorkResult r =
+            result(sum(big(BigInt(pow2(60) + 1))), budget);
+        if (verify(r.verdict == V::LimitReached &&
+                       budget.refusedBy() == Limit::Entry && !r.outputImage,
+                   "F-KC-5c-1: and one past it is refused"))
+          return 1;
+      }
+      {
+        // Past 2^64, in the source: the limit reads it, with no i64 conversion.
+        Budget budget;
+        const DynamicAPInt huge = big(pow2(40)) * big(pow2(40));
+        const KernelCosetWorkResult r = result(sum(huge), budget);
+        if (verify(r.verdict == V::LimitReached &&
+                       budget.refusedBy() == Limit::Entry &&
+                       budget.counters().eliminations == 0,
+                   "F-KC-5c-1: a source value of 2^80 is refused"))
+          return 1;
+      }
+      {
+        // Past i64 in C: the gate reads it, and past the gate the basis refuses it.
+        const IntMatrix huge{{pow2(70), BigInt(0)}};
+        Budget gated;
+        const KernelCosetWorkResult g =
+            analyzeKernelCosetWork(huge, sum(DynamicAPInt(4)), 2, gated);
+        if (verify(g.verdict == V::LimitReached &&
+                       gated.refusedBy() == Limit::MatrixBits,
+                   "F-KC-5c-1: a C coefficient of 2^70 is refused at the gate"))
+          return 1;
+        Limits wide;
+        wide.maxMatrixBits = 71;
+        Budget budget(wide);
+        const KernelCosetWorkResult r =
+            analyzeKernelCosetWork(huge, sum(DynamicAPInt(4)), 2, budget);
+        if (verify(r.verdict == V::Unsupported && !r.outputImage,
+                   "F-KC-5c-1: and past a raised gate the basis refuses it"))
+          return 1;
+        // The product is what counts: 12 bits pass in two rows, 13 do not.
+        auto rowsOf = [&](std::int64_t entry) {
+          return IntMatrix{{BigInt(entry), BigInt(1), BigInt(0)},
+                           {BigInt(1), BigInt(0), BigInt(0)}};
+        };
+        Budget plain;
+        if (verify(plain.checkMatrix(measureKernelCosetMatrix(rowsOf(4095), 3)) ==
+                           Limit::None &&
+                       plain.checkMatrix(measureKernelCosetMatrix(rowsOf(4096), 3)) ==
+                           Limit::MatrixBits,
+                   "F-KC-5c-1: rows times entry bits is the limit"))
+          return 1;
+      }
+      // C[i + 2^40 * k]: U holds -2^40, which D' multiplies by the row of i.
+      const IntMatrix skew{{BigInt(1), pow2(40)}};
+      Limits wideEntry;
+      wideEntry.maxMatrixBits = 41;
+      auto scaled = [&](std::int64_t a) {
+        IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 0));
+        for (const Row &r : std::vector<Row>{
+                 {a, 0, 0}, {-a, 0, 3 * a}, {0, 1, 0}, {0, -1, 3}})
+          D.addInequality(r);
+        return D;
+      };
+      {
+        Budget budget(wideEntry);
+        const KernelCosetWorkResult r = analyzeKernelCosetWork(
+            skew, scaled(std::int64_t(1) << 22), 2, budget);
+        if (verify(r.verdict == V::LimitReached &&
+                       budget.refusedBy() == Limit::Entry && !r.reducedDomain,
+                   "F-KC-5c-1: a reduced coefficient of 2^62 is over the limit"))
+          return 1;
+      }
+      {
+        Budget budget(wideEntry);
+        const KernelCosetWorkResult r = analyzeKernelCosetWork(
+            skew, scaled(std::int64_t(1) << 30), 2, budget);
+        if (verify(r.verdict == V::Unsupported && !r.reducedDomain,
+                   "F-KC-5c-1: a reduced coefficient of 2^70 is refused"))
+          return 1;
+      }
+    }
+
+    // ---- No constant limits kappa --------------------------------------------
+    {
+      for (unsigned kappa : {8u, 24u, 64u}) {
+        const Nest nest = simplexNest(kappa, 9);
+        Budget budget;
+        const KernelCosetWorkResult r = analyze(nest, budget);
+        bool image = r.verdict == V::ExactImage;
+        for (std::int64_t i = -1; image && i <= 10; ++i)
+          image = r.outputImage->containsPoint(Point{i}) == (i >= 0 && i <= 9);
+        const std::string name = "F-KC-5c-1: kappa " + std::to_string(kappa) +
+                                 " is exact within the default limits";
+        if (verify(image && budget.counters().eliminations == kappa &&
+                       budget.counters().emptinessQueries == 0,
+                   name.c_str()))
+          return 1;
+      }
+      // Kappa adds eliminations, not dimensions to the query: 32 kernel columns over
+      // two coupled outputs leave one query, over two variables.
+      {
+        const unsigned kappa = 32, n = kappa + 2;
+        Nest nest;
+        nest.n = n;
+        Row sum(n + 1, -1);
+        sum[n] = 9;
+        nest.ge.push_back(sum);
+        for (unsigned j = 0; j < n; ++j) {
+          Row r(n + 1, 0);
+          r[j] = 1;
+          nest.ge.push_back(r);
+        }
+        Row c0(n + 1, 0), c1(n + 1, 0);
+        c0[0] = 1;
+        c1[1] = 1;
+        nest.c = {c0, c1};
+        Budget budget;
+        const KernelCosetWorkResult r = analyze(nest, budget);
+        if (verify(r.verdict == V::ExactImage && r.outputRank == 2 &&
+                       r.outputImage->containsPoint(Point{4, 5}) &&
+                       !r.outputImage->containsPoint(Point{5, 5}) &&
+                       budget.counters().eliminations == kappa &&
+                       budget.counters().emptinessQueries == 1,
+                   "F-KC-5c-1: kappa 32 asks one query, over two variables"))
+          return 1;
+      }
+      // A dense C row costs little, so it does not limit kappa either: C[i + k_1 + ...
+      // + k_31] touches 32 columns. Each kernel direction moves two loops of the row
+      // k_1 + ... + k_31 <= i, which then reads 2, so this one is refused later: the
+      // point is that the basis ran, not that the proof did.
+      {
+        const unsigned n = 32;
+        Nest nest = simplexNest(n - 1, 9);
+        nest.c = {Row(n + 1, 1)};
+        nest.c[0][n] = 0;
+        Budget budget;
+        const KernelCosetWorkResult r = analyze(nest, budget);
+        if (verify(r.kernelRank == n - 1 && r.reducedDomain.has_value() &&
+                       !r.outputImage,
+                   "F-KC-5c-1: a C row over 32 loops passes the basis gate"))
+          return 1;
+      }
+      // Past the default size only the resource limits stop it, and they name a
+      // resource, not kappa.
+      const Nest nest = simplexNest(96, 9);
+      Budget narrow;
+      const KernelCosetWorkResult stopped = analyze(nest, narrow);
+      if (verify(stopped.verdict == V::LimitReached &&
+                     narrow.refusedBy() != Limit::None,
+                 "F-KC-5c-1: kappa 96 is stopped by a resource at the defaults"))
+        return 1;
+      Limits raised;
+      raised.maxMatrixCells = 1 << 16;
+      raised.maxSystemCells = 1 << 16;
+      Budget wide(raised);
+      const KernelCosetWorkResult r = analyze(nest, wide);
+      if (verify(r.verdict == V::ExactImage &&
+                     wide.counters().eliminations == 96,
+                 "F-KC-5c-1: and is exact once the caller raises it"))
+        return 1;
+    }
+
+    // ---- Repeated analysis ---------------------------------------------------
+    {
+      auto rowsOf = [](const std::optional<IntegerPolyhedron> &P) {
+        std::vector<std::vector<std::int64_t>> rows;
+        if (!P)
+          return rows;
+        for (unsigned r = 0; r < P->getNumInequalities(); ++r) {
+          std::vector<std::int64_t> row;
+          for (const DynamicAPInt &v : P->getInequality(r))
+            row.push_back(static_cast<std::int64_t>(v));
+          rows.push_back(row);
+        }
+        for (unsigned r = 0; r < P->getNumEqualities(); ++r) {
+          std::vector<std::int64_t> row{-1};
+          for (const DynamicAPInt &v : P->getEquality(r))
+            row.push_back(static_cast<std::int64_t>(v));
+          rows.push_back(row);
+        }
+        return rows;
+      };
+      bool same = true;
+      std::vector<Nest> nests;
+      for (const Named &e : exact)
+        nests.push_back(e.nest);
+      nests.push_back(parabola(13));
+      for (const Nest &nest : nests) {
+        const IntegerPolyhedron D = domainOf(nest);
+        const std::optional<IntegerPolyhedron> before(D);
+        Budget b0, b1;
+        const KernelCosetWorkResult r0 = analyzeKernelCosetWork(
+            linearPart(nest.c, nest.n), D, nest.n, b0);
+        const KernelCosetWorkResult r1 = analyzeKernelCosetWork(
+            linearPart(nest.c, nest.n), D, nest.n, b1);
+        same = same && r0.verdict == r1.verdict && r0.why == r1.why &&
+               r0.eliminations.size() == r1.eliminations.size() &&
+               rowsOf(r0.outputImage) == rowsOf(r1.outputImage) &&
+               rowsOf(r0.reducedDomain) == rowsOf(r1.reducedDomain) &&
+               r0.U == r1.U && b0.refusedBy() == b1.refusedBy() &&
+               b0.counters().generatedRows == b1.counters().generatedRows &&
+               b0.counters().emptinessQueries == b1.counters().emptinessQueries;
+        for (std::size_t s = 0; same && s < r0.eliminations.size(); ++s)
+          same = r0.eliminations[s].col == r1.eliminations[s].col &&
+                 r0.eliminations[s].predictedRows ==
+                     r1.eliminations[s].predictedRows &&
+                 r0.eliminations[s].actualRows == r1.eliminations[s].actualRows;
+        // The source domain is the caller's, and stays as it was.
+        same = same && rowsOf(before) == rowsOf(std::optional<IntegerPolyhedron>(D));
+      }
+      if (verify(same, "F-KC-5c-1: repeated analysis is identical, D untouched"))
+        return 1;
+    }
+
+    // ---- Random nests, kappa 1 to 4, against the enumeration -------------------
+    {
+      std::mt19937 gen(5100);
+      auto pick = [&](std::int64_t a, std::int64_t b) {
+        return a + static_cast<std::int64_t>(gen() % std::uint64_t(b - a + 1));
+      };
+      std::array<std::array<unsigned, 5>, 5> seen{};
+      bool truthful = true, predicted = true;
+      unsigned reduced = 0, reducedTwice = 0;
+      std::string first;
+      for (unsigned trial = 0; trial < 1200; ++trial) {
+        const unsigned kappa = 1 + trial % 4;
+        const unsigned rho = kappa >= 3 ? 1 : 1 + (trial / 4) % 2;
+        const unsigned n = kappa + rho;
+        const std::int64_t top = n >= 4 ? 2 : 3;
+        Nest nest;
+        nest.n = n;
+        std::tie(nest.lo, nest.hi) = span(n, -1, top + 1);
+        for (unsigned j = 0; j < n; ++j) {
+          Row lower(n + 1, 0), upper(n + 1, 0);
+          lower[j] = 1;
+          upper[j] = -1;
+          upper[n] = top;
+          nest.ge.push_back(lower);
+          nest.ge.push_back(upper);
+        }
+        for (std::int64_t r = pick(1, 4); r > 0; --r) {
+          Row row(n + 1, 0);
+          for (unsigned j = 0; j < n; ++j)
+            row[j] = pick(0, 2) == 0 ? 0 : (pick(0, 5) == 0 ? pick(-2, 2) : pick(-1, 1));
+          row[n] = pick(0, 5);
+          nest.ge.push_back(row);
+        }
+        if (pick(0, 4) == 0) {
+          Row row(n + 1, 0);
+          for (unsigned j = 0; j < n; ++j)
+            row[j] = pick(-1, 1);
+          row[n] = pick(-2, 2);
+          nest.eq.push_back(row);
+        }
+        for (unsigned i = 0; i < rho; ++i) {
+          Row c(n + 1, 0);
+          c[i] = 1;
+          if (pick(0, 3) == 0)
+            c[(i + rho) % n] = pick(-1, 1);
+          c[n] = pick(0, 2);
+          nest.c.push_back(c);
+        }
+        Row a(n + 1, 0), b(n + 1, 0);
+        for (unsigned j = 0; j < n; ++j) {
+          a[j] = pick(-1, 1);
+          b[j] = pick(-1, 1);
+        }
+        nest.a = {a};
+        nest.b = {b};
+        Budget budget;
+        const KernelCosetWorkResult r = analyze(nest, budget);
+        ++seen[kappa][static_cast<unsigned>(r.verdict)];
+        if (r.verdict == V::ExactImage || r.verdict == V::Empty)
+          if (!matchesEnumeration(nest, r) && truthful) {
+            truthful = false;
+            first = "trial " + std::to_string(trial);
+          }
+        for (const KernelCosetEliminationStep &s : r.eliminations)
+          predicted = predicted && s.actualRows <= s.predictedRows;
+        if (r.verdict != V::ExactImage && r.outputImage)
+          truthful = false;
+
+        // Again with no room to grow, so that the steps run through reductions.
+        Limits tight;
+        tight.maxSystemRows = domainOf(nest).getNumConstraints();
+        Budget squeezed(tight);
+        const KernelCosetWorkResult q = analyze(nest, squeezed);
+        reduced += squeezed.counters().reductions != 0;
+        reducedTwice += squeezed.counters().reductions >= 2;
+        if (q.verdict == V::ExactImage && !matchesEnumeration(nest, q) && truthful) {
+          truthful = false;
+          first = "squeezed trial " + std::to_string(trial);
+        }
+      }
+      if (!truthful)
+        std::cerr << first << "\n";
+      if (verify(truthful, "F-KC-5c-1: 1200 random nests match the enumeration"))
+        return 1;
+      if (verify(reduced >= 200 && reducedTwice >= 10,
+                 "F-KC-5c-1: and so do they through reductions"))
+        return 1;
+      if (verify(predicted, "F-KC-5c-1: no elimination exceeded its prediction"))
+        return 1;
+      bool covered = true;
+      for (unsigned kappa = 1; kappa <= 4; ++kappa) {
+        std::cout << "  kappa " << kappa << ": exact "
+                  << seen[kappa][unsigned(V::ExactImage)] << ", empty "
+                  << seen[kappa][unsigned(V::Empty)] << ", not certified "
+                  << seen[kappa][unsigned(V::NotCertified)] << ", limit "
+                  << seen[kappa][unsigned(V::LimitReached)] << "\n";
+        covered = covered && seen[kappa][unsigned(V::ExactImage)] >= 100;
+      }
+      if (verify(covered, "F-KC-5c-1: the random nests exercise each kappa"))
+        return 1;
+    }
+    std::cout << "Phase F-KC-5c-1 work limit tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
