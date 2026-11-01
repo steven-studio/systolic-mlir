@@ -247,14 +247,20 @@ def _kc_split_results(s):
     return [p.strip() for p in parts]
 
 
-def kernel_coset_macs(text):
+def kernel_coset_macs(text, trace=None):
     """Interpret the kernel-coset emission; return (static matmul_tile ops,
     [(A_addr, B_addr, C_addr)] expanded over every loop iteration).
 
     Handles both the Kdev==1 (M4b.2a) and the Kdev>1 (M4b.2b) IR: affine.for
     with an optional `step`, affine.if over an integer set (full-block vs
     remainder), rank-generic memref load/store, and position-keyed 1xK / Kx1
-    gather slabs so a matmul_tile(1,1,K) reads the right K physical points."""
+    gather slabs so a matmul_tile(1,1,K) reads the right K physical points.
+
+    Phase M5b-2 (additive, default off): when `trace` is a dict, every load
+    from and store to a SOURCE memref is appended to trace['load'] /
+    trace['store'] as (role, linear address) with role 0 = C, 1 = A, 2 = B
+    (in execution order; an out-of-bounds index asserts), so a caller can
+    check the exact set and count of C read-modify-write visits."""
     maps = {}
     for m in re.finditer(r'(#\w+) = affine_map<\(([^)]*)\) -> \((.*)\)>', text):
         maps[m[1]] = _kc_split_results(m[3])
@@ -394,7 +400,10 @@ def kernel_coset_macs(text):
             m = re.match(r'(%\w+) = memref.load (%\w+)\[(.*?)\] :', line)
             if m:
                 idxs = [integer(x) for x in m[3].split(',')] if m[3].strip() else []
-                scalars[m[1]] = addr(views.get(m[2], ('src', m[2])), idxs)
+                view = views.get(m[2], ('src', m[2]))
+                scalars[m[1]] = addr(view, idxs)
+                if trace is not None and view[0] != 'slab':
+                    trace.setdefault('load', []).append(scalars[m[1]])
                 continue
             m = re.match(r'memref.store (%\w+), (%\w+)\[(.*?)\] :', line)
             if m:
@@ -404,6 +413,9 @@ def kernel_coset_macs(text):
                     idxs = [integer(x) for x in m[3].split(',')]
                     packed[(name, off + sum(i * s for i, s in zip(idxs, strides)))] \
                         = scalars[m[1]]
+                elif trace is not None:
+                    idxs = [integer(x) for x in m[3].split(',')] if m[3].strip() else []
+                    trace.setdefault('store', []).append(addr(tgt, idxs))
                 continue
             m = re.match(r'(%\w+) = bufferization.to_tensor (%\w+)', line)
             if m:

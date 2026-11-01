@@ -7,6 +7,7 @@
 #include "Systolic/KernelCosetLowering.h"
 
 #include "Systolic/RankPartitionKernelCoset.h"
+#include "Systolic/RankPartitionKernelCosetImage.h"
 #include "Systolic/SystolicTilePlan.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -133,18 +134,38 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   }
 
   // ---- Kernel-coset plans (M0-M4b.1; no enumeration) -------------------
-  auto scan =
+  // A rank-one image takes the committed M1-counted scan plan (its emission is
+  // unchanged). Phase M5b-2: when that plan is UNKNOWN and the physical C has
+  // rank >= 2, the exact symbolic output scan (RankPartitionKernelCosetImage.h,
+  // Phase M5b-1) supplies the SAME fiber plan and tile bounds plus certified
+  // per-level output (and peel) faces; a rank-one image the M1 count cannot
+  // certify stays UNKNOWN exactly as before.
+  std::optional<klogical::KernelCosetScanPlan> scan =
       klogical::buildKernelCosetScanPlan(access[2], stmt.sourceDomain, n);
-  if (!scan) {
-    why = "kernel-coset scan plan UNKNOWN (kappa>2, non-contiguous image, "
-          "rank-deficient reduction, or unbounded)";
-    return failure();
+  std::optional<klogical::KernelCosetOutputScan> image;
+  std::optional<klogical::KernelCosetTileBounds> tb;
+  if (scan) {
+    tb = klogical::buildKernelCosetTileBounds(*scan);
+  } else {
+    std::string imageWhy;
+    if (auto kb = klogical::buildIntegerKernelBasis(access[2], n);
+        kb && kb->outputRank >= 2)
+      image = klogical::buildKernelCosetOutputScan(access, stmt.sourceDomain, n,
+                                                   imageWhy);
+    if (!image) {
+      why = "kernel-coset scan plan UNKNOWN (kappa>2, non-contiguous image, "
+            "rank-deficient reduction, or unbounded)";
+      if (!imageWhy.empty())
+        why += "; exact output scan (Phase M5b-2): " + imageWhy;
+      return failure();
+    }
+    scan = image->scan;
+    tb = image->tile;
   }
   if (scan->innerStride != 1) {
     why = "non-unit tile stride is out of M4b.2a scope";
     return failure();
   }
-  auto tb = klogical::buildKernelCosetTileBounds(*scan);
   if (!tb || !tb->exact) {
     why = "exact kernel-coset tile bounds UNKNOWN (congruence, pinned tile, "
           "unbounded axis, or overflow)";
@@ -154,6 +175,17 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
     why = "non-unit inner tile stride is out of M4b.2a scope";
     return failure();
   }
+  // Phase M5b-2 (finding F3): an EMPTY source domain (a zero-trip loop nest,
+  // a contradictory guard) has no output at all, yet the constant bounds MLIR
+  // reports for an infeasible system are meaningless: the committed path built
+  // output loops from them and read-modify-wrote C at addresses the source
+  // never touches (out of bounds for the det-9 base with k in [5, 5)). The M1
+  // count is 0 here and the exact output scan declines it; refuse, IR untouched.
+  if (scan->fiber.reducedDomain.isIntegerEmpty()) {
+    why = "empty source domain (zero-trip loop nest): nothing to offload -- "
+          "refused, fail closed (Phase M5b-2, finding F3)";
+    return failure();
+  }
   // Phase M5b-0 (finding F1): the output and peel loops below run over the
   // exact integer BOXES of their coordinates, which enforce a parameter-only
   // constraint of D' only when it involves a single coordinate. A constraint
@@ -161,10 +193,20 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   // chambers outside D' executing their tile interval -- MACs the source never
   // performs, reading A/B out of bounds. No IR can express it in this phase:
   // refuse, fail closed, source IR untouched.
-  if (!tb->feasibilityBoxImplied) {
+  if (!image && !tb->feasibilityBoxImplied) {
     why = "a parameter-only constraint of the reduced domain couples the output "
           "and peel coordinates (or is infeasible); the box-bounded peel loop "
           "cannot express it -- refused, fail closed (Phase M5b-0)";
+    return failure();
+  }
+  // Phase M5b-2: with certified exact output levels, the (peel, tile) nest
+  // executes exactly the fiber of every output when the peel level has exact
+  // faces (every parameter-only constraint is then a face of some level) or
+  // when every parameter-only constraint is box-implied. Otherwise refuse.
+  if (image && !image->fiberScanExact) {
+    why = "a parameter-only constraint of the reduced domain couples the output "
+          "and peel coordinates and the peel level has no certified exact "
+          "faces -- refused, fail closed (Phase M5b-2)";
     return failure();
   }
 
@@ -298,6 +340,86 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   AffineMap lbMap = AffineMap::get(numParams, 0, lbExprs, ctx);
   AffineMap ubMap = AffineMap::get(numParams, 0, ubExprs, ctx);
 
+  // Phase M5b-2: the output and peel LEVEL loops of the exact symbolic output
+  // scan, prebuilt (no IR yet) so an i64 overflow declines before emission. A
+  // level with no enclosing parameter folds its faces to exact constants; a
+  // dependent level gets max/min maps of its ceil/floor faces over the IVs of
+  // the enclosing levels (dim i <-> paramCols[i]), like the tile loop.
+  struct LevelLoop {
+    unsigned col = 0;
+    SmallVector<unsigned> paramCols;
+    bool constant = true;
+    int64_t lo = 0, hi = -1;
+    AffineMap lb, ub;
+  };
+  auto buildLevel = [&](const klogical::KernelCosetScanLevel &lvl,
+                        LevelLoop &out) -> LogicalResult {
+    out.col = lvl.col;
+    out.paramCols.assign(lvl.paramCols.begin(), lvl.paramCols.end());
+    const unsigned np = static_cast<unsigned>(lvl.paramCols.size());
+    if (np == 0) {
+      auto iv = klogical::scanLevelInterval(lvl, llvm::ArrayRef<int64_t>());
+      if (!iv)
+        return failure();
+      auto lo = bigToI64(iv->first), hi = bigToI64(iv->second);
+      if (!lo || !hi || *hi < *lo ||
+          *hi == std::numeric_limits<int64_t>::max())
+        return failure(); // empty or unrepresentable outermost level.
+      out.constant = true;
+      out.lo = *lo;
+      out.hi = *hi;
+      return success();
+    }
+    SmallVector<unsigned> cols(np);
+    for (unsigned i = 0; i < np; ++i)
+      cols[i] = i;
+    SmallVector<AffineExpr> lbs, ubs;
+    for (const auto &f : lvl.lowerCeil) {
+      auto d = bigToI64(f.divisor);
+      AffineExpr e;
+      if (!d || *d <= 0 || failed(affineRow(f.params, cols, f.constant, np, e)))
+        return failure();
+      lbs.push_back(e.ceilDiv(static_cast<uint64_t>(*d)));
+    }
+    for (const auto &f : lvl.upperFloor) {
+      auto d = bigToI64(f.divisor);
+      AffineExpr e;
+      if (!d || *d <= 0 || failed(affineRow(f.params, cols, f.constant, np, e)))
+        return failure();
+      ubs.push_back(e.floorDiv(static_cast<uint64_t>(*d)) + 1);
+    }
+    if (lbs.empty() || ubs.empty())
+      return failure();
+    out.constant = false;
+    out.lb = AffineMap::get(np, 0, lbs, ctx);
+    out.ub = AffineMap::get(np, 0, ubs, ctx);
+    return success();
+  };
+  SmallVector<LevelLoop> outputLevelLoops, peelLevelLoops;
+  if (image) {
+    for (const auto &lvl : image->outputLevels) {
+      LevelLoop ll;
+      if (failed(buildLevel(lvl, ll))) {
+        why = "integer overflow or empty range in an output level bound";
+        return failure();
+      }
+      outputLevelLoops.push_back(std::move(ll));
+    }
+    for (const auto &lvl : image->peelLevels) {
+      LevelLoop ll;
+      if (failed(buildLevel(lvl, ll))) {
+        why = "integer overflow or empty range in a peel level bound";
+        return failure();
+      }
+      peelLevelLoops.push_back(std::move(ll));
+    }
+    if (outputLevelLoops.size() != outputRank ||
+        peelLevelLoops.size() + 1 != kappa) {
+      why = "kernel-coset output scan level bookkeeping inconsistent";
+      return failure();
+    }
+  }
+
   // Pre-build the A and B physical-address maps over all n reduced coordinates
   // (dim j <-> y-column j), from the pre-validated access*U rows. Both emission
   // paths reuse them, so no address arithmetic can fail during emission.
@@ -312,12 +434,39 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
       abMaps[op].push_back(AffineMap::get(n, 0, e, ctx));
     }
 
-  // Output loops (paramCols[0 .. outputRank-1], constant box bounds).
-  for (unsigned i = 0; i < outputRank; ++i) {
-    auto lp = affine::AffineForOp::create(builder, loc, tb->outerLo[i],
-                                          tb->outerHi[i] + 1, 1);
-    yiv[tb->paramCols[i]] = lp.getInductionVar();
+  // One loop of the exact symbolic output scan (Phase M5b-2): constant bounds
+  // at a parameter-free level, max/min faces over the enclosing IVs otherwise.
+  auto emitLevelLoop = [&](const LevelLoop &ll) -> affine::AffineForOp {
+    affine::AffineForOp lp;
+    if (ll.constant) {
+      lp = affine::AffineForOp::create(builder, loc, ll.lo, ll.hi + 1, 1);
+    } else {
+      SmallVector<Value> operands;
+      for (unsigned c : ll.paramCols)
+        operands.push_back(yiv[c]);
+      lp = affine::AffineForOp::create(builder, loc, operands, ll.lb, operands,
+                                       ll.ub, 1);
+    }
+    yiv[ll.col] = lp.getInductionVar();
     builder.setInsertionPointToStart(lp.getBody());
+    return lp;
+  };
+
+  if (!image) {
+    // Output loops (paramCols[0 .. outputRank-1], constant box bounds): the
+    // rank-one image is exactly its interval (M1 contiguity certificate).
+    for (unsigned i = 0; i < outputRank; ++i) {
+      auto lp = affine::AffineForOp::create(builder, loc, tb->outerLo[i],
+                                            tb->outerHi[i] + 1, 1);
+      yiv[tb->paramCols[i]] = lp.getInductionVar();
+      builder.setInsertionPointToStart(lp.getBody());
+    }
+  } else {
+    // Phase M5b-2: one affine.for per certified output level, in nest order;
+    // the nest visits exactly proj_out(D'), so every physical C address below
+    // is an output the source writes, exactly once.
+    for (const LevelLoop &ll : outputLevelLoops)
+      emitLevelLoop(ll);
   }
 
   // Physical C address (function of the output coordinates only) and the
@@ -345,13 +494,24 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
   // Reduction nest: peel loops (paramCols[outputRank ..], constant box) and the
   // innermost tile loop (exact M4b.1 min/max affine faces).
   affine::AffineForOp redOuter;
-  for (unsigned i = outputRank; i < tb->paramCols.size(); ++i) {
-    auto lp = affine::AffineForOp::create(builder, loc, tb->outerLo[i],
-                                          tb->outerHi[i] + 1, 1);
-    if (i == outputRank)
-      redOuter = lp;
-    yiv[tb->paramCols[i]] = lp.getInductionVar();
-    builder.setInsertionPointToStart(lp.getBody());
+  if (!image) {
+    for (unsigned i = outputRank; i < tb->paramCols.size(); ++i) {
+      auto lp = affine::AffineForOp::create(builder, loc, tb->outerLo[i],
+                                            tb->outerHi[i] + 1, 1);
+      if (i == outputRank)
+        redOuter = lp;
+      yiv[tb->paramCols[i]] = lp.getInductionVar();
+      builder.setInsertionPointToStart(lp.getBody());
+    }
+  } else {
+    // Phase M5b-2: the peel level with its exact faces over the output IVs
+    // (or its constant box when the tile elimination was not certified; then
+    // every parameter-only constraint is box-implied, checked above).
+    for (const LevelLoop &ll : peelLevelLoops) {
+      auto lp = emitLevelLoop(ll);
+      if (!redOuter)
+        redOuter = lp;
+    }
   }
 
   // The tile bound maps bind dim i to paramCols[i].
@@ -507,12 +667,23 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
       memref::LoadOp::create(builder, loc, cSlab, ValueRange{zero, zero});
   memref::StoreOp::create(builder, loc, cNew, store.getMemRef(), cIndex);
 
-  if (report)
+  if (report && !image)
     anchor->emitRemark()
         << "affine GEMM lowered by the experimental symbolic kernel-coset "
            "offload (Phase M4b.2): source MACs="
         << scan->fiber.sourceMACs.str()
         << "; output fibers=" << scan->fiber.outputFibers.str()
+        << "; static K=" << kdev
+        << " device tiles over exact affine tile bounds (K=1 remainder when "
+           "K>1); no source enumeration";
+  if (report && image)
+    anchor->emitRemark()
+        << "affine GEMM lowered by the experimental symbolic kernel-coset "
+           "offload (Phase M5b-2, rank-"
+        << outputRank << " exact symbolic output scan, "
+        << image->outputCertificate << " certificate): source MACs="
+        << (image->sourceMACs ? image->sourceMACs->str() : std::string("UNKNOWN"))
+        << "; output fibers=UNKNOWN (rank>=2 image, not counted)"
         << "; static K=" << kdev
         << " device tiles over exact affine tile bounds (K=1 remainder when "
            "K>1); no source enumeration";
