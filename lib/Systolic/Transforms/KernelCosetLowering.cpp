@@ -154,6 +154,19 @@ LogicalResult mlir::systolic::lowerKernelCosetOffload(
     why = "non-unit inner tile stride is out of M4b.2a scope";
     return failure();
   }
+  // Phase M5b-0 (finding F1): the output and peel loops below run over the
+  // exact integer BOXES of their coordinates, which enforce a parameter-only
+  // constraint of D' only when it involves a single coordinate. A constraint
+  // coupling two coordinates (e.g. 0 <= y0 - y1 <= 3 from C[i+j]) would leave
+  // chambers outside D' executing their tile interval -- MACs the source never
+  // performs, reading A/B out of bounds. No IR can express it in this phase:
+  // refuse, fail closed, source IR untouched.
+  if (!tb->feasibilityBoxImplied) {
+    why = "a parameter-only constraint of the reduced domain couples the output "
+          "and peel coordinates (or is infeasible); the box-bounded peel loop "
+          "cannot express it -- refused, fail closed (Phase M5b-0)";
+    return failure();
+  }
 
   const klogical::IntMatrix &U = scan->fiber.U;
   const std::vector<unsigned> &outputCols = scan->fiber.outputCols;

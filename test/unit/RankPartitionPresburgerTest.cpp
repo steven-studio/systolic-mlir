@@ -15832,6 +15832,356 @@ int main() {
     std::cout << "C4a-sym kernel-coset M4b.1 tile-bound tests passed.\n";
   }
 
+  // ========================================================
+  // Phase M5b-0 (finding F1 of the M5a design review): parameter-only
+  // constraints of D'. An inequality (or equality) of the reduced domain with
+  // ZERO tile coefficient restricts WHICH (output, peel) chambers exist; it is
+  // not a face of the tile axis. The M4b.1 analysis dropped every such
+  // constraint as "captured by the outer box bounds", which is only true for a
+  // constraint on a SINGLE parameter: one COUPLING two parameters (y0 >= y1,
+  // y0 == y1, y0 + 2*y1 <= 9, ...) left tileInterval reporting a non-empty tile
+  // at chambers whose exact D' slice is empty -- phantom MACs.
+  //
+  // Invariant checked here for EVERY parameter tuple p of the outer box,
+  // against an INDEPENDENT brute slice (direct evaluation of every D' row at
+  // (p, t); no Presburger query, no analysis call):
+  //     T_analysis(p) == { t in Z | (p, t) in D' }   as exact integer sets.
+  // Analysis-only; the emitter's fail-closed refusal of coupled parameter-only
+  // constraints is covered by test/Systolic/kernel_coset_feasibility.mlir.
+  // ========================================================
+  {
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using systolic::logical::buildKernelCosetScanPlan;
+    using systolic::logical::buildKernelCosetTileBounds;
+    using systolic::logical::KernelCosetFiberPlan;
+    using systolic::logical::KernelCosetScanPlan;
+    using systolic::logical::KernelCosetTileBounds;
+    using systolic::logical::tileInterval;
+
+    // A reduced domain given directly by its rows over [y_0..y_{n-1}, 1]
+    // (inequalities are a.y + c >= 0, equalities a.y + c == 0).
+    auto domain = [](unsigned n, std::vector<std::vector<std::int64_t>> ineqs,
+                     std::vector<std::vector<std::int64_t>> eqs) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(n, 0, 0));
+      for (auto &r : ineqs)
+        D.addInequality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      for (auto &r : eqs)
+        D.addEquality(llvm::ArrayRef<std::int64_t>(r.data(), r.size()));
+      return D;
+    };
+    auto boxN = [&](unsigned n, std::int64_t hi) {
+      std::vector<std::vector<std::int64_t>> rows;
+      for (unsigned a = 0; a < n; ++a) {
+        std::vector<std::int64_t> lo(n + 1, 0), up(n + 1, 0);
+        lo[a] = 1;
+        up[a] = -1;
+        up[n] = hi;
+        rows.push_back(lo);
+        rows.push_back(up);
+      }
+      return rows;
+    };
+    // The scan plan of a GIVEN D' with U = I: output columns outCols, peel ..
+    // tile columns redCols (outermost first). Mirrors the public plan structs.
+    auto directPlan = [](const IntegerPolyhedron &Dp, unsigned n,
+                         std::vector<unsigned> outCols,
+                         std::vector<unsigned> redCols) {
+      KernelCosetFiberPlan fp(Dp);
+      for (unsigned i = 0; i < n; ++i) {
+        IntRow row(n, BigInt(0));
+        row[i] = BigInt(1);
+        fp.U.push_back(row);
+        fp.Uinv.push_back(row);
+      }
+      fp.outputRank = static_cast<unsigned>(outCols.size());
+      fp.kernelRank = static_cast<unsigned>(redCols.size());
+      fp.outputCols = outCols;
+      fp.reductionCols = redCols;
+      KernelCosetScanPlan sp(fp);
+      sp.peelOrder = redCols;
+      sp.innerStride = 1;
+      return sp;
+    };
+    // Independent brute slice of D' at parameter values pv: every row evaluated
+    // directly at (p, t) for t in [tmin, tmax] (D' has no locals here).
+    auto bruteSlice = [](const IntegerPolyhedron &Dp,
+                         const std::vector<unsigned> &paramCols,
+                         const std::vector<std::int64_t> &pv, unsigned tileCol,
+                         long tmin, long tmax) {
+      std::set<long> out;
+      const unsigned n = Dp.getNumDimVars();
+      for (long t = tmin; t <= tmax; ++t) {
+        std::vector<long> y(n, 0);
+        for (std::size_t i = 0; i < paramCols.size(); ++i)
+          y[paramCols[i]] = pv[i];
+        y[tileCol] = t;
+        auto eval = [&](llvm::ArrayRef<llvm::DynamicAPInt> row) {
+          long s = (long)llvm::int64fromDynamicAPInt(row[n]);
+          for (unsigned d = 0; d < n; ++d)
+            s += (long)llvm::int64fromDynamicAPInt(row[d]) * y[d];
+          return s;
+        };
+        bool ok = true;
+        for (unsigned r = 0; r < Dp.getNumInequalities() && ok; ++r)
+          ok = eval(Dp.getInequality(r)) >= 0;
+        for (unsigned r = 0; r < Dp.getNumEqualities() && ok; ++r)
+          ok = eval(Dp.getEquality(r)) == 0;
+        if (ok)
+          out.insert(t);
+      }
+      return out;
+    };
+    // T_analysis(p) vs T_brute(p) over the whole (2-parameter) outer box.
+    struct Cmp {
+      long chambers = 0, emptyBrute = 0, phantom = 0, missing = 0,
+           mismatched = 0;
+    };
+    auto compare = [&](const KernelCosetScanPlan &scan,
+                       const KernelCosetTileBounds &tb, long tmin, long tmax) {
+      Cmp c;
+      const auto &Dp = scan.fiber.reducedDomain;
+      if (tb.paramCols.size() != 2 || tb.outerLo.size() != 2) {
+        c.mismatched = -1;
+        return c;
+      }
+      for (std::int64_t v0 = tb.outerLo[0]; v0 <= tb.outerHi[0]; ++v0)
+        for (std::int64_t v1 = tb.outerLo[1]; v1 <= tb.outerHi[1]; ++v1) {
+          ++c.chambers;
+          std::vector<std::int64_t> pv = {v0, v1};
+          auto iv = tileInterval(tb, llvm::ArrayRef<std::int64_t>(pv.data(), 2));
+          std::set<long> an;
+          if (iv && iv->first <= iv->second)
+            for (BigInt t = iv->first; t <= iv->second; ++t)
+              an.insert((long)t.convert_to<std::int64_t>());
+          std::set<long> br = bruteSlice(Dp, tb.paramCols, pv, tb.tileCol, tmin, tmax);
+          if (br.empty())
+            ++c.emptyBrute;
+          long ph = 0, mi = 0;
+          for (long t : an)
+            if (!br.count(t))
+              ++ph;
+          for (long t : br)
+            if (!an.count(t))
+              ++mi;
+          c.phantom += ph;
+          c.missing += mi;
+          if (ph || mi)
+            ++c.mismatched;
+        }
+      return c;
+    };
+    auto report = [](const char *name, const Cmp &c) {
+      std::cout << "M5b-0 " << name << ": chambers " << c.chambers
+                << ", empty slices " << c.emptyBrute << ", phantom t-values "
+                << c.phantom << ", missing " << c.missing << ", mismatched chambers "
+                << c.mismatched << "\n";
+    };
+
+    // ---- The cases (all with output y0, peel y1, tile t = column 2). --------
+    // F1 counterexample: 0 <= y0, y1, t <= 3 and y0 >= y1 (output/peel only).
+    auto rowsF1 = boxN(3, 3);
+    rowsF1.push_back({1, -1, 0, 0});
+    auto scanF1 = directPlan(domain(3, rowsF1, {}), 3, {0}, {1, 2});
+    auto tbF1 = buildKernelCosetTileBounds(scanF1);
+    // Parameter-only EQUALITY coupling output and peel: y0 == y1.
+    auto scanEq = directPlan(domain(3, boxN(3, 3), {{1, -1, 0, 0}}), 3, {0}, {1, 2});
+    auto tbEq = buildKernelCosetTileBounds(scanEq);
+    // Axis-aligned parameter-only equality y1 == 2 (the outer box captures it).
+    auto scanEqAx = directPlan(domain(3, boxN(3, 3), {{0, 1, 0, -2}}), 3, {0}, {1, 2});
+    auto tbEqAx = buildKernelCosetTileBounds(scanEqAx);
+    // Negative coefficients and coordinates: -3<=y0<=3, -3<=y1<=0, -4<=t<=4,
+    // y0 + y1 + 2 >= 0 (coupled, no tile), 2t + y0 - y1 + 1 >= 0 (lower face,
+    // ceil of a negative numerator), -t + y1 + 3 >= 0 (upper face).
+    auto scanNeg = directPlan(
+        domain(3, {{1, 0, 0, 3}, {-1, 0, 0, 3}, {0, 1, 0, 3}, {0, -1, 0, 0},
+                   {0, 0, 1, 4}, {0, 0, -1, 4}, {1, 1, 0, 2}, {1, -1, 2, 1},
+                   {0, 1, -1, 3}}, {}),
+        3, {0}, {1, 2});
+    auto tbNeg = buildKernelCosetTileBounds(scanNeg);
+    // Several simultaneously active faces whose active pair changes with the
+    // parameters: t >= 0, t >= y0 - 4, t <= 3, t <= y0 + y1, over
+    // 0<=y0<=6, 0<=y1<=3, plus the coupled parameter-only y0 + 2*y1 <= 9.
+    auto scanMulti = directPlan(
+        domain(3, {{1, 0, 0, 0}, {-1, 0, 0, 6}, {0, 1, 0, 0}, {0, -1, 0, 3},
+                   {0, 0, 1, 0}, {-1, 0, 1, 4}, {0, 0, -1, 3}, {1, 1, -1, 0},
+                   {-1, -2, 0, 9}}, {}),
+        3, {0}, {1, 2});
+    auto tbMulti = buildKernelCosetTileBounds(scanMulti);
+    // F1 through the real pipeline: C[i+j] over the box 0<=i,j,k<4. The HNF
+    // gives U rows [1,-1,0],[0,1,0],[0,0,1] (x0 = y0 - y1 couples output and
+    // peel without the tile), so D' carries 0 <= y0 - y1 <= 3 as parameter-only
+    // inequalities.
+    auto boxD = [&](unsigned n, std::int64_t hi) { return domain(n, boxN(n, hi), {}); };
+    IntMatrix Cij = {{BigInt(1), BigInt(1), BigInt(0)}};
+    auto scanPipe = buildKernelCosetScanPlan(Cij, boxD(3, 3), 3);
+    auto tbPipe = scanPipe ? buildKernelCosetTileBounds(*scanPipe) : std::nullopt;
+    // Existing axis-aligned class (must stay accepted and exact): the committed
+    // skew C[i+j-2k] and the matvec C[i].
+    IntMatrix Cskew = {{BigInt(1), BigInt(1), BigInt(-2)}};
+    auto scanSkew = buildKernelCosetScanPlan(Cskew, boxD(3, 3), 3);
+    auto tbSkew = scanSkew ? buildKernelCosetTileBounds(*scanSkew) : std::nullopt;
+    IntMatrix Cmv = {{BigInt(1), BigInt(0), BigInt(0)}};
+    auto scanMv = buildKernelCosetScanPlan(Cmv, boxD(3, 3), 3);
+    auto tbMv = scanMv ? buildKernelCosetTileBounds(*scanMv) : std::nullopt;
+
+    if (verify(tbF1 && tbF1->exact && tbEq && tbEq->exact && tbEqAx &&
+                   tbEqAx->exact && tbNeg && tbNeg->exact && tbMulti &&
+                   tbMulti->exact && scanPipe && tbPipe && tbPipe->exact &&
+                   scanSkew && tbSkew && tbSkew->exact && scanMv && tbMv &&
+                   tbMv->exact,
+               "M5b-0 all supported cases build exact tile bounds (output y0, "
+               "peel y1, tile t)"))
+      return 1;
+
+    const Cmp cF1 = compare(scanF1, *tbF1, -10, 10);
+    const Cmp cEq = compare(scanEq, *tbEq, -10, 10);
+    const Cmp cEqAx = compare(scanEqAx, *tbEqAx, -10, 10);
+    const Cmp cNeg = compare(scanNeg, *tbNeg, -10, 10);
+    const Cmp cMulti = compare(scanMulti, *tbMulti, -10, 10);
+    const Cmp cPipe = compare(*scanPipe, *tbPipe, -10, 10);
+    const Cmp cSkew = compare(*scanSkew, *tbSkew, -10, 10);
+    const Cmp cMv = compare(*scanMv, *tbMv, -10, 10);
+    report("F1 y0>=y1 (direct D')", cF1);
+    report("equality y0==y1", cEq);
+    report("axis-aligned equality y1==2", cEqAx);
+    report("negative coefficients/coordinates + coupled", cNeg);
+    report("multiple active faces + coupled y0+2y1<=9", cMulti);
+    report("F1 pipeline C[i+j] box4 (HNF U)", cPipe);
+    report("committed skew C[i+j-2k] box4", cSkew);
+    report("matvec C[i] box4", cMv);
+
+    if (verify(cF1.chambers == 16 && cF1.emptyBrute == 6 && cF1.mismatched == 0,
+               "M5b-0 F1 y0>=y1: T_analysis(p) == brute slice for all 16 "
+               "chambers (6 empty), no phantom, no missing"))
+      return 1;
+    if (verify(cEq.chambers == 16 && cEq.emptyBrute == 12 && cEq.mismatched == 0,
+               "M5b-0 parameter-only equality y0==y1: exact for all 16 chambers "
+               "(12 empty)"))
+      return 1;
+    if (verify(cEqAx.chambers == 4 && cEqAx.emptyBrute == 0 &&
+                   cEqAx.mismatched == 0,
+               "M5b-0 axis-aligned equality y1==2: outer box collapses to y1=2, "
+               "4 chambers exact"))
+      return 1;
+    // (the exact integer box of y0 is [-2, 3]: y0 + y1 + 2 >= 0 with y1 <= 0
+    // tightens its lower bound, so 6 x 4 = 24 chambers, 6 of them empty)
+    if (verify(cNeg.chambers == 24 && cNeg.emptyBrute == 6 &&
+                   cNeg.mismatched == 0,
+               "M5b-0 negative coefficients/coordinates + coupled constraint: "
+               "exact for all 24 chambers (6 empty)"))
+      return 1;
+    if (verify(cMulti.chambers == 28 && cMulti.emptyBrute == 4 &&
+                   cMulti.mismatched == 0,
+               "M5b-0 changing active faces + coupled y0+2y1<=9: exact for all "
+               "28 chambers (4 empty)"))
+      return 1;
+    if (verify(cPipe.chambers == 28 && cPipe.emptyBrute == 12 &&
+                   cPipe.mismatched == 0,
+               "M5b-0 F1 pipeline C[i+j]: exact for all 28 chambers (12 empty)"))
+      return 1;
+    if (verify(cSkew.chambers == 52 && cSkew.emptyBrute == 12 &&
+                   cSkew.mismatched == 0 && cMv.chambers == 16 &&
+                   cMv.emptyBrute == 0 && cMv.mismatched == 0,
+               "M5b-0 existing axis-aligned class (skew 52 chambers/12 empty, "
+               "matvec 16/0) stays exact"))
+      return 1;
+
+    // The recorded feasibility constraints: a coupled one (two or more
+    // parameters) is NOT implied by the outer boxes and makes the emitter
+    // refuse (feasibilityBoxImplied == false); the existing axis-aligned class
+    // keeps feasibilityBoxImplied == true (every param-only row of a box D'
+    // under the skew/matvec U constrains a single coordinate).
+    auto coupled = [](const KernelCosetTileBounds &tb) {
+      long c = 0;
+      for (const auto &f : tb.feasibility)
+        if (!f.boxImplied)
+          ++c;
+      return c;
+    };
+    if (verify(!tbF1->feasibilityBoxImplied && coupled(*tbF1) == 1 &&
+                   tbF1->feasibility.size() == 5 && !tbEq->feasibilityBoxImplied &&
+                   coupled(*tbEq) == 1 && tbEqAx->feasibilityBoxImplied &&
+                   !tbNeg->feasibilityBoxImplied && coupled(*tbNeg) == 1 &&
+                   !tbMulti->feasibilityBoxImplied && coupled(*tbMulti) == 1 &&
+                   !tbPipe->feasibilityBoxImplied && coupled(*tbPipe) == 2 &&
+                   tbSkew->feasibilityBoxImplied && tbMv->feasibilityBoxImplied,
+               "M5b-0 feasibility bookkeeping: coupled constraints flagged "
+               "(F1 1 of 5, eq 1, neg 1, multi 1, C[i+j] pipeline 2 = 0<=y0-y1<=3), "
+               "axis-aligned cases box-implied"))
+      return 1;
+
+    // Exact MAC reconstruction for the pipeline case: every analysis tile
+    // point mapped back through x = U*y must be a source iteration, each
+    // exactly once, grouped by physical C (i+j) exactly as the brute source.
+    {
+      std::map<long, std::set<std::vector<long>>> brute, rebuilt;
+      for (long i = 0; i < 4; ++i)
+        for (long j = 0; j < 4; ++j)
+          for (long k = 0; k < 4; ++k)
+            brute[i + j].insert({i, j, k});
+      bool disjoint = true, inBox = true;
+      long reMac = 0;
+      const auto &U = scanPipe->fiber.U;
+      for (std::int64_t v0 = tbPipe->outerLo[0]; v0 <= tbPipe->outerHi[0]; ++v0)
+        for (std::int64_t v1 = tbPipe->outerLo[1]; v1 <= tbPipe->outerHi[1]; ++v1) {
+          std::int64_t pv[2] = {v0, v1};
+          auto iv = tileInterval(*tbPipe, llvm::ArrayRef<std::int64_t>(pv, 2));
+          if (!iv || iv->first > iv->second)
+            continue;
+          for (BigInt t = iv->first; t <= iv->second; ++t) {
+            std::vector<long> y(3, 0);
+            y[tbPipe->paramCols[0]] = v0;
+            y[tbPipe->paramCols[1]] = v1;
+            y[tbPipe->tileCol] = (long)t.convert_to<std::int64_t>();
+            std::vector<long> x(3, 0);
+            for (unsigned s = 0; s < 3; ++s)
+              for (unsigned c = 0; c < 3; ++c)
+                x[s] += (long)U[s][c].convert_to<std::int64_t>() * y[c];
+            for (long v : x)
+              if (v < 0 || v > 3)
+                inBox = false;
+            if (!rebuilt[x[0] + x[1]].insert(x).second)
+              disjoint = false;
+            ++reMac;
+          }
+        }
+      std::cout << "M5b-0 F1 pipeline C[i+j]: reconstructed MACs " << reMac
+                << " (source 64), fibers " << rebuilt.size()
+                << ", all inside the source box: " << (inBox ? "yes" : "NO")
+                << "\n";
+      if (verify(inBox && disjoint && reMac == 64 && rebuilt == brute,
+                 "M5b-0 F1 pipeline C[i+j]: exact 64 MACs / 7 fibers, every "
+                 "point a source iteration exactly once, grouping == brute"))
+        return 1;
+    }
+
+    // Unsupported constraints fail closed (UNKNOWN, no tile bounds).
+    {
+      auto sPin = directPlan(domain(3, boxN(3, 3), {{1, 0, -1, 0}}), 3, {0}, {1, 2});
+      if (verify(!buildKernelCosetTileBounds(sPin).has_value(),
+                 "M5b-0 tile-coefficient equality (t == y0) -> UNKNOWN"))
+        return 1;
+      auto rowsUnb = boxN(3, 3);
+      rowsUnb.erase(rowsUnb.begin() + 3); // drop the upper bound of y1
+      auto sUnb = directPlan(domain(3, rowsUnb, {}), 3, {0}, {1, 2});
+      if (verify(!buildKernelCosetTileBounds(sUnb).has_value(),
+                 "M5b-0 unbounded parameter axis -> UNKNOWN"))
+        return 1;
+      IntegerPolyhedron Dl(PresburgerSpace::getSetSpace(3, 0, 1)); // one local q
+      for (auto &r : boxN(3, 3)) {
+        std::vector<std::int64_t> row = {r[0], r[1], r[2], 0, r[3]};
+        Dl.addInequality(llvm::ArrayRef<std::int64_t>(row.data(), row.size()));
+      }
+      Dl.addEquality(llvm::ArrayRef<std::int64_t>({1, 0, 0, -2, 0})); // y0 = 2q
+      auto sLoc = directPlan(Dl, 3, {0}, {1, 2});
+      if (verify(!buildKernelCosetTileBounds(sLoc).has_value(),
+                 "M5b-0 local (congruence) in D' -> UNKNOWN"))
+        return 1;
+    }
+    std::cout << "Phase M5b-0 parameter-only feasibility tests passed.\n";
+  }
+
   std::cout << "All coordinate relation tests passed.\n";
   return 0;
 }

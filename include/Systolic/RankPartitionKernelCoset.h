@@ -746,9 +746,17 @@ scanTileSlice(const KernelCosetScanPlan &plan,
 // parametric form of count2DChamber's envelope, with the chambers being the
 // regions where a single (lower,upper) face pair is active. The faces are read
 // directly from D' (no projection, no enumeration) and use exact floor/ceil
-// division (correct for negative coefficients). Param-only inequalities are
-// captured by the outer box bounds; a tile-coefficient EQUALITY (pinned/
-// congruence tile) or a local in D' returns UNKNOWN (fail closed) in M4b.1.
+// division (correct for negative coefficients). A constraint of D' with ZERO
+// tile coefficient (a parameter-only inequality or equality) is not a face: it
+// decides WHICH (output, peel) chambers exist at all. Phase M5b-0 (finding F1
+// of the M5a review): every such constraint is recorded as a feasibility
+// constraint and tileInterval reports an EMPTY tile wherever one is violated,
+// so the reported interval equals the exact integer slice of D' at every
+// parameter tuple, empty slices included. Only a constraint on a SINGLE
+// parameter is implied by the exact outer box bounds (`feasibilityBoxImplied`);
+// one coupling two or more parameters (e.g. y0 >= y1 from C[i+j]) is not, and
+// the emitter refuses it. A tile-coefficient EQUALITY (pinned/congruence tile)
+// or a local in D' returns UNKNOWN (fail closed) as in M4b.1.
 //===----------------------------------------------------------------------===//
 
 /// One parametric tile bound: value = ceil((params.p + constant)/divisor) for a
@@ -757,6 +765,21 @@ struct TileBoundFace {
   std::vector<BigInt> params; // coefficients over KernelCosetTileBounds.paramCols
   BigInt constant;
   BigInt divisor;
+};
+
+/// Phase M5b-0: one constraint of D' with zero tile coefficient,
+/// params.p + constant >= 0 (or == 0 when `equality`), over
+/// KernelCosetTileBounds.paramCols. It restricts which (output, peel) chambers
+/// exist and must hold before a tile interval may be considered non-empty.
+/// `boxImplied` is true when the constraint involves at most one parameter (the
+/// exact integer box bounds outerLo/outerHi then already enforce it, or it is a
+/// satisfied constant); a constraint coupling two or more parameters -- or an
+/// infeasible constant -- is NOT implied by the boxes.
+struct TileFeasibilityConstraint {
+  std::vector<BigInt> params; // coefficients over KernelCosetTileBounds.paramCols
+  BigInt constant;
+  bool equality = false;
+  bool boxImplied = false;
 };
 
 /// Exact symbolic bounds of the tile axis over the (output ++ peel) parameters.
@@ -768,6 +791,10 @@ struct KernelCosetTileBounds {
   std::int64_t innerStride = 1;
   std::vector<unsigned> outerCols;         // loop columns = paramCols
   std::vector<std::int64_t> outerLo, outerHi; // exact box bounds of the params
+  // Phase M5b-0: the parameter-only constraints of D' (zero tile coefficient),
+  // and whether every one of them is already implied by the outer boxes.
+  std::vector<TileFeasibilityConstraint> feasibility;
+  bool feasibilityBoxImplied = true;
   bool exact = false;
 };
 
@@ -786,9 +813,11 @@ inline std::optional<BigInt> evalTileFace(const TileBoundFace &f,
 }
 
 /// The exact integer tile interval [lo, hi] at the given parameter values:
-/// lo = max over lower faces of ceil(.), hi = min over upper faces of floor(.).
-/// lo > hi means the tile (and this output+peel chamber) is empty. nullopt on an
-/// arity mismatch or missing bounds.
+/// lo = max over lower faces of ceil(.), hi = min over upper faces of floor(.),
+/// and (Phase M5b-0) EMPTY whenever a parameter-only feasibility constraint of
+/// D' is violated at these parameters -- the chamber is then not in D' at all,
+/// whatever the faces say. lo > hi means the tile (and this output+peel chamber)
+/// is empty. nullopt on an arity mismatch or missing bounds.
 inline std::optional<std::pair<BigInt, BigInt>>
 tileInterval(const KernelCosetTileBounds &tb,
              llvm::ArrayRef<std::int64_t> params) {
@@ -806,6 +835,18 @@ tileInterval(const KernelCosetTileBounds &tb,
     if (!v)
       return std::nullopt;
     hi = hi ? std::min(*hi, *v) : *v;
+  }
+  for (const auto &f : tb.feasibility) {
+    if (f.params.size() != params.size())
+      return std::nullopt;
+    BigInt v = f.constant;
+    for (std::size_t i = 0; i < params.size(); ++i)
+      v += f.params[i] * BigInt(params[i]);
+    if (f.equality ? v != 0 : v < 0) {
+      if (*lo <= *hi)
+        *lo = *hi + 1; // violated: the slice is empty (lo > hi)
+      break;
+    }
   }
   return std::make_pair(*lo, *hi);
 }
@@ -844,13 +885,55 @@ buildKernelCosetTileBounds(const KernelCosetScanPlan &scan) {
     tb.outerLo.push_back(*lo);
     tb.outerHi.push_back(*hi);
   }
+  // Phase M5b-0: a constraint with zero tile coefficient is a parameter-only
+  // feasibility constraint over paramCols (never a face). Every column is
+  // either a parameter or the tile, so no coefficient can be lost; a nonzero
+  // coefficient elsewhere, or i64 overflow, is UNKNOWN.
+  std::vector<bool> isParam(n, false);
+  for (unsigned c : tb.paramCols)
+    if (c < n)
+      isParam[c] = true;
+  auto recordFeasibility = [&](llvm::ArrayRef<llvm::DynamicAPInt> row,
+                               bool equality) -> bool {
+    for (unsigned c = 0; c < n; ++c)
+      if (!isParam[c] && c != tb.tileCol && row[c] != llvm::DynamicAPInt(0))
+        return false;
+    TileFeasibilityConstraint f;
+    f.equality = equality;
+    f.params.assign(tb.paramCols.size(), BigInt(0));
+    unsigned nonzero = 0;
+    for (std::size_t i = 0; i < tb.paramCols.size(); ++i) {
+      auto v = toI64(row[tb.paramCols[i]]);
+      if (!v)
+        return false;
+      f.params[i] = BigInt(*v);
+      if (*v != 0)
+        ++nonzero;
+    }
+    auto c = toI64(row[n]); // constant (0 locals, so col n is the constant)
+    if (!c)
+      return false;
+    f.constant = BigInt(*c);
+    // Implied by the exact integer boxes iff it constrains a single parameter
+    // (getConstantBound64 is at least as tight as any single-variable row of
+    // D'); a constant row is implied only when it already holds.
+    f.boxImplied =
+        nonzero == 1 || (nonzero == 0 && (equality ? *c == 0 : *c >= 0));
+    if (!f.boxImplied)
+      tb.feasibilityBoxImplied = false;
+    tb.feasibility.push_back(std::move(f));
+    return true;
+  };
   // A tile-coefficient equality would pin the tile (degenerate/congruence) ->
-  // out of M4b.1 scope. Param-only equalities are allowed (outer domain).
+  // out of M4b.1 scope. A param-only equality is a feasibility constraint.
   for (unsigned r = 0; r < Dp.getNumEqualities(); ++r) {
-    auto a = toI64(Dp.getEquality(r)[tb.tileCol]);
+    auto row = Dp.getEquality(r);
+    auto a = toI64(row[tb.tileCol]);
     if (!a)
       return std::nullopt;
     if (*a != 0)
+      return std::nullopt;
+    if (!recordFeasibility(row, /*equality=*/true))
       return std::nullopt;
   }
   for (unsigned r = 0; r < Dp.getNumInequalities(); ++r) {
@@ -858,8 +941,14 @@ buildKernelCosetTileBounds(const KernelCosetScanPlan &scan) {
     auto a = toI64(row[tb.tileCol]);
     if (!a)
       return std::nullopt;
-    if (*a == 0)
-      continue; // param-only inequality -> captured by the outer box bounds.
+    if (*a == 0) {
+      // Param-only inequality: a feasibility constraint, not a face. (M4b.1
+      // dropped it as "captured by the outer box bounds", which holds only
+      // for a single-parameter constraint -- finding F1.)
+      if (!recordFeasibility(row, /*equality=*/false))
+        return std::nullopt;
+      continue;
+    }
     TileBoundFace f;
     f.params.assign(tb.paramCols.size(), BigInt(0));
     for (std::size_t i = 0; i < tb.paramCols.size(); ++i) {
