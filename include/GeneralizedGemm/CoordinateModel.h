@@ -184,6 +184,10 @@ struct CandidateReport {
   bool strictNonDegenerate = false;
   // Valid, a box, unit multiplicity, injective views, strictly non-degenerate.
   bool genuine = false;
+  // Valid, a box, unit multiplicity and strictly non-degenerate, with no demand
+  // on the views. A view may ignore an axis: `genuine` is false for that, and
+  // the decomposition is no less valid. Not printed by the G3a report.
+  bool structurallyFull = false;
   // Theorem 2 applies: within injective-view boxes this is the only answer.
   bool uniqueUpToRelabelling = false;
 

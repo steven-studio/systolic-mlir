@@ -322,6 +322,7 @@ void Inspection::classifyResult() {
   bool unit = out.multiplicity == MultiplicityForm::Unit;
   out.genuine = out.decompositionValid && box && unit && injective &&
                 out.strictNonDegenerate;
+  out.structurallyFull = out.decompositionValid && box && unit && out.strictNonDegenerate;
   out.uniqueUpToRelabelling = out.decompositionValid && box && injective;
   if (!out.decompositionValid)
     return;

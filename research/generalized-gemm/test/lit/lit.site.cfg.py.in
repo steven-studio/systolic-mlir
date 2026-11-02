@@ -9,5 +9,6 @@ config.excludes = ["Inputs"]
 config.substitutions.append(("%report", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-report"))
 config.substitutions.append(("%termreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-termination-report"))
 config.substitutions.append(("%coordreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-coordinate-report"))
+config.substitutions.append(("%synthreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-synthesis-report"))
 config.substitutions.append(("FileCheck", "@GG_FILECHECK@"))
 config.substitutions.append((" not ", " @GG_NOT@ "))

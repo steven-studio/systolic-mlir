@@ -14,6 +14,8 @@
 #include "GeneralizedGemm/CanonicalRecovery.h"
 #include "GeneralizedGemm/FiniteDomain.h"
 
+#include "llvm/Support/JSON.h"
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -51,6 +53,9 @@ std::string toJSON(const SemanticProgram &program, const CoordinateResult &resul
 /// A bare table has no domain evidence, so its status stays Unknown. The facts
 /// are the checker's. For oracles over finite mappings.
 std::string tableToJSON(const AccessTable &table, const CoordinateCandidate *candidate);
+
+/// One report, as G3a prints it. G3b adds what it needs beside this.
+llvm::json::Value reportToJSON(const CandidateReport &report);
 
 } // namespace mlir::generalized_gemm
 #endif

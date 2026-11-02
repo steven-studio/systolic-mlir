@@ -47,6 +47,15 @@ struct EnumerationOptions {
   // The value of every argument cell. Obliviousness says it cannot matter; the
   // tests compare two fills to hold that to account.
   uint64_t referenceFill = 0;
+  // G3b. Off by default, and the default output does not change. With this, x
+  // is every integer state variable that is independent of memory and defined at
+  // all events of the group, whether or not an address reads it: a coordinate
+  // need not appear in any access.
+  bool liveStatePoints = false;
+  // G3b. When nonempty, only these points run, each of which must be in the
+  // scope. The certificate is still checked for the whole scope, and the result
+  // is marked as a sample: it is evidence about these points alone.
+  std::vector<std::vector<llvm::APInt>> onlyPoints;
 };
 
 /// Sites sharing one (C, A, B) root triple. A scalar accumulator has no output
@@ -79,7 +88,11 @@ struct DomainEnumeration {
   std::vector<SiteGroup> groups;
   std::vector<PointEvidence> points;
   uint64_t outsideDomain = 0; // Scope points with a negative extent.
+  bool sampled = false;       // Not every point of the scope ran.
 };
+
+/// State variables that no value read from memory can reach.
+std::vector<bool> memoryIndependentState(const SemanticProgram &program);
 
 /// `certificate` may be null: then there is no enumeration.
 DomainEnumeration enumerateDomain(const SemanticProgram &program,

@@ -41,6 +41,8 @@ def evaluate(e, env):
         return (a * b) & MASK
     if op == "%":
         return a % b
+    if op == "/":
+        return a // b
     if op == "sel<":  # (sel<, x, y, then, else)
         return evaluate(e[3] if a < b else e[4], env)
     raise ValueError(op)
@@ -71,7 +73,7 @@ class Emitter:
             self.lines.append(f"{indent}{test} = arith.cmpi ult, {a}, {b} : index")
             self.lines.append(f"{indent}{name} = arith.select {test}, {then}, {other} : index")
             return name
-        mnemonic = {"+": "addi", "-": "subi", "*": "muli", "%": "remui"}[op]
+        mnemonic = {"+": "addi", "-": "subi", "*": "muli", "%": "remui", "/": "divui"}[op]
         self.lines.append(f"{indent}{name} = arith.{mnemonic} {a}, {b} : index")
         return name
 

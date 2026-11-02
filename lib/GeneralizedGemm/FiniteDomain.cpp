@@ -3,6 +3,9 @@
 #include "GeneralizedGemm/CutPaths.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
+#include "llvm/ADT/DenseSet.h"
+
+#include <functional>
 #include <map>
 #include <tuple>
 
@@ -40,6 +43,18 @@ std::vector<SiteGroup> groupSites(const SemanticProgram &program) {
       group.second = site.b.root;
       group.sites = {site.id};
       group.unsupported = "a scalar accumulator has no exact output view";
+      groups.push_back(std::move(group));
+      continue;
+    }
+    // A read of another root makes this C := D + A * B, which is no reduction at
+    // any index.
+    if (site.outputRead->root != site.output->root) {
+      SiteGroup group;
+      group.output = site.output->root;
+      group.first = site.a.root;
+      group.second = site.b.root;
+      group.sites = {site.id};
+      group.unsupported = "the update reads one root and writes another";
       groups.push_back(std::move(group));
       continue;
     }
@@ -140,6 +155,50 @@ bool hasNegativeExtent(const SemanticProgram &program, const std::vector<APInt> 
   return false;
 }
 
+bool hasLoad(Term term, llvm::DenseSet<Term> &seen) {
+  if (!seen.insert(term).second)
+    return false;
+  if (term->op == TermOp::Load)
+    return true;
+  return llvm::any_of(term->args, [&](Term arg) { return hasLoad(arg, seen); });
+}
+
+/// runConcrete, keeping the state at block entry of each event.
+RunResult runKeepingState(const SemanticProgram &program, const EntryState &entry,
+                          const RunLimits &limits,
+                          std::vector<std::vector<std::optional<APInt>>> &states) {
+  RunResult result;
+  auto config = initialConfiguration(program, entry, limits, result.reason);
+  if (!config) {
+    result.status = RunStatus::InvalidEntry;
+    return result;
+  }
+  while (true) {
+    if (config->location == program.exitLocation()) {
+      result.status = RunStatus::Returned;
+      return result;
+    }
+    if (result.steps >= limits.fuel) {
+      result.status = RunStatus::OutOfFuel;
+      result.reason = "fuel exhausted: this proves nothing";
+      return result;
+    }
+    auto before = config->state;
+    StepOutcome step = stepConfiguration(program, entry, *config);
+    if (step.stopped) {
+      result.status = *step.stopped;
+      result.reason = step.reason;
+      return result;
+    }
+    for (MacEvent &event : step.events) {
+      event.step = result.steps;
+      result.events.push_back(std::move(event));
+      states.push_back(before);
+    }
+    ++result.steps;
+  }
+}
+
 class Enumerator {
 public:
   Enumerator(const SemanticProgram &program, const EnumerationOptions &options,
@@ -151,9 +210,13 @@ public:
   }
 
   void enumerate(const Ranges &ranges);
+  void visit(const std::vector<APInt> &point);
 
 private:
-  void visit(const std::vector<APInt> &point);
+  void fillLive(const RunResult &run,
+                const std::vector<std::vector<std::optional<APInt>>> &states,
+                const std::vector<APInt> &point, const DomainEvidence &evidence,
+                PointEvidence &slot);
   void fill(const RunResult &run, const std::vector<APInt> &point,
             const DomainEvidence &evidence, PointEvidence &evidenceOut);
 
@@ -190,6 +253,39 @@ void Enumerator::fill(const RunResult &run, const std::vector<APInt> &point,
           DomainAuthority::make(program, point, evidence, std::move(tables[g]));
 }
 
+void Enumerator::fillLive(const RunResult &run,
+                          const std::vector<std::vector<std::optional<APInt>>> &states,
+                          const std::vector<APInt> &point,
+                          const DomainEvidence &evidence, PointEvidence &slot) {
+  std::vector<bool> independent = memoryIndependentState(program);
+  for (unsigned g = 0; g < out.groups.size(); ++g) {
+    if (!out.groups[g].unsupported.empty())
+      continue;
+    // One list for every site of the group, or x would not mean one thing.
+    std::vector<unsigned> ids;
+    for (const StateVar &s : program.state)
+      if (independent[s.id] && s.sort.kind == Sort::BV)
+        ids.push_back(s.id);
+    for (size_t e = 0; e < run.events.size(); ++e)
+      if (groupOfSite.at(run.events[e].site) == g)
+        llvm::erase_if(ids, [&](unsigned id) { return !states[e][id]; });
+    AccessTable table;
+    table.coordinateNames = ids;
+    table.coordinatesUniform = true;
+    for (size_t e = 0; e < run.events.size(); ++e) {
+      const MacEvent &event = run.events[e];
+      if (groupOfSite.at(event.site) != g)
+        continue;
+      IndexTuple x;
+      for (unsigned id : ids)
+        x.push_back(*states[e][id]);
+      table.add(event.site, event.step, x, event.h, event.hRead, event.f, event.g);
+    }
+    if (!table.events().empty())
+      slot.domains[g] = DomainAuthority::make(program, point, evidence, std::move(table));
+  }
+}
+
 void Enumerator::visit(const std::vector<APInt> &point) {
   if (!parametersInScope(options.scope, point))
     return;
@@ -211,7 +307,10 @@ void Enumerator::visit(const std::vector<APInt> &point) {
   limits.fuel = options.limits.fuel;
   limits.maxCells = options.limits.maxCells;
   limits.maxRecordedConfigurations = 0;
-  RunResult run = runConcrete(program, *entry, limits);
+  std::vector<std::vector<std::optional<APInt>>> states;
+  RunResult run = options.liveStatePoints
+                      ? runKeepingState(program, *entry, limits, states)
+                      : runConcrete(program, *entry, limits);
   evidence.run = run.status;
   DomainEvidence domain = domainEvidenceFromRun(program, *entry, run);
   DomainAdmission admission = admitsClaim(domain, DomainClaim::Coverage);
@@ -219,6 +318,8 @@ void Enumerator::visit(const std::vector<APInt> &point) {
     evidence.reason = run.reason.empty() ? domain.provenance : run.reason;
   } else if (run.events.size() > options.limits.maxEvents) {
     evidence.reason = "the event limit";
+  } else if (options.liveStatePoints) {
+    fillLive(run, states, point, domain, evidence);
   } else {
     fill(run, point, domain, evidence);
   }
@@ -251,6 +352,28 @@ void Enumerator::enumerate(const Ranges &ranges) {
 
 } // namespace
 
+std::vector<bool> memoryIndependentState(const SemanticProgram &program) {
+  std::vector<bool> tainted(program.state.size(), false);
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (const Transition &t : program.transitions)
+      for (const auto &[id, term] : t.assignments) {
+        if (tainted[id])
+          continue;
+        llvm::DenseSet<Term> seen;
+        bool depends = hasLoad(term, seen) || term->sort.kind != Sort::BV ||
+                       containsFloat(term) ||
+                       llvm::any_of(stateSupport(term), [&](unsigned r) { return tainted[r]; });
+        if (depends) {
+          tainted[id] = true;
+          changed = true;
+        }
+      }
+  }
+  tainted.flip();
+  return tainted;
+}
+
 DomainEnumeration enumerateDomain(const SemanticProgram &program,
                                   const TerminationCertificate *certificate,
                                   const EnumerationOptions &options,
@@ -279,7 +402,15 @@ DomainEnumeration enumerateDomain(const SemanticProgram &program,
     return close(GateStatus::Unsupported, "control or an address reads a float");
 
   Ranges ranges = parameterRanges(program, options.scope);
-  if (ranges.points.ugt(options.limits.maxPoints))
+  out.sampled = !options.onlyPoints.empty();
+  if (out.sampled) {
+    if (options.onlyPoints.size() > options.limits.maxPoints)
+      return close(GateStatus::Unknown, "more sample points than the limit");
+    for (const auto &point : options.onlyPoints)
+      if (point.size() != program.parameters.size() ||
+          !parametersInScope(options.scope, point))
+        return close(GateStatus::Unknown, "a sample point is outside the scope");
+  } else if (ranges.points.ugt(options.limits.maxPoints))
     return close(GateStatus::Unknown, "the scope has more points than the limit");
 
   if (!certificate)
@@ -298,7 +429,12 @@ DomainEnumeration enumerateDomain(const SemanticProgram &program,
     return close(GateStatus::Unknown,
                  "the certificate was not accepted: " + outcome.verdict.reason());
 
-  Enumerator(program, options, out).enumerate(ranges);
+  Enumerator enumerator(program, options, out);
+  if (out.sampled)
+    for (const auto &point : options.onlyPoints)
+      enumerator.visit(point);
+  else
+    enumerator.enumerate(ranges);
   return close(GateStatus::Open, "");
 }
 

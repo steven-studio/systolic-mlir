@@ -233,6 +233,8 @@ CoordinateResult recoverCoordinates(const SemanticProgram &program,
   return result;
 }
 
+json::Value reportToJSON(const CandidateReport &report) { return reportJSON(report); }
+
 std::string toJSON(const SemanticProgram &program, const CoordinateResult &result,
                    bool events) {
   const DomainEnumeration &enumeration = result.enumeration;

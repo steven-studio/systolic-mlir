@@ -1153,6 +1153,31 @@ static void testGroups() {
   CHECK(bad.result.reason().find("output_read_differs") != std::string::npos);
   CHECK(!bad.hints.has_value());
 
+  // A read of another root is no reduction at any index, and C0 alone compares
+  // indices. This program was accepted once.
+  Module otherRoot(R"(
+func.func @other(%a: memref<2xi32>, %b: memref<2xi32>, %c: memref<2xi32>, %d: memref<2xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    %x = memref.load %a[%i] : memref<2xi32>
+    %y = memref.load %b[%i] : memref<2xi32>
+    %z = memref.load %d[%i] : memref<2xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<2xi32>
+  }
+  return
+}
+)");
+  SemanticProgram other = otherRoot.import("other", true);
+  CoordinateResult read = recover(other);
+  CHECK(read.enumeration.gate == GateStatus::Unsupported);
+  CHECK(read.enumeration.reason.find("root") != std::string::npos);
+  CHECK(read.enumeration.groups.size() == 1);
+  CHECK(read.points.empty());
+
   // A canonical failure is Unknown with hints: never a refutation of the program.
   Module failing(R"(
 func.func @a_of_k(%a: memref<4xi32>, %b: memref<4x4xi32>, %c: memref<4x4xi32>) {

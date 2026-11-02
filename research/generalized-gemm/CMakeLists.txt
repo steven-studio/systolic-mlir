@@ -81,20 +81,45 @@ add_library(generalized-gemm-candidate-checker STATIC "${GG_LIB_DIR}/CandidateCh
 target_link_libraries(generalized-gemm-candidate-checker PUBLIC generalized-gemm-coordinate-model)
 add_library(generalized-gemm-canonical-recovery STATIC "${GG_LIB_DIR}/CanonicalRecovery.cpp")
 target_link_libraries(generalized-gemm-canonical-recovery PUBLIC generalized-gemm-coordinate-model)
-add_library(generalized-gemm-coordinates STATIC
-  "${GG_LIB_DIR}/FiniteDomain.cpp"
-  "${GG_LIB_DIR}/CoordinateAnalysis.cpp")
+add_library(generalized-gemm-finite-domain STATIC "${GG_LIB_DIR}/FiniteDomain.cpp")
+target_link_libraries(generalized-gemm-finite-domain PUBLIC
+  generalized-gemm-coordinate-model generalized-gemm-checker)
+add_library(generalized-gemm-coordinates STATIC "${GG_LIB_DIR}/CoordinateAnalysis.cpp")
 target_link_libraries(generalized-gemm-coordinates PUBLIC
   generalized-gemm-candidate-checker generalized-gemm-canonical-recovery
-  generalized-gemm-checker)
+  generalized-gemm-finite-domain)
 foreach(target generalized-gemm-coordinate-model generalized-gemm-candidate-checker
-        generalized-gemm-canonical-recovery generalized-gemm-coordinates)
+        generalized-gemm-canonical-recovery generalized-gemm-finite-domain
+        generalized-gemm-coordinates)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
 endforeach()
 
 add_executable(generalized-gemm-coordinate-report CoordinateReport.cpp)
 target_link_libraries(generalized-gemm-coordinate-report PRIVATE
   generalized-gemm-coordinates generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
+# G3b. The grammar and the search can issue nothing: the tier authority links
+# neither of them, and the G3a checker stays the judge of every finite claim.
+add_library(generalized-gemm-tier-checker STATIC
+  "${GG_LIB_DIR}/CoordinateFamily.cpp"
+  "${GG_LIB_DIR}/SymbolicDomain.cpp"
+  "${GG_LIB_DIR}/CoverageSimulation.cpp"
+  "${GG_LIB_DIR}/SymbolicCandidateChecker.cpp")
+target_link_libraries(generalized-gemm-tier-checker PUBLIC
+  generalized-gemm-candidate-checker generalized-gemm-finite-domain)
+add_library(generalized-gemm-synthesis STATIC
+  "${GG_LIB_DIR}/CoordinateGrammar.cpp"
+  "${GG_LIB_DIR}/CoordinateSynthesis.cpp"
+  "${GG_LIB_DIR}/SynthesisAnalysis.cpp")
+target_link_libraries(generalized-gemm-synthesis PUBLIC
+  generalized-gemm-tier-checker generalized-gemm-coordinates)
+foreach(target generalized-gemm-tier-checker generalized-gemm-synthesis)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()
+
+add_executable(generalized-gemm-synthesis-report SynthesisReport.cpp)
+target_link_libraries(generalized-gemm-synthesis-report PRIVATE
+  generalized-gemm-synthesis generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
@@ -133,6 +158,12 @@ target_link_libraries(generalized-gemm-coordinate-test PRIVATE
 add_test(NAME generalized-gemm-coordinates COMMAND generalized-gemm-coordinate-test)
 set_tests_properties(generalized-gemm-coordinates PROPERTIES TIMEOUT 300)
 
+add_executable(generalized-gemm-synthesis-test test/unit/SynthesisTest.cpp)
+target_link_libraries(generalized-gemm-synthesis-test PRIVATE
+  generalized-gemm-synthesis generalized-gemm-termination generalized-gemm-z3)
+add_test(NAME generalized-gemm-synthesis COMMAND generalized-gemm-synthesis-test)
+set_tests_properties(generalized-gemm-synthesis PROPERTIES TIMEOUT 600)
+
 find_program(GG_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_CLANG clang HINTS "$ENV{HOME}/work/clang24-build/bin" NO_DEFAULT_PATH REQUIRED)
@@ -169,6 +200,11 @@ add_test(NAME generalized-gemm-coordinate-programs COMMAND "${Python3_EXECUTABLE
   --programs 120 --seed 1 --jobs 6)
 set_tests_properties(generalized-gemm-coordinate-programs PROPERTIES TIMEOUT 1200)
 
+add_test(NAME generalized-gemm-synthesis-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/synthesis_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
+  --programs 60 --seed 1 --jobs 6)
+set_tests_properties(generalized-gemm-synthesis-programs PROPERTIES TIMEOUT 1500)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
@@ -177,4 +213,5 @@ add_custom_target(check-generalized-gemm
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"
   DEPENDS generalized-gemm-report generalized-gemm-unit generalized-gemm-relational
     generalized-gemm-termination-report generalized-gemm-termination-test
-    generalized-gemm-coordinate-report generalized-gemm-coordinate-test)
+    generalized-gemm-coordinate-report generalized-gemm-coordinate-test
+    generalized-gemm-synthesis-report generalized-gemm-synthesis-test)
