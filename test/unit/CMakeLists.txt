@@ -68,3 +68,9 @@ target_link_libraries(rank-partition-presburger-test PRIVATE
   systolic_fpga_runtime
 )
 mlir_check_all_link_libraries(rank-partition-presburger-test)
+
+# The project-owned exact solver. It links the solver alone, with no MLIR
+# library, so that nothing else can be what answers in this test.
+add_executable(exact-solver-test ExactSolverTest.cpp)
+llvm_update_compile_flags(exact-solver-test)
+target_link_libraries(exact-solver-test PRIVATE SystolicExact)

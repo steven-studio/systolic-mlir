@@ -25,6 +25,7 @@ set(SYSTOLIC_TEST_DEPENDS
   systolic-cost
   systolic-cfront
   systolic-cc
+  exact-solver-test
 )
 
 # An LLVM built in-tree (or the Debian llvm-*-tools packages) exports
