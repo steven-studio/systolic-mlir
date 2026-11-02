@@ -8,12 +8,15 @@ add_library(SystolicExact STATIC
   Certificate.cpp
   Checker.cpp
   Decide.cpp
+  DeltaRational.cpp
   Int.cpp
   Lattice.cpp
   Normalize.cpp
   Provenance.cpp
   Rational.cpp
+  Session.cpp
   System.cpp
+  Tableau.cpp
   Verdict.cpp
 )
 llvm_update_compile_flags(SystolicExact)

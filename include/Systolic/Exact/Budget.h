@@ -31,6 +31,11 @@ struct WorkLimits {
   std::uint64_t maxVariables = 1 << 12;
   /// The largest bit length of an input value or a computed matrix entry.
   unsigned maxCoefficientBits = 1 << 16;
+  /// Rows times columns of a tableau, which is what one Session query holds.
+  std::uint64_t maxTableauCells = std::uint64_t(1) << 24;
+  /// What a Session may hold across all its open scopes, from Session::
+  /// heldCells(). The default is about 2 GB.
+  std::uint64_t maxSessionCells = std::uint64_t(1) << 26;
 };
 
 /// A cooperative request to stop, polled once per charge to a WorkMeter. A

@@ -1,10 +1,12 @@
 //===- Decide.h - The feasibility decision ----------------------*- C++ -*-===//
 //
-// decide() asks whether a System has a point in a Domain. This milestone can
-// answer only what equality elimination and row normalization settle. Anything
-// that survives them is Unknown with reason RequiresSearch: the rational and
-// integer searches are planned and do not exist yet, so such a system says
-// nothing about feasibility.
+// decide() asks whether a System has a point in a Domain. It answers only what
+// equality elimination and row normalization settle. Anything that survives
+// them is Unknown with reason RequiresSearch, which says nothing about
+// feasibility. The rational search is Session.h, which is opt-in and which
+// decide() does not call. The integer search is planned and does not exist yet.
+// decide() does not read strict rows, so a system with one is Unknown with
+// reason UnsupportedConstruct.
 //
 // Contract:
 //   Feasible    the Decision holds a witness in the domain, accepted by the
@@ -53,6 +55,10 @@ struct ExecutionReceipt {
   bool ranLattice = false;
   bool ranNormalize = false;
   bool ranChecker = false;
+  /// Whether this query ran the tableau of the rational solver in Session.h.
+  bool ranTableau = false;
+  /// Pivots of that tableau in this query.
+  std::uint64_t pivots = 0;
 };
 
 class [[nodiscard]] Decision {
@@ -114,7 +120,8 @@ Decision certifyInfeasible(const System &system, Domain domain,
 /// The text whose FNV-1a 64 is ExecutionReceipt::digest. Exact format:
 ///   canonicalText(system), then the lines
 ///   domain=<name> verdict=<name> reason=<name> steps=<n>
-///   stages=<lattice,normalize,checker, or the subset that ran>
+///   stages=<lattice,normalize,tableau,checker, or the subset that ran>
+/// and, when the tableau ran, the line pivots=<n>.
 std::string receiptText(const System &system, const Decision &decision);
 
 /// A text form of the answer: verdict, domain, reason, and the witness or proof.

@@ -3,6 +3,7 @@
 // A System is a list of variables and a list of rows over them:
 //
 //   inequality   expr >= 0
+//   strict       expr > 0
 //   equality     expr == 0
 //   congruence   expr == 0 (mod m), for an integer m >= 1
 //
@@ -12,6 +13,9 @@
 // A congruence is defined over the integers only, as the existence of an
 // integer q with expr = m * q. A rational query on a system with a congruence
 // has no meaning here and answers Unknown.
+//
+// A strict row belongs to the rational solver in Session.h. The checker reads
+// it too. decide() does not, so it answers Unknown on a system that has one.
 //
 // Variable kinds do not change feasibility: every variable is simply a point
 // coordinate, so an existential variable is decided like any other. The kind
@@ -55,6 +59,9 @@ LinearExpr linearExpr(std::initializer_list<std::int64_t> coefficients,
 struct Inequality {
   LinearExpr expr; // expr >= 0
 };
+struct StrictInequality {
+  LinearExpr expr; // expr > 0
+};
 struct Equality {
   LinearExpr expr; // expr == 0
 };
@@ -80,21 +87,26 @@ public:
   static System ofSize(unsigned count);
 
   [[nodiscard]] RowError addInequality(LinearExpr expr);
+  [[nodiscard]] RowError addStrictInequality(LinearExpr expr);
   [[nodiscard]] RowError addEquality(LinearExpr expr);
   [[nodiscard]] RowError addCongruence(LinearExpr expr, Int modulus);
 
   unsigned numVariables() const { return vars.size(); }
   const std::vector<Variable> &variables() const { return vars; }
   const std::vector<Inequality> &inequalities() const { return ineqs; }
+  const std::vector<StrictInequality> &strictInequalities() const {
+    return stricts;
+  }
   const std::vector<Equality> &equalities() const { return eqs; }
   const std::vector<Congruence> &congruences() const { return congs; }
   std::size_t numRows() const {
-    return ineqs.size() + eqs.size() + congs.size();
+    return ineqs.size() + stricts.size() + eqs.size() + congs.size();
   }
 
 private:
   std::vector<Variable> vars;
   std::vector<Inequality> ineqs;
+  std::vector<StrictInequality> stricts;
   std::vector<Equality> eqs;
   std::vector<Congruence> congs;
 };

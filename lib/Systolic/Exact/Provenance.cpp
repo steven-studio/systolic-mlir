@@ -23,6 +23,8 @@ std::atomic<std::uint64_t> latticeRuns{0};
 std::atomic<std::uint64_t> normalizeRuns{0};
 std::atomic<std::uint64_t> checkerRuns{0};
 std::atomic<std::uint64_t> checkerRefusals{0};
+std::atomic<std::uint64_t> rationalChecks{0};
+std::atomic<std::uint64_t> tableauPivots{0};
 } // namespace
 
 void detail::noteExecution(detail::Stage stage) {
@@ -42,6 +44,12 @@ void detail::noteExecution(detail::Stage stage) {
   case detail::Stage::CheckRefused:
     checkerRefusals.fetch_add(1);
     break;
+  case detail::Stage::RationalCheck:
+    rationalChecks.fetch_add(1);
+    break;
+  case detail::Stage::Pivot:
+    tableauPivots.fetch_add(1);
+    break;
   }
 }
 
@@ -49,7 +57,7 @@ const BuildDeclaration &buildDeclaration() {
   static const BuildDeclaration declaration = {
       SolverImplementation::ProjectOwned,
       SolverImplementation::LlvmUpstream,
-      "S1",
+      "S2",
       SYSTOLIC_EXACT_SOURCE_SHA256,
       "ARITHMETIC_ONLY",
       SYSTOLIC_EXACT_PROJECT_COMMIT,
@@ -80,6 +88,8 @@ RuntimeEvidence runtimeEvidence() {
   evidence.normalizeRuns = normalizeRuns.load();
   evidence.checkerRuns = checkerRuns.load();
   evidence.checkerRefusals = checkerRefusals.load();
+  evidence.rationalChecks = rationalChecks.load();
+  evidence.tableauPivots = tableauPivots.load();
   return evidence;
 }
 
@@ -166,6 +176,8 @@ std::string provenanceJson() {
           ", \"normalize_runs\": " + std::to_string(e.normalizeRuns) +
           ", \"checker_runs\": " + std::to_string(e.checkerRuns) +
           ", \"checker_refusals\": " + std::to_string(e.checkerRefusals) +
+          ", \"rational_checks\": " + std::to_string(e.rationalChecks) +
+          ", \"tableau_pivots\": " + std::to_string(e.tableauPivots) +
           "}\n";
   json += "}\n";
   return json;

@@ -8,19 +8,23 @@
 // An infeasibility proof is a derivation of a false row. Each step derives one
 // row over the system's variables, followed by one quotient per congruence,
 // taken in order. It is a list of steps, so a row can be used twice, and each
-// step reads only earlier ones. The last step must be the false row, which is
-// 0 >= c for a negative c. There are three rules:
+// step reads only earlier ones. A row is either closed, as a . x + c >= 0, or
+// strict, as a . x + c > 0. The last step must be a false row with no
+// variables: c >= 0 for a negative c, or c > 0 for c <= 0. There are three
+// rules:
 //
-//   Input     an inequality, or an equality or congruence with either sign.
-//             Congruence i contributes expr - m * q_i == 0.
-//   Combine   a sum of earlier rows with positive integer multipliers. Valid
-//             over the rationals and the integers.
+//   Input     an inequality, a strict inequality, or an equality or congruence
+//             with either sign. Congruence i contributes expr - m * q_i == 0.
+//   Combine   a sum of earlier rows with positive integer multipliers, strict
+//             when any row in it is strict. Valid over the rationals and the
+//             integers.
 //   Tighten   a . x + c >= 0 with g = gcd(a) > 0 becomes
 //             (a / g) . x + floor(c / g) >= 0. Valid over the integers only:
 //             a / g . x is an integer, so it may round. This is the step of
-//             Gomory (1958) and Chvatal (1973).
+//             Gomory (1958) and Chvatal (1973). It takes closed rows only.
 //
-// Combine alone is the Farkas lemma, which S2's conflicts will use unchanged.
+// Combine alone is the Farkas lemma, and it is what a conflict of the rational
+// solver in Session.h is written in.
 // Branching for the integer search is a planned extra rule and does not exist
 // yet; a checker that met one would have to refuse it.
 //
@@ -45,11 +49,11 @@ struct RationalWitness {
 
 /// A row of the system, by kind and index in that kind's list.
 struct RowRef {
-  enum class Kind { Inequality, Equality, Congruence };
+  enum class Kind { Inequality, Equality, Congruence, StrictInequality };
   Kind kind = Kind::Inequality;
   std::size_t index = 0;
-  /// Use the row with its sign flipped. Refused for an inequality, whose
-  /// negation does not follow from it.
+  /// Use the row with its sign flipped. Refused for an inequality or a strict
+  /// inequality, whose negation does not follow from it.
   bool negated = false;
 };
 

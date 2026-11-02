@@ -4,6 +4,7 @@
 #include "Systolic/Exact/Checker.h"
 #include "Systolic/Exact/Lattice.h"
 #include "Systolic/Exact/Normalize.h"
+#include "DecisionGate.h"
 #include "ExecutionCounters.h"
 
 namespace systolic::exact {
@@ -58,6 +59,14 @@ struct DecisionMaker {
     decision.evidence.digest = fnv1a64(receiptText(system, decision));
   }
 
+  static void seal(Decision &decision, const System &system,
+                   const detail::TableauFacts &facts) {
+    decision.evidence.steps = facts.steps;
+    decision.evidence.ranTableau = facts.ranTableau;
+    decision.evidence.pivots = facts.pivots;
+    decision.evidence.digest = fnv1a64(receiptText(system, decision));
+  }
+
 private:
   static Decision rejected(Domain domain) {
     Decision decision = unknown(domain, UnknownReason::CertificateRejected);
@@ -77,6 +86,28 @@ Decision certifyFeasible(const System &system, RationalWitness witness) {
 Decision certifyInfeasible(const System &system, Domain domain,
                            InfeasibilityProof proof) {
   return DecisionMaker::infeasible(system, domain, std::move(proof));
+}
+
+Decision detail::gateWitness(const System &system, RationalWitness witness,
+                             const TableauFacts &facts) {
+  Decision decision = DecisionMaker::feasible(system, std::move(witness));
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
+}
+
+Decision detail::gateProof(const System &system, InfeasibilityProof proof,
+                           const TableauFacts &facts) {
+  Decision decision =
+      DecisionMaker::infeasible(system, Domain::Rational, std::move(proof));
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
+}
+
+Decision detail::gateUnknown(const System &system, UnknownReason reason,
+                             const TableauFacts &facts) {
+  Decision decision = DecisionMaker::unknown(Domain::Rational, reason);
+  DecisionMaker::seal(decision, system, facts);
+  return decision;
 }
 
 std::uint64_t fnv1a64(std::string_view bytes) {
@@ -110,9 +141,15 @@ std::string receiptText(const System &system, const Decision &decision) {
   };
   note(receipt.ranLattice, "lattice");
   note(receipt.ranNormalize, "normalize");
+  note(receipt.ranTableau, "tableau");
   note(receipt.ranChecker, "checker");
   text += stages;
   text += '\n';
+  if (receipt.ranTableau) {
+    text += "pivots=";
+    text += std::to_string(receipt.pivots);
+    text += '\n';
+  }
   return text;
 }
 
@@ -365,6 +402,9 @@ Decision Query::witnessFrom(const std::vector<NormalizedRow> &rows) {
 
 Decision Query::run() {
   if (domain == Domain::Rational && !system.congruences().empty())
+    return unknown(UnknownReason::UnsupportedConstruct);
+  // This pipeline does not read strict rows, and skipping a row is not sound.
+  if (!system.strictInequalities().empty())
     return unknown(UnknownReason::UnsupportedConstruct);
   const WorkLimits &limits = meter.workLimits();
   if (numColumns > limits.maxVariables)

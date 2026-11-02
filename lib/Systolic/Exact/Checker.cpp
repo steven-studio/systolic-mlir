@@ -41,6 +41,9 @@ CheckResult checkWitness(const System &system, const IntegerWitness &witness) {
   for (const Inequality &row : system.inequalities())
     if (evaluate(row.expr, witness.values) < Int(0))
       return refuse("the witness violates an inequality");
+  for (const StrictInequality &row : system.strictInequalities())
+    if (evaluate(row.expr, witness.values) <= Int(0))
+      return refuse("the witness violates a strict inequality");
   for (const Equality &row : system.equalities())
     if (evaluate(row.expr, witness.values) != Int(0))
       return refuse("the witness violates an equality");
@@ -61,6 +64,9 @@ CheckResult checkWitness(const System &system, const RationalWitness &witness) {
   for (const Inequality &row : system.inequalities())
     if (evaluateScaled(row.expr, witness.values, common) < Int(0))
       return refuse("the witness violates an inequality");
+  for (const StrictInequality &row : system.strictInequalities())
+    if (evaluateScaled(row.expr, witness.values, common) <= Int(0))
+      return refuse("the witness violates a strict inequality");
   for (const Equality &row : system.equalities())
     if (evaluateScaled(row.expr, witness.values, common) != Int(0))
       return refuse("the witness violates an equality");
@@ -68,10 +74,12 @@ CheckResult checkWitness(const System &system, const RationalWitness &witness) {
 }
 
 namespace {
-/// a . (x, q) + c, over the system's variables and then the quotients.
+/// a . (x, q) + c, over the system's variables and then the quotients. It is
+/// known to be >= 0, or > 0 when `strict` is set.
 struct Row {
   std::vector<Int> coefficients;
   Int constant{0};
+  bool strict = false;
 };
 } // namespace
 
@@ -87,6 +95,12 @@ static std::optional<Row> inputRow(const System &system, const RowRef &ref,
     if (ref.negated || ref.index >= system.inequalities().size())
       return std::nullopt;
     expr = &system.inequalities()[ref.index].expr;
+    break;
+  case RowRef::Kind::StrictInequality:
+    if (ref.negated || ref.index >= system.strictInequalities().size())
+      return std::nullopt;
+    expr = &system.strictInequalities()[ref.index].expr;
+    row.strict = true;
     break;
   case RowRef::Kind::Equality:
     if (ref.index >= system.equalities().size())
@@ -145,6 +159,7 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
         for (std::size_t j = 0; j < width; ++j)
           row.coefficients[j] += term.multiplier * read.coefficients[j];
         row.constant += term.multiplier * read.constant;
+        row.strict = row.strict || read.strict;
       }
       break;
     case ProofStep::Rule::Tighten: {
@@ -153,6 +168,8 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
       if (step.source >= rows.size())
         return refuse("a tighten step reads a later step");
       const Row &read = rows[step.source];
+      if (read.strict)
+        return refuse("a tighten step reads a strict row");
       const Int g = contentOf(read.coefficients);
       if (g == Int(0))
         return refuse("a tighten step reads a row with no variables");
@@ -169,7 +186,7 @@ CheckResult checkInfeasibility(const System &system, Domain domain,
   for (const Int &c : last.coefficients)
     if (c != Int(0))
       return refuse("the last step still has variables");
-  if (last.constant >= Int(0))
+  if (last.constant > Int(0) || (last.constant == Int(0) && !last.strict))
     return refuse("the last step is not a false row");
   return accept();
 }

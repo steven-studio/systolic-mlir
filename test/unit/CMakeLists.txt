@@ -74,3 +74,8 @@ mlir_check_all_link_libraries(rank-partition-presburger-test)
 add_executable(exact-solver-test ExactSolverTest.cpp)
 llvm_update_compile_flags(exact-solver-test)
 target_link_libraries(exact-solver-test PRIVATE SystolicExact)
+
+# The rational solver, on the same terms.
+add_executable(exact-rational-test ExactRationalTest.cpp)
+llvm_update_compile_flags(exact-rational-test)
+target_link_libraries(exact-rational-test PRIVATE SystolicExact)

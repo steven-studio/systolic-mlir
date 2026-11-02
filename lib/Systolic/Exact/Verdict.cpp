@@ -44,6 +44,8 @@ const char *unknownReasonName(UnknownReason reason) {
     return "bit-limit";
   case UnknownReason::Cancelled:
     return "cancelled";
+  case UnknownReason::TableauLimit:
+    return "tableau-limit";
   case UnknownReason::CertificateRejected:
     return "certificate-rejected";
   }

@@ -25,6 +25,13 @@ RowError System::addInequality(LinearExpr expr) {
   return RowError::None;
 }
 
+RowError System::addStrictInequality(LinearExpr expr) {
+  if (expr.coefficients.size() != vars.size())
+    return RowError::WrongCoefficientCount;
+  stricts.push_back(StrictInequality{std::move(expr)});
+  return RowError::None;
+}
+
 RowError System::addEquality(LinearExpr expr) {
   if (expr.coefficients.size() != vars.size())
     return RowError::WrongCoefficientCount;
@@ -59,6 +66,10 @@ std::string canonicalText(const System &system) {
   text += '\n';
   for (const Inequality &row : system.inequalities()) {
     text += "ge";
+    appendExpr(text, row.expr);
+  }
+  for (const StrictInequality &row : system.strictInequalities()) {
+    text += "gt";
     appendExpr(text, row.expr);
   }
   for (const Equality &row : system.equalities()) {

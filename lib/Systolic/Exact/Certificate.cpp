@@ -33,9 +33,10 @@ std::string canonicalText(const InfeasibilityProof &proof) {
     switch (step.rule) {
     case ProofStep::Rule::Input:
       text += " input ";
-      text += step.row.kind == RowRef::Kind::Inequality ? "ge"
-              : step.row.kind == RowRef::Kind::Equality ? "eq"
-                                                        : "cong";
+      text += step.row.kind == RowRef::Kind::Inequality         ? "ge"
+              : step.row.kind == RowRef::Kind::StrictInequality ? "gt"
+              : step.row.kind == RowRef::Kind::Equality         ? "eq"
+                                                                : "cong";
       text += ' ';
       text += std::to_string(step.row.index);
       text += step.row.negated ? " neg" : " pos";

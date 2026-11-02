@@ -10,7 +10,15 @@
 
 namespace systolic::exact::detail {
 
-enum class Stage { Decide, Lattice, Normalize, Check, CheckRefused };
+enum class Stage {
+  Decide,
+  Lattice,
+  Normalize,
+  Check,
+  CheckRefused,
+  RationalCheck,
+  Pivot,
+};
 
 void noteExecution(Stage stage);
 

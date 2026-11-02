@@ -89,6 +89,10 @@ struct RuntimeEvidence {
   std::uint64_t normalizeRuns = 0;
   std::uint64_t checkerRuns = 0;
   std::uint64_t checkerRefusals = 0;
+  /// Calls of Session::check(), the project-owned rational solver.
+  std::uint64_t rationalChecks = 0;
+  /// Pivots of the project-owned tableau.
+  std::uint64_t tableauPivots = 0;
 };
 
 RuntimeEvidence runtimeEvidence();
