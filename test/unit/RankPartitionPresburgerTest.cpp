@@ -20,6 +20,7 @@
 #include "Systolic/RankPartitionKernelCosetBounds.h"
 #include "Systolic/RankPartitionKernelCosetRanges.h"
 #include "Systolic/RankPartitionKernelCosetBudget.h"
+#include "Systolic/RankPartitionKernelCosetGap.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -18923,6 +18924,1079 @@ int main() {
         return 1;
     }
     std::cout << "Phase F-KC-5c-1 work limit tests passed.\n";
+  }
+
+  // Phase F-KC-5c-2: exact gap certificates. Every decision is compared with an
+  // enumeration of the source nest in plain 64-bit arithmetic, which shares nothing
+  // with the analysis, over every integer output in a box around the true image.
+  {
+    using llvm::DynamicAPInt;
+    using mlir::presburger::IntegerPolyhedron;
+    using mlir::presburger::PresburgerSpace;
+    using Answer = KernelCosetMembership;
+    using Proof = KernelCosetGapProof;
+    using Class = KernelCosetGapClass;
+    using Limit = KernelCosetLimit;
+    using Limits = KernelCosetWorkLimits;
+    using Budget = KernelCosetWorkBudget;
+    using PlanVerdict = KernelCosetGapPlanVerdict;
+    using Row = std::vector<std::int64_t>;
+    using Point = std::vector<std::int64_t>;
+
+    // Rows are over the n loops with the constant last, read as >= 0 and == 0. Each
+    // loop variable lies strictly inside [lo[j], hi[j]].
+    struct Nest {
+      unsigned n = 0;
+      std::vector<Row> ge, eq, c;
+      Point lo, hi;
+    };
+    auto boxed = [](unsigned n, std::int64_t lo, std::int64_t hi) {
+      return std::make_pair(Point(n, lo), Point(n, hi));
+    };
+    auto domainOf = [](const Nest &nest) {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(nest.n, 0, 0));
+      for (const Row &r : nest.ge)
+        D.addInequality(r);
+      for (const Row &r : nest.eq)
+        D.addEquality(r);
+      return D;
+    };
+    auto cRows = [](const Nest &nest) {
+      IntMatrix m;
+      for (const Row &r : nest.c) {
+        IntRow row;
+        for (unsigned j = 0; j < nest.n; ++j)
+          row.push_back(BigInt(r[j]));
+        m.push_back(std::move(row));
+      }
+      return m;
+    };
+    auto evaluate = [](const Row &r, const Point &p) {
+      std::int64_t s = r[p.size()];
+      for (std::size_t j = 0; j < p.size(); ++j)
+        s += r[j] * p[j];
+      return s;
+    };
+    auto forEachPoint = [](const Point &lo, const Point &hi, auto &&visit) {
+      Point p = lo;
+      while (true) {
+        visit(static_cast<const Point &>(p));
+        std::size_t j = 0;
+        for (; j < p.size(); ++j) {
+          if (++p[j] <= hi[j])
+            break;
+          p[j] = lo[j];
+        }
+        if (j == p.size())
+          return;
+      }
+    };
+    auto exact = [](const Point &p) {
+      llvm::SmallVector<DynamicAPInt, 8> out;
+      for (std::int64_t v : p)
+        out.push_back(DynamicAPInt(v));
+      return out;
+    };
+    auto narrow = [](const std::vector<DynamicAPInt> &p) {
+      Point out;
+      for (const DynamicAPInt &v : p)
+        out.push_back(static_cast<std::int64_t>(v));
+      return out;
+    };
+    auto planFor = [&](const Nest &nest, Budget &budget) {
+      return buildKernelCosetGapPlan(cRows(nest), domainOf(nest), nest.n, budget);
+    };
+
+    struct Tally {
+      unsigned members = 0, gaps = 0, outside = 0, unknown = 0, gated = 0, counted = 0;
+      unsigned rational = 0;
+      std::array<unsigned, 8> proofs{};
+    };
+
+    // Is every answer for `plan` true of `nest`? Decide each integer output in a box
+    // three wider than the enumerated image and compare: the projected set, the
+    // witness, the nonempty and empty fibers, and the multiplicity. A gap is an output
+    // in the rational shadow that the enumeration does not reach.
+    auto audit = [&](const Nest &nest, const KernelCosetGapPlan &plan, Budget &budget,
+                     Tally &tally) {
+      const unsigned n = nest.n, rho = plan.outputCols.size();
+      auto mapped = [&](const IntMatrix &m, const Point &p) {
+        Point q(n, 0);
+        for (unsigned i = 0; i < n; ++i)
+          for (unsigned j = 0; j < n; ++j)
+            q[i] += m[i][j].convert_to<std::int64_t>() * p[j];
+        return q;
+      };
+      auto inNest = [&](const Point &x) {
+        for (const Row &r : nest.ge)
+          if (evaluate(r, x) < 0)
+            return false;
+        for (const Row &r : nest.eq)
+          if (evaluate(r, x) != 0)
+            return false;
+        return true;
+      };
+      bool ok = true;
+      std::map<Point, std::vector<Point>> fibers;
+      std::map<Point, std::size_t> byAddress;
+      Point loY, hiY;
+      forEachPoint(nest.lo, nest.hi, [&](const Point &x) {
+        if (!inNest(x))
+          return;
+        for (unsigned j = 0; j < n; ++j)
+          ok = ok && x[j] != nest.lo[j] && x[j] != nest.hi[j];
+        Point address;
+        for (const Row &r : nest.c) {
+          address.push_back(0);
+          for (unsigned j = 0; j < n; ++j)
+            address.back() += r[j] * x[j];
+        }
+        ++byAddress[address];
+        const Point coords = mapped(plan.Uinv, x);
+        ok = ok && mapped(plan.U, coords) == x;
+        Point y, t;
+        for (unsigned c : plan.outputCols)
+          y.push_back(coords[c]);
+        for (unsigned c : plan.kernelCols)
+          t.push_back(coords[c]);
+        fibers[y].push_back(t);
+        if (loY.empty()) {
+          loY = hiY = y;
+        } else {
+          for (unsigned j = 0; j < rho; ++j) {
+            loY[j] = std::min(loY[j], y[j]);
+            hiY[j] = std::max(hiY[j], y[j]);
+          }
+        }
+      });
+      // Outputs and physical C elements correspond one to one, multiplicities too.
+      ok = ok && fibers.size() == byAddress.size();
+      std::vector<std::size_t> sizes, counts;
+      for (const auto &entry : fibers)
+        sizes.push_back(entry.second.size());
+      for (const auto &entry : byAddress)
+        counts.push_back(entry.second);
+      std::sort(sizes.begin(), sizes.end());
+      std::sort(counts.begin(), counts.end());
+      ok = ok && sizes == counts;
+      if (loY.empty())
+        loY = hiY = Point(rho, 0);
+      for (unsigned j = 0; j < rho; ++j) {
+        loY[j] -= 3;
+        hiY[j] += 3;
+      }
+
+      // The rational shadow, which must contain the image.
+      IntegerPolyhedron shadow = plan.reduced;
+      std::vector<unsigned> kernel = plan.kernelCols;
+      std::sort(kernel.rbegin(), kernel.rend());
+      for (unsigned c : kernel)
+        shadow.projectOut(c, 1);
+
+      auto analysis = [&] {
+        Budget own;
+        return analyzeKernelCosetWork(cRows(nest), domainOf(nest), n, own);
+      }();
+
+      forEachPoint(loY, hiY, [&](const Point &y) {
+        const auto found = fibers.find(y);
+        const bool inImage = found != fibers.end();
+        const bool inShadow = shadow.containsPoint(y);
+        ok = ok && (!inImage || inShadow);
+        if (analysis.outputImage)
+          ok = ok && analysis.outputImage->containsPoint(y) == inImage;
+        const std::uint64_t queriesBefore = budget.counters().emptinessQueries;
+        const KernelCosetCandidateResult r =
+            certifyKernelCosetCandidate(plan, exact(y), budget);
+        ++tally.proofs[static_cast<unsigned>(r.proof)];
+        const bool queried = budget.counters().emptinessQueries != queriesBefore;
+        if (r.proof == Proof::LibraryEmpty)
+          ok = ok && queried;
+        if (r.proof == Proof::ConcreteConflict)
+          ok = ok && !queried;
+        if (r.membership == Answer::Unknown) {
+          ++tally.unknown;
+          tally.gated += r.why.rfind("limit reached", 0) == 0;
+          return;
+        }
+        if (r.membership == Answer::Member) {
+          ++tally.members;
+          ok = ok && inImage && r.proof == Proof::Witness;
+          if (!inImage)
+            return;
+          const Point t = narrow(r.kernelWitness), x = narrow(r.sourceWitness);
+          ok = ok && inNest(x) &&
+               std::find(found->second.begin(), found->second.end(), t) !=
+                   found->second.end();
+          if (r.multiplicity) {
+            ++tally.counted;
+            ok = ok && *r.multiplicity == DynamicAPInt(found->second.size());
+          }
+          return;
+        }
+        ok = ok && !inImage;
+        (inShadow ? tally.gaps : tally.outside) += 1;
+        if (r.proof == Proof::Congruence || r.proof == Proof::Inconsistent) {
+          // Check the proof from the rows of D' alone. Every integer z gives a
+          // multiple of m in nu . E * z, and nu . g(y) is not one.
+          const unsigned count = plan.kernelEqualities.size();
+          ok = ok && r.combination.size() == count;
+          const DynamicAPInt zero(0);
+          auto divides = [&](const DynamicAPInt &v) {
+            return r.proof == Proof::Inconsistent ? v == zero
+                                                  : v % r.modulus == zero;
+          };
+          for (unsigned c : plan.kernelCols) {
+            DynamicAPInt total(0);
+            for (unsigned i = 0; i < count; ++i)
+              total += r.combination[i] *
+                       plan.reduced.getEquality(plan.kernelEqualities[i])[c];
+            ok = ok && divides(total);
+          }
+          DynamicAPInt value(0);
+          for (unsigned i = 0; i < count; ++i) {
+            llvm::ArrayRef<DynamicAPInt> row =
+                plan.reduced.getEquality(plan.kernelEqualities[i]);
+            DynamicAPInt g = -row[n];
+            for (unsigned j = 0; j < rho; ++j)
+              g -= row[plan.outputCols[j]] * DynamicAPInt(y[j]);
+            value += r.combination[i] * g;
+          }
+          ok = ok && !divides(value);
+        }
+        if (r.proof == Proof::EmptyInterval) {
+          ok = ok && r.upper < r.lower;
+          // With one free coordinate, read the rational interval off the plan's own
+          // rows: is the largest lower bound at most the smallest upper bound?
+          if (plan.levels.empty() && plan.pivotCols.empty()) {
+            const auto &sys = plan.system;
+            const unsigned constant = sys.P.getNumCols() - 1;
+            std::optional<std::pair<DynamicAPInt, DynamicAPInt>> low, high;
+            for (unsigned i = 0; i < sys.P.getNumInequalities(); ++i) {
+              llvm::ArrayRef<DynamicAPInt> row = sys.P.getInequality(i);
+              DynamicAPInt rest = row[constant], a(0);
+              for (unsigned p = 0; p < sys.cols.size(); ++p) {
+                if (sys.cols[p] == plan.remaining[0])
+                  a = row[p];
+                else
+                  rest += row[p] * DynamicAPInt(y[sys.cols[p]]);
+              }
+              if (a > DynamicAPInt(0)) {
+                if (!low || -rest * low->second > low->first * a)
+                  low = std::make_pair(-rest, a);
+              } else if (a < DynamicAPInt(0)) {
+                if (!high || rest * high->second < high->first * -a)
+                  high = std::make_pair(rest, -a);
+              }
+            }
+            ok = ok && low && high &&
+                 r.rationalGap ==
+                     (low->first * high->second <= high->first * low->second);
+            tally.rational += 1;
+          }
+        }
+      });
+      return ok;
+    };
+
+    // ---- Adversarial lattices ------------------------------------------------
+    struct Named {
+      const char *name;
+      Nest nest;
+      Class cls;
+      bool gapped;
+    };
+    std::vector<Named> lattices;
+    auto add = [&](const char *name, unsigned n, std::vector<Row> ge,
+                   std::vector<Row> eq, std::vector<Row> c, std::int64_t lo,
+                   std::int64_t hi, Class cls, bool gapped) {
+      Nest nest;
+      nest.n = n;
+      nest.ge = std::move(ge);
+      nest.eq = std::move(eq);
+      nest.c = std::move(c);
+      std::tie(nest.lo, nest.hi) = boxed(n, lo, hi);
+      lattices.push_back({name, std::move(nest), cls, gapped});
+    };
+    const std::vector<Row> box29 = {{1, 0, 0}, {-1, 0, 9}, {0, 1, 0}, {0, -1, 9}};
+    add("2i == 3j + 1, output i", 2, box29, {{2, -3, -1}}, {{1, 0}}, -1, 10,
+        Class::Pinned, true);
+    add("2i == 3j + 1, output j", 2, box29, {{2, -3, -1}}, {{0, 1}}, -1, 10,
+        Class::Pinned, true);
+    add("2i == 3j + 1 between two outputs", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 7}, {0, 1, 0, 0}, {0, -1, 0, 7}, {0, 0, 1, 0},
+         {0, 0, -1, 2}},
+        {{2, -3, 0, -1}}, {{1, 0, 0}, {0, 1, 0}}, -1, 8, Class::Interval, false);
+    add("i == 2k", 2, box29, {{1, -2, 0}}, {{1, 0}}, -1, 10, Class::Pinned, true);
+    add("2i + 4k == 6", 2, {{1, 0, 3}, {-1, 0, 7}, {0, 1, 3}, {0, -1, 7}},
+        {{2, 4, -6}}, {{1, 0}}, -4, 8, Class::Pinned, true);
+    add("2i + 3j - k == 5, outputs i, j", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 3}, {0, 1, 0, 0}, {0, -1, 0, 3}, {0, 0, 1, 0},
+         {0, 0, -1, 6}},
+        {{2, 3, -1, -5}}, {{1, 0, 0}, {0, 1, 0}}, -1, 16, Class::Pinned, false);
+    add("2i + 3j - k == 5, output i", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 5}, {0, 1, 0, 0}, {0, -1, 0, 3}, {0, 0, 1, 0},
+         {0, 0, -1, 9}},
+        {{2, 3, -1, -5}}, {{1, 0, 0}}, -1, 16, Class::Interval, false);
+    add("2i + 3j == k, the semigroup hole at 1", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 4}, {0, 1, 0, 0}, {0, -1, 0, 4}, {0, 0, 1, 0},
+         {0, 0, -1, 20}},
+        {{2, 3, -1, 0}}, {{0, 0, 1}}, -1, 21, Class::Interval, true);
+    add("3k <= i <= 3k + 1", 2,
+        {{1, 0, 0}, {-1, 0, 12}, {0, 1, 0}, {0, -1, 4}, {1, -3, 0}, {-1, 3, 1}}, {},
+        {{1, 0}}, -1, 13, Class::Interval, true);
+    add("2k <= i <= 2k, as two rows", 2,
+        {{1, 0, 0}, {-1, 0, 9}, {0, 1, 0}, {0, -1, 4}, {1, -2, 0}, {-1, 2, 0}}, {},
+        {{1, 0}}, -1, 10, Class::Interval, true);
+    add("-2k + 5 >= i, 3k >= i - 7, negative values", 2,
+        {{1, 0, 6}, {-1, 0, 6}, {0, 1, 6}, {0, -1, 6}, {-1, -2, 5}, {-1, 3, 7}}, {},
+        {{1, 0}}, -7, 7, Class::Interval, false);
+    add("dependent equalities agree", 2, box29, {{1, -2, 0}, {2, -4, 0}}, {{1, 0}}, -1,
+        10, Class::Pinned, true);
+    add("dependent equalities disagree", 2, box29, {{1, -2, 0}, {1, -2, -1}}, {{1, 0}},
+        -1, 10, Class::Pinned, false);
+    add("two equalities leave no parity hole", 5,
+        {{1, 0, 0, 0, 0, 4}, {-1, 0, 0, 0, 0, 6}, {0, 1, 0, 0, 0, 4}, {0, -1, 0, 0, 0, 6},
+         {0, 0, 1, 0, 0, 0}, {0, 0, -1, 0, 0, 3}, {0, 0, 0, 1, 0, 0}, {0, 0, 0, -1, 0, 3},
+         {0, 0, 0, 0, 1, 0}, {0, 0, 0, 0, -1, 3}},
+        {{-1, 0, 1, 1, 1, 0}, {0, -1, 1, -1, 0, 0}}, {{1, 0, 0, 0, 0}, {0, 1, 0, 0, 0}},
+        -5, 7, Class::Interval, false);
+    add("2a + 3b <= i, a level below the interval", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 9}, {0, 1, 0, 0}, {0, 0, 1, 0}, {1, -2, -3, 0}}, {},
+        {{1, 0, 0}}, -1, 10, Class::Interval, false);
+    add("a + 2b + 3c <= i, kappa 3", 4,
+        {{-1, 0, 0, 0, 7}, {0, 1, 0, 0, 0}, {0, 0, 1, 0, 0}, {0, 0, 0, 1, 0},
+         {1, -1, -2, -3, 0}},
+        {}, {{1, 0, 0, 0}}, -1, 8, Class::Interval, false);
+    add("a + b + c + d <= i, kappa 4", 5,
+        {{-1, 0, 0, 0, 0, 3}, {0, 1, 0, 0, 0, 0}, {0, 0, 1, 0, 0, 0}, {0, 0, 0, 1, 0, 0},
+         {0, 0, 0, 0, 1, 0}, {1, -1, -1, -1, -1, 0}},
+        {}, {{1, 0, 0, 0, 0}}, -1, 4, Class::Interval, false);
+    add("two thin rows over two kernels", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 12}, {0, 1, 0, 0}, {0, -1, 0, 4}, {0, 0, 1, 0},
+         {0, 0, -1, 4}, {-1, 2, 3, 0}, {1, -2, -3, 1}, {0, 3, -2, 2}, {0, -3, 2, 3}},
+        {}, {{1, 0, 0}}, -1, 13, Class::Search, true);
+    add("2a + 3b + 5c == k, a coupled search", 4,
+        {{1, 0, 0, 0, 0}, {-1, 0, 0, 0, 2}, {0, 1, 0, 0, 0}, {0, -1, 0, 0, 2},
+         {0, 0, 1, 0, 0}, {0, 0, -1, 0, 2}, {0, 0, 0, 1, 0}, {0, 0, 0, -1, 20}},
+        {{2, 3, 5, -1, 0}}, {{0, 0, 0, 1}}, -1, 21, Class::Search, true);
+    add("i - j == 2k over the output i + j", 3,
+        {{1, 0, 0, 0}, {-1, 0, 0, 5}, {0, 1, 0, 0}, {0, -1, 0, 5}, {0, 0, 1, 3},
+         {0, 0, -1, 3}},
+        {{1, -1, -2, 0}}, {{1, 1, 0}}, -4, 11, Class::Interval, true);
+    add("an empty domain, a coupled row", 2,
+        {{1, 0, 0}, {-1, 0, 3}, {0, 1, 0}, {0, -1, 3}, {1, 1, -9}}, {}, {{1, 0}}, -1, 4,
+        Class::Interval, false);
+    add("an empty domain, a false constant", 2,
+        {{1, 0, 0}, {-1, 0, 3}, {0, 1, 0}, {0, -1, 3}, {0, 0, -1}}, {}, {{1, 0}}, -1, 4,
+        Class::Interval, false);
+
+    for (const Named &e : lattices) {
+      const std::string label = std::string("F-KC-5c-2: ") + e.name;
+      Budget budget;
+      const KernelCosetGapPlanResult built = planFor(e.nest, budget);
+      if (verify(built.verdict == PlanVerdict::Ready && built.plan.has_value() &&
+                     built.plan->gapClass == e.cls,
+                 (label + ": planned in the expected class").c_str()))
+        return 1;
+      Tally tally;
+      if (verify(audit(e.nest, *built.plan, budget, tally),
+                 (label + ": every answer matches the enumeration").c_str()))
+        return 1;
+      if (verify(tally.unknown == 0, (label + ": nothing is left unknown").c_str()))
+        return 1;
+      if (verify((tally.gaps != 0) == e.gapped,
+                 (label + ": the rational shadow has the expected gaps").c_str()))
+        return 1;
+      const std::uint64_t queries = budget.counters().emptinessQueries;
+      if (verify((queries != 0) == (e.cls == Class::Search),
+                 (label + ": only class Search reaches the library").c_str()))
+        return 1;
+    }
+
+    // Exact facts of the named nests, worked out by hand.
+    auto decide = [&](const char *name, const Point &y) {
+      for (const Named &e : lattices)
+        if (std::string(e.name) == name) {
+          Budget budget;
+          const KernelCosetGapPlanResult built = planFor(e.nest, budget);
+          return certifyKernelCosetCandidate(*built.plan, exact(y), budget);
+        }
+      return KernelCosetCandidateResult();
+    };
+    {
+      auto r = decide("i == 2k", {3});
+      if (verify(r.membership == Answer::NotMember && r.proof == Proof::Congruence &&
+                     r.modulus == DynamicAPInt(2),
+                 "F-KC-5c-2: 3 is not 2k, by a congruence modulo 2"))
+        return 1;
+      r = decide("i == 2k", {6});
+      if (verify(r.proof == Proof::Witness && narrow(r.kernelWitness) == Point{3} &&
+                     r.multiplicity == DynamicAPInt(1),
+                 "F-KC-5c-2: 6 is 2 * 3, with one source point"))
+        return 1;
+      r = decide("i == 2k", {20});
+      if (verify(r.proof == Proof::FalseRow,
+                 "F-KC-5c-2: 20 is even and past the range of k"))
+        return 1;
+      r = decide("2i == 3j + 1, output i", {3});
+      if (verify(r.proof == Proof::Congruence && r.modulus == DynamicAPInt(3),
+                 "F-KC-5c-2: 2 * 3 - 1 is not a multiple of 3"))
+        return 1;
+      r = decide("2i == 3j + 1, output i", {5});
+      if (verify(r.proof == Proof::Witness && narrow(r.kernelWitness) == Point{3},
+                 "F-KC-5c-2: 2 * 5 == 3 * 3 + 1"))
+        return 1;
+      r = decide("2i == 3j + 1, output j", {4});
+      if (verify(r.proof == Proof::Congruence && r.modulus == DynamicAPInt(2),
+                 "F-KC-5c-2: 3 * 4 + 1 is odd"))
+        return 1;
+      r = decide("2i == 3j + 1 between two outputs", {2, 1});
+      if (verify(r.proof == Proof::Witness && r.multiplicity == DynamicAPInt(3),
+                 "F-KC-5c-2: an output on the lattice has three source points"))
+        return 1;
+      r = decide("2i == 3j + 1 between two outputs", {3, 1});
+      if (verify(r.proof == Proof::FalseRow,
+                 "F-KC-5c-2: an output off the lattice fails its own equality"))
+        return 1;
+      r = decide("2i + 3j == k, the semigroup hole at 1", {1});
+      if (verify(r.proof == Proof::EmptyInterval && r.rationalGap,
+                 "F-KC-5c-2: 1 is rational in the semigroup <2, 3> and not integer"))
+        return 1;
+      r = decide("2i + 3j == k, the semigroup hole at 1", {12});
+      if (verify(r.proof == Proof::Witness && r.multiplicity == DynamicAPInt(2),
+                 "F-KC-5c-2: 12 is 2 * 6 + 0 and 2 * 3 + 3 * 2, within the box"))
+        return 1;
+      r = decide("3k <= i <= 3k + 1", {5});
+      if (verify(r.proof == Proof::EmptyInterval && r.rationalGap &&
+                     r.lower == DynamicAPInt(2) && r.upper == DynamicAPInt(1),
+                 "F-KC-5c-2: no integer k has 3k <= 5 <= 3k + 1"))
+        return 1;
+      r = decide("2k <= i <= 2k, as two rows", {3});
+      if (verify(r.proof == Proof::EmptyInterval && r.rationalGap,
+                 "F-KC-5c-2: a rational interval of one point is still a gap"))
+        return 1;
+      r = decide("3k <= i <= 3k + 1", {30});
+      if (verify(r.proof == Proof::FalseRow || r.proof == Proof::EmptyInterval,
+                 "F-KC-5c-2: an output past the domain is refused"))
+        return 1;
+      r = decide("dependent equalities disagree", {4});
+      if (verify(r.proof == Proof::Inconsistent,
+                 "F-KC-5c-2: i == 2k and i == 2k + 1 have no solution anywhere"))
+        return 1;
+      r = decide("two equalities leave no parity hole", {3, 0});
+      if (verify(r.membership == Answer::Member && r.proof == Proof::Witness,
+                 "F-KC-5c-2: c absorbs the parity of a + b and a - b"))
+        return 1;
+      r = decide("a + b + c + d <= i, kappa 4", {2});
+      if (verify(r.proof == Proof::Witness && !r.multiplicity,
+                 "F-KC-5c-2: a fiber of dimension 3 has no closed count here"))
+        return 1;
+      r = decide("two thin rows over two kernels", {0});
+      if (verify(r.membership != Answer::Unknown,
+                 "F-KC-5c-2: class Search decides"))
+        return 1;
+    }
+
+    // ---- What the answers rest on ---------------------------------------------
+    {
+      // The check on the lattice is the only one, so it has to catch a system that is
+      // not triangular: this row has two unknowns.
+      using kernel_coset_gap_detail::solveLattice;
+      const std::vector<std::vector<DynamicAPInt>> H = {
+          {DynamicAPInt(1), DynamicAPInt(1)}, {DynamicAPInt(1), DynamicAPInt(0)}};
+      std::vector<KernelCosetLatticeCondition> pivots, dependent;
+      if (verify(!solveLattice(H, {0, 1}, pivots, dependent),
+                 "F-KC-5c-2: a lattice that is not triangular is refused"))
+        return 1;
+      // No answer is Member unless its witness substitutes: a plan whose source
+      // domain has gone wrong gives Unknown, not a claim.
+      const Nest *evens = nullptr;
+      for (const Named &e : lattices)
+        if (std::string(e.name) == "i == 2k")
+          evens = &e.nest;
+      Budget budget;
+      const KernelCosetGapPlanResult built = planFor(*evens, budget);
+      KernelCosetGapPlan tampered = *built.plan;
+      tampered.source.addInequality(Row{0, 0, -1});
+      const auto r = certifyKernelCosetCandidate(tampered, exact({6}), budget);
+      if (verify(r.membership == Answer::Unknown && r.proof == Proof::None &&
+                     r.kernelWitness.empty() && !r.multiplicity,
+                 "F-KC-5c-2: a witness that fails its substitution is no answer"))
+        return 1;
+      KernelCosetGapPlan otherReduced = *built.plan;
+      otherReduced.reduced.addInequality(Row{0, 0, -1});
+      if (verify(certifyKernelCosetCandidate(otherReduced, exact({6}), budget)
+                         .membership == Answer::Unknown,
+                 "F-KC-5c-2: and so does one that fails in the reduced domain"))
+        return 1;
+    }
+
+    // ---- The LLVM Simplex defect --------------------------------------------
+    {
+      // Rows 0, 2 and 4 say x3 <= -1, and rows 2, 3 and 5 say x3 >= 1, so this is
+      // rationally empty. Constructing a Simplex from it, directly or through
+      // isIntegerEmpty, findIntegerSample or removeRedundantConstraints, does not
+      // return in LLVM 24. These checks finish because nothing here does that.
+      IntegerPolyhedron P(PresburgerSpace::getSetSpace(5, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0, 0, 0, 0},
+                                           {0, -1, 0, 0, 0, 2},
+                                           {0, 0, 1, 0, 0, 0},
+                                           {0, 0, 0, 0, 1, 0},
+                                           {-3, 0, -3, -1, 0, -1},
+                                           {0, 0, -1, 1, -1, -1}})
+        P.addInequality(r);
+      P.addEquality(Row{0, -2, -2, 3, 3, 3});
+      P.addEquality(Row{-2, 2, -1, -1, 0, 1});
+      if (verify(kernel_coset_gap_detail::rationallyEmpty(P),
+                 "F-KC-5c-2: rows stop at the first that empties the tableau"))
+        return 1;
+      // The same rows with each equality as two inequalities, the order in which
+      // the tenth row is the one that never returns.
+      IntegerPolyhedron rows(PresburgerSpace::getSetSpace(5, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0, 0, 0, 0},
+                                           {0, -1, 0, 0, 0, 2},
+                                           {0, 0, 1, 0, 0, 0},
+                                           {0, 0, 0, 0, 1, 0},
+                                           {-3, 0, -3, -1, 0, -1},
+                                           {0, 0, -1, 1, -1, -1},
+                                           {0, -2, -2, 3, 3, 3},
+                                           {0, 2, 2, -3, -3, -3},
+                                           {-2, 2, -1, -1, 0, 1},
+                                           {2, -2, 1, 1, 0, -1}})
+        rows.addInequality(r);
+      if (verify(kernel_coset_gap_detail::rationallyEmpty(rows),
+                 "F-KC-5c-2: and they stop among the inequalities too"))
+        return 1;
+      // Only the second side of the equality x == 1 contradicts x >= 2.
+      IntegerPolyhedron oneSide(PresburgerSpace::getSetSpace(1, 0, 0));
+      oneSide.addInequality(Row{1, -2});
+      oneSide.addEquality(Row{1, -1});
+      if (verify(kernel_coset_gap_detail::rationallyEmpty(oneSide),
+                 "F-KC-5c-2: both sides of an equality count"))
+        return 1;
+      IntegerPolyhedron reducible = P;
+      if (verify(!kernel_coset_gap_detail::reduceRows(reducible) &&
+                     reducible.getNumConstraints() == 8,
+                 "F-KC-5c-2: a rationally empty system is not reduced"))
+        return 1;
+      Budget budget;
+      const KernelCosetSampleResult sample = gatedFindIntegerSample(P, budget);
+      if (verify(sample.verdict == KernelCosetEmptiness::Empty && sample.queried &&
+                     budget.counters().emptinessQueries == 1,
+                 "F-KC-5c-2: and it never reaches findIntegerSample"))
+        return 1;
+      // This one stalls even in the row order the restriction gives it, so only the
+      // guard around findIntegerSample keeps it away from the library.
+      IntegerPolyhedron restricted(PresburgerSpace::getSetSpace(6, 0, 0));
+      for (const Row &r : std::vector<Row>{{-3, 0, 0, -3, 2, 1, -2},
+                                           {-2, 0, -1, 1, 0, 3, 0},
+                                           {0, 0, 0, 0, -1, -3, 1},
+                                           {1, 0, 0, 0, 0, 0, 0},
+                                           {0, 0, -1, 0, 0, 0, 2},
+                                           {0, 0, 0, 1, 0, 0, 0}})
+        restricted.addInequality(r);
+      restricted.addEquality(Row{0, 0, 0, -2, -1, 3, -2});
+      restricted.addEquality(Row{-2, 3, -2, 3, 0, 1, -2});
+      Budget second;
+      const KernelCosetSampleResult stalled =
+          gatedFindIntegerSample(restricted, second);
+      if (verify(stalled.verdict == KernelCosetEmptiness::Empty && stalled.queried,
+                 "F-KC-5c-2: a stall that survives the restriction is caught too"))
+        return 1;
+      IntegerPolyhedron feasible(PresburgerSpace::getSetSpace(2, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0}, {-1, 0, 1}, {1, -1, 0}, {-1, 1, 0}})
+        feasible.addInequality(r);
+      feasible.addEquality(Row{1, 1, -2});
+      if (verify(!kernel_coset_gap_detail::rationallyEmpty(feasible),
+                 "F-KC-5c-2: a feasible system is not called empty"))
+        return 1;
+      if (verify(kernel_coset_gap_detail::reduceRows(feasible),
+                 "F-KC-5c-2: and it is reduced"))
+        return 1;
+    }
+
+    // ---- Locals: a congruence in the source domain ---------------------------
+    {
+      // i == 2 * q + 1 with q existential, and k <= i: the odd i, k free.
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 1));
+      for (const Row &r : std::vector<Row>{{1, 0, 0, 0},
+                                           {-1, 0, 0, 7},
+                                           {0, 1, 0, 0},
+                                           {1, -1, 0, 0}})
+        D.addInequality(r);
+      D.addEquality(Row{1, 0, -2, -1});
+      Budget budget;
+      const IntMatrix C{{BigInt(1), BigInt(0)}};
+      const KernelCosetGapPlanResult built = buildKernelCosetGapPlan(C, D, 2, budget);
+      if (verify(built.verdict == PlanVerdict::Ready, "F-KC-5c-2: a local is planned"))
+        return 1;
+      bool truthful = true;
+      for (std::int64_t i = -3; i <= 10; ++i) {
+        const auto r = certifyKernelCosetCandidate(*built.plan, exact({i}), budget);
+        const bool in = i >= 0 && i <= 7 && i % 2 != 0;
+        truthful = truthful && (r.membership == Answer::Member) == in &&
+                   r.membership != Answer::Unknown;
+        if (in)
+          truthful = truthful && r.localWitness.size() == 1 &&
+                     r.localWitness[0] == DynamicAPInt((i - 1) / 2) &&
+                     narrow(r.sourceWitness)[0] == i && !r.multiplicity;
+        else if (i >= 0 && i <= 7)
+          truthful = truthful && r.proof == Proof::Congruence;
+      }
+      if (verify(truthful, "F-KC-5c-2: a local congruence has its parity holes"))
+        return 1;
+      Budget other;
+      const KernelCosetWorkResult analysis = analyzeKernelCosetWork(C, D, 2, other);
+      if (verify(analysis.verdict == KernelCosetWorkVerdict::Unsupported,
+                 "F-KC-5c-2: and the image analysis still refuses it"))
+        return 1;
+    }
+
+    // ---- An unbounded fiber is still decided, and not counted ----------------
+    {
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0}, {-1, 0, 3}, {1, -2, 0}})
+        D.addInequality(r);
+      Budget budget;
+      const auto built = buildKernelCosetGapPlan(IntMatrix{{BigInt(1), BigInt(0)}}, D,
+                                                 2, budget);
+      const auto r = certifyKernelCosetCandidate(*built.plan, exact({1}), budget);
+      if (verify(r.membership == Answer::Member && !r.multiplicity,
+                 "F-KC-5c-2: a one-sided fiber has a witness and no count"))
+        return 1;
+    }
+
+    // ---- The class Search gate ------------------------------------------------
+    {
+      const Nest *thin = nullptr;
+      for (const Named &e : lattices)
+        if (e.cls == Class::Search && e.nest.n == 3)
+          thin = &e.nest;
+      auto withLimits = [&](const Limits &limits, Budget &budget) {
+        const KernelCosetGapPlanResult built = buildKernelCosetGapPlan(
+            cRows(*thin), domainOf(*thin), thin->n, budget);
+        return certifyKernelCosetCandidate(*built.plan, exact({1}), budget);
+      };
+      Limits none;
+      none.maxEmptinessQueries = 0;
+      Budget stopped(none);
+      const auto r0 = withLimits(none, stopped);
+      if (verify(r0.membership == Answer::Unknown &&
+                     r0.proof == Proof::None &&
+                     stopped.refusedBy() == Limit::EmptinessQueries &&
+                     stopped.counters().emptinessQueries == 0,
+                 "F-KC-5c-2: no query left means Unknown, before the library runs"))
+        return 1;
+      Limits narrowGate;
+      narrowGate.maxQueryVariables = 1;
+      Budget shape(narrowGate);
+      const auto r1 = withLimits(narrowGate, shape);
+      if (verify(r1.membership == Answer::Unknown && !shape.exhausted() &&
+                     shape.counters().emptinessQueries == 0,
+                 "F-KC-5c-2: a query over too many variables is Unknown, not sticky"))
+        return 1;
+      Limits smallCoefficient;
+      smallCoefficient.maxQueryCoefficient = 2;
+      Budget coefficient(smallCoefficient);
+      const auto r2 = withLimits(smallCoefficient, coefficient);
+      if (verify(r2.membership == Answer::Unknown &&
+                     coefficient.counters().emptinessQueries == 0,
+                 "F-KC-5c-2: a coefficient past the gate is Unknown"))
+        return 1;
+      Budget one;
+      const auto built = planFor(*thin, one);
+      const auto wrong =
+          certifyKernelCosetCandidate(*built.plan, exact({1, 2}), one);
+      if (verify(wrong.membership == Answer::Unknown,
+                 "F-KC-5c-2: a candidate of the wrong arity is Unknown"))
+        return 1;
+    }
+
+    // ---- gatedFindIntegerSample, directly ------------------------------------
+    {
+      auto system = [](unsigned vars, const std::vector<Row> &ge,
+                       const std::vector<Row> &eq = {}) {
+        IntegerPolyhedron P(PresburgerSpace::getSetSpace(vars, 0, 0));
+        for (const Row &r : ge)
+          P.addInequality(r);
+        for (const Row &r : eq)
+          P.addEquality(r);
+        return P;
+      };
+      using E = KernelCosetEmptiness;
+      Budget budget;
+      const auto box = gatedFindIntegerSample(system(2, {{1, 0, -2}, {0, -1, 5}}), budget);
+      if (verify(box.verdict == E::NonEmpty && !box.queried &&
+                     box.sample[0] == DynamicAPInt(2) &&
+                     box.sample[1] == DynamicAPInt(5),
+                 "F-KC-5c-2: a box gives its sample with no query"))
+        return 1;
+      const auto gcd = gatedFindIntegerSample(system(2, {}, {{2, 4, -1}}), budget);
+      if (verify(gcd.verdict == E::Empty && !gcd.queried,
+                 "F-KC-5c-2: a failed gcd test needs no query"))
+        return 1;
+      // Coupled variables 1 and 3 around uncoupled 0 and 2: the mapping back.
+      const auto mixed = gatedFindIntegerSample(
+          system(4, {{1, 0, 0, 0, -7}, {0, 0, -1, 0, 2}, {0, 1, 0, 1, -3}, {0, -1, 0, -1, 3},
+                     {0, 1, 0, 0, 0}, {0, 0, 0, 1, 0}}),
+          budget);
+      if (verify(mixed.verdict == E::NonEmpty && mixed.queried &&
+                     mixed.sample[0] == DynamicAPInt(7) &&
+                     mixed.sample[2] == DynamicAPInt(2) &&
+                     mixed.sample[1] + mixed.sample[3] == DynamicAPInt(3),
+                 "F-KC-5c-2: a query fills the variables it did not see"))
+        return 1;
+      const auto thin = gatedFindIntegerSample(
+          system(2, {{3, 5, -1}, {-3, -5, 1}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}}),
+          budget);
+      if (verify(thin.verdict == E::Empty && thin.queried,
+                 "F-KC-5c-2: a query proves a thin system empty"))
+        return 1;
+      IntegerPolyhedron withLocal(PresburgerSpace::getSetSpace(1, 0, 1));
+      withLocal.addEquality(Row{1, -2, 0});
+      if (verify(gatedFindIntegerSample(withLocal, budget).verdict == E::Unknown,
+                 "F-KC-5c-2: the gate does not measure a local, and refuses it"))
+        return 1;
+    }
+
+    // ---- Plan limits, on both sides of the value a nest needs -----------------
+    {
+      const Nest *simplex = nullptr, *dependent = nullptr, *pinned = nullptr;
+      for (const Named &e : lattices) {
+        if (std::string(e.name) == "a + b + c + d <= i, kappa 4")
+          simplex = &e.nest;
+        if (std::string(e.name) == "dependent equalities agree")
+          dependent = &e.nest;
+        if (std::string(e.name) == "2i + 4k == 6")
+          pinned = &e.nest;
+      }
+      auto refused = [&](const Nest &nest, Limits limits, Limit which) {
+        Budget budget(limits);
+        const auto built = planFor(nest, budget);
+        return built.verdict == PlanVerdict::LimitReached && !built.plan &&
+               budget.refusedBy() == which && !built.why.empty();
+      };
+      auto ready = [&](const Nest &nest, Limits limits) {
+        Budget budget(limits);
+        return planFor(nest, budget).verdict == PlanVerdict::Ready;
+      };
+      Limits l;
+      // Three eliminations of (3 + 1) = 4 lowers and uppers: predicted by hand below.
+      l.maxEliminations = 3;
+      if (verify(ready(*simplex, l), "F-KC-5c-2: 3 eliminations leave the last column"))
+        return 1;
+      l.maxEliminations = 2;
+      if (verify(refused(*simplex, l, Limit::Eliminations),
+                 "F-KC-5c-2: and 2 refuse the plan"))
+        return 1;
+      Limits rows;
+      rows.maxSystemRows = 6;
+      if (verify(ready(*simplex, rows), "F-KC-5c-2: 6 system rows suffice"))
+        return 1;
+      rows.maxSystemRows = 5;
+      if (verify(refused(*simplex, rows, Limit::SystemRows),
+                 "F-KC-5c-2: and 5 refuse the source domain"))
+        return 1;
+      Limits generated;
+      generated.maxGeneratedRows = 12;
+      if (verify(ready(*simplex, generated),
+                 "F-KC-5c-2: 5 + 4 + 3 generated rows suffice"))
+        return 1;
+      generated.maxGeneratedRows = 11;
+      if (verify(refused(*simplex, generated, Limit::GeneratedRows),
+                 "F-KC-5c-2: and 11 refuse the third elimination"))
+        return 1;
+      Limits equalities;
+      equalities.maxMatrixRows = 2;
+      if (verify(ready(*dependent, equalities),
+                 "F-KC-5c-2: two kernel equalities pass at 2 rows"))
+        return 1;
+      equalities.maxMatrixRows = 1;
+      if (verify(refused(*dependent, equalities, Limit::MatrixRows),
+                 "F-KC-5c-2: and refuse the lattice at 1, past one C row"))
+        return 1;
+      Limits bits;
+      bits.maxMatrixBits = 3;
+      if (verify(ready(*pinned, bits),
+                 "F-KC-5c-2: one row of entry 4 has 3 bits"))
+        return 1;
+      bits.maxMatrixBits = 2;
+      if (verify(refused(*pinned, bits, Limit::MatrixBits),
+                 "F-KC-5c-2: and refuses the lattice at 2"))
+        return 1;
+      Limits entry;
+      entry.maxEntry = 8;
+      if (verify(ready(*simplex, entry), "F-KC-5c-2: the entries fit within 8"))
+        return 1;
+      entry.maxEntry = 2;
+      if (verify(refused(*simplex, entry, Limit::Entry),
+                 "F-KC-5c-2: and stop at 2, past the source domain"))
+        return 1;
+
+      // A limit in the way of an elimination asks for a reduction first. The last
+      // four rows are implied by the box, and with them column a predicts 3 * 3 + 4
+      // rows, past the limit of 10 that the source domain itself fits.
+      Nest redundant;
+      redundant.n = 3;
+      redundant.ge = {{1, 0, 0, 0},   {-1, 0, 0, 6},  {0, 1, 0, 0},  {0, -1, 0, 3},
+                      {0, 0, 1, 0},   {0, 0, -1, 3},  {0, -1, -1, 9}, {0, -1, 1, 9},
+                      {0, 1, -1, 9},  {0, 1, 1, 9}};
+      redundant.c = {{1, 0, 0}};
+      std::tie(redundant.lo, redundant.hi) = boxed(3, -1, 7);
+      Limits tight;
+      tight.maxSystemRows = 10;
+      Budget tightBudget(tight);
+      const auto reduced = planFor(redundant, tightBudget);
+      Tally tally;
+      if (verify(reduced.verdict == PlanVerdict::Ready &&
+                     tightBudget.counters().reductions == 1 &&
+                     audit(redundant, *reduced.plan, tightBudget, tally) &&
+                     tally.unknown == 0,
+                 "F-KC-5c-2: a reduction makes room, and the answers stay exact"))
+        return 1;
+
+      // Parallel rows go in the linear pass, before anything is predicted, so no
+      // Simplex is spent on them. Without it either column predicts 4 * 4 + 10 rows,
+      // past the 18 that the source domain fits.
+      Nest parallel = redundant;
+      parallel.ge = {{1, 0, 0, 0},  {-1, 0, 0, 6}, {0, 1, 0, 0}, {0, -1, 0, 3},
+                     {0, 0, 1, 0},  {0, 0, -1, 3}};
+      for (std::int64_t t = 1; t <= 3; ++t) {
+        parallel.ge.push_back({0, 1, 0, t});
+        parallel.ge.push_back({0, -1, 0, 3 + t});
+        parallel.ge.push_back({0, 0, 1, t});
+        parallel.ge.push_back({0, 0, -1, 3 + t});
+      }
+      Limits room;
+      room.maxSystemRows = 18;
+      Budget parallelBudget(room);
+      if (verify(planFor(parallel, parallelBudget).verdict == PlanVerdict::Ready &&
+                     parallelBudget.counters().reductions == 0,
+                 "F-KC-5c-2: parallel rows cost no reduction"))
+        return 1;
+      Limits noReduction = tight;
+      noReduction.maxReductions = 0;
+      if (verify(refused(redundant, noReduction, Limit::Reductions),
+                 "F-KC-5c-2: and it has to be available"))
+        return 1;
+    }
+
+    // ---- Unsupported input ---------------------------------------------------
+    {
+      IntegerPolyhedron symbol(PresburgerSpace::getSetSpace(2, 1, 0));
+      symbol.addInequality(Row{1, 0, 1, 0});
+      IntegerPolyhedron box(PresburgerSpace::getSetSpace(2, 0, 0));
+      for (const Row &r : std::vector<Row>{{1, 0, 0}, {-1, 0, 3}, {0, 1, 0}, {0, -1, 3}})
+        box.addInequality(r);
+      const IntMatrix firstLoop{{BigInt(1), BigInt(0)}};
+      auto unsupported = [&](const IntMatrix &c, const IntegerPolyhedron &D, unsigned n) {
+        Budget budget;
+        const auto built = buildKernelCosetGapPlan(c, D, n, budget);
+        return built.verdict == PlanVerdict::Unsupported && !built.plan &&
+               !built.why.empty();
+      };
+      {
+        Budget budget;
+        if (verify(buildKernelCosetGapPlan(firstLoop, symbol, 2, budget).why.find(
+                       "symbols") != std::string::npos,
+                   "F-KC-5c-2: a symbol is refused as a symbol"))
+          return 1;
+      }
+      if (verify(unsupported(firstLoop, symbol, 2) && unsupported(firstLoop, box, 0) &&
+                     unsupported(firstLoop, box, 3) && unsupported(IntMatrix{}, box, 2) &&
+                     unsupported(IntMatrix{{BigInt(0), BigInt(0)}}, box, 2) &&
+                     unsupported(IntMatrix{{BigInt(1), BigInt(0)}, {BigInt(0), BigInt(1)}},
+                                 box, 2),
+                 "F-KC-5c-2: symbols, degenerate shapes and kappa 0 are unsupported"))
+        return 1;
+      Limits l;
+      l.maxReductions = 0;
+      Budget spent(l);
+      spent.refuse(Limit::Reductions, "spent");
+      if (verify(buildKernelCosetGapPlan(firstLoop, box, 2, spent).verdict ==
+                     PlanVerdict::LimitReached,
+                 "F-KC-5c-2: an exhausted budget plans nothing"))
+        return 1;
+    }
+
+    // ---- Values far past 64 bits ---------------------------------------------
+    {
+      auto pow2 = [](unsigned e) -> DynamicAPInt {
+        DynamicAPInt v(1);
+        for (unsigned i = 0; i < e; ++i)
+          v *= DynamicAPInt(2);
+        return v;
+      };
+      // i == 2 * k with k in [0, 2^59].
+      IntegerPolyhedron D(PresburgerSpace::getSetSpace(2, 0, 0));
+      D.addEquality(Row{1, -2, 0});
+      D.addInequality(Row{0, 1, 0});
+      llvm::SmallVector<DynamicAPInt, 3> top{DynamicAPInt(0), DynamicAPInt(-1), pow2(59)};
+      D.addInequality(top);
+      Budget budget;
+      const auto built =
+          buildKernelCosetGapPlan(IntMatrix{{BigInt(1), BigInt(0)}}, D, 2, budget);
+      auto at = [&](const DynamicAPInt &i) {
+        llvm::SmallVector<DynamicAPInt, 1> y{i};
+        return certifyKernelCosetCandidate(*built.plan, y, budget);
+      };
+      const auto edge = at(pow2(60));
+      if (verify(edge.proof == Proof::Witness && edge.kernelWitness[0] == pow2(59),
+                 "F-KC-5c-2: 2^60 is exact at the top of the range"))
+        return 1;
+      if (verify(at(pow2(60) + DynamicAPInt(2)).proof == Proof::FalseRow,
+                 "F-KC-5c-2: and the next even value is past it"))
+        return 1;
+      if (verify(at(pow2(60) + DynamicAPInt(1)).proof == Proof::Congruence,
+                 "F-KC-5c-2: an odd value near 2^60 fails its congruence"))
+        return 1;
+      if (verify(at(pow2(200) + DynamicAPInt(1)).proof == Proof::Congruence,
+                 "F-KC-5c-2: an odd value near 2^200 too, with no overflow"))
+        return 1;
+      if (verify(at(pow2(200)).proof == Proof::FalseRow,
+                 "F-KC-5c-2: and an even one fails its range"))
+        return 1;
+      if (verify(at(-pow2(200) - DynamicAPInt(1)).proof == Proof::Congruence,
+                 "F-KC-5c-2: a negative odd value has the same congruence"))
+        return 1;
+    }
+
+    // ---- Repeated decisions ---------------------------------------------------
+    {
+      bool same = true;
+      for (const Named &e : lattices) {
+        Budget b0, b1;
+        const auto p0 = planFor(e.nest, b0), p1 = planFor(e.nest, b1);
+        same = same && p0.plan->gapClass == p1.plan->gapClass &&
+               p0.plan->levels.size() == p1.plan->levels.size();
+        for (std::int64_t v = -2; v <= 6; ++v) {
+          const Point y(p0.plan->outputCols.size(), v);
+          const auto r0 = certifyKernelCosetCandidate(*p0.plan, exact(y), b0);
+          const auto r1 = certifyKernelCosetCandidate(*p1.plan, exact(y), b1);
+          same = same && r0.membership == r1.membership && r0.proof == r1.proof &&
+                 r0.why == r1.why && r0.kernelWitness == r1.kernelWitness &&
+                 r0.sourceWitness == r1.sourceWitness && r0.modulus == r1.modulus &&
+                 r0.lower == r1.lower && r0.upper == r1.upper &&
+                 r0.rationalGap == r1.rationalGap && r0.multiplicity == r1.multiplicity;
+        }
+        same = same && b0.counters().emptinessQueries == b1.counters().emptinessQueries;
+      }
+      if (verify(same, "F-KC-5c-2: repeated plans and decisions are identical"))
+        return 1;
+    }
+
+    // ---- Random nests, kappa 1 to 4, against the enumeration ------------------
+    {
+      std::mt19937 gen(5200);
+      auto pick = [&](std::int64_t a, std::int64_t b) {
+        return a + static_cast<std::int64_t>(gen() % std::uint64_t(b - a + 1));
+      };
+      std::array<unsigned, 3> classes{};
+      std::array<unsigned, 8> proofs{};
+      unsigned gaps = 0, members = 0, counted = 0, unknown = 0, gated = 0, refused = 0;
+      bool truthful = true;
+      std::string first;
+      for (unsigned trial = 0; trial < 6000; ++trial) {
+        const unsigned kappa = 1 + trial % 4;
+        const unsigned rho = kappa >= 3 ? 1 : 1 + (trial / 4) % 2;
+        const unsigned n = kappa + rho;
+        const std::int64_t top = n >= 4 ? 2 : 3;
+        Nest nest;
+        nest.n = n;
+        std::tie(nest.lo, nest.hi) = boxed(n, -1, top + 1);
+        for (unsigned j = 0; j < n; ++j) {
+          Row lower(n + 1, 0), upper(n + 1, 0);
+          lower[j] = 1;
+          upper[j] = -1;
+          upper[n] = top;
+          nest.ge.push_back(lower);
+          nest.ge.push_back(upper);
+        }
+        for (std::int64_t r = pick(0, 3); r > 0; --r) {
+          Row row(n + 1, 0);
+          for (unsigned j = 0; j < n; ++j)
+            row[j] = pick(0, 2) == 0 ? 0 : pick(-3, 3);
+          row[n] = pick(-2, 6);
+          nest.ge.push_back(row);
+        }
+        // A thin slab through the box: an equality in all but name, whose integer
+        // points are a lattice with holes.
+        for (std::int64_t r = pick(0, 2); r > 0; --r) {
+          Row row(n + 1, 0);
+          for (unsigned j = 0; j < n; ++j)
+            row[j] = pick(0, 1) == 0 ? 0 : pick(-3, 3);
+          row[n] = pick(-3, 3);
+          Row opposite(n + 1, 0);
+          for (unsigned j = 0; j <= n; ++j)
+            opposite[j] = -row[j];
+          opposite[n] += pick(0, 1);
+          nest.ge.push_back(row);
+          nest.ge.push_back(opposite);
+        }
+        for (std::int64_t r = pick(0, 2); r > 0; --r) {
+          Row row(n + 1, 0);
+          for (unsigned j = 0; j < n; ++j)
+            row[j] = pick(0, 1) == 0 ? 0 : pick(-3, 3);
+          row[n] = pick(-3, 3);
+          nest.eq.push_back(row);
+        }
+        for (unsigned i = 0; i < rho; ++i) {
+          Row c(n + 1, 0);
+          c[i] = 1;
+          if (pick(0, 3) == 0)
+            c[(i + rho) % n] = pick(-1, 1);
+          nest.c.push_back(c);
+        }
+        Budget budget;
+        const KernelCosetGapPlanResult built = planFor(nest, budget);
+        if (built.verdict != PlanVerdict::Ready) {
+          ++refused;
+          continue;
+        }
+        ++classes[static_cast<unsigned>(built.plan->gapClass)];
+        Tally tally;
+        if (!audit(nest, *built.plan, budget, tally) && truthful) {
+          truthful = false;
+          first = "trial " + std::to_string(trial);
+        }
+        gaps += tally.gaps;
+        members += tally.members;
+        counted += tally.counted;
+        unknown += tally.unknown;
+        gated += tally.gated;
+        for (unsigned p = 0; p < proofs.size(); ++p)
+          proofs[p] += tally.proofs[p];
+      }
+      if (!truthful)
+        std::cerr << first << "\n";
+      if (verify(truthful, "F-KC-5c-2: 6000 random nests match the enumeration"))
+        return 1;
+      if (verify(unknown == gated && refused == 0,
+                 "F-KC-5c-2: all that stays unknown is a gate refusing a query"))
+        return 1;
+      std::cout << "  classes pinned " << classes[0] << ", interval " << classes[1]
+                << ", search " << classes[2] << "; members " << members << ", gaps "
+                << gaps << ", counted " << counted << ", unknown " << unknown
+                << "\n  proofs";
+      for (unsigned p = 0; p < proofs.size(); ++p)
+        std::cout << " " << proofs[p];
+      std::cout << "\n";
+      if (verify(classes[0] >= 200 && classes[1] >= 200 && classes[2] >= 200,
+                 "F-KC-5c-2: the random nests reach every class"))
+        return 1;
+      if (verify(gaps >= 300 && members >= 4000 && counted >= 2000,
+                 "F-KC-5c-2: and real gaps, members and multiplicities"))
+        return 1;
+      bool everyProof = true;
+      for (Proof p : {Proof::Witness, Proof::FalseRow, Proof::Congruence,
+                      Proof::Inconsistent, Proof::EmptyInterval,
+                      Proof::ConcreteConflict, Proof::LibraryEmpty})
+        everyProof = everyProof && proofs[static_cast<unsigned>(p)] >= 10;
+      if (verify(everyProof, "F-KC-5c-2: and every kind of proof"))
+        return 1;
+    }
+    std::cout << "Phase F-KC-5c-2 exact gap certificate tests passed.\n";
   }
 
   std::cout << "All coordinate relation tests passed.\n";
