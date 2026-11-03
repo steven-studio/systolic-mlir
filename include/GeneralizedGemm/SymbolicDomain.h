@@ -48,6 +48,14 @@ SiteArrivals reachSites(const SemanticProgram &program,
                         llvm::ArrayRef<unsigned> sites, Term scope,
                         const PathLimits &limits);
 
+/// The same for blocks: every arrival at each location, whether or not a site is
+/// there, with `site` holding the location. For effects that belong to no site.
+SiteArrivals reachLocations(const SemanticProgram &program,
+                            const std::map<unsigned, Term> &invariants,
+                            llvm::ArrayRef<unsigned> cuts,
+                            llvm::ArrayRef<unsigned> locations, Term scope,
+                            const PathLimits &limits);
+
 /// The guards so far and the no-stop conditions of the blocks left, with memory
 /// and float conditions dropped. Null when a guard itself reads memory.
 Term pathPremise(const SemanticProgram &program, const SymbolicPath &path);

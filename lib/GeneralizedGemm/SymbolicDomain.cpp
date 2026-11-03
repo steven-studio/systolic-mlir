@@ -39,10 +39,12 @@ Term secondCopy(const SemanticProgram &program, Term term) {
   });
 }
 
-SiteArrivals reachSites(const SemanticProgram &program,
-                        const std::map<unsigned, Term> &invariants,
-                        ArrayRef<unsigned> cuts, ArrayRef<unsigned> sites, Term scope,
-                        const PathLimits &limits) {
+/// Every arrival at one of `targets`, each an (id, location) pair.
+static SiteArrivals reachTargets(const SemanticProgram &program,
+                                 const std::map<unsigned, Term> &invariants,
+                                 ArrayRef<unsigned> cuts,
+                                 ArrayRef<std::pair<unsigned, unsigned>> targets, Term scope,
+                                 const PathLimits &limits) {
   SiteArrivals out;
   TermContext &terms = *program.terms;
   struct Limit {
@@ -64,9 +66,8 @@ SiteArrivals reachSites(const SemanticProgram &program,
         throw Limit{"a location has no transition"};
       // Conditions of the block are the same on all of its transitions.
       SymbolicPath probe = extendSymbolicPath(program, path, leaving.front());
-      for (unsigned id : sites) {
-        const MacSite &site = program.sites[id];
-        if (site.location != path.end)
+      for (auto [id, location] : targets) {
+        if (location != path.end)
           continue;
         SiteArrival arrival;
         arrival.site = id;
@@ -112,6 +113,26 @@ SiteArrivals reachSites(const SemanticProgram &program,
   }
   out.complete = true;
   return out;
+}
+
+SiteArrivals reachSites(const SemanticProgram &program,
+                        const std::map<unsigned, Term> &invariants,
+                        ArrayRef<unsigned> cuts, ArrayRef<unsigned> sites, Term scope,
+                        const PathLimits &limits) {
+  std::vector<std::pair<unsigned, unsigned>> targets;
+  for (unsigned id : sites)
+    targets.push_back({id, program.sites[id].location});
+  return reachTargets(program, invariants, cuts, targets, scope, limits);
+}
+
+SiteArrivals reachLocations(const SemanticProgram &program,
+                            const std::map<unsigned, Term> &invariants,
+                            ArrayRef<unsigned> cuts, ArrayRef<unsigned> locations, Term scope,
+                            const PathLimits &limits) {
+  std::vector<std::pair<unsigned, unsigned>> targets;
+  for (unsigned location : locations)
+    targets.push_back({location, location});
+  return reachTargets(program, invariants, cuts, targets, scope, limits);
 }
 
 std::map<unsigned, std::set<unsigned>> controlLiveState(const SemanticProgram &program) {

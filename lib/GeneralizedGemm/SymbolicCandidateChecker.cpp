@@ -105,6 +105,9 @@ public:
         backend(backend), terms(*program.terms) {}
 
   bool prepare(const TerminationCertificate &certificate, std::string &why);
+  bool premises(const TerminationCertificate &certificate,
+                std::map<unsigned, Term> &invariants, std::string &why);
+  Term scopeTerm() const { return scope; }
   void addDefinitions(const TerminationCertificate &certificate,
                       std::map<unsigned, Term> &invariants);
   bool dischargeValidity(const EnumerationOrder &order);
@@ -271,11 +274,11 @@ void Symbolic::addDefinitions(const TerminationCertificate &certificate,
     invariants[cut] = holding(cut);
 }
 
-bool Symbolic::prepare(const TerminationCertificate &certificate, std::string &why) {
+bool Symbolic::premises(const TerminationCertificate &certificate,
+                        std::map<unsigned, Term> &invariants, std::string &why) {
   scope = scopeFormula(program, options.scope, why);
   if (!scope)
     return false;
-  std::map<unsigned, Term> invariants;
   for (const auto &[cut, term] : certificate.invariants) {
     Term kept = adoptProofTerm(program, term, why);
     if (!kept)
@@ -283,6 +286,13 @@ bool Symbolic::prepare(const TerminationCertificate &certificate, std::string &w
     invariants[cut] = kept;
   }
   addDefinitions(certificate, invariants);
+  return true;
+}
+
+bool Symbolic::prepare(const TerminationCertificate &certificate, std::string &why) {
+  std::map<unsigned, Term> invariants;
+  if (!premises(certificate, invariants, why))
+    return false;
   std::vector<unsigned> ids(group.sites.begin(), group.sites.end());
   sites = reachSites(program, invariants, certificate.cuts, ids, scope, options.limits.paths);
   if (!sites.complete) {
@@ -394,6 +404,24 @@ bool Symbolic::dischargeCoverage(const EnumerationOrder &order, std::string &why
 }
 
 } // namespace
+
+ProvenPremises provenPremises(const SemanticProgram &program,
+                              const TerminationCertificate &certificate,
+                              const SymbolicCheckOptions &options, SmtBackend &backend) {
+  static const SiteGroup noGroup;
+  static const CoordinateFamily noFamily;
+  ProvenPremises out;
+  Symbolic symbolic(program, noGroup, noFamily, options, backend);
+  try {
+    out.ready = symbolic.premises(certificate, out.invariants, out.why);
+  } catch (const TermError &error) {
+    out.ready = false;
+    out.why = std::string("term limit: ") + error.what();
+  }
+  out.scope = symbolic.scopeTerm();
+  out.records = std::move(symbolic.records);
+  return out;
+}
 
 CheckedFamily checkFamilyFinite(const SemanticProgram &program,
                                 const DomainEnumeration &enumeration, unsigned group,

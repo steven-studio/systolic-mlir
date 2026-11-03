@@ -121,6 +121,23 @@ add_executable(generalized-gemm-synthesis-report SynthesisReport.cpp)
 target_link_libraries(generalized-gemm-synthesis-report PRIVATE
   generalized-gemm-synthesis generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
+# G4a. The computation authority links the tier checker and neither the grammar
+# nor the search: nothing a proposer computes can reach a verdict.
+add_library(generalized-gemm-computation-checker STATIC
+  "${GG_LIB_DIR}/HerbrandReplay.cpp"
+  "${GG_LIB_DIR}/ComputationChecker.cpp")
+target_link_libraries(generalized-gemm-computation-checker PUBLIC generalized-gemm-tier-checker)
+add_library(generalized-gemm-computation STATIC "${GG_LIB_DIR}/ComputationAnalysis.cpp")
+target_link_libraries(generalized-gemm-computation PUBLIC
+  generalized-gemm-computation-checker generalized-gemm-synthesis)
+foreach(target generalized-gemm-computation-checker generalized-gemm-computation)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()
+
+add_executable(generalized-gemm-computation-report ComputationReport.cpp)
+target_link_libraries(generalized-gemm-computation-report PRIVATE
+  generalized-gemm-computation generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -164,6 +181,12 @@ target_link_libraries(generalized-gemm-synthesis-test PRIVATE
 add_test(NAME generalized-gemm-synthesis COMMAND generalized-gemm-synthesis-test)
 set_tests_properties(generalized-gemm-synthesis PROPERTIES TIMEOUT 600)
 
+add_executable(generalized-gemm-computation-test test/unit/ComputationTest.cpp)
+target_link_libraries(generalized-gemm-computation-test PRIVATE
+  generalized-gemm-computation generalized-gemm-termination generalized-gemm-z3)
+add_test(NAME generalized-gemm-computation COMMAND generalized-gemm-computation-test)
+set_tests_properties(generalized-gemm-computation PROPERTIES TIMEOUT 1200)
+
 find_program(GG_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_CLANG clang HINTS "$ENV{HOME}/work/clang24-build/bin" NO_DEFAULT_PATH REQUIRED)
@@ -205,6 +228,11 @@ add_test(NAME generalized-gemm-synthesis-programs COMMAND "${Python3_EXECUTABLE}
   --programs 60 --seed 1 --jobs 6)
 set_tests_properties(generalized-gemm-synthesis-programs PROPERTIES TIMEOUT 1500)
 
+add_test(NAME generalized-gemm-computation-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/computation_oracle.py" --driver $<TARGET_FILE:generalized-gemm-computation-report>
+  --programs 60 --fills 40 --seed 1 --jobs 6)
+set_tests_properties(generalized-gemm-computation-programs PROPERTIES TIMEOUT 1200)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
@@ -214,4 +242,5 @@ add_custom_target(check-generalized-gemm
   DEPENDS generalized-gemm-report generalized-gemm-unit generalized-gemm-relational
     generalized-gemm-termination-report generalized-gemm-termination-test
     generalized-gemm-coordinate-report generalized-gemm-coordinate-test
-    generalized-gemm-synthesis-report generalized-gemm-synthesis-test)
+    generalized-gemm-synthesis-report generalized-gemm-synthesis-test
+    generalized-gemm-computation-report generalized-gemm-computation-test)

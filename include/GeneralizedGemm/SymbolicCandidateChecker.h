@@ -98,6 +98,20 @@ struct SymbolicCheckOptions {
   SymbolicLimits2 limits;
 };
 
+/// What a symbolic claim may assume at each cut: the certificate's invariants and
+/// the definition facts proved over them. `ready` false means no premise is usable.
+/// For G4, which proves other claims over the same domain.
+struct ProvenPremises {
+  bool ready = false;
+  std::string why;
+  Term scope = nullptr;
+  std::map<unsigned, Term> invariants;
+  std::vector<ObligationRecord> records;
+};
+ProvenPremises provenPremises(const SemanticProgram &program,
+                              const TerminationCertificate &certificate,
+                              const SymbolicCheckOptions &options, SmtBackend &backend);
+
 /// SymbolicValid, then SymbolicExact when the order proves coverage. `certificate`
 /// is re-checked here. `order` may be null: there is no tier without one, because
 /// V3 needs the set the coordinates range over.
