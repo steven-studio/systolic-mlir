@@ -151,6 +151,13 @@ private:
 
 } // namespace
 
+bool walkToNextEvents(const SemanticProgram &program, ArrayRef<unsigned> locations,
+                      unsigned depth, const AskUnsat &ask, std::string &why,
+                      const SymbolicPath &path, Term assumption, const WalkLeaf &leaf) {
+  Walker walker(program, locations, depth, ask, why);
+  return walker.walk(path, assumption, leaf);
+}
+
 Term inOrderSet(const SemanticProgram &program, const EnumerationOrder &order,
                 ArrayRef<Term> values) {
   return Order(program, order).member(values);

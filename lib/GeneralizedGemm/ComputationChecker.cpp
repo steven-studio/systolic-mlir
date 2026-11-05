@@ -449,6 +449,40 @@ std::optional<std::string> replayDifference(const SemanticProgram &program,
 
 namespace {
 
+} // namespace
+
+bool enumerationCoversScope(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                            const ParameterScope &scope) {
+  if (enumeration.sampled || scope.allParameters)
+    return false;
+  APInt expected(128, 1);
+  for (const Parameter &p : program.parameters) {
+    if (p.sort.kind != Sort::BV)
+      continue;
+    auto found = std::find_if(scope.ranges.begin(), scope.ranges.end(),
+                              [&](const ParameterRange &r) { return r.parameter == p.id; });
+    if (found == scope.ranges.end() || found->upper.slt(found->lower))
+      return false;
+    APInt span = (found->upper.sext(128) - found->lower.sext(128)) + 1;
+    bool overflow = false;
+    expected = expected.umul_ov(span, overflow);
+    if (overflow)
+      return false;
+  }
+  std::set<std::vector<uint64_t>> seen;
+  for (const PointEvidence &point : enumeration.points) {
+    if (!parametersInScope(scope, point.parameters))
+      return false;
+    std::vector<uint64_t> key;
+    for (const APInt &value : point.parameters)
+      key.push_back(value.getZExtValue());
+    seen.insert(std::move(key));
+  }
+  return expected == APInt(128, seen.size() + enumeration.outsideDomain);
+}
+
+namespace {
+
 /// What a claim is about. A candidate joins only claims with its own.
 std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
                       const ComputationOptions &options) {
@@ -483,7 +517,8 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
 
   std::vector<ReplayFacts> facts;
   std::set<MemoryDependentStop> stops = memoryStopsOf(program);
-  bool complete = !enumeration.sampled, stopsSeen = false;
+  // ScopeEnumerated only for an enumeration of exactly this scope.
+  bool complete = enumerationCoversScope(program, enumeration, options.scope), stopsSeen = false;
   std::string open;
   for (const PointEvidence &point : enumeration.points) {
     if (!point.reason.empty()) {

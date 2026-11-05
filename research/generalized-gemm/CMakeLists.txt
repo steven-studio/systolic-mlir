@@ -138,6 +138,26 @@ add_executable(generalized-gemm-computation-report ComputationReport.cpp)
 target_link_libraries(generalized-gemm-computation-report PRIVATE
   generalized-gemm-computation generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
+# G5a. The domain authority links the computation checker and the tier checker, and
+# neither a proposer nor any Presburger or Simplex code.
+add_library(generalized-gemm-domain-checker STATIC
+  "${GG_LIB_DIR}/GuardedOrbit.cpp"
+  "${GG_LIB_DIR}/ReductionSemantics.cpp"
+  "${GG_LIB_DIR}/DomainChecker.cpp")
+target_link_libraries(generalized-gemm-domain-checker PUBLIC generalized-gemm-computation-checker)
+add_library(generalized-gemm-domain STATIC
+  "${GG_LIB_DIR}/DomainProposer.cpp"
+  "${GG_LIB_DIR}/DomainAnalysis.cpp")
+target_link_libraries(generalized-gemm-domain PUBLIC
+  generalized-gemm-domain-checker generalized-gemm-synthesis)
+foreach(target generalized-gemm-domain-checker generalized-gemm-domain)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+endforeach()
+
+add_executable(generalized-gemm-domain-report DomainReport.cpp)
+target_link_libraries(generalized-gemm-domain-report PRIVATE
+  generalized-gemm-domain generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -187,6 +207,14 @@ target_link_libraries(generalized-gemm-computation-test PRIVATE
 add_test(NAME generalized-gemm-computation COMMAND generalized-gemm-computation-test)
 set_tests_properties(generalized-gemm-computation PROPERTIES TIMEOUT 1200)
 
+add_executable(generalized-gemm-domain-test test/unit/DomainTest.cpp)
+target_link_libraries(generalized-gemm-domain-test PRIVATE
+  generalized-gemm-domain generalized-gemm-termination generalized-gemm-z3)
+add_test(NAME generalized-gemm-domain COMMAND generalized-gemm-domain-test core)
+set_tests_properties(generalized-gemm-domain PROPERTIES TIMEOUT 1500)
+add_test(NAME generalized-gemm-domain-holes COMMAND generalized-gemm-domain-test holes)
+set_tests_properties(generalized-gemm-domain-holes PROPERTIES TIMEOUT 3000)
+
 find_program(GG_MLIR_OPT mlir-opt HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_MLIR_TRANSLATE mlir-translate HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH REQUIRED)
 find_program(GG_CLANG clang HINTS "$ENV{HOME}/work/clang24-build/bin" NO_DEFAULT_PATH REQUIRED)
@@ -233,6 +261,11 @@ add_test(NAME generalized-gemm-computation-programs COMMAND "${Python3_EXECUTABL
   --programs 60 --fills 40 --seed 1 --jobs 6)
 set_tests_properties(generalized-gemm-computation-programs PROPERTIES TIMEOUT 1200)
 
+add_test(NAME generalized-gemm-domain-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/domain_oracle.py" --driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 40 --fills 16 --seed 1 --jobs 2)
+set_tests_properties(generalized-gemm-domain-programs PROPERTIES TIMEOUT 1800)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
@@ -243,4 +276,5 @@ add_custom_target(check-generalized-gemm
     generalized-gemm-termination-report generalized-gemm-termination-test
     generalized-gemm-coordinate-report generalized-gemm-coordinate-test
     generalized-gemm-synthesis-report generalized-gemm-synthesis-test
-    generalized-gemm-computation-report generalized-gemm-computation-test)
+    generalized-gemm-computation-report generalized-gemm-computation-test
+    generalized-gemm-domain-report generalized-gemm-domain-test)

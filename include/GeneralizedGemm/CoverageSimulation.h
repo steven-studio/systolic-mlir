@@ -38,6 +38,16 @@ Term inOrderSet(const SemanticProgram &program, const EnumerationOrder &order,
 std::vector<Term> orderValues(const SemanticProgram &program, const EnumerationOrder &order,
                               const SymbolicPath &path);
 
+/// One step of every proof by simulation: each feasible way from the end of `path` to
+/// the next arrival at one of `locations` or to the exit, calling `leaf` with the path,
+/// its premise and whether it exited. Prunes where `ask` shows a prefix infeasible, and
+/// fails at `depth` transitions past `path` unless that is infeasible. True only when
+/// every leaf returned true. Exposed for G5, with the walk proveCoverage uses.
+using WalkLeaf = std::function<bool(const SymbolicPath &, Term premise, bool exit)>;
+bool walkToNextEvents(const SemanticProgram &program, llvm::ArrayRef<unsigned> locations,
+                      unsigned depth, const AskUnsat &ask, std::string &why,
+                      const SymbolicPath &path, Term assumption, const WalkLeaf &leaf);
+
 /// True only when every obligation is unsat. `why` names the first that is not.
 bool proveCoverage(const SemanticProgram &program, const EnumerationOrder &order,
                    const SiteArrivals &arrivals, llvm::ArrayRef<unsigned> locations,

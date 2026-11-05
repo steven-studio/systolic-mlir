@@ -1,0 +1,404 @@
+#!/usr/bin/env python3
+"""G5a mutation test. Each mutant weakens one thing the checker relies on, and the
+unmodified tree must pass first. Every result is one of:
+
+  KILLED          a test failed by its own assertion. Nothing else is a kill.
+  SURVIVED        every test ran to the end and passed.
+  EQUIVALENT      cannot be killed: listed below, with the reason and the evidence.
+  TIMEOUT         a test ran out of time and no other test killed it.
+  RESOURCE_LIMIT  a test ran out of memory and no other test killed it.
+  HARNESS_ERROR   a stale pattern, a mutant that does not build, or a crash that no
+                  assertion explains.
+
+Only KILLED and EQUIVALENT let a run pass. Each test runs in its own process group under
+a wall-clock limit that kills the whole group, and under an address-space limit that its
+descendants inherit. There is at most one worker by default and never more than two.
+
+Results are appended to --results as they finish, with the hash of the tree they are
+about. A run skips mutants that file already holds for this tree, and refuses a file
+about another tree, so an interrupted run loses nothing and mixes nothing. A scratch
+directory holding a snapshot of another tree is refused too.
+"""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import os
+from pathlib import Path
+import resource
+import shutil
+import signal
+import subprocess
+import sys
+
+O = "GuardedOrbit.cpp"
+D = "DomainChecker.cpp"
+R = "ReductionSemantics.cpp"
+V = "CoverageSimulation.cpp"
+C = "ComputationChecker.cpp"
+
+MUTANTS = [
+    # Theorem 12: D1 to D3.
+    ("D1 skipped", O, "    return mustHold(\"D1\", \"the first event\", terms.logicalAnd(premise, bad));\n", "    (void)bad;\n    return true;\n"),
+    ("D1 exit skipped", O, "      return mustHold(\"D1\", \"the entry reaches the exit\", terms.logicalAnd(premise, yInside));\n", "      return true;\n"),
+    ("D2 skipped", O, "      return mustHold(\"D2\", \"the next event\", terms.logicalAnd(premise, bad));\n", "      (void)bad;\n      return true;\n"),
+    ("D3 skipped", O, "        return mustHold(\"D3\", \"an event that is not the last reaches the exit\",\n                        terms.logicalAnd(premise, later));\n", "        return true;\n"),
+    ("D1 earlier point ignored", O, "    Term bad = terms.logicalOr(terms.logicalNot(inGuardedSet(program, order, x)), earlier);\n", "    Term bad = terms.logicalNot(inGuardedSet(program, order, x));\n    (void)earlier;\n"),
+    ("D2 between ignored", O, "                                                 between));\n", "                                                 terms.boolean(false)));\n    (void)between;\n"),
+    ("D2 increase ignored", O, "terms.logicalOr(terms.logicalNot(guardedLess(program, order, b, x)),", "terms.logicalOr(terms.boolean(false),"),
+    ("D2 membership ignored", O, "      Term bad = terms.logicalOr(terms.logicalNot(inGuardedSet(program, order, x)),\n                                 terms.logicalOr(", "      Term bad = terms.logicalOr(terms.boolean(false),\n                                 terms.logicalOr("),
+    ("event assumed outside", O, "    Term assumption = terms.logicalAnd(arrival.premise, inGuardedSet(program, order, b));\n", "    Term assumption = arrival.premise;\n"),
+    ("entry-block site admitted", O, "  if (std::find(locations.begin(), locations.end(), program.entryLocation) != locations.end()) {\n    why = \"a site in the entry block\";\n    return false;\n  }\n", ""),
+    ("first walk without scope", O, "begin, scope, firstLeaf))", "begin, terms.boolean(true), firstLeaf))"),
+    ("lower bound ignored", O, "    all = terms.logicalAnd(all, terms.icmp(le, bindLevels(program, level.lower, values), values[m]));\n", ""),
+    ("upper bound ignored", O, "    all = terms.logicalAnd(all, terms.icmp(lt, values[m], bindLevels(program, level.upper, values)));\n", ""),
+    ("guard ignored", O, "  Term all = bindLevels(program, order.guard, values);\n", "  Term all = terms.boolean(true);\n"),
+    ("direction ignored", O, "  return level.descending ? terms.icmp(before, b, a) : terms.icmp(before, a, b);\n", "  return terms.icmp(before, a, b);\n"),
+    ("signedness ignored", O, "  Predicate before = level.isSigned ? Predicate::Slt : Predicate::Ult;\n", "  Predicate before = Predicate::Ult;\n"),
+    ("lex not prefix", O, "    same = terms.logicalAnd(same, terms.icmp(Predicate::Eq, a[m], b[m]));\n", ""),
+    ("bound may read its own level", O, "    if (!levelTermOk(program, level.lower, sorts.size() - 1, sorts, why) ||\n        !levelTermOk(program, level.upper, sorts.size() - 1, sorts, why))", "    if (!levelTermOk(program, level.lower, 64, sorts, why) ||\n        !levelTermOk(program, level.upper, 64, sorts, why))"),
+    ("bound may read state", O, "      if (!level || *level >= levels || sorts[*level] != n->sort) {\n        why = \"a bound or guard reads state, or a level it may not\";\n        return false;\n      }\n", "      if (level && (*level >= levels || sorts[*level] != n->sort)) {\n        why = \"a bound or guard reads state, or a level it may not\";\n        return false;\n      }\n"),
+    ("level may read memory", O, "      if (!independent[id]) {\n        why = \"a level reads a value that depends on memory\";\n        return nullptr;\n      }\n", ""),
+    ("coordinate need not be a level", O, "      if (found == levels.end()) {\n        why = \"a coordinate of the family is no level\";\n        return std::nullopt;\n      }\n      levels.erase(found);\n", "      if (found != levels.end())\n        levels.erase(found);\n"),
+    ("enumeration ignores direction", O, "      APInt offset(low->getBitWidth(), level.descending ? count - 1 - n : n);\n", "      APInt offset(low->getBitWidth(), n);\n"),
+    ("enumeration ignores the guard", O, "      if (keep->isOne())\n        out.push_back(current);\n", "      out.push_back(current);\n"),
+    ("enumeration box limit ignored", O, "    if (span.getActiveBits() > 40 || visited + span.getZExtValue() > limit) {", "    if (span.getActiveBits() > 40) {"),
+    ("concrete order ignores direction", O, "    return level.descending ? !before : before;\n", "    return before;\n"),
+    ("concrete order ignores signedness", O, "    bool before = level.isSigned ? a[m].slt(b[m]) : a[m].ult(b[m]);\n", "    bool before = a[m].ult(b[m]);\n"),
+    # The walker export.
+    ("walker export skips", V, "  Walker walker(program, locations, depth, ask, why);\n  return walker.walk(path, assumption, leaf);\n", "  (void)program, (void)locations, (void)depth, (void)ask, (void)why, (void)path, (void)assumption, (void)leaf;\n  return true;\n"),
+    # The finite route.
+    ("order inversion passes", D, "      if (!concreteLess(order, lambdas[e - 1], lambdas[e]))\n        return refute(", "      if (false)\n        return refute("),
+    ("count mismatch passes", D, "    if (lambdas.size() != set->size()) {", "    if (false) {"),
+    ("element mismatch passes", D, "      if (lambdas[n] != (*set)[n])\n        return refute(", "      if (false)\n        return refute("),
+    ("pointless points pass", D, "  if (!anyEvent)\n    return CheckedDomain::unknown(open.empty() ? \"no point has events\" : open);\n", ""),
+    ("stopped point counts", D, "    if (!point.reason.empty()) {\n      complete = false;\n      continue;\n    }\n    const std::vector<APInt> &v = point.parameters;", "    if (!point.reason.empty())\n      continue;\n    const std::vector<APInt> &v = point.parameters;"),
+    ("scope not compared", D, "  bool complete = enumerationCoversScope(program, enumeration, options.scope);\n", "  bool complete = !enumeration.sampled;\n"),
+    ("box limit is a pass", D, "    if (!set) {\n      complete = false;\n      if (open.empty())\n        open = why;\n      continue;\n    }\n", "    if (!set)\n      continue;\n"),
+    ("missing value passes", D, "      if (!valued) {\n        complete = false;\n", "      if (false) {\n        complete = false;\n"),
+    ("key unchecked", D, "          if (!concreteLess(keyed, a, b) && keyHolds) {", "          if (false && keyHolds) {"),
+    ("collision unchecked", D, "      if (outputsHere.size() > 1) {", "      if (false) {"),
+    ("single unchecked", D, "      if (members.size() > 1 && single) {", "      if (false && single) {"),
+    ("access unchecked", D, "          same = value && *value == views[view][e][n];\n", "          same = true;\n          (void)value;\n"),
+    ("box multiplicity unchecked", D, "        if (!mu || *mu != APInt(128, count))", "        if (false)"),
+    ("closed gate checked", D, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
+    # Gates.
+    ("part of a group", D, "    if (same != (listed.count(site.id) != 0)) {\n      why = \"the group is not the sites of its roots\";", "    if (false) {\n      why = \"the group is not the sites of its roots\";"),
+    ("oblivious unchecked", D, "  if (!program.controlOblivious || !program.addressOblivious) {\n    why = \"the trace depends on memory contents\";", "  if (false) {\n    why = \"the trace depends on memory contents\";"),
+    ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n", "  if (false)\n"),
+    ("certificate not needed", D, "  if (outcome.verdict.kind() != TerminationVerdict::ProvenTerminating &&\n      outcome.verdict.kind() != TerminationVerdict::ProvenTerminatingIfDefined) {\n    why = \"the certificate was not accepted: \"", "  if (false) {\n    why = \"the certificate was not accepted: \""),
+    ("shared block admitted", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n", "      places.insert(program.sites[id].location);\n"),
+    ("any certificate accepted", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n"),
+    ("key order unchecked", D, "    if (key[n] >= order.levels.size() || (n && key[n] <= key[n - 1]))", "    if (key[n] >= order.levels.size())"),
+    ("access form unchecked", D, "      if (!isLevelTerm(program, out.order, term, out.order.levels.size(), why))\n        return std::nullopt;\n", "      (void)term;\n"),
+    # Symbolic facts.
+    ("K1 unchecked", D, "        SmtAnswer answer = proof.ask(\"K1\", \"the cell key\", bad);\n        if (answer != SmtAnswer::Unsat) {", "        SmtAnswer answer = SmtAnswer::Unsat;\n        (void)bad;\n        if (answer != SmtAnswer::Unsat) {"),
+    ("C1 unchecked", D, "        if (proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)", "        if (false && proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)"),
+    ("T1 unchecked", D, "        if (proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)", "        if (false && proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)"),
+    ("A1 unchecked", D, "        if (proof.ask(\"A1\", \"a closed form of a view\", program.terms->logicalAnd(a.premise, differs)) !=\n            SmtAnswer::Unsat) {", "        if (false) {"),
+    ("second copy shares state", D, "      std::vector<Term> la = proof.values(order, a), lb = proof.second(proof.values(order, b));\n      TermContext &terms", "      std::vector<Term> la = proof.values(order, a), lb = proof.values(order, b);\n      TermContext &terms"),
+    ("pair limit ignored", D, "    if (n * n > options.limits.maxPairs)\n      return unknownWith(\"more arrival pairs than the limit\");\n", ""),
+    ("query limit ignored", D, "    if (queries >= options.limits.maxQueries) {", "    if (false) {"),
+    ("unknown discharges", D, "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      entry.evidence = response.detail;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {", "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      response.answer = SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {"),
+    # Multiplicity.
+    ("box guard may read repeats", D, "  if (readsRepeat(order.guard))\n    return nullptr;\n  // Each span", "  // Each span"),
+    ("box bounds may read levels", D, "    if (readsAnyLevel(level.lower) || readsAnyLevel(level.upper))\n      return nullptr;\n", ""),
+    ("box width unchecked", D, "  if (bitsUsed >= 128)\n    return nullptr;\n", ""),
+    ("box ignores empty spans", D, "    Term span = terms.ite(terms.icmp(Predicate::Slt, lo, hi), terms.binary(TermOp::Sub, hi, lo),\n                          terms.bv(APInt(128, 0)));\n", "    Term span = terms.binary(TermOp::Sub, hi, lo);\n"),
+    # Binding.
+    ("binding ignores the request", D, "  for (const GuardedLevel &level : request.order.levels)\n    out += \"|\" + formatTerm(level.value)", "  for (const GuardedLevel &level : llvm::ArrayRef<GuardedLevel>())\n    out += \"|\" + formatTerm(level.value)"),
+    ("binding ignores the family", D, "  for (const auto &axis : family.axes) {\n    out += \"|f\";", "  for (const auto &axis : std::array<std::vector<Term>, 0>()) {\n    out += \"|f\";"),
+    ("binding ignores access", D, "  for (const auto &form : request.access) {\n    out += \"|a\";", "  for (const auto &form : std::array<std::vector<Term>, 0>()) {\n    out += \"|a\";"),
+    ("binding ignores the scope", D, "  for (const ParameterRange &range : options.scope.ranges)\n    out += std::to_string(range.parameter) + \":\" + std::to_string(range.lower.getSExtValue()) +\n           \":\" + std::to_string(range.upper.getSExtValue()) + \",\";\n  for (const std::string &name : options.authorized)\n    out += \"|\" + name;\n  for (const GuardedLevel", "  for (const std::string &name : options.authorized)\n    out += \"|\" + name;\n  for (const GuardedLevel"),
+    # Theorem 13.
+    ("T13 ignores refutation", D, "  if (refuted) {\n    out.claim = ComputationStatus::Refuted;", "  if (false) {\n    out.claim = ComputationStatus::Refuted;"),
+    ("T13 without G4a symbolic", D, "  } else if (out.compSymbolic.status() == ComputationStatus::Verified &&\n             out.domSymbolic.status() == ComputationStatus::Verified &&", "  } else if (out.domSymbolic.status() == ComputationStatus::Verified &&"),
+    ("T13 without exact order", D, "             out.domSymbolic.exactOrder()) {", "             true) {"),
+    ("T13 finite without G4a", D, "  } else if (out.compFinite.status() == ComputationStatus::Verified &&\n             out.domFinite.status() == ComputationStatus::Verified) {", "  } else if (out.domFinite.status() == ComputationStatus::Verified) {"),
+    ("T13 points not shared", D, "      if (facts.events && computed.count(pointKey(facts.parameters)))\n", "      if (facts.events)\n"),
+    ("T13 point called a scope", D, "      bool whole = out.compFinite.tier() == ComputationTier::ScopeEnumerated &&\n                   out.domFinite.tier() == ComputationTier::ScopeEnumerated;\n", "      bool whole = true;\n"),
+    ("logical tier without G3", D, "    out.logical = coordinateSymbolicOk ? ComputationTier::Symbolic : ComputationTier::Proposed;\n", "    out.logical = ComputationTier::Symbolic;\n"),
+    # Reorder facts.
+    ("trivial from points at the scope", D, "    out.trivial = out.domFinite.singleContribution();\n", "  {\n    out.trivial = out.domFinite.singleContribution();\n    out.trivial.tier = (int)ComputationTier::Symbolic;\n  }\n"),
+    ("float proven by algebra", D, "    out.floating = values.status() == ComputationStatus::Verified\n                           ? witness()\n                           : unknownFact(\"the computation is not verified\");\n", "    out.floating = proven(\"addition is associative\", ComputationTier::Symbolic);\n"),
+    ("integer flags ignored", R, "    if (contract.reductionFlags & (FlagNSW | FlagNUW)) {", "    if (false) {"),
+    ("integer observers ignored", R, "    if (effect.observesOutput) {", "    if (false) {"),
+    ("integer stop loads ignored", R, "      if (loadsFrom(condition.violated, *group.output) || throughState(condition.violated)) {", "      if (throughState(condition.violated)) {"),
+    ("integer stop state ignored", R, "      if (loadsFrom(condition.violated, *group.output) || throughState(condition.violated)) {", "      if (loadsFrom(condition.violated, *group.output)) {"),
+    ("integer float fold admitted", R, "  if (computation.fold() != FoldForm::ModularInteger) {", "  if (false) {"),
+    ("integer unverified admitted", R, "  if (computation.status() != ComputationStatus::Verified) {\n    why = \"the computation is not verified\";", "  if (false) {\n    why = \"the computation is not verified\";"),
+    ("witness from a stopped run", R, "  RunResult run = runConcrete(program, entry);\n  if (run.status != RunStatus::Returned)\n    return false;\n", "  RunResult run = runConcrete(program, entry);\n"),
+    ("witness without overflow", R, "    if (!isFloat && backwardOverflow) {", "    if (!isFloat) {"),
+    ("witness float equal bits", R, "    if (isFloat && forward != backward) {", "    if (isFloat) {"),
+    ("witness mixed sites", R, "    if (site.reduction != first.reduction || site.reductionFlags != first.reductionFlags ||\n        site.multiplyFlags != first.multiplyFlags)\n      return false;\n", ""),
+    # G4a's scope check.
+    ("scope sampled", C, "  if (enumeration.sampled || scope.allParameters)\n    return false;\n", ""),
+    ("scope count ignored", C, "  return expected == APInt(128, seen.size() + enumeration.outsideDomain);\n", "  return true;\n"),
+    ("scope point outside", C, "    if (!parametersInScope(scope, point.parameters))\n      return false;\n", ""),
+]
+
+EQUIVALENT = [
+    ("box multiplicity unchecked", "a defensive check that cannot fire: constantBox admits a box only "
+     "when the guard and every other level's bounds read no repeat level and the repeat bounds read "
+     "parameters alone, so S(v) = S_rest(v) x R(v), and with Theorem 12 at the point each logical "
+     "point has exactly |R(v)| events, which is the product. Evidence: every ConstantBox case of "
+     "DomainTest and of the oracle's multiplicity check."),
+    ("box ignores empty spans", "with a repeat span empty, R(v) and so S(v) are empty, no logical "
+     "point exists, and μ is claimed of none: the value of the product there is never read."),
+    ("T13 without exact order", "a symbolic CheckedDomain is Verified only on the path that also "
+     "sets exactOrder, so the conjunct is implied by the one before it."),
+    ("integer float fold admitted", "integerReorderConditions is called only on the integer "
+     "branch of checkReduction, so a float fold never reaches the test it removes."),
+    ("scope sampled", "with `sampled` set the enumeration lists only its sample points, and the "
+     "count must still equal the scope's: a sample that lists every point of the scope is the "
+     "whole enumeration, and nothing else passes the count."),
+    ("T13 finite without G4a", "the finite join keeps only points that G4a's finite claim lists, "
+     "and a CheckedComputation lists points only on its Verified path, so with G4a unverified the "
+     "list is empty and the result Unknown either way. Evidence: the unnamed case of testGapsG5."),
+    ("integer unverified admitted", "a CheckedComputation sets its fold form only on its Verified "
+     "paths, so an unverified one carries the default ORDERED_FLOAT and the next condition refuses "
+     "it. Evidence: the unnamed case of testGapsG5."),
+    ("integer flags ignored", "an nsw or nuw reduction add stores a value whose poison is a side "
+     "condition `poison reaches memory` reading the output's load, which the stop check refuses "
+     "first. Evidence: the mixed_flags case of testGapsG5."),
+]
+
+MEMORY_LIMIT = 6 << 30   # Per process, inherited by its descendants.
+COMPILE_LIMIT = 8 << 30  # A compile peaks at 1.6 GB and a link stays below this.
+TEST_SECONDS = 1500
+BUILD_SECONDS = 1200
+
+
+class Finished:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def run(command, cwd=None, timeout=TEST_SECONDS, memory=MEMORY_LIMIT):
+    """Its own process group, so a timeout reaches every descendant."""
+    def limit():
+        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+
+    process = subprocess.Popen([str(c) for c in command], cwd=cwd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True,
+                               preexec_fn=limit)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return Finished(process.returncode, stdout, stderr)
+
+
+def limit_of(label):
+    """The 512-program sweep runs about 25 minutes; every other test far less."""
+    return 3600 if label == "holes" else TEST_SECONDS
+
+
+def verdict_of(label, done):
+    """killed, resource, crash or passed, for one finished test."""
+    text = done.stderr + done.stdout
+    if ("bad_alloc" in text or "Cannot allocate" in text or "out of memory" in text or
+            "failed to allocate" in text or done.returncode == -signal.SIGKILL):
+        return "resource"
+    if done.returncode == 0:
+        return "passed"
+    if done.returncode == 1:
+        # A test's own assertion, in the words of that test.
+        if label == "programs":
+            own = ("driver failed" not in done.stderr and "Traceback" not in done.stderr and
+                   done.stderr.strip())
+        else:
+            own = "FAIL " in done.stderr
+        if own:
+            return "killed"
+    return "crash"
+
+
+def contents(root, parts):
+    found = {}
+    for part in parts:
+        for path in (root / part).rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts:
+                found[path.relative_to(root)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return found
+
+
+class Worker:
+    def __init__(self, index, scratch, root, args):
+        self.lib = scratch / f"lib{index}"
+        self.build = scratch / f"build{index}"
+        self.root, self.args = root, args
+        if not self.lib.exists():
+            shutil.copytree(root / "lib" / "GeneralizedGemm", self.lib)
+        configured = run(["cmake", "-S", root / "research" / "generalized-gemm", "-B", self.build,
+                          "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", f"-DGG_LIB_DIR={self.lib}",
+                          f"-DLLVM_DIR={args.llvm_dir}", f"-DMLIR_DIR={args.mlir_dir}"])
+        if configured.returncode:
+            raise RuntimeError(f"cmake failed:\n{configured.stderr[-1500:]}")
+
+    def restore(self):
+        original = self.root / "lib" / "GeneralizedGemm"
+        for f in original.iterdir():
+            copy = self.lib / f.name
+            if copy.read_text() != f.read_text():
+                shutil.copy(f, copy)
+
+    def compile(self):
+        return run(["ninja", "-C", self.build, "-j2", "generalized-gemm-domain-test",
+                    "generalized-gemm-domain-report"], timeout=BUILD_SECONDS,
+                   memory=COMPILE_LIMIT)
+
+    def commands(self):
+        fuzz = self.root / "research" / "generalized-gemm" / "test" / "fuzz"
+        test = self.build / "generalized-gemm-domain-test"
+        report = self.build / "generalized-gemm-domain-report"
+        out = [(name, [test, name]) for name in
+               ("reviewed", "gaps", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
+        out.append(("holes", [test, "holes"]))
+        out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
+                                 "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
+        return out
+
+    def trial(self, name, filename, old, new):
+        self.restore()
+        path = self.lib / filename
+        text = path.read_text()
+        if old not in text:
+            return "HARNESS_ERROR", "stale pattern"
+        path.write_text(text.replace(old, new, 1))
+        try:
+            built = self.compile()
+        except subprocess.TimeoutExpired:
+            return "HARNESS_ERROR", "the build timed out"
+        if built.returncode:
+            return "HARNESS_ERROR", "does not build: " + built.stdout[-300:]
+        notes = []
+        for label, command in self.commands():
+            try:
+                outcome = verdict_of(label, run(command, timeout=limit_of(label)))
+            except subprocess.TimeoutExpired:
+                outcome = "timeout"
+            if outcome == "killed":
+                return "KILLED", label
+            if outcome != "passed":
+                notes.append((outcome, label))
+        for outcome, name_of in (("resource", "RESOURCE_LIMIT"), ("timeout", "TIMEOUT"),
+                                 ("crash", "HARNESS_ERROR")):
+            found = [label for kind, label in notes if kind == outcome]
+            if found:
+                return name_of, outcome + " in " + ",".join(found)
+        return "SURVIVED", ""
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", required=True, help="the repository root")
+    parser.add_argument("--scratch", required=True)
+    parser.add_argument("--llvm-dir", required=True)
+    parser.add_argument("--mlir-dir", required=True)
+    parser.add_argument("--only", default="", help="comma-separated mutant names")
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--results", required=True, help="a JSON-lines file, appended to")
+    args = parser.parse_args()
+    if args.workers > 2:
+        print("at most two workers: compiles take 1.6 GB each and other jobs share this machine")
+        return 2
+
+    names = [n for n in args.only.split(",") if n]
+    unknown = sorted(set(names) - {m[0] for m in MUTANTS})
+    if unknown:
+        print(f"no such mutants: {unknown}")
+        return 2
+    if len({m[0] for m in MUTANTS}) != len(MUTANTS):
+        print("two mutants share a name")
+        return 2
+    equivalent = {e[0] for e in EQUIVALENT}
+    if not equivalent <= {m[0] for m in MUTANTS}:
+        print("an equivalent mutant is not in the list")
+        return 2
+    chosen = [m for m in MUTANTS if (not names or m[0] in names) and m[0] not in equivalent]
+
+    scratch = Path(args.scratch).resolve()
+    scratch.mkdir(exist_ok=True)
+    snapshot = scratch / "tree"
+    source = Path(args.source).resolve()
+    parts = ["include", "lib", "research"] + [
+        f"test/{p.name}" for p in (source / "test").glob("polynomial*")]
+    if not snapshot.exists():
+        snapshot.mkdir()
+        for part in parts:
+            (snapshot / part).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source / part, snapshot / part)
+    elif contents(source, parts) != contents(snapshot, parts):
+        print(f"{snapshot} is not a copy of {source}: use a new --scratch")
+        return 2
+    tree = hashlib.sha256(json.dumps(sorted((str(k), v) for k, v in contents(source, parts).items())).encode()).hexdigest()
+
+    results = Path(args.results)
+    done = {}
+    if results.exists():
+        for line in results.read_text().splitlines():
+            row = json.loads(line)
+            if row["tree"] != tree:
+                print(f"{results} is about another tree")
+                return 2
+            done[row["mutant"]] = row
+    chosen = [m for m in chosen if m[0] not in done]
+    print(f"tree {tree}: {len(done)} already recorded, {len(chosen)} to run", flush=True)
+    for name, reason in EQUIVALENT:
+        if name not in done:
+            row = {"mutant": name, "tree": tree, "result": "EQUIVALENT", "detail": reason}
+            done[name] = row
+            with results.open("a") as out:
+                out.write(json.dumps(row) + "\n")
+    workers = [Worker(i, scratch, snapshot, args) for i in range(args.workers)]
+
+    # A kill only means something if the unmodified tree passes the same tests.
+    first = workers[0]
+    first.restore()
+    built = first.compile()
+    if built.returncode:
+        print(f"BASELINE NO-BUILD\n{built.stdout[-1500:]}")
+        return 2
+    for label, command in first.commands():
+        try:
+            result = run(command, timeout=limit_of(label))
+        except subprocess.TimeoutExpired:
+            print(f"BASELINE TIMED OUT: {label}")
+            return 2
+        if verdict_of(label, result) != "passed":
+            print(f"BASELINE FAILED: {label}\n{result.stdout[-1500:]}\n{result.stderr[-1500:]}")
+            return 2
+    print("baseline passes", flush=True)
+
+    queue = list(chosen)
+
+    def serve(worker):
+        while True:
+            try:
+                name, filename, old, new = queue.pop(0)
+            except IndexError:
+                return
+            result, detail = worker.trial(name, filename, old, new)
+            row = {"mutant": name, "tree": tree, "result": result, "detail": detail}
+            with results.open("a") as out:
+                out.write(json.dumps(row) + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+            done[name] = row
+            print(f"{result}: {name} ({detail})", flush=True)
+
+    with ThreadPoolExecutor(len(workers)) as pool:
+        list(pool.map(serve, workers))
+    counts = {}
+    for row in done.values():
+        counts[row["result"]] = counts.get(row["result"], 0) + 1
+    bad = sorted(n for n, r in done.items() if r["result"] not in ("KILLED", "EQUIVALENT"))
+    print(f"{len(done)} of {len(MUTANTS)} recorded; {counts}; open: {bad}")
+    return 0 if not bad else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

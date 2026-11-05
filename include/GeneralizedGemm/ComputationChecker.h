@@ -107,6 +107,12 @@ private:
       ProofStatus::unknown("no transformation is claimed before G6 and G7");
 };
 
+/// Whether `enumeration` ran every point of `scope` and no other: every point lies in
+/// the scope, and their number, with those outside the domain, is the scope's. A
+/// claim with fewer points is about those points, whatever scope it is given.
+bool enumerationCoversScope(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                            const ParameterScope &scope);
+
 /// Point or ScopeEnumerated. `group` indexes the enumeration's groups.
 CheckedComputation checkComputationFinite(const SemanticProgram &program,
                                           const DomainEnumeration &enumeration, unsigned group,

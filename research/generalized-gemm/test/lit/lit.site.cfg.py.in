@@ -11,5 +11,6 @@ config.substitutions.append(("%termreport", "@CMAKE_CURRENT_BINARY_DIR@/generali
 config.substitutions.append(("%coordreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-coordinate-report"))
 config.substitutions.append(("%synthreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-synthesis-report"))
 config.substitutions.append(("%compreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-computation-report"))
+config.substitutions.append(("%domreport", "@CMAKE_CURRENT_BINARY_DIR@/generalized-gemm-domain-report"))
 config.substitutions.append(("FileCheck", "@GG_FILECHECK@"))
 config.substitutions.append((" not ", " @GG_NOT@ "))
