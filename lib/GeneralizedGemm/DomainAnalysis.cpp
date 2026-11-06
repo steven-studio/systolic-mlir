@@ -13,7 +13,31 @@ namespace mlir::generalized_gemm {
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,
                             const DomainAnalysisRequest &request, SmtBackend &backend) {
   DomainResult out;
-  SynthesisResult search = synthesizeProgram(program, certificate, request.synthesis, backend);
+  SynthesisResult search;
+  if (request.family) {
+    // No search: the given family stands in as the one candidate of each group.
+    EnumerationOptions gate;
+    gate.scope = request.domain.scope;
+    gate.termination = request.domain.termination;
+    gate.authorized = request.domain.authorized;
+    gate.limits = request.synthesis.limits;
+    gate.liveStatePoints = true;
+    search.enumeration = enumerateDomain(program, certificate, gate, backend);
+    for (unsigned g = 0; g < search.enumeration.groups.size(); ++g) {
+      GroupSynthesis group;
+      group.group = g;
+      group.status = RecoveryStatus::Unknown;
+      group.reason = "a family was given, and not searched for";
+      if (search.enumeration.groups[g].unsupported.empty()) {
+        VerifiedCandidate candidate;
+        candidate.family = *request.family;
+        group.candidates.push_back(std::move(candidate));
+      }
+      search.groups.push_back(std::move(group));
+    }
+  } else {
+    search = synthesizeProgram(program, certificate, request.synthesis, backend);
+  }
   // The whole scope, with live state, for the finite route and the proposer.
   EnumerationOptions enumeration;
   enumeration.scope = request.domain.scope;
@@ -81,8 +105,14 @@ json::Value termJSON(Term term) {
     return nullptr;
   json::Object out{{"width", (int64_t)term->sort.width}};
   if (term->op == TermOp::Const) {
-    out["const"] = term->value.getBitWidth() <= 64 ? json::Value((int64_t)term->value.getZExtValue())
-                                                   : json::Value(nullptr);
+    // A constant past 64 bits, as the 128-bit μ has, goes as decimal text.
+    if (term->value.getBitWidth() <= 64) {
+      out["const"] = (int64_t)term->value.getZExtValue();
+    } else {
+      llvm::SmallString<48> text;
+      term->value.toString(text, 10, /*Signed=*/false);
+      out["const"] = text.str().str();
+    }
   } else if (term->op == TermOp::State) {
     if (auto level = levelOf(term))
       out["level"] = (int64_t)*level;

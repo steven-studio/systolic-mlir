@@ -12,6 +12,10 @@ driver, and every claim is recomputed here with no library code:
 - Reorder facts: a proven integer fact against random permutations; every witness
   replayed.
 - A refuted domain claim: the events and the set differ at its point.
+- Multiplicity (Theorem 14): a spec may name repeat loops. It then runs again with the
+  family of its other loops given to the driver, and the emitted μ term is evaluated here
+  at every logical point of the nest, including the points with no event, against the
+  count of events. A perturbed term must disagree, or this check is vacuous.
 
 Every driver run has a time limit, and a timeout fails the run.
 """
@@ -54,7 +58,8 @@ def term(t, state, params, levels):
     """A term of the driver at its own width, with SMT-LIB total division."""
     w = t["width"]
     if "const" in t:
-        return wrap(t["const"], w)
+        # A constant past 64 bits comes as decimal text.
+        return wrap(int(t["const"]), w)
     if "state" in t:
         return wrap(state[t["state"]], w)
     if "param" in t:
@@ -164,7 +169,7 @@ class Emitter:
     def value(self, e, names):
         if isinstance(e, int):
             self.consts.add(e)
-            return f"%c{e}"
+            return f"%c{e}" if e >= 0 else f"%cm{-e}"
         if isinstance(e, str):
             return names[e]
         a, b = self.value(e[1], names), self.value(e[2], names)
@@ -238,7 +243,8 @@ def print_function(spec):
         mac("f", "1")
     body += ["}"] * closing
     em.consts |= {0, 1}
-    head = [f"%c{v} = arith.constant {v} : index" for v in sorted(em.consts)]
+    head = [f"%c{v} = arith.constant {v} : index" if v >= 0 else f"%cm{-v} = arith.constant {v} : index"
+            for v in sorted(em.consts)]
     args = ", ".join(f"%{r}: {t}" for r in "abc") + ", %n: index"
     return f"func.func @{spec['name']}({args}) {{\n" + "\n".join(head + body) + "\nreturn\n}\n"
 
@@ -246,14 +252,16 @@ def print_function(spec):
 AUTH = "roots 0 and 1 are separate,roots 0 and 2 are separate,roots 1 and 2 are separate"
 
 
-def run_driver(driver, spec):
+def run_driver(driver, spec, family=None):
     with tempfile.NamedTemporaryFile("w", suffix=".mlir") as handle:
         handle.write(print_function(spec))
         handle.flush()
         low, high = spec["scope"]
-        command = [driver, handle.name, "--lower-structured", f"--index-bit-width={WIDTH}",
+        command = [driver, handle.name, "--lower-structured", f"--index-bit-width={spec.get('width', WIDTH)}",
                    f"--scope=0:{low}:{high}", "--max-level=1", "--candidates-per-group=1",
                    "--print-events", f"--authorize={AUTH}"] + SOLVER
+        if family is not None:
+            command.append("--family=" + family)
         done = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT)
     if done.returncode:
         raise SystemExit(f"driver failed on {spec['name']}:\n{done.stderr[-1500:]}")
@@ -274,7 +282,7 @@ def state_map(spec, tables):
             values = theirs["x"][1:]  # The first entry is the site.
             env = dict(mine["env"])
             for id_, value in zip(table["names"], values):
-                options = {k for k, v in env.items() if wrap(v, WIDTH) == value} | (
+                options = {k for k, v in env.items() if wrap(v, spec.get("width", WIDTH)) == value} | (
                     {("const", value)})
                 if candidates is None:
                     candidates = {}
@@ -362,16 +370,86 @@ def check_facts(spec, entry, domain, n, events, lam, mapping, tally):
     if domain["single_contribution"]["status"] == "PROVEN":
         if any(len(m) > 1 for m in cells.values()):
             raise SystemExit(f"{spec['name']} n={n}: T1 is false")
-    if domain["multiplicity"] == "CONSTANT_BOX" and domain["multiplicity_term"]:
-        mu = term(domain["multiplicity_term"], {}, [n], [])
-        counts = {}
-        for e in events:
-            k = tuple(term(t, state_values(mapping, e["env"]), [n], [])
-                      for axis in "pijk" for t in entry["axes"][axis])
-            counts[k] = counts.get(k, 0) + 1
-        if any(c != mu for c in counts.values()):
-            raise SystemExit(f"{spec['name']} n={n}: μ = {mu} is false: {set(counts.values())}")
-        tally["multiplicities checked"] += 1
+    if domain["multiplicity"] in ("CONSTANT_BOX", "LOGICAL_BOX") and domain["multiplicity_term"]:
+        check_multiplicity(spec, entry, domain, n, events, lam, mapping, tally)
+
+
+def mentions(e, names):
+    if isinstance(e, str):
+        return e in names
+    if isinstance(e, (tuple, list)):
+        return any(mentions(x, names) for x in e)
+    return False
+
+
+def logical_visits(spec, n):
+    """The logical points L(v): the nest with every repeat loop run once, at its first
+    value, under the spec's own logical guard. Theorem 14 says nothing of a point outside
+    L(v), so a guard that excludes one keeps it out here too. None when the guard reads a
+    repeat variable: no box exists then, and nothing is checked."""
+    repeats = spec.get("repeats", [])
+    guard = spec.get("guard")
+    if guard is not None and mentions(guard, repeats):
+        return None
+    once = dict(spec)
+    once["loops"] = [(name, low, (("+", low, 1) if name in repeats else high), step)
+                     for name, low, high, step in spec["loops"]]
+    # A piecewise nest fires on both sides of its guard, so every point is visited.
+    if spec.get("piecewise"):
+        once["guard"] = None
+        once["piecewise"] = False
+    try:
+        events, _ = interpret(once, n)
+    except Stop:
+        return []
+    return [e["env"] for e in events]
+
+
+def check_multiplicity(spec, entry, domain, n, events, lam, mapping, tally):
+    """Theorem 14: the emitted μ term, evaluated here at the levels of each logical point,
+    equals the number of events of that point, and is 0 where the point has none."""
+    request = entry["request"]
+    mu_term = domain["multiplicity_term"]
+    logical = lambda env: tuple(term(t, state_values(mapping, env), [n], [])
+                                for axis in "pijk" for t in entry["axes"][axis])
+    levels_of = lambda env: [term(level["value"], state_values(mapping, env), [n], [])
+                             for level in request["levels"]]
+    counts, mus = {}, {}
+    for e, l in zip(events, lam):
+        k = logical(e["env"])
+        counts[k] = counts.get(k, 0) + 1
+        mu = term(mu_term, {}, [n], list(l))
+        if k in mus and mus[k] != mu:
+            raise SystemExit(f"{spec['name']} n={n}: μ differs within a logical point")
+        mus[k] = mu
+    for k, c in counts.items():
+        if c != mus[k]:
+            raise SystemExit(f"{spec['name']} n={n}: μ = {mus[k]} is false at {k}: {c} events")
+    # Points of the nest with no event at all: μ must be 0 there, which the driver's
+    # finite route never looked at.
+    visits = logical_visits(spec, n) if spec.get("repeats") else None
+    if visits is not None:
+        zero = 0
+        for env in visits:
+            k = logical(env)
+            if k in counts:
+                continue
+            try:
+                mu = term(mu_term, {}, [n], levels_of(env))
+            except KeyError:
+                continue
+            if mu != 0:
+                raise SystemExit(f"{spec['name']} n={n}: μ = {mu} at {k}, which has no event")
+            zero += 1
+        tally["zero multiplicity points"] += zero
+    # The check is no tautology: a term off by one must disagree somewhere.
+    perturbed = {"width": mu_term["width"], "op": "add",
+                 "args": [mu_term, {"width": mu_term["width"], "const": 1}]}
+    if events and all(term(perturbed, {}, [n], list(l)) == counts[logical(e["env"])]
+                      for e, l in zip(events, lam)):
+        raise SystemExit(f"{spec['name']}: the multiplicity check cannot fail")
+    tally["multiplicities checked"] += 1
+    tally["multiplicity " + domain["multiplicity"]] += 1
 
 
 def less_key(levels, a, b):
@@ -487,6 +565,54 @@ def check_witness(spec, fact, tally):
     raise SystemExit(f"{spec['name']}: a reorder witness does not replay")
 
 
+def family_text(spec, mapping):
+    """The spec's non-repeat loop variables as a driver family, by their state ids."""
+    by_name = {}
+    for id_, source in mapping.items():
+        if isinstance(source, str) and source not in by_name:
+            by_name[source] = id_
+    axes = {"p": [], "i": [], "j": [], "k": []}
+    for name, *_ in spec["loops"]:
+        if name in spec.get("repeats", []):
+            continue
+        if name not in by_name:
+            return None
+        axes[name if name in axes else "p"].append(str(by_name[name]))
+    return ";".join(f"{axis}:{','.join(ids)}" for axis, ids in axes.items())
+
+
+def check_repeats(spec, driver, rng, fills, tally):
+    """The second run of a spec with repeat loops, with the family given."""
+    first = run_driver(driver, spec)
+    tally["repeat candidates generated"] += 1
+    mapping = None
+    for group in first["groups"]:
+        mapping = state_map(spec, group.get("tables", []))
+    text = family_text(spec, mapping or {})
+    if text is None:
+        tally["repeat family unmapped"] += 1
+        return
+    result = run_driver(driver, spec, family=text)
+    for group in result["groups"]:
+        for entry in group["candidates"]:
+            if "request" not in entry:
+                tally["repeat no proposal"] += 1
+                continue
+            form = entry["domain_symbolic"]["multiplicity"]
+            finite_form = entry["domain_finite"]["multiplicity"]
+            if form == "LOGICAL_BOX":
+                tally["repeat accepted LOGICAL_BOX"] += 1
+            elif form == "CONSTANT_BOX":
+                tally["repeat accepted CONSTANT_BOX"] += 1
+            elif entry["domain_symbolic"]["status"] == "VERIFIED" or finite_form == "COUNTED":
+                tally["repeat refused (COUNTED/UNKNOWN)"] += 1
+            if spec.get("refuse") and form in ("LOGICAL_BOX", "CONSTANT_BOX"):
+                raise SystemExit(f"{spec['name']}: a box where Theorem 14's conditions fail")
+            if spec.get("box") and form != spec["box"] and entry["domain_symbolic"]["status"] == "VERIFIED":
+                raise SystemExit(f"{spec['name']}: wanted {spec['box']}, got {form}")
+    check(spec, result, rng, fills, tally)
+
+
 def check(spec, result, rng, fills, tally):
     if result["authorizes_lowering"]:
         raise SystemExit("a result authorizes lowering")
@@ -564,6 +690,30 @@ def catalogue():
           f2=["k", "i"]),
         S("stepped", [("i", 0, "n", 1), ("j", 0, 3, 1), ("k", 0, 5, 2)], ["i", "j"], ["i", "k"], ["k", "j"]),
         S("repeated", [("t", 0, 2, 1)] + IJK, ["i", "j"], ["i", "k"], ["k", "j"]),
+        S("growing", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, ("+", "k", 1), 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="LOGICAL_BOX"),
+        S("triangle_repeat", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", "k", 3, 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="LOGICAL_BOX"),
+        S("empty_repeat", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", "k", 2, 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="LOGICAL_BOX"),
+        S("signed_repeat", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", -1, ("+", "k", 1), 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="LOGICAL_BOX"),
+        S("two_repeats", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, ("+", "k", 1), 1), ("u", 0, 2, 1)], ["i", 0], ["i", "k"],
+          ["k", "i"], repeats=["t", "u"], box="LOGICAL_BOX"),
+        S("constant_repeat", [("t", 0, 2, 1), ("i", 0, "n", 1), ("k", 0, 3, 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="CONSTANT_BOX"),
+        S("nested_repeats", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, 2, 1), ("u", 0, ("+", "t", 1), 1)], ["i", 0],
+          ["i", "k"], ["k", "i"], repeats=["t", "u"], refuse=True),
+        # t < k + 1 is the box t in [0, k + 1), and a box it is. A parity guard is no
+        # interval in t, so Theorem 14's C1 refuses a closed form.
+        S("bounded_by_guard", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, 3, 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          guard=("<", "t", ("+", "k", 1)), repeats=["t"], box="LOGICAL_BOX"),
+        S("parity_repeat", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, 3, 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          guard=("==", ("%", ("+", "t", "k"), 2), 0), repeats=["t"], refuse=True),
+        S("wide_repeats", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, 2, 1), ("u", 0, 2, 1)], ["i", 0], ["i", "k"],
+          ["k", "i"], repeats=["t", "u"], refuse=True, width=64),
+        S("float_repeat", [("i", 0, "n", 1), ("k", 0, 3, 1), ("t", 0, ("+", "k", 1), 1)], ["i", 0], ["i", "k"], ["k", "i"],
+          repeats=["t"], box="LOGICAL_BOX", element="f64"),
         S("reversed", IJK, ["i", "j"], ["i", "kk"], ["kk", "j"], derived=[("kk", ("-", 2, "k"))]),
         S("collide", IJK, [("%", ("+", "i", "j"), 2), 0], ["i", "k"], ["k", "j"]),
         S("nsw", IJK, ["i", "j"], ["i", "k"], ["k", "j"], nsw=True),
@@ -575,8 +725,13 @@ def random_spec(rng, name):
     loops = [("i", 0, "n", 1), ("j", 0, rng.choice([2, 3, 4]), 1)]
     k_high = rng.choice([3, 4, "j"])
     loops.append(("k", 0, k_high, rng.choice([1, 1, 2])))
+    repeats = []
     if rng.random() < 0.2:
         loops = [("t", 0, 2, 1)] + loops
+        repeats = ["t"]
+    elif rng.random() < 0.25:
+        loops = loops + [("t", 0, rng.choice([("+", "k", 1), 2, ("-", 3, "k")]), 1)]
+        repeats = ["t"]
     guard = rng.choice([None, None, ("bit", rng.randrange(1, 512), ("+", ("*", "j", 3), "k")),
                         ("==", ("%", ("+", "j", "k"), 2), 0), ("<", "k", "j")])
     h = rng.choice([["i", "j"], ["i", "j"], [("%", ("+", "i", "j"), 2), 0], ["j", "i"]])
@@ -586,6 +741,8 @@ def random_spec(rng, name):
         spec["f2"] = ["k", "i"]
     if spec["element"] == "i32" and rng.random() < 0.2:
         spec["nsw"] = True
+    if repeats:
+        spec["repeats"] = repeats
     return spec
 
 
@@ -616,12 +773,26 @@ def main():
             continue
         tally["programs"] += 1
         check(spec, result, random.Random(args.seed * 7919 + n), args.fills, tally)
+    for n, spec in enumerate(specs):
+        if spec.get("repeats"):
+            try:
+                check_repeats(spec, args.driver, random.Random(args.seed * 104729 + n), args.fills, tally)
+            except subprocess.TimeoutExpired:
+                tally["timed out"] += 1
     for key in sorted(tally):
         print(f"{key}: {tally[key]}")
     if tally["timed out"]:
         raise SystemExit("a driver run timed out")
     if not tally["symbolic VERIFIED"] or not tally["points checked"] or not tally["Theorem 13 runs"]:
         raise SystemExit("this run tested nothing")
+    # Theorem 14 must have been exercised, accepted and refused, or this run says nothing
+    # about it.
+    if tally["repeat accepted LOGICAL_BOX"] < 4 or tally["multiplicity LOGICAL_BOX"] < 4:
+        raise SystemExit("fewer than 4 LOGICAL_BOX cases were checked")
+    if tally["repeat accepted CONSTANT_BOX"] < 1 or tally["repeat refused (COUNTED/UNKNOWN)"] < 2:
+        raise SystemExit("the constant box or the refusals were not exercised")
+    if tally["zero multiplicity points"] < 1:
+        raise SystemExit("no logical point with zero events was checked")
     print("0 disagreements")
 
 

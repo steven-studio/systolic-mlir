@@ -101,9 +101,13 @@ MUTANTS = [
     ("query limit ignored", D, "    if (queries >= options.limits.maxQueries) {", "    if (false) {"),
     ("unknown discharges", D, "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      entry.evidence = response.detail;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {", "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      response.answer = SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {"),
     # Multiplicity.
-    ("box guard may read repeats", D, "  if (readsRepeat(order.guard))\n    return nullptr;\n  // Each span", "  // Each span"),
-    ("box bounds may read levels", D, "    if (readsAnyLevel(level.lower) || readsAnyLevel(level.upper))\n      return nullptr;\n", ""),
+    ("box guard may read repeats", D, "  if (reads(order.guard, true))\n    return nullptr;\n  // Each span", "  // Each span"),
+    ("box bounds may read repeats", D, "    if (reads(level.lower, true) || reads(level.upper, true))\n      return nullptr;\n", ""),
     ("box width unchecked", D, "  if (bitsUsed >= 128)\n    return nullptr;\n", ""),
+    ("logical box called constant", D, "    out.form = readsLogical ? DomainMultiplicity::LogicalBox : DomainMultiplicity::ConstantBox;", "    out.form = DomainMultiplicity::ConstantBox;"),
+    ("mu read at no event", D, "        auto mu = evaluateLevelTerm(structure->mu, v, lambdas[firstEvent.at(point)]);", "        auto mu = evaluateLevelTerm(structure->mu, v, {});"),
+    ("mu span not clamped", D, "    Term span = terms.ite(terms.icmp(Predicate::Slt, lo, hi), terms.binary(TermOp::Sub, hi, lo),\n                          terms.bv(APInt(128, 0)));", "    Term span = terms.binary(TermOp::Sub, hi, lo);"),
+    ("mu span unsigned", D, "    Term lo = level.isSigned ? terms.sext(level.lower, 128) : terms.zext(level.lower, 128);\n    Term hi = level.isSigned ? terms.sext(level.upper, 128) : terms.zext(level.upper, 128);", "    Term lo = terms.zext(level.lower, 128);\n    Term hi = terms.zext(level.upper, 128);"),
     ("box ignores empty spans", D, "    Term span = terms.ite(terms.icmp(Predicate::Slt, lo, hi), terms.binary(TermOp::Sub, hi, lo),\n                          terms.bv(APInt(128, 0)));\n", "    Term span = terms.binary(TermOp::Sub, hi, lo);\n"),
     # Binding.
     ("binding ignores the request", D, "  for (const GuardedLevel &level : request.order.levels)\n    out += \"|\" + formatTerm(level.value)", "  for (const GuardedLevel &level : llvm::ArrayRef<GuardedLevel>())\n    out += \"|\" + formatTerm(level.value)"),
@@ -143,6 +147,11 @@ EQUIVALENT = [
      "parameters alone, so S(v) = S_rest(v) x R(v), and with Theorem 12 at the point each logical "
      "point has exactly |R(v)| events, which is the product. Evidence: every ConstantBox case of "
      "DomainTest and of the oracle's multiplicity check."),
+    ("mu span not clamped", "a clamp that the finite check cannot see fail: the repeat levels of a "
+     "box have lo < hi at every event, since each event's repeat value lies in [lo, hi), so the "
+     "clamp matters only at a logical point with no event, where μ is read by no one. The "
+     "symbolic μ term then differs from the product of the clamps, which is a weaker statement "
+     "that the oracle does not test either. Kept as a defence; listed here with that caveat."),
     ("box ignores empty spans", "with a repeat span empty, R(v) and so S(v) are empty, no logical "
      "point exists, and μ is claimed of none: the value of the product there is never read."),
     ("T13 without exact order", "a symbolic CheckedDomain is Verified only on the path that also "
@@ -255,7 +264,8 @@ class Worker:
         test = self.build / "generalized-gemm-domain-test"
         report = self.build / "generalized-gemm-domain-report"
         out = [(name, [test, name]) for name in
-               ("reviewed", "gaps", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
+               ("reviewed", "gaps", "multiplicity", "siblings", "adversarial", "limits", "binding", "wrapping",
+                "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))

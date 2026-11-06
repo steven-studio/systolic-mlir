@@ -173,40 +173,36 @@ ArrayRef<Term> viewOf(const MacSite &site, unsigned view) {
   return view == 1 ? ArrayRef<Term>(site.a.index) : ArrayRef<Term>(site.b.index);
 }
 
-/// μ as Π max(hi - lo, 0) over the repeat levels, at 128 bits so it cannot wrap. Only for
-/// a box: repeat bounds read parameters alone, and nothing else reads a repeat level.
-Term constantBox(const SemanticProgram &program, const GuardedOrder &order,
-                 const std::vector<bool> &repeat) {
+/// Theorem 14: when the guard and every logical level's bounds read no repeat level,
+/// and no repeat level's bounds read a repeat level, S(v) is, for each logical point x,
+/// a box in the repeat levels: μ(x) = Π max(hi_r(v, x) - lo_r(v, x), 0), each span in its
+/// level's own signedness, at 128 bits so the product cannot wrap (the widths sum below
+/// 128). ConstantBox when μ reads no level, LogicalBox when it reads logical ones. Null
+/// when the conditions fail: then only an enumeration counts.
+Term boxMultiplicity(const SemanticProgram &program, const GuardedOrder &order,
+                     const std::vector<bool> &repeat, bool &readsLogical) {
   TermContext &terms = *program.terms;
+  readsLogical = false;
   std::set<unsigned> repeatLevels;
   for (unsigned m = 0; m < repeat.size(); ++m)
     if (repeat[m])
       repeatLevels.insert(m);
-  auto readsRepeat = [&](Term term) {
+  auto reads = [&](Term term, bool wantRepeat) {
     llvm::DenseSet<Term> seen;
     std::function<bool(Term)> visit = [&](Term n) {
       if (!seen.insert(n).second)
         return false;
       auto level = levelOf(n);
-      if (level && repeatLevels.count(*level))
+      if (level && (repeatLevels.count(*level) != 0) == wantRepeat)
         return true;
       return llvm::any_of(n->args, visit);
     };
     return visit(term);
   };
-  auto readsAnyLevel = [&](Term term) {
-    llvm::DenseSet<Term> seen;
-    std::function<bool(Term)> visit = [&](Term n) {
-      if (!seen.insert(n).second)
-        return false;
-      return levelOf(n).has_value() || llvm::any_of(n->args, visit);
-    };
-    return visit(term);
-  };
-  if (readsRepeat(order.guard))
+  if (reads(order.guard, true))
     return nullptr;
   // Each span is below 2^w, so the product is below 2^(sum of widths): at most 127
-  // bits, or this is no constant at 128 bits.
+  // bits, or this is no value at 128 bits.
   unsigned bitsUsed = 0;
   for (unsigned m : repeatLevels)
     bitsUsed += order.levels[m].value->sort.width;
@@ -215,13 +211,11 @@ Term constantBox(const SemanticProgram &program, const GuardedOrder &order,
   Term product = terms.bv(APInt(128, 1));
   for (unsigned m = 0; m < order.levels.size(); ++m) {
     const GuardedLevel &level = order.levels[m];
-    if (!repeatLevels.count(m)) {
-      if (readsRepeat(level.lower) || readsRepeat(level.upper))
-        return nullptr;
-      continue;
-    }
-    if (readsAnyLevel(level.lower) || readsAnyLevel(level.upper))
+    if (reads(level.lower, true) || reads(level.upper, true))
       return nullptr;
+    if (!repeatLevels.count(m))
+      continue;
+    readsLogical = readsLogical || reads(level.lower, false) || reads(level.upper, false);
     Term lo = level.isSigned ? terms.sext(level.lower, 128) : terms.zext(level.lower, 128);
     Term hi = level.isSigned ? terms.sext(level.upper, 128) : terms.zext(level.upper, 128);
     Term span = terms.ite(terms.icmp(Predicate::Slt, lo, hi), terms.binary(TermOp::Sub, hi, lo),
@@ -260,11 +254,11 @@ std::optional<Structure> adoptRequest(const SemanticProgram &program, const Coor
     for (Term term : request.access[view])
       if (!isLevelTerm(program, out.order, term, out.order.levels.size(), why))
         return std::nullopt;
-  bool anyRepeat = llvm::is_contained(out.repeat, true);
+  bool anyRepeat = llvm::is_contained(out.repeat, true), readsLogical = false;
   if (!anyRepeat) {
     out.form = DomainMultiplicity::Unit;
-  } else if ((out.mu = constantBox(program, out.order, out.repeat))) {
-    out.form = DomainMultiplicity::ConstantBox;
+  } else if ((out.mu = boxMultiplicity(program, out.order, out.repeat, readsLogical))) {
+    out.form = readsLogical ? DomainMultiplicity::LogicalBox : DomainMultiplicity::ConstantBox;
   }
   return out;
 }
@@ -398,14 +392,21 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
         out.push_back(value.getZExtValue());
       return out;
     };
-    for (const auto &point : logicals)
-      here.maxMultiplicity = std::max(here.maxMultiplicity, ++counts[keyOf(point)]);
+    std::map<std::vector<uint64_t>, size_t> firstEvent;
+    for (size_t e = 0; e < logicals.size(); ++e) {
+      std::vector<uint64_t> key = keyOf(logicals[e]);
+      here.maxMultiplicity = std::max(here.maxMultiplicity, ++counts[key]);
+      firstEvent.try_emplace(key, e);
+    }
     here.logicalPoints = counts.size();
-    if (structure->form == DomainMultiplicity::ConstantBox) {
-      auto mu = evaluateLevelTerm(structure->mu, v, {});
-      for (const auto &[point, count] : counts)
+    if (structure->form == DomainMultiplicity::ConstantBox ||
+        structure->form == DomainMultiplicity::LogicalBox) {
+      // μ reads no repeat level, so any event of the point gives its value.
+      for (const auto &[point, count] : counts) {
+        auto mu = evaluateLevelTerm(structure->mu, v, lambdas[firstEvent.at(point)]);
         if (!mu || *mu != APInt(128, count))
           return CheckedDomain::unknown("the multiplicity contradicts the order's box: a defect");
+      }
     }
 
     // Cells: the order within each, the key, collisions, and single contributions.

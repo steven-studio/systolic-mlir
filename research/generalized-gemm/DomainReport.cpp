@@ -46,6 +46,9 @@ static cl::opt<uint64_t> referenceFill("reference-fill", cl::init(0));
 static cl::opt<bool> printEvents("print-events", cl::init(false));
 static cl::opt<uint64_t> maxBox("max-box", cl::init(1u << 20));
 static cl::opt<unsigned> candidatesPerGroup("candidates-per-group", cl::init(2));
+static cl::opt<std::string> familyText(
+    "family", cl::init(""),
+    cl::desc("p:ids;i:ids;j:ids;k:ids, state ids per axis, in place of the search"));
 static cl::opt<uint64_t> replaySteps("replay-steps", cl::init(1u << 22));
 static cl::opt<uint64_t> replayNodes("replay-nodes", cl::init(1u << 23));
 static cl::opt<unsigned> maxQueries("max-queries", cl::init(4000));
@@ -148,6 +151,32 @@ int main(int argc, char **argv) {
     request.domain.computation.replay.maxNodes = replayNodes;
     request.proposal.maxBox = maxBox;
     request.maxCandidates = candidatesPerGroup;
+    if (!familyText.empty() && program.isSupported()) {
+      CoordinateFamily family;
+      family.origin = "given on the command line";
+      llvm::SmallVector<llvm::StringRef> axes;
+      llvm::StringRef(familyText).split(axes, ';');
+      bool ok = axes.size() == 4;
+      for (unsigned axis = 0; ok && axis < 4; ++axis) {
+        llvm::StringRef body = axes[axis];
+        ok = body.size() >= 2 && body[0] == "pijk"[axis] && body[1] == ':';
+        llvm::SmallVector<llvm::StringRef> ids;
+        if (ok)
+          body.drop_front(2).split(ids, ',', -1, /*KeepEmpty=*/false);
+        for (llvm::StringRef text : ids) {
+          unsigned id;
+          ok = ok && !text.getAsInteger(10, id) && id < program.state.size() &&
+               program.state[id].sort.kind == Sort::BV;
+          if (ok)
+            family.axes[axis].push_back(program.terms->state(id, program.state[id].sort));
+        }
+      }
+      if (!ok) {
+        llvm::errs() << "malformed --family for " << program.functionName << "\n";
+        return 2;
+      }
+      request.family = family;
+    }
     DomainResult result = analyzeDomains(program, certificate ? &*certificate : nullptr, request, backend);
     if (!first)
       llvm::outs() << ",\n";

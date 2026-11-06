@@ -63,7 +63,15 @@ struct DomainRequest {
 enum class FactStatus { Proven, Refuted, Unknown };
 const char *stringifyFactStatus(FactStatus status);
 
-enum class DomainMultiplicity { Unit, ConstantBox, Counted, Unknown };
+/// How many events each logical point has.
+///   Unit         no repeat level: one event per point.
+///   ConstantBox  the repeat levels form a box whose bounds read parameters only:
+///                μ is one 128-bit term over parameters.
+///   LogicalBox   the repeat levels form a box whose bounds read parameters and the
+///                logical levels: μ(x) is a 128-bit term over parameters and level
+///                variables, the same for every event of a logical point (Theorem 14).
+///   Counted      exact at enumerated points, no closed form.
+enum class DomainMultiplicity { Unit, ConstantBox, LogicalBox, Counted, Unknown };
 const char *stringifyDomainMultiplicity(DomainMultiplicity form);
 
 /// One fact with what supports it. Refuted carries a concrete witness: a parameter

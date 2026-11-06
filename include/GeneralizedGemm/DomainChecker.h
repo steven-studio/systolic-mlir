@@ -62,7 +62,9 @@ public:
   /// Theorem 12 at this tier: λ maps the events onto S(v), in order.
   bool exactOrder() const { return orbit; }
   DomainMultiplicity multiplicity() const { return form; }
-  /// For ConstantBox: μ as a 128-bit term over parameters.
+  /// For ConstantBox: μ as a 128-bit term over parameters. For LogicalBox: over
+  /// parameters and level variables, to be read at any event of the logical point; it
+  /// reads no repeat level.
   Term multiplicityTerm() const { return mu; }
   const Fact &cellKey() const { return key; }
   /// Proven: no two logical outputs share a cell. Refuted: a point where two do.

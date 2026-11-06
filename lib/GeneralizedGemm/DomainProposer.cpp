@@ -38,8 +38,20 @@ bool increasing(const GuardedOrder &order, const std::vector<unsigned> &use,
   return true;
 }
 
+/// A level is compared signed where a sample value has its top bit set and none sits at
+/// the signed top: a loop from -1 is such. A guess the checker judges.
+bool guessSigned(unsigned candidate, const std::vector<Sample> &samples) {
+  bool negative = false, signedTop = false;
+  for (const Sample &s : samples)
+    for (const auto &row : s.values) {
+      negative = negative || row[candidate].isNegative();
+      signedTop = signedTop || row[candidate].isMaxSignedValue();
+    }
+  return negative && !signedTop;
+}
+
 /// Directions read from the samples: where every outer level is still, the level moves
-/// one way only. Nullopt when it moves both ways.
+/// one way only, in its signedness. Nullopt when it moves both ways.
 std::optional<GuardedOrder> directions(const std::vector<Term> &candidates,
                                        const std::vector<unsigned> &use,
                                        const std::vector<Sample> &samples) {
@@ -47,6 +59,7 @@ std::optional<GuardedOrder> directions(const std::vector<Term> &candidates,
   for (unsigned m = 0; m < use.size(); ++m) {
     GuardedLevel level;
     level.value = candidates[use[m]];
+    level.isSigned = guessSigned(use[m], samples);
     bool up = false, down = false;
     for (const Sample &s : samples)
       for (size_t e = 1; e < s.values.size(); ++e) {
@@ -56,8 +69,8 @@ std::optional<GuardedOrder> directions(const std::vector<Term> &candidates,
         if (!still)
           continue;
         const APInt &a = s.values[e - 1][use[m]], &b = s.values[e][use[m]];
-        up = up || a.ult(b);
-        down = down || b.ult(a);
+        up = up || (level.isSigned ? a.slt(b) : a.ult(b));
+        down = down || (level.isSigned ? b.slt(a) : b.ult(a));
       }
     if (up && down)
       return std::nullopt;
@@ -240,20 +253,51 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
       return order;
     return std::nullopt;
   };
+  // How many adjacent events a candidate set of levels leaves out of order, or nothing
+  // when some level moves both ways.
+  auto violations = [&](const std::vector<unsigned> &levels) -> std::optional<uint64_t> {
+    auto order = directions(candidates, levels, samples);
+    if (!order)
+      return std::nullopt;
+    uint64_t count = 0;
+    for (const Sample &s : samples)
+      for (size_t e = 1; e < s.values.size(); ++e) {
+        std::vector<APInt> a, b;
+        for (unsigned c : levels) {
+          a.push_back(s.values[e - 1][c]);
+          b.push_back(s.values[e][c]);
+        }
+        count += !concreteLess(*order, a, b);
+      }
+    return count;
+  };
   std::optional<GuardedOrder> order = attempt(use);
   for (unsigned extra = 0; !order && extra < limits.maxRepeatLevels; ++extra) {
-    for (unsigned c = coordinates; c < candidates.size() && !order; ++c) {
+    // The repeat level that leaves fewest events out of order, at its best position,
+    // even when some remain: the next one may settle them.
+    std::optional<uint64_t> best;
+    std::vector<unsigned> bestLevels;
+    for (unsigned c = coordinates; c < candidates.size(); ++c) {
       if (llvm::is_contained(use, c))
         continue;
-      for (unsigned at = 0; at <= use.size() && !order; ++at) {
+      // Innermost first: a repeat level inside the logical ones leaves their bounds free
+      // of it, which Theorem 14 needs; an outer position is taken only when it orders
+      // more events.
+      for (unsigned at = use.size() + 1; at-- > 0;) {
         std::vector<unsigned> next = use;
         next.insert(next.begin() + at, c);
-        if ((order = attempt(next)))
-          use = next;
+        auto count = violations(next);
+        if (count && (!best || *count < *best)) {
+          best = count;
+          bestLevels = next;
+        }
       }
     }
-    if (!order)
+    if (!best)
       break;
+    use = bestLevels;
+    if (*best == 0)
+      order = attempt(use);
   }
   if (!order) {
     why = "no lexicographic order of these terms fits the samples";
@@ -289,24 +333,29 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
 
   auto complete = [&](const std::vector<unsigned> &use, GuardedOrder &order,
                       std::string &failure) -> bool {
-    // A box around the samples.
+    // A box around the samples, with bounds that move with an outer level kept aside.
+    std::vector<std::pair<Term, Term>> outerBounds(use.size(), {nullptr, nullptr});
     for (unsigned m = 0; m < use.size(); ++m) {
       unsigned width = order.levels[m].value->sort.width;
+      // Extremes in the level's own signedness, or -1 would read as the top value.
+      bool sgn = guessSigned(use[m], samples);
+      auto less = [sgn](const APInt &a, const APInt &b) { return sgn ? a.slt(b) : a.ult(b); };
       std::vector<std::pair<std::vector<APInt>, APInt>> lows, highs;
-      APInt globalLow = APInt::getMaxValue(width), globalHigh(width, 0);
+      APInt globalLow = sgn ? APInt::getSignedMaxValue(width) : APInt::getMaxValue(width);
+      APInt globalHigh = sgn ? APInt::getSignedMinValue(width) : APInt(width, 0);
       bool any = false;
       for (const Sample &s : samples) {
         if (s.values.empty())
           continue;
         APInt low = s.values[0][use[m]], high = low;
         for (const auto &row : s.values) {
-          low = row[use[m]].ult(low) ? row[use[m]] : low;
-          high = high.ult(row[use[m]]) ? row[use[m]] : high;
+          low = less(row[use[m]], low) ? row[use[m]] : low;
+          high = less(high, row[use[m]]) ? row[use[m]] : high;
         }
         lows.push_back({s.parameters, low});
         highs.push_back({s.parameters, high + 1});
-        globalLow = low.ult(globalLow) ? low : globalLow;
-        globalHigh = globalHigh.ult(high + 1) ? high + 1 : globalHigh;
+        globalLow = less(low, globalLow) ? low : globalLow;
+        globalHigh = less(globalHigh, high + 1) ? high + 1 : globalHigh;
         any = true;
       }
       if (!any) {
@@ -314,8 +363,44 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
         return false;
       }
       Term lower = fit(program, lows, width), upper = fit(program, highs, width);
+      // A bound that moves with an outer level: for each value of that level the
+      // extreme is the level's value plus one constant.
+      auto fitOuter = [&](bool wantUpper) -> Term {
+        // The nearest outer level first: it is the one most likely to drive this bound.
+        for (unsigned o = m; o-- > 0;) {
+          std::map<std::pair<std::vector<uint64_t>, uint64_t>, APInt> extreme;
+          for (const Sample &s : samples)
+            for (const auto &row : s.values) {
+              std::vector<uint64_t> point;
+              for (const APInt &p : s.parameters)
+                point.push_back(p.getZExtValue());
+              auto [slot, added] = extreme.try_emplace({point, row[use[o]].getZExtValue()}, row[use[m]]);
+              if (!added)
+                slot->second = wantUpper ? (less(slot->second, row[use[m]]) ? row[use[m]] : slot->second)
+                                         : (less(row[use[m]], slot->second) ? row[use[m]] : slot->second);
+            }
+          if (extreme.empty() || order.levels[o].value->sort.width != width)
+            continue;
+          std::optional<APInt> offset;
+          bool all = true;
+          for (const auto &[key, value] : extreme) {
+            APInt bound = wantUpper ? value + 1 : value;
+            APInt c = bound - APInt(width, key.second);
+            if (!offset)
+              offset = c;
+            all = all && *offset == c;
+          }
+          if (all && offset) {
+            Term y = levelVariable(terms, o, order.levels[o].value->sort);
+            return offset->isZero() ? y : terms.binary(TermOp::Add, y, terms.bv(*offset));
+          }
+        }
+        return nullptr;
+      };
+      outerBounds[m] = {fitOuter(false), fitOuter(true)};
       order.levels[m].lower = lower ? lower : terms.bv(globalLow);
       order.levels[m].upper = upper ? upper : terms.bv(globalHigh);
+      order.levels[m].isSigned = guessSigned(use[m], samples);
       // A level that is a function of outer levels held in plain state has one value
       // for each of them: bound it to exactly that, or the box grows with it.
       Term value = order.levels[m].value;
@@ -334,17 +419,10 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
             unsigned o = outer.at(leaf->index);
             return levelVariable(terms, o, order.levels[o].value->sort);
           });
+          // [x, x + 1) is empty where x + 1 wraps; the signedness chosen above makes
+          // the comparison that keeps it nonempty where a sample sits at the top.
           order.levels[m].lower = exact;
           order.levels[m].upper = terms.binary(TermOp::Add, exact, terms.bv(APInt(width, 1)));
-          // [x, x + 1) is empty where x + 1 wraps: compare signed if a sample sits at
-          // the unsigned top, and unsigned if one sits at the signed top.
-          bool unsignedTop = false, signedTop = false;
-          for (const Sample &s : samples)
-            for (const auto &row : s.values) {
-              unsignedTop = unsignedTop || row[use[m]].isMaxValue();
-              signedTop = signedTop || row[use[m]].isMaxSignedValue();
-            }
-          order.levels[m].isSigned = unsignedTop && !signedTop;
         }
       }
     }
@@ -358,6 +436,36 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
       return value && value->isOne();
     };
     order.guard = terms.boolean(true);
+    if (exactAt(order, use, samples, limits.maxBox))
+      return true;
+    // Bounds that move with an outer level, before any guard: a triangle or a repeat
+    // that grows with its loop is a box of varying extent, and no guard is needed. Each
+    // is taken, innermost first, only where it brings the box nearer the events.
+    auto slack = [&](const GuardedOrder &candidate) -> std::optional<uint64_t> {
+      uint64_t extra = 0;
+      for (const Sample &s : samples) {
+        std::string why;
+        auto set = enumerateGuardedSet(candidate, s.parameters, limits.maxBox, why);
+        if (!set || set->size() < s.values.size())
+          return std::nullopt;
+        extra += set->size() - s.values.size();
+      }
+      return extra;
+    };
+    std::optional<uint64_t> current = slack(order);
+    for (unsigned m = use.size(); m-- > 0;)
+      for (bool upper : {true, false}) {
+        Term bound = upper ? outerBounds[m].second : outerBounds[m].first;
+        if (!bound)
+          continue;
+        GuardedOrder trial = order;
+        (upper ? trial.levels[m].upper : trial.levels[m].lower) = bound;
+        auto next = slack(trial);
+        if (next && (!current || *next < *current)) {
+          order = trial;
+          current = next;
+        }
+      }
     if (exactAt(order, use, samples, limits.maxBox))
       return true;
     Term conjunction = terms.boolean(true);

@@ -1489,6 +1489,15 @@ static void testGapsG5() {
       CHECK(finite.status() == S::Verified);
       CHECK(finite.multiplicity() != DomainMultiplicity::ConstantBox);
       CHECK(symbolic.multiplicity() != DomainMultiplicity::ConstantBox);
+      // The guard of partly_repeated reads t, so no box; growing_repeat's t is a box
+      // over k, which G5b gives a closed form (testMultiplicity).
+      if (outer) {
+        CHECK(finite.multiplicity() == DomainMultiplicity::Counted);
+        CHECK(symbolic.multiplicity() == DomainMultiplicity::Unknown);
+      } else {
+        CHECK(finite.multiplicity() == DomainMultiplicity::LogicalBox);
+        CHECK(symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+      }
     }
   }
   {
@@ -1510,8 +1519,10 @@ static void testGapsG5() {
     auto [finite, symbolic] = both(g, gf, r);
     if (finite.status() != S::Verified)
       describe("growing repeat", finite, symbolic);
-    CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::Counted);
-    CHECK(symbolic.multiplicity() != DomainMultiplicity::ConstantBox);
+    // G5b: that bound reads k, a logical level, so the repeat is a box over the
+    // logical point and μ(i, k) = k + 1 has a closed form.
+    CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::LogicalBox);
+    CHECK(symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
   }
   {
     // The binding tells requests apart by their levels too.
@@ -1622,6 +1633,560 @@ static void testGapsG5() {
   }
 }
 
+/// G5b, first milestone: multiplicity as a box over the logical levels (Theorem 14),
+/// and what must stay Counted.
+static const char *multiplicitySource = R"(func.func @signed_repeat(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %m1 = arith.constant -1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      %top = arith.addi %k, %c1 : index
+      scf.for %t = %m1 to %top step %c1 {
+        %x = memref.load %a[%i, %k] : memref<8x8xi32>
+        %y = memref.load %b[%k, %i] : memref<8x8xi32>
+        %z = memref.load %c[%i, %c0] : memref<8x8xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<8x8xi32>
+      }
+    }
+  }
+  return
+}
+func.func @nested_repeats(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      scf.for %t = %c0 to %c2 step %c1 {
+        %top = arith.addi %t, %c1 : index
+        scf.for %u = %c0 to %top step %c1 {
+          %x = memref.load %a[%i, %k] : memref<8x8xi32>
+          %y = memref.load %b[%k, %i] : memref<8x8xi32>
+          %z = memref.load %c[%i, %c0] : memref<8x8xi32>
+          %m = arith.muli %x, %y : i32
+          %s = arith.addi %z, %m : i32
+          memref.store %s, %c[%i, %c0] : memref<8x8xi32>
+        }
+      }
+    }
+  }
+  return
+}
+func.func @two_repeats(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      %top = arith.addi %k, %c1 : index
+      scf.for %t = %c0 to %top step %c1 {
+        scf.for %u = %c0 to %c2 step %c1 {
+          %x = memref.load %a[%i, %k] : memref<8x8xi32>
+          %y = memref.load %b[%k, %i] : memref<8x8xi32>
+          %z = memref.load %c[%i, %c0] : memref<8x8xi32>
+          %m = arith.muli %x, %y : i32
+          %s = arith.addi %z, %m : i32
+          memref.store %s, %c[%i, %c0] : memref<8x8xi32>
+        }
+      }
+    }
+  }
+  return
+}
+func.func @float_repeat(%a: memref<8x8xf64>, %b: memref<8x8xf64>, %c: memref<8x8xf64>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      %top = arith.addi %k, %c1 : index
+      scf.for %t = %c0 to %top step %c1 {
+        %x = memref.load %a[%i, %k] : memref<8x8xf64>
+        %y = memref.load %b[%k, %i] : memref<8x8xf64>
+        %z = memref.load %c[%i, %c0] : memref<8x8xf64>
+        %m = arith.mulf %x, %y : f64
+        %s = arith.addf %z, %m : f64
+        memref.store %s, %c[%i, %c0] : memref<8x8xf64>
+      }
+    }
+  }
+  return
+}
+)";
+
+static void describeRequest(const char *what, const DomainRequest &r) {
+  printf("%s:", what);
+  for (const GuardedLevel &level : r.order.levels)
+    printf(" [%s in %s..%s%s%s]", formatTerm(level.value, 4).c_str(), formatTerm(level.lower, 4).c_str(),
+           formatTerm(level.upper, 4).c_str(), level.descending ? " desc" : "", level.isSigned ? " signed" : "");
+  printf(" guard %s\n", formatTerm(r.order.guard, 6).c_str());
+}
+
+static const char *multiplicitySource2 = R"(func.func @descending_repeat(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      %top = arith.addi %k, %c1 : index
+      scf.for %t = %c0 to %top step %c1 {
+        %tt = arith.subi %c2, %t : index
+        %x = memref.load %a[%i, %k] : memref<8x8xi32>
+        %y = memref.load %b[%k, %tt] : memref<8x8xi32>
+        %z = memref.load %c[%i, %c0] : memref<8x8xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<8x8xi32>
+      }
+    }
+  }
+  return
+}
+func.func @empty_repeat(%a: memref<8x8xi32>, %b: memref<8x8xi32>, %c: memref<8x8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c3 step %c1 {
+      scf.for %t = %k to %c2 step %c1 {
+        %x = memref.load %a[%i, %k] : memref<8x8xi32>
+        %y = memref.load %b[%k, %i] : memref<8x8xi32>
+        %z = memref.load %c[%i, %c0] : memref<8x8xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<8x8xi32>
+      }
+    }
+  }
+  return
+}
+)";
+
+static void testMultiplicity() {
+  Module m(std::string(gapsSource) + multiplicitySource + multiplicitySource2);
+  Sort w = Sort::bv(16);
+  auto family = [&](const SemanticProgram &p, unsigned i, unsigned k) {
+    CoordinateFamily f;
+    f.axes[AxisI] = {p.terms->state(i, w)};
+    f.axes[AxisK] = {p.terms->state(k, w)};
+    return f;
+  };
+  auto evalMu = [&](Term mu, uint64_t n, const std::vector<uint64_t> &levels) {
+    if (!mu)
+      return (int64_t)-1;
+    std::vector<APInt> ls;
+    for (uint64_t v : levels)
+      ls.push_back(APInt(16, v, /*isSigned=*/true));
+    auto value = evaluateLevelTerm(mu, {APInt(16, n)}, ls);
+    return value ? (int64_t)value->getSExtValue() : (int64_t)-1;
+  };
+  {
+    // t in [0, k + 1): μ(i, k) = k + 1, over the scope and at each point.
+    Fixture g = fixture(m, "growing_repeat", 1, 2);
+    std::vector<unsigned> l = loops(g.program);
+    CoordinateFamily f = family(g.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(g.program, g.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    CHECK(r.has_value());
+    if (!r)
+      return;
+    CHECK(r->order.levels.size() == 3 && r->order.guard->op == TermOp::Const);
+    CheckedDomain finite = checkDomainFinite(g.program, g.enumeration, 0, f, *r, g.options);
+    CheckedDomain symbolic = checkDomainSymbolic(g.program, g.proof(), g.enumeration.groups[0], f, *r,
+                                                 g.options, z3Backend);
+    CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::LogicalBox);
+    CHECK(symbolic.status() == S::Verified && symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+    for (uint64_t k = 0; k < 3; ++k)
+      CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, k, 0}) == (int64_t)k + 1);
+    for (const DomainPointFacts &point : finite.points())
+      CHECK(point.maxMultiplicity == 3 && point.events == 6 * point.parameters[0].getZExtValue());
+    // Theorem 13 stands with the varying repeat, and the integer fold commutes.
+    ReductionVerdict v = checkReduction(g.program, g.proof(), g.enumeration, 0, f, nullptr, *r, g.options,
+                                        z3Backend);
+    CHECK(v.status() == S::Verified && v.tier() == T::Symbolic);
+    CHECK(v.integerReorder().status == FactStatus::Proven);
+    // The same request declared ConstantBox-shaped by a wrong constant bound is refuted.
+    DomainRequest flat = *r;
+    flat.order.levels[2].upper = g.program.terms->bv(APInt(16, 3));
+    CHECK(checkDomainFinite(g.program, g.enumeration, 0, f, flat, g.options).status() == S::Refuted);
+    CHECK(checkDomainSymbolic(g.program, g.proof(), g.enumeration.groups[0], f, flat, g.options, z3Backend)
+              .status() != S::Verified);
+    // A logical level's bound that reads the repeat level is no box (Theorem 14's C2),
+    // and the finite route still judges the set.
+    DomainRequest tangled = *r;
+    Term t = levelVariable(*g.program.terms, 2, w);
+    tangled.order.levels[1].upper = g.program.terms->binary(
+        TermOp::Add, g.program.terms->bv(APInt(16, 3)), g.program.terms->binary(TermOp::Mul, t, g.program.terms->bv(APInt(16, 0))));
+    CheckedDomain refused = checkDomainFinite(g.program, g.enumeration, 0, f, tangled, g.options);
+    CHECK(refused.reason().find("refused") != std::string::npos); // k is outer to t.
+  }
+  {
+    // t in [-1, k + 1), signed: μ = k + 2 only when the level is compared signed.
+    Fixture s = fixture(m, "signed_repeat", 1, 2);
+    std::vector<unsigned> l = loops(s.program);
+    CoordinateFamily f = family(s.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(s.program, s.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    if (!r)
+      printf("no proposal: %s\n", why.c_str());
+    CHECK(r.has_value());
+    if (r) {
+      CHECK(r->order.levels[2].isSigned);
+      CheckedDomain finite = checkDomainFinite(s.program, s.enumeration, 0, f, *r, s.options);
+      CheckedDomain symbolic = checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], f, *r,
+                                                   s.options, z3Backend);
+      if (finite.status() != S::Verified || symbolic.status() != S::Verified)
+        printf("signed_repeat: %s / %s\n", finite.reason().c_str(), symbolic.reason().c_str());
+      CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::LogicalBox);
+      CHECK(symbolic.status() == S::Verified && symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+      for (uint64_t k = 0; k < 3; ++k)
+        CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, k, 0}) == (int64_t)k + 2);
+      // Read unsigned, -1 is 65535: the events are out of the order, and refuted.
+      DomainRequest unsignedT = *r;
+      unsignedT.order.levels[2].isSigned = false;
+      CHECK(checkDomainFinite(s.program, s.enumeration, 0, f, unsignedT, s.options).status() == S::Refuted);
+      CHECK(checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], f, unsignedT, s.options,
+                                z3Backend).status() != S::Verified);
+    }
+  }
+  {
+    // u in [0, t + 1): a repeat bound reading a repeat level is no box (C3). Counted
+    // exactly: μ = 1 + 2 = 3 at every logical point.
+    Fixture s = fixture(m, "nested_repeats", 1, 2);
+    std::vector<unsigned> l = loops(s.program);
+    CoordinateFamily f = family(s.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(s.program, s.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    if (!r)
+      printf("no proposal: %s\n", why.c_str());
+    CHECK(r.has_value());
+    if (r) {
+      CheckedDomain finite = checkDomainFinite(s.program, s.enumeration, 0, f, *r, s.options);
+      CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::Counted);
+      for (const DomainPointFacts &point : finite.points())
+        CHECK(point.maxMultiplicity == 3);
+      CheckedDomain symbolic = checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], f, *r,
+                                                   s.options, z3Backend);
+      CHECK(symbolic.multiplicity() == DomainMultiplicity::Unknown);
+      CHECK(symbolic.multiplicityTerm() == nullptr);
+    }
+  }
+  {
+    // Two repeat levels, t in [0, k + 1) and u in [0, 2): μ = 2 (k + 1).
+    Fixture s = fixture(m, "two_repeats", 1, 2);
+    std::vector<unsigned> l = loops(s.program);
+    CoordinateFamily f = family(s.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(s.program, s.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    if (!r)
+      printf("no proposal: %s\n", why.c_str());
+    CHECK(r.has_value());
+    if (r) {
+      CheckedDomain symbolic = checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], f, *r,
+                                                   s.options, z3Backend);
+      if (symbolic.status() != S::Verified || symbolic.multiplicity() != DomainMultiplicity::LogicalBox) {
+        describeRequest("two_repeats", *r);
+        printf("  %s %s\n", stringifyComputationStatus(symbolic.status()), symbolic.reason().c_str());
+      }
+      CHECK(symbolic.status() == S::Verified && symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+      for (uint64_t k = 0; k < 3; ++k)
+        CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, k, 0, 0}) == 2 * ((int64_t)k + 1));
+    }
+  }
+  {
+    // Floats: the repeats stay in order, the fold is ordered, and reversing changes bits.
+    Fixture s = fixture(m, "float_repeat", 1, 2);
+    std::vector<unsigned> l = loops(s.program);
+    CoordinateFamily f = family(s.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(s.program, s.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    if (!r)
+      printf("no proposal: %s\n", why.c_str());
+    CHECK(r.has_value());
+    if (r) {
+      ReductionVerdict v = checkReduction(s.program, s.proof(), s.enumeration, 0, f, nullptr, *r, s.options,
+                                          z3Backend);
+      if (v.status() != S::Verified || v.domainSymbolic().multiplicity() != DomainMultiplicity::LogicalBox) {
+        describeRequest("float_repeat", *r);
+        printf("  %s %s\n", stringifyComputationStatus(v.domainSymbolic().status()), v.domainSymbolic().reason().c_str());
+      }
+      CHECK(v.status() == S::Verified);
+      CHECK(v.domainSymbolic().multiplicity() == DomainMultiplicity::LogicalBox);
+      CHECK(v.floatReorder().status == FactStatus::Refuted);
+      CHECK(v.integerReorder().status != FactStatus::Proven);
+    }
+  }
+  {
+    // A repeat level read the other way round: the level is 2 - t, descending, with
+    // bounds [2 - k, 3), and μ = k + 1 still. The direction must be right, or the
+    // events are out of order and refuted.
+    Fixture d = fixture(m, "descending_repeat", 1, 2);
+    std::vector<unsigned> l = loops(d.program);
+    CoordinateFamily f = family(d.program, l[0], l[1]);
+    TermContext &terms = *d.program.terms;
+    DomainRequest r;
+    GuardedLevel i, k, tt;
+    i.value = terms.state(l[0], w);
+    i.lower = terms.bv(APInt(16, 0));
+    i.upper = terms.param(0, w);
+    k.value = terms.state(l[1], w);
+    k.lower = terms.bv(APInt(16, 0));
+    k.upper = terms.bv(APInt(16, 3));
+    tt.value = terms.binary(TermOp::Sub, terms.bv(APInt(16, 2)), terms.state(l[2], w));
+    tt.lower = terms.binary(TermOp::Sub, terms.bv(APInt(16, 2)), levelVariable(terms, 1, w));
+    tt.upper = terms.bv(APInt(16, 3));
+    tt.descending = true;
+    r.order.levels = {i, k, tt};
+    r.order.guard = terms.boolean(true);
+    r.cellKey = {1, 2};
+    CheckedDomain finite = checkDomainFinite(d.program, d.enumeration, 0, f, r, d.options);
+    CheckedDomain symbolic = checkDomainSymbolic(d.program, d.proof(), d.enumeration.groups[0], f, r, d.options,
+                                                 z3Backend);
+    if (finite.status() != S::Verified || symbolic.status() != S::Verified)
+      printf("descending: %s / %s\n", finite.reason().c_str(), symbolic.reason().c_str());
+    CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::LogicalBox);
+    CHECK(symbolic.status() == S::Verified && symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+    for (uint64_t kk = 0; kk < 3; ++kk)
+      CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, kk, 0}) == (int64_t)kk + 1);
+    DomainRequest ascending = r;
+    ascending.order.levels[2].descending = false;
+    CHECK(checkDomainFinite(d.program, d.enumeration, 0, f, ascending, d.options).status() == S::Refuted);
+    CHECK(checkDomainSymbolic(d.program, d.proof(), d.enumeration.groups[0], f, ascending, d.options, z3Backend)
+              .status() != S::Verified);
+  }
+  {
+    // t in [k, 2): empty at k = 2, so that logical point has no event and μ = 0 there.
+    // Its events are two at k = 0, one at k = 1.
+    Fixture e = fixture(m, "empty_repeat", 1, 2);
+    std::vector<unsigned> l = loops(e.program);
+    CoordinateFamily f = family(e.program, l[0], l[1]);
+    std::string why;
+    auto r = proposeDomain(e.program, e.enumeration, 0, f, nullptr, ProposalLimits(), why);
+    if (!r)
+      printf("empty_repeat: %s\n", why.c_str());
+    CHECK(r.has_value());
+    if (r) {
+      CheckedDomain finite = checkDomainFinite(e.program, e.enumeration, 0, f, *r, e.options);
+      CheckedDomain symbolic = checkDomainSymbolic(e.program, e.proof(), e.enumeration.groups[0], f, *r,
+                                                   e.options, z3Backend);
+      if (finite.status() != S::Verified || symbolic.status() != S::Verified)
+        describeRequest("empty_repeat", *r);
+      CHECK(finite.status() == S::Verified && finite.multiplicity() == DomainMultiplicity::LogicalBox);
+      CHECK(symbolic.status() == S::Verified && symbolic.multiplicity() == DomainMultiplicity::LogicalBox);
+      CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, 0, 0}) == 2);
+      CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, 1, 1}) == 1);
+      CHECK(evalMu(symbolic.multiplicityTerm(), 2, {1, 2, 2}) == 0); // The clamp, not -1.
+      for (const DomainPointFacts &point : finite.points())
+        CHECK(point.logicalPoints == 2 * point.parameters[0].getZExtValue());
+    }
+  }
+}
+
+/// Sibling loops: what G5a gives today, pinned so that nothing false appears while the
+/// representation they need (G5b, second milestone) is not there.
+static const char *siblingSource = R"(func.func @sib_same(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_halves(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %jj = arith.addi %j, %c4 : index
+    %x2 = memref.load %a[%jj] : memref<8xi32>
+    %y2 = memref.load %b[%jj] : memref<8xi32>
+    %z2 = memref.load %c[%jj] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%jj] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_reversed(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %jj = arith.subi %c3, %j : index
+    %x2 = memref.load %a[%jj] : memref<8xi32>
+    %y2 = memref.load %b[%jj] : memref<8xi32>
+    %z2 = memref.load %c[%jj] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%jj] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_conditional(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  %big = arith.cmpi ugt, %n, %c1 : index
+  scf.if %big {
+    scf.for %j = %c0 to %n step %c1 {
+      %x2 = memref.load %a[%j] : memref<8xi32>
+      %y2 = memref.load %b[%j] : memref<8xi32>
+      %z2 = memref.load %c[%j] : memref<8xi32>
+      %m2 = arith.muli %x2, %y2 : i32
+      %s2 = arith.addi %z2, %m2 : i32
+      memref.store %s2, %c[%j] : memref<8xi32>
+    }
+  }
+  return
+}
+func.func @sib_roots(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %d[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+)";
+
+static void testSiblings() {
+  Module m(siblingSource);
+  Sort w = Sort::bv(16);
+  for (const char *name : {"sib_same", "sib_halves", "sib_reversed", "sib_conditional"}) {
+    Fixture f = fixture(m, name, 1, 3);
+    CHECK(f.enumeration.gate == GateStatus::Open);
+    CHECK(f.program.sites.size() == 2 && f.enumeration.groups.size() == 1);
+    // The second loop's variable is undefined during the first loop, so it is no live
+    // coordinate; the first loop's is constant during the second. No family of one
+    // loop variable can tell the second loop's events apart.
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2);
+    const AccessDomain *domain = nullptr;
+    for (const PointEvidence &point : f.enumeration.points)
+      if (point.domains[0])
+        domain = &*point.domains[0];
+    CHECK(domain != nullptr);
+    if (domain) {
+      CHECK(!llvm::is_contained(domain->table().coordinateNames, l[1]));
+      CHECK(llvm::is_contained(domain->table().coordinateNames, l[0]));
+    }
+    for (unsigned variable : l) {
+      CoordinateFamily family;
+      family.axes[AxisI] = {f.program.terms->state(variable, w)};
+      CheckedFamily finite = checkFamilyFinite(f.program, f.enumeration, 0, family);
+      CHECK(finite.status() != FamilyStatus::Verified);
+      std::string why;
+      auto r = proposeDomain(f.program, f.enumeration, 0, family, nullptr, ProposalLimits(), why);
+      if (r) {
+        CheckedDomain fin = checkDomainFinite(f.program, f.enumeration, 0, family, *r, f.options);
+        CheckedDomain sym = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], family, *r,
+                                                f.options, z3Backend);
+        CHECK(fin.status() != S::Verified && sym.status() != S::Verified);
+      }
+    }
+    // The search finds nothing either: Unknown, with no false claim on any route.
+    SynthesisOptions search;
+    search.scope = f.scope;
+    search.authorized = f.authorized;
+    search.maxLevel = 1;
+    search.termination.solver = testSolver();
+    search.synthesis.solver = testSolver();
+    SynthesisResult found = synthesizeProgram(f.program, f.proof(), search, z3Backend);
+    CHECK(found.groups.size() == 1 && found.groups[0].candidates.empty());
+    CHECK(found.groups[0].status == RecoveryStatus::Unknown);
+    // The computation, by contrast, is one group and is verified: the limit is the
+    // coordinates and the order, not the values.
+    ComputationOptions computation;
+    computation.scope = f.scope;
+    computation.authorized = f.authorized;
+    computation.termination.solver = testSolver();
+    CheckedComputation values = checkComputationSymbolic(f.program, f.proof(), f.enumeration.groups[0],
+                                                         computation, z3Backend);
+    if (values.status() != S::Verified)
+      printf("%s: %s\n", name, values.reason().c_str());
+    CHECK(values.status() == S::Verified);
+  }
+  {
+    // Different operand roots make two groups, and each group's own relation is false:
+    // the other group writes its cells. Refuted, with a witness, and no Theorem 13.
+    Fixture f = fixture(m, "sib_roots", 1, 2);
+    CHECK(f.enumeration.groups.size() == 2);
+    std::vector<unsigned> l = loops(f.program);
+    for (unsigned g = 0; g < 2; ++g) {
+      CoordinateFamily family;
+      family.axes[AxisP] = {f.program.terms->state(l[g], w)};
+      std::string why;
+      auto r = proposeDomain(f.program, f.enumeration, g, family, nullptr, ProposalLimits(), why);
+      CHECK(r.has_value());
+      if (!r)
+        continue;
+      ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, g, family, nullptr, *r,
+                                          f.options, z3Backend);
+      CHECK(v.domainSymbolic().status() == S::Verified);
+      CHECK(v.computationFinite().status() == S::Refuted && v.computationFinite().witness().has_value());
+      CHECK(v.status() == S::Refuted);
+      CHECK(v.integerReorder().status != FactStatus::Proven);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -1646,6 +2211,8 @@ int main(int argc, char **argv) {
   run("binding", testBinding);
   run("reviewed", testReviewed);
   run("gaps", testGapsG5);
+  run("multiplicity", testMultiplicity);
+  run("siblings", testSiblings);
   run("orders", testExhaustiveOrders);
   run("holes", testExhaustiveHoles);
   printf("%d checks, %d failures\n", checks, failures);

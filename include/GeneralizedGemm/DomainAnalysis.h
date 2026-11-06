@@ -22,6 +22,10 @@ struct DomainAnalysisRequest {
   DomainOptions domain;
   ProposalLimits proposal;
   unsigned maxCandidates = 2; // Per group, in the search's order.
+  // A family given from outside, in place of the search: one candidate per group, with
+  // no coordinate order. For tests and oracles that want a repeat loop outside the
+  // family. A proposal like any other: the checkers judge it.
+  std::optional<CoordinateFamily> family;
 };
 
 struct CandidateDomain {

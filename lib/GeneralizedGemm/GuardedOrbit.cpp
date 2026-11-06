@@ -40,6 +40,7 @@ const char *stringifyDomainMultiplicity(DomainMultiplicity form) {
   switch (form) {
   case DomainMultiplicity::Unit: return "UNIT";
   case DomainMultiplicity::ConstantBox: return "CONSTANT_BOX";
+  case DomainMultiplicity::LogicalBox: return "LOGICAL_BOX";
   case DomainMultiplicity::Counted: return "COUNTED";
   case DomainMultiplicity::Unknown: return "UNKNOWN";
   }
