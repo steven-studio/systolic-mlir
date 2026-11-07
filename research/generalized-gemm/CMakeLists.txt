@@ -264,7 +264,9 @@ set_tests_properties(generalized-gemm-computation-programs PROPERTIES TIMEOUT 12
 add_test(NAME generalized-gemm-domain-programs COMMAND "${Python3_EXECUTABLE}"
   "${GG_FUZZ}/domain_oracle.py" --driver $<TARGET_FILE:generalized-gemm-domain-report>
   --programs 40 --fills 16 --seed 1 --jobs 2)
-set_tests_properties(generalized-gemm-domain-programs PROPERTIES TIMEOUT 1800)
+# G5b-M2 doubled the oracle's specs (segmented nests, and a second run for those with
+# repeat loops): 40 programs take about 25 minutes with two jobs.
+set_tests_properties(generalized-gemm-domain-programs PROPERTIES TIMEOUT 3600)
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")

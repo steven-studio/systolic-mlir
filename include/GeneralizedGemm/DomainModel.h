@@ -51,13 +51,30 @@ struct GuardedOrder {
   std::string origin;   // Who proposed it. Not evidence.
 };
 
-/// What a checker is asked about one group. All of it is a proposal.
+/// One segment of a group (G5b): some of its sites, with coordinates, an order, a key
+/// and closed forms of their own. A segment's terms are read only at the events of its
+/// sites, where they are defined. Segments are in execution order: every event of one
+/// comes before every event of the next (Theorem 15). Two segments may write the same
+/// cells; what is disjoint is their events, not their memory.
+struct Segment {
+  std::vector<unsigned> sites;
+  CoordinateFamily family;
+  GuardedOrder order;
+  std::vector<unsigned> cellKey;
+  std::array<std::vector<Term>, 3> access;
+};
+
+/// What a checker is asked about one group. All of it is a proposal. With `segments`
+/// empty, the request is one order over the family given beside it, as in G5a. With
+/// segments, the fields above them are unused and that family must be empty: each
+/// segment carries its own.
 struct DomainRequest {
   GuardedOrder order;
   // The per-cell order key: level indices, outermost first.
   std::vector<unsigned> cellKey;
   // Closed forms of h, f, g over level variables. An empty list proposes nothing.
   std::array<std::vector<Term>, 3> access;
+  std::vector<Segment> segments;
 };
 
 enum class FactStatus { Proven, Refuted, Unknown };
@@ -84,6 +101,15 @@ struct Fact {
   std::string detail;
   std::optional<std::vector<llvm::APInt>> point;
   std::optional<EntryState> memory; // For facts about values.
+};
+
+/// What a checker found of one segment.
+struct SegmentFacts {
+  std::vector<unsigned> sites;
+  DomainMultiplicity multiplicity = DomainMultiplicity::Unknown;
+  Term multiplicityTerm = nullptr; // Over parameters and this segment's level variables.
+  Fact cellKey, outputInjective;
+  std::array<Fact, 3> access;
 };
 
 /// One exactly enumerated point.

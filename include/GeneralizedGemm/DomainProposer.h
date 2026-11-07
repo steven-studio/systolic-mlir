@@ -28,6 +28,7 @@ namespace mlir::generalized_gemm {
 struct ProposalLimits {
   unsigned maxAtoms = 64, maxDisjuncts = 32, maxRepeatLevels = 2;
   uint64_t maxBox = 1u << 20;
+  EnumerationLimits events; // The run that reads the state at each event, for segments.
 };
 
 /// A proposal, or nullopt with `why`. `coordinateOrder`, when given, orders the levels.
@@ -36,6 +37,16 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
                                            const CoordinateFamily &family,
                                            const EnumerationOrder *coordinateOrder,
                                            const ProposalLimits &limits, std::string &why);
+
+/// G5b: a segmented proposal. Sites whose events never interleave at the sample points
+/// form segments, in program order; each gets the loop variables defined at all of its
+/// events as coordinates, on axis I, and an order fitted to its events alone. With
+/// `logical` given, only the loop variables it names are coordinates; the others are
+/// repeat candidates, as in a flat proposal with a family.
+std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &program,
+                                                    const DomainEnumeration &samples, unsigned group,
+                                                    const CoordinateFamily *logical,
+                                                    const ProposalLimits &limits, std::string &why);
 
 } // namespace mlir::generalized_gemm
 #endif

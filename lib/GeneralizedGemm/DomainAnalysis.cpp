@@ -14,7 +14,7 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
                             const DomainAnalysisRequest &request, SmtBackend &backend) {
   DomainResult out;
   SynthesisResult search;
-  if (request.family) {
+  if (request.family || request.segmented) {
     // No search: the given family stands in as the one candidate of each group.
     EnumerationOptions gate;
     gate.scope = request.domain.scope;
@@ -30,7 +30,8 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
       group.reason = "a family was given, and not searched for";
       if (search.enumeration.groups[g].unsupported.empty()) {
         VerifiedCandidate candidate;
-        candidate.family = *request.family;
+        if (request.family)
+          candidate.family = *request.family;
         group.candidates.push_back(std::move(candidate));
       }
       search.groups.push_back(std::move(group));
@@ -57,14 +58,21 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
       if (taken++ >= request.maxCandidates)
         break;
       CandidateDomain entry;
-      entry.family = candidate.family;
+      // A segmented request carries its families in its segments; a family given with
+      // --segments only tells the proposer which loop variables are logical.
+      if (!request.segmented)
+        entry.family = candidate.family;
       entry.coordinateOrder = candidate.order;
       const EnumerationOrder *order = candidate.order ? &*candidate.order : nullptr;
-      entry.request = proposeDomain(program, out.enumeration, found.group, candidate.family, order,
-                                    request.proposal, entry.proposalReason);
+      entry.request = request.segmented
+                          ? proposeSegmentedDomain(program, out.enumeration, found.group,
+                                                   request.family ? &*request.family : nullptr,
+                                                   request.proposal, entry.proposalReason)
+                          : proposeDomain(program, out.enumeration, found.group, candidate.family, order,
+                                          request.proposal, entry.proposalReason);
       if (entry.request)
         entry.verdict = checkReduction(program, certificate, out.enumeration, found.group,
-                                       candidate.family, order, *entry.request, request.domain, backend);
+                                       entry.family, order, *entry.request, request.domain, backend);
       group.candidates.push_back(std::move(entry));
     }
     out.groups.push_back(std::move(group));
@@ -174,7 +182,23 @@ json::Object domainJSON(const CheckedDomain &d) {
                    {"cell_key", factJSON(d.cellKey())},
                    {"output_injective", factJSON(d.outputInjective())},
                    {"single_contribution", factJSON(d.singleContribution())},
+                   {"shared_cells", factJSON(d.sharedCells())},
                    {"refutation", factJSON(d.refutation())}};
+  json::Array segments;
+  for (const SegmentFacts &s : d.segments()) {
+    json::Array sites, access;
+    for (unsigned site : s.sites)
+      sites.push_back((int64_t)site);
+    for (const Fact &fact : s.access)
+      access.push_back(factJSON(fact));
+    segments.push_back(json::Object{{"sites", std::move(sites)},
+                                    {"multiplicity", stringifyDomainMultiplicity(s.multiplicity)},
+                                    {"multiplicity_term", termJSON(s.multiplicityTerm)},
+                                    {"cell_key", factJSON(s.cellKey)},
+                                    {"output_injective", factJSON(s.outputInjective)},
+                                    {"access", std::move(access)}});
+  }
+  out["segments"] = std::move(segments);
   json::Array access;
   for (const Fact &fact : d.access())
     access.push_back(factJSON(fact));
@@ -200,28 +224,53 @@ json::Object domainJSON(const CheckedDomain &d) {
   return out;
 }
 
-json::Object requestJSON(const DomainRequest &request) {
+json::Object orderJSON(const GuardedOrder &order, const std::vector<unsigned> &cellKey,
+                       const std::array<std::vector<Term>, 3> &accessForms) {
   json::Array levels;
-  for (const GuardedLevel &level : request.order.levels)
+  for (const GuardedLevel &level : order.levels)
     levels.push_back(json::Object{{"value", termJSON(level.value)},
                                   {"lower", termJSON(level.lower)},
                                   {"upper", termJSON(level.upper)},
                                   {"descending", level.descending},
                                   {"signed", level.isSigned}});
   json::Array key, access;
-  for (unsigned k : request.cellKey)
+  for (unsigned k : cellKey)
     key.push_back((int64_t)k);
-  for (const auto &form : request.access) {
+  for (const auto &form : accessForms) {
     json::Array terms;
     for (Term term : form)
       terms.push_back(termJSON(term));
     access.push_back(std::move(terms));
   }
   return json::Object{{"levels", std::move(levels)},
-                      {"guard", termJSON(request.order.guard)},
+                      {"guard", termJSON(order.guard)},
                       {"cell_key", std::move(key)},
                       {"access", std::move(access)},
-                      {"origin", request.order.origin}};
+                      {"origin", order.origin}};
+}
+
+json::Object requestJSON(const DomainRequest &request) {
+  json::Object out = orderJSON(request.order, request.cellKey, request.access);
+  json::Array segments;
+  for (const Segment &segment : request.segments) {
+    json::Object entry = orderJSON(segment.order, segment.cellKey, segment.access);
+    json::Array sites;
+    for (unsigned site : segment.sites)
+      sites.push_back((int64_t)site);
+    entry["sites"] = std::move(sites);
+    static const char *names[] = {"p", "i", "j", "k"};
+    json::Object axes;
+    for (unsigned axis = 0; axis < 4; ++axis) {
+      json::Array list;
+      for (Term term : segment.family.axes[axis])
+        list.push_back(termJSON(term));
+      axes[names[axis]] = std::move(list);
+    }
+    entry["axes"] = std::move(axes);
+    segments.push_back(std::move(entry));
+  }
+  out["segments"] = std::move(segments);
+  return out;
 }
 
 } // namespace
@@ -293,13 +342,27 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
           json::Array names, list;
           for (unsigned id : table.coordinateNames)
             names.push_back((int64_t)id);
+          // The state at every event's block entry, for oracles of segmented
+          // requests, whose terms may read what the live table leaves out.
+          auto states = eventStates(program, point.parameters, 0, EnumerationLimits());
+          size_t groupEvent = 0;
+          std::vector<std::vector<std::optional<APInt>>> stateOf;
+          if (states && states->run.status == RunStatus::Returned)
+            for (size_t e = 0; e < states->run.events.size(); ++e)
+              if (llvm::is_contained(enumeration.groups[group.group].sites, states->run.events[e].site))
+                stateOf.push_back(states->states[e]);
           for (const AccessEvent &e : table.events()) {
-            json::Array x, h;
+            json::Array x, h, state;
             for (const APInt &value : table.point(e.point))
               x.push_back((int64_t)value.getZExtValue());
             for (const APInt &value : table.view(e.h))
               h.push_back((int64_t)value.getZExtValue());
-            list.push_back(json::Object{{"site", (int64_t)e.site}, {"x", std::move(x)}, {"h", std::move(h)}});
+            if (groupEvent < stateOf.size())
+              for (const auto &value : stateOf[groupEvent])
+                state.push_back(value ? json::Value((int64_t)value->getSExtValue()) : json::Value(nullptr));
+            ++groupEvent;
+            list.push_back(json::Object{{"site", (int64_t)e.site}, {"x", std::move(x)}, {"h", std::move(h)},
+                                        {"state", std::move(state)}});
           }
           slot["names"] = std::move(names);
           slot["events"] = std::move(list);

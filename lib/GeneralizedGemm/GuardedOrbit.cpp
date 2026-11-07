@@ -304,6 +304,119 @@ bool proveGuardedOrbit(const SemanticProgram &program, const GuardedOrder &order
   return true;
 }
 
+bool proveSegmentedOrbit(const SemanticProgram &program, ArrayRef<GuardedOrder> orders,
+                         const std::map<unsigned, unsigned> &segmentOfLocation,
+                         const SiteArrivals &arrivals, ArrayRef<unsigned> locations, Term scope,
+                         unsigned maxUnfolding, const AskUnsat &ask, std::string &why) {
+  TermContext &terms = *program.terms;
+  unsigned m = orders.size();
+  auto values = [&](unsigned s, const SymbolicPath &path) {
+    std::vector<Term> out;
+    for (const GuardedLevel &level : orders[s].levels)
+      out.push_back(atPathEnd(program, path, level.value));
+    return out;
+  };
+  auto mustHold = [&](const char *id, const std::string &where, Term formula) {
+    SmtAnswer answer = ask(id, where, formula);
+    if (answer == SmtAnswer::Unsat)
+      return true;
+    if (why.empty())
+      why = std::string(id) + " at " + where + ": " + stringifySmtAnswer(answer);
+    return false;
+  };
+  auto yInside = [&](unsigned s) { return inGuardedSet(program, orders[s], freeLevels(program, orders[s])); };
+  // S_r is empty under `premise`: each segment its own query, so one y at a time.
+  auto empty = [&](const char *id, const std::string &where, Term premise, unsigned from, unsigned to) {
+    for (unsigned r = from; r < to; ++r)
+      if (!mustHold(id, where + ", segment " + std::to_string(r) + " empty",
+                    terms.logicalAnd(premise, yInside(r))))
+        return false;
+    return true;
+  };
+  auto segmentAt = [&](unsigned location) -> std::optional<unsigned> {
+    auto found = segmentOfLocation.find(location);
+    if (found == segmentOfLocation.end())
+      return std::nullopt;
+    return found->second;
+  };
+  // The first event of segment s: λ ∈ S_s and nothing of S_s before it.
+  auto isFirst = [&](unsigned s, const std::vector<Term> &x) {
+    std::vector<Term> y = freeLevels(program, orders[s]);
+    Term earlier = terms.logicalAnd(yInside(s), guardedLess(program, orders[s], y, x));
+    return terms.logicalOr(terms.logicalNot(inGuardedSet(program, orders[s], x)), earlier);
+  };
+
+  if (std::find(locations.begin(), locations.end(), program.entryLocation) != locations.end()) {
+    why = "a site in the entry block";
+    return false;
+  }
+
+  // D1', from the entry.
+  SymbolicPath begin = startSymbolicPath(program, program.entryLocation);
+  begin.shadow.assign(program.state.size(), terms.boolean(false));
+  auto firstLeaf = [&](const SymbolicPath &path, Term premise, bool exit) {
+    if (exit)
+      return empty("D1", "the entry reaches the exit", premise, 0, m);
+    auto s = segmentAt(path.end);
+    if (!s) {
+      why = "an event at a location of no segment";
+      return false;
+    }
+    if (!mustHold("D1", "the first event, segment " + std::to_string(*s),
+                  terms.logicalAnd(premise, isFirst(*s, values(*s, path)))))
+      return false;
+    return empty("D1", "before the first event", premise, 0, *s);
+  };
+  if (!walkToNextEvents(program, locations, maxUnfolding, ask, why, begin, scope, firstLeaf))
+    return false;
+
+  // D2 to D5, from each state at which an event can happen.
+  for (const SiteArrival &arrival : arrivals.arrivals) {
+    auto s = segmentAt(arrival.location);
+    if (!s) {
+      why = "an event at a location of no segment";
+      return false;
+    }
+    const GuardedOrder &order = orders[*s];
+    std::vector<Term> b = values(*s, arrival.path);
+    std::vector<Term> y = freeLevels(program, order);
+    Term assumption = terms.logicalAnd(arrival.premise, inGuardedSet(program, order, b));
+    Term later = terms.logicalAnd(inGuardedSet(program, order, y), guardedLess(program, order, b, y));
+    std::string here = "segment " + std::to_string(*s);
+    auto leaf = [&](const SymbolicPath &path, Term premise, bool exit) {
+      if (exit)
+        return mustHold("D3", "an event that is not the last of " + here + " reaches the exit",
+                        terms.logicalAnd(premise, later)) &&
+               empty("D5", "after the last event of " + here, premise, *s + 1, m);
+      auto next = segmentAt(path.end);
+      if (!next) {
+        why = "an event at a location of no segment";
+        return false;
+      }
+      if (*next < *s)
+        return mustHold("D5", "an event of segment " + std::to_string(*next) + " after " + here, premise);
+      if (*next == *s) {
+        std::vector<Term> x = values(*s, path);
+        Term between = terms.logicalAnd(later, guardedLess(program, order, y, x));
+        Term bad = terms.logicalOr(terms.logicalNot(inGuardedSet(program, order, x)),
+                                   terms.logicalOr(terms.logicalNot(guardedLess(program, order, b, x)), between));
+        return mustHold("D2", "the next event, " + here, terms.logicalAnd(premise, bad));
+      }
+      // A hand-over to a later segment: nothing of S_s remains, the segments between
+      // are empty, and the event is the first of its segment.
+      std::string handover = here + " to segment " + std::to_string(*next);
+      return mustHold("D4", "a successor remains at the hand-over " + handover,
+                      terms.logicalAnd(premise, later)) &&
+             empty("D4", "between " + handover, premise, *s + 1, *next) &&
+             mustHold("D4", "the first event after the hand-over " + handover,
+                      terms.logicalAnd(premise, isFirst(*next, values(*next, path))));
+    };
+    if (!walkToNextEvents(program, locations, maxUnfolding, ask, why, arrival.path, assumption, leaf))
+      return false;
+  }
+  return true;
+}
+
 std::optional<APInt> evaluateLevelTerm(Term t, ArrayRef<APInt> parameters, ArrayRef<APInt> levels) {
   auto arg = [&](unsigned i) { return evaluateLevelTerm(t->args[i], parameters, levels); };
   switch (t->op) {

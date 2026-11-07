@@ -352,6 +352,24 @@ void Enumerator::enumerate(const Ranges &ranges) {
 
 } // namespace
 
+std::optional<EventStates> eventStates(const SemanticProgram &program,
+                                       const std::vector<APInt> &point, uint64_t fill,
+                                       const EnumerationLimits &limits) {
+  if (point.size() != program.parameters.size() || hasNegativeExtent(program, point))
+    return std::nullopt;
+  auto entry = referenceEntry(program, point, fill, limits.maxCells);
+  if (!entry)
+    return std::nullopt;
+  EventStates out;
+  out.entry = *entry;
+  RunLimits run;
+  run.fuel = limits.fuel;
+  run.maxCells = limits.maxCells;
+  run.maxRecordedConfigurations = 0;
+  out.run = runKeepingState(program, out.entry, run, out.states);
+  return out;
+}
+
 std::vector<bool> memoryIndependentState(const SemanticProgram &program) {
   std::vector<bool> tainted(program.state.size(), false);
   for (bool changed = true; changed;) {

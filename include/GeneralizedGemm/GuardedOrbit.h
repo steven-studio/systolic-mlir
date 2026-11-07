@@ -24,6 +24,7 @@
 #include "GeneralizedGemm/CoverageSimulation.h"
 #include "GeneralizedGemm/DomainModel.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -59,6 +60,24 @@ std::vector<Term> freeLevels(const SemanticProgram &program, const GuardedOrder 
 bool proveGuardedOrbit(const SemanticProgram &program, const GuardedOrder &order,
                        const SiteArrivals &arrivals, llvm::ArrayRef<unsigned> locations,
                        Term scope, unsigned maxUnfolding, const AskUnsat &ask, std::string &why);
+
+/// Theorem 15: segments s = 1..m, each with its own order, in execution order, with the
+/// group's sites partitioned by `segmentOfLocation`. Beyond D1 to D3 within a segment:
+///
+///   D1'  The first event is at a segment s with λ = min S_s, and S_r is empty for r < s.
+///        A run with no event has every S_s empty.
+///   D4   From an event of segment s with no successor in S_s, the next event is at a
+///        segment s' > s with λ = min S_{s'}, and S_r is empty for s < r < s'. From one
+///        with a successor, the next event is at segment s with that successor.
+///   D5   No event of a segment follows an event of a later one. From the last event, or
+///        from the entry with no event, every later S_r is empty.
+///
+/// Then the extended points (s, λ_s) of the events, in order, are S_1 ⊎ ... ⊎ S_m in
+/// order. True only when every query is unsat; `why` names the first that is not.
+bool proveSegmentedOrbit(const SemanticProgram &program, llvm::ArrayRef<GuardedOrder> orders,
+                         const std::map<unsigned, unsigned> &segmentOfLocation,
+                         const SiteArrivals &arrivals, llvm::ArrayRef<unsigned> locations,
+                         Term scope, unsigned maxUnfolding, const AskUnsat &ask, std::string &why);
 
 /// A term over parameters and levels at one point. Nullopt for any other leaf or an
 /// operation outside the integer fragment.

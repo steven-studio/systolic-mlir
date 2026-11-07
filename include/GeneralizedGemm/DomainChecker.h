@@ -33,6 +33,7 @@ namespace mlir::generalized_gemm {
 
 struct DomainLimits {
   uint64_t maxBox = 1u << 20; // Points of a box enumerated at one parameter point.
+  EnumerationLimits events;   // The run that reads segment terms at each event (G5b).
   unsigned maxQueries = 6000, maxPairs = 4000, maxUnfolding = 64;
   unsigned witnessFills = 64;
   uint64_t witnessCells = 1u << 20;
@@ -72,6 +73,15 @@ public:
   const std::array<Fact, 3> &access() const { return accessFacts; }
   /// Proven: no cell has two contributions, so no order exists to change.
   const Fact &singleContribution() const { return single; }
+  /// G5b: one entry per segment of a segmented request, in execution order. Empty for a
+  /// request with one order, whose facts are the ones above. For a segmented request the
+  /// facts above are joined over the segments: a key or collision fact is Proven only
+  /// when every segment's is, `multiplicity()` is Unit only when every segment's is and
+  /// otherwise Unknown with no term, and the terms are here.
+  const std::vector<SegmentFacts> &segments() const { return segmentList; }
+  /// Proven: no cell is written by two segments. Refuted: a point where one is. Two
+  /// segments may share a cell: this is a fact for G6, not a condition.
+  const Fact &sharedCells() const { return shared; }
   /// For Refuted: the point and what is wrong there.
   const Fact &refutation() const { return counter; }
   const std::optional<std::vector<llvm::APInt>> &failingPoint() const { return failing; }
@@ -88,8 +98,9 @@ private:
   bool orbit = false;
   DomainMultiplicity form = DomainMultiplicity::Unknown;
   Term mu = nullptr;
-  Fact key, collision, single, counter;
+  Fact key, collision, single, counter, shared;
   std::array<Fact, 3> accessFacts;
+  std::vector<SegmentFacts> segmentList;
   std::optional<std::vector<llvm::APInt>> failing;
 };
 

@@ -16,6 +16,13 @@ driver, and every claim is recomputed here with no library code:
   family of its other loops given to the driver, and the emitted μ term is evaluated here
   at every logical point of the nest, including the points with no event, against the
   count of events. A perturbed term must disagree, or this check is vacuous.
+- Segments (Theorem 15, G5b-M2): a spec may be a list of nests run one after the other,
+  each with one MAC site, some under a condition on n, some empty at some points. The
+  driver runs with --segments, and at EVERY point of the scope: the events' segments are
+  non-decreasing, each segment's events in order are its S_s(v) in order (Theorem 12 per
+  segment), its key, C1 and μ hold within the segment, T1 over the group, a proven
+  shared-cells fact means no cell is written by two segments and a refuted one replays,
+  and Theorem 13 folds each cell segment by segment, within a segment by the key.
 
 Every driver run has a time limit, and a timeout fails the run.
 """
@@ -113,10 +120,34 @@ def condition(c, env):
     raise SystemExit(kind)
 
 
+def nests(spec):
+    """The nests of a spec: its segments, each with the spec's element and flags, or the
+    spec itself."""
+    if "segments" not in spec:
+        return [spec]
+    out = []
+    for segment in spec["segments"]:
+        nest = dict(segment)
+        nest["element"] = spec["element"]
+        if spec.get("nsw"):
+            nest["nsw"] = True
+        out.append(nest)
+    return out
+
+
 def interpret(spec, n, memory=None):
-    """Events in order. Each: env, cell, operand cells, and with memory, values."""
+    """Events in order. Each: env, cell, operand cells, site, segment, and with memory,
+    values. A segmented spec runs its nests one after the other; nest s has site s."""
     events = []
     mem = None if memory is None else {r: dict(cells) for r, cells in memory.items()}
+    for s, nest in enumerate(nests(spec)):
+        if not condition(nest.get("when"), {"n": n}):
+            continue
+        interpret_nest(nest, n, mem, events, s if "segments" in spec else None)
+    return events, mem
+
+
+def interpret_nest(spec, n, mem, events, segment):
     element = spec["element"]
 
     def site(env, which):
@@ -126,7 +157,7 @@ def interpret(spec, n, memory=None):
         for idx in (h, f, g):
             if not all(0 <= x < EXTENT for x in idx):
                 raise Stop("out of bounds")
-        event = dict(env=dict(env), h=h, f=f, g=g, site=which)
+        event = dict(env=dict(env), h=h, f=f, g=g, site=which if segment is None else segment, segment=segment)
         if mem is not None:
             a, b, z = mem["a"][f], mem["b"][g], mem["c"][h]
             if element == "f64":
@@ -159,7 +190,6 @@ def interpret(spec, n, memory=None):
         env.pop(name, None)
 
     go(0, {"n": n})
-    return events, mem
 
 
 class Emitter:
@@ -184,16 +214,38 @@ def print_function(spec):
     element = spec["element"]
     t = f"memref<{EXTENT}x{EXTENT}x{element}>"
     em = Emitter()
-    names = {"n": "%n"}
     body = []
+    for s, nest in enumerate(nests(spec)):
+        names = {"n": "%n"}
+        if nest.get("when") is not None:
+            kind, a, b = nest["when"]
+            a, b = em.value(a, names), em.value(b, names)
+            em.count += 1
+            test = f"%w{em.count}"
+            em.lines.append(f"{test} = arith.cmpi {'ult' if kind == '<' else 'eq'}, {a}, {b} : index")
+            body.extend(em.lines)
+            em.lines = []
+            body.append(f"scf.if {test} {{")
+        print_nest(nest, em, names, body, t, "" if "segments" not in spec else f"s{s}")
+        if nest.get("when") is not None:
+            body.append("}")
+    em.consts |= {0, 1}
+    head = [f"%c{v} = arith.constant {v} : index" if v >= 0 else f"%cm{-v} = arith.constant {v} : index"
+            for v in sorted(em.consts)]
+    args = ", ".join(f"%{r}: {t}" for r in "abc") + ", %n: index"
+    return f"func.func @{spec['name']}({args}) {{\n" + "\n".join(head + body) + "\nreturn\n}\n"
+
+
+def print_nest(spec, em, names, body, t, tag):
+    element = spec["element"]
     closing = 0
     for name, low, high, step in spec["loops"]:
         lo, hi = em.value(low, names), em.value(high, names)
         em.consts.add(step)
         body.extend(em.lines)
         em.lines = []
-        body.append(f"scf.for %{name} = {lo} to {hi} step %c{step} {{")
-        names[name] = "%" + name
+        body.append(f"scf.for %{name}{tag} = {lo} to {hi} step %c{step} {{")
+        names[name] = f"%{name}{tag}"
         closing += 1
     for name, e in spec.get("derived", []):
         v = em.value(e, names)
@@ -211,7 +263,7 @@ def print_function(spec):
         em.lines = []
         add, mul = ("arith.addf", "arith.mulf") if element == "f64" else ("arith.addi", "arith.muli")
         flags = " overflow<nsw>" if spec.get("nsw") else ""
-        s = suffix
+        s = suffix + tag
         body.extend([f"%x{s} = memref.load %a[{f}] : {t}", f"%y{s} = memref.load %b[{g}] : {t}",
                      f"%z{s} = memref.load %c[{h}] : {t}", f"%m{s} = {mul} %x{s}, %y{s} : {element}",
                      f"%s{s} = {add} %z{s}, %m{s}{flags} : {element}", f"memref.store %s{s}, %c[{h}] : {t}"])
@@ -242,11 +294,6 @@ def print_function(spec):
     else:
         mac("f", "1")
     body += ["}"] * closing
-    em.consts |= {0, 1}
-    head = [f"%c{v} = arith.constant {v} : index" if v >= 0 else f"%cm{-v} = arith.constant {v} : index"
-            for v in sorted(em.consts)]
-    args = ", ".join(f"%{r}: {t}" for r in "abc") + ", %n: index"
-    return f"func.func @{spec['name']}({args}) {{\n" + "\n".join(head + body) + "\nreturn\n}\n"
 
 
 AUTH = "roots 0 and 1 are separate,roots 0 and 2 are separate,roots 1 and 2 are separate"
@@ -262,6 +309,8 @@ def run_driver(driver, spec, family=None):
                    "--print-events", f"--authorize={AUTH}"] + SOLVER
         if family is not None:
             command.append("--family=" + family)
+        if "segments" in spec:
+            command.append("--segments")
         done = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT)
     if done.returncode:
         raise SystemExit(f"driver failed on {spec['name']}:\n{done.stderr[-1500:]}")
@@ -288,6 +337,45 @@ def state_map(spec, tables):
                     candidates = {}
                 candidates[id_] = candidates.get(id_, options) & options
     return {id_: sorted(opts, key=str)[0] for id_, opts in (candidates or {}).items() if opts}
+
+
+def segment_state_maps(spec, tables, sites_of):
+    """One state map per driver segment, from the full state at each of its events: a
+    state id maps to the spec variable whose value it holds at every event of the
+    segment, at every point, or to a constant. Also which nest each segment's events come
+    from (None for a segment with no event at any sample point): the driver orders its
+    segments itself, so its indices need not be the nests'."""
+    maps, nest_of = [], []
+    for s, sites in enumerate(sites_of):
+        candidates = None
+        nest = None
+        for table in tables:
+            if "events" not in table:
+                continue
+            n = table["parameters"][0]
+            ours, _ = interpret(spec, n)
+            if len(ours) != len(table["events"]):
+                raise SystemExit(f"{spec['name']} n={n}: {len(ours)} events here, {len(table['events'])} there")
+            for mine, theirs in zip(ours, table["events"]):
+                if theirs["site"] not in sites:
+                    continue
+                if nest is None:
+                    nest = mine["segment"]
+                elif mine["segment"] != nest:
+                    raise SystemExit(f"{spec['name']} n={n}: the driver's segment {s} spans two nests")
+                env = dict(mine["env"])
+                for id_, value in enumerate(theirs["state"]):
+                    if value is None:
+                        options = set()
+                    else:
+                        options = {k for k, v in env.items() if wrap(v, spec.get("width", WIDTH)) == value} | (
+                            {("const", value)})
+                    if candidates is None:
+                        candidates = {}
+                    candidates[id_] = candidates.get(id_, options) & options
+        maps.append({id_: sorted(opts, key=str)[0] for id_, opts in (candidates or {}).items() if opts})
+        nest_of.append(nest)
+    return maps, nest_of
 
 
 def state_values(mapping, env):
@@ -533,6 +621,261 @@ def check_theorem13(spec, entry, n, mapping, rng, fills, tally):
             tally["permutations checked"] += 1
 
 
+def needed_states(request):
+    needed = set()
+    for level in request["levels"]:
+        stack = [level["value"], level["lower"], level["upper"]] + ([request["guard"]] if request["guard"] else [])
+        while stack:
+            t = stack.pop()
+            if "state" in t:
+                needed.add(t["state"])
+            stack += t.get("args", [])
+    return needed
+
+
+def segment_lambdas(spec, request, maps, n):
+    """The events of each segment with their level values, and the whole event list."""
+    events, _ = interpret(spec, n)
+    per = []
+    for s, seg in enumerate(request["segments"]):
+        mine = [e for e in events if e["site"] in seg["sites"]]
+        lam = [tuple(term(level["value"], state_values(maps[s], e["env"]), [n], []) for level in seg["levels"])
+               for e in mine]
+        per.append((mine, lam))
+    return events, per
+
+
+def check_segmented_domain(spec, entry, n, maps, tally):
+    """Theorem 15 at a point: the segments of the events never decrease, and each
+    segment's events, in order, are its set, in order."""
+    request = entry["request"]
+    events, per = segment_lambdas(spec, request, maps, n)
+    sites = {site: s for s, seg in enumerate(request["segments"]) for site in seg["sites"]}
+    order = [sites[e["site"]] for e in events]
+    if any(b < a for a, b in zip(order, order[1:])):
+        raise SystemExit(f"{spec['name']} n={n}: Theorem 15 is false: an event of an earlier segment follows "
+                         f"a later one\n{print_function(spec)}")
+    live = 0
+    for s, (seg, (mine, lam)) in enumerate(zip(request["segments"], per)):
+        expected = enumerate_set(seg, [n])
+        if lam != expected:
+            raise SystemExit(f"{spec['name']} n={n}: Theorem 15 is false in segment {s}: events {lam[:6]} "
+                             f"set {expected[:6]}\n{print_function(spec)}")
+        if mine:
+            live += 1
+        else:
+            tally["segments empty at a point"] += 1
+    if live > 1:
+        tally["points with two live segments"] += 1
+    tally["segmented points checked"] += 1
+    return events, per
+
+
+def check_segmented_facts(spec, entry, domain, n, events, per, maps, nest_of, tally):
+    request = entry["request"]
+    for s, (seg, facts, (mine, lam)) in enumerate(zip(request["segments"], domain["segments"], per)):
+        if list(facts["sites"]) != list(seg["sites"]):
+            raise SystemExit(f"{spec['name']}: the facts of segment {s} name other sites")
+        key = seg["cell_key"]
+        cells = {}
+        for e, l in zip(mine, lam):
+            cells.setdefault(e["h"], []).append((l, e))
+        if facts["cell_key"]["status"] == "PROVEN":
+            levels = [seg["levels"][k] for k in key]
+            for members in cells.values():
+                for (a, _), (b, _) in zip(members, members[1:]):
+                    if not less_key(levels, [a[k] for k in key], [b[k] for k in key]):
+                        raise SystemExit(f"{spec['name']} n={n}: the cell key of segment {s} is false")
+            tally["segment keys checked"] += 1
+        logical = lambda e: tuple(term(t, state_values(maps[s], e["env"]), [n], [])
+                                  for axis in "pij" for t in seg["axes"][axis])
+        if facts["output_injective"]["status"] == "PROVEN":
+            for members in cells.values():
+                if len({logical(e) for _, e in members}) > 1:
+                    raise SystemExit(f"{spec['name']} n={n}: C1 of segment {s} is false")
+        if facts["multiplicity"] in ("CONSTANT_BOX", "LOGICAL_BOX") and facts["multiplicity_term"] and nest_of[s] is not None:
+            nest = nests(spec)[nest_of[s]]
+            check_multiplicity(nest, {"request": seg, "axes": seg["axes"]}, facts, n, mine, lam, maps[s], tally)
+            tally["segment multiplicity " + facts["multiplicity"]] += 1
+    # Over the group.
+    writers = {}
+    for e in events:
+        writers.setdefault(e["h"], set()).add(e["segment"])
+    if domain["single_contribution"]["status"] == "PROVEN":
+        counts = {}
+        for e in events:
+            counts[e["h"]] = counts.get(e["h"], 0) + 1
+        if any(c > 1 for c in counts.values()):
+            raise SystemExit(f"{spec['name']} n={n}: T1 is false across segments")
+    shared = domain["shared_cells"]
+    if shared["status"] == "PROVEN":
+        if any(len(w) > 1 for w in writers.values()):
+            raise SystemExit(f"{spec['name']} n={n}: a cell of two segments, yet none is claimed")
+        tally["shared cells proven checked"] += 1
+
+
+def check_segmented_theorem13(spec, entry, n, maps, rng, fills, tally):
+    """Each cell's final value is the fold of its contributions, segment by segment and
+    within a segment in the order of the segment's key."""
+    import functools
+    request = entry["request"]
+    keys = [[seg["levels"][k] for k in seg["cell_key"]] for seg in request["segments"]]
+    for _ in range(fills):
+        memory = fill(spec, rng)
+        try:
+            events, final = interpret(spec, n, memory)
+        except Stop:
+            tally["stopped runs"] += 1
+            continue
+        _, per = segment_lambdas(spec, request, maps, n)
+        cells = {}
+        for s, (seg, (mine, lam)) in enumerate(zip(request["segments"], per)):
+            for e, l in zip(mine, lam):
+                cells.setdefault(e["h"], []).append((s, [l[k] for k in seg["cell_key"]], e))
+
+        def before(x, y):
+            if x[0] != y[0]:
+                return -1 if x[0] < y[0] else 1
+            if less_key(keys[x[0]], x[1], y[1]):
+                return -1
+            return 1 if less_key(keys[x[0]], y[1], x[1]) else 0
+
+        for cell, members in cells.items():
+            ordered = sorted(members, key=functools.cmp_to_key(before))
+            products = []
+            for _, _, e in ordered:
+                a, b = memory["a"][e["f"]], memory["b"][e["g"]]
+                products.append(a * b if spec["element"] == "f64" else wrap(a * b, 32))
+            expected = fold(spec, memory["c"][cell], products)
+            if bits(expected, spec["element"]) != bits(final["c"][cell], spec["element"]):
+                raise SystemExit(f"{spec['name']} n={n}: Theorem 13 is false at cell {cell}")
+            if len({s for s, _, _ in members}) > 1:
+                tally["cells folded across segments"] += 1
+        tally["segmented Theorem 13 runs"] += 1
+
+
+def segmented_family_text(spec, maps, nest_of):
+    """The non-repeat loop variables of every nest as a driver family, by state id: with
+    --segments this names the logical variables, the rest being repeats."""
+    axes = {"p": [], "i": [], "j": [], "k": []}
+    for s, nest_index in enumerate(nest_of):
+        if nest_index is None:
+            continue
+        nest = nests(spec)[nest_index]
+        by_name = {}
+        for id_, source in maps[s].items():
+            if isinstance(source, str) and source not in by_name:
+                by_name[source] = id_
+        for name, *_ in nest["loops"]:
+            if name in nest.get("repeats", []):
+                continue
+            if name not in by_name:
+                return None
+            axes[name if name in axes else "p"].append(str(by_name[name]))
+    return ";".join(f"{axis}:{','.join(ids)}" for axis, ids in axes.items())
+
+
+def check_segmented_repeats(spec, driver, rng, fills, tally):
+    """A segmented spec with repeat loops: run once for the state maps, then with the
+    logical variables named, and check the result like any other."""
+    first = run_driver(driver, spec)
+    for group in first["groups"]:
+        for entry in group["candidates"]:
+            if "request" not in entry:
+                continue
+            maps, nest_of = segment_state_maps(spec, group.get("tables", []),
+                                               [seg["sites"] for seg in entry["request"]["segments"]])
+            text = segmented_family_text(spec, maps, nest_of)
+            if text is None:
+                tally["segmented repeat family unmapped"] += 1
+                return
+            result = run_driver(driver, spec, family=text)
+            tally["segmented repeat runs"] += 1
+            check_segmented(spec, result, rng, fills, tally, logical_given=True)
+            return
+
+
+def check_segmented(spec, result, rng, fills, tally, logical_given=False):
+    if result["authorizes_lowering"]:
+        raise SystemExit("a result authorizes lowering")
+    low, high = spec["scope"]
+    for group in result["groups"]:
+        tables = group.get("tables", [])
+        if not group["candidates"]:
+            tally["segmented no candidate"] += 1
+        for entry in group["candidates"]:
+            if entry["authorizes_lowering"] or entry["transformation"] != "UNKNOWN":
+                raise SystemExit("a later phase's claim was made")
+            if "request" not in entry:
+                tally["segmented no proposal"] += 1
+                continue
+            request = entry["request"]
+            if not request["segments"]:
+                raise SystemExit(f"{spec['name']}: a flat request from --segments")
+            if request["levels"] or any(entry["axes"][a] for a in "pijk"):
+                raise SystemExit(f"{spec['name']}: a segmented request with a family beside it")
+            maps, nest_of = segment_state_maps(spec, tables, [seg["sites"] for seg in request["segments"]])
+            if any(not needed_states(seg) <= set(maps[s]) for s, seg in enumerate(request["segments"])):
+                tally["segmented unmapped"] += 1
+                continue
+            ds, df = entry["domain_symbolic"], entry["domain_finite"]
+            tally["segmented symbolic " + ds["status"]] += 1
+            tally["segmented finite " + df["status"]] += 1
+            if ds["status"] == "REFUTED":
+                raise SystemExit("a symbolic domain claim was refuted")
+            if spec.get("expect") and ds["status"] != spec["expect"]:
+                raise SystemExit(f"{spec['name']}: wanted {spec['expect']}, got {ds['status']}: {ds['reason']}")
+            if ds["status"] == "VERIFIED" and len(request["segments"]) != len(spec["segments"]):
+                raise SystemExit(f"{spec['name']}: {len(request['segments'])} segments for {len(spec['segments'])} nests")
+            points = []
+            if ds["status"] == "VERIFIED":
+                points = list(range(low, high + 1))
+            elif df["status"] == "VERIFIED":
+                points = [p["parameters"][0] for p in df["points"]]
+            for n in points:
+                events, per = check_segmented_domain(spec, entry, n, maps, tally)
+                check_segmented_facts(spec, entry, ds if ds["status"] == "VERIFIED" else df, n, events, per, maps,
+                                      nest_of, tally)
+            if df["status"] == "REFUTED":
+                n = df["refutation"]["point"][0]
+                _, per = segment_lambdas(spec, request, maps, n)
+                if all(lam == enumerate_set(seg, [n]) for seg, (_, lam) in zip(request["segments"], per)):
+                    raise SystemExit(f"{spec['name']}: a segmented refutation does not replay")
+                tally["segmented refutations replayed"] += 1
+            # The finite route's shared-cells refutation, whichever route verified the domain.
+            shared = df["shared_cells"]
+            if shared["status"] == "REFUTED" and shared.get("point"):
+                n = shared["point"][0]
+                events, _ = interpret(spec, n)
+                writers = {}
+                for e in events:
+                    writers.setdefault(e["h"], set()).add(e["segment"])
+                if not any(len(w) > 1 for w in writers.values()):
+                    raise SystemExit(f"{spec['name']} n={n}: the shared-cells refutation does not replay")
+                tally["shared cells refuted replayed"] += 1
+            if spec.get("box") and logical_given and ds["status"] == "VERIFIED":
+                forms = [facts["multiplicity"] for facts in ds["segments"]]
+                if spec["box"] not in forms:
+                    raise SystemExit(f"{spec['name']}: wanted a {spec['box']} segment, got {forms}")
+            if entry["coordinate_symbolic"] != "PROPOSED" or entry["coordinate_finite"] != "PROPOSED":
+                raise SystemExit(f"{spec['name']}: a G3b tier claimed over segments")
+            t13 = entry["theorem13"]
+            if t13["status"] == "VERIFIED":
+                if t13["logical_tier"] != "PROPOSED":
+                    raise SystemExit(f"{spec['name']}: a logical tier claimed over segments")
+                tally["segmented Theorem 13 " + t13["tier"]] += 1
+                at = list(range(low, high + 1)) if t13["tier"] == "SYMBOLIC" else [p[0] for p in t13["points"]]
+                for n in at:
+                    check_segmented_theorem13(spec, entry, n, maps, rng, fills, tally)
+            for kind in ("integer", "float"):
+                fact = entry["reorder"][kind]
+                if fact["status"] == "REFUTED":
+                    check_witness(spec, fact, tally)
+                if kind == "float" and fact["status"] == "PROVEN":
+                    if entry["reorder"]["trivial"]["status"] != "PROVEN":
+                        raise SystemExit("a float reorder fact proven without one contribution per cell")
+
+
 def check_witness(spec, fact, tally):
     n = fact["point"][0]
     memory = {}
@@ -614,6 +957,8 @@ def check_repeats(spec, driver, rng, fills, tally):
 
 
 def check(spec, result, rng, fills, tally):
+    if "segments" in spec:
+        return check_segmented(spec, result, rng, fills, tally)
     if result["authorizes_lowering"]:
         raise SystemExit("a result authorizes lowering")
     low, high = spec["scope"]
@@ -721,6 +1066,68 @@ def catalogue():
     ]
 
 
+def N(loops, h, f, g, **more):
+    """A nest of a segmented spec."""
+    return dict(loops=loops, h=h, f=f, g=g, **more)
+
+
+def G(name, segments, scope=(1, 3), element="i32", **more):
+    return dict(name=name, segments=segments, scope=scope, element=element, **more)
+
+
+ROW = lambda var, row: N([(var, 0, "n", 1)], [var, row], [var, 0], [0, var])
+
+
+def segmented_catalogue():
+    """Sibling loops: the cases of DomainTest's testSegments, as the oracle sees them."""
+    return [
+        # The same cells twice: shared, no T1, Theorem 13 over both segments.
+        G("seg_same", [ROW("i", 0), ROW("j", 0)]),
+        # Disjoint rows: no shared cell.
+        G("seg_halves", [ROW("i", 0), ROW("j", 1)]),
+        # Different bounds.
+        G("seg_bounds", [ROW("i", 0), N([("j", 0, 3, 1)], ["j", 0], ["j", 0], [0, "j"])]),
+        # The second loop reversed through a derived index.
+        G("seg_reversed", [ROW("i", 0), N([("j", 0, "n", 1)], ["jj", 0], ["jj", 0], [0, "jj"],
+                                         derived=[("jj", ("-", 3, "j"))])]),
+        # The second loop under a condition on n.
+        G("seg_conditional", [ROW("i", 0), N([("j", 0, "n", 1)], ["j", 1], ["j", 0], [0, "j"], when=("<", 1, "n"))]),
+        # Empty first, empty second, inside the scope.
+        G("seg_empty_first", [N([("i", "n", 3, 1)], ["i", 0], ["i", 0], [0, "i"]), N([("j", 0, 2, 1)], ["j", 1], ["j", 0], [0, "j"])],
+          scope=(1, 4)),
+        G("seg_empty_second", [N([("i", 0, 2, 1)], ["i", 0], ["i", 0], [0, "i"]), N([("j", "n", 3, 1)], ["j", 1], ["j", 0], [0, "j"])],
+          scope=(1, 4)),
+        # A repeat loop inside the second segment: a logical box there, unit in the first.
+        G("seg_repeat", [ROW("i", 0), N([("j", 0, "n", 1), ("t", 0, ("+", "j", 1), 1)], ["j", 1], ["j", 0], [0, "j"],
+                                       repeats=["t"])], box="LOGICAL_BOX"),
+        # Three segments, the middle one empty at n = 1.
+        G("seg_three", [ROW("i", 0), N([("j", 1, "n", 1)], ["j", 1], ["j", 0], [0, "j"]), ROW("k", 2)]),
+        # Floats and nsw across segments.
+        G("seg_floats", [ROW("i", 0), ROW("j", 0)], element="f64"),
+        G("seg_nsw", [ROW("i", 0), ROW("j", 0)], nsw=True),
+        # Two-dimensional nests as segments, sharing a cell row.
+        G("seg_rect", [N([("i", 0, "n", 1), ("j", 0, 3, 1)], ["i", "j"], ["i", 0], [0, "j"]),
+                       N([("p", 0, 2, 1), ("q", 0, "n", 1)], ["q", "p"], ["q", 0], [0, "p"])]),
+    ]
+
+
+def random_segmented_spec(rng, name):
+    segments = []
+    for s in range(rng.choice([2, 2, 3])):
+        var = "ijk"[s]
+        low, high = rng.choice([(0, "n"), (0, "n"), ("n", 3), (0, rng.choice([2, 3])), (1, "n")])
+        loops = [(var, low, high, 1)]
+        more = {}
+        if rng.random() < 0.3:
+            loops.append(("t", 0, rng.choice([("+", var, 1), 2]), 1))
+            more["repeats"] = ["t"]
+        if rng.random() < 0.25:
+            more["when"] = ("<", rng.choice([0, 1, 2]), "n")
+        h = rng.choice([[var, 0], [var, 1], [0, var], [var, s]])
+        segments.append(N(loops, h, [var, 0], [0, var], **more))
+    return G(name, segments, scope=(1, rng.choice([3, 4])), element=rng.choice(["i32", "i32", "f64"]))
+
+
 def random_spec(rng, name):
     loops = [("i", 0, "n", 1), ("j", 0, rng.choice([2, 3, 4]), 1)]
     k_high = rng.choice([3, 4, "j"])
@@ -758,6 +1165,7 @@ def main():
     tally = Counter()
     rng = random.Random(args.seed)
     specs = catalogue() + [random_spec(rng, f"p{i}") for i in range(args.programs)]
+    specs += segmented_catalogue() + [random_segmented_spec(rng, f"g{i}") for i in range(args.programs)]
 
     def one(spec):
         try:
@@ -779,6 +1187,11 @@ def main():
                 check_repeats(spec, args.driver, random.Random(args.seed * 104729 + n), args.fills, tally)
             except subprocess.TimeoutExpired:
                 tally["timed out"] += 1
+        if "segments" in spec and any(nest.get("repeats") for nest in spec["segments"]):
+            try:
+                check_segmented_repeats(spec, args.driver, random.Random(args.seed * 7907 + n), args.fills, tally)
+            except subprocess.TimeoutExpired:
+                tally["timed out"] += 1
     for key in sorted(tally):
         print(f"{key}: {tally[key]}")
     if tally["timed out"]:
@@ -793,6 +1206,17 @@ def main():
         raise SystemExit("the constant box or the refusals were not exercised")
     if tally["zero multiplicity points"] < 1:
         raise SystemExit("no logical point with zero events was checked")
+    # Theorem 15 must have been exercised where it says something: verified segmented
+    # claims, points with two live segments, empty segments, shared cells both ways, a
+    # box inside a segment, and folds that cross a segment boundary.
+    if tally["segmented symbolic VERIFIED"] < 8 or tally["points with two live segments"] < 8:
+        raise SystemExit("fewer than 8 segmented claims with two live segments were checked")
+    if tally["segments empty at a point"] < 2:
+        raise SystemExit("no empty segment was checked")
+    if tally["shared cells refuted replayed"] < 1 or tally["shared cells proven checked"] < 1:
+        raise SystemExit("shared cells were not checked both ways")
+    if tally["segment multiplicity LOGICAL_BOX"] < 1 or tally["cells folded across segments"] < 1:
+        raise SystemExit("no segment box or cross-segment fold was checked")
     print("0 disagreements")
 
 

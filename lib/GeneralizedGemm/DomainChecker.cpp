@@ -39,6 +39,10 @@ struct DomainAuthority {
   }
   static void single(CheckedDomain &out, Fact fact) { out.single = std::move(fact); }
   static void counter(CheckedDomain &out, Fact fact) { out.counter = std::move(fact); }
+  static void shared(CheckedDomain &out, Fact fact) { out.shared = std::move(fact); }
+  static void segments(CheckedDomain &out, std::vector<SegmentFacts> list) {
+    out.segmentList = std::move(list);
+  }
   static void failing(CheckedDomain &out, std::vector<APInt> point) { out.failing = std::move(point); }
 };
 
@@ -145,6 +149,29 @@ std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
     out += "|f";
     for (Term term : axis)
       out += formatTerm(term) + ";";
+  }
+  for (const Segment &segment : request.segments) {
+    out += "|S";
+    for (unsigned site : segment.sites)
+      out += std::to_string(site) + ",";
+    for (const auto &axis : segment.family.axes) {
+      out += "|f";
+      for (Term term : axis)
+        out += formatTerm(term) + ";";
+    }
+    for (const GuardedLevel &level : segment.order.levels)
+      out += "|" + formatTerm(level.value) + ";" + formatTerm(level.lower) + ";" +
+             formatTerm(level.upper) + ";" + (level.descending ? "d" : "a") + (level.isSigned ? "s" : "u");
+    if (segment.order.guard)
+      out += "|g" + formatTerm(segment.order.guard);
+    out += "|k";
+    for (unsigned k : segment.cellKey)
+      out += std::to_string(k) + ",";
+    for (const auto &form : segment.access) {
+      out += "|a";
+      for (Term term : form)
+        out += formatTerm(term) + ";";
+    }
   }
   return out;
 }
@@ -489,6 +516,376 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
   return out;
 }
 
+
+// ---- G5b: segmented requests -------------------------------------------------------
+
+struct SegmentStructure {
+  Structure core;
+  std::vector<Term> logical, output; // The segment family's (P,I,J,K) and (P,I,J).
+  GuardedOrder keyed;
+};
+
+bool familyIsEmpty(const CoordinateFamily &family) {
+  for (const auto &axis : family.axes)
+    if (!axis.empty())
+      return false;
+  return true;
+}
+
+/// Every segment adopted, the sites a partition of the group's, and the family given
+/// beside the request empty. Nullopt with `why` otherwise.
+std::optional<std::vector<SegmentStructure>> adoptSegments(const SemanticProgram &program,
+                                                           const SiteGroup &group,
+                                                           const CoordinateFamily &family,
+                                                           const DomainRequest &request,
+                                                           std::string &why) {
+  if (!familyIsEmpty(family)) {
+    why = "a segmented request carries its own families";
+    return std::nullopt;
+  }
+  std::set<unsigned> listed(group.sites.begin(), group.sites.end()), seen;
+  std::vector<SegmentStructure> out;
+  for (const Segment &segment : request.segments) {
+    if (segment.sites.empty()) {
+      why = "a segment with no site";
+      return std::nullopt;
+    }
+    for (unsigned site : segment.sites) {
+      if (!listed.count(site)) {
+        why = "a segment names a site outside the group";
+        return std::nullopt;
+      }
+      if (!seen.insert(site).second) {
+        why = "a site in two segments";
+        return std::nullopt;
+      }
+    }
+    DomainRequest one;
+    one.order = segment.order;
+    one.cellKey = segment.cellKey;
+    one.access = segment.access;
+    auto core = adoptRequest(program, segment.family, one, why);
+    if (!core)
+      return std::nullopt;
+    SegmentStructure structure;
+    structure.core = std::move(*core);
+    std::string ignored;
+    structure.logical = axesOf(segment.family, {AxisP, AxisI, AxisJ, AxisK}, program, ignored);
+    structure.output = axesOf(segment.family, {AxisP, AxisI, AxisJ}, program, ignored);
+    structure.keyed = keyOrder(structure.core.order, structure.core.key);
+    out.push_back(std::move(structure));
+  }
+  if (seen.size() != listed.size()) {
+    why = "a site of the group is in no segment";
+    return std::nullopt;
+  }
+  return out;
+}
+
+std::map<unsigned, unsigned> segmentOfSite(const DomainRequest &request) {
+  std::map<unsigned, unsigned> out;
+  for (unsigned s = 0; s < request.segments.size(); ++s)
+    for (unsigned site : request.segments[s].sites)
+      out[site] = s;
+  return out;
+}
+
+/// The facts of every segment, and the joined ones, on a result.
+void recordSegments(CheckedDomain &out, const std::vector<SegmentStructure> &structures,
+                    const DomainRequest &request, std::vector<SegmentFacts> facts, ComputationTier tier,
+                    bool symbolic) {
+  bool allUnit = true, keysProven = true, injectiveAll = true;
+  std::optional<Fact> keyBroken, collisionBroken;
+  for (unsigned s = 0; s < facts.size(); ++s) {
+    facts[s].sites = request.segments[s].sites;
+    DomainMultiplicity form = structures[s].core.form;
+    if (symbolic && form == DomainMultiplicity::Counted)
+      form = DomainMultiplicity::Unknown;
+    facts[s].multiplicity = form;
+    facts[s].multiplicityTerm = structures[s].core.mu;
+    allUnit = allUnit && form == DomainMultiplicity::Unit;
+    if (facts[s].cellKey.status != FactStatus::Proven) {
+      keysProven = false;
+      if (!keyBroken)
+        keyBroken = facts[s].cellKey;
+    }
+    if (facts[s].outputInjective.status != FactStatus::Proven) {
+      injectiveAll = false;
+      if (!collisionBroken)
+        collisionBroken = facts[s].outputInjective;
+    }
+  }
+  DomainAuthority::multiplicity(out, allUnit ? DomainMultiplicity::Unit : DomainMultiplicity::Unknown, nullptr);
+  DomainAuthority::key(out, keysProven ? proven("every segment's key", tier) : *keyBroken);
+  DomainAuthority::collision(out, injectiveAll ? proven("every segment's outputs", tier) : *collisionBroken);
+  for (unsigned view = 0; view < 3; ++view)
+    DomainAuthority::access(out, view, unknownFact("per segment: see segments()"));
+  DomainAuthority::segments(out, std::move(facts));
+}
+
+CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                              unsigned g, const CoordinateFamily &family, const DomainRequest &request,
+                              const DomainOptions &options) {
+  if (enumeration.gate != GateStatus::Open)
+    return CheckedDomain::unknown("the domain gate is closed: " + enumeration.reason);
+  if (g >= enumeration.groups.size())
+    return CheckedDomain::unknown("no such group");
+  const SiteGroup &group = enumeration.groups[g];
+  std::string why;
+  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+    return CheckedDomain::unknown(why);
+  auto structures = adoptSegments(program, group, family, request, why);
+  if (!structures)
+    return CheckedDomain::unknown("the request is refused: " + why);
+  std::map<unsigned, unsigned> segmentOf = segmentOfSite(request);
+  unsigned m = structures->size();
+
+  std::vector<DomainPointFacts> facts;
+  std::vector<SegmentFacts> segmentFacts(m);
+  bool complete = enumerationCoversScope(program, enumeration, options.scope);
+  std::vector<bool> keyHolds(m, true), injective(m, true);
+  std::vector<std::array<bool, 3>> accessHolds(m, {true, true, true});
+  std::vector<std::optional<Fact>> keyBroken(m), collisionSeen(m);
+  std::vector<std::array<std::optional<Fact>, 3>> accessBroken(m);
+  bool single = true, sharedNone = true;
+  std::optional<Fact> multipleSeen, sharedSeen;
+  std::string open;
+  bool anyEvent = false;
+  auto refute = [&](const std::vector<APInt> &point, std::string detail) {
+    CheckedDomain out = DomainAuthority::make(ComputationTier::Proposed, ComputationStatus::Refuted,
+                                              "the segments do not describe the events: " + detail);
+    DomainAuthority::counter(out, refutedAt(point, detail));
+    return out;
+  };
+  auto keyOf = [](const std::vector<APInt> &values) {
+    std::vector<uint64_t> out;
+    for (const APInt &value : values)
+      out.push_back(value.getZExtValue());
+    return out;
+  };
+  std::set<unsigned> members(group.sites.begin(), group.sites.end());
+
+  for (const PointEvidence &point : enumeration.points) {
+    if (!point.reason.empty()) {
+      complete = false;
+      continue;
+    }
+    const std::vector<APInt> &v = point.parameters;
+    // The run again, with the state at every event: a segment's terms may read what the
+    // live table left out.
+    auto states = eventStates(program, v, 0, options.limits.events);
+    if (!states || states->run.status != RunStatus::Returned) {
+      complete = false;
+      if (open.empty())
+        open = states ? "the run at a point did not return: " + states->run.reason : "no entry at a point";
+      continue;
+    }
+    std::vector<std::vector<std::vector<APInt>>> sets(m);
+    bool boxed = true;
+    for (unsigned s = 0; s < m && boxed; ++s) {
+      auto set = enumerateGuardedSet((*structures)[s].core.order, v, options.limits.maxBox, why);
+      if (!set) {
+        boxed = false;
+        break;
+      }
+      sets[s] = std::move(*set);
+    }
+    if (!boxed) {
+      complete = false;
+      if (open.empty())
+        open = why;
+      continue;
+    }
+    // Every event of the group, with its segment and its terms' values.
+    struct Row {
+      unsigned segment;
+      std::vector<APInt> lambda, logical, output;
+      std::vector<uint64_t> cell;
+    };
+    std::vector<Row> rows;
+    Configuration config;
+    config.memory = states->entry.memory;
+    config.shadow.assign(program.state.size(), false);
+    bool valued = true;
+    std::string unvalued;
+    for (size_t e = 0; e < states->run.events.size() && valued; ++e) {
+      const MacEvent &event = states->run.events[e];
+      if (!members.count(event.site))
+        continue;
+      Row row;
+      auto placed = segmentOf.find(event.site);
+      if (placed == segmentOf.end())
+        return CheckedDomain::unknown("the request is refused: an event at a site of no segment");
+      row.segment = placed->second;
+      config.state = states->states[e];
+      auto tuple = [&](ArrayRef<Term> list, std::vector<APInt> &out) {
+        for (Term term : list) {
+          auto value = evaluateTerm(program, states->entry, config, term);
+          if (!value) {
+            valued = false;
+            unvalued = "a term of segment " + std::to_string(row.segment) + " has no value at an event";
+            return;
+          }
+          out.push_back(*value);
+        }
+      };
+      std::vector<Term> levelTerms;
+      for (const GuardedLevel &level : (*structures)[row.segment].core.order.levels)
+        levelTerms.push_back(level.value);
+      tuple(levelTerms, row.lambda);
+      tuple((*structures)[row.segment].logical, row.logical);
+      tuple((*structures)[row.segment].output, row.output);
+      row.cell = keyOf(event.h);
+      rows.push_back(std::move(row));
+    }
+    if (!valued)
+      return CheckedDomain::unknown("the request is refused: " + unvalued);
+    DomainPointFacts here;
+    here.parameters = v;
+    here.events = rows.size();
+    for (const auto &set : sets)
+      here.points += set.size();
+    anyEvent = anyEvent || !rows.empty();
+
+    // Theorem 15 at this point: segments in order, each exactly its set, in order.
+    for (size_t e = 1; e < rows.size(); ++e)
+      if (rows[e].segment < rows[e - 1].segment)
+        return refute(v, "event " + std::to_string(e) + " of segment " + std::to_string(rows[e].segment) +
+                             " follows an event of segment " + std::to_string(rows[e - 1].segment));
+    std::vector<std::vector<size_t>> ofSegment(m);
+    for (size_t e = 0; e < rows.size(); ++e)
+      ofSegment[rows[e].segment].push_back(e);
+    for (unsigned s = 0; s < m; ++s) {
+      const GuardedOrder &order = (*structures)[s].core.order;
+      const auto &mine = ofSegment[s];
+      std::string where = "segment " + std::to_string(s) + ": ";
+      for (size_t n = 1; n < mine.size(); ++n)
+        if (!concreteLess(order, rows[mine[n - 1]].lambda, rows[mine[n]].lambda))
+          return refute(v, where + "events " + std::to_string(n - 1) + " and " + std::to_string(n) +
+                               " are not in the order's increasing order");
+      if (mine.size() != sets[s].size())
+        return refute(v, where + (mine.size() < sets[s].size() ? "a point of the set has no event ("
+                                                                : "an event is no point of the set (") +
+                             std::to_string(sets[s].size()) + " points, " + std::to_string(mine.size()) +
+                             " events)");
+      for (size_t n = 0; n < mine.size(); ++n)
+        if (rows[mine[n]].lambda != sets[s][n])
+          return refute(v, where + "event " + std::to_string(n) + " is not the set's point " + std::to_string(n));
+
+      // Multiplicity, exactly, per segment.
+      std::map<std::vector<uint64_t>, uint64_t> counts;
+      std::map<std::vector<uint64_t>, size_t> firstEvent;
+      for (size_t e : mine) {
+        std::vector<uint64_t> key = keyOf(rows[e].logical);
+        here.maxMultiplicity = std::max(here.maxMultiplicity, ++counts[key]);
+        firstEvent.try_emplace(key, e);
+      }
+      here.logicalPoints += counts.size();
+      const Structure &core = (*structures)[s].core;
+      if (core.form == DomainMultiplicity::ConstantBox || core.form == DomainMultiplicity::LogicalBox)
+        for (const auto &[point, count] : counts) {
+          auto mu = evaluateLevelTerm(core.mu, v, rows[firstEvent.at(point)].lambda);
+          if (!mu || *mu != APInt(128, count))
+            return CheckedDomain::unknown("the multiplicity contradicts a segment's box: a defect");
+        }
+      // Closed forms.
+      for (unsigned view = 0; view < 3; ++view) {
+        const auto &form = request.segments[s].access[view];
+        if (form.empty() || !accessHolds[s][view])
+          continue;
+        // The views of this segment's events, from the run.
+        size_t at = 0;
+        for (size_t e = 0; e < states->run.events.size() && accessHolds[s][view]; ++e) {
+          const MacEvent &event = states->run.events[e];
+          if (!members.count(event.site))
+            continue;
+          size_t row = at++;
+          if (rows[row].segment != s)
+            continue;
+          const std::vector<APInt> &index = view == 0 ? event.h : view == 1 ? event.f : event.g;
+          bool same = form.size() == index.size();
+          for (unsigned n = 0; same && n < form.size(); ++n) {
+            auto value = evaluateLevelTerm(form[n], v, rows[row].lambda);
+            same = value && *value == index[n];
+          }
+          if (!same) {
+            accessHolds[s][view] = false;
+            accessBroken[s][view] = refutedAt(v, "a proposed closed form differs from an index");
+          }
+        }
+      }
+    }
+
+    // Cells, over the whole group: the key within a segment, collisions within a
+    // segment, cells two segments share, and single contributions.
+    std::map<std::vector<uint64_t>, std::vector<size_t>> cells;
+    for (size_t e = 0; e < rows.size(); ++e)
+      cells[rows[e].cell].push_back(e);
+    here.cells = cells.size();
+    for (const auto &[cell, list] : cells) {
+      here.maxPerCell = std::max<uint64_t>(here.maxPerCell, list.size());
+      std::set<unsigned> segmentsHere;
+      std::map<unsigned, std::set<std::vector<uint64_t>>> outputsHere;
+      for (size_t n = 0; n < list.size(); ++n) {
+        const Row &row = rows[list[n]];
+        segmentsHere.insert(row.segment);
+        outputsHere[row.segment].insert(keyOf(row.output));
+        if (n && rows[list[n - 1]].segment == row.segment) {
+          const Structure &core = (*structures)[row.segment].core;
+          std::vector<APInt> a, b;
+          for (unsigned k : core.key) {
+            a.push_back(rows[list[n - 1]].lambda[k]);
+            b.push_back(row.lambda[k]);
+          }
+          if (!concreteLess((*structures)[row.segment].keyed, a, b) && keyHolds[row.segment]) {
+            keyHolds[row.segment] = false;
+            keyBroken[row.segment] = refutedAt(v, "two contributions of one cell are not in the key's order");
+          }
+        }
+      }
+      for (const auto &[s, outputs] : outputsHere)
+        if (outputs.size() > 1) {
+          ++here.collisions;
+          if (injective[s]) {
+            injective[s] = false;
+            collisionSeen[s] = refutedAt(v, "two logical outputs of segment " + std::to_string(s) + " share a cell");
+          }
+        }
+      if (segmentsHere.size() > 1 && sharedNone) {
+        sharedNone = false;
+        sharedSeen = refutedAt(v, "two segments write one cell");
+      }
+      if (list.size() > 1 && single) {
+        single = false;
+        multipleSeen = refutedAt(v, "a cell has more than one contribution");
+      }
+    }
+    facts.push_back(std::move(here));
+  }
+  if (!anyEvent)
+    return CheckedDomain::unknown(open.empty() ? "no point has events" : open);
+  ComputationTier tier = complete ? ComputationTier::ScopeEnumerated : ComputationTier::Point;
+  CheckedDomain out = DomainAuthority::make(
+      tier, ComputationStatus::Verified,
+      open.empty() ? "each listed point enumerated exactly, segment by segment, in order"
+                   : "each listed point enumerated exactly, segment by segment, in order; another is open: " + open);
+  DomainAuthority::orbit(out, true);
+  DomainAuthority::facts(out, std::move(facts));
+  std::string where = "at the listed points";
+  for (unsigned s = 0; s < m; ++s) {
+    segmentFacts[s].cellKey = keyHolds[s] ? proven(where, tier) : *keyBroken[s];
+    segmentFacts[s].outputInjective = injective[s] ? proven(where, tier) : *collisionSeen[s];
+    for (unsigned view = 0; view < 3; ++view)
+      segmentFacts[s].access[view] = request.segments[s].access[view].empty() ? unknownFact("nothing proposed")
+                                     : accessHolds[s][view]                   ? proven(where, tier)
+                                                                              : *accessBroken[s][view];
+  }
+  recordSegments(out, *structures, request, std::move(segmentFacts), tier, false);
+  DomainAuthority::single(out, single ? proven(where, tier) : *multipleSeen);
+  DomainAuthority::shared(out, sharedNone ? proven(where, tier) : *sharedSeen);
+  return out;
+}
+
 std::optional<CheckOutcome> acceptCertificate(const SemanticProgram &program,
                                               const TerminationCertificate *certificate,
                                               const DomainOptions &options, SmtBackend &backend,
@@ -769,6 +1166,158 @@ CheckedDomain symbolicClaim(const SemanticProgram &program, const TerminationCer
   }
 }
 
+
+CheckedDomain symbolicSegmented(const SemanticProgram &program, const TerminationCertificate *certificate,
+                                const SiteGroup &group, const CoordinateFamily &family,
+                                const DomainRequest &request, const DomainOptions &options,
+                                SmtBackend &backend) {
+  if (!program.isSupported())
+    return CheckedDomain::unknown("the program is unsupported");
+  std::string why;
+  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
+    return CheckedDomain::unknown("a solver limit of zero is no limit");
+  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+    return CheckedDomain::unknown(why);
+  auto structures = adoptSegments(program, group, family, request, why);
+  if (!structures)
+    return CheckedDomain::unknown("the request is refused: " + why);
+  if (!acceptCertificate(program, certificate, options, backend, why))
+    return CheckedDomain::unknown(why);
+  {
+    std::set<unsigned> places;
+    for (unsigned id : group.sites)
+      if (!places.insert(program.sites[id].location).second)
+        return CheckedDomain::unknown("two sites of the group share a block");
+  }
+  std::map<unsigned, unsigned> ofSite = segmentOfSite(request), ofLocation;
+  for (const auto &[site, s] : ofSite)
+    ofLocation[program.sites[site].location] = s;
+  unsigned m = structures->size();
+  std::vector<GuardedOrder> orders;
+  for (const SegmentStructure &s : *structures)
+    orders.push_back(s.core.order);
+
+  Proof proof(program, group, options, backend);
+  try {
+    if (!proof.prepare(*certificate, why))
+      return CheckedDomain::unknown(why);
+    auto unknownWith = [&](std::string reason) {
+      CheckedDomain out = DomainAuthority::make(ComputationTier::Proposed, ComputationStatus::Unknown,
+                                                std::move(reason));
+      DomainAuthority::records(out, std::move(proof.records));
+      if (proof.failing)
+        DomainAuthority::failing(out, *proof.failing);
+      return out;
+    };
+    // Theorem 15.
+    std::string orbitWhy;
+    AskUnsat ask = [&](const std::string &id, const std::string &where, Term formula) {
+      return proof.ask(id, where, formula);
+    };
+    if (!proveSegmentedOrbit(program, orders, ofLocation, proof.arrivals, proof.locations, proof.scope,
+                             options.limits.maxUnfolding, ask, orbitWhy))
+      return unknownWith(proof.failure.empty() ? orbitWhy : proof.failure + "; " + orbitWhy);
+
+    size_t n = proof.arrivals.arrivals.size();
+    if (n * n > options.limits.maxPairs)
+      return unknownWith("more arrival pairs than the limit");
+
+    // Within a segment: K1 and C1. Over the group: T1, and whether two segments share
+    // a cell.
+    std::vector<bool> keyOk(m, true), injective(m, true);
+    bool single = true, sharedNone = true;
+    TermContext &terms = *program.terms;
+    proof.pairs([&](const SiteArrival &a, const SiteArrival &b) {
+      unsigned sa = ofSite.at(a.site), sb = ofSite.at(b.site);
+      const MacSite &first = program.sites[a.site], &second = program.sites[b.site];
+      Term both = terms.logicalAnd(a.premise, secondCopy(program, b.premise));
+      Term sameCell = terms.logicalAnd(both, proof.equal(proof.at(a, first.output->index),
+                                                         proof.second(proof.at(b, second.output->index))));
+      std::vector<Term> la = proof.values(orders[sa], a), lb = proof.second(proof.values(orders[sb], b));
+      if (sa != sb) {
+        if (sharedNone && proof.ask("SH", "cells of two segments", sameCell) != SmtAnswer::Unsat)
+          sharedNone = false;
+        if (single && proof.ask("T1", "one contribution per cell, across segments", sameCell) != SmtAnswer::Unsat)
+          single = false;
+        return true;
+      }
+      const SegmentStructure &s = (*structures)[sa];
+      if (keyOk[sa] && !s.core.keyAll) {
+        std::vector<Term> ka, kb;
+        for (unsigned k : s.core.key) {
+          ka.push_back(la[k]);
+          kb.push_back(lb[k]);
+        }
+        Term bad = terms.logicalAnd(sameCell, terms.logicalAnd(guardedLess(program, orders[sa], la, lb),
+                                                               terms.logicalNot(guardedLess(program, s.keyed, ka, kb))));
+        if (proof.ask("K1", "the cell key, segment " + std::to_string(sa), bad) != SmtAnswer::Unsat)
+          keyOk[sa] = false;
+      }
+      if (injective[sa]) {
+        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(proof.at(a, s.output),
+                                                                            proof.second(proof.at(b, s.output)))));
+        if (proof.ask("C1", "one logical output per cell, segment " + std::to_string(sa), bad) != SmtAnswer::Unsat)
+          injective[sa] = false;
+      }
+      if (single) {
+        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(la, lb)));
+        if (proof.ask("T1", "one contribution per cell", bad) != SmtAnswer::Unsat)
+          single = false;
+      }
+      return true;
+    });
+    std::vector<SegmentFacts> segmentFacts(m);
+    const ComputationTier symbolic = ComputationTier::Symbolic;
+    for (unsigned s = 0; s < m; ++s) {
+      const SegmentStructure &structure = (*structures)[s];
+      segmentFacts[s].cellKey = structure.core.keyAll ? proven("the key is every level", symbolic)
+                                : keyOk[s]            ? proven("K1 over the scope", symbolic)
+                                                      : unknownFact("K1 not discharged");
+      segmentFacts[s].outputInjective = injective[s] ? proven("C1 over the scope", symbolic)
+                                                     : unknownFact("C1 not discharged; a point may show it");
+      for (unsigned view = 0; view < 3; ++view) {
+        const auto &form = request.segments[s].access[view];
+        if (form.empty()) {
+          segmentFacts[s].access[view] = unknownFact("nothing proposed");
+          continue;
+        }
+        bool ok = true;
+        for (const SiteArrival &a : proof.arrivals.arrivals) {
+          if (ofSite.at(a.site) != s)
+            continue;
+          ArrayRef<Term> index = viewOf(program.sites[a.site], view);
+          if (index.size() != form.size()) {
+            ok = false;
+            break;
+          }
+          std::vector<Term> la = proof.values(orders[s], a);
+          Term differs = terms.boolean(false);
+          for (unsigned k = 0; k < form.size(); ++k)
+            differs = terms.logicalOr(differs, terms.icmp(Predicate::Ne, atPathEnd(program, a.path, index[k]),
+                                                          bindLevels(program, form[k], la)));
+          if (proof.ask("A1", "a closed form of a view, segment " + std::to_string(s),
+                        terms.logicalAnd(a.premise, differs)) != SmtAnswer::Unsat) {
+            ok = false;
+            break;
+          }
+        }
+        segmentFacts[s].access[view] = ok ? proven("over the scope", symbolic) : unknownFact("not discharged");
+      }
+    }
+    CheckedDomain out = DomainAuthority::make(ComputationTier::Symbolic, ComputationStatus::Verified,
+                                              "D1 to D5 discharged over the scope");
+    DomainAuthority::records(out, std::move(proof.records));
+    DomainAuthority::orbit(out, true);
+    recordSegments(out, *structures, request, std::move(segmentFacts), symbolic, true);
+    DomainAuthority::single(out, single ? proven("T1 over the scope", symbolic) : unknownFact("T1 not discharged"));
+    DomainAuthority::shared(out, sharedNone ? proven("no cell of two segments, over the scope", symbolic)
+                                            : unknownFact("not discharged; a point may show it"));
+    return out;
+  } catch (const TermError &error) {
+    return CheckedDomain::unknown(std::string("term limit: ") + error.what());
+  }
+}
+
 ComputationOptions computationOf(const DomainOptions &options) {
   ComputationOptions out;
   out.scope = options.scope;
@@ -790,7 +1339,8 @@ std::vector<uint64_t> pointKey(const std::vector<APInt> &point) {
 CheckedDomain checkDomainFinite(const SemanticProgram &program, const DomainEnumeration &enumeration,
                                 unsigned g, const CoordinateFamily &family,
                                 const DomainRequest &request, const DomainOptions &options) {
-  CheckedDomain out = finiteClaim(program, enumeration, g, family, request, options);
+  CheckedDomain out = request.segments.empty() ? finiteClaim(program, enumeration, g, family, request, options)
+                                               : finiteSegmented(program, enumeration, g, family, request, options);
   if (g < enumeration.groups.size())
     DomainAuthority::bind(out, bindingOf(program, enumeration.groups[g], options, family, request));
   return out;
@@ -800,7 +1350,9 @@ CheckedDomain checkDomainSymbolic(const SemanticProgram &program,
                                   const TerminationCertificate *certificate, const SiteGroup &group,
                                   const CoordinateFamily &family, const DomainRequest &request,
                                   const DomainOptions &options, SmtBackend &backend) {
-  CheckedDomain out = symbolicClaim(program, certificate, group, family, request, options, backend);
+  CheckedDomain out = request.segments.empty()
+                          ? symbolicClaim(program, certificate, group, family, request, options, backend)
+                          : symbolicSegmented(program, certificate, group, family, request, options, backend);
   DomainAuthority::bind(out, bindingOf(program, group, options, family, request));
   return out;
 }
@@ -824,11 +1376,18 @@ ReductionVerdict checkReduction(const SemanticProgram &program,
   coordinates.authorized = options.authorized;
   coordinates.limits.paths = options.termination.paths;
 
-  // Every claim below is made here, for this program, group, scope and set of names.
-  out.coordFinite = checkFamilyFinite(program, enumeration, g, family);
-  if (coordinateOrder)
-    out.coordSymbolic = checkFamilySymbolic(program, certificate, group, family, coordinateOrder,
-                                                 coordinates, backend);
+  // Every claim below is made here, for this program, group, scope and set of names. A
+  // segmented request carries one family per segment, which G3b, with its one family
+  // over every event, does not judge: its logical form has no tier here.
+  if (request.segments.empty()) {
+    out.coordFinite = checkFamilyFinite(program, enumeration, g, family);
+    if (coordinateOrder)
+      out.coordSymbolic = checkFamilySymbolic(program, certificate, group, family, coordinateOrder,
+                                              coordinates, backend);
+  } else {
+    out.coordFinite = CheckedFamily::unknown("a segmented request: per-segment coordinates are not judged by G3b");
+    out.coordSymbolic = out.coordFinite;
+  }
   out.compFinite = checkComputationFinite(program, enumeration, g, computation);
   out.compSymbolic = checkComputationSymbolic(program, certificate, group, computation, backend);
   out.domFinite = checkDomainFinite(program, enumeration, g, family, request, options);

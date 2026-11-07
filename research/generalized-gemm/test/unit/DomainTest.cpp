@@ -2187,6 +2187,937 @@ static void testSiblings() {
   }
 }
 
+/// G5b-M2: segmented families and orders, Theorem 15.
+static const char *segmentSource = R"(func.func @sib_counter(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %p1 = scf.for %i = %c0 to %n step %c1 iter_args(%p = %c0) -> (index) {
+    %x = memref.load %a[%p] : memref<8xi32>
+    %y = memref.load %b[%p] : memref<8xi32>
+    %z = memref.load %c[%p] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%p] : memref<8xi32>
+    %q = arith.addi %p, %c1 : index
+    scf.yield %q : index
+  }
+  scf.for %j = %c0 to %n step %c1 iter_args(%p2 = %p1) -> (index) {
+    %x2 = memref.load %a[%p2] : memref<8xi32>
+    %y2 = memref.load %b[%p2] : memref<8xi32>
+    %z2 = memref.load %c[%p2] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%p2] : memref<8xi32>
+    %q2 = arith.addi %p2, %c1 : index
+    scf.yield %q2 : index
+  }
+  return
+}
+func.func @sib_bounds(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %c3 step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_empty_first(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %n to %c3 step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %c2 step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_empty_second(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %n to %c3 step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_empty_single(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %n to %c2 step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_empty_both(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %n to %c3 step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %n to %c3 step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_three(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c1 to %n step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  scf.for %k = %c0 to %n step %c1 {
+    %x3 = memref.load %a[%k] : memref<8xi32>
+    %y3 = memref.load %b[%k] : memref<8xi32>
+    %z3 = memref.load %c[%k] : memref<8xi32>
+    %m3 = arith.muli %x3, %y3 : i32
+    %s3 = arith.addi %z3, %m3 : i32
+    memref.store %s3, %c[%k] : memref<8xi32>
+  }
+  return
+}
+func.func @sib_repeat(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %top = arith.addi %j, %c1 : index
+    scf.for %t = %c0 to %top step %c1 {
+      %x2 = memref.load %a[%j] : memref<8xi32>
+      %y2 = memref.load %b[%j] : memref<8xi32>
+      %z2 = memref.load %c[%j] : memref<8xi32>
+      %m2 = arith.muli %x2, %y2 : i32
+      %s2 = arith.addi %z2, %m2 : i32
+      memref.store %s2, %c[%j] : memref<8xi32>
+    }
+  }
+  return
+}
+func.func @sib_diag(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %p = %c0 to %c2 step %c1 {
+    scf.for %q = %c0 to %c3 step %c1 {
+      %d = arith.addi %p, %q : index
+      %x2 = memref.load %a[%d] : memref<8xi32>
+      %y2 = memref.load %b[%d] : memref<8xi32>
+      %z2 = memref.load %c[%d] : memref<8xi32>
+      %m2 = arith.muli %x2, %y2 : i32
+      %s2 = arith.addi %z2, %m2 : i32
+      memref.store %s2, %c[%d] : memref<8xi32>
+    }
+  }
+  return
+}
+func.func @sib_shuffle(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c4 = arith.constant 4 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %c4 step %c1 {
+    %lo = arith.remui %j, %c2 : index
+    %hi = arith.divui %j, %c2 : index
+    %sh = arith.muli %lo, %c2 : index
+    %jj = arith.addi %sh, %hi : index
+    %x2 = memref.load %a[%jj] : memref<8xi32>
+    %y2 = memref.load %b[%jj] : memref<8xi32>
+    %z2 = memref.load %c[%jj] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%jj] : memref<8xi32>
+  }
+  return
+}
+)";
+
+/// A segment of one site with levels given as (value, lower, upper, descending).
+struct LevelSpec {
+  Term value, lower, upper;
+  bool descending = false;
+  bool isSigned = false;
+};
+static Segment segmentOf(const SemanticProgram &p, std::vector<unsigned> sites,
+                         std::vector<LevelSpec> levels, Term guard = nullptr,
+                         std::vector<unsigned> key = {}, unsigned logical = ~0u) {
+  Segment out;
+  out.sites = std::move(sites);
+  for (unsigned m = 0; m < levels.size(); ++m) {
+    GuardedLevel level;
+    level.value = levels[m].value;
+    level.lower = levels[m].lower;
+    level.upper = levels[m].upper;
+    level.descending = levels[m].descending;
+    level.isSigned = levels[m].isSigned;
+    out.order.levels.push_back(level);
+    if (logical == ~0u || m < logical)
+      out.family.axes[AxisI].push_back(levels[m].value);
+  }
+  out.order.guard = guard ? guard : p.terms->boolean(true);
+  out.cellKey = key.empty() ? std::vector<unsigned>{(unsigned)levels.size() - 1} : key;
+  return out;
+}
+
+/// Each obligation of Theorem 15 alone, and every gate of the segmented route.
+static void testSegmentGates() {
+  Module m(std::string(siblingSource) + segmentSource);
+  Sort w = Sort::bv(16);
+  CoordinateFamily none;
+  auto both = [&](Fixture &f, const DomainRequest &r) {
+    return std::make_pair(checkDomainFinite(f.program, f.enumeration, 0, none, r, f.options),
+                          checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, r,
+                                              f.options, z3Backend));
+  };
+  auto describe = [](const char *what, const CheckedDomain &a, const CheckedDomain &b) {
+    printf("%s: finite %s %s (%s); symbolic %s (%s)\n", what, stringifyComputationStatus(a.status()),
+           stringifyComputationTier(a.tier()), a.reason().c_str(), stringifyComputationStatus(b.status()),
+           b.reason().c_str());
+  };
+  auto expectVerified = [&](const char *what, Fixture &f, const DomainRequest &r) {
+    auto [fin, sym] = both(f, r);
+    bool ok = fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated && sym.status() == S::Verified;
+    if (!ok)
+      describe(what, fin, sym);
+    CHECK(ok);
+  };
+  // A finite refutation, and no symbolic claim: the one obligation named is what stands
+  // between the request and a false proof.
+  auto expectRefuted = [&](const char *what, Fixture &f, const DomainRequest &r, const char *obligation) {
+    auto [fin, sym] = both(f, r);
+    bool ok = fin.status() == S::Refuted && fin.refutation().point.has_value() && sym.status() == S::Unknown &&
+              sym.reason().find(obligation) != std::string::npos;
+    if (!ok)
+      describe(what, fin, sym);
+    CHECK(ok);
+  };
+  auto plain = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper, bool desc = false) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, desc, false};
+  };
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), one = terms.bv(APInt(16, 1));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n)})};
+    auto run = [&](SmtBackend &backend, const DomainOptions &options, const DomainRequest &req) {
+      return checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, req, options, backend);
+    };
+    CHECK(run(z3Backend, f.options, r).status() == S::Verified);
+    // Every obligation is asked, and an unknown or sat answer to any one is Unknown. (D5
+    // is asked where a first loop can reach the exit: below, on sib_empty_second.)
+    for (const char *id : {"; D1 ", "; D2 ", "; D3 ", "; D4 "})
+      for (SmtAnswer answer : {SmtAnswer::Unknown, SmtAnswer::Sat}) {
+        Selective solver(id, answer);
+        CheckedDomain out = run(solver, f.options, r);
+        if (solver.hits == 0)
+          printf("no %s query\n", id);
+        CHECK(solver.hits > 0);
+        CHECK(out.status() == S::Unknown && !out.exactOrder());
+      }
+    // The facts: unknown leaves them unproven and the order stands. (K1 and A1 are not
+    // asked here: a one-level key is every level, and no access terms were proposed.)
+    for (const char *id : {"; C1 ", "; T1 ", "; SH "}) {
+      Selective solver(id, SmtAnswer::Unknown);
+      CheckedDomain out = run(solver, f.options, r);
+      CHECK(solver.hits > 0);
+      CHECK(out.status() == S::Verified);
+      std::string name(id);
+      if (name == "; T1 ")
+        CHECK(out.singleContribution().status == FactStatus::Unknown);
+      if (name == "; SH ")
+        CHECK(out.sharedCells().status == FactStatus::Unknown);
+      if (name == "; C1 ")
+        CHECK(out.segments()[0].outputInjective.status == FactStatus::Unknown &&
+              out.outputInjective().status == FactStatus::Unknown);
+    }
+    // Limits and certificates, as for one order.
+    DomainOptions zero_ = f.options;
+    zero_.termination.solver.timeoutMilliseconds = 0;
+    CHECK(run(z3Backend, zero_, r).reason().find("limit of zero") != std::string::npos);
+    DomainOptions few = f.options;
+    few.limits.maxQueries = 3;
+    CHECK(run(z3Backend, few, r).status() == S::Unknown);
+    DomainOptions shallow = f.options;
+    shallow.limits.maxUnfolding = 1;
+    CHECK(run(z3Backend, shallow, r).status() == S::Unknown);
+    DomainOptions pairs = f.options;
+    pairs.limits.maxPairs = 0;
+    CHECK(run(z3Backend, pairs, r).reason().find("arrival pairs") != std::string::npos);
+    DomainOptions box = f.options;
+    box.limits.maxBox = 1; // Only n = 1 fits.
+    CheckedDomain boxed = checkDomainFinite(f.program, f.enumeration, 0, none, r, box);
+    CHECK(boxed.status() == S::Unknown || (boxed.tier() == T::Point && boxed.points().size() == 1));
+    CHECK(checkDomainSymbolic(f.program, nullptr, f.enumeration.groups[0], none, r, f.options, z3Backend).status() ==
+          S::Unknown);
+    if (f.certificate) {
+      TerminationCertificate broken = *f.certificate;
+      broken.levels.clear();
+      CHECK(checkDomainSymbolic(f.program, &broken, f.enumeration.groups[0], none, r, f.options, z3Backend)
+                .reason().find("not accepted") != std::string::npos);
+    }
+    // A sample is no scope; a point the run outgrew is no point.
+    {
+      Fixture one = fixture(m, "sib_same", 1, 3, 16, {{APInt(16, 1)}});
+      CheckedDomain finite = checkDomainFinite(one.program, one.enumeration, 0, none, r, one.options);
+      CHECK(finite.status() == S::Verified && finite.tier() == T::Point);
+    }
+    {
+      EnumerationOptions tight;
+      tight.scope = f.scope;
+      tight.authorized = f.authorized;
+      tight.termination.solver = testSolver();
+      tight.liveStatePoints = true;
+      tight.limits.maxEvents = 5; // n = 3 has six events.
+      DomainEnumeration limited = enumerateDomain(f.program, f.proof(), tight, z3Backend);
+      unsigned stopped = 0;
+      for (const PointEvidence &point : limited.points)
+        stopped += !point.reason.empty();
+      CHECK(stopped == 1);
+      CheckedDomain finite = checkDomainFinite(f.program, limited, 0, none, r, f.options);
+      CHECK(finite.status() == S::Verified && finite.tier() == T::Point && finite.points().size() == 2);
+    }
+    // One obligation at a time.
+    DomainRequest firstLong = r;
+    firstLong.segments[0].order.levels[0].upper = terms.binary(TermOp::Add, n, one);
+    expectRefuted("first segment too long", f, firstLong, "D4");
+    DomainRequest shifted = r;
+    shifted.segments[1] = segmentOf(f.program, {1}, {LevelSpec{terms.binary(TermOp::Add, terms.state(l[1], w), one),
+                                                               zero, terms.binary(TermOp::Add, n, one), false, false}});
+    expectRefuted("second segment shifted by one", f, shifted, "D4");
+    DomainRequest backward;
+    backward.segments = {segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n)}, terms.boolean(false)),
+                         segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)})};
+    expectRefuted("the later loop as an empty earlier segment", f, backward, "D5");
+    DomainRequest tooLong = r;
+    tooLong.segments[1].order.levels[0].upper = terms.binary(TermOp::Add, n, one);
+    expectRefuted("second segment too long", f, tooLong, "D3");
+    // The same size, in order, and other elements: [1, n + 1) for events 0 .. n - 1.
+    DomainRequest offset = r;
+    offset.segments[1].order.levels[0].lower = one;
+    offset.segments[1].order.levels[0].upper = terms.binary(TermOp::Add, n, one);
+    expectRefuted("second segment offset by one", f, offset, "D4");
+    // A scope wider than the enumeration: no claim over it.
+    {
+      DomainOptions wider = f.options;
+      wider.scope = range(f.program, 1, 4);
+      CheckedDomain finite = checkDomainFinite(f.program, f.enumeration, 0, none, r, wider);
+      CHECK(finite.status() == S::Verified && finite.tier() == T::Point);
+    }
+    DomainRequest undefinedLevel;
+    undefinedLevel.segments = {segmentOf(f.program, {0, 1}, {plain(f.program, l[1], zero, n)})};
+    CheckedDomain refused = checkDomainFinite(f.program, f.enumeration, 0, none, undefinedLevel, f.options);
+    CHECK(refused.status() == S::Unknown && refused.reason().find("refused") != std::string::npos);
+    CHECK(checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, undefinedLevel, f.options,
+                              z3Backend).status() != S::Verified);
+  }
+  {
+    // A level that goes back without skipping: p + q over p in [0, 2), q in [0, 3) runs
+    // 0 1 2 1 2 3, and only D2's increase stands against the set [0, 4).
+    Fixture f = fixture(m, "sib_diag", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 3);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    Term d = terms.binary(TermOp::Add, terms.state(l[1], w), terms.state(l[2], w));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {LevelSpec{d, zero, terms.bv(APInt(16, 4)), false, false}})};
+    expectRefuted("a diagonal level that steps back", f, r, "D2");
+    // By (p, q) it is a box, and the cells are shared with the first loop.
+    DomainRequest box = r;
+    box.segments[1] = segmentOf(f.program, {1}, {plain(f.program, l[1], zero, terms.bv(APInt(16, 2))),
+                                                 plain(f.program, l[2], zero, terms.bv(APInt(16, 3)))});
+    expectVerified("the diagonal nest by its loop variables", f, box);
+  }
+  {
+    Fixture f = fixture(m, "sib_empty_first", 1, 4);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), three = terms.bv(APInt(16, 3));
+    Term y0 = levelVariable(terms, 0, w);
+    // A first segment right only in scope: [1, 3) with i >= n. Out of scope, at n = 0,
+    // the first event would not be its minimum.
+    DomainRequest scoped;
+    scoped.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], terms.bv(APInt(16, 1)), three)},
+                                 terms.icmp(Predicate::Uge, y0, n)),
+                       segmentOf(f.program, {1}, {plain(f.program, l[1], zero, terms.bv(APInt(16, 2)))})};
+    expectVerified("a first segment that needs the scope", f, scoped);
+    // S_0 nonempty where the first event is the second loop's: D1' alone.
+    DomainRequest before = scoped;
+    before.segments[0].order.guard =
+        terms.logicalOr(terms.icmp(Predicate::Uge, y0, n), terms.icmp(Predicate::Uge, n, three));
+    before.segments[0].order.levels[0].lower = zero;
+    expectRefuted("a nonempty set before the first event", f, before, "D1");
+  }
+  {
+    Fixture f = fixture(m, "sib_empty_both", 1, 4);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), three = terms.bv(APInt(16, 3));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], n, three)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], n, three)})};
+    expectVerified("both segments empty at n >= 3", f, r);
+    // A run with no event, and a set that is not empty: D1' at the exit alone.
+    DomainRequest atExit = r;
+    atExit.segments[1] = segmentOf(f.program, {1}, {plain(f.program, l[1], zero, terms.binary(TermOp::Sub, n, terms.bv(APInt(16, 2))))},
+                                   terms.icmp(Predicate::Uge, n, three));
+    expectRefuted("a nonempty set when the run has no event", f, atExit, "D1");
+    // D5 is asked here: the first loop reaches the exit where the second is empty.
+    {
+      Fixture s = fixture(m, "sib_empty_second", 1, 4);
+      std::vector<unsigned> sl = loops(s.program);
+      DomainRequest second;
+      TermContext &st = *s.program.terms;
+      Term szero = st.bv(APInt(16, 0)), sn = st.param(0, w), sthree = st.bv(APInt(16, 3));
+      second.segments = {segmentOf(s.program, {0}, {LevelSpec{st.state(sl[0], w), szero, st.bv(APInt(16, 2)), false, false}}),
+                         segmentOf(s.program, {1}, {LevelSpec{st.state(sl[1], w), sn, sthree, false, false}})};
+      CHECK(checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], none, second, s.options, z3Backend)
+                .status() == S::Verified);
+      for (SmtAnswer answer : {SmtAnswer::Unknown, SmtAnswer::Sat}) {
+        Selective solver("; D5 ", answer);
+        CheckedDomain out = checkDomainSymbolic(s.program, s.proof(), s.enumeration.groups[0], none, second,
+                                                s.options, solver);
+        if (solver.hits == 0)
+          printf("no D5 query on sib_empty_second\n");
+        CHECK(solver.hits > 0);
+        CHECK(out.status() == S::Unknown && !out.exactOrder());
+      }
+    }
+    // No point with events is no evidence.
+    Fixture g = fixture(m, "sib_empty_both", 3, 4);
+    CheckedDomain none_ = checkDomainFinite(g.program, g.enumeration, 0, none, r, g.options);
+    CHECK(none_.status() == S::Unknown && none_.reason().find("no point has events") != std::string::npos);
+  }
+  {
+    Fixture f = fixture(m, "sib_three", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 3);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), one = terms.bv(APInt(16, 1));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], one, n)}),
+                  segmentOf(f.program, {2}, {plain(f.program, l[2], zero, n)})};
+    expectVerified("three segments, the middle empty at n = 1", f, r);
+    // The proposer needs two events of the middle loop at some point: n up to 3.
+    Fixture wide = fixture(m, "sib_three", 1, 3);
+    expectVerified("three segments, n up to 3", wide, r);
+    std::string why;
+    auto proposed = proposeSegmentedDomain(wide.program, wide.enumeration, 0, nullptr, ProposalLimits(), why);
+    if (!proposed)
+      printf("sib_three proposal: %s\n", why.c_str());
+    CHECK(proposed && proposed->segments.size() == 3);
+    if (proposed)
+      expectVerified("three segments proposed", wide, *proposed);
+    // The middle set nonempty at n = 1, where the first hands over to the third: D4 alone.
+    DomainRequest between = r;
+    between.segments[1] = segmentOf(f.program, {1}, {plain(f.program, l[1], terms.binary(TermOp::Sub, n, one), n)});
+    expectRefuted("a nonempty set between a hand-over", f, between, "D4");
+  }
+  // The gates of the one-order route, on the segmented one.
+  {
+    Module rm(reviewed);
+    Module gm(gapsSource);
+    {
+      Fixture e = fixture(gm, "entry_site", 1, 2);
+      std::vector<unsigned> el = loops(e.program);
+      TermContext &terms = *e.program.terms;
+      DomainRequest r;
+      r.segments = {segmentOf(e.program, e.enumeration.groups[0].sites,
+                              {plain(e.program, el[0], terms.bv(APInt(16, 0)), terms.bv(APInt(16, 0)))})};
+      CheckedDomain symbolic = checkDomainSymbolic(e.program, e.proof(), e.enumeration.groups[0], none, r,
+                                                   e.options, z3Backend);
+      CHECK(symbolic.status() == S::Unknown && symbolic.reason().find("entry block") != std::string::npos);
+    }
+    {
+      Fixture f = fixture(rm, "two", 1, 2);
+      std::vector<unsigned> l = loops(f.program);
+      TermContext &terms = *f.program.terms;
+      Term zero = terms.bv(APInt(16, 0)), three = terms.bv(APInt(16, 3));
+      DomainRequest r;
+      r.segments = {segmentOf(f.program, f.enumeration.groups[0].sites,
+                              {plain(f.program, l[0], zero, terms.param(0, w)), plain(f.program, l[1], zero, three),
+                               plain(f.program, l[2], zero, three)})};
+      CheckedDomain symbolic = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, r,
+                                                   f.options, z3Backend);
+      CHECK(symbolic.status() == S::Unknown && symbolic.reason().find("share a block") != std::string::npos);
+      CHECK(checkDomainFinite(f.program, f.enumeration, 0, none, r, f.options).status() == S::Refuted);
+    }
+    {
+      Fixture g = fixture(gm, "memory_guard", 1, 2);
+      std::vector<unsigned> gl = loops(g.program);
+      TermContext &terms = *g.program.terms;
+      DomainRequest r;
+      r.segments = {segmentOf(g.program, {0}, {plain(g.program, gl[0], terms.bv(APInt(16, 0)), terms.param(0, w)),
+                                                plain(g.program, gl[1], terms.bv(APInt(16, 0)), terms.bv(APInt(16, 3)))})};
+      CHECK(checkDomainFinite(g.program, g.enumeration, 0, none, r, g.options).reason().find("gate is closed") !=
+            std::string::npos);
+    }
+  }
+}
+
+static void testSegments() {
+  Module m(std::string(siblingSource) + segmentSource);
+  Sort w = Sort::bv(16);
+  CoordinateFamily none;
+  auto both = [&](Fixture &f, const DomainRequest &r) {
+    return std::make_pair(checkDomainFinite(f.program, f.enumeration, 0, none, r, f.options),
+                          checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, r,
+                                              f.options, z3Backend));
+  };
+  auto describe = [](const char *what, const CheckedDomain &a, const CheckedDomain &b) {
+    printf("%s: finite %s %s (%s); symbolic %s (%s)\n", what, stringifyComputationStatus(a.status()),
+           stringifyComputationTier(a.tier()), a.reason().c_str(), stringifyComputationStatus(b.status()),
+           b.reason().c_str());
+  };
+  auto expectVerified = [&](const char *what, Fixture &f, const DomainRequest &r, bool symbolicToo = true) {
+    auto [fin, sym] = both(f, r);
+    bool ok = fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated &&
+              (!symbolicToo || sym.status() == S::Verified);
+    if (!ok)
+      describe(what, fin, sym);
+    CHECK(ok);
+    CHECK(fin.exactOrder() && (!symbolicToo || sym.exactOrder()));
+    CHECK(fin.segments().size() == r.segments.size() && (!symbolicToo || sym.segments().size() == r.segments.size()));
+    return std::make_pair(std::move(fin), std::move(sym));
+  };
+  auto expectNotVerified = [&](const char *what, Fixture &f, const DomainRequest &r, S finiteWant,
+                               const char *text = nullptr) {
+    auto [fin, sym] = both(f, r);
+    bool ok = fin.status() == finiteWant && sym.status() != S::Verified &&
+              (!text || fin.reason().find(text) != std::string::npos);
+    if (!ok)
+      describe(what, fin, sym);
+    CHECK(ok);
+    CHECK(sym.status() != S::Refuted);
+    if (fin.status() == S::Refuted)
+      CHECK(fin.refutation().point.has_value());
+  };
+  auto plain = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper, bool desc = false) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, desc, false};
+  };
+
+  // Two loops over the same roots and cells: one group, two segments. Theorem 15 holds
+  // on both routes; the cells are shared, which is a fact, and Theorem 13 holds over the
+  // segmented key.
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n)})};
+    auto [fin, sym] = expectVerified("sib_same", f, r);
+    CHECK(fin.sharedCells().status == FactStatus::Refuted && fin.sharedCells().point.has_value());
+    CHECK(sym.sharedCells().status != FactStatus::Proven);
+    CHECK(fin.singleContribution().status == FactStatus::Refuted);
+    CHECK(fin.multiplicity() == DomainMultiplicity::Unit && sym.multiplicity() == DomainMultiplicity::Unit);
+    for (const SegmentFacts &s : sym.segments())
+      CHECK(s.cellKey.status == FactStatus::Proven && s.outputInjective.status == FactStatus::Proven);
+    ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r, f.options,
+                                        z3Backend);
+    CHECK(v.status() == S::Verified && v.tier() == T::Symbolic);
+    CHECK(v.logicalTier() == T::Proposed); // No G3b claim over segments.
+    CHECK(v.computationSymbolic().status() == S::Verified);
+    CHECK(v.integerReorder().status == FactStatus::Proven); // Two wrapping adds commute.
+    CHECK(v.trivialReorder().status != FactStatus::Proven);
+    // The proposer finds the same shape on its own.
+    std::string why;
+    auto proposed = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    if (!proposed)
+      printf("sib_same proposal: %s\n", why.c_str());
+    CHECK(proposed && proposed->segments.size() == 2);
+    if (proposed)
+      expectVerified("sib_same proposed", f, *proposed);
+
+    // Adversaries on the same program.
+    DomainRequest swapped = r;
+    std::swap(swapped.segments[0], swapped.segments[1]);
+    expectNotVerified("segments swapped", f, swapped, S::Refuted, "follows an event of segment");
+    DomainRequest missing = r;
+    missing.segments.pop_back();
+    expectNotVerified("a site in no segment", f, missing, S::Unknown, "is in no segment");
+    DomainRequest twice = r;
+    twice.segments[1].sites = {0, 1};
+    expectNotVerified("a site in two segments", f, twice, S::Unknown, "two segments");
+    DomainRequest outside = r;
+    outside.segments[1].sites = {1, 7};
+    expectNotVerified("a site outside the group", f, outside, S::Unknown, "outside the group");
+    DomainRequest withFamily = r;
+    CoordinateFamily extra;
+    extra.axes[AxisI] = {terms.state(l[0], w)};
+    CheckedDomain fam = checkDomainFinite(f.program, f.enumeration, 0, extra, withFamily, f.options);
+    CHECK(fam.status() == S::Unknown && fam.reason().find("own families") != std::string::npos);
+    DomainRequest longer = r;
+    longer.segments[1].order.levels[0].upper = terms.binary(TermOp::Add, n, terms.bv(APInt(16, 1)));
+    expectNotVerified("second segment too long", f, longer, S::Refuted, "has no event");
+    DomainRequest shorter = r;
+    shorter.segments[1].order.levels[0].upper = terms.binary(TermOp::Sub, n, terms.bv(APInt(16, 1)));
+    expectNotVerified("second segment too short", f, shorter, S::Refuted, "no point of the set");
+    DomainRequest descending = r;
+    descending.segments[1].order.levels[0].descending = true;
+    expectNotVerified("second segment reversed", f, descending, S::Refuted, "increasing order");
+    DomainRequest merged;
+    merged.segments = {segmentOf(f.program, {0, 1}, {plain(f.program, l[0], zero, n)})};
+    // One segment for both sites: the first loop's variable is frozen in the second.
+    expectNotVerified("one segment for two loops", f, merged, S::Refuted);
+    // Binding tells segmented requests apart.
+    CHECK(fin.binding() != checkDomainFinite(f.program, f.enumeration, 0, none, longer, f.options).binding());
+    CHECK(fin.binding() != checkDomainFinite(f.program, f.enumeration, 0, none, swapped, f.options).binding());
+  }
+  // Disjoint halves: no shared cell, on both routes.
+  {
+    Fixture f = fixture(m, "sib_halves", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], terms.bv(APInt(16, 0)), terms.param(0, w))}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], terms.bv(APInt(16, 0)), terms.param(0, w))})};
+    auto [fin, sym] = expectVerified("sib_halves", f, r);
+    CHECK(fin.sharedCells().status == FactStatus::Proven && sym.sharedCells().status == FactStatus::Proven);
+    CHECK(fin.singleContribution().status == FactStatus::Proven && sym.singleContribution().status == FactStatus::Proven);
+    ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r, f.options, z3Backend);
+    CHECK(v.status() == S::Verified && v.trivialReorder().status == FactStatus::Proven);
+  }
+  // The second loop reversed: the level may be j ascending, or 3 - j descending; 3 - j
+  // declared ascending is refuted.
+  {
+    Fixture f = fixture(m, "sib_reversed", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n)})};
+    expectVerified("sib_reversed, j", f, r);
+    Term jj = terms.binary(TermOp::Sub, terms.bv(APInt(16, 3)), terms.state(l[1], w));
+    DomainRequest flipped = r;
+    flipped.segments[1] = segmentOf(f.program, {1},
+                                    {LevelSpec{jj, terms.binary(TermOp::Sub, terms.bv(APInt(16, 4)), n),
+                                               terms.bv(APInt(16, 4)), true, false}});
+    expectVerified("sib_reversed, 3 - j descending", f, flipped);
+    DomainRequest wrong = flipped;
+    wrong.segments[1].order.levels[0].descending = false;
+    expectNotVerified("3 - j declared ascending", f, wrong, S::Refuted, "increasing order");
+  }
+  // A guard around the second loop: its set is empty where the guard is false.
+  {
+    Fixture f = fixture(m, "sib_conditional", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    Term guard = terms.icmp(Predicate::Ugt, n, terms.bv(APInt(16, 1)));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n)}, guard)};
+    expectVerified("sib_conditional", f, r);
+    DomainRequest unguarded = r;
+    unguarded.segments[1].order.guard = terms.boolean(true);
+    expectNotVerified("guard dropped", f, unguarded, S::Refuted, "has no event");
+    // Also as the proposer sees it.
+    std::string why;
+    auto proposed = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    if (!proposed)
+      printf("sib_conditional proposal: %s\n", why.c_str());
+    CHECK(proposed.has_value());
+    if (proposed)
+      expectVerified("sib_conditional proposed", f, *proposed);
+  }
+  // An empty first segment, and an empty second one, inside the scope.
+  for (const char *name : {"sib_empty_first", "sib_empty_second"}) {
+    bool firstEmpty = std::string(name) == "sib_empty_first";
+    Fixture f = fixture(m, name, 1, 4);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    if (firstEmpty)
+      r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], n, terms.bv(APInt(16, 3)))}),
+                    segmentOf(f.program, {1}, {plain(f.program, l[1], zero, terms.bv(APInt(16, 2)))})};
+    else
+      r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, terms.bv(APInt(16, 2)))}),
+                    segmentOf(f.program, {1}, {plain(f.program, l[1], n, terms.bv(APInt(16, 3)))})};
+    auto [fin, sym] = expectVerified(name, f, r);
+    // At n = 3 or 4 the first set is empty; at n >= 3 the second. Both routes agree.
+    bool sawEmpty = false;
+    for (const DomainPointFacts &point : fin.points())
+      sawEmpty = sawEmpty || point.points < 5;
+    CHECK(sawEmpty);
+    std::string why;
+    auto proposed = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    if (!proposed)
+      printf("%s proposal: %s\n", name, why.c_str());
+    CHECK(proposed.has_value());
+    if (proposed)
+      expectVerified(name, f, *proposed);
+  }
+  // A second segment with one event in the whole scope: the checker judges the request,
+  // the proposer has nothing to fit and says so.
+  {
+    Fixture f = fixture(m, "sib_empty_single", 1, 4);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, terms.bv(APInt(16, 2)))}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], n, terms.bv(APInt(16, 2)))})};
+    expectVerified("sib_empty_single", f, r);
+    std::string why;
+    auto proposed = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    CHECK(!proposed && why.find("no state tells apart") != std::string::npos);
+  }
+  // A counter carried from the first loop into the second through SSA.
+  {
+    Fixture f = fixture(m, "sib_counter", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 4); // i, p, j, p2.
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    // By the loop variables.
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[2], zero, n)})};
+    expectVerified("sib_counter, loop variables", f, r);
+    // By the counter itself: p in [0, n), then p2 in [n, 2n).
+    DomainRequest counted;
+    counted.segments = {segmentOf(f.program, {0}, {plain(f.program, l[1], zero, n)}),
+                        segmentOf(f.program, {1}, {plain(f.program, l[3], n, terms.binary(TermOp::Add, n, n))})};
+    {
+      auto [fin, sym] = both(f, counted);
+      bool ok = fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated && fin.exactOrder() &&
+                sym.status() == S::Unknown && sym.reason().find("D2") != std::string::npos;
+      if (!ok)
+        describe("sib_counter, counter", fin, sym);
+      CHECK(ok);
+      CHECK(fin.sharedCells().status == FactStatus::Proven);
+    }
+    std::string why;
+    auto proposed = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    if (!proposed)
+      printf("sib_counter proposal: %s\n", why.c_str());
+    CHECK(proposed.has_value());
+    if (proposed)
+      expectVerified("sib_counter proposed", f, *proposed);
+  }
+  // Different bounds, and the repeat of M1 inside a segment.
+  {
+    Fixture f = fixture(m, "sib_bounds", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], terms.bv(APInt(16, 0)), terms.param(0, w))}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], terms.bv(APInt(16, 0)), terms.bv(APInt(16, 3)))})};
+    expectVerified("sib_bounds", f, r);
+  }
+  {
+    Fixture f = fixture(m, "sib_repeat", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    // Segment 2: j logical, t repeat in [0, j + 1): μ(j) = j + 1 within the segment.
+    Term jVar = levelVariable(terms, 0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {plain(f.program, l[1], zero, n),
+                                             plain(f.program, l[2], zero, terms.binary(TermOp::Add, jVar, terms.bv(APInt(16, 1))))},
+                            nullptr, {0, 1}, /*logical=*/1)};
+    auto [fin, sym] = expectVerified("sib_repeat", f, r);
+    CHECK(fin.segments()[0].multiplicity == DomainMultiplicity::Unit);
+    CHECK(fin.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
+    CHECK(sym.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
+    CHECK(fin.multiplicity() == DomainMultiplicity::Unknown && fin.multiplicityTerm() == nullptr);
+    auto mu = evaluateLevelTerm(sym.segments()[1].multiplicityTerm, {APInt(16, 3)}, {APInt(16, 2), APInt(16, 0)});
+    CHECK(mu && mu->getZExtValue() == 3);
+    // The proposer alone takes t for a coordinate (Unit over (j, t)); told that i and j
+    // are the logical variables, it proposes the box, and the checker certifies it.
+    std::string why;
+    auto flat = proposeSegmentedDomain(f.program, f.enumeration, 0, nullptr, ProposalLimits(), why);
+    CHECK(flat && flat->segments.size() == 2 && flat->segments[1].order.levels.size() == 2 &&
+          flat->segments[1].family.axes[AxisI].size() == 2);
+    if (flat)
+      expectVerified("sib_repeat proposed, t logical", f, *flat);
+    CoordinateFamily logical;
+    logical.axes[AxisI] = {terms.state(l[0], w), terms.state(l[1], w)};
+    auto boxed = proposeSegmentedDomain(f.program, f.enumeration, 0, &logical, ProposalLimits(), why);
+    if (!boxed)
+      printf("sib_repeat logical proposal: %s\n", why.c_str());
+    CHECK(boxed && boxed->segments.size() == 2 && boxed->segments[1].family.axes[AxisI].size() == 1);
+    if (boxed) {
+      auto [bf, bs] = expectVerified("sib_repeat proposed, t repeat", f, *boxed);
+      CHECK(bs.segments().size() == 2 && bs.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
+    }
+  }
+  // A level that is not monotone in the second loop: no lexicographic order, refuted;
+  // and the loop variable itself, which is monotone, verified.
+  {
+    Fixture f = fixture(m, "sib_shuffle", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    Term j = terms.state(l[1], w), two = terms.bv(APInt(16, 2));
+    Term jj = terms.binary(TermOp::Add, terms.binary(TermOp::Mul, terms.binary(TermOp::URem, j, two), two),
+                           terms.binary(TermOp::UDiv, j, two));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {plain(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {LevelSpec{jj, zero, terms.bv(APInt(16, 4)), false, false}})};
+    expectNotVerified("a shuffled level", f, r, S::Refuted, "increasing order");
+    DomainRequest byJ = r;
+    byJ.segments[1] = segmentOf(f.program, {1}, {plain(f.program, l[1], zero, terms.bv(APInt(16, 4)))});
+    expectVerified("the loop variable instead", f, byJ);
+  }
+  // Different operand roots: two groups, each segmented and each with its own order
+  // verified, and G4a still refutes each group's computation: the segments do not go
+  // around it.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 2);
+    CHECK(f.enumeration.groups.size() == 2);
+    for (unsigned g = 0; g < 2; ++g) {
+      std::string why;
+      auto proposed = proposeSegmentedDomain(f.program, f.enumeration, g, nullptr, ProposalLimits(), why);
+      CHECK(proposed.has_value());
+      if (!proposed)
+        continue;
+      ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, g, none, nullptr, *proposed,
+                                          f.options, z3Backend);
+      CHECK(v.domainSymbolic().status() == S::Verified && v.domainSymbolic().exactOrder());
+      CHECK(v.computationFinite().status() == S::Refuted);
+      CHECK(v.status() == S::Refuted);
+    }
+  }
+  // A request with one segment is the G5a request in another coat: the same answers.
+  {
+    Module cat(catalogue());
+    Fixture f = fixture(cat, "rect", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CoordinateFamily family = loopFamily(f.program, {l[0]}, {l[1]}, {l[2]});
+    std::string why;
+    auto flat = proposeDomain(f.program, f.enumeration, 0, family, nullptr, ProposalLimits(), why);
+    CHECK(flat.has_value());
+    if (flat) {
+      DomainRequest one;
+      Segment segment;
+      segment.sites = f.enumeration.groups[0].sites;
+      segment.family = family;
+      segment.order = flat->order;
+      segment.cellKey = flat->cellKey;
+      segment.access = flat->access;
+      one.segments = {segment};
+      CheckedDomain a = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], family, *flat, f.options, z3Backend);
+      CheckedDomain b = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, one, f.options, z3Backend);
+      CHECK(a.status() == S::Verified && b.status() == S::Verified);
+      CHECK(b.segments().size() == 1 && b.segments()[0].cellKey.status == a.cellKey().status &&
+            b.segments()[0].outputInjective.status == a.outputInjective().status);
+      CHECK(b.singleContribution().status == a.singleContribution().status);
+    }
+  }
+  testSegmentGates();
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -2213,6 +3144,7 @@ int main(int argc, char **argv) {
   run("gaps", testGapsG5);
   run("multiplicity", testMultiplicity);
   run("siblings", testSiblings);
+  run("segments", testSegments);
   run("orders", testExhaustiveOrders);
   run("holes", testExhaustiveHoles);
   printf("%d checks, %d failures\n", checks, failures);

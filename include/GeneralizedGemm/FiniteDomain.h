@@ -94,6 +94,19 @@ struct DomainEnumeration {
 /// State variables that no value read from memory can reach.
 std::vector<bool> memoryIndependentState(const SemanticProgram &program);
 
+/// One point run with the reference memory, keeping the whole state at the entry of
+/// each event's block. For G5b, whose segment terms read state the live table omits: a
+/// loop variable that is undefined during another loop's events. The trace is the same
+/// for every memory, by obliviousness, which the caller must have checked.
+struct EventStates {
+  EntryState entry;
+  RunResult run;
+  std::vector<std::vector<std::optional<llvm::APInt>>> states; // Parallel to run.events.
+};
+std::optional<EventStates> eventStates(const SemanticProgram &program,
+                                       const std::vector<llvm::APInt> &point, uint64_t fill,
+                                       const EnumerationLimits &limits);
+
 /// `certificate` may be null: then there is no enumeration.
 DomainEnumeration enumerateDomain(const SemanticProgram &program,
                                   const TerminationCertificate *certificate,

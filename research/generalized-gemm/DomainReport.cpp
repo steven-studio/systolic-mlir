@@ -46,6 +46,9 @@ static cl::opt<uint64_t> referenceFill("reference-fill", cl::init(0));
 static cl::opt<bool> printEvents("print-events", cl::init(false));
 static cl::opt<uint64_t> maxBox("max-box", cl::init(1u << 20));
 static cl::opt<unsigned> candidatesPerGroup("candidates-per-group", cl::init(2));
+static cl::opt<bool> segmentsFlag("segments", cl::init(false),
+                                  cl::desc("propose segments by site, in place of the search; with --family, "
+                                           "the family names the logical loop variables and the rest repeat"));
 static cl::opt<std::string> familyText(
     "family", cl::init(""),
     cl::desc("p:ids;i:ids;j:ids;k:ids, state ids per axis, in place of the search"));
@@ -151,6 +154,7 @@ int main(int argc, char **argv) {
     request.domain.computation.replay.maxNodes = replayNodes;
     request.proposal.maxBox = maxBox;
     request.maxCandidates = candidatesPerGroup;
+    request.segmented = segmentsFlag;
     if (!familyText.empty() && program.isSupported()) {
       CoordinateFamily family;
       family.origin = "given on the command line";

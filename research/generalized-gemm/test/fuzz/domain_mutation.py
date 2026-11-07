@@ -45,11 +45,15 @@ MUTANTS = [
     ("D3 skipped", O, "        return mustHold(\"D3\", \"an event that is not the last reaches the exit\",\n                        terms.logicalAnd(premise, later));\n", "        return true;\n"),
     ("D1 earlier point ignored", O, "    Term bad = terms.logicalOr(terms.logicalNot(inGuardedSet(program, order, x)), earlier);\n", "    Term bad = terms.logicalNot(inGuardedSet(program, order, x));\n    (void)earlier;\n"),
     ("D2 between ignored", O, "                                                 between));\n", "                                                 terms.boolean(false)));\n    (void)between;\n"),
-    ("D2 increase ignored", O, "terms.logicalOr(terms.logicalNot(guardedLess(program, order, b, x)),", "terms.logicalOr(terms.boolean(false),"),
+    ("D2 increase ignored", O, "terms.logicalOr(terms.logicalNot(guardedLess(program, order, b, x)),\n", "terms.logicalOr(terms.boolean(false),\n"),
+    ("D2 increase ignored, segment", O, "terms.logicalOr(terms.logicalNot(guardedLess(program, order, b, x)), between));", "terms.logicalOr(terms.boolean(false), between));"),
     ("D2 membership ignored", O, "      Term bad = terms.logicalOr(terms.logicalNot(inGuardedSet(program, order, x)),\n                                 terms.logicalOr(", "      Term bad = terms.logicalOr(terms.boolean(false),\n                                 terms.logicalOr("),
-    ("event assumed outside", O, "    Term assumption = terms.logicalAnd(arrival.premise, inGuardedSet(program, order, b));\n", "    Term assumption = arrival.premise;\n"),
-    ("entry-block site admitted", O, "  if (std::find(locations.begin(), locations.end(), program.entryLocation) != locations.end()) {\n    why = \"a site in the entry block\";\n    return false;\n  }\n", ""),
-    ("first walk without scope", O, "begin, scope, firstLeaf))", "begin, terms.boolean(true), firstLeaf))"),
+    ("event assumed outside", O, "    std::vector<Term> b = values(arrival.path);\n    Term assumption = terms.logicalAnd(arrival.premise, inGuardedSet(program, order, b));\n", "    std::vector<Term> b = values(arrival.path);\n    Term assumption = arrival.premise;\n"),
+    ("event assumed outside, segment", O, "    std::vector<Term> y = freeLevels(program, order);\n    Term assumption = terms.logicalAnd(arrival.premise, inGuardedSet(program, order, b));\n", "    std::vector<Term> y = freeLevels(program, order);\n    Term assumption = arrival.premise;\n"),
+    ("entry-block site admitted", O, "  // The first event happens inside the entry block, where no walk starts.\n  if (std::find(locations.begin(), locations.end(), program.entryLocation) != locations.end()) {\n    why = \"a site in the entry block\";\n    return false;\n  }\n", ""),
+    ("entry-block site admitted, segment", O, "  if (std::find(locations.begin(), locations.end(), program.entryLocation) != locations.end()) {\n    why = \"a site in the entry block\";\n    return false;\n  }\n\n  // D1', from the entry.\n", "\n  // D1', from the entry.\n"),
+    ("first walk without scope", O, "begin, scope, firstLeaf))\n    return false;\n\n  // D2 and D3, from each state", "begin, terms.boolean(true), firstLeaf))\n    return false;\n\n  // D2 and D3, from each state"),
+    ("first walk without scope, segment", O, "begin, scope, firstLeaf))\n    return false;\n\n  // D2 to D5, from each state", "begin, terms.boolean(true), firstLeaf))\n    return false;\n\n  // D2 to D5, from each state"),
     ("lower bound ignored", O, "    all = terms.logicalAnd(all, terms.icmp(le, bindLevels(program, level.lower, values), values[m]));\n", ""),
     ("upper bound ignored", O, "    all = terms.logicalAnd(all, terms.icmp(lt, values[m], bindLevels(program, level.upper, values)));\n", ""),
     ("guard ignored", O, "  Term all = bindLevels(program, order.guard, values);\n", "  Term all = terms.boolean(true);\n"),
@@ -65,39 +69,71 @@ MUTANTS = [
     ("enumeration box limit ignored", O, "    if (span.getActiveBits() > 40 || visited + span.getZExtValue() > limit) {", "    if (span.getActiveBits() > 40) {"),
     ("concrete order ignores direction", O, "    return level.descending ? !before : before;\n", "    return before;\n"),
     ("concrete order ignores signedness", O, "    bool before = level.isSigned ? a[m].slt(b[m]) : a[m].ult(b[m]);\n", "    bool before = a[m].ult(b[m]);\n"),
+    # Theorem 15 (G5b-M2): segmented orders.
+    ("D1' empty before skipped", O, "    return empty(\"D1\", \"before the first event\", premise, 0, *s);\n", "    return true;\n"),
+    ("D1' exit empties skipped", O, "      return empty(\"D1\", \"the entry reaches the exit\", premise, 0, m);\n", "      return true;\n"),
+    ("D4 successor remains skipped", O, "      return mustHold(\"D4\", \"a successor remains at the hand-over \" + handover,\n                      terms.logicalAnd(premise, later)) &&\n", "      return true &&\n"),
+    ("D4 between empty skipped", O, "             empty(\"D4\", \"between \" + handover, premise, *s + 1, *next) &&\n", ""),
+    ("D4 first event skipped", O, "             mustHold(\"D4\", \"the first event after the hand-over \" + handover,\n                      terms.logicalAnd(premise, isFirst(*next, values(*next, path))));", "             true;"),
+    ("D5 backward admitted", O, "      if (*next < *s)\n        return mustHold(\"D5\", \"an event of segment \" + std::to_string(*next) + \" after \" + here, premise);\n", "      if (*next < *s)\n        return true;\n"),
+    ("D5 after last skipped", O, "               empty(\"D5\", \"after the last event of \" + here, premise, *s + 1, m);", "               true;"),
+    ("D3 per segment skipped", O, "        return mustHold(\"D3\", \"an event that is not the last of \" + here + \" reaches the exit\",\n                        terms.logicalAnd(premise, later)) &&", "        return true &&"),
+    ("segment order unchecked", D, "      if (rows[e].segment < rows[e - 1].segment)\n        return refute(", "      if (false)\n        return refute("),
+    ("longer segment set admitted", D, "      if (mine.size() != sets[s].size())\n        return refute(", "      if (mine.size() > sets[s].size())\n        return refute("),
+    ("segment elements unchecked", D, "        if (rows[mine[n]].lambda != sets[s][n])\n          return refute(", "        if (false)\n          return refute("),
+    ("site in no segment admitted", D, "  if (seen.size() != listed.size()) {\n    why = \"a site of the group is in no segment\";\n    return std::nullopt;\n  }\n", ""),
+    ("site in two segments admitted", D, "      if (!seen.insert(site).second) {\n        why = \"a site in two segments\";\n        return std::nullopt;\n      }\n", "      seen.insert(site);\n"),
+    ("site outside the group admitted", D, "      if (!listed.count(site)) {\n        why = \"a segment names a site outside the group\";\n        return std::nullopt;\n      }\n", ""),
+    ("family beside segments admitted", D, "  if (!familyIsEmpty(family)) {\n    why = \"a segmented request carries its own families\";\n    return std::nullopt;\n  }\n", ""),
+    ("shared cells unchecked", D, "      if (segmentsHere.size() > 1 && sharedNone) {", "      if (false) {"),
+    ("cross-segment T1 skipped", D, "        if (single && proof.ask(\"T1\", \"one contribution per cell, across segments\", sameCell) != SmtAnswer::Unsat)\n          single = false;\n", ""),
+    ("symbolic shared cells unchecked", D, "        if (sharedNone && proof.ask(\"SH\", \"cells of two segments\", sameCell) != SmtAnswer::Unsat)\n          sharedNone = false;\n", ""),
+    ("unvalued segment term admitted", D, "    if (!valued)\n      return CheckedDomain::unknown(\"the request is refused: \" + unvalued);\n", ""),
+    ("segmented binding ignores segments", D, "  for (const Segment &segment : request.segments) {\n    out += \"|S\";", "  for (const Segment &segment : std::vector<Segment>()) {\n    out += \"|S\";"),
+    ("segmented request on the flat route", D, "  CheckedDomain out = request.segments.empty() ? finiteClaim(program, enumeration, g, family, request, options)\n                                               : finiteSegmented(program, enumeration, g, family, request, options);", "  CheckedDomain out = finiteSegmented(program, enumeration, g, family, request, options);"),
     # The walker export.
     ("walker export skips", V, "  Walker walker(program, locations, depth, ask, why);\n  return walker.walk(path, assumption, leaf);\n", "  (void)program, (void)locations, (void)depth, (void)ask, (void)why, (void)path, (void)assumption, (void)leaf;\n  return true;\n"),
     # The finite route.
     ("order inversion passes", D, "      if (!concreteLess(order, lambdas[e - 1], lambdas[e]))\n        return refute(", "      if (false)\n        return refute("),
     ("count mismatch passes", D, "    if (lambdas.size() != set->size()) {", "    if (false) {"),
     ("element mismatch passes", D, "      if (lambdas[n] != (*set)[n])\n        return refute(", "      if (false)\n        return refute("),
-    ("pointless points pass", D, "  if (!anyEvent)\n    return CheckedDomain::unknown(open.empty() ? \"no point has events\" : open);\n", ""),
-    ("stopped point counts", D, "    if (!point.reason.empty()) {\n      complete = false;\n      continue;\n    }\n    const std::vector<APInt> &v = point.parameters;", "    if (!point.reason.empty())\n      continue;\n    const std::vector<APInt> &v = point.parameters;"),
-    ("scope not compared", D, "  bool complete = enumerationCoversScope(program, enumeration, options.scope);\n", "  bool complete = !enumeration.sampled;\n"),
+    ("pointless points pass", D, "  if (!anyEvent)\n    return CheckedDomain::unknown(open.empty() ? \"no point has events\" : open);\n  ComputationTier tier = complete ? ComputationTier::ScopeEnumerated : ComputationTier::Point;\n  CheckedDomain out = DomainAuthority::make(\n      tier, ComputationStatus::Verified,\n      open.empty() ? \"each listed point enumerated exactly, in order\"", "  ComputationTier tier = complete ? ComputationTier::ScopeEnumerated : ComputationTier::Point;\n  CheckedDomain out = DomainAuthority::make(\n      tier, ComputationStatus::Verified,\n      open.empty() ? \"each listed point enumerated exactly, in order\""),
+    ("pointless points pass, segment", D, "  if (!anyEvent)\n    return CheckedDomain::unknown(open.empty() ? \"no point has events\" : open);\n  ComputationTier tier = complete ? ComputationTier::ScopeEnumerated : ComputationTier::Point;\n  CheckedDomain out = DomainAuthority::make(\n      tier, ComputationStatus::Verified,\n      open.empty() ? \"each listed point enumerated exactly, segment by segment, in order\"", "  ComputationTier tier = complete ? ComputationTier::ScopeEnumerated : ComputationTier::Point;\n  CheckedDomain out = DomainAuthority::make(\n      tier, ComputationStatus::Verified,\n      open.empty() ? \"each listed point enumerated exactly, segment by segment, in order\""),
+    ("stopped point counts", D, "    if (!point.reason.empty()) {\n      complete = false;\n      continue;\n    }\n    const std::vector<APInt> &v = point.parameters;\n    auto set = enumerateGuardedSet(", "    if (!point.reason.empty())\n      continue;\n    const std::vector<APInt> &v = point.parameters;\n    auto set = enumerateGuardedSet("),
+    ("stopped point counts, segment", D, "    if (!point.reason.empty()) {\n      complete = false;\n      continue;\n    }\n    const std::vector<APInt> &v = point.parameters;\n    // The run again", "    if (!point.reason.empty())\n      continue;\n    const std::vector<APInt> &v = point.parameters;\n    // The run again"),
+    ("scope not compared", D, "  std::vector<DomainPointFacts> facts;\n  bool complete = enumerationCoversScope(program, enumeration, options.scope);\n", "  std::vector<DomainPointFacts> facts;\n  bool complete = !enumeration.sampled;\n"),
+    ("box multiplicity unchecked, segment", D, "          if (!mu || *mu != APInt(128, count))\n            return CheckedDomain::unknown(\"the multiplicity contradicts a segment's box: a defect\");", "          if (false)\n            return CheckedDomain::unknown(\"the multiplicity contradicts a segment's box: a defect\");"),
+    ("scope not compared, segment", D, "  std::vector<SegmentFacts> segmentFacts(m);\n  bool complete = enumerationCoversScope(program, enumeration, options.scope);\n", "  std::vector<SegmentFacts> segmentFacts(m);\n  bool complete = !enumeration.sampled;\n"),
     ("box limit is a pass", D, "    if (!set) {\n      complete = false;\n      if (open.empty())\n        open = why;\n      continue;\n    }\n", "    if (!set)\n      continue;\n"),
     ("missing value passes", D, "      if (!valued) {\n        complete = false;\n", "      if (false) {\n        complete = false;\n"),
     ("key unchecked", D, "          if (!concreteLess(keyed, a, b) && keyHolds) {", "          if (false && keyHolds) {"),
     ("collision unchecked", D, "      if (outputsHere.size() > 1) {", "      if (false) {"),
     ("single unchecked", D, "      if (members.size() > 1 && single) {", "      if (false && single) {"),
     ("access unchecked", D, "          same = value && *value == views[view][e][n];\n", "          same = true;\n          (void)value;\n"),
-    ("box multiplicity unchecked", D, "        if (!mu || *mu != APInt(128, count))", "        if (false)"),
-    ("closed gate checked", D, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
+    ("box multiplicity unchecked", D, "        if (!mu || *mu != APInt(128, count))\n          return CheckedDomain::unknown(\"the multiplicity contradicts the order's box: a defect\");", "        if (false)\n          return CheckedDomain::unknown(\"the multiplicity contradicts the order's box: a defect\");"),
+    ("closed gate checked", D, "CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeration &enumeration,\n                          unsigned g, const CoordinateFamily &family, const DomainRequest &request,\n                          const DomainOptions &options) {\n  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", "CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeration &enumeration,\n                          unsigned g, const CoordinateFamily &family, const DomainRequest &request,\n                          const DomainOptions &options) {\n"),
+    ("closed gate checked, segment", D, "                              const DomainOptions &options) {\n  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", "                              const DomainOptions &options) {\n"),
     # Gates.
     ("part of a group", D, "    if (same != (listed.count(site.id) != 0)) {\n      why = \"the group is not the sites of its roots\";", "    if (false) {\n      why = \"the group is not the sites of its roots\";"),
     ("oblivious unchecked", D, "  if (!program.controlOblivious || !program.addressOblivious) {\n    why = \"the trace depends on memory contents\";", "  if (false) {\n    why = \"the trace depends on memory contents\";"),
-    ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n", "  if (false)\n"),
+    ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest("),
+    ("zero limit accepted, segment", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments("),
     ("certificate not needed", D, "  if (outcome.verdict.kind() != TerminationVerdict::ProvenTerminating &&\n      outcome.verdict.kind() != TerminationVerdict::ProvenTerminatingIfDefined) {\n    why = \"the certificate was not accepted: \"", "  if (false) {\n    why = \"the certificate was not accepted: \""),
-    ("shared block admitted", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n", "      places.insert(program.sites[id].location);\n"),
-    ("any certificate accepted", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n"),
+    ("shared block admitted", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  Proof proof(", "      places.insert(program.sites[id].location);\n  }\n  Proof proof("),
+    ("shared block admitted, segment", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  std::map<unsigned, unsigned> ofSite", "      places.insert(program.sites[id].location);\n  }\n  std::map<unsigned, unsigned> ofSite"),
+    ("any certificate accepted", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n  const GuardedOrder &order = structure->order;", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n  const GuardedOrder &order = structure->order;"),
+    ("any certificate accepted, segment", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n  {\n    std::set<unsigned> places;", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n  {\n    std::set<unsigned> places;"),
     ("key order unchecked", D, "    if (key[n] >= order.levels.size() || (n && key[n] <= key[n - 1]))", "    if (key[n] >= order.levels.size())"),
     ("access form unchecked", D, "      if (!isLevelTerm(program, out.order, term, out.order.levels.size(), why))\n        return std::nullopt;\n", "      (void)term;\n"),
     # Symbolic facts.
     ("K1 unchecked", D, "        SmtAnswer answer = proof.ask(\"K1\", \"the cell key\", bad);\n        if (answer != SmtAnswer::Unsat) {", "        SmtAnswer answer = SmtAnswer::Unsat;\n        (void)bad;\n        if (answer != SmtAnswer::Unsat) {"),
     ("C1 unchecked", D, "        if (proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)", "        if (false && proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)"),
-    ("T1 unchecked", D, "        if (proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)", "        if (false && proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)"),
+    ("T1 unchecked", D, "        if (proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)\n          injective = false;\n      }\n      if (single) {\n        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(la, lb)));\n        if (proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)", "        if (proof.ask(\"C1\", \"one logical output per cell\", bad) != SmtAnswer::Unsat)\n          injective = false;\n      }\n      if (single) {\n        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(la, lb)));\n        if (false && proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)"),
+    ("T1 unchecked, same segment", D, "          injective[sa] = false;\n      }\n      if (single) {\n        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(la, lb)));\n        if (proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)", "          injective[sa] = false;\n      }\n      if (single) {\n        Term bad = terms.logicalAnd(sameCell, terms.logicalNot(proof.equal(la, lb)));\n        if (false && proof.ask(\"T1\", \"one contribution per cell\", bad) != SmtAnswer::Unsat)"),
     ("A1 unchecked", D, "        if (proof.ask(\"A1\", \"a closed form of a view\", program.terms->logicalAnd(a.premise, differs)) !=\n            SmtAnswer::Unsat) {", "        if (false) {"),
     ("second copy shares state", D, "      std::vector<Term> la = proof.values(order, a), lb = proof.second(proof.values(order, b));\n      TermContext &terms", "      std::vector<Term> la = proof.values(order, a), lb = proof.values(order, b);\n      TermContext &terms"),
-    ("pair limit ignored", D, "    if (n * n > options.limits.maxPairs)\n      return unknownWith(\"more arrival pairs than the limit\");\n", ""),
+    ("pair limit ignored", D, "    if (n * n > options.limits.maxPairs)\n      return unknownWith(\"more arrival pairs than the limit\");\n\n    // K1, C1, T1 over pairs", "\n    // K1, C1, T1 over pairs"),
+    ("pair limit ignored, segment", D, "    if (n * n > options.limits.maxPairs)\n      return unknownWith(\"more arrival pairs than the limit\");\n\n    // Within a segment", "\n    // Within a segment"),
     ("query limit ignored", D, "    if (queries >= options.limits.maxQueries) {", "    if (false) {"),
     ("unknown discharges", D, "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      entry.evidence = response.detail;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {", "    entry.discharged = response.answer == SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Unknown)\n      response.answer = SmtAnswer::Unsat;\n    if (response.answer == SmtAnswer::Sat && id != \"prune\" && !failing) {"),
     # Multiplicity.
@@ -147,6 +183,11 @@ EQUIVALENT = [
      "parameters alone, so S(v) = S_rest(v) x R(v), and with Theorem 12 at the point each logical "
      "point has exactly |R(v)| events, which is the product. Evidence: every ConstantBox case of "
      "DomainTest and of the oracle's multiplicity check."),
+    ("box multiplicity unchecked, segment", "the same defensive check inside a segment, which cannot fire "
+     "for the same reason: a segment's box is admitted under the conditions of Theorem 14 over the "
+     "segment's own levels, and Theorem 15 at the point gives each logical point of the segment "
+     "exactly |R(v)| events. Evidence: the sib_repeat case of testSegments and the oracle's "
+     "segment multiplicity check."),
     ("mu span not clamped", "a clamp that the finite check cannot see fail: the repeat levels of a "
      "box have lo < hi at every event, since each event's repeat value lies in [lo, hi), so the "
      "clamp matters only at a logical point with no event, where μ is read by no one. The "
@@ -264,8 +305,8 @@ class Worker:
         test = self.build / "generalized-gemm-domain-test"
         report = self.build / "generalized-gemm-domain-report"
         out = [(name, [test, name]) for name in
-               ("reviewed", "gaps", "multiplicity", "siblings", "adversarial", "limits", "binding", "wrapping",
-                "catalogue", "orders")]
+               ("reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial", "limits", "binding",
+                "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
@@ -275,8 +316,8 @@ class Worker:
         self.restore()
         path = self.lib / filename
         text = path.read_text()
-        if old not in text:
-            return "HARNESS_ERROR", "stale pattern"
+        if text.count(old) != 1:
+            return "HARNESS_ERROR", "stale pattern" if old not in text else "ambiguous pattern"
         path.write_text(text.replace(old, new, 1))
         try:
             built = self.compile()
@@ -308,7 +349,8 @@ def main():
     parser.add_argument("--scratch", required=True)
     parser.add_argument("--llvm-dir", required=True)
     parser.add_argument("--mlir-dir", required=True)
-    parser.add_argument("--only", default="", help="comma-separated mutant names")
+    parser.add_argument("--only", default="", help="mutant names, comma-separated, or semicolon-separated "
+                        "when a name holds a comma")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--results", required=True, help="a JSON-lines file, appended to")
     args = parser.parse_args()
@@ -316,7 +358,8 @@ def main():
         print("at most two workers: compiles take 1.6 GB each and other jobs share this machine")
         return 2
 
-    names = [n for n in args.only.split(",") if n]
+    # Names may hold a comma ("D2 increase ignored, segment"): a semicolon then separates.
+    names = [n for n in args.only.split(";" if ";" in args.only else ",") if n]
     unknown = sorted(set(names) - {m[0] for m in MUTANTS})
     if unknown:
         print(f"no such mutants: {unknown}")

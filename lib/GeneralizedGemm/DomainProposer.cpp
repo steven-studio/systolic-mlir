@@ -173,62 +173,23 @@ bool exactAt(const GuardedOrder &order, const std::vector<unsigned> &use,
 
 } // namespace
 
-std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
-                                           const DomainEnumeration &enumeration, unsigned g,
-                                           const CoordinateFamily &family,
-                                           const EnumerationOrder *coordinateOrder,
-                                           const ProposalLimits &limits, std::string &why) {
-  TermContext &terms = *program.terms;
-  if (enumeration.gate != GateStatus::Open || g >= enumeration.groups.size()) {
-    why = "no samples";
-    return std::nullopt;
-  }
-  // Candidates: the family's coordinates, then every live state variable.
-  std::vector<Term> candidates;
-  std::set<Term> seen;
-  auto offer = [&](Term term) {
-    if (term && seen.insert(term).second)
-      candidates.push_back(term);
-  };
-  if (coordinateOrder)
-    for (const OrderLevel &level : coordinateOrder->levels)
-      offer(level.value);
-  for (const auto &axis : family.axes)
-    for (Term term : axis)
-      offer(term);
-  unsigned coordinates = candidates.size();
-  std::vector<Sample> samples;
-  for (const PointEvidence &point : enumeration.points) {
-    if (!point.reason.empty() || !point.domains[g])
-      continue;
-    const AccessDomain &domain = *point.domains[g];
-    for (unsigned id : domain.table().coordinateNames)
-      offer(terms.state(id, program.state[id].sort));
-  }
-  for (const PointEvidence &point : enumeration.points) {
-    if (!point.reason.empty())
-      continue;
-    Sample s;
-    s.parameters = point.parameters;
-    if (point.domains[g]) {
-      const AccessDomain &domain = *point.domains[g];
-      EventEvaluator values(program, domain);
-      for (size_t e = 0; e < domain.table().events().size(); ++e) {
-        std::vector<APInt> row;
-        for (Term term : candidates) {
-          auto value = values.value(term, e);
-          row.push_back(value ? *value : APInt(term->sort.width, 0));
-        }
-        s.values.push_back(std::move(row));
-        std::vector<uint64_t> cell;
-        for (const APInt &value : domain.table().view(domain.table().events()[e].h))
-          cell.push_back(value.getZExtValue());
-        s.cells.push_back(std::move(cell));
-      }
-    }
-    samples.push_back(std::move(s));
-  }
+/// What the fitting gives: the levels used (indices into the candidates), the order with
+/// its bounds and guard, the cell key, and closed forms of one site's views.
+struct Fitted {
+  std::vector<unsigned> use;
+  GuardedOrder order;
+  std::vector<unsigned> cellKey;
+  std::array<std::vector<Term>, 3> access;
+};
 
+/// Fits an order to `samples` over `candidates`, whose first `coordinates` are the
+/// family's and must all be levels; the rest may become repeat levels. `constants` are
+/// state variables with one value at every sample event, read as that value in guards.
+std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector<Term> &candidates,
+                               unsigned coordinates, const EnumerationOrder *coordinateOrder,
+                               const std::vector<Sample> &samples, const std::map<unsigned, APInt> &constants,
+                               const MacSite *site, const ProposalLimits &limits, std::string &why) {
+  TermContext &terms = *program.terms;
   // Coordinates slowest first, unless an order is given.
   std::vector<unsigned> use;
   for (unsigned c = 0; c < coordinates; ++c)
@@ -304,33 +265,6 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
     return std::nullopt;
   }
 
-  // State that holds one value at every sample event.
-  std::map<unsigned, APInt> constants;
-  {
-    std::map<unsigned, std::optional<APInt>> seenValue;
-    std::set<unsigned> varies;
-    for (const PointEvidence &point : enumeration.points) {
-      if (!point.reason.empty() || !point.domains[g])
-        continue;
-      const AccessDomain &domain = *point.domains[g];
-      EventEvaluator values(program, domain);
-      for (unsigned id : domain.table().coordinateNames) {
-        Term leaf = terms.state(id, program.state[id].sort);
-        for (size_t e = 0; e < domain.table().events().size(); ++e) {
-          auto value = values.value(leaf, e);
-          auto &known = seenValue[id];
-          if (!value || (known && *known != *value))
-            varies.insert(id);
-          else
-            known = *value;
-        }
-      }
-    }
-    for (const auto &[id, value] : seenValue)
-      if (value && !varies.count(id))
-        constants.emplace(id, *value);
-  }
-
   auto complete = [&](const std::vector<unsigned> &use, GuardedOrder &order,
                       std::string &failure) -> bool {
     // A box around the samples, with bounds that move with an outer level kept aside.
@@ -381,18 +315,34 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
             }
           if (extreme.empty() || order.levels[o].value->sort.width != width)
             continue;
-          std::optional<APInt> offset;
-          bool all = true;
-          for (const auto &[key, value] : extreme) {
-            APInt bound = wantUpper ? value + 1 : value;
-            APInt c = bound - APInt(width, key.second);
-            if (!offset)
-              offset = c;
-            all = all && *offset == c;
-          }
-          if (all && offset) {
-            Term y = levelVariable(terms, o, order.levels[o].value->sort);
-            return offset->isZero() ? y : terms.binary(TermOp::Add, y, terms.bv(*offset));
+          Term y = levelVariable(terms, o, order.levels[o].value->sort);
+          // bound = level + c, or bound = level + parameter + c.
+          auto constantOffset = [&](const std::function<APInt(const std::pair<std::vector<uint64_t>, uint64_t> &)> &base)
+              -> std::optional<APInt> {
+            std::optional<APInt> offset;
+            for (const auto &[key, value] : extreme) {
+              APInt bound = wantUpper ? value + 1 : value;
+              APInt c = bound - base(key);
+              if (!offset)
+                offset = c;
+              else if (*offset != c)
+                return std::nullopt;
+            }
+            return offset;
+          };
+          if (auto c = constantOffset([&](const auto &key) { return APInt(width, key.second); }))
+            return c->isZero() ? y : terms.binary(TermOp::Add, y, terms.bv(*c));
+          for (const Parameter &p : program.parameters) {
+            if (p.sort != Sort::bv(width))
+              continue;
+            auto c = constantOffset([&](const auto &key) {
+              return APInt(width, key.second) + APInt(width, key.first[p.id], /*isSigned=*/false,
+                                                      /*implicitTrunc=*/true);
+            });
+            if (c) {
+              Term sum = terms.binary(TermOp::Add, y, terms.param(p.id, p.sort));
+              return c->isZero() ? sum : terms.binary(TermOp::Add, sum, terms.bv(*c));
+            }
           }
         }
         return nullptr;
@@ -547,7 +497,8 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
     order = std::move(widened);
   }
 
-  DomainRequest out;
+  Fitted out;
+  out.use = use;
   out.order = std::move(*order);
   out.order.origin = "fitted to the samples";
   // The key: the levels that change within a cell, if they order each cell.
@@ -573,12 +524,10 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
   for (unsigned m = 0; m < out.order.levels.size(); ++m)
     if (out.order.levels[m].value->op == TermOp::State)
       levelOfState[out.order.levels[m].value->index] = m;
-  const SiteGroup &group = enumeration.groups[g];
-  for (unsigned view = 0; view < 3; ++view) {
-    const MacSite &site = program.sites[group.sites.front()];
-    llvm::ArrayRef<Term> index = view == 0 ? llvm::ArrayRef<Term>(site.output->index)
-                               : view == 1 ? llvm::ArrayRef<Term>(site.a.index)
-                                           : llvm::ArrayRef<Term>(site.b.index);
+  for (unsigned view = 0; view < 3 && site; ++view) {
+    llvm::ArrayRef<Term> index = view == 0 ? llvm::ArrayRef<Term>(site->output->index)
+                               : view == 1 ? llvm::ArrayRef<Term>(site->a.index)
+                                           : llvm::ArrayRef<Term>(site->b.index);
     std::vector<Term> form;
     bool ok = true;
     for (Term term : index) {
@@ -595,6 +544,343 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
     }
     if (ok)
       out.access[view] = std::move(form);
+  }
+  return out;
+}
+
+std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
+                                           const DomainEnumeration &enumeration, unsigned g,
+                                           const CoordinateFamily &family,
+                                           const EnumerationOrder *coordinateOrder,
+                                           const ProposalLimits &limits, std::string &why) {
+  TermContext &terms = *program.terms;
+  if (enumeration.gate != GateStatus::Open || g >= enumeration.groups.size()) {
+    why = "no samples";
+    return std::nullopt;
+  }
+  // Candidates: the family's coordinates, then every live state variable.
+  std::vector<Term> candidates;
+  std::set<Term> seen;
+  auto offer = [&](Term term) {
+    if (term && seen.insert(term).second)
+      candidates.push_back(term);
+  };
+  if (coordinateOrder)
+    for (const OrderLevel &level : coordinateOrder->levels)
+      offer(level.value);
+  for (const auto &axis : family.axes)
+    for (Term term : axis)
+      offer(term);
+  unsigned coordinates = candidates.size();
+  std::vector<Sample> samples;
+  for (const PointEvidence &point : enumeration.points) {
+    if (!point.reason.empty() || !point.domains[g])
+      continue;
+    const AccessDomain &domain = *point.domains[g];
+    for (unsigned id : domain.table().coordinateNames)
+      offer(terms.state(id, program.state[id].sort));
+  }
+  for (const PointEvidence &point : enumeration.points) {
+    if (!point.reason.empty())
+      continue;
+    Sample s;
+    s.parameters = point.parameters;
+    if (point.domains[g]) {
+      const AccessDomain &domain = *point.domains[g];
+      EventEvaluator values(program, domain);
+      for (size_t e = 0; e < domain.table().events().size(); ++e) {
+        std::vector<APInt> row;
+        for (Term term : candidates) {
+          auto value = values.value(term, e);
+          row.push_back(value ? *value : APInt(term->sort.width, 0));
+        }
+        s.values.push_back(std::move(row));
+        std::vector<uint64_t> cell;
+        for (const APInt &value : domain.table().view(domain.table().events()[e].h))
+          cell.push_back(value.getZExtValue());
+        s.cells.push_back(std::move(cell));
+      }
+    }
+    samples.push_back(std::move(s));
+  }
+
+  // State that holds one value at every sample event.
+  std::map<unsigned, APInt> constants;
+  {
+    std::map<unsigned, std::optional<APInt>> seenValue;
+    std::set<unsigned> varies;
+    for (const PointEvidence &point : enumeration.points) {
+      if (!point.reason.empty() || !point.domains[g])
+        continue;
+      const AccessDomain &domain = *point.domains[g];
+      EventEvaluator values(program, domain);
+      for (unsigned id : domain.table().coordinateNames) {
+        Term leaf = terms.state(id, program.state[id].sort);
+        for (size_t e = 0; e < domain.table().events().size(); ++e) {
+          auto value = values.value(leaf, e);
+          auto &known = seenValue[id];
+          if (!value || (known && *known != *value))
+            varies.insert(id);
+          else
+            known = *value;
+        }
+      }
+    }
+    for (const auto &[id, value] : seenValue)
+      if (value && !varies.count(id))
+        constants.emplace(id, *value);
+  }
+  const SiteGroup &group = enumeration.groups[g];
+  auto fitted = fitOrder(program, candidates, coordinates, coordinateOrder, samples, constants,
+                         &program.sites[group.sites.front()], limits, why);
+  if (!fitted)
+    return std::nullopt;
+  DomainRequest out;
+  out.order = std::move(fitted->order);
+  out.cellKey = std::move(fitted->cellKey);
+  out.access = std::move(fitted->access);
+  return out;
+}
+
+/// Segments of a group: sites whose events never interleave at any sample point, in the
+/// order of their first site, which is program order. Two sites interleave at a point when
+/// one has an event between two of the other's; such sites share a segment, transitively.
+/// (The order of first appearance would misplace a segment that is empty at the first
+/// point; the checker judges the order either way.)
+static std::vector<std::vector<unsigned>> segmentSites(const std::vector<std::vector<unsigned>> &siteSequences) {
+  std::vector<unsigned> order; // Sites by first appearance.
+  std::map<unsigned, unsigned> parent;
+  auto find = [&](unsigned site) {
+    while (parent[site] != site)
+      site = parent[site] = parent[parent[site]];
+    return site;
+  };
+  auto unite = [&](unsigned a, unsigned b) { parent[find(a)] = find(b); };
+  for (const auto &sequence : siteSequences) {
+    std::map<unsigned, std::pair<size_t, size_t>> span; // Within this point.
+    for (size_t e = 0; e < sequence.size(); ++e) {
+      unsigned site = sequence[e];
+      if (!parent.count(site)) {
+        parent[site] = site;
+        order.push_back(site);
+      }
+      auto [slot, added] = span.try_emplace(site, std::make_pair(e, e));
+      if (!added)
+        slot->second.second = e;
+    }
+    for (const auto &[a, sa] : span)
+      for (const auto &[b, sb] : span)
+        if (a < b && sa.first <= sb.second && sb.first <= sa.second)
+          unite(a, b);
+  }
+  std::vector<std::vector<unsigned>> segments;
+  std::map<unsigned, size_t> indexOfRoot;
+  std::sort(order.begin(), order.end());
+  for (unsigned site : order) {
+    unsigned root = find(site);
+    auto [slot, added] = indexOfRoot.try_emplace(root, segments.size());
+    if (added)
+      segments.push_back({});
+    segments[slot->second].push_back(site);
+  }
+  return segments;
+}
+
+/// Whether a state term is named on any axis of a family.
+static bool namedIn(const CoordinateFamily &family, Term state) {
+  for (const std::vector<Term> &axis : family.axes)
+    if (llvm::is_contained(axis, state))
+      return true;
+  return false;
+}
+
+std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &program,
+                                                    const DomainEnumeration &enumeration, unsigned g,
+                                                    const CoordinateFamily *logical,
+                                                    const ProposalLimits &limits, std::string &why) {
+  TermContext &terms = *program.terms;
+  if (enumeration.gate != GateStatus::Open || g >= enumeration.groups.size()) {
+    why = "no samples";
+    return std::nullopt;
+  }
+  const SiteGroup &group = enumeration.groups[g];
+  std::set<unsigned> members(group.sites.begin(), group.sites.end());
+  // Every event of the group at every sample point, with the state at its block entry.
+  struct Event {
+    unsigned site;
+    std::vector<std::optional<APInt>> state;
+    std::vector<uint64_t> cell;
+  };
+  struct PointEvents {
+    std::vector<APInt> parameters;
+    std::vector<Event> events;
+  };
+  std::vector<PointEvents> points;
+  std::vector<std::vector<unsigned>> siteSequences;
+  for (const PointEvidence &point : enumeration.points) {
+    if (!point.reason.empty())
+      continue;
+    auto states = eventStates(program, point.parameters, 0, limits.events);
+    if (!states || states->run.status != RunStatus::Returned)
+      continue;
+    PointEvents pe;
+    pe.parameters = point.parameters;
+    std::vector<unsigned> sequence;
+    for (size_t e = 0; e < states->run.events.size(); ++e) {
+      const MacEvent &event = states->run.events[e];
+      if (!members.count(event.site))
+        continue;
+      Event row;
+      row.site = event.site;
+      row.state = states->states[e];
+      for (const APInt &value : event.h)
+        row.cell.push_back(value.getZExtValue());
+      pe.events.push_back(std::move(row));
+      sequence.push_back(event.site);
+    }
+    siteSequences.push_back(std::move(sequence));
+    points.push_back(std::move(pe));
+  }
+  if (points.empty()) {
+    why = "no sample point ran";
+    return std::nullopt;
+  }
+  std::vector<std::vector<unsigned>> segments = segmentSites(siteSequences);
+  // Sites with no event at any sample point still need a segment: last, alone.
+  for (unsigned site : group.sites) {
+    bool placed = false;
+    for (const auto &segment : segments)
+      placed = placed || llvm::is_contained(segment, site);
+    if (!placed)
+      segments.push_back({site});
+  }
+  std::vector<bool> independent = memoryIndependentState(program);
+
+  DomainRequest out;
+  for (const std::vector<unsigned> &sites : segments) {
+    std::set<unsigned> mine(sites.begin(), sites.end());
+    // State defined at every event of the segment, memory-independent and integer.
+    // Defined at every event of the segment; varying when two events of one point
+    // differ, since a variable frozen at another loop's final value differs only
+    // between points; constant when one value serves every event of every point.
+    std::vector<bool> defined(program.state.size(), true), varies(program.state.size(), false);
+    std::vector<std::optional<APInt>> first(program.state.size());
+    bool oneValue = true;
+    size_t count = 0;
+    for (const PointEvents &pe : points) {
+      std::vector<std::optional<APInt>> here(program.state.size());
+      for (const Event &event : pe.events) {
+        if (!mine.count(event.site))
+          continue;
+        ++count;
+        for (unsigned id = 0; id < program.state.size(); ++id) {
+          if (!event.state[id]) {
+            defined[id] = false;
+            continue;
+          }
+          if (!here[id])
+            here[id] = event.state[id];
+          else if (*here[id] != *event.state[id])
+            varies[id] = true;
+          if (!first[id])
+            first[id] = event.state[id];
+          else if (*first[id] != *event.state[id])
+            oneValue = oneValue && false;
+        }
+      }
+    }
+    (void)oneValue;
+    std::vector<Term> candidates;
+    std::map<unsigned, APInt> constants;
+    auto usable = [&](unsigned id) {
+      return defined[id] && independent[id] && program.state[id].sort.kind == Sort::BV && count > 0;
+    };
+    // Loop variables first, as the segment's coordinates, or with `logical` given only
+    // the ones it names; then other varying state as repeat candidates; state with one
+    // value is a constant for the guards.
+    auto coordinate = [&](const StateVar &s) {
+      return s.kind == StateVar::BlockArgument && s.loopCarried &&
+             (!logical || namedIn(*logical, terms.state(s.id, s.sort)));
+    };
+    for (const StateVar &s : program.state)
+      if (usable(s.id) && varies[s.id] && coordinate(s))
+        candidates.push_back(terms.state(s.id, s.sort));
+    unsigned coordinates = candidates.size();
+    for (const StateVar &s : program.state)
+      if (usable(s.id) && varies[s.id] && !coordinate(s))
+        candidates.push_back(terms.state(s.id, s.sort));
+    // One value at every event of every point: a constant for the guards. A value fixed
+    // within each point and different between them is neither level nor constant.
+    for (const StateVar &s : program.state) {
+      if (!usable(s.id) || varies[s.id] || !first[s.id])
+        continue;
+      bool same = true;
+      for (const PointEvents &pe : points)
+        for (const Event &event : pe.events)
+          if (mine.count(event.site) && event.state[s.id] && *event.state[s.id] != *first[s.id])
+            same = false;
+      if (same)
+        constants.emplace(s.id, *first[s.id]);
+    }
+    if (count == 0) {
+      // A segment no sample reaches: a level with an empty box, which the checker
+      // will judge against the scope.
+      Segment segment;
+      segment.sites = sites;
+      GuardedLevel level;
+      Term zero = terms.bv(APInt(program.indexBitWidth ? program.indexBitWidth : 16, 0));
+      level.value = zero;
+      level.lower = zero;
+      level.upper = zero;
+      segment.order.levels.push_back(level);
+      segment.order.guard = terms.boolean(false);
+      segment.order.origin = "no sample reaches this segment";
+      segment.cellKey = {0};
+      out.segments.push_back(std::move(segment));
+      continue;
+    }
+    if (coordinates == 0) {
+      // No loop variable moves: the one event per point is its own point.
+      coordinates = candidates.size();
+      if (coordinates == 0) {
+        why = "a segment whose events no state tells apart";
+        return std::nullopt;
+      }
+    }
+    std::vector<Sample> samples;
+    for (const PointEvents &pe : points) {
+      Sample s;
+      s.parameters = pe.parameters;
+      for (const Event &event : pe.events) {
+        if (!mine.count(event.site))
+          continue;
+        std::vector<APInt> row;
+        for (Term term : candidates)
+          row.push_back(*event.state[term->index]);
+        s.values.push_back(std::move(row));
+        s.cells.push_back(event.cell);
+      }
+      samples.push_back(std::move(s));
+    }
+    std::string failure;
+    auto fitted = fitOrder(program, candidates, coordinates, nullptr, samples, constants,
+                           &program.sites[sites.front()], limits, failure);
+    if (!fitted) {
+      why = "segment of site " + std::to_string(sites.front()) + ": " + failure;
+      return std::nullopt;
+    }
+    Segment segment;
+    segment.sites = sites;
+    segment.order = std::move(fitted->order);
+    segment.cellKey = std::move(fitted->cellKey);
+    segment.access = std::move(fitted->access);
+    // The coordinates are this segment's logical point, on one axis: which axis each
+    // belongs to is G3's question, which no segment answers here.
+    for (unsigned c : fitted->use)
+      if (c < coordinates)
+        segment.family.axes[AxisI].push_back(candidates[c]);
+    segment.family.origin = "the loop variables of the segment";
+    out.segments.push_back(std::move(segment));
   }
   return out;
 }

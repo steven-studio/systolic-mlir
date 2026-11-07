@@ -108,12 +108,11 @@ listed under the decisions below. Until then each group's claim is refuted, corr
 | Milestone | Scope | Contract change |
 | --- | --- | --- |
 | **M1 (this record)** | Multiplicity as a box over the logical levels, Theorem 14 | None: a new `DomainMultiplicity` value and a wider μ term |
-| M2 | Segmented families and orders, Theorem 15, in G5a's checker; G3b's V1 and V2 over per-segment terms (`checkFamilySymbolic`) | **Yes:** `CoordinateFamily` gains per-site terms, `DomainRequest` gains segments; G3b's SymbolicValid obligations are restated over them |
+| M2 (below) | Segmented families and orders, Theorem 15, in G5a's checker; a segmented proposer | **Yes:** `DomainRequest` gains segments, each with its own `CoordinateFamily`; `CheckedDomain` gains per-segment facts and a shared-cells fact. `CoordinateFamily` itself is unchanged and G3b is **not** restated over segments: a segmented request's logical form stays `Proposed` |
 | M3 | Multi-group replay in G4a for `sib_roots` | **Yes:** `CheckedComputation` over a set of groups |
-| M4 | Proposer: segment detection by site location, per-segment fitting | None |
+| M4 | G3b over per-segment terms, so that a segmented Theorem 13 can carry a logical tier | **Yes:** G3b's SymbolicValid obligations restated over segments |
 
-M2 and M3 change public proof contracts and are not started. The decision they need is
-below.
+M3 and M4 are not started.
 
 ## Milestone 1: multiplicity as a box over the logical levels
 
@@ -171,6 +170,222 @@ disagrees somewhere, so the comparison is no tautology. The run fails unless at 
 - Nothing about sibling loops changes: they are pinned as Unknown by tests, with G4a's
   computation claim still Verified for them.
 
+## Milestone 2: segmented families and orders
+
+M2 lets one group's sites be split into **segments**, each with its own coordinate terms
+and guarded order, and proves that the events of a run are those of the segments' sets one
+after the other. It is what `sib_same`, `sib_halves`, `sib_conditional` and their kin
+needed: two loops over the same roots, each with a loop variable that is undefined during
+the other loop.
+
+### Objects
+
+```
+struct Segment {                      // DomainModel.h
+  std::vector<unsigned> sites;        // its sites: a block of the group's partition
+  CoordinateFamily family;            // its logical terms, read only at its events
+  GuardedOrder order;                 // levels, bounds, guard over its level variables
+  std::vector<unsigned> cellKey;      // which levels order a cell, within the segment
+  std::array<std::vector<Term>, 3> access;
+};
+struct DomainRequest { ...; std::vector<Segment> segments; };   // nonempty = segmented
+struct SegmentFacts { sites; multiplicity; multiplicityTerm; cellKey; outputInjective; access; };
+```
+
+A request with `segments` nonempty is **segmented**; its own `order`, `cellKey` and
+`access` are unused, and the family passed beside it must be empty, or the checker refuses
+it (`a segmented request carries its own families`). The segments are in execution order,
+and their sites must partition the group exactly: a site in no segment, in two, or outside
+the group is refused. A request with one segment is the G5a request in another coat and
+gets the same answers (tested).
+
+The segments' **event sets** are disjoint by construction: an event belongs to the segment
+of its site. Their **memory** need not be: two segments may write the same cells, and
+whether they do is a fact (`CheckedDomain::sharedCells()`: Proven, no cell of two
+segments over the scope; Refuted, a point and a cell written by two), never a condition.
+The one-contribution fact T1 is judged over the whole group, so a shared cell refutes it.
+
+### Theorem 15 (segmented orbit)
+
+Let a group have segments s = 0, …, m−1 in that order, each with a guarded set S_s(v)
+over its own levels, and let the run at parameter point v complete. The **extended point**
+of an event is (s, λ_s), with s the segment of its site and λ_s its segment's levels read
+at the block entry. The claim: the extended points of the events, in order, are exactly
+S_0(v) ⊎ … ⊎ S_{m−1}(v) in order, segment by segment and lexicographically within one.
+
+Obligations, each a QF_BV query over G3b's walker that must be **unsat**:
+
+- **D1' (first event).** On every path from the entry to the first event, that event is
+  at a site of some segment s, its λ_s is min S_s(v), and S_r(v) is empty for every r < s.
+  On every path from the entry to the exit with no event, every S_s(v) is empty.
+- **D2 (successor, within a segment).** From an event of segment s with a successor in
+  S_s(v), on every path to the next event, that event is at a site of s and its λ_s is the
+  successor. (Theorem 12's D2.)
+- **D3 (last).** From an event of segment s with a successor in S_s(v), no path reaches
+  the exit. (Theorem 12's D3, per segment.)
+- **D4 (hand-over).** From an event of segment s with no successor in S_s(v), on every
+  path to the next event, that event is at a site of a segment s' > s, its λ_{s'} is
+  min S_{s'}(v), and S_r(v) is empty for s < r < s'.
+- **D5 (no return, empty tails).** From an event of segment s, no path reaches an event of
+  a segment r < s. From the last event of segment s (no successor), on every path to the
+  exit, S_r(v) is empty for every r > s.
+
+Every obligation is stated under the premise that the event it starts from is in its
+segment's set (as in Theorem 12, by induction on the events) and under the scope.
+
+*Proof.* By induction on the events of the run. D1' places the first event as the minimum
+of the first nonempty set and shows every earlier set empty. Given that the events so far
+are a prefix of S_0 ⊎ … ⊎ S_s ending at some element of S_s: if that element has a
+successor in S_s, D2 makes the next event that successor and D3 forbids the exit; if it is
+the last of S_s, D4 makes the next event the minimum of the next nonempty set, with the
+sets between empty, and D5 forbids an event of an earlier segment ever again. At the exit
+D5 shows every later set empty, so nothing of S is omitted; and nothing is duplicated
+because each step moves to the strict successor in the segmented order. ∎
+
+**Where each obligation is discharged.** Symbolically, `proveSegmentedOrbit`
+(`GuardedOrbit.cpp`) asks every query of D1', D2, D3, D4 and D5 and returns true only
+when all are unsat; any sat, unknown, limit or cut walk is Unknown with the first failing
+obligation named (`D4 at between segment 0 to segment 2, segment 1 empty: sat`). At
+points, `finiteSegmented` (`DomainChecker.cpp`) re-runs each point keeping the whole state
+at every event (`eventStates`, so a segment's term can read a loop variable the live table
+omitted), evaluates each event's segment terms there, and refutes with the point when the
+events' segments ever decrease, or when any segment's events in order differ from its set
+in order. Both routes then judge the key, C1 and μ within each segment, and T1 and shared
+cells over the group. A proposal that cannot be evaluated at an event (a term reading
+state undefined there) is refused, not guessed; so is an event at a site of no segment,
+which the partition check already excludes.
+
+**Guards at the boundary.** A sibling loop under `scf.if` (`sib_conditional`) is a
+segment whose guard is the branch condition over the parameters: where it is false the
+segment's set is empty, which D4 and D5 demand and the finite route checks. A guard
+read from the program's conditions is still a proposal: the checker evaluates it, nothing
+else.
+
+### Theorem 13 over segments
+
+`checkReduction` makes Theorem 13 for a segmented request exactly as before: G4a's
+computation claim over the group, which knows nothing of segments, together with Theorem
+15 over the scope, with the per-cell order (segment, κ_s). A cell written by both loops of
+`sib_same` has its first loop's contributions before its second loop's, which D5 proves,
+and the integer reorder fact is proven over both. What changes is the logical form: G3b
+judges one family over every event of the group and a segmented request has one per
+segment, so `logicalTier()` is `Proposed` for every segmented request. Theorem 13's
+status and tier are unaffected (`VERIFIED SYMBOLIC` for the sibling cases), and G4a is
+not bypassed: `sib_roots`, two loops over different operand roots, gets two groups, each
+segmented and each with Theorem 15 verified, and G4a refutes each group's computation as
+before.
+
+### The segmented proposer (untrusted)
+
+`proposeSegmentedDomain` reads the events of every sample point with their full state,
+puts two sites in one segment when their events interleave at some point (transitively),
+orders segments by their first site (program order), and fits each segment's order to its
+own events with the G5a fitting (`fitOrder`, now shared): loop-carried block arguments
+that vary within a point are its coordinates, other varying state its repeat candidates,
+state with one value at every event a constant for the guards. Bounds may now be another
+level plus a parameter plus a constant (`sib_counter`'s second loop runs its counter from
+n). With `--segments --family=…` the family names the logical loop variables and the
+rest are repeat levels, as with a flat `--family`; without it every loop variable is a
+coordinate and a repeat loop is Unit over (j, t) rather than a box over j. A segment no
+sample reaches gets an empty box with guard false, which the checker judges against the
+scope. Nothing the proposer does is evidence.
+
+### How M2 is checked independently
+
+The oracle (`domain_oracle.py`) gained **segmented specs**: a list of nests run one after
+the other, each with one MAC site, some under a condition on n, some empty at some points,
+some with a repeat loop. The driver runs them with `--segments` (and again with the
+logical variables named when a nest has repeats), and the oracle recomputes, at every
+point of the scope and with its own interpreter:
+
+- the events' segments never decrease, and each segment's events in order are its set in
+  order (Theorem 15, from the request's own bounds and guards);
+- the key, C1 and μ within each segment (μ at every logical point of the nest, as in M1);
+- T1 over the group, a proven shared-cells fact against the cells two nests write, and a
+  refuted one replayed at its point;
+- Theorem 13 with random fills, folding each cell segment by segment and within a segment
+  by the key;
+- no family beside a segmented request, no G3b tier over segments, no later phase's claim.
+
+The run fails below 8 verified segmented claims with two live segments, 2 empty segments
+at a point, 1 shared-cells proof and 1 refutation, 1 box inside a segment and 1 fold that
+crosses a segment boundary. The mutation harness refuses an anchor that is no longer
+unique (14 of M1's anchors were duplicated by the segmented copies of the checks, and are
+re-anchored with surrounding lines; each makes the same edit at the same place in the
+one-order route, and one, `entry-block site admitted`, also deletes the comment line above
+its check), and gains 35 mutants over `proveSegmentedOrbit`, `finiteSegmented`,
+`symbolicSegmented`, `adoptSegments` and the dispatch, one of them listed equivalent with
+its reason (the segment copy of the defensive box check). `testSegmentGates` gives each
+obligation of Theorem 15 a request that only it refutes (a first segment too long for D4,
+a shifted second segment for D4's first event, a later loop declared an empty earlier
+segment for D5, a nonempty set before the first event and at a no-event exit for D1', a
+nonempty set between a hand-over for D4), asks every obligation through a selective
+solver, and runs the limit, certificate, sample, event-limit, wider-scope, entry-block,
+shared-block and closed-gate refusals of the one-order route on the segmented one. The
+first full mutation run left three survivors and two crashes, each a missing test rather
+than a defect: a level that steps back without skipping (`sib_diag`, D2's increase
+alone), a set of the same size with other elements (the second segment offset by one), a
+scope wider than the enumeration, a set longer than the events (the size mutant now admits
+only that, so it refutes instead of indexing past the end), and a site of no segment
+(now a refusal, not a map error). The CTest oracle run keeps 40 programs and gets 3600 s.
+
+### What M2 verifies, refuses, leaves
+
+**Verified** (unit `segments`, oracle, lit `dom_segments.mlir`): two sibling loops over
+identical roots and cells; disjoint halves; different bounds; the second loop reversed,
+as j ascending or 3 − j descending; a sibling loop under a parameter condition; an empty
+first or second segment inside the scope; three segments with the middle one empty at a
+point; a repeat loop inside a segment as a logical box; a counter carried through SSA
+from the first loop into the second, by the loop variables; one segment for one loop.
+
+**Conservatively refused or refuted**, with the reason named: a family beside a segmented
+request; sites in no, two, or foreign segments; segments swapped; a segment too long, too
+short, or declared in the wrong direction; a level that is not monotone in its loop
+(`sib_shuffle`'s shuffled index); the second segment's guard dropped; one segment for
+two loops; a segment order wrongly ordered by the proposer (`seg_three` before the fix,
+refuted by the finite route and Unknown at D4 symbolically).
+
+**Unsupported, Unknown by design**: a segmented request's logical form (G3b over
+segments, M4); two loops over different operand roots as one claim (M3); the
+SSA-carried counter *as a level* over [n, 2n) is Verified at points and Unknown
+symbolically at D2, because the symbolic route does not infer the invariant p₂ = n + j;
+a segment with at most one event per sample point gets no proposal (`a segment whose
+events no state tells apart`), though a hand-written request for it is verified; sites
+that interleave at a point share a segment and are then judged as G5a would.
+
+**Untested assumptions**: Theorem 15 is stated for runs that complete; its symbolic
+discharge rests on G3b's walker and the solver as D1 to D3 did, and on obliviousness of
+the trace, which `traceIsFixed` checks as before. The proposer's reading of full state at
+each event assumes the reference run is representative, which the checker's own re-run
+confirms or refutes.
+
+**Coverage limits of the tests**: `finiteSegmented` re-runs each point under
+`DomainLimits::events`; a re-run that does not return, or a point whose memory exceeds the
+cell limit there, makes the point incomplete and the tier at most Point, with the reason
+kept. No test sets those limits below the enumeration's own, so that branch is not
+exercised, and the candidate mutant that would admit a cut re-run (it would compare a
+prefix of the events with the set and refute falsely) was left out of the harness rather
+than killed. Five of the ten equivalent mutants rest on an argument from the code's
+structure, not on a named test; their reasons are in `domain_mutation.py`.
+
+## Validation of M2 (2026-11-07, LLVM 24.0.0git, Z3 4.8.12, base 2a1afa0)
+
+Every result below is from one frozen tree (hash `f1c676a8…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. A first run of the same
+script on the tree before the mutation follow-ups above had one CTest timeout (the oracle
+at 1800 s) and five open mutants; the tests were added, and the whole run repeated.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 18 of 18 CTest suites, G1 to G5a and G5b-M1/M2; the oracle suite 1,840 s of its 3,600 |
+| G5a/G5b unit, core | 709 checks, 0 failures; `segments` 228 among them (`testSegments` and `testSegmentGates`), `siblings` 60 unchanged |
+| Oracle, seed 20261110 | 194 programs: 102 flat (375 points against S(v), 5,543 Theorem 13 runs, 3,502 permutations, 45 witnesses) and 92 segmented (134 verified symbolic claims, 475 points against Theorem 15, 7,582 segmented Theorem 13 runs, 212 empty segments at a point, 238 shared-cells proofs and 67 refutations replayed, 88 `LOGICAL_BOX` and 96 `CONSTANT_BOX` segment terms at every logical point, 4 without a proposal), 0 disagreements, 0 timeouts |
+| Mutation | 126 mutants: 116 killed by a test's own assertion, 10 equivalent with reasons in `domain_mutation.py`, 0 survived, 0 timeouts, 0 resource limits, 0 harness errors |
+| ASan, UBSan, leaks | Clean: unit core 709 checks and 8 oracle programs |
+| Byte-identical | G1 42, G2a 14, G3a 14, G3b 14 outputs against 2542b68, G4a 16 against 4ecb778 |
+| Lit | `dom_segments.mlir`: the sibling program verified through `--segments`, Unknown without |
+
 ## Validation of M1 (2026-11-06, LLVM 24.0.0git, Z3 4.8.12, base 8aa5447)
 
 Every result below is from one frozen tree, unchanged from the start of the run to its
@@ -196,3 +411,12 @@ skips the zero check where the guard reads a repeat variable, since no box exist
 None in G1 to G4a. In G5a, `DomainMultiplicity` gains `LogicalBox`, and the one unit test
 that pinned the old limitation (`growing_repeat` in `testGapsG5` expected `Counted`) now
 expects `LogicalBox` with its μ checked. No other assertion changed.
+
+M2 changes no G5a or M1 assertion or expected output: `testSiblings` still pins the flat
+route's answers for the sibling programs (Unknown, never a claim), and the segmented
+route is reached only through a request with segments or `--segments`. New public
+surface: `Segment`, `DomainRequest::segments`, `SegmentFacts`,
+`CheckedDomain::segments()` and `sharedCells()`, `DomainLimits::events`,
+`eventStates`, `proveSegmentedOrbit`, `proposeSegmentedDomain`,
+`DomainAnalysisRequest::segmented`, the driver's `--segments`, and `shared_cells`,
+`segments` and per-event `state` in the JSON.

@@ -26,6 +26,9 @@ struct DomainAnalysisRequest {
   // no coordinate order. For tests and oracles that want a repeat loop outside the
   // family. A proposal like any other: the checkers judge it.
   std::optional<CoordinateFamily> family;
+  // G5b: propose segments by site instead of one order over the search's family. One
+  // candidate per group, with an empty family; the segments carry theirs.
+  bool segmented = false;
 };
 
 struct CandidateDomain {
