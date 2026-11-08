@@ -5,6 +5,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/bit.h"
 
 #include <algorithm>
 #include <functional>
@@ -93,9 +94,9 @@ class Machine {
 public:
   Machine(const SemanticProgram &program, const SiteGroup &group,
           const std::vector<APInt> &parameters, const HerbrandLimits &limits,
-          ReplayResult &out)
+          ReplayResult &out, const std::vector<int> *groupOf = nullptr, unsigned groupCount = 0)
       : program(program), group(group), parameters(parameters), limits(limits), out(out),
-        table(limits.maxNodes) {}
+        table(limits.maxNodes), groupOf(groupOf), groupCount(groupCount) {}
 
   void run();
 
@@ -153,6 +154,13 @@ private:
   std::map<CellKey, uint64_t> folds;      // Contributions per cell so far.
   std::set<CellKey> foreign;              // Written outside the group.
   std::string pending;                    // The first mismatch.
+
+  // G5b-M3, for a set of groups only: each site's listed group, the groups that wrote
+  // each cell, as bits, and the latest group seen.
+  const std::vector<int> *groupOf;
+  unsigned groupCount;
+  std::map<CellKey, uint64_t> cellGroups;
+  int latest = -1;
 };
 
 bool Machine::layout() {
@@ -422,6 +430,15 @@ bool Machine::event(const MacSite &site, Term writtenTerm, CellKey &cell) {
   replay[cell] = next;
   out.facts.maxContributions = std::max(out.facts.maxContributions, ++folds[cell]);
   ++out.facts.events;
+  if (groupOf) {
+    int listed = (*groupOf)[site.id];
+    ++out.groupEvents[listed];
+    cellGroups[cell] |= uint64_t(1) << listed;
+    // An event of a group after one of a later-listed group breaks the listed order.
+    if (listed < latest)
+      out.listedOrder = false;
+    latest = std::max(latest, listed);
+  }
   return true;
 }
 
@@ -595,7 +612,18 @@ void Machine::run() {
     return;
   for (const Transition &t : program.transitions)
     outgoing[t.from].push_back(&t);
+  if (groupOf) {
+    if (groupCount == 0 || groupCount > 64 || groupOf->size() != program.sites.size()) {
+      finish(ReplayOutcome::Refused, "a malformed list of groups");
+      return;
+    }
+    out.groupEvents.assign(groupCount, 0);
+  }
   for (unsigned id : group.sites) {
+    if (groupOf && (id >= groupOf->size() || (*groupOf)[id] < 0 || (*groupOf)[id] >= (int)groupCount)) {
+      finish(ReplayOutcome::Refused, "a site of no listed group");
+      return;
+    }
     const MacSite &site = program.sites[id];
     if (!site.output || !site.outputRead || !site.accumulatedValue) {
       finish(ReplayOutcome::Refused, "a site with no output in memory");
@@ -634,6 +662,8 @@ void Machine::run() {
       pending = "a cell's final value is not the replay's";
   }
   out.facts.outputCells = folds.size();
+  for (const auto &[cell, groups] : cellGroups)
+    out.sharedCells += llvm::popcount(groups) > 1;
   for (auto it = out.prefix.begin(); it != out.prefix.end();)
     it = folds.count(it->first) ? std::next(it) : out.prefix.erase(it);
   out.facts.prefixCells = out.prefix.size();
@@ -652,6 +682,20 @@ ReplayResult replayGroup(const SemanticProgram &program, const SiteGroup &group,
                          const std::vector<APInt> &parameters, const HerbrandLimits &limits) {
   ReplayResult out;
   Machine machine(program, group, parameters, limits, out);
+  try {
+    machine.run();
+  } catch (const LimitReached &limit) {
+    out.outcome = ReplayOutcome::Limit;
+    out.reason = limit.reason;
+  }
+  return out;
+}
+
+ReplayResult replayGroupSet(const SemanticProgram &program, const SiteGroup &united,
+                            const std::vector<int> &groupOfSite, unsigned groupCount,
+                            const std::vector<APInt> &parameters, const HerbrandLimits &limits) {
+  ReplayResult out;
+  Machine machine(program, united, parameters, limits, out, &groupOfSite, groupCount);
   try {
     machine.run();
   } catch (const LimitReached &limit) {

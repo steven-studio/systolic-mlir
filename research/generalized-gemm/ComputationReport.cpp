@@ -52,6 +52,34 @@ static cl::opt<bool> noCertificate("no-certificate", cl::init(false),
                                    cl::desc("withhold the certificate, as a test"));
 static cl::opt<std::string> authorize(
     "authorize", cl::init(""), cl::desc("comma separated assumption names"));
+static cl::opt<std::string> groupSets(
+    "groups", cl::init(""),
+    cl::desc("G5b-M3: claims over sets of groups, ';' between sets, each a comma separated "
+             "list of group indices, `all` or `all-reversed`"));
+
+static std::optional<std::vector<GroupSetRequest>> parseGroupSets() {
+  std::vector<GroupSetRequest> out;
+  llvm::SmallVector<llvm::StringRef> sets;
+  llvm::StringRef(groupSets).split(sets, ';', -1, /*KeepEmpty=*/false);
+  for (llvm::StringRef text : sets) {
+    GroupSetRequest set;
+    if (text == "all" || text == "all-reversed") {
+      set.all = true;
+      set.reversed = text == "all-reversed";
+    } else {
+      llvm::SmallVector<llvm::StringRef> items;
+      text.split(items, ',', -1, /*KeepEmpty=*/false);
+      for (llvm::StringRef item : items) {
+        unsigned g;
+        if (item.trim().getAsInteger(10, g))
+          return std::nullopt;
+        set.groups.push_back(g);
+      }
+    }
+    out.push_back(std::move(set));
+  }
+  return out;
+}
 
 static std::optional<ParameterScope> parseScope(const SemanticProgram &program) {
   ParameterScope scope;
@@ -92,6 +120,11 @@ int main(int argc, char **argv) {
   if (!module)
     return 2;
 
+  auto sets = parseGroupSets();
+  if (!sets) {
+    llvm::errs() << "malformed --groups\n";
+    return 2;
+  }
   ImportOptions importOptions;
   importOptions.indexBitWidth = indexWidth;
   importOptions.lowerStructured = lowerStructured;
@@ -144,6 +177,7 @@ int main(int argc, char **argv) {
     request.computation.limits.replay.maxSteps = replaySteps;
     request.computation.limits.replay.maxNodes = replayNodes;
     request.computation.limits.maxQueries = maxQueries;
+    request.groupSets = *sets;
     ComputationResult result = analyzeComputation(
         program, certificate ? &*certificate : nullptr, request, backend);
     if (!first)

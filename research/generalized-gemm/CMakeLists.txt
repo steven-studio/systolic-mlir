@@ -261,6 +261,12 @@ add_test(NAME generalized-gemm-computation-programs COMMAND "${Python3_EXECUTABL
   --programs 60 --fills 40 --seed 1 --jobs 6)
 set_tests_properties(generalized-gemm-computation-programs PROPERTIES TIMEOUT 1200)
 
+# G5b-M3: claims over sets of groups, against the source trace.
+add_test(NAME generalized-gemm-multigroup-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/multigroup_oracle.py" --driver $<TARGET_FILE:generalized-gemm-computation-report>
+  --programs 24 --fills 12 --seed 1 --jobs 2)
+set_tests_properties(generalized-gemm-multigroup-programs PROPERTIES TIMEOUT 3600)
+
 add_test(NAME generalized-gemm-domain-programs COMMAND "${Python3_EXECUTABLE}"
   "${GG_FUZZ}/domain_oracle.py" --driver $<TARGET_FILE:generalized-gemm-domain-report>
   --programs 40 --fills 16 --seed 1 --jobs 2)

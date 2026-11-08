@@ -1,6 +1,7 @@
 //===- ComputationChecker.cpp ---------------------------------------------===//
 #include "GeneralizedGemm/ComputationChecker.h"
 
+#include "GeneralizedGemm/CoverageSimulation.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <functional>
 #include <random>
+#include <tuple>
 
 using llvm::APInt;
 using llvm::ArrayRef;
@@ -41,6 +43,15 @@ const char *stringifyFoldForm(FoldForm form) {
   case FoldForm::OrderedFloat: return "ORDERED_FLOAT";
   }
   return "ORDERED_FLOAT";
+}
+
+const char *stringifySetFactStatus(SetFactStatus status) {
+  switch (status) {
+  case SetFactStatus::Proven: return "PROVEN";
+  case SetFactStatus::Refuted: return "REFUTED";
+  case SetFactStatus::Unknown: return "UNKNOWN";
+  }
+  return "UNKNOWN";
 }
 
 struct ComputationAuthority {
@@ -76,6 +87,13 @@ struct ComputationAuthority {
   }
   static void failing(CheckedComputation &out, std::vector<APInt> point) {
     out.failing = std::move(point);
+  }
+  static void groupSet(CheckedComputation &out, std::vector<std::vector<unsigned>> listed,
+                       SetFact order, SetFact shared, std::vector<GroupSetPoint> points) {
+    out.listed = std::move(listed);
+    out.order = std::move(order);
+    out.shared = std::move(shared);
+    out.setPoints = std::move(points);
   }
 };
 
@@ -127,6 +145,12 @@ bool groupIsWhole(const SemanticProgram &program, const SiteGroup &group, std::s
     why = "the group has no output in memory";
     return false;
   }
+  // Every program site is compared below, and an id past them would be read later.
+  for (unsigned id : group.sites)
+    if (id >= program.sites.size()) {
+      why = "the group names a site the program does not have";
+      return false;
+    }
   std::set<unsigned> listed(group.sites.begin(), group.sites.end());
   for (const MacSite &site : program.sites) {
     bool direct = site.form == ReductionForm::Direct && site.output && site.outputRead &&
@@ -183,10 +207,13 @@ bool separationsFor(const SemanticProgram &program, const SiteGroup &group,
   return true;
 }
 
+/// The sites of one group share their output root and so their kind of addition. The
+/// union of several groups may not: one float site makes the whole claim ordered.
 FoldForm foldOf(const SemanticProgram &program, const SiteGroup &group) {
-  return program.sites[group.sites.front()].reduction == ReductionOp::Add
-             ? FoldForm::ModularInteger
-             : FoldForm::OrderedFloat;
+  bool modular = llvm::all_of(group.sites, [&](unsigned id) {
+    return program.sites[id].reduction == ReductionOp::Add;
+  });
+  return modular ? FoldForm::ModularInteger : FoldForm::OrderedFloat;
 }
 
 /// Whether a term's value can depend on memory, directly or through state.
@@ -286,7 +313,10 @@ std::optional<unsigned> readOf(const SemanticProgram &program, const Transition 
   return std::nullopt;
 }
 
-std::vector<ResidualEffect> frameOf(const SemanticProgram &program, const SiteGroup &group) {
+/// `outputs`: the output roots of a union of groups (G5b-M3). One group's by default.
+std::vector<ResidualEffect> frameOf(const SemanticProgram &program, const SiteGroup &group,
+                                    const std::set<unsigned> *outputs = nullptr) {
+  std::set<unsigned> observed = outputs ? *outputs : std::set<unsigned>{*group.output};
   // Effects of the group, by position: a second, equal load of a cell is not one.
   std::set<std::pair<unsigned, unsigned>> ownEffects;
   std::vector<bool> independent = memoryIndependentState(program);
@@ -322,7 +352,7 @@ std::vector<ResidualEffect> frameOf(const SemanticProgram &program, const SiteGr
       if (effect.kind == MemoryEffect::Write)
         residual.valueReadsMemory = dependsOnMemory(effect.value, independent);
       else
-        residual.observesOutput = effect.root == *group.output;
+        residual.observesOutput = observed.count(effect.root) != 0;
       out.push_back(residual);
     }
   }
@@ -483,6 +513,17 @@ bool enumerationCoversScope(const SemanticProgram &program, const DomainEnumerat
 
 namespace {
 
+/// The scope and the authorizations, in every binding.
+std::string scopeBinding(const ComputationOptions &options) {
+  std::string out = options.scope.allParameters ? "|all|" : "|some|";
+  for (const ParameterRange &range : options.scope.ranges)
+    out += std::to_string(range.parameter) + ":" + std::to_string(range.lower.getSExtValue()) +
+           ":" + std::to_string(range.upper.getSExtValue()) + ",";
+  for (const std::string &name : options.authorized)
+    out += "|" + name;
+  return out;
+}
+
 /// What a claim is about. A candidate joins only claims with its own.
 std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
                       const ComputationOptions &options) {
@@ -491,14 +532,127 @@ std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
                     std::to_string(group.first) + "," + std::to_string(group.second) + "|";
   for (unsigned site : group.sites)
     out += std::to_string(site) + ",";
-  out += options.scope.allParameters ? "|all|" : "|some|";
-  for (const ParameterRange &range : options.scope.ranges)
-    out += std::to_string(range.parameter) + ":" + std::to_string(range.lower.getSExtValue()) +
-           ":" + std::to_string(range.upper.getSExtValue()) + ",";
-  for (const std::string &name : options.authorized)
-    out += "|" + name;
+  return out + scopeBinding(options);
+}
+
+/// G5b-M3: every listed group, in the listed order, so that no claim over a set can
+/// stand in for the claim of one group, or of another set.
+std::string setBindingOf(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                         const ComputationOptions &options) {
+  std::string out = program.fingerprint + "|groups|";
+  for (const SiteGroup *group : listed) {
+    out += std::to_string(group->output ? (int64_t)*group->output : -1) + "," +
+           std::to_string(group->first) + "," + std::to_string(group->second) + ":";
+    for (unsigned site : group->sites)
+      out += std::to_string(site) + ",";
+    out += ";";
+  }
+  return out + scopeBinding(options);
+}
+
+/// G5b-M3: the listed groups of a claim over several, and what its replays found.
+struct SetTrace {
+  std::vector<const SiteGroup *> groups; // In the listed order.
+  std::vector<int> groupOf;              // The listed index of each program site, or -1.
+  std::set<unsigned> outputs;            // The listed groups' output roots.
+  // From the finite route: the points with events, and the first point at which the
+  // listed order fails, or two groups write one cell.
+  std::vector<GroupSetPoint> points;
+  std::optional<std::vector<APInt>> orderBroken, cellShared;
+  // From the symbolic route.
+  SetFact symbolicOrder, symbolicShared;
+
+  /// Only a run that reached the exit has its whole trace. The point's reference run
+  /// returned, and the trace is one at a point (Theorem 9a), so a fact seen here is
+  /// seen by every completing run there.
+  void observe(const std::vector<APInt> &parameters, const ReplayResult &replay) {
+    if (replay.outcome != ReplayOutcome::Equal && replay.outcome != ReplayOutcome::Mismatch)
+      return;
+    if (!replay.listedOrder && !orderBroken)
+      orderBroken = parameters;
+    if (replay.sharedCells && !cellShared)
+      cellShared = parameters;
+    if (replay.outcome == ReplayOutcome::Equal && replay.facts.events)
+      points.push_back({parameters, replay.groupEvents, replay.sharedCells, replay.listedOrder});
+  }
+};
+
+std::vector<std::vector<unsigned>> sitesOf(ArrayRef<const SiteGroup *> listed) {
+  std::vector<std::vector<unsigned>> out;
+  for (const SiteGroup *group : listed)
+    out.push_back(group->sites);
   return out;
 }
+
+/// G5b-M3: the union of whole groups, each listed once, with the listed index of each
+/// site. Nothing about how their cells meet is assumed or needed here.
+std::optional<SiteGroup> unite(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                               SetTrace &set, std::string &why) {
+  if (listed.empty()) {
+    why = "no group is listed";
+    return std::nullopt;
+  }
+  if (listed.size() > 64) {
+    why = "more than 64 groups are listed";
+    return std::nullopt;
+  }
+  std::set<std::tuple<unsigned, unsigned, unsigned>> triples;
+  set.groupOf.assign(program.sites.size(), -1);
+  SiteGroup united;
+  for (unsigned i = 0; i < listed.size(); ++i) {
+    const SiteGroup &group = *listed[i];
+    // A claim about part of a group is no claim about its events, here as alone.
+    if (!groupIsWhole(program, group, why))
+      return std::nullopt;
+    if (!triples.insert({*group.output, group.first, group.second}).second) {
+      why = "a group is listed twice";
+      return std::nullopt;
+    }
+    for (unsigned site : group.sites) {
+      if (set.groupOf[site] != -1) {
+        why = "a site is listed twice";
+        return std::nullopt;
+      }
+      set.groupOf[site] = i;
+      united.sites.push_back(site);
+    }
+    set.groups.push_back(&group);
+    set.outputs.insert(*group.output);
+  }
+  // Sites in increasing order, as one group's are: every obligation is then asked in
+  // the same order whatever the listing, and so is the first one that fails.
+  std::sort(united.sites.begin(), united.sites.end());
+  united.output = listed.front()->output;
+  united.first = listed.front()->first;
+  united.second = listed.front()->second;
+  return united;
+}
+
+SetFact provenFact(ComputationTier tier, std::string detail) {
+  SetFact out;
+  out.status = SetFactStatus::Proven;
+  out.tier = tier;
+  out.detail = std::move(detail);
+  return out;
+}
+
+SetFact refutedFact(std::vector<APInt> point, std::string detail) {
+  SetFact out;
+  out.status = SetFactStatus::Refuted;
+  out.point = std::move(point);
+  out.detail = std::move(detail);
+  return out;
+}
+
+SetFact unknownFact(std::string detail) {
+  SetFact out;
+  out.detail = std::move(detail);
+  return out;
+}
+
+CheckedComputation finiteOver(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                              const SiteGroup &group, const ComputationOptions &options,
+                              SetTrace *set);
 
 CheckedComputation finiteClaim(const SemanticProgram &program,
                                const DomainEnumeration &enumeration, unsigned g,
@@ -511,9 +665,19 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
   std::string why;
   if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
     return CheckedComputation::unknown(why);
+  return finiteOver(program, enumeration, group, options, nullptr);
+}
+
+/// One group, or the union of several (G5b-M3, with `set`): the events of `group`'s
+/// sites, each with its own site's roots, replayed together in execution order.
+CheckedComputation finiteOver(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                              const SiteGroup &group, const ComputationOptions &options,
+                              SetTrace *set) {
+  std::string why;
   std::vector<SeparationUse> separations;
   if (!separationsFor(program, group, options.authorized, separations, why))
     return CheckedComputation::unknown(why);
+  auto frame = [&] { return frameOf(program, group, set ? &set->outputs : nullptr); };
 
   std::vector<ReplayFacts> facts;
   std::set<MemoryDependentStop> stops = memoryStopsOf(program);
@@ -525,7 +689,12 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
       complete = false;
       continue;
     }
-    ReplayResult replay = replayGroup(program, group, point.parameters, options.limits.replay);
+    ReplayResult replay =
+        set ? replayGroupSet(program, group, set->groupOf, set->groups.size(), point.parameters,
+                             options.limits.replay)
+            : replayGroup(program, group, point.parameters, options.limits.replay);
+    if (set)
+      set->observe(point.parameters, replay);
     stopsSeen = stopsSeen || !replay.conditionalStops.empty();
     stops.insert(replay.conditionalStops.begin(), replay.conditionalStops.end());
     if (replay.outcome == ReplayOutcome::Equal) {
@@ -557,7 +726,7 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
           "the program and the replay differ at a concrete run: " + *difference);
       ComputationAuthority::witness(out, std::move(*entry));
       ComputationAuthority::separations(out, std::move(separations));
-      ComputationAuthority::frame(out, frameOf(program, group));
+      ComputationAuthority::frame(out, frame());
       ComputationAuthority::stops(out, std::move(stops));
       return out;
     }
@@ -569,7 +738,7 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
     CheckedComputation out = CheckedComputation::unknown(
         open.empty() ? "no point has events" : open);
     ComputationAuthority::separations(out, std::move(separations));
-    ComputationAuthority::frame(out, frameOf(program, group));
+    ComputationAuthority::frame(out, frame());
     ComputationAuthority::stops(out, std::move(stops));
     return out;
   }
@@ -580,7 +749,7 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
                    : "Herbrand replay equal at each listed point; another point is open: " + open);
   ComputationAuthority::contracts(out, std::move(contracts), foldOf(program, group));
   ComputationAuthority::separations(out, std::move(separations));
-  ComputationAuthority::frame(out, frameOf(program, group));
+  ComputationAuthority::frame(out, frame());
   ComputationAuthority::stops(out, std::move(stops));
   ComputationAuthority::facts(out, std::move(facts));
   ComputationAuthority::every(out, enumeration.termination.kind() ==
@@ -599,15 +768,19 @@ struct Access {
 
 class Proof {
 public:
+  /// `set`: the listed groups when `group` is the union of several (G5b-M3).
   Proof(const SemanticProgram &program, const SiteGroup &group,
-        const ComputationOptions &options, SmtBackend &backend)
+        const ComputationOptions &options, SmtBackend &backend, const SetTrace *set = nullptr)
       : program(program), group(group), options(options), backend(backend),
-        terms(*program.terms) {}
+        terms(*program.terms), set(set) {}
 
   bool prepare(const TerminationCertificate &certificate, std::string &why);
   bool discharge();
   ViewInjectivity injective(const std::vector<Term> &key, unsigned view);
-  SmtAnswer ask(const std::string &id, const std::string &where, Term formula);
+  /// `keep` false: a fact's query, which is no obligation of the claim.
+  SmtAnswer ask(const std::string &id, const std::string &where, Term formula, bool keep = true);
+  SetFact sharedFact();
+  SetFact orderFact();
 
   std::vector<ObligationRecord> records;
   std::vector<SiteContract> contracts;
@@ -630,12 +803,13 @@ private:
   const ComputationOptions &options;
   SmtBackend &backend;
   TermContext &terms;
+  const SetTrace *set;
   Term scope = nullptr;
   unsigned queries = 0;
   std::map<unsigned, Term> invariants;
 };
 
-SmtAnswer Proof::ask(const std::string &id, const std::string &where, Term formula) {
+SmtAnswer Proof::ask(const std::string &id, const std::string &where, Term formula, bool keep) {
   if (queries >= options.limits.maxQueries) {
     if (failure.empty())
       failure = "the query limit";
@@ -665,7 +839,8 @@ SmtAnswer Proof::ask(const std::string &id, const std::string &where, Term formu
     }
     failing = std::move(point);
   }
-  records.push_back(std::move(record));
+  if (keep)
+    records.push_back(std::move(record));
   return response.answer;
 }
 
@@ -846,8 +1021,19 @@ bool Proof::discharge() {
   }
 
   // F3: the relation speaks of initial cells. A fresh root has none, so a claim here
-  // could be vacuous: every run might stop at its first read.
-  for (unsigned root : {*group.output, group.first, group.second})
+  // could be vacuous: every run might stop at its first read. Every listed group's.
+  std::vector<unsigned> roots{*group.output, group.first, group.second};
+  if (set) {
+    roots.clear();
+    // By first site, not by the listing, so that no record depends on the listing.
+    std::vector<const SiteGroup *> ordered(set->groups.begin(), set->groups.end());
+    std::sort(ordered.begin(), ordered.end(), [](const SiteGroup *x, const SiteGroup *y) {
+      return x->sites.front() < y->sites.front();
+    });
+    for (const SiteGroup *listed : ordered)
+      roots.insert(roots.end(), {*listed->output, listed->first, listed->second});
+  }
+  for (unsigned root : roots)
     if (!structural("F3", "root " + std::to_string(root),
                     program.roots[root].origin == MemoryRoot::FunctionArgument))
       return false;
@@ -959,6 +1145,81 @@ bool Proof::hasEventfulPoint() {
   return false;
 }
 
+/// G5b-M3: no cell is written by stores of two listed groups, over the scope. Each pair
+/// of stores of different groups on one root is asked apart, at one parameter point. A
+/// fact: an answer other than unsat leaves it Unknown and changes no claim.
+SetFact Proof::sharedFact() {
+  std::vector<std::pair<const MacSite *, const MacSite *>> pairs;
+  uint64_t count = 0;
+  for (unsigned x : group.sites)
+    for (unsigned y : group.sites) {
+      const MacSite &first = program.sites[x], &second = program.sites[y];
+      if (set->groupOf[x] >= set->groupOf[y] || first.output->root != second.output->root)
+        continue;
+      pairs.push_back({&first, &second});
+      count += arrivals[first.location].size() * arrivals[second.location].size();
+    }
+  if (count > options.limits.maxPairs)
+    return unknownFact("more arrival pairs than the limit");
+  for (const auto &[first, second] : pairs)
+    for (const SiteArrival &a : arrivals[first->location])
+      for (const SiteArrival &b : arrivals[second->location]) {
+        SmtAnswer answer = ask("SH", "stores of sites " + std::to_string(first->id) + " and " +
+                                         std::to_string(second->id),
+                               sameCell(a, first->output->index, b, second->output->index), false);
+        if (answer != SmtAnswer::Unsat)
+          return unknownFact(std::string("SH at sites ") + std::to_string(first->id) + " and " +
+                             std::to_string(second->id) + ": " + stringifySmtAnswer(answer));
+      }
+  return provenFact(ComputationTier::Symbolic, "no cell of two listed groups, over the scope");
+}
+
+/// G5b-M3: from every arrival at a site of the j-th listed group, every feasible way to
+/// the next event of the union arrives at a group listed no earlier than j. Induction on
+/// the events: the listed indices never fall, which is the listed order. The walk calls a
+/// leaf only for a path the solver found feasible, so reaching an earlier group there is
+/// a failure, with no query of its own. One block with sites of two groups holds two
+/// events the walk takes for one, so it is not judged.
+SetFact Proof::orderFact() {
+  std::map<unsigned, int> groupAt;
+  for (unsigned id : group.sites) {
+    auto [slot, added] = groupAt.try_emplace(program.sites[id].location, set->groupOf[id]);
+    if (!added && slot->second != set->groupOf[id])
+      return unknownFact("two listed groups have sites in one block");
+  }
+  std::vector<unsigned> locations;
+  for (const auto &[location, listed] : groupAt)
+    locations.push_back(location);
+  AskUnsat quiet = [&](const std::string &id, const std::string &where, Term formula) {
+    return ask(id, where, formula, false);
+  };
+  for (const auto &[location, listed] : groupAt)
+    for (const SiteArrival &arrival : arrivals[location]) {
+      std::string why;
+      int here = listed;
+      auto leaf = [&](const SymbolicPath &path, Term premise, bool exit) {
+        if (exit)
+          return true;
+        auto next = groupAt.find(path.end);
+        if (next == groupAt.end()) {
+          why = "an event at a block of no listed group";
+          return false;
+        }
+        (void)premise;
+        if (next->second >= here)
+          return true;
+        why = "GO: an event of group " + std::to_string(next->second) + " may follow one of group " +
+              std::to_string(here) + " on a feasible path";
+        return false;
+      };
+      if (!walkToNextEvents(program, locations, options.limits.maxUnfolding, quiet, why,
+                            arrival.path, arrival.premise, leaf))
+        return unknownFact(why.empty() ? "the walk to the next event failed" : why);
+    }
+  return provenFact(ComputationTier::Symbolic,
+                    "no event of a group follows one of a later-listed group, over the scope");
+}
+
 ViewInjectivity Proof::injective(const std::vector<Term> &key, unsigned view) {
   auto viewOf = [&](const MacSite &site) -> ArrayRef<Term> {
     if (view == 0)
@@ -1020,16 +1281,13 @@ bool limitsAreEffective(const ComputationOptions &options, std::string &why) {
 
 } // namespace
 
-CheckedComputation symbolicClaim(const SemanticProgram &program,
-                                 const TerminationCertificate *certificate,
-                                 const SiteGroup &group, const ComputationOptions &options,
-                                 SmtBackend &backend) {
-  if (!program.isSupported())
-    return CheckedComputation::unknown("the program is unsupported");
+/// One group, or the union of several (G5b-M3, with `set`): Theorem 9 over the sites of
+/// `group`, and for a set its two facts once the claim stands.
+CheckedComputation symbolicOver(const SemanticProgram &program,
+                                const TerminationCertificate *certificate,
+                                const SiteGroup &group, const ComputationOptions &options,
+                                SmtBackend &backend, SetTrace *set) {
   std::string why;
-  if (!limitsAreEffective(options, why) || !groupIsWhole(program, group, why) ||
-      !traceIsFixed(program, why))
-    return CheckedComputation::unknown(why);
   std::vector<SeparationUse> separations;
   if (!separationsFor(program, group, options.authorized, separations, why))
     return CheckedComputation::unknown(why);
@@ -1037,7 +1295,7 @@ CheckedComputation symbolicClaim(const SemanticProgram &program,
   if (!outcome)
     return CheckedComputation::unknown(why);
 
-  Proof proof(program, group, options, backend);
+  Proof proof(program, group, options, backend, set);
   std::set<MemoryDependentStop> stops = memoryStopsOf(program);
   try {
     if (!proof.prepare(*certificate, why))
@@ -1048,9 +1306,23 @@ CheckedComputation symbolicClaim(const SemanticProgram &program,
                                             "E, OP, R, W and F discharged over the scope")
                : ComputationAuthority::make(ComputationTier::Proposed, ComputationStatus::Unknown,
                                             proof.failure);
+    // Facts once the claim stands. A term limit in one leaves it Unknown, and the claim
+    // as it is.
+    if (set && passed) {
+      try {
+        set->symbolicShared = proof.sharedFact();
+      } catch (const TermError &error) {
+        set->symbolicShared = unknownFact(std::string("term limit: ") + error.what());
+      }
+      try {
+        set->symbolicOrder = proof.orderFact();
+      } catch (const TermError &error) {
+        set->symbolicOrder = unknownFact(std::string("term limit: ") + error.what());
+      }
+    }
     ComputationAuthority::records(out, std::move(proof.records));
     ComputationAuthority::separations(out, std::move(separations));
-    ComputationAuthority::frame(out, frameOf(program, group));
+    ComputationAuthority::frame(out, frameOf(program, group, set ? &set->outputs : nullptr));
     ComputationAuthority::every(out, passed &&
                                          outcome->verdict.kind() ==
                                              TerminationVerdict::ProvenTerminating &&
@@ -1064,6 +1336,81 @@ CheckedComputation symbolicClaim(const SemanticProgram &program,
   } catch (const TermError &error) {
     return CheckedComputation::unknown(std::string("term limit: ") + error.what());
   }
+}
+
+CheckedComputation symbolicClaim(const SemanticProgram &program,
+                                 const TerminationCertificate *certificate,
+                                 const SiteGroup &group, const ComputationOptions &options,
+                                 SmtBackend &backend) {
+  if (!program.isSupported())
+    return CheckedComputation::unknown("the program is unsupported");
+  std::string why;
+  if (!limitsAreEffective(options, why) || !groupIsWhole(program, group, why) ||
+      !traceIsFixed(program, why))
+    return CheckedComputation::unknown(why);
+  return symbolicOver(program, certificate, group, options, backend, nullptr);
+}
+
+/// The facts of a finite claim over a set: Refuted at the first point that shows a
+/// violation, Proven at the claim's own tier when it is verified, and Unknown otherwise.
+SetFact finiteFact(const CheckedComputation &claim, const std::optional<std::vector<APInt>> &broken,
+                   const char *refuted, const char *proven) {
+  if (broken)
+    return refutedFact(*broken, refuted);
+  if (claim.status() == ComputationStatus::Verified)
+    return provenFact(claim.tier(), proven);
+  return unknownFact("the claim is not verified");
+}
+
+CheckedComputation finiteSetClaim(const SemanticProgram &program,
+                                  const DomainEnumeration &enumeration,
+                                  ArrayRef<const SiteGroup *> listed,
+                                  const ComputationOptions &options) {
+  if (enumeration.gate != GateStatus::Open)
+    return CheckedComputation::unknown("the domain gate is closed for the set: " + enumeration.reason);
+  SetTrace set;
+  std::string why;
+  auto united = unite(program, listed, set, why);
+  if (!united || !traceIsFixed(program, why))
+    return CheckedComputation::unknown(why);
+  CheckedComputation out = finiteOver(program, enumeration, *united, options, &set);
+  SetFact order = finiteFact(out, set.orderBroken, "an event of a group follows one of a later-listed group",
+                             "the listed order at each replayed point");
+  SetFact shared = finiteFact(out, set.cellShared, "two listed groups write one cell",
+                              "no cell of two listed groups at each replayed point");
+  ComputationAuthority::groupSet(out, sitesOf(listed), std::move(order), std::move(shared),
+                                 std::move(set.points));
+  return out;
+}
+
+CheckedComputation symbolicSetClaim(const SemanticProgram &program,
+                                    const TerminationCertificate *certificate,
+                                    ArrayRef<const SiteGroup *> listed,
+                                    const ComputationOptions &options, SmtBackend &backend) {
+  if (!program.isSupported())
+    return CheckedComputation::unknown("the program is unsupported");
+  std::string why;
+  if (!limitsAreEffective(options, why))
+    return CheckedComputation::unknown(why);
+  SetTrace set;
+  auto united = unite(program, listed, set, why);
+  if (!united || !traceIsFixed(program, why))
+    return CheckedComputation::unknown(why);
+  set.symbolicOrder = set.symbolicShared = unknownFact("the claim is not verified");
+  CheckedComputation out = symbolicOver(program, certificate, *united, options, backend, &set);
+  ComputationAuthority::groupSet(out, sitesOf(listed), std::move(set.symbolicOrder),
+                                 std::move(set.symbolicShared), {});
+  return out;
+}
+
+/// A set refused before any replay still names its groups, and says why its facts are
+/// unknown.
+CheckedComputation refusedSet(CheckedComputation out, ArrayRef<const SiteGroup *> listed) {
+  if (!out.groupSites().empty())
+    return out;
+  SetFact unknown = unknownFact("the set is refused: " + out.reason());
+  ComputationAuthority::groupSet(out, sitesOf(listed), unknown, unknown, {});
+  return out;
 }
 
 } // namespace
@@ -1084,6 +1431,34 @@ CheckedComputation checkComputationSymbolic(const SemanticProgram &program,
                                             SmtBackend &backend) {
   CheckedComputation out = symbolicClaim(program, certificate, group, options, backend);
   ComputationAuthority::bind(out, bindingOf(program, group, options));
+  return out;
+}
+
+CheckedComputation checkGroupSetFinite(const SemanticProgram &program,
+                                       const DomainEnumeration &enumeration,
+                                       ArrayRef<unsigned> groups,
+                                       const ComputationOptions &options) {
+  std::vector<const SiteGroup *> listed;
+  for (unsigned g : groups) {
+    if (g >= enumeration.groups.size())
+      return refusedSet(CheckedComputation::unknown("no such group"), {});
+    listed.push_back(&enumeration.groups[g]);
+  }
+  CheckedComputation out = refusedSet(finiteSetClaim(program, enumeration, listed, options), listed);
+  ComputationAuthority::bind(out, setBindingOf(program, listed, options));
+  return out;
+}
+
+CheckedComputation checkGroupSetSymbolic(const SemanticProgram &program,
+                                         const TerminationCertificate *certificate,
+                                         ArrayRef<SiteGroup> groups,
+                                         const ComputationOptions &options, SmtBackend &backend) {
+  std::vector<const SiteGroup *> listed;
+  for (const SiteGroup &group : groups)
+    listed.push_back(&group);
+  CheckedComputation out =
+      refusedSet(symbolicSetClaim(program, certificate, listed, options, backend), listed);
+  ComputationAuthority::bind(out, setBindingOf(program, listed, options));
   return out;
 }
 

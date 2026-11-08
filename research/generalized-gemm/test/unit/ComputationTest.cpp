@@ -1970,6 +1970,766 @@ static void testReach() {
   }
 }
 
+// G5b-M3: one claim over several groups (Theorem 16). Programs over one-dimensional
+// roots a, b, c, d, e (ids 0 to 4), each loop one site.
+static const char *gsHeader =
+    "  %c0 = arith.constant 0 : index\n  %c1 = arith.constant 1 : index\n"
+    "  %c2 = arith.constant 2 : index\n  %c3 = arith.constant 3 : index\n"
+    "  %c4 = arith.constant 4 : index\n";
+
+static std::string gsMac(const std::string &out, const std::string &x, const std::string &y,
+                         const std::string &tag, const std::string &element = "i32",
+                         const std::string &type = "memref<8xi32>") {
+  bool isFloat = element[0] == 'f';
+  std::string add = isFloat ? "arith.addf" : "arith.addi", mul = isFloat ? "arith.mulf" : "arith.muli";
+  return "    %x" + tag + " = memref.load " + x + " : " + type + "\n" + "    %y" + tag +
+         " = memref.load " + y + " : " + type + "\n" + "    %z" + tag + " = memref.load " + out +
+         " : " + type + "\n" + "    %m" + tag + " = " + mul + " %x" + tag + ", %y" + tag + " : " +
+         element + "\n" + "    %s" + tag + " = " + add + " %z" + tag + ", %m" + tag + " : " + element +
+         "\n" + "    memref.store %s" + tag + ", " + out + " : " + type + "\n";
+}
+
+static std::string gsLoop(const std::string &var, const std::string &low, const std::string &high,
+                          const std::string &body) {
+  return "  scf.for %" + var + " = " + low + " to " + high + " step %c1 {\n" + body + "  }\n";
+}
+
+static std::string gsFunction(const std::string &name, const std::string &body,
+                              const std::string &element = "i32", const std::string &roots = "abcde",
+                              const std::string &extent = "8") {
+  std::string type = "memref<" + extent + "x" + element + ">", args;
+  for (char root : roots)
+    args += std::string("%") + root + ": " + type + ", ";
+  return "func.func @" + name + "(" + args + "%n: index) {\n" + gsHeader + body + "  return\n}\n";
+}
+
+static std::string groupSetSource() {
+  auto L = gsLoop;
+  auto I = [](const std::string &o, const std::string &x, const std::string &y, const std::string &tag) {
+    return gsMac(o, x, y, tag);
+  };
+  auto F = [](const std::string &o, const std::string &x, const std::string &y, const std::string &tag) {
+    return gsMac(o, x, y, tag, "f64", "memref<8xf64>");
+  };
+  std::string ab = L("i", "%c0", "%n", I("%c[%i]", "%a[%i]", "%b[%i]", "1"));
+  std::string de = L("j", "%c0", "%n", I("%c[%j]", "%d[%j]", "%e[%j]", "2"));
+  std::string out;
+  out += gsFunction("different_cells", ab + L("j", "%c0", "%n", "    %jj = arith.addi %j, %c4 : index\n" +
+                                                                     I("%c[%jj]", "%d[%j]", "%e[%j]", "2")));
+  out += gsFunction("same_cells", ab + de);
+  out += gsFunction("reads_written", ab + L("j", "%c0", "%n", I("%d[%j]", "%c[%j]", "%e[%j]", "2")));
+  out += gsFunction("reads_first", L("j", "%c0", "%n", I("%d[%j]", "%c[%j]", "%e[%j]", "2")) + ab);
+  std::string fab = L("i", "%c0", "%n", F("%c[%i]", "%a[%i]", "%b[%i]", "1"));
+  std::string fde = L("j", "%c0", "%n", F("%c[%j]", "%d[%j]", "%e[%j]", "2"));
+  out += gsFunction("float_ab", fab + fde, "f64");
+  out += gsFunction("float_ba", fde + fab, "f64");
+  out += gsFunction("interleaved", L("i", "%c0", "%n", I("%c[%i]", "%a[%i]", "%b[%i]", "1") +
+                                                       I("%c[%i]", "%d[%i]", "%e[%i]", "2")));
+  out += gsFunction("empty_second", ab + L("j", "%n", "%c2", I("%c[%j]", "%d[%j]", "%e[%j]", "2")));
+  out += gsFunction("never", ab + L("j", "%c0", "%c0", I("%c[%j]", "%d[%j]", "%e[%j]", "2")));
+  out += gsFunction("repeat_shared", "  scf.for %t = %c0 to %c2 step %c1 {\n" + ab + "  }\n" + de);
+  out += gsFunction("three_groups", ab + de + L("k", "%c0", "%n", I("%c[%k]", "%a[%k]", "%e[%k]", "3")));
+  out += gsFunction("two_sites", ab + L("j", "%c0", "%n", I("%c[%j]", "%a[%j]", "%b[%j]", "2")) +
+                                     L("k", "%c0", "%n", I("%c[%k]", "%d[%k]", "%e[%k]", "3")));
+  out += gsFunction("outer_once", "  scf.for %t = %c0 to %c1 step %c1 {\n" + ab + de + "  }\n");
+  out += gsFunction("outer_twice", "  scf.for %t = %c0 to %c2 step %c1 {\n" + ab + de + "  }\n");
+  // Stores outside both groups, beside their cells: an F1 and an OP2 query each.
+  out += gsFunction("framed", ab + de + "  %v = arith.constant 7 : i32\n"
+                                        "  memref.store %v, %c[%c4] : memref<8xi32>\n"
+                                        "  memref.store %v, %d[%c4] : memref<8xi32>\n");
+  out += gsFunction("observed_second", ab + L("j", "%c0", "%n", I("%d[%j]", "%e[%j]", "%b[%j]", "2")) +
+                                           "  %q = memref.load %d[%c0] : memref<8xi32>\n"
+                                           "  memref.store %q, %a[%c4] : memref<8xi32>\n");
+  // x * 1 written back at n >= 2: equal values, different nodes, so that point stays open
+  // and the claim is a Point claim at n = 1.
+  out += gsFunction("identity_late", ab + de + "  %late = arith.cmpi uge, %n, %c2 : index\n  scf.if %late {\n"
+                                               "    %q = memref.load %c[%c0] : memref<8xi32>\n"
+                                               "    %one = arith.constant 1 : i32\n"
+                                               "    %r = arith.muli %q, %one : i32\n"
+                                               "    memref.store %r, %c[%c0] : memref<8xi32>\n  }\n");
+  // Two groups whose stores each meet operands of both: OP2 fails at more than one pair,
+  // and the first named must not depend on the listing. Two fresh outputs: F3 likewise.
+  out += gsFunction("two_overlaps", L("i", "%c0", "%n", "    %i1 = arith.addi %i, %c1 : index\n" +
+                                                         I("%c[%i]", "%c[%i1]", "%e[%c0]", "1")) +
+                                        L("k", "%c0", "%n", "    %k1 = arith.addi %k, %c1 : index\n" +
+                                                         I("%c[%k]", "%c[%k1]", "%a[%c0]", "2")));
+  out += gsFunction("fresh_both", "  %f = memref.alloc() : memref<8xi32>\n  %g = memref.alloc() : memref<8xi32>\n" +
+                                      L("i", "%c0", "%n", I("%f[%i]", "%a[%i]", "%b[%i]", "1")) +
+                                      L("j", "%c0", "%n", I("%g[%j]", "%d[%j]", "%e[%j]", "2")));
+  // A foreign store to a shared cell, only at n >= 3000: past any enumeration.
+  out += gsFunction("far_shared", L("i", "%c0", "%c2", I("%c[%i]", "%a[%i]", "%b[%i]", "1")) +
+                                      L("j", "%c0", "%c2", I("%c[%j]", "%d[%j]", "%e[%j]", "2")) +
+                                      "  %far = arith.constant 3000 : index\n"
+                                      "  %big = arith.cmpi uge, %n, %far : index\n  scf.if %big {\n"
+                                      "    %w = arith.constant 7 : i32\n"
+                                      "    memref.store %w, %c[%c0] : memref<8xi32>\n  }\n");
+  // A group under a guard that reads memory, and a group with a fresh output.
+  out += gsFunction("memory_guarded", L("i", "%c0", "%n", "    %g = memref.load %a[%i] : memref<8xi32>\n"
+                                                            "    %zero = arith.constant 0 : i32\n"
+                                                            "    %p = arith.cmpi sgt, %g, %zero : i32\n"
+                                                            "    scf.if %p {\n" +
+                                                            I("%c[%i]", "%a[%i]", "%b[%i]", "1") + "    }\n") + de);
+  out += gsFunction("fresh_second", ab + "  %f = memref.alloc() : memref<8xi32>\n" +
+                                        L("j", "%c0", "%n", I("%f[%j]", "%d[%j]", "%e[%j]", "2")));
+  out += "func.func @mixed(%a: memref<8xf64>, %b: memref<8xf64>, %c: memref<8xf64>, %p: memref<8xi32>, "
+         "%q: memref<8xi32>, %r: memref<8xi32>, %n: index) {\n" +
+         std::string(gsHeader) + fab + L("j", "%c0", "%n", I("%r[%j]", "%p[%j]", "%q[%j]", "2")) +
+         "  return\n}\n";
+  // The numeric example: C = [0, 0], A = [1, 2], B = [10, 20], with a unit factor U, so
+  // that each event adds one operand.
+  out += gsFunction("numeric",
+                    L("i", "%c0", "%n", gsMac("%c[%i]", "%a[%i]", "%u[%i]", "1", "i32", "memref<2xi32>")) +
+                        L("j", "%c0", "%n", gsMac("%c[%j]", "%b[%j]", "%u[%j]", "2", "i32", "memref<2xi32>")),
+                    "i32", "abcu", "2");
+  return out;
+}
+
+static EntryState gsEntry(const SemanticProgram &p, unsigned n,
+                          const std::function<APInt(unsigned root, unsigned cell)> &value) {
+  EntryState entry;
+  entry.parameters = {APInt(16, n)};
+  for (const MemoryRoot &root : p.roots) {
+    RootData data;
+    uint64_t cells = 1;
+    for (int64_t extent : root.extents) {
+      data.shape.push_back(extent);
+      cells *= extent;
+    }
+    for (unsigned c = 0; c < cells; ++c)
+      data.cells.emplace_back(value(root.id, c));
+    entry.memory.push_back(std::move(data));
+  }
+  return entry;
+}
+
+static void testGroupSets() {
+  Module m(groupSetSource());
+  using F = SetFactStatus;
+  struct Case {
+    std::string name;
+    SemanticProgram program;
+    ParameterScope scope;
+    Authorizations authorized;
+    Prepared ready;
+    ComputationOptions options;
+  };
+  auto load = [&](const char *name, int64_t low, int64_t high) {
+    Case c;
+    c.name = name;
+    c.program = m.import(name);
+    CHECK(c.program.isSupported());
+    c.scope = range(c.program, low, high);
+    c.authorized = everyPair(c.program);
+    c.ready = prepare(c.program, c.scope, c.authorized);
+    CHECK(c.ready.enumeration.gate == GateStatus::Open);
+    c.options = computationOptions(c.scope, c.authorized);
+    return c;
+  };
+  // A group by its roots.
+  auto G = [&](const Case &c, unsigned out, unsigned first, unsigned second) {
+    for (unsigned g = 0; g < c.ready.enumeration.groups.size(); ++g) {
+      const SiteGroup &group = c.ready.enumeration.groups[g];
+      if (group.output && *group.output == out && group.first == first && group.second == second)
+        return g;
+    }
+    printf("%s: no group (%u; %u, %u)\n", c.name.c_str(), out, first, second);
+    CHECK(false);
+    return 0u;
+  };
+  auto claims = [&](const Case &c, const std::vector<unsigned> &groups, SmtBackend &backend,
+                    const ComputationOptions *options = nullptr) {
+    const ComputationOptions &o = options ? *options : c.options;
+    std::vector<SiteGroup> listed;
+    for (unsigned g : groups)
+      listed.push_back(c.ready.enumeration.groups[g]);
+    return std::make_pair(checkGroupSetFinite(c.program, c.ready.enumeration, groups, o),
+                          checkGroupSetSymbolic(c.program, c.ready.proof(), listed, o, backend));
+  };
+  auto describe = [](const char *what, const CheckedComputation &a, const CheckedComputation &b) {
+    printf("%s: finite %s %s (%s), order %s (%s), shared %s; symbolic %s (%s), order %s (%s), shared %s (%s)\n",
+           what, stringifyComputationStatus(a.status()), stringifyComputationTier(a.tier()), a.reason().c_str(),
+           stringifySetFactStatus(a.groupOrder().status), a.groupOrder().detail.c_str(),
+           stringifySetFactStatus(a.sharedCells().status), stringifyComputationStatus(b.status()),
+           b.reason().c_str(), stringifySetFactStatus(b.groupOrder().status), b.groupOrder().detail.c_str(),
+           stringifySetFactStatus(b.sharedCells().status), b.sharedCells().detail.c_str());
+  };
+  struct Want {
+    S finite;
+    T finiteTier;
+    S symbolic;
+    F order, shared, symbolicOrder, symbolicShared;
+  };
+  // Every claim over a set, whatever its verdict: a refutation is a concrete run judged
+  // again here, a fact refuted has its point, a fact proven its claim's tier, the facts
+  // per point add up to the claim's, and later phases' questions stay open.
+  auto expect = [&](const char *what, const Case &c, const std::vector<unsigned> &groups, Want want) {
+    auto [finite, symbolic] = claims(c, groups, z3Backend);
+    bool ok = finite.status() == want.finite && finite.tier() == want.finiteTier &&
+              symbolic.status() == want.symbolic && finite.groupOrder().status == want.order &&
+              finite.sharedCells().status == want.shared && symbolic.groupOrder().status == want.symbolicOrder &&
+              symbolic.sharedCells().status == want.symbolicShared;
+    if (!ok)
+      describe(what, finite, symbolic);
+    CHECK(ok);
+    CHECK(symbolic.status() != S::Refuted);
+    CHECK((finite.status() == S::Refuted) == finite.witness().has_value());
+    if (finite.witness()) {
+      RunResult run = runConcrete(c.program, *finite.witness());
+      CHECK(run.status == RunStatus::Returned);
+      SiteGroup united;
+      for (unsigned g : groups)
+        for (unsigned site : c.ready.enumeration.groups[g].sites)
+          united.sites.push_back(site);
+      ReplayResult replay = replayGroup(c.program, united, finite.witness()->parameters, HerbrandLimits());
+      CHECK(replay.outcome == ReplayOutcome::Mismatch);
+      CHECK(replayDifference(c.program, united, *finite.witness(), run, replay.prefix).has_value());
+    }
+    for (const CheckedComputation *claim : {&finite, &symbolic}) {
+      CHECK(claim->groupSites().size() == groups.size());
+      CHECK(claim->binding().find("|groups|") != std::string::npos);
+      CHECK(claim->domainAndOrder().kind() == ProofStatus::Kind::Unknown);
+      CHECK(claim->transformationEquivalence().kind() == ProofStatus::Kind::Unknown);
+      for (const SetFact *fact : {&claim->groupOrder(), &claim->sharedCells()}) {
+        CHECK((fact->status == F::Refuted) == fact->point.has_value());
+        if (fact->status == F::Proven)
+          CHECK(claim->status() == S::Verified && fact->tier == claim->tier());
+        if (fact->status == F::Refuted)
+          CHECK(claim == &finite);
+      }
+    }
+    if (finite.status() == S::Verified) {
+      CHECK(finite.groupPoints().size() == finite.points().size());
+      for (unsigned k = 0; k < finite.points().size() && k < finite.groupPoints().size(); ++k) {
+        const GroupSetPoint &point = finite.groupPoints()[k];
+        uint64_t sum = 0;
+        for (uint64_t count : point.events)
+          sum += count;
+        CHECK(point.events.size() == groups.size() && sum == finite.points()[k].events);
+        CHECK(point.parameters == finite.points()[k].parameters);
+      }
+    }
+    return std::make_pair(std::move(finite), std::move(symbolic));
+  };
+  auto alone = [&](const Case &c, unsigned g) {
+    return std::make_pair(checkComputationFinite(c.program, c.ready.enumeration, g, c.options),
+                          checkComputationSymbolic(c.program, c.ready.proof(), c.ready.enumeration.groups[g],
+                                                   c.options, z3Backend));
+  };
+
+  // 1. Two groups, one root, cells that never meet: each group alone holds too, since
+  // the other's stores are a disjoint frame.
+  {
+    Case c = load("different_cells", 1, 3);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    expect("different cells", c, {g1, g2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Proven, F::Proven, F::Proven});
+    for (unsigned g : {g1, g2}) {
+      auto [finite, symbolic] = alone(c, g);
+      CHECK(finite.status() == S::Verified && symbolic.status() == S::Verified);
+      CHECK(finite.groupSites().empty() && finite.groupOrder().status == F::Unknown);
+    }
+  }
+  // 2 and 8. The same cells, from different operand roots: each group alone is refuted,
+  // and the union verified on both routes, with the cells shared.
+  {
+    Case c = load("same_cells", 1, 3);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    auto [finite, symbolic] = expect("same cells", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted,
+                                      F::Proven, F::Unknown});
+    for (unsigned g : {g1, g2}) {
+      auto [one, oneSymbolic] = alone(c, g);
+      CHECK(one.status() == S::Refuted && oneSymbolic.status() == S::Unknown);
+    }
+    CHECK(finite.fold() == FoldForm::ModularInteger && symbolic.fold() == FoldForm::ModularInteger);
+    CHECK(finite.contracts().size() == 2 && symbolic.contracts().size() == 2);
+    for (const GroupSetPoint &point : finite.groupPoints()) {
+      uint64_t n = point.parameters[0].getZExtValue();
+      CHECK(point.events == std::vector<uint64_t>({n, n}) && point.sharedCells == n && point.listedOrder);
+    }
+    for (const ReplayFacts &facts : finite.points())
+      CHECK(facts.maxContributions == 2 && facts.outputCells == facts.parameters[0].getZExtValue());
+    // 9, reordered: the listing changes the order fact and nothing else.
+    auto [backward, backwardSymbolic] = expect("same cells, listed backwards", c, {g2, g1},
+                                               {S::Verified, T::ScopeEnumerated, S::Verified, F::Refuted,
+                                                F::Refuted, F::Unknown, F::Unknown});
+    CHECK(backward.reason() == finite.reason() && backward.points().size() == finite.points().size());
+    CHECK(backwardSymbolic.reason() == symbolic.reason() &&
+          backwardSymbolic.records().size() == symbolic.records().size());
+    CHECK(backward.binding() != finite.binding());
+    CHECK(backwardSymbolic.groupOrder().detail.find("GO") != std::string::npos);
+    // 9, duplicated and malformed: refused, never a claim.
+    auto refused = [&](const char *what, const std::vector<SiteGroup> &listed, const char *text) {
+      CheckedComputation out = checkGroupSetSymbolic(c.program, c.ready.proof(), listed, c.options, z3Backend);
+      bool ok = out.status() == S::Unknown && out.tier() == T::Proposed &&
+                out.reason().find(text) != std::string::npos;
+      if (!ok)
+        printf("%s: %s\n", what, out.reason().c_str());
+      CHECK(ok);
+      CHECK(out.groupOrder().status == F::Unknown && out.groupOrder().detail.find("refused") != std::string::npos);
+    };
+    const SiteGroup &first = c.ready.enumeration.groups[g1], &second = c.ready.enumeration.groups[g2];
+    refused("a group twice", {first, first}, "a group is listed twice");
+    refused("no group", {}, "no group");
+    SiteGroup bogus = first;
+    bogus.sites.push_back(77);
+    refused("a site the program lacks", {bogus, second}, "does not have");
+    SiteGroup doubled = first;
+    doubled.sites.push_back(doubled.sites.front());
+    refused("a site twice", {doubled, second}, "site is listed twice");
+    SiteGroup mixed = first;
+    mixed.sites.push_back(second.sites.front());
+    refused("a site of another group", {mixed}, "not the sites of its roots");
+    CHECK(checkGroupSetFinite(c.program, c.ready.enumeration, {g1, g1}, c.options).reason().find("listed twice") !=
+          std::string::npos);
+    CHECK(checkGroupSetFinite(c.program, c.ready.enumeration, {g1, 99}, c.options).reason() == "no such group");
+    CHECK(checkGroupSetFinite(c.program, c.ready.enumeration, {}, c.options).reason().find("no group") !=
+          std::string::npos);
+    // 10, the symbolic route's queries. Here no write shares a root with an operand, so
+    // the claim asks none; `framed` below has some.
+    ComputationOptions noTimeout = c.options;
+    noTimeout.termination.solver.timeoutMilliseconds = 0;
+    CHECK(claims(c, {g1, g2}, z3Backend, &noTimeout).second.reason().find("limit of zero") != std::string::npos);
+    ComputationOptions tight = c.options;
+    tight.limits.replay.maxSteps = 2;
+    CHECK(claims(c, {g1, g2}, z3Backend, &tight).first.status() == S::Unknown);
+    std::vector<SiteGroup> listed{first, second};
+    CHECK(checkGroupSetSymbolic(c.program, nullptr, listed, c.options, z3Backend).status() == S::Unknown);
+    // A sample is no scope, for the claim and for its facts.
+    Prepared sampled = prepare(c.program, c.scope, c.authorized, {{APInt(16, 2)}});
+    CheckedComputation sample = checkGroupSetFinite(c.program, sampled.enumeration, {g1, g2}, c.options);
+    CHECK(sample.status() == S::Verified && sample.tier() == T::Point);
+    CHECK(sample.groupOrder().status == F::Proven && sample.groupOrder().tier == T::Point);
+    CHECK(sample.sharedCells().status == F::Refuted && *sample.sharedCells().point == std::vector<APInt>{APInt(16, 2)});
+    // A set never stands in for a group: different bindings, so a candidate cannot use it.
+    auto [oneFinite, oneSymbolic] = alone(c, g1);
+    CHECK(finite.binding() != oneFinite.binding() && symbolic.binding() != oneSymbolic.binding());
+    CHECK(checkGroupSetFinite(c.program, c.ready.enumeration, {g1}, c.options).binding() != oneFinite.binding());
+    CHECK(checkGroupSetFinite(c.program, c.ready.enumeration, {g1}, c.options).binding() != finite.binding());
+    // A fact's own limit: the claim asks no pair here, the shared-cells fact asks one.
+    ComputationOptions noPairs = c.options;
+    noPairs.limits.maxPairs = 0;
+    CheckedComputation pairless = claims(c, {g1, g2}, z3Backend, &noPairs).second;
+    CHECK(pairless.status() == S::Verified && pairless.sharedCells().status == F::Unknown &&
+          pairless.sharedCells().detail.find("arrival pairs") != std::string::npos);
+  }
+  // 10. A store outside both groups beside each output: F1 and OP2 are asked, and an
+  // unknown or sat answer to either is Unknown, as are the facts with it. A fact's query
+  // answered unknown leaves only that fact open.
+  {
+    Case c = load("framed", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    expect("framed", c, {g1, g2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted, F::Proven, F::Unknown});
+    for (const char *id : {"OP2 ", "F1 "})
+      for (SmtAnswer answer : {SmtAnswer::Unknown, SmtAnswer::Sat}) {
+        Selective solver(id, answer);
+        auto [f, s] = claims(c, {g1, g2}, solver);
+        if (solver.hits == 0)
+          printf("framed: no %s query\n", id);
+        CHECK(solver.hits > 0);
+        CHECK(s.status() == S::Unknown && s.tier() == T::Proposed);
+        CHECK(s.groupOrder().status == F::Unknown && s.sharedCells().status == F::Unknown);
+      }
+    ComputationOptions narrow = c.options;
+    narrow.limits.maxPairs = 0;
+    CHECK(claims(c, {g1, g2}, z3Backend, &narrow).second.reason().find("arrival pairs") != std::string::npos);
+    ComputationOptions few = c.options;
+    few.limits.maxQueries = 1;
+    CHECK(claims(c, {g1, g2}, z3Backend, &few).second.status() == S::Unknown);
+    Selective quiet("SH ", SmtAnswer::Unknown);
+    auto [f, s] = claims(c, {g1, g2}, quiet);
+    CHECK(quiet.hits > 0 && s.status() == S::Verified && s.sharedCells().status == F::Unknown);
+    CHECK(s.groupOrder().status == F::Proven);
+  }
+  // 3. The second group reads what the first wrote: no claim over the union can say its
+  // operands are initial. Refuted at a concrete run; Unknown symbolically, at OP2.
+  {
+    Case c = load("reads_written", 1, 3);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 3, 2, 4);
+    auto [finite, symbolic] = expect("reads written", c, {g1, g2},
+                                     {S::Refuted, T::Proposed, S::Unknown, F::Unknown, F::Unknown,
+                                      F::Unknown, F::Unknown});
+    CHECK(finite.reason().find("operand") != std::string::npos);
+    CHECK(symbolic.reason().find("OP2") != std::string::npos);
+    auto [first, firstSymbolic] = alone(c, g1);
+    CHECK(first.status() == S::Verified && firstSymbolic.status() == S::Verified);
+    CHECK(alone(c, g2).first.status() == S::Refuted);
+  }
+  // 4. The same loops the other way round: the reads see initial values, so the union
+  // holds at every point. OP2 is order-free, so the symbolic route cannot say so. And the
+  // two orders compute different things.
+  {
+    Case before = load("reads_first", 1, 3), after = load("reads_written", 1, 3);
+    unsigned g1 = G(before, 2, 0, 1), g2 = G(before, 3, 2, 4);
+    expect("reads first", before, {g2, g1},
+           {S::Verified, T::ScopeEnumerated, S::Unknown, F::Proven, F::Proven, F::Unknown, F::Unknown});
+    // Listed in the other order, the listing is what is refuted, not the claim.
+    expect("reads first, listed backwards", before, {g1, g2},
+           {S::Verified, T::ScopeEnumerated, S::Unknown, F::Refuted, F::Proven, F::Unknown, F::Unknown});
+    auto value = [](unsigned root, unsigned cell) { return APInt(32, 3 + root * 8 + cell); };
+    RunResult x = runConcrete(before.program, gsEntry(before.program, 2, value));
+    RunResult y = runConcrete(after.program, gsEntry(after.program, 2, value));
+    CHECK(x.status == RunStatus::Returned && y.status == RunStatus::Returned);
+    CHECK(x.memory[3].cells[0] != y.memory[3].cells[0]);
+  }
+  // 4 and 5, floats: each order verified as it runs, and the two orders differ. A listing
+  // against the run's order refutes the order fact, never the claim.
+  {
+    Case ab = load("float_ab", 1, 2), ba = load("float_ba", 1, 2);
+    unsigned a1 = G(ab, 2, 0, 1), a2 = G(ab, 2, 3, 4), b1 = G(ba, 2, 0, 1), b2 = G(ba, 2, 3, 4);
+    auto [forward, forwardSymbolic] = expect("float ab", ab, {a1, a2},
+                                             {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven,
+                                              F::Refuted, F::Proven, F::Unknown});
+    expect("float ba, listed ab", ba, {b1, b2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Refuted, F::Refuted, F::Unknown, F::Unknown});
+    expect("float ba, listed ba", ba, {b2, b1},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted, F::Proven, F::Unknown});
+    CHECK(forward.fold() == FoldForm::OrderedFloat && forwardSymbolic.fold() == FoldForm::OrderedFloat);
+    // c0 = 1e16, a b = 1, d e = -1e16: (1e16 + 1) - 1e16 = 0, but (1e16 - 1e16) + 1 = 1.
+    auto value = [](unsigned root, unsigned cell) {
+      double v = cell != 0 ? 0.0 : root == 2 ? 1e16 : root == 3 ? -1e16 : 1.0;
+      return APInt(64, llvm::bit_cast<uint64_t>(v));
+    };
+    RunResult x = runConcrete(ab.program, gsEntry(ab.program, 1, value));
+    RunResult y = runConcrete(ba.program, gsEntry(ba.program, 1, value));
+    CHECK(x.status == RunStatus::Returned && y.status == RunStatus::Returned);
+    CHECK(x.memory[2].cells[0] && y.memory[2].cells[0] && *x.memory[2].cells[0] != *y.memory[2].cells[0]);
+    CHECK(ab.program.fingerprint != ba.program.fingerprint);
+  }
+  // 5. One block with a site of each group: the fold alternates, which the replay
+  // follows; the listed order fails at n = 2, and the walk does not judge such a block.
+  {
+    Case c = load("interleaved", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    auto [finite, symbolic] = expect("interleaved", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Refuted, F::Refuted,
+                                      F::Unknown, F::Unknown});
+    CHECK(*finite.groupOrder().point == std::vector<APInt>{APInt(16, 2)});
+    CHECK(symbolic.groupOrder().detail.find("one block") != std::string::npos);
+  }
+  // 5. An outer loop around both: once, the order holds over the scope, the walk's way
+  // back to the first group pruned as infeasible; twice, it is feasible and fails.
+  {
+    Case once = load("outer_once", 1, 2), twice = load("outer_twice", 1, 2);
+    unsigned o1 = G(once, 2, 0, 1), o2 = G(once, 2, 3, 4), t1 = G(twice, 2, 0, 1), t2 = G(twice, 2, 3, 4);
+    expect("outer once", once, {o1, o2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted, F::Proven, F::Unknown});
+    expect("outer twice", twice, {t1, t2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Refuted, F::Refuted, F::Unknown, F::Unknown});
+    // The walk's pruning undecided: the order is not known, and the claim stands.
+    Selective undecided("next event walk", SmtAnswer::Unknown);
+    auto [f, s] = claims(once, {o1, o2}, undecided);
+    CHECK(undecided.hits > 0);
+    CHECK(s.status() == S::Verified && s.groupOrder().status == F::Unknown);
+    CHECK(s.groupOrder().detail.find("could not be decided") != std::string::npos);
+  }
+  // 6. A group with no event at some points, or at none: it contributes nothing, and is
+  // listed with zero events. A set of only that group has no claim.
+  {
+    Case c = load("empty_second", 1, 3);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    auto [finite, symbolic] = expect("empty second", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Proven,
+                                      F::Proven, F::Proven});
+    unsigned zero = 0;
+    for (const GroupSetPoint &point : finite.groupPoints())
+      zero += point.events.size() == 2 && point.events[1] == 0;
+    CHECK(zero == 2);
+    Case never = load("never", 1, 3);
+    unsigned n1 = G(never, 2, 0, 1), n2 = G(never, 2, 3, 4);
+    auto [all, allSymbolic] = expect("never", never, {n1, n2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Proven,
+                                      F::Proven, F::Proven});
+    for (const GroupSetPoint &point : all.groupPoints())
+      CHECK(point.events.size() == 2 && point.events[1] == 0);
+    auto [idle, idleSymbolic] = claims(never, {n2}, z3Backend);
+    CHECK(idle.status() == S::Unknown && idle.reason().find("no point has events") != std::string::npos);
+    CHECK(idleSymbolic.status() == S::Unknown && idleSymbolic.reason().find("NV") != std::string::npos);
+  }
+  // 7. A cell with three contributions, two from a repeated loop.
+  {
+    Case c = load("repeat_shared", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    auto [finite, symbolic] = expect("repeat shared", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted,
+                                      F::Proven, F::Unknown});
+    for (const ReplayFacts &facts : finite.points())
+      CHECK(facts.maxContributions == 3);
+    for (const GroupSetPoint &point : finite.groupPoints()) {
+      uint64_t n = point.parameters[0].getZExtValue();
+      CHECK(point.events == std::vector<uint64_t>({2 * n, n}));
+    }
+  }
+  // 8 and 9. Three groups on one row: the three hold together; any two of them leave the
+  // third's stores a foreign write, which no claim may hide.
+  {
+    Case c = load("three_groups", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4), g3 = G(c, 2, 0, 4);
+    expect("three groups", c, {g1, g2, g3},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted, F::Proven, F::Unknown});
+    // The listed two still share their cells, which the trace shows before the witness.
+    for (std::vector<unsigned> missing : {std::vector<unsigned>{g1, g2}, {g1, g3}, {g2, g3}})
+      expect("a group missing", c, missing,
+             {S::Refuted, T::Proposed, S::Unknown, F::Unknown, F::Refuted, F::Unknown, F::Unknown});
+  }
+  // 9. A group of two sites, and a set that lists only part of it.
+  {
+    Case c = load("two_sites", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    CHECK(c.ready.enumeration.groups[g1].sites.size() == 2);
+    expect("two sites", c, {g1, g2},
+           {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted, F::Proven, F::Unknown});
+    SiteGroup part = c.ready.enumeration.groups[g1];
+    part.sites.pop_back();
+    std::vector<SiteGroup> listed{part, c.ready.enumeration.groups[g2]};
+    CHECK(checkGroupSetSymbolic(c.program, c.ready.proof(), listed, c.options, z3Backend).reason().find(
+              "not the sites of its roots") != std::string::npos);
+  }
+  // The listing changes the order fact and the binding, and nothing of the claim: not its
+  // status, tier or reason, not its records, contracts or points, on either route.
+  {
+    Case c = load("two_overlaps", 1, 2);
+    unsigned g1 = G(c, 2, 2, 4), g2 = G(c, 2, 2, 0);
+    auto [forward, forwardSymbolic] = claims(c, {g1, g2}, z3Backend);
+    auto [backward, backwardSymbolic] = claims(c, {g2, g1}, z3Backend);
+    CHECK(forwardSymbolic.status() == S::Unknown && forwardSymbolic.reason().find("OP2") != std::string::npos);
+    for (auto [a, b] : {std::make_pair(&forward, &backward), std::make_pair(&forwardSymbolic, &backwardSymbolic)}) {
+      bool same = a->status() == b->status() && a->tier() == b->tier() && a->reason() == b->reason() &&
+                  a->records().size() == b->records().size() && a->contracts().size() == b->contracts().size() &&
+                  a->points().size() == b->points().size();
+      for (unsigned k = 0; same && k < a->records().size(); ++k)
+        same = a->records()[k].id == b->records()[k].id && a->records()[k].location == b->records()[k].location &&
+               a->records()[k].result == b->records()[k].result;
+      for (unsigned k = 0; same && k < a->contracts().size(); ++k)
+        same = a->contracts()[k].site == b->contracts()[k].site;
+      if (!same)
+        printf("two overlaps: %s / %s\n", a->reason().c_str(), b->reason().c_str());
+      CHECK(same);
+      CHECK(a->binding() != b->binding());
+    }
+    SemanticProgram p = m.import("fresh_both");
+    ParameterScope scope = range(p, 1, 2);
+    Authorizations all = everyPair(p);
+    Prepared ready = prepare(p, scope, all);
+    CHECK(ready.enumeration.groups.size() == 2);
+    std::vector<SiteGroup> listed = ready.enumeration.groups, reversed(listed.rbegin(), listed.rend());
+    CheckedComputation x = checkGroupSetSymbolic(p, ready.proof(), listed, computationOptions(scope, all), z3Backend);
+    CheckedComputation y = checkGroupSetSymbolic(p, ready.proof(), reversed, computationOptions(scope, all), z3Backend);
+    if (x.reason() != y.reason() || x.reason().find("F3") == std::string::npos)
+      printf("fresh both: %s / %s\n", x.reason().c_str(), y.reason().c_str());
+    CHECK(x.status() == S::Unknown && x.reason().find("F3") != std::string::npos && x.reason() == y.reason());
+  }
+  // An open point: the claim stands at the others, and lists facts for those only.
+  {
+    Case c = load("identity_late", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 2, 3, 4);
+    auto [finite, symbolic] = expect("identity late", c, {g1, g2},
+                                     {S::Verified, T::Point, S::Unknown, F::Proven, F::Refuted, F::Unknown,
+                                      F::Unknown});
+    CHECK(finite.points().size() == 1 && finite.groupPoints().size() == 1);
+    CHECK(finite.reason().find("open") != std::string::npos);
+  }
+  // A lead from the symbolic route that does not refute leaves the finite claim as it was.
+  {
+    Case c = load("reads_first", 1, 3);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 3, 2, 4);
+    ComputationRequest request;
+    request.search = false;
+    request.synthesis.scope = c.scope;
+    request.synthesis.authorized = c.authorized;
+    request.synthesis.termination.solver = testSolver();
+    request.computation = c.options;
+    GroupSetRequest pair;
+    pair.groups = {g2, g1};
+    request.groupSets = {pair};
+    ComputationResult result = analyzeComputation(c.program, c.ready.proof(), request, z3Backend);
+    CHECK(result.sets.size() == 1);
+    if (result.sets.size() == 1) {
+      CHECK(result.sets[0].symbolic.status() == S::Unknown && result.sets[0].symbolic.failingPoint().has_value());
+      CHECK(result.sets[0].finite.status() == S::Verified && result.sets[0].finite.tier() == T::ScopeEnumerated);
+    }
+  }
+  // A failed query's point, past what any enumeration covers, is replayed exactly for a
+  // set as for a group.
+  {
+    SemanticProgram p = m.import("far_shared");
+    ParameterScope scope = range(p, 1, 5000);
+    Authorizations all = everyPair(p);
+    TerminationOptions termination;
+    termination.scope = scope;
+    termination.authorized = all;
+    termination.limits.replayFuel = 1u << 12;
+    termination.limits.solver = testSolver();
+    auto certificate = analyzeTermination(p, z3Backend, termination).certificate;
+    CHECK(certificate.has_value());
+    ComputationRequest request;
+    request.search = false;
+    request.synthesis.scope = scope;
+    request.synthesis.authorized = all;
+    request.synthesis.termination.solver = testSolver();
+    request.computation = computationOptions(scope, all);
+    GroupSetRequest every;
+    every.all = true;
+    request.groupSets = {every};
+    ComputationResult result = analyzeComputation(p, certificate ? &*certificate : nullptr, request, z3Backend);
+    CHECK(result.enumeration.gate != GateStatus::Open);
+    CHECK(result.sets.size() == 1 && result.groups.size() == 2);
+    if (result.sets.size() == 1) {
+      const GroupSetComputation &set = result.sets[0];
+      if (set.finite.status() != S::Refuted)
+        describe("far shared", set.finite, set.symbolic);
+      CHECK(set.groups == std::vector<unsigned>({0, 1}));
+      CHECK(set.symbolic.status() == S::Unknown && set.symbolic.reason().find("F1") != std::string::npos);
+      CHECK(set.finite.status() == S::Refuted && set.finite.witness().has_value());
+      if (set.finite.witness())
+        CHECK(set.finite.witness()->parameters[0].uge(3000));
+    }
+    std::string json = toJSON(p, result);
+    CHECK(json.find("\"group_sets\"") != std::string::npos && json.find("\"group_order\"") != std::string::npos);
+    ComputationRequest plain = request;
+    plain.groupSets.clear();
+    CHECK(toJSON(p, analyzeComputation(p, certificate ? &*certificate : nullptr, plain, z3Backend))
+              .find("group_sets") == std::string::npos);
+  }
+  // The trace must not depend on memory, for a set as for a group; a fresh output has no
+  // initial cells, and F3 says so for every listed group, not only the first.
+  {
+    SemanticProgram p = m.import("memory_guarded");
+    CHECK(p.isSupported() && !p.controlOblivious);
+    ParameterScope scope = range(p, 1, 2);
+    Authorizations all = everyPair(p);
+    Prepared ready = prepare(p, scope, all);
+    CHECK(ready.enumeration.groups.size() == 2);
+    ComputationOptions options = computationOptions(scope, all);
+    std::vector<SiteGroup> listed = ready.enumeration.groups;
+    CheckedComputation symbolic = checkGroupSetSymbolic(p, ready.proof(), listed, options, z3Backend);
+    CHECK(symbolic.status() == S::Unknown && symbolic.reason().find("depends on memory contents") != std::string::npos);
+    CheckedComputation finite = checkGroupSetFinite(p, ready.enumeration, {0, 1}, options);
+    CHECK(finite.status() == S::Unknown && finite.reason().find("gate is closed") != std::string::npos);
+
+    SemanticProgram q = m.import("fresh_second");
+    ParameterScope qs = range(q, 1, 2);
+    Authorizations qa = everyPair(q);
+    Prepared qr = prepare(q, qs, qa);
+    CHECK(qr.enumeration.groups.size() == 2);
+    std::vector<SiteGroup> both = qr.enumeration.groups;
+    CheckedComputation fresh = checkGroupSetSymbolic(q, qr.proof(), both, computationOptions(qs, qa), z3Backend);
+    if (fresh.reason().find("F3") == std::string::npos)
+      printf("fresh second: %s\n", fresh.reason().c_str());
+    CHECK(fresh.status() == S::Unknown && fresh.reason().find("F3") != std::string::npos);
+    // Too many groups: refused before anything else is read.
+    std::vector<SiteGroup> many(65, both[0]);
+    CHECK(checkGroupSetSymbolic(q, qr.proof(), many, computationOptions(qs, qa), z3Backend).reason().find(
+              "more than 64") != std::string::npos);
+  }
+  // The frame of a union observes every listed output; the fold of a union with one float
+  // site is ordered, whichever group comes first.
+  {
+    Case c = load("observed_second", 1, 2);
+    unsigned g1 = G(c, 2, 0, 1), g2 = G(c, 3, 4, 1);
+    auto [finite, symbolic] = expect("observed second", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Proven,
+                                      F::Proven, F::Proven});
+    for (const CheckedComputation *claim : {&finite, &symbolic}) {
+      bool observer = false;
+      for (const ResidualEffect &effect : claim->frame())
+        observer = observer || (effect.kind == MemoryEffect::Read && effect.root == 3 && effect.observesOutput);
+      CHECK(observer);
+    }
+    Case mix = load("mixed", 1, 2);
+    unsigned f = G(mix, 2, 0, 1), i = G(mix, 5, 3, 4);
+    auto [mixed, mixedSymbolic] = expect("mixed", mix, {i, f},
+                                         {S::Verified, T::ScopeEnumerated, S::Verified, F::Refuted, F::Proven,
+                                          F::Unknown, F::Proven});
+    CHECK(mixed.fold() == FoldForm::OrderedFloat && mixedSymbolic.fold() == FoldForm::OrderedFloat);
+    CHECK(alone(mix, i).first.fold() == FoldForm::ModularInteger);
+  }
+  // A set of one group is that group's claim, with a binding of its own.
+  {
+    Module cat(catalogue());
+    struct One {
+      const char *name;
+      unsigned group;
+    };
+    for (One one : {One{"clean", 0}, One{"chain", 0}, One{"chain", 1}, One{"overwritten", 0},
+                    One{"prefix", 0}, One{"collapsed", 0}, One{"also_stored", 0}, One{"observed", 0},
+                    One{"same_root", 0}, One{"relay", 0}, One{"repeated", 0}, One{"integer", 0}}) {
+      SemanticProgram p = cat.import(one.name);
+      ParameterScope scope = range(p, 1, 2);
+      Authorizations all = everyPair(p);
+      Prepared ready = prepare(p, scope, all);
+      ComputationOptions options = computationOptions(scope, all);
+      CheckedComputation finite = checkComputationFinite(p, ready.enumeration, one.group, options);
+      CheckedComputation symbolic =
+          checkComputationSymbolic(p, ready.proof(), ready.enumeration.groups[one.group], options, z3Backend);
+      CheckedComputation setFinite = checkGroupSetFinite(p, ready.enumeration, {one.group}, options);
+      std::vector<SiteGroup> listed{ready.enumeration.groups[one.group]};
+      CheckedComputation setSymbolic = checkGroupSetSymbolic(p, ready.proof(), listed, options, z3Backend);
+      bool same = finite.status() == setFinite.status() && finite.tier() == setFinite.tier() &&
+                  finite.reason() == setFinite.reason() && finite.points().size() == setFinite.points().size() &&
+                  finite.frame().size() == setFinite.frame().size() && finite.fold() == setFinite.fold() &&
+                  symbolic.status() == setSymbolic.status() && symbolic.reason() == setSymbolic.reason() &&
+                  symbolic.records().size() == setSymbolic.records().size() &&
+                  symbolic.contracts().size() == setSymbolic.contracts().size() &&
+                  symbolic.separations().size() == setSymbolic.separations().size();
+      if (!same)
+        printf("%s group %u: alone %s / %s, as a set %s / %s\n", one.name, one.group, finite.reason().c_str(),
+               symbolic.reason().c_str(), setFinite.reason().c_str(), setSymbolic.reason().c_str());
+      CHECK(same);
+      CHECK(finite.binding() != setFinite.binding());
+      if (setFinite.status() == S::Verified)
+        CHECK(setFinite.groupOrder().status == F::Proven && setFinite.sharedCells().status == F::Proven);
+    }
+  }
+  // The numeric example, run as it is written. Group 1 adds A, group 2 adds B, and the
+  // trace is C[0] += 1, C[1] += 2, C[0] += 10, C[1] += 20, so C ends as [11, 22]. Each
+  // group alone is refuted, and the union verified.
+  {
+    Case c = load("numeric", 1, 2);
+    unsigned g1 = G(c, 2, 0, 3), g2 = G(c, 2, 1, 3);
+    const unsigned values[4][2] = {{1, 2}, {10, 20}, {0, 0}, {1, 1}};
+    EntryState entry = gsEntry(c.program, 2, [&](unsigned root, unsigned cell) { return APInt(32, values[root][cell]); });
+    RunResult run = runConcrete(c.program, entry);
+    CHECK(run.status == RunStatus::Returned && run.events.size() == 4);
+    if (run.events.size() == 4) {
+      unsigned site1 = c.ready.enumeration.groups[g1].sites[0], site2 = c.ready.enumeration.groups[g2].sites[0];
+      const unsigned sites[4] = {site1, site1, site2, site2}, cells[4] = {0, 1, 0, 1}, updates[4] = {1, 2, 11, 22};
+      for (unsigned e = 0; e < 4; ++e)
+        CHECK(run.events[e].site == sites[e] && run.events[e].h[0] == cells[e] &&
+              run.events[e].updateValue == APInt(32, updates[e]));
+      CHECK(*run.memory[2].cells[0] == APInt(32, 11) && *run.memory[2].cells[1] == APInt(32, 22));
+    }
+    auto [finite, symbolic] = expect("numeric", c, {g1, g2},
+                                     {S::Verified, T::ScopeEnumerated, S::Verified, F::Proven, F::Refuted,
+                                      F::Proven, F::Unknown});
+    bool sawTwo = false;
+    for (const GroupSetPoint &point : finite.groupPoints())
+      if (point.parameters[0] == APInt(16, 2)) {
+        sawTwo = true;
+        CHECK(point.events == std::vector<uint64_t>({2, 2}) && point.sharedCells == 2 && point.listedOrder);
+      }
+    CHECK(sawTwo);
+    SiteGroup united;
+    united.sites = {c.ready.enumeration.groups[g1].sites[0], c.ready.enumeration.groups[g2].sites[0]};
+    ReplayResult replay = replayGroup(c.program, united, entry.parameters, HerbrandLimits());
+    CHECK(replay.outcome == ReplayOutcome::Equal);
+    CHECK(!replayDifference(c.program, united, entry, run, replay.prefix).has_value());
+    for (unsigned g : {g1, g2}) {
+      CheckedComputation one = checkComputationFinite(c.program, c.ready.enumeration, g, c.options);
+      CHECK(one.status() == S::Refuted && one.witness().has_value());
+      if (one.witness()) {
+        RunResult witnessed = runConcrete(c.program, *one.witness());
+        CHECK(replayDifference(c.program, c.ready.enumeration.groups[g], *one.witness(), witnessed,
+                               replayGroup(c.program, c.ready.enumeration.groups[g], one.witness()->parameters,
+                                           HerbrandLimits())
+                                   .prefix)
+                  .has_value());
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -1994,6 +2754,7 @@ int main(int argc, char **argv) {
   run("float", testFloatSemantics);
   run("candidates", testCandidates);
   run("reach", testReach);
+  run("sets", testGroupSets);
   run("exhaustive", testExhaustive);
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;

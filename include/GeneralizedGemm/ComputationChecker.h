@@ -17,6 +17,12 @@
 //   Point, ScopeEnumerated   Herbrand replay of each exact point (Theorem 11).
 //   Symbolic                 E, OP, R, W and F over the whole scope (Theorem 9).
 //
+// G5b-M3: the same relation over several groups at once (Theorem 16), replayed over the
+// union of their sites in execution order, each event with its own roots. Nothing is
+// assumed of how the groups' cells meet: a cell two groups write is one fold, and an
+// operand cell any write reaches is refused as before. A claim about each group is no
+// claim about their union, and the union is checked as its own claim.
+//
 // A solver's unknown, an exhausted limit, an unsupported form and a Herbrand
 // mismatch all give Unknown. Refuted needs a concrete run, which is replayed.
 // Separation of two roots comes from fresh allocation or from an authorized name,
@@ -40,6 +46,7 @@ namespace mlir::generalized_gemm {
 struct ComputationLimits {
   HerbrandLimits replay;
   unsigned maxQueries = 4000, maxPairs = 4000;
+  unsigned maxUnfolding = 64; // G5b-M3: the walk from one event to the next, for groupOrder().
   // Concrete runs tried for a witness, after a mismatch. Only these use fills.
   unsigned witnessFills = 64;
   uint64_t witnessFuel = 1u << 22, witnessCells = 1u << 20;
@@ -85,6 +92,19 @@ public:
   /// Always Unknown here: G6 and G7 own these.
   const ProofStatus &transformationEquivalence() const { return transformationStatus; }
 
+  /// G5b-M3, for a claim over several groups: the sites of each listed group, in the
+  /// listed order. Empty for a claim about one group, whose facts below stay Unknown.
+  const std::vector<std::vector<unsigned>> &groupSites() const { return listed; }
+  /// Whether every event of a listed group comes before every event of each later-listed
+  /// one. Refuted at a point whose trace has one after; Proven at the claim's points, or
+  /// over the scope. A fact: the relation is in execution order whatever the listing.
+  const SetFact &groupOrder() const { return order; }
+  /// Whether two listed groups ever write one cell. Refuted at a point where two do.
+  /// A fact: a cell two groups write is one fold, in execution order.
+  const SetFact &sharedCells() const { return shared; }
+  /// Per replayed point with events, parallel to points().
+  const std::vector<GroupSetPoint> &groupPoints() const { return setPoints; }
+
 private:
   friend struct ComputationAuthority;
   CheckedComputation(ComputationTier tier, ComputationStatus status, std::string reason)
@@ -105,6 +125,9 @@ private:
   ProofStatus domainStatus = ProofStatus::unknown("no domain or order is claimed before G5");
   ProofStatus transformationStatus =
       ProofStatus::unknown("no transformation is claimed before G6 and G7");
+  std::vector<std::vector<unsigned>> listed;
+  SetFact order, shared;
+  std::vector<GroupSetPoint> setPoints;
 };
 
 /// Whether `enumeration` ran every point of `scope` and no other: every point lies in
@@ -123,6 +146,23 @@ CheckedComputation checkComputationSymbolic(const SemanticProgram &program,
                                             const TerminationCertificate *certificate,
                                             const SiteGroup &group,
                                             const ComputationOptions &options, SmtBackend &backend);
+
+/// G5b-M3, Point or ScopeEnumerated: one claim over the union of several groups.
+/// `groups` index the enumeration's groups, each whole and listed once. Their order is
+/// the one groupOrder() judges, and the one the binding, groupSites() and groupPoints()
+/// list them in; the claim itself, its reason, records and contracts are the same for
+/// every listing. The binding names every listed group, so this claim never stands in
+/// for the claim of one group.
+CheckedComputation checkGroupSetFinite(const SemanticProgram &program,
+                                       const DomainEnumeration &enumeration,
+                                       llvm::ArrayRef<unsigned> groups,
+                                       const ComputationOptions &options);
+
+/// G5b-M3, Symbolic: the obligations of Theorem 9 over the union of the groups' sites.
+CheckedComputation checkGroupSetSymbolic(const SemanticProgram &program,
+                                         const TerminationCertificate *certificate,
+                                         llvm::ArrayRef<SiteGroup> groups,
+                                         const ComputationOptions &options, SmtBackend &backend);
 
 /// A concrete entry at which `run` of `entry` differs from the replay. Exposed so a
 /// witness can be judged again by a test. Nullopt means no difference was shown,

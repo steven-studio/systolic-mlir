@@ -20,10 +20,18 @@
 
 namespace mlir::generalized_gemm {
 
+/// G5b-M3: one claim over several groups, by their indices, in the order the claim's
+/// groupOrder() judges. `all`: every supported group, in index order, or reversed.
+struct GroupSetRequest {
+  std::vector<unsigned> groups;
+  bool all = false, reversed = false;
+};
+
 struct ComputationRequest {
   SynthesisOptions synthesis;
   ComputationOptions computation;
   bool search = true; // False: the group claims alone, with no candidates.
+  std::vector<GroupSetRequest> groupSets; // G5b-M3. Empty: no claim over a set.
 };
 
 struct GroupComputation {
@@ -35,9 +43,17 @@ struct GroupComputation {
   std::vector<CandidateComputation> candidates;
 };
 
+/// G5b-M3: the claims over one set of groups.
+struct GroupSetComputation {
+  std::vector<unsigned> groups;
+  CheckedComputation finite = CheckedComputation::unknown("not checked");
+  CheckedComputation symbolic = CheckedComputation::unknown("not checked");
+};
+
 struct ComputationResult {
   DomainEnumeration enumeration;
   std::vector<GroupComputation> groups;
+  std::vector<GroupSetComputation> sets;
 };
 
 ComputationResult analyzeComputation(const SemanticProgram &program,

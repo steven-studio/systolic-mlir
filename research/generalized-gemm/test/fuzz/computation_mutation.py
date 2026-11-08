@@ -44,7 +44,8 @@ MUTANTS = [
     ("mismatch refutes alone", C, "      auto difference = replayDifference(program, group, *entry, run, replay.prefix);\n", "      std::optional<std::string> difference = std::string(\"nodes differ\");\n"),
     ("no witness search", C, "for (unsigned n = 0; n < options.limits.witnessFills; ++n) {", "for (unsigned n = 0; n < 0u; ++n) {"),
     ("stopped point ignored", C, "    if (!point.reason.empty()) {\n      complete = false;\n      continue;\n    }\n", "    if (!point.reason.empty())\n      continue;\n"),
-    ("sample called a scope", C, "bool complete = !enumeration.sampled, stopsSeen = false;", "bool complete = true, stopsSeen = false;"),
+    # Re-anchored in G5b-M3: G5a replaced `!enumeration.sampled` with the scope check.
+    ("sample called a scope", C, "bool complete = enumerationCoversScope(program, enumeration, options.scope), stopsSeen = false;", "bool complete = true, stopsSeen = false;"),
     ("open point called a scope", C, "    complete = false;\n    if (open.empty())\n", "    if (open.empty())\n"),
     ("no events accepted", C, "      if (replay.facts.events)\n        facts.push_back(std::move(replay.facts));\n", "      facts.push_back(std::move(replay.facts));\n"),
     ("closed gate checked", C, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedComputation::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
@@ -107,7 +108,7 @@ MUTANTS = [
     ("binding ignores the scope", C, "  for (const ParameterRange &range : options.scope.ranges)\n    out += std::to_string(range.parameter)", "  for (const ParameterRange &range : llvm::ArrayRef<ParameterRange>())\n    out += std::to_string(range.parameter)"),
     ("binding ignores authorizations", C, "  for (const std::string &name : options.authorized)\n    out += \"|\" + name;\n", ""),
     ("short key passes", C, "              if (!kept)\n                return ViewInjectivity::NotProven;\n              list.push_back(kept);\n", "              if (kept)\n                list.push_back(kept);\n"),
-    ("frame hides observers", C, "        residual.observesOutput = effect.root == *group.output;\n", ""),
+    ("frame hides observers", C, "        residual.observesOutput = observed.count(effect.root) != 0;\n", ""),
     ("frame hides value source", C, "        residual.valueReadsMemory = dependsOnMemory(effect.value, independent);\n", "        residual.valueReadsMemory = false;\n"),
     # Witnesses.
     ("difference ignores operands", C, "    if (event.aValue != *a0 || event.bValue != *b0)\n      note(name + \" reads an operand that is not its initial value\");\n", ""),
@@ -153,6 +154,41 @@ MUTANTS = [
     ("a lead is not run", A, "    if (group.finite.status() != ComputationStatus::Refuted && group.symbolic.failingPoint()) {", "    if (false) {"),
     ("a lead replaces a finite claim", A, "      if (lead.status() == ComputationStatus::Refuted)\n        group.finite = std::move(lead);\n", "      group.finite = std::move(lead);\n"),
     ("locations not reached", Y, "  for (unsigned location : locations)\n    targets.push_back({location, location});\n", ""),
+    # G5b-M3: claims over sets of groups.
+    ("set of part of a group", C, "    if (!groupIsWhole(program, group, why))\n      return std::nullopt;\n", ""),
+    ("set lists a group twice", C, "    if (!triples.insert({*group.output, group.first, group.second}).second) {\n      why = \"a group is listed twice\";\n      return std::nullopt;\n    }\n", "    triples.insert({*group.output, group.first, group.second});\n"),
+    ("set lists a site twice", C, "      if (set.groupOf[site] != -1) {\n        why = \"a site is listed twice\";\n        return std::nullopt;\n      }\n", ""),
+    ("set of more than 64", C, "  if (listed.size() > 64) {", "  if (false) {"),
+    ("set outputs unrecorded", C, "    set.outputs.insert(*group.output);\n", ""),
+    ("set replayed as a group", C, "        set ? replayGroupSet(program, group, set->groupOf, set->groups.size(), point.parameters,", "        false ? replayGroupSet(program, group, set->groupOf, set->groups.size(), point.parameters,"),
+    ("set points unobserved", C, "    if (set)\n      set->observe(point.parameters, replay);\n", ""),
+    ("order violation unseen", C, "    if (!replay.listedOrder && !orderBroken)\n      orderBroken = parameters;\n", ""),
+    ("shared cell unseen", C, "    if (replay.sharedCells && !cellShared)\n      cellShared = parameters;\n", ""),
+    ("mismatch points listed", C, "    if (replay.outcome == ReplayOutcome::Equal && replay.facts.events)\n      points.push_back(", "    if (replay.facts.events)\n      points.push_back("),
+    ("finite fact refutation dropped", C, "  if (broken)\n    return refutedFact(*broken, refuted);\n", ""),
+    ("finite fact without a claim", C, "  if (claim.status() == ComputationStatus::Verified)\n    return provenFact(claim.tier(), proven);", "  if (true)\n    return provenFact(claim.tier(), proven);"),
+    ("fold of the first site", C, "  bool modular = llvm::all_of(group.sites, [&](unsigned id) {", "  bool modular = llvm::any_of(group.sites, [&](unsigned id) {"),
+    ("frame observes the first output", C, "  std::set<unsigned> observed = outputs ? *outputs : std::set<unsigned>{*group.output};", "  std::set<unsigned> observed = std::set<unsigned>{*group.output};"),
+    ("F3 for no listed group", C, "    for (const SiteGroup *listed : ordered)\n      roots.insert(roots.end(), {*listed->output, listed->first, listed->second});\n", ""),
+    ("F3 in the listed order", C, "    std::sort(ordered.begin(), ordered.end(), [](const SiteGroup *x, const SiteGroup *y) {\n      return x->sites.front() < y->sites.front();\n    });\n", ""),
+    ("union in the listed order", C, "  std::sort(united.sites.begin(), united.sites.end());\n", ""),
+    ("set facts before the claim", C, "    if (set && passed) {\n      try {", "    if (set) {\n      try {"),
+    ("shared query ignored", C, "        if (answer != SmtAnswer::Unsat)\n          return unknownFact(std::string(\"SH at sites \")", "        if (false)\n          return unknownFact(std::string(\"SH at sites \")"),
+    ("shared pairs within a group", C, "      if (set->groupOf[x] >= set->groupOf[y] || first.output->root != second.output->root)", "      if (set->groupOf[x] > set->groupOf[y] || first.output->root != second.output->root)"),
+    ("shared pair limit ignored", C, "  if (count > options.limits.maxPairs)\n    return unknownFact(\"more arrival pairs than the limit\");\n", ""),
+    ("order walk skipped", C, "      if (!walkToNextEvents(program, locations, options.limits.maxUnfolding, quiet, why,", "      if (false && !walkToNextEvents(program, locations, options.limits.maxUnfolding, quiet, why,"),
+    ("order backward step admitted", C, "        if (next->second >= here)\n          return true;\n", "        return true;\n"),
+    ("two groups in a block admitted", C, "    if (!added && slot->second != set->groupOf[id])\n      return unknownFact(\"two listed groups have sites in one block\");\n", ""),
+    ("fact queries recorded", C, "  if (keep)\n    records.push_back(std::move(record));\n", "  records.push_back(std::move(record));\n"),
+    ("set limits unchecked", C, "  if (!limitsAreEffective(options, why))\n    return CheckedComputation::unknown(why);\n  SetTrace set;", "  SetTrace set;"),
+    ("set trace not fixed", C, "  SetTrace set;\n  auto united = unite(program, listed, set, why);\n  if (!united || !traceIsFixed(program, why))", "  SetTrace set;\n  auto united = unite(program, listed, set, why);\n  if (!united)"),
+    ("set binding of the first group", C, "  for (const SiteGroup *group : listed) {\n    out += std::to_string(group->output", "  for (const SiteGroup *group : listed.take_front(1)) {\n    out += std::to_string(group->output"),
+    ("set events uncounted", H, "    ++out.groupEvents[listed];\n", ""),
+    ("set cells unmarked", H, "    cellGroups[cell] |= uint64_t(1) << listed;\n", ""),
+    ("set order never broken", H, "    if (listed < latest)\n      out.listedOrder = false;\n", ""),
+    ("one writer is shared", H, "    out.sharedCells += llvm::popcount(groups) > 1;", "    out.sharedCells += llvm::popcount(groups) > 0;"),
+    ("a set lead is not run", A, "    if (set.finite.status() != ComputationStatus::Refuted && set.symbolic.failingPoint()) {", "    if (false) {"),
+    ("a set lead replaces a finite claim", A, "      if (lead.status() == ComputationStatus::Refuted)\n        set.finite = std::move(lead);\n", "      set.finite = std::move(lead);\n"),
 ]
 
 
@@ -219,7 +255,7 @@ def verdict_of(label, done):
         return "passed"
     if done.returncode == 1:
         # A test's own assertion, in the words of that test.
-        if label == "programs":
+        if label in ("programs", "groups"):
             own = ("driver failed" not in done.stderr and "Traceback" not in done.stderr and
                    done.stderr.strip())
         else:
@@ -268,18 +304,20 @@ class Worker:
         test = self.build / "generalized-gemm-computation-test"
         report = self.build / "generalized-gemm-computation-report"
         out = [(name, [test, name]) for name in
-               ("gaps", "gaps2", "tampered", "separation", "limits", "float", "reach", "claims", "candidates",
-                "exhaustive")]
+               ("sets", "gaps", "gaps2", "tampered", "separation", "limits", "float", "reach", "claims",
+                "candidates", "exhaustive")]
         out.append(("programs", [sys.executable, fuzz / "computation_oracle.py", "--driver", report,
                                  "--programs", "16", "--fills", "24", "--seed", "41", "--jobs", "2"]))
+        out.append(("groups", [sys.executable, fuzz / "multigroup_oracle.py", "--driver", report,
+                               "--programs", "4", "--fills", "6", "--seed", "41", "--jobs", "2"]))
         return out
 
     def trial(self, name, filename, old, new):
         self.restore()
         path = self.lib / filename
         text = path.read_text()
-        if old not in text:
-            return "HARNESS_ERROR", "stale pattern"
+        if text.count(old) != 1:
+            return "HARNESS_ERROR", "stale pattern" if old not in text else "ambiguous pattern"
         path.write_text(text.replace(old, new, 1))
         try:
             built = self.compile()
@@ -319,7 +357,8 @@ def main():
         print("at most two workers: compiles take 1.6 GB each and other jobs share this machine")
         return 2
 
-    names = [n for n in args.only.split(",") if n]
+    # Names may hold a comma: a semicolon then separates them.
+    names = [n for n in args.only.split(";" if ";" in args.only else ",") if n]
     unknown = sorted(set(names) - {m[0] for m in MUTANTS})
     if unknown:
         print(f"no such mutants: {unknown}")

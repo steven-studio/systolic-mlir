@@ -55,12 +55,27 @@ struct ReplayResult {
   // Constants a cell holds before its first event, which start its fold.
   std::map<CellKey, llvm::APInt> prefix;
   std::set<MemoryDependentStop> conditionalStops;
+  // G5b-M3, from replayGroupSet only: the events of each listed group, the cells two
+  // listed groups write, and whether no event of a group followed one of a later-listed
+  // group. Read only when the run reached the exit: Equal or Mismatch.
+  std::vector<uint64_t> groupEvents;
+  uint64_t sharedCells = 0;
+  bool listedOrder = true;
 };
 
-/// The relation for one group at one point, over all initial memories.
+/// The relation for one group at one point, over all initial memories. The machine
+/// reads only `group.sites`, and each event's roots from its own site.
 ReplayResult replayGroup(const SemanticProgram &program, const SiteGroup &group,
                          const std::vector<llvm::APInt> &parameters,
                          const HerbrandLimits &limits);
+
+/// G5b-M3: the same relation over `united`, the sites of several groups, with every
+/// event counted for its group. `groupOfSite[s]` is the listed index of site s's group,
+/// below `groupCount`, for every site of `united`.
+ReplayResult replayGroupSet(const SemanticProgram &program, const SiteGroup &united,
+                            const std::vector<int> &groupOfSite, unsigned groupCount,
+                            const std::vector<llvm::APInt> &parameters,
+                            const HerbrandLimits &limits);
 
 } // namespace mlir::generalized_gemm
 #endif

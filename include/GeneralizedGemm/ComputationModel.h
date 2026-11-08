@@ -87,5 +87,27 @@ struct ReplayFacts {
   uint64_t maxContributions = 0; // The longest fold of a cell.
 };
 
+/// G5b-M3. A fact about a claim over several groups, and no condition of it: the claim
+/// holds or fails whatever its facts say.
+enum class SetFactStatus { Proven, Refuted, Unknown };
+const char *stringifySetFactStatus(SetFactStatus status);
+
+struct SetFact {
+  SetFactStatus status = SetFactStatus::Unknown;
+  ComputationTier tier = ComputationTier::Proposed; // Of a Proven fact.
+  std::string detail;
+  // Of a Refuted fact: a point whose reference run completed and shows it. The trace
+  // is one at a point (Theorem 9a), so every completing run there shows it too.
+  std::optional<std::vector<llvm::APInt>> point;
+};
+
+/// G5b-M3. One replayed point of a claim over several groups, beside its ReplayFacts.
+struct GroupSetPoint {
+  std::vector<llvm::APInt> parameters;
+  std::vector<uint64_t> events;  // Per listed group, in the listed order.
+  uint64_t sharedCells = 0;      // Cells written by events of two or more listed groups.
+  bool listedOrder = true;       // No event of a group follows one of a later-listed group.
+};
+
 } // namespace mlir::generalized_gemm
 #endif
