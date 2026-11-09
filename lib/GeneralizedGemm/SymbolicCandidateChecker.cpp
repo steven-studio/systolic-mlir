@@ -1,6 +1,7 @@
 #include "GeneralizedGemm/SymbolicCandidateChecker.h"
 
 #include "GeneralizedGemm/CoverageSimulation.h"
+#include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
@@ -34,6 +35,15 @@ const char *stringifyFamilyStatus(FamilyStatus status) {
   return "UNKNOWN";
 }
 
+const char *stringifyRefutes(Refutes what) {
+  switch (what) {
+  case Refutes::Nothing: return "NOTHING";
+  case Refutes::ThisFamily: return "THIS_FAMILY";
+  case Refutes::EveryFamily: return "EVERY_FAMILY";
+  }
+  return "NOTHING";
+}
+
 struct FamilyAuthority {
   static CheckedFamily make(EvidenceTier tier, FamilyStatus status, std::string reason) {
     return CheckedFamily(tier, status, std::move(reason));
@@ -51,6 +61,13 @@ struct FamilyAuthority {
   static void exact(CheckedFamily &out, DomainEvidence evidence, bool box) {
     out.domain = std::move(evidence);
     out.box = box;
+  }
+  static void refutes(CheckedFamily &out, Refutes what) { out.scope = what; }
+  /// A family that is malformed, or reads what no coordinate may: this family alone.
+  static CheckedFamily refusedFamily(std::string reason) {
+    CheckedFamily out = make(EvidenceTier::Proposed, FamilyStatus::Refuted, std::move(reason));
+    refutes(out, Refutes::ThisFamily);
+    return out;
   }
 };
 
@@ -428,12 +445,20 @@ CheckedFamily checkFamilyFinite(const SemanticProgram &program,
                                 const CoordinateFamily &family) {
   if (enumeration.gate != GateStatus::Open)
     return CheckedFamily::unknown("the domain gate is closed: " + enumeration.reason);
+  // The group the domains were built for, bounded and whole as G4a and G5a require on their
+  // finite routes (G5b-M4-0): an index past the groups would read past every point's slots.
+  if (group >= enumeration.groups.size())
+    return CheckedFamily::unknown("no such group");
   std::string why;
+  if (!wholeGroup(program, enumeration.groups[group], why))
+    return CheckedFamily::unknown(why);
   auto kept = adopted(program, family, why);
   if (!kept)
-    return FamilyAuthority::make(EvidenceTier::Proposed, FamilyStatus::Refuted, why);
+    return FamilyAuthority::refusedFamily(why);
   std::vector<PointFacts> facts;
-  bool complete = !enumeration.sampled;
+  // Every point of the scope the enumeration was made for, as the enumerator counted them:
+  // a list with a point removed is a sample of it (G5b-M4-0).
+  bool complete = enumerationRanItsScope(enumeration);
   for (const PointEvidence &point : enumeration.points) {
     const auto &domain = point.domains[group];
     if (!domain) {
@@ -442,18 +467,28 @@ CheckedFamily checkFamilyFinite(const SemanticProgram &program,
         complete = false;
       continue;
     }
-    auto refuted = [&](std::string reason) {
+    auto refuted = [&](std::string reason, Refutes what) {
       CheckedFamily out = FamilyAuthority::make(EvidenceTier::Proposed, FamilyStatus::Refuted,
                                                 std::move(reason));
       FamilyAuthority::failing(out, point.parameters);
+      FamilyAuthority::refutes(out, what);
       return out;
     };
+    // A coordinate with no value or no definition at an event fails this family only.
     auto labels = familyLabels(program, *domain, *kept, why);
     if (!labels)
-      return refuted(why);
+      return refuted(why, Refutes::ThisFamily);
     CheckedCandidate checked = checkCandidate(*domain, *labels);
+    if (checked.kind() == RecoveryStatus::CandidateRefuted) {
+      // C0 is the one counterexample no family can change.
+      bool c0 = llvm::any_of(checked.report().counterexamples, [](const Counterexample &c) {
+        return c.kind == CounterexampleKind::OutputReadDiffers;
+      });
+      return refuted(checked.reason(), c0 ? Refutes::EveryFamily : Refutes::ThisFamily);
+    }
+    // G3a's unknown is no refutation: there is no counterexample to show.
     if (checked.kind() != RecoveryStatus::CandidateFound)
-      return refuted(checked.reason());
+      return CheckedFamily::unknown("the G3a checker gives no verdict at a point: " + checked.reason());
     facts.push_back({point.parameters, checked.report()});
   }
   if (facts.empty())
@@ -475,21 +510,12 @@ CheckedFamily checkFamilySymbolic(const SemanticProgram &program,
     return CheckedFamily::unknown("the program is unsupported");
   if (!program.controlOblivious || !program.addressOblivious)
     return CheckedFamily::unknown("the trace depends on memory contents");
-  if (!group.unsupported.empty() || !group.output)
-    return CheckedFamily::unknown(group.unsupported);
-  // A claim about part of a group is no claim about its events: the group must be
-  // every direct site of this root triple, and nothing else.
-  std::set<unsigned> listed(group.sites.begin(), group.sites.end());
-  for (const MacSite &site : program.sites) {
-    bool direct = site.form == ReductionForm::Direct && site.output && site.outputRead &&
-                  site.outputRead->root == site.output->root;
-    bool same = direct && site.output->root == *group.output && site.a.root == group.first &&
-                site.b.root == group.second;
-    if (same != (listed.count(site.id) != 0))
-      return CheckedFamily::unknown("the group is not the sites of its roots");
-  }
-  if (listed.empty())
-    return CheckedFamily::unknown("the group has no sites");
+  // A claim about part of a group is no claim about its events: the group must be every
+  // direct site of this root triple, each a site of the program. One gate for G3b, G4a
+  // and G5a (G5b-M4-0).
+  std::string gate;
+  if (!wholeGroup(program, group, gate))
+    return CheckedFamily::unknown(gate);
   if (!certificate)
     return CheckedFamily::unknown("no termination certificate");
   if (!order || order->levels.empty())
@@ -508,7 +534,7 @@ CheckedFamily checkFamilySymbolic(const SemanticProgram &program,
   std::string why;
   auto kept = adopted(program, family, why);
   if (!kept)
-    return FamilyAuthority::make(EvidenceTier::Proposed, FamilyStatus::Refuted, why);
+    return FamilyAuthority::refusedFamily(why);
 
   // The order's levels must be exactly the coordinates, or its bijection is
   // about something else.

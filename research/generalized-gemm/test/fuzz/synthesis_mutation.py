@@ -22,6 +22,7 @@ S = "CoordinateSynthesis.cpp"
 A = "SynthesisAnalysis.cpp"
 D = "FiniteDomain.cpp"
 K = "CandidateChecker.cpp"
+T = "SiteSets.cpp"  # G5b-M4-0: the group gate G3b, G4a and G5a share.
 MUTANTS = [
     # Definedness and evaluation.
     ("division ignored", F, "case TermOp::UDiv: case TermOp::URem: case TermOp::SDiv: case TermOp::SRem: {", "case TermOp::SDiv: case TermOp::SRem: {"),
@@ -55,7 +56,7 @@ MUTANTS = [
     ("V2 ignored", C, "        injective = false;\n", "        ;\n"),
     ("V2 vacuous", C, "terms.logicalAnd(terms.logicalAnd(both, equalOn(all, a, b)), apart)))", "terms.boolean(false)))"),
     ("V4 skipped", C, 'if (!require("V4", "the update reads the cell it writes", terms.logicalAnd(a.premise, differs)))\n      return false;', "(void)differs;"),
-    ("read root ignored by the checker", C, "&&\n                  site.outputRead->root == site.output->root;", ";"),
+    ("read root ignored by the checker", T, "&&\n                  site.outputRead->root == site.output->root;", ";"),
     ("tainted coordinate adopted", C, "        if (!independent[id]) {", "        if (false) {"),
     ("shadow coordinate adopted", C, "      if (readsShadow(kept, seen)) {", "      if (false) {"),
     ("every run always claimed", C, "  bool everyRun = outcome.verdict.kind() == TerminationVerdict::ProvenTerminating;", "  bool everyRun = true;"),
@@ -69,9 +70,10 @@ MUTANTS = [
     ("certificate result ignored", C, "  if (outcome.verdict.kind() != TerminationVerdict::ProvenTerminating &&\n      outcome.verdict.kind() != TerminationVerdict::ProvenTerminatingIfDefined)\n    return CheckedFamily::unknown(\"the certificate", "  if (false)\n    return CheckedFamily::unknown(\"the certificate"),
     ("wider scope not checked", C, "  check.scope = options.scope;\n  check.limits = options.termination;", "  check.limits = options.termination;"),
     ("non-oblivious admitted", C, 'if (!program.controlOblivious || !program.addressOblivious)\n    return CheckedFamily::unknown("the trace depends on memory contents");\n', ""),
-    ("unsupported group admitted", C, 'if (!group.unsupported.empty() || !group.output)\n    return CheckedFamily::unknown(group.unsupported);\n', ""),
-    ("partial group admitted", C, '    if (same != (listed.count(site.id) != 0))\n      return CheckedFamily::unknown("the group is not the sites of its roots");\n', "    (void)same;\n"),
-    ("empty group admitted", C, '  if (listed.empty())\n    return CheckedFamily::unknown("the group has no sites");\n', ""),
+    ("unsupported group admitted", T, '  if (!group.unsupported.empty()) {\n    why = group.unsupported;\n    return false;\n  }\n', ""),
+    ("partial group admitted", T, '    if (same != (listed.count(site.id) != 0)) {\n      why = "the group is not the sites of its roots";', '    if (false) {\n      why = "the group is not the sites of its roots";'),
+    ("empty group admitted", T, '  if (group.sites.empty()) {\n    why = "the group has no sites";\n    return false;\n  }\n', ""),
+    ("group gate skipped", C, '  if (!wholeGroup(program, group, gate))\n    return CheckedFamily::unknown(gate);\n', ""),
     ("definition proofs lost", C, "  if (id != \"prune\")\n    records.push_back(std::move(record));", "  if (id != \"prune\" && id != \"I\")\n    records.push_back(std::move(record));"),
     ("no order accepted", C, 'if (!order || order->levels.empty())\n    return CheckedFamily::unknown("no enumeration order to bound the coordinates");\n', ""),
     ("bound may read state", C, 'if (!stateSupport(copy.lower).empty() || !stateSupport(copy.upper).empty())\n      return CheckedFamily::unknown("a bound reads state");\n', ""),
@@ -82,9 +84,9 @@ MUTANTS = [
     ("V2 and coverage both open", C, "    if (!exact && !symbolic.injective) {", "    if (false) {"),
     ("box with any bound", C, "        if (level.upperOuter >= 0 && !batch.count(levels.levels[level.upperOuter].value))\n          box = false;\n", ""),
     ("shared block admitted", C, '  if (distinct.size() != locations.size()) {\n    why = "two sites of the group share a block";\n    return false;\n  }\n', ""),
-    ("sample is the scope", C, "  bool complete = !enumeration.sampled;\n", "  bool complete = true;\n"),
+    ("sample is the scope", C, "  bool complete = enumerationRanItsScope(enumeration);\n", "  bool complete = true;\n"),
     ("stopped point ignored", C, "      if (!point.reason.empty())\n        complete = false;\n", ""),
-    ("refuted candidate passes", C, "    if (checked.kind() != RecoveryStatus::CandidateFound)\n      return refuted(checked.reason());\n", ""),
+    ("refuted candidate passes", C, "    if (checked.kind() == RecoveryStatus::CandidateRefuted) {\n      // C0 is the one counterexample no family can change.\n      bool c0 = llvm::any_of(checked.report().counterexamples, [](const Counterexample &c) {\n        return c.kind == CounterexampleKind::OutputReadDiffers;\n      });\n      return refuted(checked.reason(), c0 ? Refutes::EveryFamily : Refutes::ThisFamily);\n    }\n    // G3a's unknown is no refutation: there is no counterexample to show.\n    if (checked.kind() != RecoveryStatus::CandidateFound)\n      return CheckedFamily::unknown(\"the G3a checker gives no verdict at a point: \" + checked.reason());\n", ""),
     ("memory term adopted", C, "      Term kept = adoptProofTerm(program, term, why);\n      if (!kept)\n        return std::nullopt;\n      DenseSet<Term> seen;", "      Term kept = term;\n      DenseSet<Term> seen;"),
     ("closed gate checked", C, '  if (enumeration.gate != GateStatus::Open)\n    return CheckedFamily::unknown("the domain gate is closed: " + enumeration.reason);\n', ""),
     ("no point checked", C, '  if (facts.empty())\n    return CheckedFamily::unknown("no point has events");\n', ""),

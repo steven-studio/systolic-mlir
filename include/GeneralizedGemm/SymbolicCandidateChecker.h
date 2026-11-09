@@ -36,6 +36,16 @@ const char *stringifyEvidenceTier(EvidenceTier tier);
 enum class FamilyStatus { Verified, Refuted, Unknown };
 const char *stringifyFamilyStatus(FamilyStatus status);
 
+/// What a Refuted result refutes (G5b-M4-0). A family is a candidate, and its failure
+/// is no statement about the program.
+///   ThisFamily   This family fails on the named events. Nothing is said of any other
+///                family, nor of whether the group has a valid decomposition.
+///   EveryFamily  An update reads a cell other than the one it writes (C0). No family can
+///                change that, so no += decomposition of the group exists at that point.
+///   Nothing      Every result that is not Refuted.
+enum class Refutes { Nothing, ThisFamily, EveryFamily };
+const char *stringifyRefutes(Refutes what);
+
 struct PointFacts {
   std::vector<llvm::APInt> parameters;
   CandidateReport report;
@@ -64,6 +74,8 @@ public:
   bool holdsForEveryRun() const { return every; }
   /// Always Unknown in G3b.
   const ProofStatus &equivalence() const { return equivalenceStatus; }
+  /// What a Refuted result refutes: this family, or every family of the group (C0).
+  Refutes refutes() const { return scope; }
 
 private:
   friend struct FamilyAuthority;
@@ -79,9 +91,15 @@ private:
   bool box = false, every = false;
   ProofStatus equivalenceStatus =
       ProofStatus::unknown("no equivalence is claimed before G4 to G7");
+  Refutes scope = Refutes::Nothing;
 };
 
-/// Point or ScopeEnumerated. `group` indexes the enumeration's groups.
+/// Point or ScopeEnumerated. `group` indexes the enumeration's groups: an index past them
+/// is "no such group", and the group must pass wholeGroup (G5b-M4-0). ScopeEnumerated
+/// needs every point of the scope the enumeration was made for (enumerationRanItsScope):
+/// a sample, or a list with a point removed, is Point at most. Refuted only for a
+/// malformed family, a coordinate with no value or no definition at an event, or labels
+/// that G3a refutes at a point; G3a's unknown stays unknown.
 CheckedFamily checkFamilyFinite(const SemanticProgram &program,
                                 const DomainEnumeration &enumeration, unsigned group,
                                 const CoordinateFamily &family);

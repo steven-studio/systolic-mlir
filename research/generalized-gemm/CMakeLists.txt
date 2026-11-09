@@ -81,7 +81,8 @@ add_library(generalized-gemm-candidate-checker STATIC "${GG_LIB_DIR}/CandidateCh
 target_link_libraries(generalized-gemm-candidate-checker PUBLIC generalized-gemm-coordinate-model)
 add_library(generalized-gemm-canonical-recovery STATIC "${GG_LIB_DIR}/CanonicalRecovery.cpp")
 target_link_libraries(generalized-gemm-canonical-recovery PUBLIC generalized-gemm-coordinate-model)
-add_library(generalized-gemm-finite-domain STATIC "${GG_LIB_DIR}/FiniteDomain.cpp")
+add_library(generalized-gemm-finite-domain STATIC "${GG_LIB_DIR}/FiniteDomain.cpp"
+  "${GG_LIB_DIR}/SiteSets.cpp")
 target_link_libraries(generalized-gemm-finite-domain PUBLIC
   generalized-gemm-coordinate-model generalized-gemm-checker)
 add_library(generalized-gemm-coordinates STATIC "${GG_LIB_DIR}/CoordinateAnalysis.cpp")
@@ -156,6 +157,11 @@ endforeach()
 
 add_executable(generalized-gemm-domain-report DomainReport.cpp)
 target_link_libraries(generalized-gemm-domain-report PRIVATE
+  generalized-gemm-domain generalized-gemm-polynomial-adapter generalized-gemm-z3)
+
+# G5b-M4-0: what the shared site-set rules answer, for an oracle with no library code.
+add_executable(generalized-gemm-identity-report IdentityReport.cpp)
+target_link_libraries(generalized-gemm-identity-report PRIVATE
   generalized-gemm-domain generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
 add_executable(generalized-gemm-report SemanticReport.cpp)
@@ -274,6 +280,12 @@ add_test(NAME generalized-gemm-domain-programs COMMAND "${Python3_EXECUTABLE}"
 # repeat loops): 40 programs take about 25 minutes with two jobs.
 set_tests_properties(generalized-gemm-domain-programs PROPERTIES TIMEOUT 3600)
 
+# G5b-M4-0: group gates, cells, refutation scope and tiers, against the source trace.
+add_test(NAME generalized-gemm-identity-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/identity_oracle.py" --driver $<TARGET_FILE:generalized-gemm-identity-report>
+  --programs 60 --seed 1 --jobs 2)
+set_tests_properties(generalized-gemm-identity-programs PROPERTIES TIMEOUT 1800)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
@@ -285,4 +297,5 @@ add_custom_target(check-generalized-gemm
     generalized-gemm-coordinate-report generalized-gemm-coordinate-test
     generalized-gemm-synthesis-report generalized-gemm-synthesis-test
     generalized-gemm-computation-report generalized-gemm-computation-test
-    generalized-gemm-domain-report generalized-gemm-domain-test)
+    generalized-gemm-domain-report generalized-gemm-domain-test
+    generalized-gemm-identity-report)

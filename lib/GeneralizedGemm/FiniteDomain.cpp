@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <map>
+#include <set>
 #include <tuple>
 
 using namespace llvm;
@@ -420,6 +421,7 @@ DomainEnumeration enumerateDomain(const SemanticProgram &program,
     return close(GateStatus::Unsupported, "control or an address reads a float");
 
   Ranges ranges = parameterRanges(program, options.scope);
+  out.scope = options.scope;
   out.sampled = !options.onlyPoints.empty();
   if (out.sampled) {
     if (options.onlyPoints.size() > options.limits.maxPoints)
@@ -448,12 +450,29 @@ DomainEnumeration enumerateDomain(const SemanticProgram &program,
                  "the certificate was not accepted: " + outcome.verdict.reason());
 
   Enumerator enumerator(program, options, out);
-  if (out.sampled)
+  if (out.sampled) {
     for (const auto &point : options.onlyPoints)
       enumerator.visit(point);
-  else
+  } else {
     enumerator.enumerate(ranges);
+    out.scopePoints = out.points.size() + out.outsideDomain;
+  }
   return close(GateStatus::Open, "");
+}
+
+bool enumerationRanItsScope(const DomainEnumeration &enumeration) {
+  if (enumeration.sampled || enumeration.gate != GateStatus::Open)
+    return false;
+  std::set<std::vector<uint64_t>> seen;
+  for (const PointEvidence &point : enumeration.points) {
+    if (!parametersInScope(enumeration.scope, point.parameters))
+      return false;
+    std::vector<uint64_t> key;
+    for (const APInt &value : point.parameters)
+      key.push_back(value.getZExtValue());
+    seen.insert(std::move(key));
+  }
+  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;
 }
 
 } // namespace mlir::generalized_gemm

@@ -2,6 +2,7 @@
 #include "GeneralizedGemm/ComputationChecker.h"
 
 #include "GeneralizedGemm/CoverageSimulation.h"
+#include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
@@ -135,36 +136,6 @@ bool traceIsFixed(const SemanticProgram &program, std::string &why) {
   return true;
 }
 
-/// A claim about part of a group is no claim about its events.
-bool groupIsWhole(const SemanticProgram &program, const SiteGroup &group, std::string &why) {
-  if (!group.unsupported.empty()) {
-    why = group.unsupported;
-    return false;
-  }
-  if (!group.output || group.sites.empty()) {
-    why = "the group has no output in memory";
-    return false;
-  }
-  // Every program site is compared below, and an id past them would be read later.
-  for (unsigned id : group.sites)
-    if (id >= program.sites.size()) {
-      why = "the group names a site the program does not have";
-      return false;
-    }
-  std::set<unsigned> listed(group.sites.begin(), group.sites.end());
-  for (const MacSite &site : program.sites) {
-    bool direct = site.form == ReductionForm::Direct && site.output && site.outputRead &&
-                  site.outputRead->root == site.output->root;
-    bool same = direct && site.output->root == *group.output && site.a.root == group.first &&
-                site.b.root == group.second;
-    if (same != (listed.count(site.id) != 0)) {
-      why = "the group is not the sites of its roots";
-      return false;
-    }
-  }
-  return true;
-}
-
 /// Every written root against every root the program touches, not only the group's:
 /// a value can go through a third root and back into the output, and the model of
 /// one array per root is wrong for all of them if any two overlap. Different ids say
@@ -185,23 +156,20 @@ bool separationsFor(const SemanticProgram &program, const SiteGroup &group,
     for (unsigned r : accessed)
       if (w != r)
         pairs.insert({std::min(w, r), std::max(w, r)});
+  // The separation of each pair is the shared rule (SiteSets.h), so that a checker that
+  // compares cells of two roots reads the same answer as this gate.
   for (auto [first, second] : pairs) {
-    const MemoryRoot &a = program.roots[first], &b = program.roots[second];
+    RootSeparation separation = rootSeparation(program, authorized, first, second);
+    if (!separation.apart) {
+      why = "not authorized: " + separation.name;
+      return false;
+    }
     SeparationUse use;
     use.first = first;
     use.second = second;
-    use.name = "roots " + std::to_string(first) + " and " + std::to_string(second) + " are separate";
-    if (a.origin == MemoryRoot::FreshAllocation || b.origin == MemoryRoot::FreshAllocation) {
-      use.assumption = false;
-      use.basis = "fresh allocation";
-    } else if (authorized.count(use.name)) {
-      use.basis = a.restrictArgument || b.restrictArgument
-                      ? "authorized, with an llvm.noalias source contract"
-                      : "authorized";
-    } else {
-      why = "not authorized: " + use.name;
-      return false;
-    }
+    use.assumption = separation.assumption;
+    use.basis = separation.basis;
+    use.name = separation.name;
     uses.push_back(std::move(use));
   }
   return true;
@@ -602,7 +570,7 @@ std::optional<SiteGroup> unite(const SemanticProgram &program, ArrayRef<const Si
   for (unsigned i = 0; i < listed.size(); ++i) {
     const SiteGroup &group = *listed[i];
     // A claim about part of a group is no claim about its events, here as alone.
-    if (!groupIsWhole(program, group, why))
+    if (!wholeGroup(program, group, why))
       return std::nullopt;
     if (!triples.insert({*group.output, group.first, group.second}).second) {
       why = "a group is listed twice";
@@ -663,7 +631,7 @@ CheckedComputation finiteClaim(const SemanticProgram &program,
     return CheckedComputation::unknown("no such group");
   const SiteGroup &group = enumeration.groups[g];
   std::string why;
-  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
     return CheckedComputation::unknown(why);
   return finiteOver(program, enumeration, group, options, nullptr);
 }
@@ -1345,7 +1313,7 @@ CheckedComputation symbolicClaim(const SemanticProgram &program,
   if (!program.isSupported())
     return CheckedComputation::unknown("the program is unsupported");
   std::string why;
-  if (!limitsAreEffective(options, why) || !groupIsWhole(program, group, why) ||
+  if (!limitsAreEffective(options, why) || !wholeGroup(program, group, why) ||
       !traceIsFixed(program, why))
     return CheckedComputation::unknown(why);
   return symbolicOver(program, certificate, group, options, backend, nullptr);

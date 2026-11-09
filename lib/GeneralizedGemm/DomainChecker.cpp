@@ -1,5 +1,6 @@
 //===- DomainChecker.cpp --------------------------------------------------===//
 #include "GeneralizedGemm/DomainChecker.h"
+#include "GeneralizedGemm/SiteSets.h"
 
 #include "GeneralizedGemm/ReductionSemantics.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
@@ -72,29 +73,6 @@ Fact unknownFact(std::string detail) {
   Fact f;
   f.detail = std::move(detail);
   return f;
-}
-
-bool groupIsWhole(const SemanticProgram &program, const SiteGroup &group, std::string &why) {
-  if (!group.unsupported.empty()) {
-    why = group.unsupported;
-    return false;
-  }
-  if (!group.output || group.sites.empty()) {
-    why = "the group has no output in memory";
-    return false;
-  }
-  std::set<unsigned> listed(group.sites.begin(), group.sites.end());
-  for (const MacSite &site : program.sites) {
-    bool direct = site.form == ReductionForm::Direct && site.output && site.outputRead &&
-                  site.outputRead->root == site.output->root;
-    bool same = direct && site.output->root == *group.output && site.a.root == group.first &&
-                site.b.root == group.second;
-    if (same != (listed.count(site.id) != 0)) {
-      why = "the group is not the sites of its roots";
-      return false;
-    }
-  }
-  return true;
 }
 
 bool traceIsFixed(const SemanticProgram &program, std::string &why) {
@@ -310,7 +288,7 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
     return CheckedDomain::unknown("no such group");
   const SiteGroup &group = enumeration.groups[g];
   std::string why;
-  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
     return CheckedDomain::unknown(why);
   auto structure = adoptRequest(program, family, request, why);
   if (!structure)
@@ -352,6 +330,7 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
     here.points = set->size();
     std::vector<std::vector<APInt>> lambdas, logicals, outputs;
     std::vector<IndexTuple> cellsOf;
+    std::vector<unsigned> roots; // The output root of each event: a cell is a root and an index.
     std::array<std::vector<IndexTuple>, 3> views;
     const auto &domain = point.domains[g];
     if (domain) {
@@ -378,6 +357,7 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
         logicals.push_back(tuple(logical, e));
         outputs.push_back(tuple(output, e));
         const AccessEvent &event = table.events()[e];
+        roots.push_back(program.sites[event.site].output->root);
         views[0].push_back(table.view(event.h));
         views[1].push_back(table.view(event.f));
         views[2].push_back(table.view(event.g));
@@ -438,12 +418,8 @@ CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeratio
 
     // Cells: the order within each, the key, collisions, and single contributions.
     std::map<std::vector<uint64_t>, std::vector<size_t>> cells;
-    for (size_t e = 0; e < lambdas.size(); ++e) {
-      std::vector<uint64_t> cell;
-      for (const APInt &value : views[0][e])
-        cell.push_back(value.getZExtValue());
-      cells[cell].push_back(e);
-    }
+    for (size_t e = 0; e < lambdas.size(); ++e)
+      cells[cellKey(roots[e], views[0][e])].push_back(e);
     here.cells = cells.size();
     for (const auto &[cell, members] : cells) {
       here.maxPerCell = std::max<uint64_t>(here.maxPerCell, members.size());
@@ -632,7 +608,7 @@ CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumer
     return CheckedDomain::unknown("no such group");
   const SiteGroup &group = enumeration.groups[g];
   std::string why;
-  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
     return CheckedDomain::unknown(why);
   auto structures = adoptSegments(program, group, family, request, why);
   if (!structures)
@@ -735,7 +711,7 @@ CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumer
       tuple(levelTerms, row.lambda);
       tuple((*structures)[row.segment].logical, row.logical);
       tuple((*structures)[row.segment].output, row.output);
-      row.cell = keyOf(event.h);
+      row.cell = cellKey(program.sites[event.site].output->root, event.h);
       rows.push_back(std::move(row));
     }
     if (!valued)
@@ -1030,7 +1006,7 @@ CheckedDomain symbolicClaim(const SemanticProgram &program, const TerminationCer
   std::string why;
   if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
     return CheckedDomain::unknown("a solver limit of zero is no limit");
-  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
     return CheckedDomain::unknown(why);
   auto structure = adoptRequest(program, family, request, why);
   if (!structure)
@@ -1082,9 +1058,10 @@ CheckedDomain symbolicClaim(const SemanticProgram &program, const TerminationCer
     proof.pairs([&](const SiteArrival &a, const SiteArrival &b) {
       const MacSite &first = program.sites[a.site], &second = program.sites[b.site];
       Term both = program.terms->logicalAnd(a.premise, secondCopy(program, b.premise));
-      Term sameCell = program.terms->logicalAnd(
-          both, proof.equal(proof.at(a, first.output->index),
-                            proof.second(proof.at(b, second.output->index))));
+      Term sameCell = sameCellFormula(
+          *program.terms,
+          rootRelation(program, options.authorized, first.output->root, second.output->root), both,
+          proof.equal(proof.at(a, first.output->index), proof.second(proof.at(b, second.output->index))));
       std::vector<Term> la = proof.values(order, a), lb = proof.second(proof.values(order, b));
       TermContext &terms = *program.terms;
       if (keyOk && !structure->keyAll) {
@@ -1176,7 +1153,7 @@ CheckedDomain symbolicSegmented(const SemanticProgram &program, const Terminatio
   std::string why;
   if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
     return CheckedDomain::unknown("a solver limit of zero is no limit");
-  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
     return CheckedDomain::unknown(why);
   auto structures = adoptSegments(program, group, family, request, why);
   if (!structures)
@@ -1231,8 +1208,9 @@ CheckedDomain symbolicSegmented(const SemanticProgram &program, const Terminatio
       unsigned sa = ofSite.at(a.site), sb = ofSite.at(b.site);
       const MacSite &first = program.sites[a.site], &second = program.sites[b.site];
       Term both = terms.logicalAnd(a.premise, secondCopy(program, b.premise));
-      Term sameCell = terms.logicalAnd(both, proof.equal(proof.at(a, first.output->index),
-                                                         proof.second(proof.at(b, second.output->index))));
+      Term sameCell = sameCellFormula(
+          terms, rootRelation(program, options.authorized, first.output->root, second.output->root), both,
+          proof.equal(proof.at(a, first.output->index), proof.second(proof.at(b, second.output->index))));
       std::vector<Term> la = proof.values(orders[sa], a), lb = proof.second(proof.values(orders[sb], b));
       if (sa != sb) {
         if (sharedNone && proof.ask("SH", "cells of two segments", sameCell) != SmtAnswer::Unsat)

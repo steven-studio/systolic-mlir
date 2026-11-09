@@ -89,7 +89,18 @@ struct DomainEnumeration {
   std::vector<PointEvidence> points;
   uint64_t outsideDomain = 0; // Scope points with a negative extent.
   bool sampled = false;       // Not every point of the scope ran.
+  // G5b-M4-0: the scope the enumerator was given, and, when it ran every point of it, how
+  // many it counted, with those outside the domain. A list with a point removed no longer
+  // matches its count, and reads as the sample it is.
+  ParameterScope scope;
+  uint64_t scopePoints = 0;
 };
+
+/// Whether every point of the scope the enumeration was made for ran: not a sample, an
+/// open gate, every point inside that scope, and as many distinct points, with those
+/// outside the domain, as the enumerator counted (G5b-M4-0). It says nothing of another
+/// scope: a claim about a given scope compares with that scope (enumerationCoversScope).
+bool enumerationRanItsScope(const DomainEnumeration &enumeration);
 
 /// State variables that no value read from memory can reach.
 std::vector<bool> memoryIndependentState(const SemanticProgram &program);

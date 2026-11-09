@@ -568,6 +568,167 @@ listings, the oracle compares obligations, contracts and points as well, and two
 (`union in the listed order`, `F3 in the listed order`) remove each ordering. The whole
 validation was then repeated on the new tree.
 
+## Milestone 4-0: one rule for groups and cells
+
+M4-0 is the groundwork the M4 design review asked for before any set-level claim. It adds
+no claim. G3b, G4a and G5a each kept their own whole-group check, and the copies had
+drifted. The domain checker compared cells by their index alone. G3b promoted a finite
+check with a point removed to the whole scope, and a refuted flat family read as if the
+program had no decomposition. M4a to M4d, G6 and G7 are not started.
+
+### Findings fixed
+
+| | Before | Now |
+| --- | --- | --- |
+| F1 | The G3b and G5a gates did not bound site ids: a hand-made group naming a site past the program passed them and was read out of bounds. Only G4a's gate had the bound (M3). | One gate, `wholeGroup`, for all three. |
+| F2 | G5a keyed output cells by index alone, finite and symbolic. Harmless within one group, which has one output root, and wrong for a set of groups. | A cell is a root and an index. Two roots that may alias are never called apart. |
+| F3 | G3b's finite tier was the whole scope whenever the list was not marked as a sample: a list with a point removed was promoted. | `enumerationRanItsScope`: the scope the enumerator recorded, every listed point inside it, and as many distinct points, with those outside the domain, as it counted. |
+| F4 | A refuted family carried no scope: a flat family failing over sibling loops read like a program with no decomposition. | `CheckedFamily::refutes()`: this family, or every family, or nothing. |
+| F5 | G3b turned G3a's unknown into a refutation. | Unknown stays unknown. No enumerated domain reaches this case. |
+| F6 | G3b's finite route indexed a point's domains by the group with no bound, and applied no gate. G4a's and G5a's finite routes do both. | The same bound, "no such group", and the same gate. |
+| F7 | No single-group gate refused a site listed twice, and every checker walks the list. The set route already refused it. | The gate refuses it, in the set route's words. |
+
+F1 to F5 are the review's findings. F6 and F7 were found while unifying the gates. No
+group that the enumerator makes is affected by any of them: every earlier output is
+byte-identical.
+
+### The gate
+
+`SiteSets.h` is the one definition. A group fails at the first of these, in this order,
+with these words:
+
+| Order | Condition | Words |
+| --- | --- | --- |
+| 1 | marked unsupported | the group's own words |
+| 2 | no output root | `the group has no output in memory` |
+| 3 | no site listed | `the group has no sites` |
+| 4 | an id at or past the program's site count | `the group names a site the program does not have` |
+| 5 | an id listed twice | `a site is listed twice` |
+| 6 | not exactly the direct sites of its root triple | `the group is not the sites of its roots` |
+
+A refused group gets these words from the symbolic routes of G3b, G4a and G5a, after
+their checks of the program itself. Each finite route first says the gate of the
+enumeration is closed, then `no such group` for an index past the groups, then the gate's
+words. Only refusal text changes, never a status: G4a and G5a said "no output in memory"
+for an empty list, and G3b gave an empty reason for a group without an output.
+
+### Cells
+
+| First | Second | Relation |
+| --- | --- | --- |
+| root r, index i | root r, index i | `SAME` |
+| root r, index i | root r, index j ≠ i | `DISTINCT` |
+| root r, one rank or width | root r, another | `MAY_ALIAS`, never `DISTINCT` |
+| root r | root s ≠ r, either a fresh allocation | `DISTINCT`, a proof |
+| root r | root s ≠ r, `roots min and max are separate` authorized | `DISTINCT`, an assumption that G4a records |
+| root r | root s ≠ r, otherwise | `MAY_ALIAS` |
+| a root the program does not have | anything | `MAY_ALIAS` |
+
+Different root ids say nothing by themselves, and the name of an authorization is read
+lower root first, as G4a writes it. `rootSeparation` is the function G4a's separations
+now call. `sameCellFormula` is what the domain checker's symbolic routes ask. For one root
+it is both events happening with equal indices. For roots apart it is false. For roots
+that may alias it is both events happening, so a fact that rests on the cells being
+apart stays unproven. The finite route keys a cell by `cellKey`, which is the root and
+then the index.
+
+### What a refutation refutes
+
+| G3b outcome | `refutes()` |
+| --- | --- |
+| Verified, or Unknown | `NOTHING` |
+| The family is malformed or reads memory, on either route | `THIS_FAMILY` |
+| A coordinate has no value, or is undefined, at an event | `THIS_FAMILY` |
+| G3a refutes the labels at a point, with no `output_read_differs` there | `THIS_FAMILY` |
+| G3a reports `output_read_differs` at the failing point: an update reads a cell other than the one it writes | `EVERY_FAMILY` |
+
+`EVERY_FAMILY` is the one refutation that holds for every coordinate family, since no
+labelling changes which cell an update reads. A program whose flat family fails over
+sibling loops stays open to a segmented claim: on `sib_same`, the flat family is refuted
+for itself only, and G4a's claim, G5a's domain and the segmented Theorem 13 all stand.
+
+### Proof levels
+
+Point, ScopeEnumerated and the symbolic tiers mean what they did. G3b's ScopeEnumerated
+now needs `enumerationRanItsScope` and no stopped point. G4a and G5a keep
+`enumerationCoversScope`, which compares the list with the scope of the claim. A sample,
+a list with a point removed, and a list with a point removed and another repeated are
+Point on all three, in the unit test and in the oracle. Nothing is promoted to a tier
+it did not reach.
+
+### New public surface
+
+`SiteSets.h` (`wholeGroup`, `RootSeparation`, `rootSeparation`, `CellRelation`,
+`rootRelation`, `CellRef`, `relateCells`, `cellKey`, `sameCellFormula`), `Refutes` and
+`CheckedFamily::refutes()`, `DomainEnumeration::scope` and `::scopePoints`,
+`enumerationRanItsScope`, and the driver `generalized-gemm-identity-report`. The public
+interface of `CoordinateFamily` does not change. No earlier driver's output changes.
+
+### How M4-0 is checked independently
+
+- **Unit.** The `identity` section of the domain test: the gate at site 0, at the last
+  site and at the first id past them, for all three checkers and both routes; `C[0]`
+  against `D[0]` with and without the authorization; a fresh root; the formula; the
+  tiers under trimmed, repeated, sampled, moved and closed lists and a point outside the
+  domain; the refutation scope on sibling loops, on C0, on a refused family and on an
+  undefined coordinate.
+- **Oracle.** `identity_oracle.py` shares no code with the library. It writes random
+  programs of sibling nests over four argument roots and sometimes a fresh one, some
+  updates reading another root or a shifted cell, and interprets them itself. It
+  predicts the sites, the groups, every gate refusal with its words, every cell relation,
+  and G3b's verdict on the empty family point by point, with its refutation scope, its
+  failing point and its reason. It checks that a removed point demotes G3b and G4a. With
+  every point run, it checks that G4a's tier agrees with G4a's own report of a point left
+  open: that half is consistency, not prediction. It fails below minimum counts of each
+  outcome, the closed gate among them. It runs in CTest as
+  `generalized-gemm-identity-programs`, and with `--memory-limit-gb 0` against a
+  sanitizer build, whose shadow memory a 4 GiB address-space limit refuses.
+- **Mutation.** The domain harness runs the identity section first and the identity
+  oracle last. It gains 41 mutants of the gate, the cells, the refutation scope and the
+  recorded scope. Five are equivalent, with reasons in `domain_mutation.py`: four
+  call sites of G5a's cells, where one group has one output root, and G3a's unknown, which
+  no enumerated domain reaches. The six G3b and six G4a mutants whose code moved into
+  `SiteSets.cpp` are re-anchored there with the same edit, and one is added for G3b's
+  call of the gate.
+
+### What stays Unknown
+
+- Two argument roots with no authorization may alias. Every fact that needs their cells
+  apart stays Unknown.
+- G3b's symbolic route refutes only a refused family. A failed obligation there stays
+  Unknown, as before.
+- A group refused by the gate is Unknown on every route, whatever its sites compute.
+
+### Not done
+
+Segments that belong to one group (Theorem 18), coordinates validated per segment,
+coverage across segments from Theorem 15, and a set-level verdict kept apart from the
+one-group verdict are M4a to M4d. None is started.
+
+## Validation of M4-0 (2026-11-10, LLVM 24.0.0git, Z3 4.8.12, base 7bf6534)
+
+Every result below is from one frozen tree (hash `1846937d…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The last mutation row is the
+final tree (`3f093064…`), which adds one equivalence to `computation_mutation.py` and
+nothing else. A first run, on the tree before the oracle fixes of this milestone, stopped
+at the domain mutation baseline: the identity oracle expected G4a's whole-scope tier
+whenever G4a verified with every point, and G4a demotes to Point when a replay stays open.
+The oracle was fixed and checked on eight seeds, and the whole run repeated.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 20 of 20 CTest suites, the new `identity-programs` among them |
+| G5a/G5b unit, core | 917 checks, 0 failures: `identity` 208, and every earlier section's count as at M3 (709) |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures: the counts the M3 binaries give, section by section for G4a |
+| Identity oracle, seed 20261112 | 120 programs, 0 failures: 1,857 whole groups and 8,031 refusals word for word, 5,163 cell relations (`C[0]` against `D[0]`: 263 apart when authorized, 60 may alias when not), the empty family 176 times whole scope, 107 times Point with a point removed, 128 times refuting every family and 266 times this family only, 57 flat families refuted over sibling loops, 45 closed gates |
+| Domain, G4a and multi-group oracles, seed 20261112 | 0 disagreements each: 114 domain specs, 60 + 20 G4a programs, 24 + 14 multi-group programs |
+| Byte-identical against the M3 binaries | G1 42, G2a 14, G3a 14, G3b 14 outputs, G4a 18 functions, 18 computation and domain lit RUN lines |
+| ASan, UBSan, leaks | Clean: domain core 917, G4a 3,658 and G3b 517 checks, and 12 identity oracle programs against the sanitized driver. G3b's finite route without its group bound stops with an AddressSanitizer report |
+| Mutation, domain harness | 167 mutants: 152 killed by a test's own assertion (41 by `identity`), 15 equivalent with reasons, 0 open |
+| Mutation, G3b and G3a, strict | The mutants of `SymbolicCandidateChecker.cpp`, `SiteSets.cpp` and `FiniteDomain.cpp`: 68 killed of 72, **4 open**. `no order accepted`, `bound may read inner levels` and `memory term adopted` end in a segfault inside the mutated code with no assertion first. `assumptions not passed to the check` fails two assertions and the test then crashes on an unguarded index. All four are guards older than M4-0, on lines it did not change; three sit inside functions it did change (`checkFamilySymbolic` twice, `enumerateDomain` once). The harnesses' own runners count a crash as a kill; the strict runner never does, and they stay open |
+| Mutation, G4a harness, final tree | The mutants of `ComputationChecker.cpp` and `SiteSets.cpp`: 103 killed, 6 equivalent, 0 open. `set lists a site twice` is equivalent since M4-0: the gate refuses a site twice first, in the same words |
+
 ## Validation of M3 (2026-11-08, LLVM 24.0.0git, Z3 4.8.12, base 8d6c8d0)
 
 Every result below is from one frozen tree (hash `dea9972f…` over `include/`, `lib/` and
@@ -640,3 +801,10 @@ surface: `Segment`, `DomainRequest::segments`, `SegmentFacts`,
 `eventStates`, `proveSegmentedOrbit`, `proposeSegmentedDomain`,
 `DomainAnalysisRequest::segmented`, the driver's `--segments`, and `shared_cells`,
 `segments` and per-event `state` in the JSON.
+
+M4-0 changes no earlier assertion or expected output, and no output of an earlier driver.
+It changes refusal text only, for groups the enumerator never makes, as the gate table
+above lists. G3b's ScopeEnumerated needs every point of the recorded scope where it needed
+only an unsampled list. The domain test gains the `identity` section, first in its order.
+The synthesis and computation mutation harnesses re-anchor the mutants whose code moved
+into `SiteSets.cpp`, with the same edits, and the synthesis harness gains one.

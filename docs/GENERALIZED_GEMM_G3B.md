@@ -43,7 +43,7 @@ valid.
 | --- | --- | --- | --- |
 | Proposed | None | None | The search |
 | Point | Exact at each listed point | G3a checker on exact domains, labels defined at every event | `checkFamilyFinite` |
-| ScopeEnumerated | The same, at every point of a finite scope | The same, with no sample and no stopped point | `checkFamilyFinite` |
+| ScopeEnumerated | The same, at every point of a finite scope | The same, with every point of the scope the enumeration recorded (`enumerationRanItsScope`, G5b-M4-0) and no stopped point | `checkFamilyFinite` |
 | SymbolicValid | For every point of S: V0 to V4. No coverage | SMT on an over-approximation | `checkFamilySymbolic` |
 | SymbolicExact | SymbolicValid or its bijection by S, and events are the orbit of the order | S1 to S3 as well | `checkFamilySymbolic` |
 

@@ -35,6 +35,7 @@ C = "ComputationChecker.cpp"
 H = "HerbrandReplay.cpp"
 A = "ComputationAnalysis.cpp"
 Y = "SymbolicDomain.cpp"
+T = "SiteSets.cpp"  # G5b-M4-0: the group gate and root separation, shared.
 
 MUTANTS = [
     # The finite route.
@@ -51,17 +52,17 @@ MUTANTS = [
     ("closed gate checked", C, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedComputation::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
     ("every run regardless of stops", C, "TerminationVerdict::ProvenTerminating &&\n                                   !stopsSeen);", "TerminationVerdict::ProvenTerminating);"),
     # Separation.
-    ("any two roots are apart", C, "    } else if (authorized.count(use.name)) {\n", "    } else if (true) {\n"),
-    ("noalias is enough", C, "    } else if (authorized.count(use.name)) {\n", "    } else if (authorized.count(use.name) || a.restrictArgument || b.restrictArgument) {\n"),
-    ("fresh hides as an assumption", C, "      use.assumption = false;\n", ""),
+    ("any two roots are apart", T, "  } else if (authorized.count(out.name)) {\n", "  } else if (true) {\n"),
+    ("noalias is enough", T, "  } else if (authorized.count(out.name)) {\n", "  } else if (authorized.count(out.name) || a.restrictArgument || b.restrictArgument) {\n"),
+    ("fresh hides as an assumption", T, "    out.assumption = false;\n", ""),
     ("output not separated", C, "written, accessed{*group.output, group.first, group.second};\n", "written, accessed{group.first, group.second};\n"),
     ("other reads not separated", C, "      accessed.insert(effect.root);\n", ""),
     ("only the output's writes", C, "      if (effect.kind == MemoryEffect::Write)\n        written.insert(effect.root);\n", "      if (effect.kind == MemoryEffect::Write && effect.root == *group.output)\n        written.insert(effect.root);\n"),
     ("separations dropped", C, "  ComputationAuthority::contracts(out, std::move(contracts), foldOf(program, group));\n  ComputationAuthority::separations(out, std::move(separations));\n", "  ComputationAuthority::contracts(out, std::move(contracts), foldOf(program, group));\n"),
     ("symbolic separations dropped", C, "    ComputationAuthority::records(out, std::move(proof.records));\n    ComputationAuthority::separations(out, std::move(separations));\n", "    ComputationAuthority::records(out, std::move(proof.records));\n"),
     # Gates.
-    ("part of a group", C, "    if (same != (listed.count(site.id) != 0)) {\n", "    if (false) {\n"),
-    ("unsupported group", C, "  if (!group.unsupported.empty()) {\n    why = group.unsupported;\n    return false;\n  }\n", ""),
+    ("part of a group", T, "    if (same != (listed.count(site.id) != 0)) {\n", "    if (false) {\n"),
+    ("unsupported group", T, "  if (!group.unsupported.empty()) {\n    why = group.unsupported;\n    return false;\n  }\n", ""),
     ("oblivious unchecked", C, "  if (!program.controlOblivious || !program.addressOblivious) {\n    why = \"the trace depends on memory contents\";\n    return false;\n  }\n", ""),
     ("zero limit accepted", C, "  if (solver.timeoutMilliseconds && solver.resourceLimit)\n", "  if (true)\n"),
     ("either limit enough", C, "  if (solver.timeoutMilliseconds && solver.resourceLimit)\n", "  if (solver.timeoutMilliseconds || solver.resourceLimit)\n"),
@@ -155,7 +156,7 @@ MUTANTS = [
     ("a lead replaces a finite claim", A, "      if (lead.status() == ComputationStatus::Refuted)\n        group.finite = std::move(lead);\n", "      group.finite = std::move(lead);\n"),
     ("locations not reached", Y, "  for (unsigned location : locations)\n    targets.push_back({location, location});\n", ""),
     # G5b-M3: claims over sets of groups.
-    ("set of part of a group", C, "    if (!groupIsWhole(program, group, why))\n      return std::nullopt;\n", ""),
+    ("set of part of a group", C, "    if (!wholeGroup(program, group, why))\n      return std::nullopt;\n", ""),
     ("set lists a group twice", C, "    if (!triples.insert({*group.output, group.first, group.second}).second) {\n      why = \"a group is listed twice\";\n      return std::nullopt;\n    }\n", "    triples.insert({*group.output, group.first, group.second});\n"),
     ("set lists a site twice", C, "      if (set.groupOf[site] != -1) {\n        why = \"a site is listed twice\";\n        return std::nullopt;\n      }\n", ""),
     ("set of more than 64", C, "  if (listed.size() > 64) {", "  if (false) {"),
@@ -215,6 +216,11 @@ EQUIVALENT = [
      "symbolically, and checkFamilySymbolic adopts every term of the family first, by the same "
      "adoptProofTerm, refusing the family otherwise. So no term reaching this point fails to "
      "adopt. Evidence: the unadoptable family of testGapsTwo."),
+    ("set lists a site twice", "unreachable since G5b-M4-0. The shared gate refuses a site listed "
+     "twice within one group, in the same words, before the union is built. A site listed in two "
+     "groups gives both groups the one root triple of that site, so the second is refused first "
+     "as a group listed twice. The check stays as a defence. Evidence: the `a site twice` case of "
+     "testGroupSets, now refused by the gate, and the duplicate cases of the identity section."),
 ]
 
 MEMORY_LIMIT = 6 << 30   # Per process, inherited by its descendants.

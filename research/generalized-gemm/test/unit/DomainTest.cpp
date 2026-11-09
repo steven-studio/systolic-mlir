@@ -2,6 +2,7 @@
 // test/fuzz/domain_oracle.py recomputes the results with no library code.
 #include "GeneralizedGemm/DomainAnalysis.h"
 #include "GeneralizedGemm/ReductionSemantics.h"
+#include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 #include "GeneralizedGemm/Z3Backend.h"
@@ -3118,6 +3119,443 @@ static void testSegments() {
   testSegmentGates();
 }
 
+// G5b-M4-0: one group gate for G3b, G4a and G5a, cells as a root and an index, a
+// whole-scope tier that needs every point, and a candidate's refutation kept apart from
+// the program's.
+static const char *identitySource = R"(func.func @two_groups(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %x2 = memref.load %a[%j] : memref<8xi32>
+    %y2 = memref.load %b[%j] : memref<8xi32>
+    %z2 = memref.load %c[%j] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %c[%j] : memref<8xi32>
+  }
+  scf.for %k = %c0 to %n step %c1 {
+    %x3 = memref.load %a[%k] : memref<8xi32>
+    %y3 = memref.load %b[%k] : memref<8xi32>
+    %z3 = memref.load %d[%k] : memref<8xi32>
+    %m3 = arith.muli %x3, %y3 : i32
+    %s3 = arith.addi %z3, %m3 : i32
+    memref.store %s3, %d[%k] : memref<8xi32>
+  }
+  return
+}
+func.func @fresh_cells(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %f = memref.alloc() : memref<8xi32>
+  %v = arith.constant 7 : i32
+  memref.store %v, %f[%c0] : memref<8xi32>
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  %q = memref.load %c[%c0] : memref<8xi32>
+  memref.store %q, %d[%c0] : memref<8xi32>
+  return
+}
+func.func @dyn_extent(%a: memref<4xi32>, %b: memref<4xi32>, %c: memref<?xi32>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %e = memref.dim %c, %c0 : memref<?xi32>
+  scf.for %i = %c0 to %e step %c1 {
+    %x = memref.load %a[%c0] : memref<4xi32>
+    %y = memref.load %b[%c0] : memref<4xi32>
+    %z = memref.load %c[%i] : memref<?xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<?xi32>
+  }
+  return
+}
+func.func @c0_shift(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %i1 = arith.addi %i, %c1 : index
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i1] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  return
+}
+)";
+
+static void testIdentity() {
+  Module m(std::string(identitySource) + siblingSource);
+  Sort w = Sort::bv(16);
+  CoordinateFamily none;
+  DomainRequest nothing;
+
+  // 1. The group gate, at site id 0, at the last id and at the first id past it, the same
+  // for G3b, G4a and G5a. A refused group gets the gate's own words from each checker; a
+  // whole one never does.
+  {
+    Fixture f = fixture(m, "two_groups", 1, 2);
+    const SemanticProgram &p = f.program;
+    CHECK(p.sites.size() == 3 && f.enumeration.groups.size() == 2);
+    unsigned last = p.sites.size() - 1, past = p.sites.size();
+    const SiteGroup &first = f.enumeration.groups[0], &second = f.enumeration.groups[1];
+    CHECK(first.sites == std::vector<unsigned>({0, 1}) && second.sites == std::vector<unsigned>({last}));
+    auto with = [&](const SiteGroup &roots, std::vector<unsigned> sites) {
+      SiteGroup out = roots;
+      out.sites = std::move(sites);
+      return out;
+    };
+    SymbolicCheckOptions coordinates;
+    coordinates.scope = f.options.scope;
+    coordinates.termination = f.options.termination;
+    coordinates.authorized = f.options.authorized;
+    ComputationOptions computation;
+    computation.scope = f.options.scope;
+    computation.termination = f.options.termination;
+    computation.authorized = f.options.authorized;
+    computation.limits.maxQueries = 4000;
+    auto reasons = [&](const SiteGroup &group) {
+      return std::vector<std::string>{
+          checkFamilySymbolic(p, f.proof(), group, none, nullptr, coordinates, z3Backend).reason(),
+          checkComputationSymbolic(p, f.proof(), group, computation, z3Backend).reason(),
+          checkDomainSymbolic(p, f.proof(), group, none, nothing, f.options, z3Backend).reason()};
+    };
+    const char *gateWords[] = {"the group has no output in memory", "the group has no sites",
+                               "the group names a site the program does not have",
+                               "a site is listed twice", "the group is not the sites of its roots"};
+    struct Case {
+      const char *what;
+      SiteGroup group;
+      const char *refusal; // Null: whole.
+    };
+    SiteGroup unsupported = first, noOutput = first;
+    unsupported.unsupported = "a scalar accumulator has no exact output view";
+    noOutput.output.reset();
+    std::vector<Case> cases = {
+        {"the first group", first, nullptr},
+        {"the last site's group", second, nullptr},
+        {"site 0 alone", with(first, {0}), "the group is not the sites of its roots"},
+        {"the last site under the first group's roots", with(first, {0, 1, last}),
+         "the group is not the sites of its roots"},
+        {"the first id past the program", with(first, {0, 1, past}),
+         "the group names a site the program does not have"},
+        {"only an id past the program", with(second, {past}),
+         "the group names a site the program does not have"},
+        {"site 0 twice", with(first, {0, 1, 0}), "a site is listed twice"},
+        {"the last site twice", with(second, {last, last}), "a site is listed twice"},
+        {"an id past the program before a site twice", with(first, {0, 0, past}),
+         "the group names a site the program does not have"},
+        {"no site", with(first, {}), "the group has no sites"},
+        {"no output", noOutput, "the group has no output in memory"},
+        {"unsupported", unsupported, "a scalar accumulator has no exact output view"},
+    };
+    for (const Case &c : cases) {
+      std::string why;
+      bool whole = wholeGroup(p, c.group, why);
+      bool ok = c.refusal ? !whole && why == c.refusal : whole && why.empty();
+      if (!ok)
+        printf("%s: whole %d, why '%s'\n", c.what, whole, why.c_str());
+      CHECK(ok);
+      if (!c.refusal) {
+        for (const std::string &reason : reasons(c.group))
+          for (const char *words : gateWords)
+            CHECK(reason.find(words) == std::string::npos);
+        continue;
+      }
+      // An id past the program reaches the checkers only once the gate has refused it.
+      if (whole)
+        continue;
+      for (const std::string &reason : reasons(c.group)) {
+        if (reason != c.refusal)
+          printf("%s: a checker says '%s'\n", c.what, reason.c_str());
+        CHECK(reason == c.refusal);
+      }
+    }
+    // A set over a group with an id past the program, or with a site twice, is refused
+    // the same way.
+    std::vector<SiteGroup> listed{with(first, {0, 1, past}), second};
+    CHECK(checkGroupSetSymbolic(p, f.proof(), listed, computation, z3Backend).reason() ==
+          "the group names a site the program does not have");
+    std::vector<SiteGroup> twice{with(first, {0, 1, 1}), second};
+    CHECK(checkGroupSetSymbolic(p, f.proof(), twice, computation, z3Backend).reason() ==
+          "a site is listed twice");
+
+    // The finite routes take a group by its index in an enumeration. An index past the
+    // groups, or a group there that is not whole, gets the same words from all three.
+    auto finiteReasons = [&](const DomainEnumeration &e, unsigned g) {
+      return std::vector<std::string>{checkFamilyFinite(p, e, g, none).reason(),
+                                      checkComputationFinite(p, e, g, computation).reason(),
+                                      checkDomainFinite(p, e, g, none, nothing, f.options).reason()};
+    };
+    auto altered = [&](unsigned g, std::function<void(SiteGroup &)> change) {
+      DomainEnumeration e = f.enumeration;
+      change(e.groups[g]);
+      return e;
+    };
+    struct FiniteCase {
+      const char *what;
+      DomainEnumeration enumeration;
+      unsigned group;
+      const char *refusal;
+    };
+    unsigned groupsPast = f.enumeration.groups.size();
+    std::vector<FiniteCase> finiteCases = {
+        {"the first index past the groups", f.enumeration, groupsPast, "no such group"},
+        {"site 0 alone", altered(0, [](SiteGroup &g) { g.sites = {0}; }), 0,
+         "the group is not the sites of its roots"},
+        {"an id past the program", altered(0, [&](SiteGroup &g) { g.sites.push_back(past); }), 0,
+         "the group names a site the program does not have"},
+        {"a site twice", altered(0, [](SiteGroup &g) { g.sites.push_back(1); }), 0,
+         "a site is listed twice"},
+        {"unsupported", altered(1, [](SiteGroup &g) { g.unsupported = "marked unsupported"; }), 1,
+         "marked unsupported"},
+    };
+    for (const FiniteCase &c : finiteCases) {
+      // A group the gate wrongly admitted would reach the checkers with an id past the
+      // program: they are asked only once the gate has refused it.
+      if (c.group < c.enumeration.groups.size()) {
+        std::string why;
+        bool whole = wholeGroup(p, c.enumeration.groups[c.group], why);
+        CHECK(!whole && why == c.refusal);
+        if (whole)
+          continue;
+      }
+      for (const std::string &reason : finiteReasons(c.enumeration, c.group)) {
+        if (reason != c.refusal)
+          printf("finite, %s: a checker says '%s'\n", c.what, reason.c_str());
+        CHECK(reason == c.refusal);
+      }
+    }
+    for (unsigned g = 0; g < groupsPast; ++g)
+      for (const std::string &reason : finiteReasons(f.enumeration, g)) {
+        CHECK(reason != "no such group");
+        for (const char *words : gateWords)
+          CHECK(reason.find(words) == std::string::npos);
+      }
+  }
+
+  // 2. Cells. C[0] and D[0]: two roots, one index, two cells only when the roots are known
+  // apart. One root and one index: one cell. A fresh allocation is apart from everything.
+  {
+    Fixture f = fixture(m, "fresh_cells", 1, 2);
+    const SemanticProgram &p = f.program;
+    CHECK(p.roots.size() == 5);
+    unsigned c = 2, d = 3, fresh = 4;
+    CHECK(p.roots[fresh].origin == MemoryRoot::FreshAllocation && p.roots[c].origin == MemoryRoot::FunctionArgument);
+    auto at = [](unsigned root, std::vector<uint64_t> index) {
+      CellRef out;
+      out.root = root;
+      for (uint64_t v : index)
+        out.index.push_back(APInt(16, v));
+      return out;
+    };
+    Authorizations apart{"roots 2 and 3 are separate"}, silent;
+    CHECK(relateCells(p, apart, at(c, {0}), at(d, {0})) == CellRelation::Distinct);
+    CHECK(relateCells(p, silent, at(c, {0}), at(d, {0})) == CellRelation::MayAlias);
+    CHECK(relateCells(p, silent, at(d, {0}), at(c, {0})) == CellRelation::MayAlias);
+    CHECK(relateCells(p, Authorizations{"roots 3 and 2 are separate"}, at(c, {0}), at(d, {0})) ==
+          CellRelation::MayAlias); // The name is the lower root first, as G4a writes it.
+    CHECK(relateCells(p, silent, at(c, {0}), at(fresh, {0})) == CellRelation::Distinct);
+    CHECK(relateCells(p, silent, at(c, {0}), at(c, {0})) == CellRelation::Same);
+    CHECK(relateCells(p, silent, at(c, {0}), at(c, {1})) == CellRelation::Distinct);
+    CHECK(relateCells(p, silent, at(c, {0}), at(c, {0, 0})) == CellRelation::MayAlias);
+    CellRef wide = at(c, {0});
+    wide.index[0] = APInt(32, 0);
+    CHECK(relateCells(p, silent, at(c, {0}), wide) == CellRelation::MayAlias);
+    CHECK(relateCells(p, apart, at(c, {0}), at(9, {0})) == CellRelation::MayAlias);
+    CHECK(rootRelation(p, silent, c, c) == CellRelation::Same);
+    CHECK(rootRelation(p, apart, c, d) == CellRelation::Distinct && rootRelation(p, silent, c, d) == CellRelation::MayAlias);
+    CHECK(cellKey(c, {APInt(16, 0)}) != cellKey(d, {APInt(16, 0)}));
+    CHECK(cellKey(c, {APInt(16, 0)}) == cellKey(c, {APInt(16, 0)}));
+    CHECK(cellKey(c, {APInt(16, 1)}) != cellKey(c, {APInt(16, 0)}));
+    // The separation the cells read is G4a's gate, word for word.
+    RootSeparation byName = rootSeparation(p, apart, d, c), byFresh = rootSeparation(p, silent, c, fresh);
+    CHECK(byName.apart && byName.assumption && byName.basis == "authorized" &&
+          byName.name == "roots 2 and 3 are separate");
+    CHECK(byFresh.apart && !byFresh.assumption && byFresh.basis == "fresh allocation");
+    CHECK(!rootSeparation(p, silent, c, d).apart && rootSeparation(p, silent, c, d).basis.empty());
+    ComputationOptions computation;
+    computation.scope = f.options.scope;
+    computation.termination = f.options.termination;
+    computation.authorized = f.options.authorized;
+    CheckedComputation g4 = checkComputationFinite(p, f.enumeration, 0, computation);
+    CHECK(g4.status() == S::Verified);
+    unsigned matched = 0;
+    for (const SeparationUse &use : g4.separations()) {
+      RootSeparation same = rootSeparation(p, f.options.authorized, use.first, use.second);
+      matched += same.apart && same.assumption == use.assumption && same.basis == use.basis && same.name == use.name;
+    }
+    CHECK(matched == g4.separations().size() && matched > 0);
+    // The formula: one root, the index equality under the premise; apart, never; may
+    // alias, whenever both happen.
+    TermContext &terms = *p.terms;
+    Term premise = terms.icmp(Predicate::Ult, terms.param(0, w), terms.bv(APInt(16, 3)));
+    Term equal = terms.icmp(Predicate::Eq, terms.param(0, w), terms.bv(APInt(16, 1)));
+    CHECK(sameCellFormula(terms, CellRelation::Same, premise, equal) == terms.logicalAnd(premise, equal));
+    CHECK(sameCellFormula(terms, CellRelation::Distinct, premise, equal) == terms.boolean(false));
+    CHECK(sameCellFormula(terms, CellRelation::MayAlias, premise, equal) == premise);
+    CHECK(std::string(stringifyCellRelation(CellRelation::MayAlias)) == "MAY_ALIAS");
+  }
+  // One root and one index across two segments of one group: a shared cell, seen on the
+  // finite route and never claimed apart on the symbolic one.
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {LevelSpec{terms.state(l[0], w), zero, n, false, false}}),
+                  segmentOf(f.program, {1}, {LevelSpec{terms.state(l[1], w), zero, n, false, false}})};
+    CheckedDomain finite = checkDomainFinite(f.program, f.enumeration, 0, none, r, f.options);
+    CheckedDomain symbolic = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, r,
+                                                 f.options, z3Backend);
+    CHECK(finite.status() == S::Verified && finite.sharedCells().status == FactStatus::Refuted);
+    CHECK(symbolic.status() == S::Verified && symbolic.sharedCells().status == FactStatus::Unknown);
+    CHECK(finite.singleContribution().status == FactStatus::Refuted);
+  }
+
+  // 3. The whole scope needs every point. A sample, a list with a point removed, and one
+  // with a point removed and another repeated, are no whole scope for G3b, G4a or G5a.
+  {
+    Module cat(catalogue());
+    Fixture f = fixture(cat, "rect", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CoordinateFamily family = loopFamily(f.program, {l[0]}, {l[1]}, {l[2]});
+    CHECK(enumerationRanItsScope(f.enumeration) && f.enumeration.scopePoints == 3);
+    CHECK(checkFamilyFinite(f.program, f.enumeration, 0, family).tier() == EvidenceTier::ScopeEnumerated);
+    ComputationOptions o;
+    o.scope = f.options.scope;
+    o.termination = f.options.termination;
+    o.authorized = f.options.authorized;
+    CHECK(checkComputationFinite(f.program, f.enumeration, 0, o).tier() == T::ScopeEnumerated);
+    std::string why;
+    auto request = proposeDomain(f.program, f.enumeration, 0, family, nullptr, ProposalLimits(), why);
+    CHECK(request.has_value());
+    if (request)
+      CHECK(checkDomainFinite(f.program, f.enumeration, 0, family, *request, f.options).tier() ==
+            T::ScopeEnumerated);
+    DomainEnumeration trimmed = f.enumeration;
+    trimmed.points.pop_back();
+    DomainEnumeration repeated = trimmed;
+    repeated.points.push_back(repeated.points.front());
+    Fixture sample = fixture(cat, "rect", 1, 3, 16, {{APInt(16, 2)}});
+    for (const DomainEnumeration *e : {&trimmed, &repeated, &sample.enumeration}) {
+      CHECK(!enumerationRanItsScope(*e));
+      CheckedFamily g3 = checkFamilyFinite(f.program, *e, 0, family);
+      CHECK(g3.status() == FamilyStatus::Verified && g3.tier() == EvidenceTier::Point);
+      CheckedComputation g4 = checkComputationFinite(f.program, *e, 0, o);
+      CHECK(g4.status() == S::Verified && g4.tier() == T::Point);
+      if (request) {
+        CheckedDomain g5 = checkDomainFinite(f.program, *e, 0, family, *request, f.options);
+        CHECK(g5.status() == S::Verified && g5.tier() == T::Point);
+      }
+    }
+    // The recorded scope is the one the enumerator ran; a point outside it is no point of it.
+    DomainEnumeration moved = f.enumeration;
+    moved.points.back().parameters = {APInt(16, 9)};
+    CHECK(!enumerationRanItsScope(moved));
+    // Each condition on its own: a list marked as a sample, or behind a closed gate, is no
+    // run of the scope, whatever it holds.
+    DomainEnumeration marked = f.enumeration, closed = f.enumeration;
+    marked.sampled = true;
+    closed.gate = GateStatus::Unknown;
+    CHECK(!enumerationRanItsScope(marked) && !enumerationRanItsScope(closed));
+    CHECK(!enumerationRanItsScope(DomainEnumeration()));
+  }
+  // A point with a negative extent lies outside the domain and is counted as run: the scope
+  // here is four points, one of them outside.
+  {
+    Fixture f = fixture(m, "dyn_extent", -1, 2);
+    CHECK(f.enumeration.gate == GateStatus::Open && f.enumeration.outsideDomain == 1 &&
+          f.enumeration.points.size() == 3 && f.enumeration.scopePoints == 4);
+    CHECK(enumerationRanItsScope(f.enumeration));
+    DomainEnumeration trimmed = f.enumeration;
+    trimmed.points.pop_back();
+    CHECK(!enumerationRanItsScope(trimmed));
+  }
+
+  // 4. A flat candidate over sibling loops fails, and says only that this family fails:
+  // the program's computation, domain and Theorem 13 all stand. C0 alone refutes every
+  // family; a verified family refutes nothing.
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CoordinateFamily flat = loopFamily(f.program, {l[0]}, {}, {});
+    CheckedFamily candidate = checkFamilyFinite(f.program, f.enumeration, 0, flat);
+    CHECK(candidate.status() == FamilyStatus::Refuted && candidate.failingPoint().has_value());
+    CHECK(candidate.refutes() == Refutes::ThisFamily);
+    ComputationOptions o;
+    o.scope = f.options.scope;
+    o.termination = f.options.termination;
+    o.authorized = f.options.authorized;
+    CHECK(checkComputationFinite(f.program, f.enumeration, 0, o).status() == S::Verified);
+    CHECK(checkComputationSymbolic(f.program, f.proof(), f.enumeration.groups[0], o, z3Backend).status() ==
+          S::Verified);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {LevelSpec{terms.state(l[0], w), zero, n, false, false}}),
+                  segmentOf(f.program, {1}, {LevelSpec{terms.state(l[1], w), zero, n, false, false}})};
+    ReductionVerdict verdict = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r,
+                                              f.options, z3Backend);
+    CHECK(verdict.status() == S::Verified && verdict.tier() == T::Symbolic);
+    CHECK(verdict.domainSymbolic().status() == S::Verified);
+    CHECK(std::string(stringifyRefutes(candidate.refutes())) == "THIS_FAMILY");
+
+    Fixture shifted = fixture(m, "c0_shift", 1, 3);
+    std::vector<unsigned> sl = loops(shifted.program);
+    CheckedFamily every = checkFamilyFinite(shifted.program, shifted.enumeration, 0,
+                                            loopFamily(shifted.program, {}, {}, {}, {sl[0]}));
+    CHECK(every.status() == FamilyStatus::Refuted && every.refutes() == Refutes::EveryFamily);
+    CHECK(every.reason().find("output_read_differs") != std::string::npos);
+
+    Module cat(catalogue());
+    Fixture rect = fixture(cat, "rect", 1, 2);
+    std::vector<unsigned> rl = loops(rect.program);
+    CheckedFamily good = checkFamilyFinite(rect.program, rect.enumeration, 0, loopFamily(rect.program, {rl[0]}, {rl[1]}, {rl[2]}));
+    CHECK(good.status() == FamilyStatus::Verified && good.refutes() == Refutes::Nothing);
+    // A family that reads memory is refused on both routes as this family only.
+    CoordinateFamily loaded = loopFamily(rect.program, {rl[0]}, {rl[1]}, {rl[2]});
+    loaded.axes[AxisI][0] = rect.program.terms->load(rect.program.terms->memVar(rect.program.roots[0].sort),
+                                                     {loaded.axes[AxisI][0], loaded.axes[AxisI][0]});
+    CHECK(checkFamilyFinite(rect.program, rect.enumeration, 0, loaded).refutes() == Refutes::ThisFamily);
+    SymbolicCheckOptions coordinates;
+    coordinates.scope = rect.options.scope;
+    coordinates.termination = rect.options.termination;
+    coordinates.authorized = rect.options.authorized;
+    // An order, so that the route gets as far as reading the family.
+    EnumerationOrder order;
+    TermContext &rt = *rect.program.terms;
+    order.levels.push_back({rt.state(rl[0], w), rt.bv(APInt(16, 0)), rt.param(0, w), -1});
+    CheckedFamily symbolicLoaded = checkFamilySymbolic(rect.program, rect.proof(), rect.enumeration.groups[0], loaded,
+                                                       &order, coordinates, z3Backend);
+    CHECK(symbolicLoaded.status() == FamilyStatus::Refuted && symbolicLoaded.refutes() == Refutes::ThisFamily);
+    CHECK(CheckedFamily::unknown("x").refutes() == Refutes::Nothing);
+    // A coordinate undefined at an event fails this family alone, before G3a is asked.
+    CoordinateFamily undefinedAt = loopFamily(rect.program, {rl[0]}, {rl[1]}, {rl[2]});
+    undefinedAt.axes[AxisP].push_back(rt.binary(TermOp::UDiv, rt.state(rl[0], w), rt.bv(APInt(16, 0))));
+    CheckedFamily undefinedFamily = checkFamilyFinite(rect.program, rect.enumeration, 0, undefinedAt);
+    CHECK(undefinedFamily.status() == FamilyStatus::Refuted && undefinedFamily.refutes() == Refutes::ThisFamily);
+    CHECK(undefinedFamily.reason().rfind("a coordinate is undefined at event", 0) == 0);
+    CHECK(undefinedFamily.failingPoint().has_value());
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -3135,6 +3573,7 @@ int main(int argc, char **argv) {
              failures);
     }
   };
+  run("identity", testIdentity);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);
   run("wrapping", testWrapping);

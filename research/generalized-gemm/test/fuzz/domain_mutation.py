@@ -36,6 +36,9 @@ D = "DomainChecker.cpp"
 R = "ReductionSemantics.cpp"
 V = "CoverageSimulation.cpp"
 C = "ComputationChecker.cpp"
+T = "SiteSets.cpp"                  # G5b-M4-0: groups and cells, one rule for G3b, G4a and G5a.
+G = "SymbolicCandidateChecker.cpp"  # G3b: its refutation scope and finite gate (G5b-M4-0).
+F = "FiniteDomain.cpp"              # The scope an enumeration records (G5b-M4-0).
 
 MUTANTS = [
     # Theorem 12: D1 to D3.
@@ -114,10 +117,10 @@ MUTANTS = [
     ("closed gate checked", D, "CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeration &enumeration,\n                          unsigned g, const CoordinateFamily &family, const DomainRequest &request,\n                          const DomainOptions &options) {\n  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", "CheckedDomain finiteClaim(const SemanticProgram &program, const DomainEnumeration &enumeration,\n                          unsigned g, const CoordinateFamily &family, const DomainRequest &request,\n                          const DomainOptions &options) {\n"),
     ("closed gate checked, segment", D, "                              const DomainOptions &options) {\n  if (enumeration.gate != GateStatus::Open)\n    return CheckedDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", "                              const DomainOptions &options) {\n"),
     # Gates.
-    ("part of a group", D, "    if (same != (listed.count(site.id) != 0)) {\n      why = \"the group is not the sites of its roots\";", "    if (false) {\n      why = \"the group is not the sites of its roots\";"),
+    ("part of a group", T, "    if (same != (listed.count(site.id) != 0)) {\n      why = \"the group is not the sites of its roots\";", "    if (false) {\n      why = \"the group is not the sites of its roots\";"),
     ("oblivious unchecked", D, "  if (!program.controlOblivious || !program.addressOblivious) {\n    why = \"the trace depends on memory contents\";", "  if (false) {\n    why = \"the trace depends on memory contents\";"),
-    ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest("),
-    ("zero limit accepted, segment", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!groupIsWhole(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments("),
+    ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest("),
+    ("zero limit accepted, segment", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments("),
     ("certificate not needed", D, "  if (outcome.verdict.kind() != TerminationVerdict::ProvenTerminating &&\n      outcome.verdict.kind() != TerminationVerdict::ProvenTerminatingIfDefined) {\n    why = \"the certificate was not accepted: \"", "  if (false) {\n    why = \"the certificate was not accepted: \""),
     ("shared block admitted", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  Proof proof(", "      places.insert(program.sites[id].location);\n  }\n  Proof proof("),
     ("shared block admitted, segment", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  std::map<unsigned, unsigned> ofSite", "      places.insert(program.sites[id].location);\n  }\n  std::map<unsigned, unsigned> ofSite"),
@@ -175,6 +178,52 @@ MUTANTS = [
     ("scope sampled", C, "  if (enumeration.sampled || scope.allParameters)\n    return false;\n", ""),
     ("scope count ignored", C, "  return expected == APInt(128, seen.size() + enumeration.outsideDomain);\n", "  return true;\n"),
     ("scope point outside", C, "    if (!parametersInScope(scope, point.parameters))\n      return false;\n", ""),
+    # G5b-M4-0: the group gate, one for G3b, G4a and G5a.
+    ("site id unbounded", T, '  for (unsigned id : group.sites)\n    if (id >= program.sites.size()) {\n      why = "the group names a site the program does not have";\n      return false;\n    }\n', ""),
+    ("a site listed twice admitted", T, '  if (listed.size() != group.sites.size()) {\n    why = "a site is listed twice";\n    return false;\n  }\n', ""),
+    ("group without output admitted", T, '  if (!group.output) {\n    why = "the group has no output in memory";\n    return false;\n  }\n', ""),
+    ("group without sites admitted", T, '  if (group.sites.empty()) {\n    why = "the group has no sites";\n    return false;\n  }\n', ""),
+    ("unsupported group admitted", T, '  if (!group.unsupported.empty()) {\n    why = group.unsupported;\n    return false;\n  }\n', ""),
+    ("a site twice before an id past", T, '  for (unsigned id : group.sites)\n    if (id >= program.sites.size()) {\n      why = "the group names a site the program does not have";\n      return false;\n    }\n  // The checkers walk the list, so a site in it twice would be walked twice. The words\n  // are the set route\'s, which refused this before any single group did.\n  std::set<unsigned> listed(group.sites.begin(), group.sites.end());\n  if (listed.size() != group.sites.size()) {\n    why = "a site is listed twice";\n    return false;\n  }\n', '  std::set<unsigned> listed(group.sites.begin(), group.sites.end());\n  if (listed.size() != group.sites.size()) {\n    why = "a site is listed twice";\n    return false;\n  }\n  for (unsigned id : group.sites)\n    if (id >= program.sites.size()) {\n      why = "the group names a site the program does not have";\n      return false;\n    }\n'),
+    # Roots and cells.
+    ("one root may alias itself", T, "  if (first == second)\n    return CellRelation::Same;\n", ""),
+    ("roots that may alias are apart", T, "  return rootSeparation(program, authorized, first, second).apart ? CellRelation::Distinct\n                                                                  : CellRelation::MayAlias;\n", "  return CellRelation::Distinct;\n"),
+    ("a fresh root may alias", T, "  if (a.origin == MemoryRoot::FreshAllocation || b.origin == MemoryRoot::FreshAllocation) {", "  if (false) {"),
+    ("a reversed name separates", T, '  out.name = "roots " + std::to_string(low) + " and " + std::to_string(high) + " are separate";', '  out.name = "roots " + std::to_string(first) + " and " + std::to_string(second) + " are separate";'),
+    ("an absent root is apart", T, "  if (first >= program.roots.size() || second >= program.roots.size())\n    return CellRelation::MayAlias;\n", "  if (first >= program.roots.size() || second >= program.roots.size())\n    return CellRelation::Distinct;\n"),
+    ("cell indices ignored", T, "  for (unsigned n = 0; n < first.index.size(); ++n)\n    if (first.index[n] != second.index[n])\n      return CellRelation::Distinct;\n", ""),
+    ("two ranks are two cells", T, "  if (first.index.size() != second.index.size())\n    return CellRelation::MayAlias;\n", "  if (first.index.size() != second.index.size())\n    return CellRelation::Distinct;\n"),
+    ("cell key drops the root", T, "  std::vector<uint64_t> out{root};\n", "  std::vector<uint64_t> out;\n  (void)root;\n"),
+    ("cell key drops the index", T, "    out.push_back(value.getZExtValue());\n", "    (void)value;\n"),
+    ("apart cells may meet", T, "  case CellRelation::Distinct:\n    return terms.boolean(false);\n", "  case CellRelation::Distinct:\n    return premise;\n"),
+    ("aliasing cells never meet", T, "  case CellRelation::MayAlias:\n    return premise;\n  }\n", "  case CellRelation::MayAlias:\n    return terms.boolean(false);\n  }\n"),
+    ("one root, any index", T, "    return terms.logicalAnd(premise, equalIndices);\n", "    return premise;\n"),
+    # G5a's cells.
+    ("domain flat cells by index only", D, "      cells[cellKey(roots[e], views[0][e])].push_back(e);\n", "      cells[cellKey(0, views[0][e])].push_back(e);\n"),
+    ("domain segment cells by index only", D, "      row.cell = cellKey(program.sites[event.site].output->root, event.h);\n", "      row.cell = cellKey(0, event.h);\n"),
+    ("domain same cell ignores roots", D, "          rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          CellRelation::Same, both,\n"),
+    ("domain same cell ignores roots, segment", D, "          terms, rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          terms, CellRelation::Same, both,\n"),
+    ("domain cells may alias", D, "          rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          CellRelation::MayAlias, both,\n"),
+    ("domain cells may alias, segment", D, "          terms, rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          terms, CellRelation::MayAlias, both,\n"),
+    ("domain cells apart", D, "          rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          CellRelation::Distinct, both,\n"),
+    ("domain cells apart, segment", D, "          terms, rootRelation(program, options.authorized, first.output->root, second.output->root), both,\n", "          terms, CellRelation::Distinct, both,\n"),
+    # G3b: what a refutation refutes, and the finite route's gate.
+    ("C0 refutes this family only", G, "c0 ? Refutes::EveryFamily : Refutes::ThisFamily", "Refutes::ThisFamily"),
+    ("every counterexample refutes every family", G, "c0 ? Refutes::EveryFamily : Refutes::ThisFamily", "Refutes::EveryFamily"),
+    ("undefined labels refute every family", G, "      return refuted(why, Refutes::ThisFamily);\n", "      return refuted(why, Refutes::EveryFamily);\n"),
+    ("a refused family refutes nothing", G, "    refutes(out, Refutes::ThisFamily);\n", ""),
+    ("G3a unknown refutes", G, '      return CheckedFamily::unknown("the G3a checker gives no verdict at a point: " + checked.reason());\n', "      return refuted(checked.reason(), Refutes::ThisFamily);\n"),
+    ("finite group gate skipped", G, "  std::string why;\n  if (!wholeGroup(program, enumeration.groups[group], why))\n    return CheckedFamily::unknown(why);\n", "  std::string why;\n"),
+    ("not a sample is the scope", G, "  bool complete = enumerationRanItsScope(enumeration);\n", "  bool complete = !enumeration.sampled;\n"),
+    # The scope an enumeration ran.
+    ("scope not recorded", F, "  out.scope = options.scope;\n", ""),
+    ("scope count not kept", F, "    out.scopePoints = out.points.size() + out.outsideDomain;\n", ""),
+    ("a sample ran its scope", F, "  if (enumeration.sampled || enumeration.gate != GateStatus::Open)\n    return false;\n", "  if (enumeration.gate != GateStatus::Open)\n    return false;\n"),
+    ("a closed gate ran its scope", F, "  if (enumeration.sampled || enumeration.gate != GateStatus::Open)\n    return false;\n", "  if (enumeration.sampled)\n    return false;\n"),
+    ("points outside the recorded scope", F, "    if (!parametersInScope(enumeration.scope, point.parameters))\n      return false;\n", ""),
+    ("repeated points counted", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return enumeration.points.size() + enumeration.outsideDomain == enumeration.scopePoints;\n"),
+    ("outside points not counted", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return seen.size() == enumeration.scopePoints;\n"),
+    ("any count ran its scope", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return true;\n"),
 ]
 
 EQUIVALENT = [
@@ -211,6 +260,22 @@ EQUIVALENT = [
     ("integer flags ignored", "an nsw or nuw reduction add stores a value whose poison is a side "
      "condition `poison reaches memory` reading the output's load, which the stop check refuses "
      "first. Evidence: the mixed_flags case of testGapsG5."),
+    ("domain flat cells by index only", "G5b-M4-0 keys G5a's cells by root and index for M4's sets of "
+     "groups, but within one group every site writes the group's output root: the gate admits only "
+     "the direct sites of one root triple. The root in the key is then one constant, and the map "
+     "groups the events exactly as before. Evidence: the identity section asks cellKey of two roots "
+     "and one index directly."),
+    ("domain segment cells by index only", "the same: the segments of one group are sites of that group, "
+     "each writing its output root, so the root in each row's key is one constant."),
+    ("domain same cell ignores roots", "within one group both sites of a pair write the group's output "
+     "root, and rootRelation of a root of the program with itself is Same, so the formula is unchanged. "
+     "The may-alias and apart variants of this call are killed, which shows the call is read."),
+    ("domain same cell ignores roots, segment", "the same, for pairs within and across the segments of "
+     "one group."),
+    ("G3a unknown refutes", "G3a gives unknown only for a malformed candidate, with no events or a label "
+     "list of another length. The finite route asks it only at a point whose domain exists, which the "
+     "enumerator makes only for a table with events, and familyLabels gives every event one label on "
+     "every axis or fails before G3a is asked. A domain is made by the enumerator alone."),
 ]
 
 MEMORY_LIMIT = 6 << 30   # Per process, inherited by its descendants.
@@ -259,6 +324,10 @@ def verdict_of(label, done):
         if label == "programs":
             own = ("driver failed" not in done.stderr and "Traceback" not in done.stderr and
                    done.stderr.strip())
+        elif label == "identity-programs":
+            # Its own disagreements only: a driver that failed or ran out of time is no kill.
+            own = ("driver exit" not in done.stderr and "timed out" not in done.stderr and
+                   "Traceback" not in done.stderr and "FAIL: " in done.stderr)
         else:
             own = "FAIL " in done.stderr
         if own:
@@ -297,19 +366,24 @@ class Worker:
 
     def compile(self):
         return run(["ninja", "-C", self.build, "-j2", "generalized-gemm-domain-test",
-                    "generalized-gemm-domain-report"], timeout=BUILD_SECONDS,
-                   memory=COMPILE_LIMIT)
+                    "generalized-gemm-domain-report", "generalized-gemm-identity-report"],
+                   timeout=BUILD_SECONDS, memory=COMPILE_LIMIT)
 
     def commands(self):
         fuzz = self.root / "research" / "generalized-gemm" / "test" / "fuzz"
         test = self.build / "generalized-gemm-domain-test"
         report = self.build / "generalized-gemm-domain-report"
+        # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
+        # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial", "limits", "binding",
-                "wrapping", "catalogue", "orders")]
+               ("identity", "reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial", "limits",
+                "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
+        out.append(("identity-programs", [sys.executable, fuzz / "identity_oracle.py", "--driver",
+                                          self.build / "generalized-gemm-identity-report", "--programs", "12",
+                                          "--seed", "41", "--jobs", "1", "--no-minimum"]))
         return out
 
     def trial(self, name, filename, old, new):
