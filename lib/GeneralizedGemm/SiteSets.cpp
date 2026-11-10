@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <set>
+#include <tuple>
 
 using llvm::APInt;
 
@@ -44,6 +45,44 @@ bool wholeGroup(const SemanticProgram &program, const SiteGroup &group, std::str
       return false;
     }
   }
+  return true;
+}
+
+bool uniteGroups(const SemanticProgram &program, llvm::ArrayRef<const SiteGroup *> listed,
+                 GroupUnion &out, std::string &why) {
+  if (listed.empty()) {
+    why = "no group is listed";
+    return false;
+  }
+  if (listed.size() > 64) {
+    why = "more than 64 groups are listed";
+    return false;
+  }
+  std::set<std::tuple<unsigned, unsigned, unsigned>> triples;
+  GroupUnion united;
+  united.listedOf.assign(program.sites.size(), -1);
+  for (unsigned i = 0; i < listed.size(); ++i) {
+    const SiteGroup &group = *listed[i];
+    // A claim about part of a group is no claim about its events, here as alone.
+    if (!wholeGroup(program, group, why))
+      return false;
+    if (!triples.insert({*group.output, group.first, group.second}).second) {
+      why = "a group is listed twice";
+      return false;
+    }
+    for (unsigned site : group.sites) {
+      if (united.listedOf[site] != -1) {
+        why = "a site is listed twice";
+        return false;
+      }
+      united.listedOf[site] = i;
+      united.sites.push_back(site);
+    }
+  }
+  // Increasing, as one group's are: whatever the listing, every obligation is then asked
+  // in the same order, and so is the first one that fails.
+  std::sort(united.sites.begin(), united.sites.end());
+  out = std::move(united);
   return true;
 }
 

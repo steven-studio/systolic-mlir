@@ -5,6 +5,8 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+
 using llvm::APInt;
 namespace json = llvm::json;
 
@@ -76,6 +78,59 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
       group.candidates.push_back(std::move(entry));
     }
     out.groups.push_back(std::move(group));
+  }
+  // G5b-M4a: each set's request from its groups' own proposals, in program order. The
+  // checkers run whatever came of it, and their gates speak for a request that is missing.
+  for (const DomainSetRequest &asked : request.groupSets) {
+    SetDomain set;
+    set.groups = asked.groups;
+    if (asked.all) {
+      set.groups.clear();
+      for (unsigned g = 0; g < out.enumeration.groups.size(); ++g)
+        if (out.enumeration.groups[g].unsupported.empty())
+          set.groups.push_back(g);
+      if (asked.reversed)
+        std::reverse(set.groups.begin(), set.groups.end());
+    }
+    const std::vector<unsigned> &listed = set.groups;
+    DomainRequest joined;
+    bool proposed = true;
+    for (unsigned g : listed) {
+      if (g >= out.enumeration.groups.size()) {
+        proposed = false;
+        set.proposalReason = "no such group";
+        break;
+      }
+      std::string why;
+      auto mine = proposeSegmentedDomain(program, out.enumeration, g, nullptr, request.proposal, why);
+      if (!mine) {
+        proposed = false;
+        set.proposalReason = "group " + std::to_string(g) + ": " + why;
+        break;
+      }
+      for (Segment &segment : mine->segments)
+        joined.segments.push_back(std::move(segment));
+    }
+    if (proposed) {
+      auto first = [](const Segment &segment) {
+        return *std::min_element(segment.sites.begin(), segment.sites.end());
+      };
+      std::stable_sort(joined.segments.begin(), joined.segments.end(),
+                       [&](const Segment &a, const Segment &b) { return first(a) < first(b); });
+      set.request = std::move(joined);
+    }
+    DomainRequest given = set.request ? *set.request : DomainRequest();
+    set.finite = checkSetDomainFinite(program, out.enumeration, listed, given, request.domain);
+    std::vector<SiteGroup> groups;
+    bool known = true;
+    for (unsigned g : listed) {
+      known = known && g < out.enumeration.groups.size();
+      if (known)
+        groups.push_back(out.enumeration.groups[g]);
+    }
+    set.symbolic = known ? checkSetDomainSymbolic(program, certificate, groups, given, request.domain, backend)
+                         : CheckedSetDomain::unknown("no such group");
+    out.sets.push_back(std::move(set));
   }
   return out;
 }
@@ -219,6 +274,67 @@ json::Object domainJSON(const CheckedDomain &d) {
     records.push_back(json::Object{{"id", r.id}, {"location", r.location}, {"result", r.result},
                                    {"discharged", r.discharged}});
   out["obligations"] = std::move(records);
+  if (d.failingPoint())
+    out["failing_point"] = pointJSON(*d.failingPoint());
+  return out;
+}
+
+/// G5b-M4a.
+json::Object setDomainJSON(const CheckedSetDomain &d) {
+  json::Array groups, segmentGroups, segments, pairs, points, records;
+  for (const SiteGroup &group : d.groups()) {
+    json::Array sites;
+    for (unsigned site : group.sites)
+      sites.push_back((int64_t)site);
+    groups.push_back(json::Object{{"output", group.output ? json::Value((int64_t)*group.output) : json::Value(nullptr)},
+                                  {"first", (int64_t)group.first},
+                                  {"second", (int64_t)group.second},
+                                  {"sites", std::move(sites)}});
+  }
+  for (unsigned g : d.segmentGroups())
+    segmentGroups.push_back((int64_t)g);
+  for (const SegmentFacts &s : d.segments()) {
+    json::Array sites, access;
+    for (unsigned site : s.sites)
+      sites.push_back((int64_t)site);
+    for (const Fact &fact : s.access)
+      access.push_back(factJSON(fact));
+    segments.push_back(json::Object{{"sites", std::move(sites)},
+                                    {"multiplicity", stringifyDomainMultiplicity(s.multiplicity)},
+                                    {"cell_key", factJSON(s.cellKey)},
+                                    {"output_injective", factJSON(s.outputInjective)},
+                                    {"access", std::move(access)}});
+  }
+  for (const RootPair &pair : d.rootPairs())
+    pairs.push_back(json::Object{{"first", (int64_t)pair.first},
+                                 {"second", (int64_t)pair.second},
+                                 {"relation", stringifyCellRelation(pair.relation)},
+                                 {"basis", pair.basis},
+                                 {"assumption", pair.assumption}});
+  for (const DomainPointFacts &p : d.points())
+    points.push_back(json::Object{{"parameters", pointJSON(p.parameters)},
+                                  {"events", (int64_t)p.events},
+                                  {"points", (int64_t)p.points},
+                                  {"cells", (int64_t)p.cells},
+                                  {"max_per_cell", (int64_t)p.maxPerCell}});
+  for (const ObligationRecord &r : d.records())
+    records.push_back(json::Object{{"id", r.id}, {"location", r.location}, {"result", r.result},
+                                   {"discharged", r.discharged}});
+  json::Object out{{"tier", stringifyComputationTier(d.tier())},
+                   {"status", stringifyComputationStatus(d.status())},
+                   {"reason", d.reason()},
+                   {"binding", d.binding()},
+                   {"exact_order", d.exactOrder()},
+                   {"groups", std::move(groups)},
+                   {"segment_groups", std::move(segmentGroups)},
+                   {"segments", std::move(segments)},
+                   {"shared_cells", factJSON(d.sharedCells())},
+                   {"single_contribution", factJSON(d.singleContribution())},
+                   {"root_pairs", std::move(pairs)},
+                   {"refutation", factJSON(d.refutation())},
+                   {"points", std::move(points)},
+                   {"obligations", std::move(records)},
+                   {"authorizes_lowering", false}};
   if (d.failingPoint())
     out["failing_point"] = pointJSON(*d.failingPoint());
   return out;
@@ -374,6 +490,23 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
     groups.push_back(std::move(entry));
   }
   out["groups"] = std::move(groups);
+  // G5b-M4a: printed only when sets were asked for, so that no other output changes.
+  if (!result.sets.empty()) {
+    json::Array sets;
+    for (const SetDomain &set : result.sets) {
+      json::Array listed;
+      for (unsigned g : set.groups)
+        listed.push_back((int64_t)g);
+      json::Object entry{{"groups", std::move(listed)},
+                         {"proposal_reason", set.proposalReason},
+                         {"finite", setDomainJSON(set.finite)},
+                         {"symbolic", setDomainJSON(set.symbolic)}};
+      if (set.request)
+        entry["request"] = requestJSON(*set.request);
+      sets.push_back(std::move(entry));
+    }
+    out["group_sets"] = std::move(sets);
+  }
   std::string text;
   llvm::raw_string_ostream stream(text);
   stream << llvm::formatv("{0:2}", json::Value(std::move(out)));

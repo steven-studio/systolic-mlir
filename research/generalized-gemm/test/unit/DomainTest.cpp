@@ -3556,6 +3556,452 @@ static void testIdentity() {
   }
 }
 
+
+/// G5b-M4a: programs of several groups, run one after the other.
+static const char *setSource = R"(func.func @case_b(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %b[%j] : memref<8xi32>
+    %zj = memref.load %d[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %d[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @case_b_fresh(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c8 = arith.constant 8 : index
+  %zero = arith.constant 0 : i32
+  %f = memref.alloc() : memref<8xi32>
+  scf.for %w = %c0 to %c8 step %c1 {
+    memref.store %zero, %f[%w] : memref<8xi32>
+  }
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %b[%j] : memref<8xi32>
+    %zj = memref.load %f[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %f[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_interleaved(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+    %x2 = memref.load %a[%i] : memref<8xi32>
+    %y2 = memref.load %b[%i] : memref<8xi32>
+    %z2 = memref.load %d[%i] : memref<8xi32>
+    %m2 = arith.muli %x2, %y2 : i32
+    %s2 = arith.addi %z2, %m2 : i32
+    memref.store %s2, %d[%i] : memref<8xi32>
+  }
+  return
+}
+func.func @set_empty_second(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %k = arith.subi %n, %c1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %k step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %b[%j] : memref<8xi32>
+    %zj = memref.load %d[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %d[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_never(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %c0 step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %b[%j] : memref<8xi32>
+    %zj = memref.load %d[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %d[%j] : memref<8xi32>
+  }
+  return
+}
+)";
+
+/// G5b-M4a: one domain claim over the union of several groups. Theorem 15 over the union's
+/// sites; the set gate (XS); segments each inside one group (XP); cells of two roots
+/// compared only through their relation (CI); the scope; the solver's answers; and the
+/// claim of a set of one group against the group's own.
+static void testSetDomain() {
+  Module m(std::string(setSource) + siblingSource);
+  Sort w = Sort::bv(16);
+  CoordinateFamily none;
+  auto level = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, false, false};
+  };
+  auto finite = [&](Fixture &f, std::vector<unsigned> groups, const DomainRequest &r, const DomainOptions &o) {
+    return checkSetDomainFinite(f.program, f.enumeration, groups, r, o);
+  };
+  auto symbolic = [&](Fixture &f, std::vector<unsigned> groups, const DomainRequest &r, const DomainOptions &o,
+                      SmtBackend &backend) {
+    std::vector<SiteGroup> listed;
+    for (unsigned g : groups)
+      listed.push_back(f.enumeration.groups[g]);
+    return checkSetDomainSymbolic(f.program, f.proof(), listed, r, o, backend);
+  };
+  auto say = [](const char *what, const CheckedSetDomain &d) {
+    printf("%s: %s %s (%s)\n", what, stringifyComputationStatus(d.status()), stringifyComputationTier(d.tier()),
+           d.reason().c_str());
+  };
+  auto expect = [&](const char *what, const CheckedSetDomain &d, ComputationStatus status, const std::string &words) {
+    bool ok = d.status() == status && d.reason().find(words) != std::string::npos;
+    if (!ok)
+      say(what, d);
+    CHECK(ok);
+  };
+  // Two segments, each one site and one loop variable over [0, upper).
+  auto twoSegments = [&](Fixture &f, unsigned firstSite, unsigned firstVar, unsigned secondSite,
+                         unsigned secondVar, Term secondUpper = nullptr) {
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {firstSite}, {level(f.program, firstVar, zero, n)}),
+                  segmentOf(f.program, {secondSite}, {level(f.program, secondVar, zero, secondUpper ? secondUpper : n)})};
+    return r;
+  };
+
+  // Case A, the brief's first numeric case: two groups write the same cells of C. At n = 2
+  // the union has exactly four events, two of each group; the events are disjoint and the
+  // cells are not, and the claim says each for what it is.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(f.enumeration.groups.size() == 2 && l.size() == 2);
+    CHECK(f.enumeration.groups[0].sites == std::vector<unsigned>({0}) &&
+          f.enumeration.groups[1].sites == std::vector<unsigned>({1}));
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[1]);
+    CheckedSetDomain fin = finite(f, {0, 1}, r, f.options), sym = symbolic(f, {0, 1}, r, f.options, z3Backend);
+    if (fin.status() != S::Verified || sym.status() != S::Verified) {
+      say("case A finite", fin);
+      say("case A symbolic", sym);
+    }
+    CHECK(fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated && fin.exactOrder());
+    CHECK(sym.status() == S::Verified && sym.tier() == T::Symbolic && sym.exactOrder());
+    unsigned atTwo = 0;
+    for (const DomainPointFacts &point : fin.points())
+      if (point.parameters[0] == 2) {
+        ++atTwo;
+        CHECK(point.events == 4 && point.points == 4 && point.cells == 2);
+      }
+    CHECK(atTwo == 1 && fin.points().size() == 3);
+    CHECK(fin.groups().size() == 2 && fin.segmentGroups() == std::vector<unsigned>({0, 1}));
+    CHECK(fin.groups()[0].sites == std::vector<unsigned>({0}) && fin.groups()[1].sites == std::vector<unsigned>({1}));
+    CHECK(fin.rootPairs().empty() && sym.rootPairs().empty());
+    CHECK(fin.sharedCells().status == FactStatus::Refuted && fin.sharedCells().point.has_value());
+    CHECK(fin.singleContribution().status == FactStatus::Refuted);
+    CHECK(sym.sharedCells().status == FactStatus::Unknown && sym.singleContribution().status == FactStatus::Unknown);
+    for (const CheckedSetDomain *d : {&fin, &sym}) {
+      CHECK(d->segments().size() == 2);
+      for (const SegmentFacts &segment : d->segments())
+        CHECK(segment.cellKey.status == FactStatus::Proven && segment.outputInjective.status == FactStatus::Proven);
+    }
+    CHECK(fin.binding().find(f.program.fingerprint + "|set|") == 0 && fin.binding() == sym.binding());
+    // Two sets of other groups are two claims, whatever the request.
+    CHECK(finite(f, {0}, r, f.options).binding() != finite(f, {1}, r, f.options).binding());
+
+    // The listing's order changes nothing.
+    CheckedSetDomain back = finite(f, {1, 0}, r, f.options), backSym = symbolic(f, {1, 0}, r, f.options, z3Backend);
+    CHECK(back.binding() == fin.binding() && back.status() == fin.status() && back.tier() == fin.tier() &&
+          back.reason() == fin.reason() && back.segmentGroups() == fin.segmentGroups() &&
+          back.sharedCells().status == fin.sharedCells().status);
+    CHECK(backSym.binding() == sym.binding() && backSym.status() == sym.status() &&
+          backSym.records().size() == sym.records().size());
+
+    // The groups run in the other order than the segments say: refuted at a point, and no
+    // symbolic claim.
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), one = terms.bv(APInt(16, 1));
+    DomainRequest backward;
+    backward.segments = {segmentOf(f.program, {1}, {level(f.program, l[1], zero, n)}),
+                         segmentOf(f.program, {0}, {level(f.program, l[0], zero, n)})};
+    CheckedSetDomain wrong = finite(f, {0, 1}, backward, f.options);
+    expect("case A backwards", wrong, S::Refuted, "follows an event of segment");
+    CHECK(wrong.refutation().point.has_value() && !wrong.exactOrder());
+    CheckedSetDomain wrongSym = symbolic(f, {0, 1}, backward, f.options, z3Backend);
+    CHECK(wrongSym.status() == S::Unknown && !wrongSym.exactOrder());
+    // A segment whose set misses an event, and one whose set has a point with no event.
+    DomainRequest missing = twoSegments(f, 0, l[0], 1, l[1], terms.binary(TermOp::Sub, n, one));
+    expect("an event outside its set", finite(f, {0, 1}, missing, f.options), S::Refuted, "an event is no point of the set");
+    CHECK(symbolic(f, {0, 1}, missing, f.options, z3Backend).status() == S::Unknown);
+    DomainRequest extra = twoSegments(f, 0, l[0], 1, l[1], terms.binary(TermOp::Add, n, one));
+    expect("a point with no event", finite(f, {0, 1}, extra, f.options), S::Refuted, "a point of the set has no event");
+    CHECK(symbolic(f, {0, 1}, extra, f.options, z3Backend).status() == S::Unknown);
+
+    // The scope: a sample and a list with a point removed are no whole scope.
+    DomainEnumeration trimmed = f.enumeration;
+    trimmed.points.pop_back();
+    CheckedSetDomain part = checkSetDomainFinite(f.program, trimmed, {0, 1}, r, f.options);
+    CHECK(part.status() == S::Verified && part.tier() == T::Point);
+    Fixture sample = fixture(m, "sib_roots", 1, 3, 16, {{APInt(16, 2)}});
+    std::vector<unsigned> sl = loops(sample.program);
+    CheckedSetDomain sampled = finite(sample, {0, 1}, twoSegments(sample, 0, sl[0], 1, sl[1]), sample.options);
+    CHECK(sampled.status() == S::Verified && sampled.tier() == T::Point);
+
+    // The solver: an unknown or sat answer to any obligation of Theorem 15 is no claim; an
+    // unknown on a fact leaves that fact open and the claim standing; a limit is Unknown.
+    for (const char *id : {"; D1 ", "; D2 ", "; D3 ", "; D4 "})
+      for (SmtAnswer answer : {SmtAnswer::Unknown, SmtAnswer::Sat}) {
+        Selective solver(id, answer);
+        CheckedSetDomain out = symbolic(f, {0, 1}, r, f.options, solver);
+        if (solver.hits == 0)
+          printf("no %s query on the union\n", id);
+        CHECK(solver.hits > 0 && out.status() == S::Unknown && !out.exactOrder());
+      }
+    for (const char *id : {"; SH ", "; T1 "}) {
+      Selective solver(id, SmtAnswer::Unknown);
+      CheckedSetDomain out = symbolic(f, {0, 1}, r, f.options, solver);
+      CHECK(solver.hits > 0 && out.status() == S::Verified);
+      CHECK(out.sharedCells().status == FactStatus::Unknown && out.singleContribution().status == FactStatus::Unknown);
+    }
+    {
+      Selective liar("; SH ", SmtAnswer::Unsat);
+      CheckedSetDomain out = symbolic(f, {0, 1}, r, f.options, liar);
+      CHECK(liar.hits > 0 && out.status() == S::Verified);
+    }
+    DomainOptions few = f.options;
+    few.limits.maxQueries = 1;
+    expect("query limit", symbolic(f, {0, 1}, r, few, z3Backend), S::Unknown, "query limit");
+    DomainOptions narrow = f.options;
+    narrow.limits.maxPairs = 1;
+    expect("pair limit", symbolic(f, {0, 1}, r, narrow, z3Backend), S::Unknown, "more arrival pairs than the limit");
+    DomainOptions zero0 = f.options;
+    zero0.termination.solver.timeoutMilliseconds = 0;
+    expect("zero limit", symbolic(f, {0, 1}, r, zero0, z3Backend), S::Unknown, "a solver limit of zero is no limit");
+    std::vector<SiteGroup> listed{f.enumeration.groups[0], f.enumeration.groups[1]};
+    expect("no certificate", checkSetDomainSymbolic(f.program, nullptr, listed, r, f.options, z3Backend), S::Unknown,
+           "no termination certificate");
+
+    // The gates, on both routes and in their words.
+    auto refusedBoth = [&](const char *what, std::vector<unsigned> groups, const DomainRequest &req,
+                           const std::string &words) {
+      expect(what, finite(f, groups, req, f.options), S::Unknown, words);
+      expect(what, symbolic(f, groups, req, f.options, z3Backend), S::Unknown, words);
+    };
+    DomainRequest mixed;
+    mixed.segments = {segmentOf(f.program, {0, 1}, {level(f.program, l[0], zero, n)})};
+    refusedBoth("a segment of two groups", {0, 1}, mixed, "the request is refused: segment 0 mixes groups");
+    CHECK(finite(f, {0, 1}, mixed, f.options).segmentGroups().empty());
+    refusedBoth("a site outside the set", {0}, r, "the request is refused: a segment names a site outside the set");
+    DomainRequest firstOnly;
+    firstOnly.segments = {r.segments[0]};
+    refusedBoth("a site in no segment", {0, 1}, firstOnly, "the request is refused: a site of the set is in no segment");
+    DomainRequest emptySegment = r;
+    emptySegment.segments.push_back(segmentOf(f.program, {}, {level(f.program, l[1], zero, n)}));
+    refusedBoth("an empty segment", {0, 1}, emptySegment, "the request is refused: a segment with no site");
+    refusedBoth("a group twice", {0, 0}, r, "a group is listed twice");
+    refusedBoth("no group", {}, r, "no group is listed");
+    refusedBoth("a flat request", {0, 1}, DomainRequest(), "a claim over a set needs a segmented request");
+    expect("a group past the enumeration", finite(f, {0, 2}, r, f.options), S::Unknown, "no such group");
+    DomainEnumeration closed = f.enumeration;
+    closed.gate = GateStatus::Unknown;
+    closed.reason = "closed by the test";
+    expect("a closed gate", checkSetDomainFinite(f.program, closed, {0, 1}, r, f.options), S::Unknown,
+           "the domain gate is closed: closed by the test");
+    SiteGroup twice = f.enumeration.groups[0];
+    twice.sites.push_back(twice.sites.front());
+    expect("a site twice", checkSetDomainSymbolic(f.program, f.proof(), {twice, f.enumeration.groups[1]}, r, f.options,
+                                                  z3Backend), S::Unknown, "a site is listed twice");
+    SiteGroup past = f.enumeration.groups[0];
+    past.sites.push_back(77);
+    expect("an id past the program", checkSetDomainSymbolic(f.program, f.proof(), {past}, r, f.options, z3Backend),
+           S::Unknown, "the group names a site the program does not have");
+    std::vector<SiteGroup> many(65, f.enumeration.groups[0]);
+    expect("65 groups", checkSetDomainSymbolic(f.program, f.proof(), many, r, f.options, z3Backend), S::Unknown,
+           "more than 64 groups are listed");
+  }
+
+  // Case B: the second group writes D. Index for index, C[i] and D[i] are two cells only
+  // when C and D are known apart. Authorized: no cell is common, on both routes, and no
+  // query is asked for it. Not authorized, or under the reversed name: the facts stay open
+  // and the claim about events still stands.
+  {
+    Fixture f = fixture(m, "case_b", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(f.enumeration.groups.size() == 2 && l.size() == 2);
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[1]);
+    CheckedSetDomain fin = finite(f, {0, 1}, r, f.options), sym = symbolic(f, {0, 1}, r, f.options, z3Backend);
+    CHECK(fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated && sym.status() == S::Verified);
+    for (const CheckedSetDomain *d : {&fin, &sym}) {
+      CHECK(d->rootPairs().size() == 1);
+      if (d->rootPairs().size() == 1) {
+        const RootPair &pair = d->rootPairs()[0];
+        CHECK(pair.first == 2 && pair.second == 3 && pair.relation == CellRelation::Distinct &&
+              pair.basis == "authorized" && pair.assumption);
+      }
+      CHECK(d->sharedCells().status == FactStatus::Proven && d->singleContribution().status == FactStatus::Proven);
+    }
+    Selective quiet("; SH ", SmtAnswer::Sat);
+    CheckedSetDomain asked = symbolic(f, {0, 1}, r, f.options, quiet);
+    CHECK(quiet.hits == 0 && asked.sharedCells().status == FactStatus::Proven);
+    for (Authorizations names : {Authorizations{}, Authorizations{"roots 3 and 2 are separate"}}) {
+      DomainOptions o = f.options;
+      o.authorized = names;
+      CheckedSetDomain open = finite(f, {0, 1}, r, o), openSym = symbolic(f, {0, 1}, r, o, z3Backend);
+      if (openSym.status() != S::Verified)
+        say("case B without the name", openSym);
+      CHECK(open.status() == S::Verified && open.tier() == T::ScopeEnumerated && openSym.status() == S::Verified);
+      for (const CheckedSetDomain *d : {&open, &openSym}) {
+        CHECK(d->rootPairs().size() == 1 && d->rootPairs()[0].relation == CellRelation::MayAlias &&
+              d->rootPairs()[0].basis.empty());
+        CHECK(d->sharedCells().status == FactStatus::Unknown && d->singleContribution().status == FactStatus::Unknown);
+        CHECK(d->sharedCells().detail.find("roots 2 and 3 may alias") != std::string::npos);
+      }
+    }
+  }
+  // A fresh allocation is apart from every argument, as a proof, with no name given.
+  {
+    Fixture f = fixture(m, "case_b_fresh", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(f.enumeration.groups.size() == 2 && l.size() == 3);
+    DomainRequest r = twoSegments(f, 0, l[1], 1, l[2]);
+    DomainOptions o = f.options;
+    o.authorized.clear();
+    CheckedSetDomain fin = finite(f, {0, 1}, r, o), sym = symbolic(f, {0, 1}, r, o, z3Backend);
+    if (fin.status() != S::Verified)
+      say("fresh", fin);
+    CHECK(fin.status() == S::Verified && sym.status() == S::Verified);
+    for (const CheckedSetDomain *d : {&fin, &sym}) {
+      CHECK(d->rootPairs().size() == 1 && d->rootPairs()[0].relation == CellRelation::Distinct &&
+            d->rootPairs()[0].basis == "fresh allocation" && !d->rootPairs()[0].assumption);
+      CHECK(d->sharedCells().status == FactStatus::Proven);
+    }
+  }
+  // Two groups in one loop: their events interleave, so no segment order holds. A run
+  // shows it; the symbolic route has no order for two sites of one block.
+  {
+    Fixture f = fixture(m, "set_interleaved", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(f.enumeration.groups.size() == 2 && l.size() == 1);
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[0]);
+    CheckedSetDomain fin = finite(f, {0, 1}, r, f.options);
+    expect("interleaved", fin, S::Refuted, "follows an event of segment");
+    CHECK(fin.refutation().point.has_value());
+    expect("interleaved, symbolic", symbolic(f, {0, 1}, r, f.options, z3Backend), S::Unknown,
+           "two sites of the set share a block");
+  }
+  // A segment empty at a point, and a group with no event at any point.
+  {
+    Fixture f = fixture(m, "set_empty_second", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term less = terms.binary(TermOp::Sub, terms.param(0, w), terms.bv(APInt(16, 1)));
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[1], less);
+    CheckedSetDomain fin = finite(f, {0, 1}, r, f.options), sym = symbolic(f, {0, 1}, r, f.options, z3Backend);
+    if (fin.status() != S::Verified || sym.status() != S::Verified) {
+      say("empty second", fin);
+      say("empty second, symbolic", sym);
+    }
+    CHECK(fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated && sym.status() == S::Verified);
+    for (const DomainPointFacts &point : fin.points())
+      if (point.parameters[0] == 1)
+        CHECK(point.events == 1 && point.points == 1);
+    for (SmtAnswer answer : {SmtAnswer::Unknown, SmtAnswer::Sat}) {
+      Selective solver("; D5 ", answer);
+      CheckedSetDomain out = symbolic(f, {0, 1}, r, f.options, solver);
+      if (solver.hits == 0)
+        printf("no D5 query on the union\n");
+      CHECK(solver.hits > 0 && out.status() == S::Unknown);
+    }
+  }
+  {
+    Fixture f = fixture(m, "set_never", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0));
+    CHECK(f.enumeration.groups.size() == 2);
+    DomainRequest never;
+    never.segments = {segmentOf(f.program, {1}, {level(f.program, l[1], zero, zero)})};
+    expect("a group with no event", finite(f, {1}, never, f.options), S::Unknown, "no point has events");
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[1], zero);
+    CheckedSetDomain fin = finite(f, {0, 1}, r, f.options);
+    if (fin.status() != S::Verified)
+      say("never", fin);
+    CHECK(fin.status() == S::Verified && fin.tier() == T::ScopeEnumerated);
+    CHECK(symbolic(f, {0, 1}, r, f.options, z3Backend).status() == S::Verified);
+  }
+  // A set of one group is that group's segmented claim, under its own binding.
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(f.enumeration.groups.size() == 1);
+    DomainRequest r = twoSegments(f, 0, l[0], 1, l[1]);
+    CheckedSetDomain set = finite(f, {0}, r, f.options), setSym = symbolic(f, {0}, r, f.options, z3Backend);
+    CheckedDomain one = checkDomainFinite(f.program, f.enumeration, 0, none, r, f.options);
+    CheckedDomain oneSym = checkDomainSymbolic(f.program, f.proof(), f.enumeration.groups[0], none, r, f.options, z3Backend);
+    auto same = [&](const CheckedSetDomain &a, const CheckedDomain &b) {
+      bool ok = a.status() == b.status() && a.tier() == b.tier() && a.reason() == b.reason() &&
+                a.exactOrder() == b.exactOrder() && a.points().size() == b.points().size() &&
+                a.segments().size() == b.segments().size() && a.records().size() == b.records().size() &&
+                a.sharedCells().status == b.sharedCells().status && a.sharedCells().detail == b.sharedCells().detail &&
+                a.singleContribution().status == b.singleContribution().status &&
+                a.singleContribution().detail == b.singleContribution().detail && a.binding() != b.binding();
+      for (size_t k = 0; ok && k < a.points().size(); ++k)
+        ok = a.points()[k].events == b.points()[k].events && a.points()[k].cells == b.points()[k].cells;
+      for (size_t s = 0; ok && s < a.segments().size(); ++s)
+        ok = a.segments()[s].cellKey.status == b.segments()[s].cellKey.status &&
+             a.segments()[s].outputInjective.status == b.segments()[s].outputInjective.status &&
+             a.segments()[s].sites == b.segments()[s].sites;
+      for (size_t k = 0; ok && k < a.records().size(); ++k)
+        ok = a.records()[k].id == b.records()[k].id && a.records()[k].result == b.records()[k].result;
+      return ok;
+    };
+    CHECK(same(set, one) && same(setSym, oneSym));
+    CHECK(set.status() == S::Verified && set.rootPairs().empty() && set.segmentGroups() == std::vector<unsigned>({0, 0}));
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -3574,6 +4020,7 @@ int main(int argc, char **argv) {
     }
   };
   run("identity", testIdentity);
+  run("setdomain", testSetDomain);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);
   run("wrapping", testWrapping);

@@ -46,6 +46,10 @@ static cl::opt<uint64_t> referenceFill("reference-fill", cl::init(0));
 static cl::opt<bool> printEvents("print-events", cl::init(false));
 static cl::opt<uint64_t> maxBox("max-box", cl::init(1u << 20));
 static cl::opt<unsigned> candidatesPerGroup("candidates-per-group", cl::init(2));
+static cl::opt<std::string> groupSets(
+    "groups", cl::init(""),
+    cl::desc("G5b-M4a: domain claims over sets of groups, ';' between sets, each a comma "
+             "separated list of group indices, `all` or `all-reversed`"));
 static cl::opt<bool> segmentsFlag("segments", cl::init(false),
                                   cl::desc("propose segments by site, in place of the search; with --family, "
                                            "the family names the logical loop variables and the rest repeat"));
@@ -155,6 +159,27 @@ int main(int argc, char **argv) {
     request.proposal.maxBox = maxBox;
     request.maxCandidates = candidatesPerGroup;
     request.segmented = segmentsFlag;
+    {
+      llvm::SmallVector<llvm::StringRef> sets;
+      llvm::StringRef(groupSets).split(sets, ';', -1, /*KeepEmpty=*/false);
+      for (llvm::StringRef text : sets) {
+        DomainSetRequest set;
+        set.all = text == "all" || text == "all-reversed";
+        set.reversed = text == "all-reversed";
+        llvm::SmallVector<llvm::StringRef> items;
+        if (!set.all)
+          text.split(items, ',', -1, /*KeepEmpty=*/false);
+        for (llvm::StringRef item : items) {
+          unsigned g;
+          if (item.trim().getAsInteger(10, g)) {
+            llvm::errs() << "malformed --groups\n";
+            return 2;
+          }
+          set.groups.push_back(g);
+        }
+        request.groupSets.push_back(std::move(set));
+      }
+    }
     if (!familyText.empty() && program.isSupported()) {
       CoordinateFamily family;
       family.origin = "given on the command line";

@@ -45,10 +45,36 @@ struct DomainAuthority {
     out.segmentList = std::move(list);
   }
   static void failing(CheckedDomain &out, std::vector<APInt> point) { out.failing = std::move(point); }
+
+  /// G5b-M4a: a claim over a union is the segmented route's claim over the union's sites,
+  /// with what only a union has.
+  static CheckedSetDomain set(const CheckedDomain &in) {
+    CheckedSetDomain out(in.evidenceTier, in.claimStatus, in.text);
+    out.obligations = in.obligations;
+    out.facts = in.facts;
+    out.orbit = in.orbit;
+    out.segmentList = in.segmentList;
+    out.shared = in.shared;
+    out.single = in.single;
+    out.counter = in.counter;
+    out.failing = in.failing;
+    return out;
+  }
+  static void placeSet(CheckedSetDomain &out, std::string binding, std::vector<SiteGroup> groups,
+                       std::vector<unsigned> segmentGroups, std::vector<RootPair> pairs) {
+    out.bound = std::move(binding);
+    out.groupList = std::move(groups);
+    out.segmentGroup = std::move(segmentGroups);
+    out.pairs = std::move(pairs);
+  }
 };
 
 CheckedDomain CheckedDomain::unknown(std::string reason) {
   return CheckedDomain(ComputationTier::Proposed, ComputationStatus::Unknown, std::move(reason));
+}
+
+CheckedSetDomain CheckedSetDomain::unknown(std::string reason) {
+  return CheckedSetDomain(ComputationTier::Proposed, ComputationStatus::Unknown, std::move(reason));
 }
 
 namespace {
@@ -96,15 +122,10 @@ bool traceIsFixed(const SemanticProgram &program, std::string &why) {
 }
 
 /// What a claim is about: program, group, scope, names and the request itself.
-std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
-                      const DomainOptions &options, const CoordinateFamily &family,
-                      const DomainRequest &request) {
-  std::string out = program.fingerprint + "|" +
-                    std::to_string(group.output ? (int64_t)*group.output : -1) + "," +
-                    std::to_string(group.first) + "," + std::to_string(group.second) + "|";
-  for (unsigned site : group.sites)
-    out += std::to_string(site) + ",";
-  out += options.scope.allParameters ? "|all|" : "|some|";
+/// The scope, the names and everything the request and the family say.
+std::string requestBinding(const DomainOptions &options, const CoordinateFamily &family,
+                           const DomainRequest &request) {
+  std::string out = options.scope.allParameters ? "|all|" : "|some|";
   for (const ParameterRange &range : options.scope.ranges)
     out += std::to_string(range.parameter) + ":" + std::to_string(range.lower.getSExtValue()) +
            ":" + std::to_string(range.upper.getSExtValue()) + ",";
@@ -152,6 +173,30 @@ std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
     }
   }
   return out;
+}
+
+std::string groupBinding(const SiteGroup &group) {
+  std::string out = std::to_string(group.output ? (int64_t)*group.output : -1) + "," +
+                    std::to_string(group.first) + "," + std::to_string(group.second) + "|";
+  for (unsigned site : group.sites)
+    out += std::to_string(site) + ",";
+  return out;
+}
+
+std::string bindingOf(const SemanticProgram &program, const SiteGroup &group,
+                      const DomainOptions &options, const CoordinateFamily &family,
+                      const DomainRequest &request) {
+  return program.fingerprint + "|" + groupBinding(group) + requestBinding(options, family, request);
+}
+
+/// G5b-M4a: the groups by their first site, so that a listing in another order is the
+/// same claim. "set" keeps it apart from every one-group binding.
+std::string setBindingOf(const SemanticProgram &program, ArrayRef<const SiteGroup *> canonical,
+                         const DomainOptions &options, const DomainRequest &request) {
+  std::string out = program.fingerprint + "|set|";
+  for (const SiteGroup *group : canonical)
+    out += groupBinding(*group) + ";";
+  return out + requestBinding(options, CoordinateFamily(), request);
 }
 
 bool keyIsWellFormed(const GuardedOrder &order, const std::vector<unsigned> &key) {
@@ -508,10 +553,11 @@ bool familyIsEmpty(const CoordinateFamily &family) {
   return true;
 }
 
-/// Every segment adopted, the sites a partition of the group's, and the family given
-/// beside the request empty. Nullopt with `why` otherwise.
+/// Every segment adopted, the sites a partition of the group's (or of the set's, for a
+/// union: G5b-M4a), and the family given beside the request empty. Nullopt with `why`
+/// otherwise.
 std::optional<std::vector<SegmentStructure>> adoptSegments(const SemanticProgram &program,
-                                                           const SiteGroup &group,
+                                                           ArrayRef<unsigned> sites, const char *whole,
                                                            const CoordinateFamily &family,
                                                            const DomainRequest &request,
                                                            std::string &why) {
@@ -519,7 +565,7 @@ std::optional<std::vector<SegmentStructure>> adoptSegments(const SemanticProgram
     why = "a segmented request carries its own families";
     return std::nullopt;
   }
-  std::set<unsigned> listed(group.sites.begin(), group.sites.end()), seen;
+  std::set<unsigned> listed(sites.begin(), sites.end()), seen;
   std::vector<SegmentStructure> out;
   for (const Segment &segment : request.segments) {
     if (segment.sites.empty()) {
@@ -528,7 +574,7 @@ std::optional<std::vector<SegmentStructure>> adoptSegments(const SemanticProgram
     }
     for (unsigned site : segment.sites) {
       if (!listed.count(site)) {
-        why = "a segment names a site outside the group";
+        why = std::string("a segment names a site outside the ") + whole;
         return std::nullopt;
       }
       if (!seen.insert(site).second) {
@@ -552,10 +598,55 @@ std::optional<std::vector<SegmentStructure>> adoptSegments(const SemanticProgram
     out.push_back(std::move(structure));
   }
   if (seen.size() != listed.size()) {
-    why = "a site of the group is in no segment";
+    why = std::string("a site of the ") + whole + " is in no segment";
     return std::nullopt;
   }
   return out;
+}
+
+/// G5b-M4a: what a claim over a union adds to the segmented route. The route fills the
+/// last three.
+struct SetContext {
+  const GroupUnion *gate = nullptr;
+  const Authorizations *authorized = nullptr;
+  std::vector<unsigned> segmentListed; // Per segment: the listed index of its group.
+  std::vector<RootPair> pairs;         // Every two output roots of the segments.
+  std::optional<std::string> aliasOpen; // The first two roots that may alias.
+};
+
+/// XP: each segment's sites belong to one listed group. Then CI: every two output roots of
+/// the segments, with how they stand; for two that may alias, `aliasOpen` says so.
+bool placeSegments(const SemanticProgram &program, const DomainRequest &request, SetContext &set,
+                   std::string &why) {
+  std::set<unsigned> roots;
+  for (unsigned s = 0; s < request.segments.size(); ++s) {
+    const std::vector<unsigned> &sites = request.segments[s].sites;
+    int listed = set.gate->listedOf[sites.front()];
+    for (unsigned site : sites)
+      if (set.gate->listedOf[site] != listed) {
+        why = "segment " + std::to_string(s) + " mixes groups";
+        set.segmentListed.clear(); // A refused request names no segment's group.
+        return false;
+      }
+    set.segmentListed.push_back(listed);
+    roots.insert(program.sites[sites.front()].output->root);
+  }
+  for (auto a = roots.begin(); a != roots.end(); ++a)
+    for (auto b = std::next(a); b != roots.end(); ++b) {
+      RootSeparation separation = rootSeparation(program, *set.authorized, *a, *b);
+      RootPair pair;
+      pair.first = *a;
+      pair.second = *b;
+      pair.relation = rootRelation(program, *set.authorized, *a, *b);
+      pair.basis = separation.basis;
+      pair.assumption = separation.assumption;
+      if (pair.relation == CellRelation::MayAlias && !set.aliasOpen)
+        set.aliasOpen = "roots " + std::to_string(*a) + " and " + std::to_string(*b) +
+                        " may alias: neither is a fresh allocation, and `" + separation.name +
+                        "` is not authorized";
+      set.pairs.push_back(std::move(pair));
+    }
+  return true;
 }
 
 std::map<unsigned, unsigned> segmentOfSite(const DomainRequest &request) {
@@ -599,19 +690,17 @@ void recordSegments(CheckedDomain &out, const std::vector<SegmentStructure> &str
   DomainAuthority::segments(out, std::move(facts));
 }
 
-CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumeration &enumeration,
-                              unsigned g, const CoordinateFamily &family, const DomainRequest &request,
-                              const DomainOptions &options) {
-  if (enumeration.gate != GateStatus::Open)
-    return CheckedDomain::unknown("the domain gate is closed: " + enumeration.reason);
-  if (g >= enumeration.groups.size())
-    return CheckedDomain::unknown("no such group");
-  const SiteGroup &group = enumeration.groups[g];
+/// Theorem 15 at each listed point, over the events of `sites`: one group's, or the union
+/// of several (G5b-M4a, with `set`). The caller has applied the gates.
+CheckedDomain finiteSegmentedOver(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                                  ArrayRef<unsigned> sites, const char *whole,
+                                  const CoordinateFamily &family, const DomainRequest &request,
+                                  const DomainOptions &options, SetContext *set) {
   std::string why;
-  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
-    return CheckedDomain::unknown(why);
-  auto structures = adoptSegments(program, group, family, request, why);
+  auto structures = adoptSegments(program, sites, whole, family, request, why);
   if (!structures)
+    return CheckedDomain::unknown("the request is refused: " + why);
+  if (set && !placeSegments(program, request, *set, why))
     return CheckedDomain::unknown("the request is refused: " + why);
   std::map<unsigned, unsigned> segmentOf = segmentOfSite(request);
   unsigned m = structures->size();
@@ -639,7 +728,7 @@ CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumer
       out.push_back(value.getZExtValue());
     return out;
   };
-  std::set<unsigned> members(group.sites.begin(), group.sites.end());
+  std::set<unsigned> members(sites.begin(), sites.end());
 
   for (const PointEvidence &point : enumeration.points) {
     if (!point.reason.empty()) {
@@ -857,9 +946,28 @@ CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumer
                                                                               : *accessBroken[s][view];
   }
   recordSegments(out, *structures, request, std::move(segmentFacts), tier, false);
-  DomainAuthority::single(out, single ? proven(where, tier) : *multipleSeen);
-  DomainAuthority::shared(out, sharedNone ? proven(where, tier) : *sharedSeen);
+  // Cells of two roots that may alias were compared by key, which says nothing of them: a
+  // fact that needs them apart stays open. A shared cell of one root is a fact anyway.
+  auto apart = [&](Fact fact) {
+    return set && set->aliasOpen ? unknownFact(*set->aliasOpen) : fact;
+  };
+  DomainAuthority::single(out, single ? apart(proven(where, tier)) : *multipleSeen);
+  DomainAuthority::shared(out, sharedNone ? apart(proven(where, tier)) : *sharedSeen);
   return out;
+}
+
+CheckedDomain finiteSegmented(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                              unsigned g, const CoordinateFamily &family, const DomainRequest &request,
+                              const DomainOptions &options) {
+  if (enumeration.gate != GateStatus::Open)
+    return CheckedDomain::unknown("the domain gate is closed: " + enumeration.reason);
+  if (g >= enumeration.groups.size())
+    return CheckedDomain::unknown("no such group");
+  const SiteGroup &group = enumeration.groups[g];
+  std::string why;
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
+    return CheckedDomain::unknown(why);
+  return finiteSegmentedOver(program, enumeration, group.sites, "group", family, request, options, nullptr);
 }
 
 std::optional<CheckOutcome> acceptCertificate(const SemanticProgram &program,
@@ -885,9 +993,10 @@ std::optional<CheckOutcome> acceptCertificate(const SemanticProgram &program,
 
 class Proof {
 public:
-  Proof(const SemanticProgram &program, const SiteGroup &group, const DomainOptions &options,
+  Proof(const SemanticProgram &program, ArrayRef<unsigned> sites, const DomainOptions &options,
         SmtBackend &backend)
-      : program(program), group(group), options(options), backend(backend), terms(*program.terms) {}
+      : program(program), sites(sites.begin(), sites.end()), options(options), backend(backend),
+        terms(*program.terms) {}
 
   SmtAnswer ask(const std::string &id, const std::string &where, Term formula, bool record = true) {
     if (queries >= options.limits.maxQueries) {
@@ -937,14 +1046,14 @@ public:
       return false;
     }
     scope = premises.scope;
-    std::vector<unsigned> ids(group.sites.begin(), group.sites.end());
+    std::vector<unsigned> ids(sites.begin(), sites.end());
     arrivals = reachSites(program, premises.invariants, certificate.cuts, ids, scope,
                           options.termination.paths);
     if (!arrivals.complete) {
       why = arrivals.reason;
       return false;
     }
-    for (unsigned id : group.sites)
+    for (unsigned id : sites)
       locations.push_back(program.sites[id].location);
     return true;
   }
@@ -984,7 +1093,7 @@ public:
   }
 
   const SemanticProgram &program;
-  const SiteGroup &group;
+  std::vector<unsigned> sites;
   const DomainOptions &options;
   SmtBackend &backend;
   TermContext &terms;
@@ -1024,7 +1133,7 @@ CheckedDomain symbolicClaim(const SemanticProgram &program, const TerminationCer
       if (!places.insert(program.sites[id].location).second)
         return CheckedDomain::unknown("two sites of the group share a block");
   }
-  Proof proof(program, group, options, backend);
+  Proof proof(program, group.sites, options, backend);
   try {
     if (!proof.prepare(*certificate, why))
       return CheckedDomain::unknown(why);
@@ -1144,27 +1253,25 @@ CheckedDomain symbolicClaim(const SemanticProgram &program, const TerminationCer
 }
 
 
-CheckedDomain symbolicSegmented(const SemanticProgram &program, const TerminationCertificate *certificate,
-                                const SiteGroup &group, const CoordinateFamily &family,
-                                const DomainRequest &request, const DomainOptions &options,
-                                SmtBackend &backend) {
-  if (!program.isSupported())
-    return CheckedDomain::unknown("the program is unsupported");
+/// D1' to D5 and the facts over the scope, for the arrivals at `sites`: one group's, or
+/// the union of several (G5b-M4a, with `set`). The caller has applied the gates.
+CheckedDomain symbolicSegmentedOver(const SemanticProgram &program, const TerminationCertificate *certificate,
+                                    ArrayRef<unsigned> sites, const char *whole,
+                                    const CoordinateFamily &family, const DomainRequest &request,
+                                    const DomainOptions &options, SmtBackend &backend, SetContext *set) {
   std::string why;
-  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
-    return CheckedDomain::unknown("a solver limit of zero is no limit");
-  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
-    return CheckedDomain::unknown(why);
-  auto structures = adoptSegments(program, group, family, request, why);
+  auto structures = adoptSegments(program, sites, whole, family, request, why);
   if (!structures)
+    return CheckedDomain::unknown("the request is refused: " + why);
+  if (set && !placeSegments(program, request, *set, why))
     return CheckedDomain::unknown("the request is refused: " + why);
   if (!acceptCertificate(program, certificate, options, backend, why))
     return CheckedDomain::unknown(why);
   {
     std::set<unsigned> places;
-    for (unsigned id : group.sites)
+    for (unsigned id : sites)
       if (!places.insert(program.sites[id].location).second)
-        return CheckedDomain::unknown("two sites of the group share a block");
+        return CheckedDomain::unknown(std::string("two sites of the ") + whole + " share a block");
   }
   std::map<unsigned, unsigned> ofSite = segmentOfSite(request), ofLocation;
   for (const auto &[site, s] : ofSite)
@@ -1174,7 +1281,7 @@ CheckedDomain symbolicSegmented(const SemanticProgram &program, const Terminatio
   for (const SegmentStructure &s : *structures)
     orders.push_back(s.core.order);
 
-  Proof proof(program, group, options, backend);
+  Proof proof(program, sites, options, backend);
   try {
     if (!proof.prepare(*certificate, why))
       return CheckedDomain::unknown(why);
@@ -1213,6 +1320,10 @@ CheckedDomain symbolicSegmented(const SemanticProgram &program, const Terminatio
           proof.equal(proof.at(a, first.output->index), proof.second(proof.at(b, second.output->index))));
       std::vector<Term> la = proof.values(orders[sa], a), lb = proof.second(proof.values(orders[sb], b));
       if (sa != sb) {
+        // Two roots of a union: their relation is the whole answer, and no query is asked.
+        // Apart, no cell is common; may alias, the facts stay open below.
+        if (set && first.output->root != second.output->root)
+          return true;
         if (sharedNone && proof.ask("SH", "cells of two segments", sameCell) != SmtAnswer::Unsat)
           sharedNone = false;
         if (single && proof.ask("T1", "one contribution per cell, across segments", sameCell) != SmtAnswer::Unsat)
@@ -1287,13 +1398,31 @@ CheckedDomain symbolicSegmented(const SemanticProgram &program, const Terminatio
     DomainAuthority::records(out, std::move(proof.records));
     DomainAuthority::orbit(out, true);
     recordSegments(out, *structures, request, std::move(segmentFacts), symbolic, true);
-    DomainAuthority::single(out, single ? proven("T1 over the scope", symbolic) : unknownFact("T1 not discharged"));
-    DomainAuthority::shared(out, sharedNone ? proven("no cell of two segments, over the scope", symbolic)
+    auto apart = [&](Fact fact) {
+      return set && set->aliasOpen ? unknownFact(*set->aliasOpen) : fact;
+    };
+    DomainAuthority::single(out, single ? apart(proven("T1 over the scope", symbolic)) : unknownFact("T1 not discharged"));
+    DomainAuthority::shared(out, sharedNone ? apart(proven("no cell of two segments, over the scope", symbolic))
                                             : unknownFact("not discharged; a point may show it"));
     return out;
   } catch (const TermError &error) {
     return CheckedDomain::unknown(std::string("term limit: ") + error.what());
   }
+}
+
+CheckedDomain symbolicSegmented(const SemanticProgram &program, const TerminationCertificate *certificate,
+                                const SiteGroup &group, const CoordinateFamily &family,
+                                const DomainRequest &request, const DomainOptions &options,
+                                SmtBackend &backend) {
+  if (!program.isSupported())
+    return CheckedDomain::unknown("the program is unsupported");
+  std::string why;
+  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
+    return CheckedDomain::unknown("a solver limit of zero is no limit");
+  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))
+    return CheckedDomain::unknown(why);
+  return symbolicSegmentedOver(program, certificate, group.sites, "group", family, request, options, backend,
+                               nullptr);
 }
 
 ComputationOptions computationOf(const DomainOptions &options) {
@@ -1310,6 +1439,47 @@ std::vector<uint64_t> pointKey(const std::vector<APInt> &point) {
   for (const APInt &value : point)
     out.push_back(value.getZExtValue());
   return out;
+}
+
+/// G5b-M4a: the listed groups by their first site.
+std::vector<const SiteGroup *> canonicalOrder(ArrayRef<const SiteGroup *> listed) {
+  std::vector<const SiteGroup *> out(listed.begin(), listed.end());
+  auto first = [](const SiteGroup *group) {
+    return group->sites.empty() ? ~0u : *std::min_element(group->sites.begin(), group->sites.end());
+  };
+  std::stable_sort(out.begin(), out.end(),
+                   [&](const SiteGroup *a, const SiteGroup *b) { return first(a) < first(b); });
+  return out;
+}
+
+/// G5b-M4a: the gates of a claim over a union (XS, and a segmented request), then one
+/// route over the union's sites, which applies XP and CI.
+CheckedSetDomain setClaim(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                          const DomainRequest &request, const DomainOptions &options,
+                          const std::function<CheckedDomain(ArrayRef<unsigned>, SetContext &)> &route) {
+  std::vector<const SiteGroup *> canonical = canonicalOrder(listed);
+  std::vector<SiteGroup> groups;
+  for (const SiteGroup *group : canonical)
+    groups.push_back(*group);
+  std::string binding = setBindingOf(program, canonical, options, request);
+  auto finish = [&](CheckedSetDomain out, std::vector<unsigned> segmentGroups, std::vector<RootPair> pairs) {
+    DomainAuthority::placeSet(out, binding, groups, std::move(segmentGroups), std::move(pairs));
+    return out;
+  };
+  GroupUnion gate;
+  std::string why;
+  if (!uniteGroups(program, listed, gate, why) || !traceIsFixed(program, why))
+    return finish(CheckedSetDomain::unknown(why), {}, {});
+  if (request.segments.empty())
+    return finish(CheckedSetDomain::unknown("a claim over a set needs a segmented request"), {}, {});
+  SetContext set;
+  set.gate = &gate;
+  set.authorized = &options.authorized;
+  CheckedSetDomain out = DomainAuthority::set(route(gate.sites, set));
+  std::vector<unsigned> segmentGroups;
+  for (unsigned index : set.segmentListed)
+    segmentGroups.push_back(std::find(canonical.begin(), canonical.end(), listed[index]) - canonical.begin());
+  return finish(std::move(out), std::move(segmentGroups), std::move(set.pairs));
 }
 
 } // namespace
@@ -1333,6 +1503,39 @@ CheckedDomain checkDomainSymbolic(const SemanticProgram &program,
                           : symbolicSegmented(program, certificate, group, family, request, options, backend);
   DomainAuthority::bind(out, bindingOf(program, group, options, family, request));
   return out;
+}
+
+CheckedSetDomain checkSetDomainFinite(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                                      ArrayRef<unsigned> groups, const DomainRequest &request,
+                                      const DomainOptions &options) {
+  if (enumeration.gate != GateStatus::Open)
+    return CheckedSetDomain::unknown("the domain gate is closed: " + enumeration.reason);
+  std::vector<const SiteGroup *> listed;
+  for (unsigned g : groups) {
+    if (g >= enumeration.groups.size())
+      return CheckedSetDomain::unknown("no such group");
+    listed.push_back(&enumeration.groups[g]);
+  }
+  return setClaim(program, listed, request, options, [&](ArrayRef<unsigned> sites, SetContext &set) {
+    return finiteSegmentedOver(program, enumeration, sites, "set", CoordinateFamily(), request, options, &set);
+  });
+}
+
+CheckedSetDomain checkSetDomainSymbolic(const SemanticProgram &program,
+                                        const TerminationCertificate *certificate,
+                                        ArrayRef<SiteGroup> groups, const DomainRequest &request,
+                                        const DomainOptions &options, SmtBackend &backend) {
+  if (!program.isSupported())
+    return CheckedSetDomain::unknown("the program is unsupported");
+  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)
+    return CheckedSetDomain::unknown("a solver limit of zero is no limit");
+  std::vector<const SiteGroup *> listed;
+  for (const SiteGroup &group : groups)
+    listed.push_back(&group);
+  return setClaim(program, listed, request, options, [&](ArrayRef<unsigned> sites, SetContext &set) {
+    return symbolicSegmentedOver(program, certificate, sites, "set", CoordinateFamily(), request, options,
+                                 backend, &set);
+  });
 }
 
 ReductionVerdict checkReduction(const SemanticProgram &program,

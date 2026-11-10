@@ -17,6 +17,13 @@
 
 namespace mlir::generalized_gemm {
 
+/// G5b-M4a: one set of groups to claim over: by index, or every supported group, in
+/// increasing or decreasing order.
+struct DomainSetRequest {
+  std::vector<unsigned> groups;
+  bool all = false, reversed = false;
+};
+
 struct DomainAnalysisRequest {
   SynthesisOptions synthesis;
   DomainOptions domain;
@@ -29,6 +36,19 @@ struct DomainAnalysisRequest {
   // G5b: propose segments by site instead of one order over the search's family. One
   // candidate per group, with an empty family; the segments carry theirs.
   bool segmented = false;
+  // G5b-M4a: one claim over each set of groups, by their indices. The request over a set is
+  // each listed group's own segmented proposal, the segments then in program order by their
+  // first site: untrusted, for the checker to judge. A proposer over unions is not here.
+  std::vector<DomainSetRequest> groupSets;
+};
+
+/// G5b-M4a: one set of groups, its request, and both routes' claims.
+struct SetDomain {
+  std::vector<unsigned> groups; // As listed.
+  std::optional<DomainRequest> request;
+  std::string proposalReason;
+  CheckedSetDomain finite = CheckedSetDomain::unknown("not checked");
+  CheckedSetDomain symbolic = CheckedSetDomain::unknown("not checked");
 };
 
 struct CandidateDomain {
@@ -49,6 +69,7 @@ struct GroupDomain {
 struct DomainResult {
   DomainEnumeration enumeration;
   std::vector<GroupDomain> groups;
+  std::vector<SetDomain> sets; // G5b-M4a, one per listed set.
 };
 
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,

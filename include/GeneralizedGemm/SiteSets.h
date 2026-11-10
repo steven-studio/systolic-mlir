@@ -7,6 +7,7 @@
 //
 //   wholeGroup    A group is exactly the direct sites of its root triple, each listed once,
 //                 and every id it lists is a site of the program.
+//   uniteGroups   A set of groups is whole groups, no triple twice and no site twice.
 //   roots         Two roots are apart when one is a fresh allocation, which is a proof, or
 //                 when their pair is authorized by name, which is an assumption to record.
 //                 Different root ids say nothing by themselves.
@@ -37,6 +38,18 @@ namespace mlir::generalized_gemm {
 /// of sites the program has, lists none twice, and lists exactly the direct sites of its
 /// root triple. False otherwise, with `why` naming the first failure in that order.
 bool wholeGroup(const SemanticProgram &program, const SiteGroup &group, std::string &why);
+
+/// The union of several whole groups (G5b-M3 for G4a, G5b-M4a for the domain).
+struct GroupUnion {
+  std::vector<unsigned> sites; // Every listed site, in increasing order.
+  std::vector<int> listedOf;   // Per program site: the listed index of its group, or -1.
+};
+
+/// One gate for every claim over a set of groups: at least one group and at most 64, each
+/// whole, no root triple listed twice, no site in two listed groups. False otherwise,
+/// with `why` naming the first failure, groups visited in the listed order.
+bool uniteGroups(const SemanticProgram &program, llvm::ArrayRef<const SiteGroup *> listed,
+                 GroupUnion &out, std::string &why);
 
 /// How two different roots stand, as G4a records it.
 struct RootSeparation {

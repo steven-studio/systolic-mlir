@@ -23,6 +23,7 @@
 #include "GeneralizedGemm/ComputationChecker.h"
 #include "GeneralizedGemm/DomainModel.h"
 #include "GeneralizedGemm/GuardedOrbit.h"
+#include "GeneralizedGemm/SiteSets.h"
 
 #include <array>
 #include <optional>
@@ -117,6 +118,94 @@ CheckedDomain checkDomainSymbolic(const SemanticProgram &program,
                                   const SiteGroup &group, const CoordinateFamily &family,
                                   const DomainRequest &request, const DomainOptions &options,
                                   SmtBackend &backend);
+
+/// G5b-M4a. One segmented domain claim over the union of several groups: Theorem 15
+/// asked of every listed site at once, with M2's obligations (D1' to D5) and nothing new
+/// about events. What a union adds is checked before any obligation:
+///
+///   XS  The set gate (uniteGroups): one to 64 whole groups, no root triple twice, no site
+///       in two of them.
+///   XP  The segments partition the union's sites, and each segment's sites belong to one
+///       listed group: a segment never mixes groups.
+///   CI  A cell is a root and an index. Cells of one root are compared by index. Cells of
+///       two roots are compared only through rootRelation: apart by a fresh allocation, a
+///       proof, or by an authorized name, an assumption; both are listed in rootPairs().
+///       For roots that may alias, every fact that needs their cells apart (sharedCells,
+///       singleContribution) stays Unknown, whatever the indices say.
+///
+/// Verified means Theorem 15 over the union at the tier given: the events of the listed
+/// sites, in execution order, are segment 0's set S_0(v) in its order, then segment 1's,
+/// and so on; no event of a listed site is left out and none is counted twice. The facts
+/// are reported beside the claim and never raise it. Nothing here claims values (G4a, which
+/// stays its own claim over a set), a fold (Theorem 17) or coordinates (Theorem 18).
+struct RootPair {
+  unsigned first = 0, second = 0; // Output roots of two segments, first < second.
+  CellRelation relation = CellRelation::MayAlias;
+  std::string basis;       // rootSeparation's: empty when the roots may alias.
+  bool assumption = true;  // False only for a fresh allocation.
+};
+
+class CheckedSetDomain {
+public:
+  /// Anyone may say they do not know.
+  static CheckedSetDomain unknown(std::string reason);
+
+  ComputationTier tier() const { return evidenceTier; }
+  ComputationStatus status() const { return claimStatus; }
+  const std::string &reason() const { return text; }
+  /// The program, the groups by their first site, the request, the scope and the names. No
+  /// one-group claim has it.
+  const std::string &binding() const { return bound; }
+  /// The listed groups, by their first site: the listing's order changes nothing.
+  const std::vector<SiteGroup> &groups() const { return groupList; }
+  /// Per segment: the index in groups() of the group its sites belong to.
+  const std::vector<unsigned> &segmentGroups() const { return segmentGroup; }
+  const std::vector<ObligationRecord> &records() const { return obligations; }
+  const std::vector<DomainPointFacts> &points() const { return facts; }
+  /// Theorem 15 over the union, at this tier.
+  bool exactOrder() const { return orbit; }
+  /// One entry per segment, in execution order, each with its own key, collision, access
+  /// and multiplicity facts.
+  const std::vector<SegmentFacts> &segments() const { return segmentList; }
+  /// Proven: no cell is written by two segments. Refuted: a point where one is, on one root.
+  const Fact &sharedCells() const { return shared; }
+  /// Proven: no cell has two contributions. Refuted: a point where one has, on one root.
+  const Fact &singleContribution() const { return single; }
+  /// Every two different output roots of the segments, and how they stand.
+  const std::vector<RootPair> &rootPairs() const { return pairs; }
+  /// For Refuted: the point and what is wrong there.
+  const Fact &refutation() const { return counter; }
+  const std::optional<std::vector<llvm::APInt>> &failingPoint() const { return failing; }
+
+private:
+  friend struct DomainAuthority;
+  CheckedSetDomain(ComputationTier tier, ComputationStatus status, std::string reason)
+      : evidenceTier(tier), claimStatus(status), text(std::move(reason)) {}
+  ComputationTier evidenceTier;
+  ComputationStatus claimStatus;
+  std::string text, bound;
+  std::vector<SiteGroup> groupList;
+  std::vector<unsigned> segmentGroup;
+  std::vector<ObligationRecord> obligations;
+  std::vector<DomainPointFacts> facts;
+  bool orbit = false;
+  std::vector<SegmentFacts> segmentList;
+  Fact shared, single, counter;
+  std::vector<RootPair> pairs;
+  std::optional<std::vector<llvm::APInt>> failing;
+};
+
+/// Point or ScopeEnumerated, at the points of an enumeration. `groups` index its groups.
+CheckedSetDomain checkSetDomainFinite(const SemanticProgram &program,
+                                      const DomainEnumeration &enumeration,
+                                      llvm::ArrayRef<unsigned> groups, const DomainRequest &request,
+                                      const DomainOptions &options);
+
+/// Symbolic, over the scope. `certificate` is re-checked here.
+CheckedSetDomain checkSetDomainSymbolic(const SemanticProgram &program,
+                                        const TerminationCertificate *certificate,
+                                        llvm::ArrayRef<SiteGroup> groups, const DomainRequest &request,
+                                        const DomainOptions &options, SmtBackend &backend);
 
 class ReductionVerdict;
 ReductionVerdict checkReduction(const SemanticProgram &program,

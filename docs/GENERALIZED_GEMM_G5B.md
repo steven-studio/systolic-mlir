@@ -705,6 +705,149 @@ Segments that belong to one group (Theorem 18), coordinates validated per segmen
 coverage across segments from Theorem 15, and a set-level verdict kept apart from the
 one-group verdict are M4a to M4d. None is started.
 
+## Milestone 4a: one domain claim over a union of groups
+
+M4a is the first of M4's milestones, and the only one started. It adds one claim: the
+events of several groups, as one segmented domain. M3 already claims their values
+together (G4a over a set); M4a claims their events, their order and their cells. It claims
+no fold over the set (Theorem 17, M4b), no coordinates per segment (Theorem 18, M4c) and
+nothing about whether the segments compose into one GEMM (G6).
+
+### Contract
+
+`DomainChecker.h` gains `checkSetDomainFinite` (groups by their index in an enumeration)
+and `checkSetDomainSymbolic` (the groups themselves), which return a `CheckedSetDomain`.
+It is a class of its own, so no set claim can stand where a one-group claim is expected,
+and its binding (`…|set|…`) is no one-group binding. Its parts:
+
+| Part | Meaning |
+| --- | --- |
+| `status()`, `tier()`, `reason()` | Theorem 15 over the union, at Point or ScopeEnumerated (finite) or Symbolic |
+| `groups()`, `segmentGroups()` | The listed groups by their first site, and the group of each segment |
+| `segments()` | Each segment's key, collision, access and multiplicity facts |
+| `sharedCells()`, `singleContribution()` | Root-aware: Proven, Refuted at a point on one root, or Unknown |
+| `rootPairs()` | Every two output roots of the segments: `DISTINCT` by fresh allocation (a proof) or by name (an assumption), or `MAY_ALIAS` |
+| `points()`, `records()`, `refutation()`, `failingPoint()` | As for one group. `points()` counts cells by root and index: for roots that may alias it counts keys, not memory cells, and no fact rests on it. A refutation is of this request's Theorem 15 at a point, never a statement that no segmentation exists |
+
+### Theorem 15 over a union
+
+The union's sites are the event source. Nothing about events changes: the segments must
+partition the sites, and D1' to D5 are asked of the arrivals at all of them, exactly as M2
+asks them of one group's. Theorem 15 never reads a root, so it holds of a union on the same
+proof. The finite route reads each listed point's run and checks the same statement: the
+union's events never return to an earlier segment, and each segment's events in order are
+its set S_s(v) in order. The one-group routes are now these routes with one group's sites
+and no set, and every one-group output is unchanged byte for byte.
+
+Three checks come before any obligation:
+
+| | Check | Refusal |
+| --- | --- | --- |
+| XS | `uniteGroups`, which G4a's set route now shares: 1 to 64 whole groups, no triple twice, no site twice | the gate's words |
+| XP | The segments partition the union's sites, and each segment's sites belong to one group | `segment s mixes groups`, and M2's partition words with "set" for "group" |
+| CI | Cells of one root compare by index. Cells of two roots compare only through their relation | none: the facts that need them apart stay Unknown |
+
+On the symbolic route a pair of events on two roots never reaches a query: apart, they
+share no cell; may alias, the facts stay open. The finite route keys cells by root and
+index, which separates two roots only when they are apart, so the same rule leaves its
+facts open for roots that may alias. A shared cell on one root is refuted at a point on
+either kind of union, since it needs no separation.
+
+### The seven obligations of the brief
+
+| Obligation | Where it is checked |
+| --- | --- |
+| 1. Site-set validity | XS, and XP for the segments |
+| 2. Exact event coverage | Theorem 15: each segment's events are exactly its set, the segments cover the union's sites, and each point's event count is the union's |
+| 3. Segmented partition | XP: every site in exactly one segment, every segment in one group |
+| 4. Order preservation | Theorem 15: D2 and D3 within a segment, D4 and D5 between segments, never back to an earlier one |
+| 5. Root-aware cell identity | CI |
+| 6. Scope soundness | ScopeEnumerated only with every point of the claim's scope (`enumerationCoversScope`) and no stopped point; Symbolic only with every obligation unsat |
+| 7. Proof composition | Verified only on the full path of one route; a fact never raises the claim, and the finite and symbolic claims are never joined |
+
+### The brief's two cases
+
+Case A is `sib_roots`: two groups, C[i] += A[i]·B[i] and C[i] += A[i]·D[i]. Over n = 2 the
+union has exactly four events, two per group in program order. Both routes verify the
+union. The finite route refutes "no cell of two segments" at a point, and the symbolic
+route leaves it Unknown, as it leaves every fact it cannot prove: the events are disjoint
+and the cells are not.
+
+Case B writes C in the first group and D in the second. With `roots 2 and 3 are separate`
+authorized, no cell is common on either route, and no query is asked for it. With no name,
+or with the reversed one, both facts are Unknown, saying the two roots may alias, while the
+claim about events still stands. A fresh allocation in place of D is apart with no name, as
+a proof.
+
+### What stays Unknown or is refused
+
+- Two sites of the union in one block, of one group or two: the symbolic route has no order
+  for them. The finite route refutes an interleaving where a run shows one.
+- Cells of two roots that may alias, for every fact that needs them apart.
+- A set that is not whole groups, a segment that mixes groups, a flat request over a set,
+  and everything a one-group segmented claim leaves Unknown.
+- The fold over the union (M4b), per-segment coordinates (M4c), the candidate verdict and a
+  proposer over unions (M4d), and G6 and G7.
+
+### How M4a is checked independently
+
+- **Unit.** The `setdomain` section of the domain test runs both cases, possibly aliasing
+  and fresh roots, interleaving, the segments backwards, a set that misses events and one
+  with points that have none, every refusal, empty segments and groups, a sample and a
+  trimmed list, every obligation answered sat and unknown, both limits, listing in either
+  order, and a set of one group against that group's own claim.
+- **Oracle.** `setdomain_oracle.py` shares no code with the library. It writes programs of
+  nests over several root triples and interprets them itself. For each union and each
+  group alone, with every name authorized and with none, it checks the partition, Theorem
+  15 at each listed point (finite) or every point (symbolic), each point's event count,
+  every refutation's point, the root pairs, and the cell facts against cells of one root.
+  It checks that the listing changes nothing, that a set of one group is the group's own
+  claim, and that interleaved groups are never verified. It runs in CTest as
+  `generalized-gemm-setdomain-programs`.
+- **Driver.** `generalized-gemm-domain-report --groups=…` asks for sets, with `all` and
+  `all-reversed`, and prints `group_sets` only then. The request for a set joins each
+  group's own segmented proposal in program order: an untrusted proposal for the checker,
+  not the proposer over unions, which is M4d's.
+
+### Changes to earlier phases (M4a)
+
+- `SiteSets.h` gains `uniteGroups`, and G4a's set route calls it: the same checks, in the
+  same order, in the same words. M3's results are unchanged, and the six G4a mutants of
+  that code are re-anchored on it with the same edits.
+- The domain checker's segmented routes run over a list of sites. One-group claims, their
+  bindings and their JSON are unchanged.
+- The domain test gains the `setdomain` section. The domain harness runs it second, and the
+  set oracle last; it gains 16 mutants. One M4-0 equivalence, `domain segment cells by index
+  only`, is no longer equivalent, since a union holds two roots, and is run as a mutant.
+
+**Found on the way, not changed.** The untrusted flat proposer aborts a debug build on some
+programs: `conditionAtoms` builds a one-bit constant from the value 2. It is reached on the
+default path of the domain driver, with no `--segments`, for `sib_roots` at width 16 and
+scope 1 to 3, and on M4-0 alike. No claim depends on it, since a proposal is judged anyway,
+and the set route uses the segmented proposer.
+
+## Validation of M4a (2026-11-11, LLVM 24.0.0git, Z3 4.8.12, base 5e08faa)
+
+Every result below is from one frozen tree (hash `9d1bed38…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The M4-0 binaries it is
+compared with were built from a snapshot of the commit, not from this worktree.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 21 of 21 CTest suites, the new `setdomain-programs` among them |
+| G5a/G5b unit, core | 1,037 checks, 0 failures: `setdomain` 120, and every M4-0 section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as at M4-0, section by section for G4a |
+| Set oracle, seed 20261113 | 60 programs, 0 failures: 480 finite and 460 symbolic claims verified and 2,296 points checked against Theorem 15; 36 finite refutations replayed, all of them interleaved unions; 120 listings compared; 308 one-group sets equal to the group's own claim; shared cells refuted on one root 194 times and proven across roots apart 36 times, and Unknown for roots that may alias 20 times; 90 segments empty at a point |
+| Identity, domain, G4a and multi-group oracles, seed 20261113 | 0 failures, 0 disagreements |
+| Byte-identical against M4-0 | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; 19 computation and domain RUN lines, G4a's set lines among them; 6 identity-driver outputs: 0 differ |
+| Lit | `dom_sets.mlir`: both cases through `--groups` |
+| ASan, UBSan, leaks | Clean: domain core 1,037 and G4a 3,658 checks, 8 set-oracle and 12 identity-oracle programs against the sanitized drivers |
+| Mutation, domain harness, all | 183 mutants: 169 killed by a test's own assertion (every M4a mutant by `setdomain`), 14 equivalent with reasons, 0 survived, 0 timeouts, 0 crashes |
+| Mutation, G4a harness | The mutants of `ComputationChecker.cpp` and `SiteSets.cpp`: 103 killed, 6 equivalent, 0 survived, 0 timeouts, 0 crashes |
+| Mutation, G3b, strict | The mutants of `SiteSets.cpp`: 4 killed |
+| Not rerun | The mutants of files M4a did not change: 33 in the G4a harness, 110 in the G3b harness, the 88 of the G3a harness. The four G3b and G3a mutants left open at M4-0 stay open |
+
 ## Validation of M4-0 (2026-11-10, LLVM 24.0.0git, Z3 4.8.12, base 7bf6534)
 
 Every result below is from one frozen tree (hash `1846937d…` over `include/`, `lib/` and

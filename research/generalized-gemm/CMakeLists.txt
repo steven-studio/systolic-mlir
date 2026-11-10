@@ -286,6 +286,12 @@ add_test(NAME generalized-gemm-identity-programs COMMAND "${Python3_EXECUTABLE}"
   --programs 60 --seed 1 --jobs 2)
 set_tests_properties(generalized-gemm-identity-programs PROPERTIES TIMEOUT 1800)
 
+# G5b-M4a: domain claims over unions of groups, against the source trace.
+add_test(NAME generalized-gemm-setdomain-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/setdomain_oracle.py" --driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --seed 1 --jobs 2)
+set_tests_properties(generalized-gemm-setdomain-programs PROPERTIES TIMEOUT 3600)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)

@@ -553,43 +553,20 @@ std::vector<std::vector<unsigned>> sitesOf(ArrayRef<const SiteGroup *> listed) {
 }
 
 /// G5b-M3: the union of whole groups, each listed once, with the listed index of each
-/// site. Nothing about how their cells meet is assumed or needed here.
+/// site. Nothing about how their cells meet is assumed or needed here. The gate is the
+/// one every claim over a set of groups shares (G5b-M4a).
 std::optional<SiteGroup> unite(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
                                SetTrace &set, std::string &why) {
-  if (listed.empty()) {
-    why = "no group is listed";
+  GroupUnion gate;
+  if (!uniteGroups(program, listed, gate, why))
     return std::nullopt;
+  set.groupOf = std::move(gate.listedOf);
+  for (const SiteGroup *group : listed) {
+    set.groups.push_back(group);
+    set.outputs.insert(*group->output);
   }
-  if (listed.size() > 64) {
-    why = "more than 64 groups are listed";
-    return std::nullopt;
-  }
-  std::set<std::tuple<unsigned, unsigned, unsigned>> triples;
-  set.groupOf.assign(program.sites.size(), -1);
   SiteGroup united;
-  for (unsigned i = 0; i < listed.size(); ++i) {
-    const SiteGroup &group = *listed[i];
-    // A claim about part of a group is no claim about its events, here as alone.
-    if (!wholeGroup(program, group, why))
-      return std::nullopt;
-    if (!triples.insert({*group.output, group.first, group.second}).second) {
-      why = "a group is listed twice";
-      return std::nullopt;
-    }
-    for (unsigned site : group.sites) {
-      if (set.groupOf[site] != -1) {
-        why = "a site is listed twice";
-        return std::nullopt;
-      }
-      set.groupOf[site] = i;
-      united.sites.push_back(site);
-    }
-    set.groups.push_back(&group);
-    set.outputs.insert(*group.output);
-  }
-  // Sites in increasing order, as one group's are: every obligation is then asked in
-  // the same order whatever the listing, and so is the first one that fails.
-  std::sort(united.sites.begin(), united.sites.end());
+  united.sites = std::move(gate.sites);
   united.output = listed.front()->output;
   united.first = listed.front()->first;
   united.second = listed.front()->second;

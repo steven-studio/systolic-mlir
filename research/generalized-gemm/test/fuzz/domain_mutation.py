@@ -84,9 +84,9 @@ MUTANTS = [
     ("segment order unchecked", D, "      if (rows[e].segment < rows[e - 1].segment)\n        return refute(", "      if (false)\n        return refute("),
     ("longer segment set admitted", D, "      if (mine.size() != sets[s].size())\n        return refute(", "      if (mine.size() > sets[s].size())\n        return refute("),
     ("segment elements unchecked", D, "        if (rows[mine[n]].lambda != sets[s][n])\n          return refute(", "        if (false)\n          return refute("),
-    ("site in no segment admitted", D, "  if (seen.size() != listed.size()) {\n    why = \"a site of the group is in no segment\";\n    return std::nullopt;\n  }\n", ""),
+    ("site in no segment admitted", D, "  if (seen.size() != listed.size()) {\n    why = std::string(\"a site of the \") + whole + \" is in no segment\";\n    return std::nullopt;\n  }\n", ""),
     ("site in two segments admitted", D, "      if (!seen.insert(site).second) {\n        why = \"a site in two segments\";\n        return std::nullopt;\n      }\n", "      seen.insert(site);\n"),
-    ("site outside the group admitted", D, "      if (!listed.count(site)) {\n        why = \"a segment names a site outside the group\";\n        return std::nullopt;\n      }\n", ""),
+    ("site outside the group admitted", D, "      if (!listed.count(site)) {\n        why = std::string(\"a segment names a site outside the \") + whole;\n        return std::nullopt;\n      }\n", ""),
     ("family beside segments admitted", D, "  if (!familyIsEmpty(family)) {\n    why = \"a segmented request carries its own families\";\n    return std::nullopt;\n  }\n", ""),
     ("shared cells unchecked", D, "      if (segmentsHere.size() > 1 && sharedNone) {", "      if (false) {"),
     ("cross-segment T1 skipped", D, "        if (single && proof.ask(\"T1\", \"one contribution per cell, across segments\", sameCell) != SmtAnswer::Unsat)\n          single = false;\n", ""),
@@ -120,10 +120,10 @@ MUTANTS = [
     ("part of a group", T, "    if (same != (listed.count(site.id) != 0)) {\n      why = \"the group is not the sites of its roots\";", "    if (false) {\n      why = \"the group is not the sites of its roots\";"),
     ("oblivious unchecked", D, "  if (!program.controlOblivious || !program.addressOblivious) {\n    why = \"the trace depends on memory contents\";", "  if (false) {\n    why = \"the trace depends on memory contents\";"),
     ("zero limit accepted", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structure = adoptRequest("),
-    ("zero limit accepted, segment", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  auto structures = adoptSegments("),
+    ("zero limit accepted, segment", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  return symbolicSegmentedOver(", "  if (false)\n    return CheckedDomain::unknown(\"a solver limit of zero is no limit\");\n  if (!wholeGroup(program, group, why) || !traceIsFixed(program, why))\n    return CheckedDomain::unknown(why);\n  return symbolicSegmentedOver("),
     ("certificate not needed", D, "  if (outcome.verdict.kind() != TerminationVerdict::ProvenTerminating &&\n      outcome.verdict.kind() != TerminationVerdict::ProvenTerminatingIfDefined) {\n    why = \"the certificate was not accepted: \"", "  if (false) {\n    why = \"the certificate was not accepted: \""),
     ("shared block admitted", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  Proof proof(", "      places.insert(program.sites[id].location);\n  }\n  Proof proof("),
-    ("shared block admitted, segment", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(\"two sites of the group share a block\");\n  }\n  std::map<unsigned, unsigned> ofSite", "      places.insert(program.sites[id].location);\n  }\n  std::map<unsigned, unsigned> ofSite"),
+    ("shared block admitted, segment", D, "      if (!places.insert(program.sites[id].location).second)\n        return CheckedDomain::unknown(std::string(\"two sites of the \") + whole + \" share a block\");\n  }\n  std::map<unsigned, unsigned> ofSite", "      places.insert(program.sites[id].location);\n  }\n  std::map<unsigned, unsigned> ofSite"),
     ("any certificate accepted", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n  const GuardedOrder &order = structure->order;", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n  const GuardedOrder &order = structure->order;"),
     ("any certificate accepted, segment", D, "  if (!acceptCertificate(program, certificate, options, backend, why))\n    return CheckedDomain::unknown(why);\n  {\n    std::set<unsigned> places;", "  if (!certificate)\n    return CheckedDomain::unknown(why);\n  {\n    std::set<unsigned> places;"),
     ("key order unchecked", D, "    if (key[n] >= order.levels.size() || (n && key[n] <= key[n - 1]))", "    if (key[n] >= order.levels.size())"),
@@ -224,6 +224,23 @@ MUTANTS = [
     ("repeated points counted", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return enumeration.points.size() + enumeration.outsideDomain == enumeration.scopePoints;\n"),
     ("outside points not counted", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return seen.size() == enumeration.scopePoints;\n"),
     ("any count ran its scope", F, "  return seen.size() + enumeration.outsideDomain == enumeration.scopePoints;\n", "  return true;\n"),
+    # G5b-M4a: one domain claim over a union of groups.
+    ("segment mixes groups admitted", D, "      if (set.gate->listedOf[site] != listed) {", "      if (false) {"),
+    ("set placement skipped, finite", D, "  if (set && !placeSegments(program, request, *set, why))\n    return CheckedDomain::unknown(\"the request is refused: \" + why);\n  std::map<unsigned, unsigned> segmentOf", "  std::map<unsigned, unsigned> segmentOf"),
+    ("set placement skipped, symbolic", D, "  if (set && !placeSegments(program, request, *set, why))\n    return CheckedDomain::unknown(\"the request is refused: \" + why);\n  if (!acceptCertificate(", "  if (!acceptCertificate("),
+    ("roots that may alias leave nothing open", D, "      if (pair.relation == CellRelation::MayAlias && !set.aliasOpen)", "      if (false && !set.aliasOpen)"),
+    ("alias gate ignored, finite", D, "  auto apart = [&](Fact fact) {\n    return set && set->aliasOpen ? unknownFact(*set->aliasOpen) : fact;\n  };", "  auto apart = [&](Fact fact) {\n    return fact;\n  };"),
+    ("alias gate ignored, symbolic", D, "    auto apart = [&](Fact fact) {\n      return set && set->aliasOpen ? unknownFact(*set->aliasOpen) : fact;\n    };", "    auto apart = [&](Fact fact) {\n      return fact;\n    };"),
+    ("pairs of two roots asked", D, "        if (set && first.output->root != second.output->root)\n          return true;\n", ""),
+    ("every pair across segments skipped", D, "        if (set && first.output->root != second.output->root)\n", "        if (set)\n"),
+    ("set binding drops the groups", D, "  for (const SiteGroup *group : canonical)\n    out += groupBinding(*group) + \";\";\n", ""),
+    ("set binding is a group binding", D, "  std::string out = program.fingerprint + \"|set|\";", "  std::string out = program.fingerprint + \"|\";"),
+    ("listing order kept", D, "  std::stable_sort(out.begin(), out.end(),\n                   [&](const SiteGroup *a, const SiteGroup *b) { return first(a) < first(b); });\n", ""),
+    ("segment groups by listing", D, "    segmentGroups.push_back(std::find(canonical.begin(), canonical.end(), listed[index]) - canonical.begin());", "    segmentGroups.push_back(index);"),
+    ("set gate ignored", D, "  if (!uniteGroups(program, listed, gate, why) || !traceIsFixed(program, why))\n    return finish(CheckedSetDomain::unknown(why), {}, {});", "  if ((uniteGroups(program, listed, gate, why), false) || !traceIsFixed(program, why))\n    return finish(CheckedSetDomain::unknown(why), {}, {});"),
+    ("flat request over a set", D, "  if (request.segments.empty())\n    return finish(CheckedSetDomain::unknown(\"a claim over a set needs a segmented request\"), {}, {});\n", ""),
+    ("zero limit accepted, set", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedSetDomain::unknown(\"a solver limit of zero is no limit\");", "  if (false)\n    return CheckedSetDomain::unknown(\"a solver limit of zero is no limit\");"),
+    ("closed gate checked, set", D, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedSetDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
 ]
 
 EQUIVALENT = [
@@ -265,13 +282,13 @@ EQUIVALENT = [
      "the direct sites of one root triple. The root in the key is then one constant, and the map "
      "groups the events exactly as before. Evidence: the identity section asks cellKey of two roots "
      "and one index directly."),
-    ("domain segment cells by index only", "the same: the segments of one group are sites of that group, "
-     "each writing its output root, so the root in each row's key is one constant."),
     ("domain same cell ignores roots", "within one group both sites of a pair write the group's output "
      "root, and rootRelation of a root of the program with itself is Same, so the formula is unchanged. "
      "The may-alias and apart variants of this call are killed, which shows the call is read."),
     ("domain same cell ignores roots, segment", "the same, for pairs within and across the segments of "
-     "one group."),
+     "one group. In a union (G5b-M4a) a pair of two roots never reaches the formula: their relation "
+     "answers first, and the mutants `pairs of two roots asked` and `every pair across segments "
+     "skipped` are killed."),
     ("G3a unknown refutes", "G3a gives unknown only for a malformed candidate, with no events or a label "
      "list of another length. The finite route asks it only at a point whose domain exists, which the "
      "enumerator makes only for a table with events, and familyLabels gives every event one label on "
@@ -324,7 +341,7 @@ def verdict_of(label, done):
         if label == "programs":
             own = ("driver failed" not in done.stderr and "Traceback" not in done.stderr and
                    done.stderr.strip())
-        elif label == "identity-programs":
+        elif label in ("identity-programs", "setdomain-programs"):
             # Its own disagreements only: a driver that failed or ran out of time is no kill.
             own = ("driver exit" not in done.stderr and "timed out" not in done.stderr and
                    "Traceback" not in done.stderr and "FAIL: " in done.stderr)
@@ -376,14 +393,16 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("identity", "reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial", "limits",
-                "binding", "wrapping", "catalogue", "orders")]
+               ("identity", "setdomain", "reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial",
+                "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
         out.append(("identity-programs", [sys.executable, fuzz / "identity_oracle.py", "--driver",
                                           self.build / "generalized-gemm-identity-report", "--programs", "12",
                                           "--seed", "41", "--jobs", "1", "--no-minimum"]))
+        out.append(("setdomain-programs", [sys.executable, fuzz / "setdomain_oracle.py", "--driver", report,
+                                           "--programs", "6", "--seed", "41", "--jobs", "1", "--no-minimum"]))
         return out
 
     def trial(self, name, filename, old, new):
