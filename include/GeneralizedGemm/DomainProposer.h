@@ -20,8 +20,10 @@
 #include "GeneralizedGemm/DomainModel.h"
 #include "GeneralizedGemm/FiniteDomain.h"
 
+#include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace mlir::generalized_gemm {
 
@@ -30,6 +32,14 @@ struct ProposalLimits {
   uint64_t maxBox = 1u << 20;
   EnumerationLimits events; // The run that reads the state at each event, for segments.
 };
+
+/// Untrusted, for tests of the proposer: the atoms a proposal's guard may use for `order`,
+/// the program's conditions over the order's levels and the congruences of each level by
+/// 2, 3 and 4 where the level's width holds the modulus. Every constant in an atom fits
+/// its width. Nothing trusts an atom.
+std::vector<Term> proposalConditionAtoms(const SemanticProgram &program, const GuardedOrder &order,
+                                         const std::map<unsigned, llvm::APInt> &constants,
+                                         unsigned limit);
 
 /// A proposal, or nullopt with `why`. `coordinateOrder`, when given, orders the levels.
 std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,

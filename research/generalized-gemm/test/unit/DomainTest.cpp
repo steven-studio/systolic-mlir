@@ -4002,6 +4002,226 @@ static void testSetDomain() {
   }
 }
 
+
+/// A loop with a step, for the congruence atoms the proposer adds at widths that hold them.
+static const char *steppedSource = R"(func.func @stepped(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %i = %c0 to %n step %c2 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    %y = memref.load %b[%i] : memref<8xi32>
+    %z = memref.load %c[%i] : memref<8xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%i] : memref<8xi32>
+  }
+  return
+}
+)";
+
+/// Every constant under `term` fits its width: a bit pattern wider than the sort is an
+/// APInt no checker may see. Read without APInt's own assertions, so that a release build
+/// checks it too.
+static bool constantsFit(Term term, std::set<Term> &seen) {
+  if (!term || !seen.insert(term).second)
+    return true;
+  if (term->op == TermOp::Const) {
+    unsigned width = term->sort.width;
+    if (term->value.getBitWidth() != width)
+      return false;
+    if (width < 64 && (term->value.getZExtValue() >> width) != 0)
+      return false;
+  }
+  for (Term arg : term->args)
+    if (!constantsFit(arg, seen))
+      return false;
+  return true;
+}
+static bool constantsFit(const DomainRequest &request) {
+  std::set<Term> seen;
+  bool ok = constantsFit(request.order.guard, seen);
+  for (const GuardedLevel &level : request.order.levels)
+    ok = ok && constantsFit(level.value, seen) && constantsFit(level.lower, seen) && constantsFit(level.upper, seen);
+  for (const auto &view : request.access)
+    for (Term term : view)
+      ok = ok && constantsFit(term, seen);
+  for (const Segment &segment : request.segments) {
+    ok = ok && constantsFit(segment.order.guard, seen);
+    for (const GuardedLevel &level : segment.order.levels)
+      ok = ok && constantsFit(level.value, seen) && constantsFit(level.lower, seen) && constantsFit(level.upper, seen);
+  }
+  return ok;
+}
+
+/// The congruence atoms among `atoms`: `(y urem c) == r`, with the moduli seen.
+static unsigned congruences(const std::vector<Term> &atoms, std::set<uint64_t> &moduli, bool &fit) {
+  unsigned count = 0;
+  std::set<Term> seen;
+  for (Term atom : atoms) {
+    fit = fit && constantsFit(atom, seen);
+    if (atom->op != TermOp::ICmp || atom->aux != (unsigned)Predicate::Eq || atom->args.size() != 2)
+      continue;
+    Term left = atom->args[0];
+    if (left->op != TermOp::URem)
+      continue;
+    if (left->args.size() == 2 && left->args[1]->op == TermOp::Const && atom->args[1]->op == TermOp::Const) {
+      ++count;
+      moduli.insert(left->args[1]->value.getZExtValue());
+    }
+  }
+  return count;
+}
+
+/// The proposer's congruence atoms at widths 1, 2, 8 and 32: none where no modulus fits,
+/// 2 and 3 at two bits, all three from three bits on, every constant fitting its width;
+/// and the end-to-end program that once aborted a debug build, through the search.
+static void testProposer() {
+  Module m(std::string(siblingSource) + steppedSource);
+  // The atoms, directly, for one level of each width.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 2);
+    TermContext &terms = *f.program.terms;
+    std::vector<unsigned> l = loops(f.program);
+    Sort w16 = Sort::bv(16);
+    Term bit = terms.icmp(Predicate::Eq, terms.state(l[0], w16), terms.bv(APInt(16, 0))); // one bit
+    Term two = terms.zext(bit, 2);                                                        // two bits
+    Term eight = terms.trunc(terms.state(l[0], w16), 8);
+    Term wide = terms.zext(terms.state(l[0], w16), 32);
+    struct Case {
+      Term level;
+      unsigned width;
+      unsigned expected;
+      std::set<uint64_t> moduli;
+    };
+    std::vector<Case> cases = {{bit, 1, 0, {}}, {two, 2, 5, {2, 3}}, {eight, 8, 9, {2, 3, 4}}, {wide, 32, 9, {2, 3, 4}}};
+    for (const Case &c : cases) {
+      CHECK(c.level->sort.width == c.width);
+      GuardedOrder order;
+      GuardedLevel level;
+      level.value = c.level;
+      level.lower = terms.bv(APInt(c.width, 0));
+      level.upper = terms.bv(APInt(c.width, 1));
+      order.levels.push_back(level);
+      order.guard = terms.boolean(true);
+      std::vector<Term> atoms = proposalConditionAtoms(f.program, order, {}, 64);
+      std::set<uint64_t> moduli;
+      bool fit = true;
+      unsigned count = congruences(atoms, moduli, fit);
+      if (count != c.expected || moduli != c.moduli || !fit)
+        printf("width %u: %u congruence atoms, %zu moduli, fit %d\n", c.width, count, moduli.size(), fit);
+      CHECK(count == c.expected && moduli == c.moduli && fit);
+      // No modulus a width cannot hold, whatever the count says.
+      for (uint64_t modulus : moduli)
+        CHECK(c.width >= 64 || (modulus >> c.width) == 0);
+    }
+    // Two one-bit levels and a sixteen-bit one together: the wide level keeps its nine.
+    GuardedOrder mixed;
+    for (Term value : {bit, terms.state(l[0], w16), terms.icmp(Predicate::Ne, terms.state(l[1], w16), terms.bv(APInt(16, 0)))}) {
+      GuardedLevel level;
+      level.value = value;
+      level.lower = terms.bv(APInt(value->sort.width, 0));
+      level.upper = terms.bv(APInt(value->sort.width, 1));
+      mixed.levels.push_back(level);
+    }
+    mixed.guard = terms.boolean(true);
+    std::set<uint64_t> moduli;
+    bool fit = true;
+    CHECK(congruences(proposalConditionAtoms(f.program, mixed, {}, 64), moduli, fit) == 9 && fit);
+    // A limit stops the atoms, with or without a one-bit level.
+    CHECK(proposalConditionAtoms(f.program, mixed, {}, 0).empty());
+  }
+  // A proposal whose family holds a one-bit and a two-bit coordinate: a request or a
+  // refusal, never an abort, and every constant of a request fits.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    TermContext &terms = *f.program.terms;
+    std::vector<unsigned> l = loops(f.program);
+    Sort w16 = Sort::bv(16);
+    for (unsigned width : {1u, 2u}) {
+      CoordinateFamily family = loopFamily(f.program, {l[0]}, {}, {});
+      Term bit = terms.icmp(Predicate::Eq, terms.binary(TermOp::URem, terms.state(l[0], w16), terms.bv(APInt(16, 2))),
+                            terms.bv(APInt(16, 0)));
+      family.axes[AxisP].push_back(width == 1 ? bit : terms.zext(bit, 2));
+      std::string why;
+      auto request = proposeDomain(f.program, f.enumeration, 0, family, nullptr, ProposalLimits(), why);
+      if (request)
+        CHECK(constantsFit(*request));
+      CHECK(request.has_value() || !why.empty());
+    }
+  }
+  // The search itself, as the driver runs it: the program and scope that aborted.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    SynthesisOptions search;
+    search.scope = f.scope;
+    search.termination = f.options.termination;
+    search.authorized = f.authorized;
+    search.limits.maxPoints = 256;
+    search.maxLevel = 3;
+    search.synthesis.maxCandidates = 5;
+    search.synthesis.maxRounds = 300;
+    search.synthesis.solver = testSolver();
+    DomainAnalysisRequest request;
+    request.synthesis = search;
+    request.domain = f.options;
+    request.maxCandidates = 2;
+    DomainResult result = analyzeDomains(f.program, f.proof(), request, z3Backend);
+    CHECK(result.enumeration.gate == GateStatus::Open && result.groups.size() == 2);
+    // The search finds families of comparison terms here, and the proposer refuses each
+    // ("no guard from the program's conditions is exact at the samples"), before and after
+    // the fix: what changed is that it now says so instead of aborting on the way.
+    unsigned candidates = 0;
+    for (const GroupDomain &group : result.groups)
+      for (const CandidateDomain &candidate : group.candidates) {
+        ++candidates;
+        if (candidate.request)
+          CHECK(constantsFit(*candidate.request));
+        else
+          CHECK(!candidate.proposalReason.empty());
+      }
+    CHECK(candidates > 0);
+  }
+  // Steps at eight and thirty-two bits: the congruence is what makes the box exact, and
+  // the finite checker verifies the proposal that uses it.
+  for (unsigned width : {8u, 32u}) {
+    Fixture f = fixture(m, "stepped", 1, 5, width);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 1);
+    CoordinateFamily family = loopFamily(f.program, {l[0]}, {}, {});
+    std::string why;
+    auto request = proposeDomain(f.program, f.enumeration, 0, family, nullptr, ProposalLimits(), why);
+    if (!request)
+      printf("stepped at %u bits: no proposal: %s\n", width, why.c_str());
+    CHECK(request.has_value());
+    if (!request)
+      continue;
+    CHECK(constantsFit(*request));
+    std::set<uint64_t> moduli;
+    bool fit = true;
+    unsigned used = congruences({request->order.guard}, moduli, fit);
+    // The guard is a conjunction or disjunction holding the atom: count congruences inside.
+    std::vector<Term> leaves;
+    std::function<void(Term)> flatten = [&](Term t) {
+      if (t->op == TermOp::And || t->op == TermOp::Or) {
+        for (Term a : t->args)
+          flatten(a);
+      } else {
+        leaves.push_back(t);
+      }
+    };
+    flatten(request->order.guard);
+    used += congruences(leaves, moduli, fit);
+    CHECK(used > 0 && moduli.count(2) && fit);
+    for (uint64_t modulus : moduli)
+      CHECK(modulus >> width == 0);
+    CheckedDomain finite = checkDomainFinite(f.program, f.enumeration, 0, family, *request, f.options);
+    if (finite.status() != S::Verified)
+      printf("stepped at %u bits: %s (%s)\n", width, stringifyComputationStatus(finite.status()), finite.reason().c_str());
+    CHECK(finite.status() == S::Verified && finite.tier() == T::ScopeEnumerated);
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -4021,6 +4241,7 @@ int main(int argc, char **argv) {
   };
   run("identity", testIdentity);
   run("setdomain", testSetDomain);
+  run("proposer", testProposer);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);
   run("wrapping", testWrapping);

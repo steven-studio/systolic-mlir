@@ -109,7 +109,7 @@ Term fit(const SemanticProgram &program, const std::vector<std::pair<std::vector
 /// guards of every transition and their boolean parts. A state variable that holds one
 /// value at every sample event is read as that constant: a guess, which the checker
 /// proves or refutes like the rest. Congruences of each level by small moduli are
-/// added, for steps.
+/// added, for steps, where the level's width holds the modulus.
 std::vector<Term> conditionAtoms(const SemanticProgram &program, const GuardedOrder &order,
                                  const std::map<unsigned, APInt> &constants, unsigned limit) {
   TermContext &terms = *program.terms;
@@ -147,11 +147,18 @@ std::vector<Term> conditionAtoms(const SemanticProgram &program, const GuardedOr
   for (unsigned m = 0; m < order.levels.size() && out.size() < limit; ++m) {
     Sort sort = order.levels[m].value->sort;
     Term y = levelVariable(terms, m, sort);
-    for (uint64_t modulus = 2; modulus <= 4; ++modulus)
+    for (uint64_t modulus = 2; modulus <= 4; ++modulus) {
+      // A modulus the level's width cannot hold is no congruence of that level: the atom
+      // is skipped, never built from a truncated constant. A one-bit level, which the
+      // search may propose from a comparison, gets none; a two-bit level gets 2 and 3.
+      // Every rest below the modulus then fits as well.
+      if (sort.width < 64 && (modulus >> sort.width) != 0)
+        continue;
       for (uint64_t rest = 0; rest < modulus; ++rest)
         out.push_back(terms.icmp(Predicate::Eq,
                                  terms.binary(TermOp::URem, y, terms.bv(APInt(sort.width, modulus))),
                                  terms.bv(APInt(sort.width, rest))));
+    }
   }
   return out;
 }
@@ -546,6 +553,11 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
       out.access[view] = std::move(form);
   }
   return out;
+}
+
+std::vector<Term> proposalConditionAtoms(const SemanticProgram &program, const GuardedOrder &order,
+                                         const std::map<unsigned, APInt> &constants, unsigned limit) {
+  return conditionAtoms(program, order, constants, limit);
 }
 
 std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,

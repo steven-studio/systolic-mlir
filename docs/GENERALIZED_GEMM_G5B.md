@@ -945,6 +945,18 @@ surface: `Segment`, `DomainRequest::segments`, `SegmentFacts`,
 `DomainAnalysisRequest::segmented`, the driver's `--segments`, and `shared_cells`,
 `segments` and per-event `state` in the JSON.
 
+**Proposer fix (2026-11-11).** The flat domain proposer's congruence atoms, y mod 2, 3
+and 4 for each order level, were built for every level whatever its width. The coordinate
+search can propose a one-bit comparison term as a coordinate, and the proposer then built
+`APInt(1, 2)`, which aborted a debug build before any report was printed (a release build
+would have built a bit pattern wider than its sort instead). A modulus the level's width
+cannot hold is now skipped, never truncated: a one-bit level gets no congruence, a two-bit
+level gets 2 and 3, three bits and up get all three. `proposalConditionAtoms` exposes the
+atoms to tests, untrusted like the rest of the proposer; no checker changed. The `proposer`
+section of the domain test and `dom_congruence.mlir` pin widths 1, 2, 8 and 32, the
+program that aborted, and a stepped loop whose proposal needs the congruence. The record
+is in `integration-backups-20261111/conditionatoms-crash/`.
+
 M4-0 changes no earlier assertion or expected output, and no output of an earlier driver.
 It changes refusal text only, for groups the enumerator never makes, as the gate table
 above lists. G3b's ScopeEnumerated needs every point of the recorded scope where it needed
