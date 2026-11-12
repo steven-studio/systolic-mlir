@@ -292,6 +292,12 @@ add_test(NAME generalized-gemm-setdomain-programs COMMAND "${Python3_EXECUTABLE}
   --programs 30 --seed 1 --jobs 2)
 set_tests_properties(generalized-gemm-setdomain-programs PROPERTIES TIMEOUT 3600)
 
+# G5b-M4b-1: Theorem 17 over sets of groups, folds against the source trace.
+add_test(NAME generalized-gemm-setreduction-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/setreduction_oracle.py" --driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 6 --seed 1 --jobs 2)
+set_tests_properties(generalized-gemm-setreduction-programs PROPERTIES TIMEOUT 3600)
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
 set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)

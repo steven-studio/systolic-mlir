@@ -241,6 +241,24 @@ MUTANTS = [
     ("flat request over a set", D, "  if (request.segments.empty())\n    return finish(CheckedSetDomain::unknown(\"a claim over a set needs a segmented request\"), {}, {});\n", ""),
     ("zero limit accepted, set", D, "  if (!options.termination.solver.timeoutMilliseconds || !options.termination.solver.resourceLimit)\n    return CheckedSetDomain::unknown(\"a solver limit of zero is no limit\");", "  if (false)\n    return CheckedSetDomain::unknown(\"a solver limit of zero is no limit\");"),
     ("closed gate checked, set", D, "  if (enumeration.gate != GateStatus::Open)\n    return CheckedSetDomain::unknown(\"the domain gate is closed: \" + enumeration.reason);\n", ""),
+    # G5b-M4b-1: Theorem 17 over a set of groups.
+    ("set reduction refutation of the computation dropped", D, "    if (claim && claim->status() == ComputationStatus::Refuted) {\n      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Computation;", "    if (false) {\n      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Computation;"),
+    ("set reduction refutation of the domain dropped", D, "    if (claim && claim->status() == ComputationStatus::Refuted) {\n      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;", "    if (false) {\n      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;"),
+    ("set reduction refuted by the domain called the computation's", D, "      out.refuted = RefutedBy::Domain;", "      out.refuted = RefutedBy::Computation;"),
+    ("set reduction witness dropped", D, "      out.counterexample = claim->witness();\n", ""),
+    ("set reduction symbolic from finite", D, "    out.claimTier = whole ? ComputationTier::ScopeEnumerated : ComputationTier::Point;\n    out.every = computationFinite.holdsForEveryRun();", "    out.claimTier = ComputationTier::Symbolic;\n    out.every = computationFinite.holdsForEveryRun();"),
+    ("set reduction symbolic without the domain", D, "  if (cs && computationSymbolic.status() == ComputationStatus::Verified && ds &&\n      domainSymbolic.status() == ComputationStatus::Verified && domainSymbolic.exactOrder()) {", "  if (cs && computationSymbolic.status() == ComputationStatus::Verified) {"),
+    ("set reduction symbolic without the computation", D, "  if (cs && computationSymbolic.status() == ComputationStatus::Verified && ds &&\n      domainSymbolic.status() == ComputationStatus::Verified && domainSymbolic.exactOrder()) {", "  if (ds && domainSymbolic.status() == ComputationStatus::Verified && domainSymbolic.exactOrder()) {"),
+    ("set reduction exact order not needed", D, "      domainSymbolic.status() == ComputationStatus::Verified && domainSymbolic.exactOrder()) {", "      domainSymbolic.status() == ComputationStatus::Verified) {"),
+    ("set reduction alias gate dropped", D, "      if (pair.relation != CellRelation::Distinct) {", "      if (false) {"),
+    ("set reduction computation binding unchecked", D, "    if (claim.binding() != compBinding || claim.groupSites() != listedSites)\n      return refuse(what);", "    if (false)\n      return refuse(what);"),
+    ("set reduction domain binding unchecked", D, "    if (!same)\n      return refuse(what);", "    if (false)\n      return refuse(what);"),
+    ("set reduction from the first group alone", D, "  CheckedComputation compFinite = checkGroupSetFinite(program, enumeration, groups, computation);", "  CheckedComputation compFinite = checkGroupSetFinite(program, enumeration, groups.take_front(1), computation);"),
+    ("set reduction integer fact without trivial", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n", "  if (out.claim == ComputationStatus::Verified) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n"),
+    ("set reduction float fact from the integer rule", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n", "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = out.trivial;\n  } else {\n"),
+    ("set reduction whole scope from the domain alone", D, "    bool whole = computationFinite.tier() == ComputationTier::ScopeEnumerated &&\n                 domainFinite.tier() == ComputationTier::ScopeEnumerated;", "    bool whole = domainFinite.tier() == ComputationTier::ScopeEnumerated;"),
+    ("set reduction event count unchecked", D, "      if (counted != facts.events) {", "      if (false) {"),
+    ("set reduction order contradiction unchecked", D, "      if (respects && found->second < computationFinite.groupPoints().size() &&\n          !computationFinite.groupPoints()[found->second].listedOrder) {", "      if (false) {"),
 ]
 
 EQUIVALENT = [
@@ -289,6 +307,24 @@ EQUIVALENT = [
      "one group. In a union (G5b-M4a) a pair of two roots never reaches the formula: their relation "
      "answers first, and the mutants `pairs of two roots asked` and `every pair across segments "
      "skipped` are killed."),
+    ("set reduction exact order not needed", "a symbolic CheckedSetDomain is Verified only on the path that "
+     "also sets exactOrder (the set route's claim is the segmented route's, which sets the orbit with every "
+     "verified claim), so the conjunct is implied by the one before it, as for `T13 without exact order` in "
+     "the one-group join. Kept as a defence against a future symbolic route that verifies without an exact "
+     "order. Survived the frozen run of 2026-11-12 and was declared with this reason; the harness was run "
+     "again on the final tree."),
+    ("set reduction event count unchecked", "a defect detector. Both claims read the one trace at a point "
+     "(obliviousness, which both gates require), so their event counts agree on every tree that builds, and "
+     "no test can hand the composer two genuine claims that disagree: the verdict has no public constructor "
+     "for a claim. Kept as the EC check of the design; listed here with that reason."),
+    ("set reduction order contradiction unchecked", "the same: M3's listed-order fact and Theorem 15 over the "
+     "union read one trace, and never contradict each other on a tree that builds. OC is a defect detector, "
+     "never the order's source, and no test can fabricate the contradiction."),
+    ("set reduction whole scope from the domain alone", "both finite claims demote together: each ties "
+     "ScopeEnumerated to enumerationCoversScope over the one scope in DomainOptions and to no stopped point, "
+     "and the composer joins them only at points both list. A computation claim left open at a point while "
+     "the domain is whole needs a replay that is neither equal nor refuted, which no program of the tests "
+     "produces for a set; the whole-scope minimum is kept, with this caveat."),
     ("G3a unknown refutes", "G3a gives unknown only for a malformed candidate, with no events or a label "
      "list of another length. The finite route asks it only at a point whose domain exists, which the "
      "enumerator makes only for a table with events, and familyLabels gives every event one label on "
@@ -341,7 +377,7 @@ def verdict_of(label, done):
         if label == "programs":
             own = ("driver failed" not in done.stderr and "Traceback" not in done.stderr and
                    done.stderr.strip())
-        elif label in ("identity-programs", "setdomain-programs"):
+        elif label in ("identity-programs", "setdomain-programs", "setreduction-programs"):
             # Its own disagreements only: a driver that failed or ran out of time is no kill.
             own = ("driver exit" not in done.stderr and "timed out" not in done.stderr and
                    "Traceback" not in done.stderr and "FAIL: " in done.stderr)
@@ -393,8 +429,8 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("identity", "setdomain", "reviewed", "gaps", "multiplicity", "siblings", "segments", "adversarial",
-                "limits", "binding", "wrapping", "catalogue", "orders")]
+               ("identity", "setdomain", "setreduction", "reviewed", "gaps", "multiplicity", "siblings", "segments",
+                "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
@@ -403,6 +439,9 @@ class Worker:
                                           "--seed", "41", "--jobs", "1", "--no-minimum"]))
         out.append(("setdomain-programs", [sys.executable, fuzz / "setdomain_oracle.py", "--driver", report,
                                            "--programs", "6", "--seed", "41", "--jobs", "1", "--no-minimum"]))
+        out.append(("setreduction-programs", [sys.executable, fuzz / "setreduction_oracle.py", "--driver", report,
+                                              "--programs", "6", "--fills", "3", "--seed", "41", "--jobs", "1",
+                                              "--no-minimum"]))
         return out
 
     def trial(self, name, filename, old, new):

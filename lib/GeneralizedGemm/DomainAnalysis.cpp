@@ -120,16 +120,15 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
       set.request = std::move(joined);
     }
     DomainRequest given = set.request ? *set.request : DomainRequest();
-    set.finite = checkSetDomainFinite(program, out.enumeration, listed, given, request.domain);
-    std::vector<SiteGroup> groups;
+    // G5b-M4b-1: the verdict makes the four claims itself; the two domain claims printed
+    // beside it are its own, so that M4a's output stays what it was.
+    set.reduction = checkSetReduction(program, certificate, out.enumeration, listed, given, request.domain, backend);
     bool known = true;
-    for (unsigned g : listed) {
+    for (unsigned g : listed)
       known = known && g < out.enumeration.groups.size();
-      if (known)
-        groups.push_back(out.enumeration.groups[g]);
-    }
-    set.symbolic = known ? checkSetDomainSymbolic(program, certificate, groups, given, request.domain, backend)
-                         : CheckedSetDomain::unknown("no such group");
+    set.finite = known ? set.reduction.domainFinite()
+                       : checkSetDomainFinite(program, out.enumeration, listed, given, request.domain);
+    set.symbolic = known ? set.reduction.domainSymbolic() : CheckedSetDomain::unknown("no such group");
     out.sets.push_back(std::move(set));
   }
   return out;
@@ -340,6 +339,53 @@ json::Object setDomainJSON(const CheckedSetDomain &d) {
   return out;
 }
 
+/// G5b-M4b-1.
+json::Object reductionJSON(const SetReductionVerdict &v) {
+  auto claimJSON = [](ComputationStatus status, ComputationTier tier, const std::string &reason) {
+    return json::Object{{"status", stringifyComputationStatus(status)},
+                        {"tier", stringifyComputationTier(tier)},
+                        {"reason", reason}};
+  };
+  json::Array points;
+  for (const auto &p : v.points())
+    points.push_back(pointJSON(p));
+  json::Object out{{"status", stringifyComputationStatus(v.status())},
+                   {"tier", stringifyComputationTier(v.tier())},
+                   {"logical_tier", stringifyComputationTier(v.logicalTier())},
+                   {"reason", v.reason()},
+                   {"refuted_by", stringifyRefutedBy(v.refutedBy())},
+                   {"holds_for", v.everyRun() ? "every run" : "runs that complete"},
+                   {"fold", stringifyFoldForm(v.fold())},
+                   {"points", std::move(points)},
+                   {"binding", v.binding()},
+                   {"computation_finite", claimJSON(v.computationFinite().status(), v.computationFinite().tier(),
+                                                    v.computationFinite().reason())},
+                   {"computation_symbolic", claimJSON(v.computationSymbolic().status(), v.computationSymbolic().tier(),
+                                                      v.computationSymbolic().reason())},
+                   {"domain_finite", claimJSON(v.domainFinite().status(), v.domainFinite().tier(),
+                                               v.domainFinite().reason())},
+                   {"domain_symbolic", claimJSON(v.domainSymbolic().status(), v.domainSymbolic().tier(),
+                                                 v.domainSymbolic().reason())},
+                   {"reorder", json::Object{{"trivial", factJSON(v.trivialReorder())},
+                                            {"integer", factJSON(v.integerReorder())},
+                                            {"float", factJSON(v.floatReorder())}}},
+                   {"transformation", v.transformation().name()},
+                   {"authorizes_lowering", false}};
+  if (v.failingPoint())
+    out["failing_point"] = pointJSON(*v.failingPoint());
+  if (v.witness()) {
+    json::Array memory;
+    for (const RootData &root : v.witness()->memory) {
+      json::Array cells;
+      for (const auto &cell : root.cells)
+        cells.push_back(cell ? json::Value(hex(*cell)) : json::Value(nullptr));
+      memory.push_back(std::move(cells));
+    }
+    out["witness"] = json::Object{{"parameters", pointJSON(v.witness()->parameters)}, {"memory", std::move(memory)}};
+  }
+  return out;
+}
+
 json::Object orderJSON(const GuardedOrder &order, const std::vector<unsigned> &cellKey,
                        const std::array<std::vector<Term>, 3> &accessForms) {
   json::Array levels;
@@ -500,7 +546,8 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
       json::Object entry{{"groups", std::move(listed)},
                          {"proposal_reason", set.proposalReason},
                          {"finite", setDomainJSON(set.finite)},
-                         {"symbolic", setDomainJSON(set.symbolic)}};
+                         {"symbolic", setDomainJSON(set.symbolic)},
+                         {"reduction", reductionJSON(set.reduction)}};
       if (set.request)
         entry["request"] = requestJSON(*set.request);
       sets.push_back(std::move(entry));

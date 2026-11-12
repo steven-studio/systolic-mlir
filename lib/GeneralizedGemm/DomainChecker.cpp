@@ -1677,4 +1677,227 @@ ReductionVerdict checkReduction(const SemanticProgram &program,
   return out;
 }
 
+// ---- G5b-M4b-1: Theorem 17 over a set of groups.
+
+const char *stringifyRefutedBy(RefutedBy what) {
+  switch (what) {
+  case RefutedBy::Nothing: return "NOTHING";
+  case RefutedBy::Computation: return "COMPUTATION";
+  case RefutedBy::Domain: return "DOMAIN";
+  }
+  return "NOTHING";
+}
+
+namespace {
+
+bool sameGroup(const SiteGroup &a, const SiteGroup &b) {
+  return a.output == b.output && a.first == b.first && a.second == b.second && a.sites == b.sites &&
+         a.unsupported == b.unsupported;
+}
+
+} // namespace
+
+SetReductionVerdict joinSetReduction(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                                     ArrayRef<unsigned> groups, const DomainRequest &request,
+                                     const DomainOptions &options, const CheckedComputation &computationFinite,
+                                     const CheckedComputation &computationSymbolic,
+                                     const CheckedSetDomain &domainFinite, const CheckedSetDomain &domainSymbolic) {
+  SetReductionVerdict out;
+  out.compFinite = computationFinite;
+  out.compSymbolic = computationSymbolic;
+  out.domFinite = domainFinite;
+  out.domSymbolic = domainSymbolic;
+  std::vector<const SiteGroup *> listed;
+  for (unsigned g : groups) {
+    if (g >= enumeration.groups.size()) {
+      out.why = "no such group";
+      return out;
+    }
+    listed.push_back(&enumeration.groups[g]);
+  }
+  if (listed.empty()) {
+    out.why = "no group is listed";
+    return out;
+  }
+  std::vector<const SiteGroup *> canonical = canonicalOrder(listed);
+  for (const SiteGroup *group : canonical)
+    out.groupList.push_back(*group);
+  std::string domBinding = setBindingOf(program, canonical, options, request);
+  std::string compBinding = groupSetBinding(program, listed, computationOf(options));
+  out.bound = "reduction|" + domBinding;
+
+  // B. A claim that says anything is about these groups, in this program, scope, set of
+  // names and, for the domain, this request. Anything else refuses the whole verdict: a
+  // refutation of something else refutes nothing here.
+  std::vector<std::vector<unsigned>> listedSites;
+  for (const SiteGroup *group : listed)
+    listedSites.push_back(group->sites);
+  bool foreign = false;
+  auto refuse = [&](const char *what) {
+    if (!foreign)
+      out.why = std::string(what) + " is a claim about something else";
+    foreign = true;
+    return false;
+  };
+  auto compUsable = [&](const CheckedComputation &claim, const char *what) {
+    if (claim.status() == ComputationStatus::Unknown)
+      return false;
+    if (claim.binding() != compBinding || claim.groupSites() != listedSites)
+      return refuse(what);
+    return true;
+  };
+  auto domUsable = [&](const CheckedSetDomain &claim, const char *what) {
+    if (claim.status() == ComputationStatus::Unknown)
+      return false;
+    bool same = claim.binding() == domBinding && claim.groups().size() == canonical.size();
+    for (size_t i = 0; same && i < canonical.size(); ++i)
+      same = sameGroup(claim.groups()[i], *canonical[i]);
+    if (!same)
+      return refuse(what);
+    return true;
+  };
+  bool cf = compUsable(computationFinite, "the finite computation claim");
+  bool cs = compUsable(computationSymbolic, "the symbolic computation claim");
+  bool df = domUsable(domainFinite, "the finite domain claim");
+  bool ds = domUsable(domainSymbolic, "the symbolic domain claim");
+  if (foreign)
+    return out;
+
+  // VR, refutations first: the computation's is a program-level witness; the domain's is
+  // this request at a point, and says nothing about other requests.
+  for (const CheckedComputation *claim : {cf ? &computationFinite : nullptr, cs ? &computationSymbolic : nullptr})
+    if (claim && claim->status() == ComputationStatus::Refuted) {
+      out.claim = ComputationStatus::Refuted;
+      out.refuted = RefutedBy::Computation;
+      out.counterexample = claim->witness();
+      out.failing = claim->witness() ? std::optional(claim->witness()->parameters) : claim->failingPoint();
+      out.why = "the computation over the set is refuted: " + claim->reason();
+      return out;
+    }
+  for (const CheckedSetDomain *claim : {df ? &domainFinite : nullptr, ds ? &domainSymbolic : nullptr})
+    if (claim && claim->status() == ComputationStatus::Refuted) {
+      out.claim = ComputationStatus::Refuted;
+      out.refuted = RefutedBy::Domain;
+      out.failing = claim->refutation().point ? claim->refutation().point : claim->failingPoint();
+      out.why = "this request's Theorem 15 over the set is refuted: " + claim->reason();
+      return out;
+    }
+
+  // RA. Two output roots that may alias leave the contributions of a cell undetermined.
+  const CheckedSetDomain *dom = ds ? &domainSymbolic : df ? &domainFinite : nullptr;
+  if (dom)
+    for (const RootPair &pair : dom->rootPairs())
+      if (pair.relation != CellRelation::Distinct) {
+        out.why = "roots " + std::to_string(pair.first) + " and " + std::to_string(pair.second) +
+                  " may alias: the cells of the set are not determined, and nothing is claimed";
+        return out;
+      }
+
+  // TT and the claim.
+  if (cs && computationSymbolic.status() == ComputationStatus::Verified && ds &&
+      domainSymbolic.status() == ComputationStatus::Verified && domainSymbolic.exactOrder()) {
+    out.claim = ComputationStatus::Verified;
+    out.claimTier = ComputationTier::Symbolic;
+    out.every = computationSymbolic.holdsForEveryRun();
+    out.foldForm = computationSymbolic.fold();
+    out.why = "Theorem 16 and Theorem 15 over the set, over the scope";
+  } else if (cf && computationFinite.status() == ComputationStatus::Verified && df &&
+             domainFinite.status() == ComputationStatus::Verified) {
+    // The segments respect the listing when their groups' listed positions never decrease:
+    // then M3's listed-order fact must hold wherever the domain verified the segment order.
+    std::vector<unsigned> listedPosition(canonical.size());
+    for (unsigned c = 0; c < canonical.size(); ++c)
+      listedPosition[c] = std::find(listed.begin(), listed.end(), canonical[c]) - listed.begin();
+    bool respects = true;
+    const std::vector<unsigned> &segmentGroups = domainFinite.segmentGroups();
+    for (size_t s = 1; s < segmentGroups.size(); ++s)
+      respects = respects && listedPosition[segmentGroups[s - 1]] <= listedPosition[segmentGroups[s]];
+    std::map<std::vector<uint64_t>, size_t> computed;
+    for (size_t k = 0; k < computationFinite.points().size(); ++k)
+      computed[pointKey(computationFinite.points()[k].parameters)] = k;
+    for (const DomainPointFacts &facts : domainFinite.points()) {
+      auto found = computed.find(pointKey(facts.parameters));
+      if (!facts.events || found == computed.end())
+        continue;
+      // EC: one trace at a point, so one count of its events.
+      uint64_t counted = 0;
+      if (found->second < computationFinite.groupPoints().size())
+        for (uint64_t n : computationFinite.groupPoints()[found->second].events)
+          counted += n;
+      if (counted != facts.events) {
+        out.why = "a defect: the computation counts " + std::to_string(counted) + " events and the domain " +
+                  std::to_string(facts.events) + " at one point";
+        out.at.clear();
+        return out;
+      }
+      // OC: never the order's source, only a contradiction to catch.
+      if (respects && found->second < computationFinite.groupPoints().size() &&
+          !computationFinite.groupPoints()[found->second].listedOrder) {
+        out.why = "a defect: the computation saw an event out of the listed order at a point where the "
+                  "domain verified the segment order";
+        out.at.clear();
+        return out;
+      }
+      out.at.push_back(facts.parameters);
+    }
+    if (out.at.empty()) {
+      out.why = "the computation and domain points do not meet";
+      return out;
+    }
+    bool whole = computationFinite.tier() == ComputationTier::ScopeEnumerated &&
+                 domainFinite.tier() == ComputationTier::ScopeEnumerated;
+    out.claim = ComputationStatus::Verified;
+    out.claimTier = whole ? ComputationTier::ScopeEnumerated : ComputationTier::Point;
+    out.every = computationFinite.holdsForEveryRun();
+    out.foldForm = computationFinite.fold();
+    out.why = "Theorem 16 and Theorem 15 over the set at the listed points";
+  } else {
+    out.why = "no tier of the computation over the set meets a tier of the domain over the set";
+  }
+
+  // The reorder facts: `trivial` from the domain claim, root-aware there; the others only
+  // as `trivial` implies them, in this milestone.
+  if (ds && domainSymbolic.status() == ComputationStatus::Verified &&
+      domainSymbolic.singleContribution().status == FactStatus::Proven)
+    out.trivial = domainSymbolic.singleContribution();
+  else if (df && domainFinite.status() == ComputationStatus::Verified)
+    out.trivial = domainFinite.singleContribution();
+  else if (dom && dom->status() == ComputationStatus::Verified)
+    out.trivial = dom->singleContribution();
+  else
+    out.trivial = unknownFact("no domain claim over the set");
+  bool isFloat = out.foldForm == FoldForm::OrderedFloat;
+  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {
+    out.integer = isFloat ? unknownFact("not an integer fold") : out.trivial;
+    out.floating = isFloat ? out.trivial : unknownFact("not a float fold");
+  } else {
+    out.integer = unknownFact(isFloat || out.claim != ComputationStatus::Verified
+                                  ? "not an integer fold, or no claim"
+                                  : "not yet generalized to a set (M4b-2)");
+    out.floating = unknownFact(!isFloat || out.claim != ComputationStatus::Verified
+                                   ? "not a float fold, or no claim"
+                                   : "only trivial proves a float fold reorderable; not yet generalized to a set (M4b-2)");
+  }
+  return out;
+}
+
+SetReductionVerdict checkSetReduction(const SemanticProgram &program, const TerminationCertificate *certificate,
+                                      const DomainEnumeration &enumeration, ArrayRef<unsigned> groups,
+                                      const DomainRequest &request, const DomainOptions &options,
+                                      SmtBackend &backend) {
+  std::vector<SiteGroup> listed;
+  for (unsigned g : groups) {
+    if (g >= enumeration.groups.size())
+      return SetReductionVerdict::unknown("no such group");
+    listed.push_back(enumeration.groups[g]);
+  }
+  ComputationOptions computation = computationOf(options);
+  CheckedComputation compFinite = checkGroupSetFinite(program, enumeration, groups, computation);
+  CheckedComputation compSymbolic = checkGroupSetSymbolic(program, certificate, listed, computation, backend);
+  CheckedSetDomain domFinite = checkSetDomainFinite(program, enumeration, groups, request, options);
+  CheckedSetDomain domSymbolic = checkSetDomainSymbolic(program, certificate, listed, request, options, backend);
+  return joinSetReduction(program, enumeration, groups, request, options, compFinite, compSymbolic, domFinite,
+                          domSymbolic);
+}
+
 } // namespace mlir::generalized_gemm

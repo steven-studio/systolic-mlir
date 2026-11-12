@@ -147,6 +147,12 @@ CheckedComputation checkComputationSymbolic(const SemanticProgram &program,
                                             const SiteGroup &group,
                                             const ComputationOptions &options, SmtBackend &backend);
 
+/// G5b-M4b-1: the binding checkGroupSetFinite and checkGroupSetSymbolic give a claim over
+/// these groups, in this order, for a composer to compare its claims against. It makes no
+/// claim.
+std::string groupSetBinding(const SemanticProgram &program, llvm::ArrayRef<const SiteGroup *> listed,
+                            const ComputationOptions &options);
+
 /// G5b-M3, Point or ScopeEnumerated: one claim over the union of several groups.
 /// `groups` index the enumeration's groups, each whole and listed once. Their order is
 /// the one groupOrder() judges, and the one the binding, groupSites() and groupPoints()

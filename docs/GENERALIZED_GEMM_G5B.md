@@ -826,6 +826,130 @@ default path of the domain driver, with no `--segments`, for `sib_roots` at widt
 scope 1 to 3, and on M4-0 alike. No claim depends on it, since a proposal is judged anyway,
 and the set route uses the segmented proposer.
 
+## Milestone 4b-1: Theorem 17 over a set of groups
+
+M4b-1 joins two claims the composer makes itself, M3's computation claim over a set
+(Theorem 16) and M4a's domain claim over the same set (Theorem 15 over the union), into
+Theorem 17: for every cell c = (root, index), with every two output roots of the segments
+apart, and every initial memory whose run completes,
+
+    C_final[c] = foldl ⊕ C_init[c] [ A_s[f_s(λ)] ⊗ B_s[g_s(λ)] :
+                 s = 1 … m in order, λ ∈ S_s(v), C_s = C, h_s(λ) = x, in κ_s order ]
+
+each step the exact operation of its site. The order is Theorem 15's: segment by segment,
+and within a segment in λ order, which K1 makes κ order. For floats that order is the
+claim, and nothing in this milestone reorders a contribution. It claims no fold over
+logical points (Theorem 18, M4c), no reorder beyond the trivial fact (M4b-2), and nothing
+about one GEMM (G6).
+
+### Contract
+
+`checkSetReduction(program, certificate, enumeration, groups, segmented request, options,
+backend)` returns a `SetReductionVerdict`, a class of its own with no public constructor for
+a claim. It carries the four component claims (`computationFinite/Symbolic()` as M3 set
+claims, `domainFinite/Symbolic()` as M4a set claims), `status()`, `tier()`, `points()`,
+`everyRun()`, `refutedBy()`, `witness()`, `failingPoint()`, `fold()`, `logicalTier()`
+(Proposed), `groups()`, `binding()` (`reduction|` and the set binding) and the reorder
+facts. `joinSetReduction` is the join itself, public so that tests can hand it claims:
+it accepts only claims about this program, these groups, this scope, these names and, for
+the domain, this request, and refuses anything else in words. `groupSetBinding` in
+`ComputationChecker.h` exposes M3's set binding for that comparison; it makes no claim.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| B | A claim that says anything carries the binding recomputed here for its kind, and the listed groups (M3: `groupSites()`; M4a: `groups()`). The claims' bindings differ in form, M3's in listed order and M4a's canonical, so each is compared with its own recomputation | Unknown, "… is a claim about something else" |
+| VR | A usable Refuted claim refutes: the computation's with its witness (`refutedBy = Computation`, program-level), else the domain's at its point (`refutedBy = Domain`, this request only) | Refuted |
+| RA | Every `rootPairs()` entry of the domain claim is `DISTINCT` | Unknown, naming the pair |
+| TT | Symbolic only when both symbolic claims are Verified and the order is exact; finite at the points both finite claims list with events; ScopeEnumerated only when both are | the lower tier, or Unknown |
+| EC | At every shared finite point the computation's event count equals the domain's | Unknown, "a defect" |
+| OC | Where the segments respect the listing, M3's listed-order fact is not Refuted at a point the domain verified | Unknown, "a defect" |
+| facts | `trivial` from the domain claim (root-aware, so Unknown for roots that may alias); `integer` and `float` only as `trivial` implies them | Unknown |
+
+An Unknown component is not looked at: the verdict rests on the others or is Unknown. A
+Refuted claim of something else refutes nothing. The listed-order fact is never the
+order's source. A finite verdict never becomes Symbolic.
+
+### The brief's cases
+
+| Case | Program | Verdict |
+| --- | --- | --- |
+| 1. Two groups, one cell | `sib_roots` | Verified Symbolic; modular fold; `trivial` Refuted at a point; no reorder claimed; each group alone Refuted by M3 and unused |
+| 2, 3. Different cells, roots apart | `case_b` authorized; `case_b_fresh` with no name | Verified Symbolic; `trivial` Proven; `integer` Proven by it |
+| 4. Roots that may alias | `case_b` with no name | Unknown, "roots 2 and 3 may alias" |
+| 5. Empty segment, empty group | `set_empty_second`, `set_never` | Verified Symbolic |
+| 6. Multiplicity 2 | `set_repeat` | Verified Symbolic; `trivial` Refuted; the segment's key Proven |
+| 7. Events left out | a segment's set short of an event; a writer left out (`set_third` minus one) | Refuted by the Domain at a point; Refuted by the Computation with a witness |
+| 8. Wrong order across segments | `sib_roots` backwards; `set_interleaved` | Refuted by the Domain at a point |
+| 9. Float order | `set_float`: (1e16 ⊕ 1) ⊕ (−1e16) = 0 in segment order, 1 in the other | Verified Symbolic, `fold` OrderedFloat, `trivial` Refuted, `float` Unknown; the concrete run gives 0 |
+| 10. Mismatches | another scope, another request, another site set, another program, a refutation of something else | Unknown, "a claim about something else"; a group twice, a flat request, an index past the groups: Unknown |
+
+### How M4b-1 is checked independently
+
+- **Unit.** The `setreduction` section: the cases above, TT with each symbolic claim lost
+  (the domain's by a solver answer, the computation's by its query limit), a trimmed list and
+  an enumeration of another scope at Point, the listing, a set of one group against
+  `checkReduction` on the same request, and `set_reads`, where each group alone is Verified
+  and the union is Refuted.
+- **Oracle.** `setreduction_oracle.py` shares no code with the library. Its programs mix
+  integer and double nests over several triples, some reading another nest's output, some
+  interleaved, some with a repeat loop. For every union and every group alone, with the
+  listing in both orders, it recomputes the verdict's tier from the components' and, where
+  Verified, folds each cell in the request's order, segment by segment and within a segment
+  in the printed order's λ order, with the initial operands and the exact operation, against
+  the cells the union's events write in the program's final memory, on a designed memory
+  (operands 1, outputs 2^53 and −2^53, where the two orders give 0 and 1) and on random
+  ones; it swaps two segments' contributions to one cell and requires the double fold to
+  change on some program and the integer fold never; it replays every refutation over the
+  union's events; and it compares a set of one group with that group's own Theorem 13. A
+  cell of the same root that only another group writes is outside the claim, as Theorem 16
+  states it for the cells the union writes. It runs in CTest as
+  `generalized-gemm-setreduction-programs`.
+- **Mutation.** The domain harness runs the new section third and the oracle last, and gains
+  17 mutants of the composer: refutations dropped or misattributed, the witness dropped,
+  Symbolic from finite or without a component, the exact order not needed, the alias gate
+  dropped, either binding unchecked, the computation from the first group alone, the integer
+  fact without `trivial`, the float fact from the integer rule, the whole scope from one
+  claim, EC and OC dropped. Four are equivalent with reasons: EC and OC detect defects no
+  genuine pair of claims shows; both finite claims demote together; and a symbolic set-domain
+  claim is Verified only on the path that sets the exact order, so the order conjunct is
+  implied, as `T13 without exact order` is for one group. That last one survived the frozen
+  run and was declared with its reason afterwards.
+
+### What stays Unknown
+
+Roots that may alias (RA); two sites of the union in one block on the symbolic route; the
+integer and float reorder facts beyond `trivial` (M4b-2); the fold over logical points
+(M4c); whether the segments compose into one GEMM or their order may change (G6);
+everything M3 and M4a leave Unknown.
+
+## Validation of M4b-1 (2026-11-12, LLVM 24.0.0git, Z3 4.8.12, base c6c7ded)
+
+Every result below is from one frozen tree (hash `98ec7f04…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the
+suites run one at a time and every subprocess under a limit. The binaries it is compared
+with were built from a snapshot of the fix commit. A first run on the tree before three
+corrections of the Theorem 17 oracle was stopped at its oracle step; the corrections (the
+union's written cells, not whole roots; a whole-scope verdict lists the eventful points; the
+shared-cell shapes write overlapping cells) changed no checker, and the whole run was
+repeated. The final tree adds one line to `domain_mutation.py`, the equivalence of the one
+survivor; its own run is the last row.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 22 of 22 CTest suites, `setreduction-programs` and `dom_reduction.mlir` among them |
+| G5a/G5b unit, core | 1,166 checks, 0 failures: `setreduction` 85, and every earlier section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as before |
+| Theorem 17 oracle, seed 20261115 | 60 programs, 30 integer and 30 double, 0 failures: 105 symbolic and 37 whole-scope verdicts verified, 363 points and 2,178 folds against the program's cells, 68 computation and 16 domain refutations replayed, 16 Unknown verdicts with no refuted component, 116 one-group verdicts equal to Theorem 13, 60 listings compared; 624 double swaps of which 11 change the result, 570 integer swaps of which none does |
+| Set-domain, multi-group, G4a, domain and identity oracles | 0 disagreements each. The set-domain oracle's 30-program run met only 4 of its 5 "roots may alias" cases, identically on the M4a and fix-commit binaries; at 60 programs on the same frozen binaries it passes with 8 |
+| Byte-identical against the fix commit | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; 25 RUN lines, the 3 with `--groups` compared with the new `reduction` entries removed; 6 identity outputs: 0 differ |
+| ASan, UBSan, leaks | 0 reports: G4a 3,658 checks, 8 Theorem 17 oracle programs, domain core 1,166 checks. Two checks of the `segments` section failed in the loaded run by the 3,000 ms solver limit (the section took 958 s against 771 and 787 s before) and pass alone (228 checks, 393 s) and in the final tree's idle run |
+| Mutation, domain harness, all 200 | 182 killed by a test's own assertion (every M4b-1 mutant by `setreduction`), 17 equivalent with reasons, 1 survived: `set reduction exact order not needed`, implied as `T13 without exact order` is, declared equivalent afterwards; 0 timeouts, 0 crashes |
+| Mutation, G4a harness, `ComputationChecker.cpp` | 94 killed, 6 equivalent, 0 survived, 0 timeouts, 0 crashes |
+| Not rerun | The 48 G4a mutants of other files, the G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Final tree | code hash `027a315f…`, unchanged through its run: the sanitized domain core alone on an idle machine, 1,166 checks, 0 failures, 0 reports; the domain harness again, 182 killed, 18 equivalent, 0 survived, 0 timeouts, 0 crashes; whitespace clean |
+
 ## Validation of M4a (2026-11-11, LLVM 24.0.0git, Z3 4.8.12, base 5e08faa)
 
 Every result below is from one frozen tree (hash `9d1bed38…` over `include/`, `lib/` and

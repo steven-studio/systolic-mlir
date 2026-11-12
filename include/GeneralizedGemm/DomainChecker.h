@@ -207,6 +207,110 @@ CheckedSetDomain checkSetDomainSymbolic(const SemanticProgram &program,
                                         llvm::ArrayRef<SiteGroup> groups, const DomainRequest &request,
                                         const DomainOptions &options, SmtBackend &backend);
 
+/// G5b-M4b-1. Theorem 17 over a set of groups, from two claims the composer makes itself:
+/// M3's computation claim over the set (Theorem 16) and M4a's domain claim over the set
+/// (Theorem 15 over the union, root-aware cells). For every cell c = (root, index), with
+/// every two output roots of the segments apart, and every initial memory whose run
+/// completes: C_final[c] is the fold of c's contributions, segment by segment in the order
+/// Theorem 15 proved, within a segment in the order's λ order (the key's order where K1 is
+/// proven), each step the exact operation of its site. For floats that order is the claim:
+/// nothing here reorders a contribution.
+///
+/// What the composer checks before it joins (the design review's obligations):
+///   B   both claims are about this program, these groups, this scope, these names and, for
+///       the domain, this request: their bindings equal the ones recomputed here, and their
+///       groups are the listed ones. A claim about anything else is refused.
+///   EC  at every point both finite claims list, they count the same events.
+///   RA  every two output roots of the segments are apart (`rootPairs()`): otherwise the
+///       contributions of a cell are not determined, and nothing is claimed.
+///   TT  Symbolic only when both claims are Symbolic and the order is exact; otherwise at
+///       the points both list; ScopeEnumerated only when both are. A finite claim never
+///       becomes Symbolic.
+///   VR  Refuted when a claim it rests on is Refuted, with that claim's witness and
+///       `refutedBy()` saying which: Computation is a program-level witness, Domain is this
+///       request's Theorem 15 at a point. Unknown otherwise.
+///   OC  M3's listed-order fact is never the order's source; where it contradicts a
+///       verified segment order at a shared point, the verdict is Unknown.
+/// The reorder facts are facts, never a licence: in this milestone `trivial` from the
+/// domain claim, and the integer and float facts only as `trivial` implies them.
+enum class RefutedBy { Nothing, Computation, Domain };
+const char *stringifyRefutedBy(RefutedBy what);
+
+class SetReductionVerdict;
+SetReductionVerdict joinSetReduction(const SemanticProgram &program, const DomainEnumeration &enumeration,
+                                     llvm::ArrayRef<unsigned> groups, const DomainRequest &request,
+                                     const DomainOptions &options, const CheckedComputation &computationFinite,
+                                     const CheckedComputation &computationSymbolic,
+                                     const CheckedSetDomain &domainFinite, const CheckedSetDomain &domainSymbolic);
+
+class SetReductionVerdict {
+public:
+  static SetReductionVerdict unknown(std::string reason) {
+    SetReductionVerdict out;
+    out.why = std::move(reason);
+    return out;
+  }
+  const CheckedComputation &computationFinite() const { return compFinite; }
+  const CheckedComputation &computationSymbolic() const { return compSymbolic; }
+  const CheckedSetDomain &domainFinite() const { return domFinite; }
+  const CheckedSetDomain &domainSymbolic() const { return domSymbolic; }
+  ComputationStatus status() const { return claim; }
+  ComputationTier tier() const { return claimTier; }
+  /// Finite tiers: the points both claims list with events.
+  const std::vector<std::vector<llvm::APInt>> &points() const { return at; }
+  bool everyRun() const { return every; }
+  RefutedBy refutedBy() const { return refuted; }
+  /// For a Computation refutation: M3's entry at which the program and the replay differ.
+  const std::optional<EntryState> &witness() const { return counterexample; }
+  /// For a Domain refutation: the point where this request's Theorem 15 fails. For a
+  /// Computation refutation: the witness's parameters.
+  const std::optional<std::vector<llvm::APInt>> &failingPoint() const { return failing; }
+  /// Always Proposed here: the statement over (P, I, J, K) per segment is Theorem 18's.
+  ComputationTier logicalTier() const { return ComputationTier::Proposed; }
+  /// The exact operation of the fold, from the computation claim the verdict rests on.
+  FoldForm fold() const { return foldForm; }
+  const std::string &reason() const { return why; }
+  const std::string &binding() const { return bound; }
+  /// The listed groups, by their first site.
+  const std::vector<SiteGroup> &groups() const { return groupList; }
+  const Fact &trivialReorder() const { return trivial; }
+  const Fact &integerReorder() const { return integer; }
+  const Fact &floatReorder() const { return floating; }
+  const ProofStatus &transformation() const { return transformationStatus; }
+
+private:
+  SetReductionVerdict() = default;
+  friend SetReductionVerdict joinSetReduction(const SemanticProgram &, const DomainEnumeration &,
+                                              llvm::ArrayRef<unsigned>, const DomainRequest &,
+                                              const DomainOptions &, const CheckedComputation &,
+                                              const CheckedComputation &, const CheckedSetDomain &,
+                                              const CheckedSetDomain &);
+  CheckedComputation compFinite = CheckedComputation::unknown("not checked");
+  CheckedComputation compSymbolic = CheckedComputation::unknown("not checked");
+  CheckedSetDomain domFinite = CheckedSetDomain::unknown("not checked");
+  CheckedSetDomain domSymbolic = CheckedSetDomain::unknown("not checked");
+  ComputationStatus claim = ComputationStatus::Unknown;
+  ComputationTier claimTier = ComputationTier::Proposed;
+  std::vector<std::vector<llvm::APInt>> at;
+  bool every = false;
+  RefutedBy refuted = RefutedBy::Nothing;
+  std::optional<EntryState> counterexample;
+  std::optional<std::vector<llvm::APInt>> failing;
+  FoldForm foldForm = FoldForm::OrderedFloat;
+  std::string why, bound;
+  std::vector<SiteGroup> groupList;
+  Fact trivial, integer, floating;
+  ProofStatus transformationStatus =
+      ProofStatus::unknown("no transformation is claimed before G6 and G7");
+};
+
+/// Makes the four claims itself, then joins them. `groups` index the enumeration's groups;
+/// `request` must be segmented. Nothing from outside is believed.
+SetReductionVerdict checkSetReduction(const SemanticProgram &program, const TerminationCertificate *certificate,
+                                      const DomainEnumeration &enumeration, llvm::ArrayRef<unsigned> groups,
+                                      const DomainRequest &request, const DomainOptions &options,
+                                      SmtBackend &backend);
+
 class ReductionVerdict;
 ReductionVerdict checkReduction(const SemanticProgram &program,
                                 const TerminationCertificate *certificate,

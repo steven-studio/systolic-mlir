@@ -49,6 +49,8 @@ struct SetDomain {
   std::string proposalReason;
   CheckedSetDomain finite = CheckedSetDomain::unknown("not checked");
   CheckedSetDomain symbolic = CheckedSetDomain::unknown("not checked");
+  // G5b-M4b-1: Theorem 17 over the set, whose domain components are the two above.
+  SetReductionVerdict reduction = SetReductionVerdict::unknown("not checked");
 };
 
 struct CandidateDomain {

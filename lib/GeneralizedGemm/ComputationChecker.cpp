@@ -1379,6 +1379,11 @@ CheckedComputation checkComputationSymbolic(const SemanticProgram &program,
   return out;
 }
 
+std::string groupSetBinding(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                            const ComputationOptions &options) {
+  return setBindingOf(program, listed, options);
+}
+
 CheckedComputation checkGroupSetFinite(const SemanticProgram &program,
                                        const DomainEnumeration &enumeration,
                                        ArrayRef<unsigned> groups,
