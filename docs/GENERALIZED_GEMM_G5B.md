@@ -875,7 +875,7 @@ order's source. A finite verdict never becomes Symbolic.
 
 | Case | Program | Verdict |
 | --- | --- | --- |
-| 1. Two groups, one cell | `sib_roots` | Verified Symbolic; modular fold; `trivial` Refuted at a point; no reorder claimed; each group alone Refuted by M3 and unused |
+| 1. Two groups, one cell | `sib_roots` | Verified Symbolic; modular fold; `trivial` Refuted at a point; no reorder claimed in M4b-1 (M4b-2a below proves the `integer` fact here); each group alone Refuted by M3 and unused |
 | 2, 3. Different cells, roots apart | `case_b` authorized; `case_b_fresh` with no name | Verified Symbolic; `trivial` Proven; `integer` Proven by it |
 | 4. Roots that may alias | `case_b` with no name | Unknown, "roots 2 and 3 may alias" |
 | 5. Empty segment, empty group | `set_empty_second`, `set_never` | Verified Symbolic |
@@ -920,9 +920,190 @@ order's source. A finite verdict never becomes Symbolic.
 ### What stays Unknown
 
 Roots that may alias (RA); two sites of the union in one block on the symbolic route; the
-integer and float reorder facts beyond `trivial` (M4b-2); the fold over logical points
-(M4c); whether the segments compose into one GEMM or their order may change (G6);
-everything M3 and M4a leave Unknown.
+integer and float reorder facts beyond `trivial` (the integer fact: M4b-2a, next; the float
+fact: M4b-2b); the fold over logical points (M4c); whether the segments compose into one
+GEMM or their order may change (G6); everything M3 and M4a leave Unknown.
+
+## M4b-2a: the integer reorder fact over a set (2026-11-12)
+
+Theorem 13's integer fact, read over the union of the listed groups. For a Verified Theorem
+17 verdict over groups G_1..G_m with union U of their sites and output roots R, pairwise apart
+(RA), at tier τ, Theorem 16 gives every cell c = (root, index) its fold in execution order,
+
+    C_final[c] = ((z_c ⊕ p_1) ⊕ p_2) … ⊕ p_k
+
+with p_i = A[f](μ) ⊗ B[g](μ) the product of event e_i's operands in the initial memory and
+z_c the cell's initial value or prefix constant. The integer fact says: for every point of τ,
+every initial memory whose run completes, every cell and every permutation π of its events,
+each event keeping its own operation, the fold in π's order is the fold in execution order,
+the completing runs are the same runs, and no effect outside U observes a partial sum. It
+is a fact about the model, never a licence: the verdict's order stays Theorem 15's, and the
+verdict's status, tier, points, binding, `fold()`, `everyRun()` and `refutedBy()` are
+final before any fact is computed and are never read back from one.
+
+**The rule (IR-1 to IR-5).** The fact is Proven exactly when: IR-1, the set claim the verdict's
+tier came from is Verified with `fold() == ModularInteger` (one `addf` site makes the union
+`OrderedFloat`, `foldOf`); IR-2, no reduction add of U carries `nsw` or `nuw` (the set claim's
+`contracts()` cover every site of U); IR-3, no residual effect reads a root of R (the set
+claim's `frame()`, which `frameOf` marks for every listed output root); IR-4, no side
+condition loads from a root of R or depends on state that holds a value from memory
+(`memoryIndependentState`); IR-5, the same for every guard. Under them ⊕ is addition in
+Z/2^w, a commutative monoid, so every permutation gives z_c + Σ p_i; the products rest on
+the set claim's operand separation and not on any partial sum; and no stop, guard or other
+effect can tell one order from another, so the completing runs are the same. The argument
+rests on Theorem 16 and the algebra, not on Theorem 15, which is why the fact can hold where
+the order is still the claim. IR-5 is a defence: a guard that reads memory closes the
+obliviousness gate before any claim is made.
+
+**Refuted** only by a witness: a parameter point of the verdict and an initial memory at
+which the program completes and reversing one cell's contributions overflows a flagged
+addition (`reversalDiffers`, the one judge, shared with the tests). The search runs the
+fixed fill sequence of Theorem 13 at the verdict's own points (the listed ones of a finite
+verdict; the enumerated points where a listed group has a domain for a symbolic one), with
+the set's own replay (`replayGroupSet`) for the prefix constants, and judges the union's
+events on every listed root. A memory at which no difference shows is no evidence. With
+`nuw` no reversal can overflow (unsigned partial sums only grow), so the fact is Unknown by
+the contract, never Refuted. Unknown otherwise, with the first failing condition in words.
+
+**What the fact does not say.** It fixes the products: every p_i is the product of the
+initial operands, as Theorem 16 states. A listed group may read a root another listed group
+writes, when every such read precedes the writes (OP2 over the union); moving that group's
+events past those writes would change its operands, which is no permutation of any cell's
+contributions and nothing here licenses. A transformation that reorders nests (G6, G7) must
+keep every operand read before the writes of its root on its own account. The oracle's
+other-order comparison is therefore made only for unions in which no nest reads a root
+another nest of the union writes; the first frozen run of 2026-11-12 found the comparison
+wrongly applied to such a union (`r56`, seed 20261116: a third nest writing `d`, which the
+second reads), the oracle was corrected, and the whole run was repeated. The second run was
+stopped as well, after its units and three oracles had passed: the `set_nsw` unit case
+accepted an Unknown fact beside the Refuted one, which would have let a witness search over
+the first group alone survive; the case now requires the refutation, whose fill sequence is
+fixed, and the whole run was repeated once more. The third run reached CTest, where the
+oracle's own 30-program suite failed on `r17` (seed 1): a `reads_output` program whose
+reading nest is guarded by `1 < n`, so that at n = 1 the union has no cross read and the
+verdict, at that point alone (tier Point), is right; the oracle's blanket rule "a union of
+that shape is never verified" was replaced by the exact check it stood for, that at no
+verified point does an event of the union read a cell an earlier event of the union wrote,
+and the run was repeated a third time. Three repeats, each for a wrong expectation of the
+oracle, none for the checker.
+
+**Tier.** A Proven fact holds at the verdict's tier (`claimTier`): Symbolic over the scope,
+Point or ScopeEnumerated at the listed points, never above the verdict. `trivial` keeps its
+precedence: where it is Proven the integer fact is it, as for one group.
+
+**Floats.** Unchanged: Proven only by `trivial`, else Unknown (M4b-2b). No algebraic rule
+is admitted for floats, not even for two contributions ((z ⊕ p_1) ⊕ p_2 against (z ⊕ p_2) ⊕
+p_1 is a reassociation), and `reassoc` or any fast-math flag is no licence: the model
+evaluates the strict refinement, and a claim about other associations would be another
+claim. The detail string of an open float fact still names M4b-2 as the milestone that
+generalizes it; that milestone is M4b-2b.
+
+### Contract
+
+`ReductionSemantics.h` gains the union forms, and the one-group functions become them over
+one group, byte for byte: `integerReorderConditionsOver(program, outputs, computation, why)`
+reads every root of `outputs` where one group's root was read; `unitedSiteGroup(program,
+listed, groupOfSite, why)` is the union through the gate every set claim shares
+(`uniteGroups`); `reorderWitnessOver(program, listed, parameters, fills, maxCells)` replays
+the set and judges the reversal over the union. `joinSetReduction` computes the fact after
+the verdict: claim not Verified → Unknown; `trivial` Proven → it; `OrderedFloat` → Unknown
+("not an integer fold, or no claim"); else the rule with the computation claim the tier came
+from, Proven at the verdict's tier, or the witness at the verdict's points, or Unknown with
+the reason. The single-group API and `checkReduction` are unchanged in behaviour: every
+one-group output is byte-identical.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| IR-1 | the set claim used is Verified with a modular fold | Unknown |
+| IR-2 | no `nsw`/`nuw` on any add of U | Unknown; Refuted with a witness when a reversal overflows |
+| IR-3 | no residual read of any root of R | Unknown |
+| IR-4 | no stop loads from a root of R or memory-derived state | Unknown |
+| IR-5 | no guard does | Unknown (a defence) |
+| NB-1 | facts are computed from the final verdict and never read back into it; a refuted Theorem 15 order is never rescued by the algebra | mutants `set refuted fact refutes the verdict`, `set wrapping algebra rescues a refuted order` |
+| NB-2 | a Proven fact only on a Verified verdict, at its tier | mutants `set integer fact on an unverified claim`, `… tier above the verdict` |
+| NB-3 | every listed root, every union site | mutants `… conditions over the first root`, `integer stop loads first root only`, `set witness over the first group`, `set witness judges the first group` |
+
+### The brief's cases
+
+| Case | Program | Verdict and fact |
+| --- | --- | --- |
+| A. 8-bit modular addition | `set_i8`: C[0] = 250, +10 then +20 | Verified Symbolic; `integer` Proven Symbolic by the rule; the run ends at 24, (250 + 20) + 10 is 24, the judge finds no reversal that differs; `sib_roots` at 32 bits likewise (−10, +10, +20 → 20) |
+| B. Distinct cells | `set_cells` (C[i] and C[i + 4]), `case_b` (C and D) | `trivial` Proven, `integer` by it; the run shows the cells apart (11 and 27) |
+| C. Roots that may alias | `case_b`, `set_i8` without names | Unknown verdict, every fact Unknown |
+| D. Flags | `set_nsw` | Verified (runs that complete); `integer` Refuted by the fixed fill sequence with a replayable witness, and a hand-built one (C[0] = INT_MAX, contributions −1 then +1) judged again; `set_nuw`: Unknown, no reversal can overflow |
+| E. Wrong listings | `sib_roots` backwards, an event missing, a group twice, `set_third` minus a writer, `set_interleaved` | as M4b-1 says; every fact Unknown |
+| Each condition alone | `set_observer`, `set_stop_second` (the stop on the second root; the first two groups alone Proven), `set_carried_stop` (R3 over a set), `set_mixed` (a float group; the integer groups alone Proven), `set_mixed_flags` (no refutation of a fold of two operations) | Unknown, each with its reason |
+| Tiers and limits | the domain's symbolic claim lost; a trimmed enumeration; a solver limit of zero (both symbolic claims Unknown, the finite tier stands) | Proven at ScopeEnumerated, Point, ScopeEnumerated |
+| Bindings and scopes | another scope, another site set, the computation's symbolic claim lost | Unknown; Unknown; Proven at the finite tier |
+| One group | `sib_same` as a set of one against `checkReduction` | status, tier and detail of every fact equal |
+
+### How M4b-2a is checked independently
+
+- **Unit.** The `setreorder` section (118 checks: the cases above, the two guard programs
+  that close the gate, and the two verdicts the claims do not meet at any tier, which carry
+  no fact), and the two M4b-1 assertions that pinned the integer fact at Unknown, now Proven
+  (case A) and equal to Theorem 13's (one group).
+- **Oracle.** `setreduction_oracle.py` gains three knobs on integer programs, by index:
+  `nsw` on every add, an observer (a load of the first nest's output root between the nests,
+  stored to a root of its own), a stop on the second nest's accumulate load (never taken).
+  It reads the rule off the program it printed: `integer` Proven by the rule only on a plain
+  32-bit union, at the verdict's tier; then the union's program with its nests in the other
+  order (only where no nest of the union reads a root another nest of it writes), and with a
+  repeat loop run backwards, ends with the same bits on every written cell on designed and
+  random memories, and every permutation of a cell's contributions folds to the same value;
+  a plain 32-bit union with two contributions to a cell is never left Unknown; at no
+  verified point does an event of the union read a cell an earlier event of the union wrote
+  (the exact form of M4b-1's "a cross-group read is never verified");
+  a knob never lets the rule prove. Every integer refutation is replayed: the witness run
+  completes here, and the reversed fold of some cell overflows while the forward fold does
+  not. The interpreter stops on a flagged overflow, and such fills are outside the claim.
+  A set of one group has Theorem 13's facts, status and tier.
+- **Mutation.** The domain harness runs `setreorder` fourth and gains 12 mutants: the
+  conditions skipped, on an unverified claim, the fold ignored, the tier above the verdict,
+  the first root only (twice), the first group only (twice), the guard check dropped, the
+  witness memory dropped, a refuted fact refuting the verdict, the algebra rescuing a refuted
+  order; the two Theorem 13 stop mutants and the two M4b-1 fact mutants are re-aimed at the
+  new text. `integer guard loads ignored` is declared equivalent before the run, with its
+  evidence: a guard that reads an output root, directly or through state, closes the
+  obliviousness gate (`set_guard`, `set_guard_state`), so no claim reaches IR-5.
+- **Byte-identity.** Against the M4b-1 commit: every one-group output, and every `--groups`
+  output with `reduction.reorder.integer` removed; every change of that key listed, each
+  Unknown → Proven or Unknown → Refuted.
+
+### What stays Unknown
+
+The float fact beyond `trivial` (M4b-2b); `nuw` adds (no witness can exist, no rule is
+admitted); mixed unions (one `addf` site, or flags that differ between the groups: the judge
+refuses a fold of two operations); any fact on a verdict that is not Verified; everything
+M3, M4a and M4b-1 leave Unknown.
+
+## Validation of M4b-2a (2026-11-13, LLVM 24.0.0git, Z3 4.8.12, base 184d0eb)
+
+Every result below is from one frozen tree (hash `2765d220…` over `include/`, `lib/` and
+`research/generalized-gemm`), unchanged from the start of the run to its end, with the suites
+run one at a time and every subprocess under a limit. The binaries it is compared with were
+built from a snapshot of the M4b-1 commit. Three earlier frozen runs were stopped, each for a
+wrong expectation on the oracle's or a unit case's side and none for the checker (the
+other-order comparison applied to a union with a cross read; the `set_nsw` case accepting an
+Unknown fact beside the Refuted one; the blanket "a `reads_output` union is never verified"
+rule, wrong for a guarded reading nest at a point where it does not run); each correction is
+described in the M4b-2a section above, and the whole run was repeated after each.
+
+| Check | Result |
+| --- | --- |
+| `check-generalized-gemm` | 22 of 22 CTest suites, `setreduction-programs` (30 programs, seed 1: 11 integer facts by the rule, 2 refutations replayed) and `dom_reduction.mlir` with its `A` and `NSW` checks among them |
+| G5a/G5b unit, core | 1,276 checks, 0 failures: `setreorder` 109 (new), `setreduction` 86 (one assertion strengthened), every other section's count unchanged |
+| G4a, G3b and G3a units | 3,658, 517 and 355 checks, 0 failures, as before |
+| Release build | the `setreorder` and `setreduction` sections pass (before the two guard programs were added: 99 and 86 checks); the `set_nsw` witness is found there too |
+| Theorem 17 oracle, seed 20261116 | 60 programs, 30 integer and 30 double, 0 failures: 94 symbolic and 36 whole-scope verdicts verified, 316 points and 1,753 folds against the program's cells, 72 computation and 14 domain refutations replayed, 32 Unknown verdicts with no refuted component, 114 one-group verdicts and 66 one-group fact sets equal to Theorem 13, 60 listings compared; integer: 10 facts proven by the rule with their structure checked, 17 by `trivial`, 4 refutations replayed, 60 other-order program comparisons, 300 permutation folds, 32 negative shapes never proven, 143 flagged fills that stop |
+| Set-domain, multi-group, G4a, domain and identity oracles | 0 disagreements each (60 programs, 102 witnesses, 27 witnesses, 40 programs, 120 programs) |
+| Byte-identical against the M4b-1 commit | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; identity-report 6 outputs; 28 RUN lines, 0 differ: the 6 with `--groups` compared with `reduction.reorder.integer` removed, and exactly 2 integer facts changed, both Unknown → Proven Symbolic by the rule (`set_a` of `dom_reduction.mlir` and of `dom_sets.mlir`); every one-group output identical |
+| ASan, UBSan, leaks | 0 reports in the G4a unit (3,658 checks) and the 8-program Theorem 17 oracle run. The sanitized domain core, run inside the frozen run, failed two `segments` checks by the 3,000 ms solver limit (`sib_counter proposed`: the symbolic claim's path undecided; `sib_repeat`: the certificate's parameter domain unknown), the same two as M4b-1's loaded run, and then stopped at a UBSan report in test code: `DomainTest.cpp:3032` indexes `fin.segments()[0]` of the claim those failed checks had just found Unknown (an empty vector; reference binding to null). Alone on the idle machine after the run (`san-core-idle.sh`), the same binary passes every section: 1,276 checks, 0 failures, 0 reports, `segments` 990 s. The test-code index after a failed check is pre-existing (M2) and reachable only after a check has already failed; a size guard there would turn the report into that failure and is left for a later milestone |
+| Mutation, domain harness, all 212 | 192 killed by a test's own assertion (every M4b-2a mutant but one by `setreorder` or `setreduction`), 19 equivalent with reasons (`integer guard loads ignored` declared before the run, with its evidence), **1 survived**: `set integer fact on an unverified claim`, which drops the `claim != Verified` conjunct of the fact block. It is equivalent: `foldForm` is `OrderedFloat` by default and assigned only in the two branches that make the verdict Verified, so at the fact block `claim != Verified` entails `isFloat`, and the conjunct is a defence (as `T13 without exact order` and `set reduction exact order not needed` are). It was first read as a test gap, two NB-2 cases were added to `setreorder` (a flat request; domain claims lost by hand: Verified computation claims, an Unknown verdict, every fact Unknown), and the survivor-only harness run on that tree let it survive again, which confirmed the analysis; it is declared equivalent with that reason on the final tree. 0 timeouts, 0 crashes, 0 untested |
+| Not rerun | The G4a, G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Final tree, two steps | (1) Hash `cbd1ae93…`, the frozen tree plus the two NB-2 cases: Debug domain core 1,285 checks, 0 failures (`setreorder` 118); lit 23 of 23; the harness for the survivor alone, its baseline passing: SURVIVED again (so not a test gap); the sanitized domain core alone on the idle machine: 1,285 checks, 0 failures, 0 reports (`segments` 1,121 s); whitespace clean; tree unchanged through the run. (2) Hash `6d96ec4a355711cb…`, plus the equivalence declaration in `domain_mutation.py` (a harness file: no binary changes): every mutant's pattern occurs once, 212 mutants, 20 equivalents; the result stands at 192 killed, 20 equivalent, 0 survived, 0 timeouts, 0 crashes. The 191 other kills and the 19 earlier equivalences are the frozen tree's; neither step can turn a kill into a survival |
 
 ## Validation of M4b-1 (2026-11-12, LLVM 24.0.0git, Z3 4.8.12, base c6c7ded)
 

@@ -1855,8 +1855,11 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
     out.why = "no tier of the computation over the set meets a tier of the domain over the set";
   }
 
-  // The reorder facts: `trivial` from the domain claim, root-aware there; the others only
-  // as `trivial` implies them, in this milestone.
+  // The reorder facts, computed from the verdict above and never read back into it:
+  // `trivial` from the domain claim, root-aware there; the integer fact by Theorem 13's
+  // rule over the union (G5b-M4b-2a), every listed output root checked, at the verdict's
+  // own tier, or refuted by a witness over the union; the float fact only as `trivial`
+  // implies it (M4b-2b). A fact is never a licence, and a Refuted fact refutes nothing.
   if (ds && domainSymbolic.status() == ComputationStatus::Verified &&
       domainSymbolic.singleContribution().status == FactStatus::Proven)
     out.trivial = domainSymbolic.singleContribution();
@@ -1870,13 +1873,50 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
   if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {
     out.integer = isFloat ? unknownFact("not an integer fold") : out.trivial;
     out.floating = isFloat ? out.trivial : unknownFact("not a float fold");
-  } else {
-    out.integer = unknownFact(isFloat || out.claim != ComputationStatus::Verified
-                                  ? "not an integer fold, or no claim"
-                                  : "not yet generalized to a set (M4b-2)");
-    out.floating = unknownFact(!isFloat || out.claim != ComputationStatus::Verified
+  } else if (out.claim != ComputationStatus::Verified || isFloat) {
+    out.integer = unknownFact("not an integer fold, or no claim");
+    out.floating = unknownFact(out.claim != ComputationStatus::Verified
                                    ? "not a float fold, or no claim"
                                    : "only trivial proves a float fold reorderable; not yet generalized to a set (M4b-2)");
+  } else {
+    out.floating = unknownFact("not a float fold, or no claim");
+    // The claim the verdict's tier came from: Theorem 16 over the set at that tier. The
+    // fact holds at the verdict's tier, never above it.
+    const CheckedComputation &values =
+        out.claimTier == ComputationTier::Symbolic ? computationSymbolic : computationFinite;
+    std::vector<unsigned> outputs;
+    for (const SiteGroup *group : canonical)
+      if (group->output)
+        outputs.push_back(*group->output);
+    std::sort(outputs.begin(), outputs.end());
+    outputs.erase(std::unique(outputs.begin(), outputs.end()), outputs.end());
+    std::string why;
+    if (integerReorderConditionsOver(program, outputs, values, why)) {
+      out.integer = proven("wrapping addition with no flag, unobserved, at the computation's tier", out.claimTier);
+    } else {
+      // A witness, looked for at the verdict's own points: the listed ones of a finite
+      // verdict, or the enumerated points where a listed group has a domain.
+      std::set<std::vector<uint64_t>> verdictPoints;
+      for (const std::vector<APInt> &point : out.at)
+        verdictPoints.insert(pointKey(point));
+      Fact found = unknownFact("no point to look at");
+      unsigned looked = 0;
+      for (const PointEvidence &point : enumeration.points) {
+        if (!point.reason.empty() || looked >= 4)
+          continue;
+        bool listedPoint = out.claimTier == ComputationTier::Symbolic
+                               ? llvm::any_of(groups, [&](unsigned g) { return (bool)point.domains[g]; })
+                               : verdictPoints.count(pointKey(point.parameters)) != 0;
+        if (!listedPoint)
+          continue;
+        ++looked;
+        found = reorderWitnessOver(program, listed, point.parameters, options.limits.witnessFills,
+                                   options.limits.witnessCells);
+        if (found.status == FactStatus::Refuted)
+          break;
+      }
+      out.integer = found.status == FactStatus::Refuted ? found : unknownFact(why);
+    }
   }
   return out;
 }

@@ -2,6 +2,7 @@
 #include "GeneralizedGemm/ReductionSemantics.h"
 
 #include "GeneralizedGemm/FiniteDomain.h"
+#include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
 #include "llvm/ADT/DenseSet.h"
@@ -11,6 +12,7 @@
 #include <random>
 
 using llvm::APInt;
+using llvm::ArrayRef;
 
 namespace mlir::generalized_gemm {
 
@@ -81,8 +83,8 @@ std::optional<EntryState> randomEntry(const SemanticProgram &program,
 
 } // namespace
 
-bool integerReorderConditions(const SemanticProgram &program, const SiteGroup &group,
-                              const CheckedComputation &computation, std::string &why) {
+bool integerReorderConditionsOver(const SemanticProgram &program, ArrayRef<unsigned> outputs,
+                                  const CheckedComputation &computation, std::string &why) {
   if (computation.status() != ComputationStatus::Verified) {
     why = "the computation is not verified";
     return false;
@@ -101,9 +103,12 @@ bool integerReorderConditions(const SemanticProgram &program, const SiteGroup &g
       why = "another effect reads the output, so it can see a partial sum";
       return false;
     }
-  // A partial sum can reach a stop or a guard through a load of the output, or
+  // A partial sum can reach a stop or a guard through a load of an output root, or
   // through any state that holds a value from memory. Either may decide the run.
   std::vector<bool> independent = memoryIndependentState(program);
+  auto loadsOutput = [&](Term term) {
+    return llvm::any_of(outputs, [&](unsigned root) { return loadsFrom(term, root); });
+  };
   auto throughState = [&](Term term) {
     llvm::DenseSet<Term> seen;
     std::function<bool(Term)> visit = [&](Term n) {
@@ -117,16 +122,36 @@ bool integerReorderConditions(const SemanticProgram &program, const SiteGroup &g
   };
   for (const Transition &t : program.transitions)
     for (const SideCondition &condition : t.sideConditions)
-      if (loadsFrom(condition.violated, *group.output) || throughState(condition.violated)) {
+      if (loadsOutput(condition.violated) || throughState(condition.violated)) {
         why = "a stop reads the output or memory-derived state, so a partial sum can decide it";
         return false;
       }
   for (const Transition &t : program.transitions)
-    if (loadsFrom(t.guard, *group.output) || throughState(t.guard)) {
+    if (loadsOutput(t.guard) || throughState(t.guard)) {
       why = "control reads the output or memory-derived state";
       return false;
     }
   return true;
+}
+
+bool integerReorderConditions(const SemanticProgram &program, const SiteGroup &group,
+                              const CheckedComputation &computation, std::string &why) {
+  unsigned root = *group.output;
+  return integerReorderConditionsOver(program, root, computation, why);
+}
+
+std::optional<SiteGroup> unitedSiteGroup(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                                         std::vector<int> &groupOfSite, std::string &why) {
+  GroupUnion gate;
+  if (!uniteGroups(program, listed, gate, why))
+    return std::nullopt;
+  groupOfSite = std::move(gate.listedOf);
+  SiteGroup united;
+  united.sites = std::move(gate.sites);
+  united.output = listed.front()->output;
+  united.first = listed.front()->first;
+  united.second = listed.front()->second;
+  return united;
 }
 
 bool reversalDiffers(const SemanticProgram &program, const SiteGroup &group,
@@ -222,11 +247,15 @@ bool reversalDiffers(const SemanticProgram &program, const SiteGroup &group,
   return false;
 }
 
-Fact reorderWitness(const SemanticProgram &program, const SiteGroup &group,
+namespace {
+
+/// The search both witness functions run: the fixed fill sequence at `parameters`, each
+/// fill judged by reversalDiffers against the replay's prefix constants. A fill that shows
+/// no difference is no evidence; the detail says so.
+Fact searchReversal(const SemanticProgram &program, const SiteGroup &group, const ReplayResult &replay,
                     const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
   Fact out;
   out.detail = "no memory found at which a reversal differs";
-  ReplayResult replay = replayGroup(program, group, parameters, HerbrandLimits());
   if (replay.outcome != ReplayOutcome::Equal) {
     out.detail = "the replay at this point is not equal";
     return out;
@@ -246,6 +275,29 @@ Fact reorderWitness(const SemanticProgram &program, const SiteGroup &group,
     }
   }
   return out;
+}
+
+} // namespace
+
+Fact reorderWitness(const SemanticProgram &program, const SiteGroup &group,
+                    const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
+  ReplayResult replay = replayGroup(program, group, parameters, HerbrandLimits());
+  return searchReversal(program, group, replay, parameters, fills, maxCells);
+}
+
+Fact reorderWitnessOver(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                        const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
+  std::vector<int> groupOfSite;
+  std::string why;
+  std::optional<SiteGroup> united = unitedSiteGroup(program, listed, groupOfSite, why);
+  if (!united) {
+    Fact out;
+    out.detail = why;
+    return out;
+  }
+  ReplayResult replay =
+      replayGroupSet(program, *united, groupOfSite, listed.size(), parameters, HerbrandLimits());
+  return searchReversal(program, *united, replay, parameters, fills, maxCells);
 }
 
 } // namespace mlir::generalized_gemm

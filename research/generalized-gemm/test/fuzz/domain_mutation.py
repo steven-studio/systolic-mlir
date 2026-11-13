@@ -166,8 +166,13 @@ MUTANTS = [
     ("float proven by algebra", D, "    out.floating = values.status() == ComputationStatus::Verified\n                           ? witness()\n                           : unknownFact(\"the computation is not verified\");\n", "    out.floating = proven(\"addition is associative\", ComputationTier::Symbolic);\n"),
     ("integer flags ignored", R, "    if (contract.reductionFlags & (FlagNSW | FlagNUW)) {", "    if (false) {"),
     ("integer observers ignored", R, "    if (effect.observesOutput) {", "    if (false) {"),
-    ("integer stop loads ignored", R, "      if (loadsFrom(condition.violated, *group.output) || throughState(condition.violated)) {", "      if (throughState(condition.violated)) {"),
-    ("integer stop state ignored", R, "      if (loadsFrom(condition.violated, *group.output) || throughState(condition.violated)) {", "      if (loadsFrom(condition.violated, *group.output)) {"),
+    ("integer stop loads ignored", R, "      if (loadsOutput(condition.violated) || throughState(condition.violated)) {", "      if (throughState(condition.violated)) {"),
+    ("integer stop state ignored", R, "      if (loadsOutput(condition.violated) || throughState(condition.violated)) {", "      if (loadsOutput(condition.violated)) {"),
+    # G5b-M4b-2a: the conditions over a union, the guard, the witness over the union.
+    ("integer stop loads first root only", R, "    return llvm::any_of(outputs, [&](unsigned root) { return loadsFrom(term, root); });", "    return loadsFrom(term, outputs.front());"),
+    ("integer guard loads ignored", R, "    if (loadsOutput(t.guard) || throughState(t.guard)) {", "    if (throughState(t.guard)) {"),
+    ("set witness judges the first group", R, "  return searchReversal(program, *united, replay, parameters, fills, maxCells);", "  return searchReversal(program, *listed.front(), replay, parameters, fills, maxCells);"),
+    ("witness memory dropped", R, "      out.memory = std::move(*entry);\n", ""),
     ("integer float fold admitted", R, "  if (computation.fold() != FoldForm::ModularInteger) {", "  if (false) {"),
     ("integer unverified admitted", R, "  if (computation.status() != ComputationStatus::Verified) {\n    why = \"the computation is not verified\";", "  if (false) {\n    why = \"the computation is not verified\";"),
     ("witness from a stopped run", R, "  RunResult run = runConcrete(program, entry);\n  if (run.status != RunStatus::Returned)\n    return false;\n", "  RunResult run = runConcrete(program, entry);\n"),
@@ -254,8 +259,17 @@ MUTANTS = [
     ("set reduction computation binding unchecked", D, "    if (claim.binding() != compBinding || claim.groupSites() != listedSites)\n      return refuse(what);", "    if (false)\n      return refuse(what);"),
     ("set reduction domain binding unchecked", D, "    if (!same)\n      return refuse(what);", "    if (false)\n      return refuse(what);"),
     ("set reduction from the first group alone", D, "  CheckedComputation compFinite = checkGroupSetFinite(program, enumeration, groups, computation);", "  CheckedComputation compFinite = checkGroupSetFinite(program, enumeration, groups.take_front(1), computation);"),
-    ("set reduction integer fact without trivial", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n", "  if (out.claim == ComputationStatus::Verified) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n"),
-    ("set reduction float fact from the integer rule", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else {\n", "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = out.trivial;\n  } else {\n"),
+    ("set reduction integer fact without trivial", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n", "  if (out.claim == ComputationStatus::Verified) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n"),
+    ("set reduction float fact from the integer rule", D, "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = isFloat ? out.trivial : unknownFact(\"not a float fold\");\n  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n", "  if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {\n    out.integer = isFloat ? unknownFact(\"not an integer fold\") : out.trivial;\n    out.floating = out.trivial;\n  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n"),
+    # G5b-M4b-2a: the integer fact over a set.
+    ("set integer fact on an unverified claim", D, "  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n    out.integer = unknownFact(\"not an integer fold, or no claim\");", "  } else if (isFloat) {\n    out.integer = unknownFact(\"not an integer fold, or no claim\");"),
+    ("set integer fact ignores the fold", D, "  } else if (out.claim != ComputationStatus::Verified || isFloat) {\n    out.integer = unknownFact(\"not an integer fold, or no claim\");", "  } else if (out.claim != ComputationStatus::Verified) {\n    out.integer = unknownFact(\"not an integer fold, or no claim\");"),
+    ("set integer fact tier above the verdict", D, "      out.integer = proven(\"wrapping addition with no flag, unobserved, at the computation's tier\", out.claimTier);", "      out.integer = proven(\"wrapping addition with no flag, unobserved, at the computation's tier\", ComputationTier::Symbolic);"),
+    ("set integer conditions skipped", D, "    if (integerReorderConditionsOver(program, outputs, values, why)) {", "    if (true) {"),
+    ("set integer conditions over the first root", D, "    for (const SiteGroup *group : canonical)\n      if (group->output)\n        outputs.push_back(*group->output);\n", "    if (canonical.front()->output)\n      outputs.push_back(*canonical.front()->output);\n"),
+    ("set witness over the first group", D, "        found = reorderWitnessOver(program, listed, point.parameters, options.limits.witnessFills,", "        found = reorderWitnessOver(program, llvm::ArrayRef<const SiteGroup *>(listed).take_front(1), point.parameters, options.limits.witnessFills,"),
+    ("set refuted fact refutes the verdict", D, "      }\n      out.integer = found.status == FactStatus::Refuted ? found : unknownFact(why);\n", "      }\n      out.integer = found.status == FactStatus::Refuted ? found : unknownFact(why);\n      if (found.status == FactStatus::Refuted)\n        out.claim = ComputationStatus::Refuted;\n"),
+    ("set wrapping algebra rescues a refuted order", D, "      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;", "      out.claim = computationFinite.fold() == FoldForm::ModularInteger ? ComputationStatus::Verified : ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;"),
     ("set reduction whole scope from the domain alone", D, "    bool whole = computationFinite.tier() == ComputationTier::ScopeEnumerated &&\n                 domainFinite.tier() == ComputationTier::ScopeEnumerated;", "    bool whole = domainFinite.tier() == ComputationTier::ScopeEnumerated;"),
     ("set reduction event count unchecked", D, "      if (counted != facts.events) {", "      if (false) {"),
     ("set reduction order contradiction unchecked", D, "      if (respects && found->second < computationFinite.groupPoints().size() &&\n          !computationFinite.groupPoints()[found->second].listedOrder) {", "      if (false) {"),
@@ -307,6 +321,21 @@ EQUIVALENT = [
      "one group. In a union (G5b-M4a) a pair of two roots never reaches the formula: their relation "
      "answers first, and the mutants `pairs of two roots asked` and `every pair across segments "
      "skipped` are killed."),
+    ("set integer fact on an unverified claim", "a defence the fold form implies: `foldForm` of a "
+     "SetReductionVerdict is OrderedFloat by default and is assigned only in the two branches that make the "
+     "verdict Verified, so at the fact block `claim != Verified` entails `isFloat`, and dropping the first "
+     "conjunct changes no branch. The verdicts that reach the block without a claim (the claims meet at no "
+     "tier: a flat request, domain claims lost) carry every fact Unknown either way, which the NB-2 cases of "
+     "the setreorder section pin. Survived the frozen run of 2026-11-13 and the final tree's run with those "
+     "cases added; declared with this reason afterwards. Kept as a defence against a future branch that sets "
+     "the fold form before the claim."),
+    ("integer guard loads ignored", "IR-5 is a defence that no claim reaches: a guard that loads an output "
+     "root, or reads state that holds a value from memory, makes the trace depend on memory contents, and the "
+     "obliviousness gate (traceIsFixed, which every computation and domain claim requires) closes before any "
+     "claim is made, so integerReorderConditions is never called for such a program. Evidence: set_guard and "
+     "set_guard_state in the setreorder section, both gated UNSUPPORTED with every fact Unknown. Declared "
+     "2026-11-12 after that analysis, before the frozen run; the four-mutant smoke run of the same day, from a "
+     "tree without this entry, is the empirical record."),
     ("set reduction exact order not needed", "a symbolic CheckedSetDomain is Verified only on the path that "
      "also sets exactOrder (the set route's claim is the segmented route's, which sets the orbit with every "
      "verified claim), so the conjunct is implied by the one before it, as for `T13 without exact order` in "
@@ -429,8 +458,8 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("identity", "setdomain", "setreduction", "reviewed", "gaps", "multiplicity", "siblings", "segments",
-                "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
+               ("identity", "setdomain", "setreduction", "setreorder", "reviewed", "gaps", "multiplicity", "siblings",
+                "segments", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))

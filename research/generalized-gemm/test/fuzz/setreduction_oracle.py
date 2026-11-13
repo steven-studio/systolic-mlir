@@ -29,13 +29,26 @@ entry is recomputed with no library code:
 - The listing changes nothing, and a set of one group has the status and tier of that
   group's own Theorem 13 on the same request.
 - The reorder facts: `trivial` PROVEN only where no cell has two contributions at any point
-  of the scope and all output roots are apart; `integer` and `float` PROVEN only with it.
+  of the scope and all output roots are apart; `float` PROVEN only with it.
+- G5b-M4b-2a, the integer fact: PROVEN by `trivial`, or by the rule, which this file reads
+  off the program it printed: a 32-bit fold, no overflow flag, no load of an output root
+  between the nests (the observer knob), no stop on an accumulate load (the stop knob); then
+  the fact's tier is the verdict's, the union's program with its nests in the other order
+  (where no nest of the union reads a root another writes: the fact fixes the products and
+  licenses no move of a read) and with a repeat loop reversed ends with the same bits on
+  every written cell, and every permutation of a cell's contributions folds to the same
+  value. REFUTED only with a flag,
+  and the witness is run here: the program completes, and the reversed fold of some cell
+  overflows a signed 32-bit addition. A plain 32-bit union with two contributions to a cell
+  is never left Unknown; a knob never lets the rule prove.
 
 Every driver run has a time limit and an address-space limit, and a timeout fails the run.
 """
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from functools import reduce
+import itertools
 import json
 import random
 import resource
@@ -49,12 +62,16 @@ MEMORY = 4 << 30
 WIDTH = 16
 SIZE = 16
 SOLVER = ["--timeout-ms=3000", "--rlimit=2000000"]
-ROOTS = {"a": 0, "b": 1, "c": 2, "d": 3, "f": 4}
+ROOTS = {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4, "f": 4}  # e, an observer's root, and f, a fresh allocation, never meet.
 NAMES = "abcdf"
 
 
 class Failure(Exception):
     pass
+
+
+class Stopped(Exception):
+    """The interpreted run stopped: a flagged addition overflowed. Outside every claim."""
 
 
 def limit():
@@ -174,7 +191,19 @@ def gen_nest(rng, number, roots, shape):
 def gen_spec(rng, index):
     shape = ["shared_out", "distinct_out", "same_triple", "reads_output", "interleaved", "repeat", "fresh_out"][index % 7]
     element = "f64" if index % 2 else "i32"
-    fresh = shape == "fresh_out" or rng.random() < 0.25
+    # G5b-M4b-2a: one thing the integer rule must see, on integer programs: an overflow
+    # flag on every add, a load of an output root between the nests stored to a root e of
+    # its own, or a stop on the second nest's accumulate load. An observer's root is root 4,
+    # as a fresh allocation is, so the two never meet.
+    # 3i mod 4 walks the knobs so that every knob meets the shared-cell shapes within 30
+    # programs (index 14: shared_out with nsw; 26: repeat with the stop; 28: shared_out observed).
+    knob = ["none", "nsw", "observer", "stop"][(3 * (index // 2)) % 4] if element == "i32" else "none"
+    # A flagged program keeps its outputs in argument roots: a fresh root starts every cell at
+    # zero, and with two contributions a reversal from zero overflows exactly when the program
+    # does, so no witness could exist there.
+    fresh = shape == "fresh_out" or (knob not in ("observer", "nsw") and rng.random() < 0.25)
+    if knob == "observer" and fresh:
+        knob = "none"
     roots = ["a", "b", "c", "d"] + (["f"] if fresh else [])
     nests = [gen_nest(rng, k, roots, shape) for k in range(rng.randint(2, 3))]
     first, second = nests[0]["sites"][0], nests[1]["sites"][0]
@@ -195,7 +224,37 @@ def gen_spec(rng, index):
         second.update(out="f", a=first["a"], b=first["b"])  # keep M3's symbolic claim Unknown.
     lo = rng.choice([1, 1, 2])
     return {"name": f"r{index}", "element": element, "fresh": fresh, "nests": nests,
-            "scope": (lo, lo + rng.choice([1, 2])), "shape": shape}
+            "scope": (lo, lo + rng.choice([1, 2])), "shape": shape,
+            "flags": "nsw" if knob == "nsw" else None, "observer": knob == "observer", "stop": knob == "stop"}
+
+
+def knobs(spec):
+    """The knobs set on this program: the flag, the observer, the stop."""
+    return [k for k in (spec.get("flags"), "observer" if spec.get("observer") else None,
+                        "stop" if spec.get("stop") else None) if k]
+
+
+def blockers(spec, union_sites):
+    """What keeps the integer rule from proving a set whose sites are `union_sites`, read off
+    the program: a flag is on every add; a load of a root the set writes by a site outside
+    the set (an operand, or that site's own accumulate load) is an effect outside the union
+    that reads an output root, whatever its place in the order; the observer reads the first
+    nest's output root; the stop reads the second nest's accumulate load, so it blocks the
+    sets that write the second nest's output root. A set none of them touches has partial
+    sums that decide nothing."""
+    sites = sites_of(spec)
+    outs = {ROOTS[site["out"]] for number, (nest, site) in enumerate(sites) if number in union_sites}
+    out = []
+    if spec.get("flags"):
+        out.append(spec["flags"])
+    if any(ROOTS[site[k]] in outs for number, (nest, site) in enumerate(sites) if number not in union_sites
+           for k in ("a", "b", "out")):
+        out.append("another nest reads a root the set writes")
+    if spec.get("observer") and ROOTS[spec["nests"][0]["sites"][0]["out"]] in outs:
+        out.append("observer")
+    if spec.get("stop") and any(ROOTS[site["out"]] in outs for site in spec["nests"][1]["sites"]):
+        out.append("stop")
+    return out
 
 
 def sites_of(spec):
@@ -206,9 +265,13 @@ def print_function(spec):
     e = spec["element"]
     t = f"memref<{SIZE}x{e}>"
     mul, add = ("arith.mulf", "arith.addf") if e == "f64" else ("arith.muli", "arith.addi")
-    lines = [f"func.func @{spec['name']}(%a: {t}, %b: {t}, %c: {t}, %d: {t}, %n: index) {{",
+    observer = f", %e: {t}" if spec.get("observer") else ""
+    lines = [f"func.func @{spec['name']}(%a: {t}, %b: {t}, %c: {t}, %d: {t}{observer}, %n: index) {{",
              "  %c0 = arith.constant 0 : index", "  %c1 = arith.constant 1 : index",
              "  %c2 = arith.constant 2 : index", "  %c3 = arith.constant 3 : index"]
+    if spec.get("stop"):
+        lines.append("  %one = arith.constant 1 : i32")
+    flag = " overflow<nsw>" if spec.get("flags") == "nsw" else ""
     if spec["fresh"]:
         zero = "arith.constant 0.0 : f64" if e == "f64" else "arith.constant 0 : i32"
         lines += [f"  %f = memref.alloc() : {t}", f"  %zero = {zero}", f"  %size = arith.constant {SIZE} : index",
@@ -219,7 +282,7 @@ def print_function(spec):
         count[0] += 1
         return f"%{base}{count[0]}"
 
-    for nest in spec["nests"]:
+    for k, nest in enumerate(spec["nests"]):
         indent, closing, outer = "  ", 0, None
         if nest["when"] is not None:
             test = name("w")
@@ -253,13 +316,23 @@ def print_function(spec):
             x, y, z, m, s = (name(b) for b in "xyzms")
             lines += [f"{indent}{x} = memref.load %{site['a']}[{index}] : {t}",
                       f"{indent}{y} = memref.load %{site['b']}[{index}] : {t}",
-                      f"{indent}{z} = memref.load %{site['out']}[{index}] : {t}",
-                      f"{indent}{m} = {mul} {x}, {y} : {e}",
-                      f"{indent}{s} = {add} {z}, {m} : {e}",
+                      f"{indent}{z} = memref.load %{site['out']}[{index}] : {t}"]
+            if spec.get("stop") and k == 1:
+                # A stop that reads the accumulate load: never taken (the divisor is odd), so
+                # every run completes, and the integer rule must still refuse.
+                odd, q = name("o"), name("q")
+                lines += [f"{indent}{odd} = arith.ori {z}, %one : i32", f"{indent}{q} = arith.divui %one, {odd} : i32"]
+            lines += [f"{indent}{m} = {mul} {x}, {y} : {e}",
+                      f"{indent}{s} = {add} {z}, {m}{flag} : {e}",
                       f"{indent}memref.store {s}, %{site['out']}[{index}] : {t}"]
         for _ in range(closing):
             indent = indent[:-2]
             lines.append(f"{indent}}}")
+        if k == 0 and spec.get("observer"):
+            # A load of the first nest's output root between the nests, stored to e: an
+            # effect outside the groups that sees a partial sum.
+            first = spec["nests"][0]["sites"][0]["out"]
+            lines += [f"  %o = memref.load %{first}[%c0] : {t}", f"  memref.store %o, %e[%c0] : {t}"]
     lines += ["  return", "}"]
     return "\n".join(lines) + "\n"
 
@@ -283,9 +356,15 @@ def interpret(spec, n, memory=None):
     def combine(z, a, b):
         if e == "f64":
             return z + a * b
-        return wrap(z + wrap(a * b, 32), 32)
+        product = wrap(a * b, 32)
+        total = wrap(z + product, 32)
+        if spec.get("flags") == "nsw" and signed(z, 32) + signed(product, 32) != signed(total, 32):
+            raise Stopped()
+        return total
 
     for k, nest in enumerate(spec["nests"]):
+        if k == 1 and spec.get("observer") and mem is not None:
+            mem[ROOTS["e"]][0] = mem[ROOTS[spec["nests"][0]["sites"][0]["out"]]][0]
         if nest["when"] is not None and not nest["when"] < n:
             continue
 
@@ -304,7 +383,8 @@ def interpret(spec, n, memory=None):
                 return
             var, bound = nest["loops"][level]
             upper = n if bound[0] == "n" else bound[1] if bound[0] == "const" else env[nest["loops"][level - 1][0]] + 1
-            for value in range(upper):
+            values = reversed(range(upper)) if var in spec.get("reverse", ()) else range(upper)
+            for value in values:
                 env[var] = value
                 go(level + 1, env)
             env.pop(var, None)
@@ -338,10 +418,14 @@ def designed_memory(spec):
     for r in range(4):
         if spec["element"] == "f64":
             value = big if r in outs else -big if r in second_ops - first_ops else 1.0
+        elif spec.get("flags") == "nsw":
+            # Outputs at INT_MAX, an operand only the first nest reads at -1, the rest 1:
+            # contributions -1 then +1 complete in the program's order and overflow reversed.
+            value = (1 << 31) - 1 if r in outs else ((1 << 32) - 1) if r in first_ops - second_ops else 1
         else:
             value = (1 << 31) if r in outs else ((1 << 32) - 1) if r in second_ops - first_ops else 1
         memory[r] = [value] * SIZE
-    if spec["fresh"]:
+    if spec["fresh"] or spec.get("observer"):
         memory[4] = [0.0 if spec["element"] == "f64" else 0] * SIZE
     return memory
 
@@ -358,7 +442,7 @@ def random_memory(spec, rng):
         memory.update({ROOTS[r]: [rng.choice(outputs) for _ in range(SIZE)] for r in "cd"})
     else:
         memory = {ROOTS[r]: [rng.randrange(1 << 32) for _ in range(SIZE)] for r in "abcd"}
-    if spec["fresh"]:
+    if spec["fresh"] or spec.get("observer"):
         memory[4] = [0.0 if spec["element"] == "f64" else 0] * SIZE
     return memory
 
@@ -493,7 +577,11 @@ def check_verified(spec, out, entry, verdict, segments, group_of_site, union_sit
         written = {(e["root"], e["h"]) for e in ordered}
         for fill in range(fills):
             memory = designed_memory(spec) if fill == 0 else random_memory(spec, rng)
-            _, actual = interpret(spec, n, memory)
+            try:
+                _, actual = interpret(spec, n, memory)
+            except Stopped:
+                counts["fills whose run stops"] += 1  # A flagged add overflowed: outside the claim.
+                continue
             stated = theorem17_fold(spec, memory, ordered)
             if not same_cells(actual, stated, spec["element"], written):
                 raise Failure(f"{where} n={n}: Theorem 17 is false: the fold in the request's order is not the "
@@ -534,12 +622,120 @@ def check_verified(spec, out, entry, verdict, segments, group_of_site, union_sit
             if any(c > 1 for c in seen.values()):
                 raise Failure(f"{where} n={n}: trivial proven with a cell of two contributions")
         counts["trivial proven checked"] += 1
-    for name in ("integer", "float"):
-        fact = verdict["reorder"][name]
-        if fact["status"] == "PROVEN" and trivial["status"] != "PROVEN":
-            raise Failure(f"{where}: {name} reorder proven without trivial")
-        if fact["status"] == "REFUTED":
-            raise Failure(f"{where}: a {name} reorder refutation, which this milestone does not make")
+    fact = verdict["reorder"]["float"]
+    if fact["status"] == "PROVEN" and trivial["status"] != "PROVEN":
+        raise Failure(f"{where}: float reorder proven without trivial")
+    if fact["status"] == "REFUTED":
+        raise Failure(f"{where}: a float reorder refutation, which M4b-2a does not make")
+    check_integer_fact(spec, verdict, trivial, points, segments, maps, rng, fills, counts, where, label, union_sites)
+
+
+def overflows(start, products):
+    """Whether folding `products` onto `start` overflows a signed 32-bit addition at some step."""
+    acc = signed(start, 32)
+    for product in products:
+        acc += signed(product, 32)
+        if not -(1 << 31) <= acc < (1 << 31):
+            return True
+    return False
+
+
+def contributions_of(ordered, memory):
+    """Per written cell, its products in the given order, from the initial memory."""
+    cells = {}
+    for event in ordered:
+        (ra, ia), (rb, ib) = event["a"], event["b"]
+        cells.setdefault((event["root"], event["h"]), []).append(wrap(memory[ra][ia] * memory[rb][ib], 32))
+    return cells
+
+
+def check_integer_fact(spec, verdict, trivial, points, segments, maps, rng, fills, counts, where, label, union_sites):
+    """G5b-M4b-2a: the integer fact against the program this file printed."""
+    fact = verdict["reorder"]["integer"]
+    blocked = blockers(spec, union_sites)
+    plain = spec["element"] == "i32" and not blocked
+    if fact["status"] == "PROVEN":
+        if trivial["status"] == "PROVEN":
+            counts["integer proven by trivial"] += 1
+            return
+        if not plain:
+            raise Failure(f"{where}: integer reorder proven by the rule on {spec['element']} with {blocked}")
+        if verdict["fold"] != "MODULAR_INTEGER":
+            raise Failure(f"{where}: integer reorder proven on an ordered fold")
+        if fact["tier"] != verdict["tier"]:
+            raise Failure(f"{where}: the integer fact's tier {fact['tier']} is not the verdict's {verdict['tier']}")
+        counts["integer proven by the rule, structure checked"] += 1
+        # The union's program in another order is another program: its nests reversed, and a
+        # repeat loop run backwards. On every written cell both end as the program does. The
+        # fact speaks of the fold's order with the products fixed, and licenses no move of a
+        # read: where a nest of the union reads a root another nest of it writes (allowed when
+        # every such read precedes the writes), reversing the nests changes that nest's
+        # operands, which is not a reordering of any cell's contributions, so the nests are
+        # not reversed there; a repeat loop reads nothing another nest writes within itself.
+        others = []
+        sites = sites_of(spec)
+        outs = {ROOTS[site["out"]] for number, (nest, site) in enumerate(sites) if number in union_sites}
+        cross = any(ROOTS[site[k]] in outs for number, (nest, site) in enumerate(sites) if number in union_sites
+                    for k in ("a", "b"))
+        if label == "all" and not cross:
+            others.append(dict(spec, nests=list(reversed(spec["nests"]))))
+        repeats = {var for nest in spec["nests"] for var, bound in nest["loops"] if bound[0] == "const" and bound[1] > 1}
+        if label == "all" and repeats:
+            others.append(dict(spec, reverse=repeats))
+        for n in points:
+            ordered, wrong = ordered_events(spec, n, segments, maps)
+            if wrong:
+                raise Failure(f"{where} n={n}: {wrong}")
+            written = {(e["root"], e["h"]) for e in ordered}
+            for fill in range(fills):
+                memory = designed_memory(spec) if fill == 0 else random_memory(spec, rng)
+                _, mine = interpret(spec, n, memory)
+                for other in others:
+                    _, theirs = interpret(other, n, memory)
+                    if not same_cells(mine, theirs, "i32", written):
+                        raise Failure(f"{where} n={n}: the program in another order ends differently under a proven "
+                                      f"integer reorder fact\n{print_function(spec)}")
+                    counts["programs compared in another order"] += 1
+                # Every permutation of a cell's contributions, folded with wrapping addition.
+                for (root, x), products in contributions_of(ordered, memory).items():
+                    if len(products) < 2 or len(products) > 5:
+                        continue
+                    folds = {reduce(lambda acc, p: wrap(acc + p, 32), perm, memory[root][x])
+                             for perm in itertools.permutations(products)}
+                    if len(folds) != 1:
+                        raise Failure(f"{where} n={n}: two permutations of wrapping additions differ")
+                    counts["permutations folded"] += 1
+        return
+    if fact["status"] == "REFUTED":
+        if spec["element"] != "i32" or not spec.get("flags"):
+            raise Failure(f"{where}: an integer reorder refutation with no overflow flag")
+        if not fact.get("memory") or not fact.get("point"):
+            raise Failure(f"{where}: an integer refutation without its witness")
+        n = fact["point"][0]
+        memory = {r: [hex_to_value(text, "i32") if text is not None else 0 for text in cells]
+                  for r, cells in enumerate(fact["memory"])}
+        try:
+            interpret(spec, n, memory)
+        except Stopped:
+            raise Failure(f"{where}: the witness run stops, so it is no witness")
+        ordered, wrong = ordered_events(spec, n, segments, maps)
+        if wrong:
+            raise Failure(f"{where} n={n}: {wrong}")
+        reversed_overflows = False
+        for (root, x), products in contributions_of(ordered, memory).items():
+            if len(products) < 2:
+                continue
+            if overflows(memory[root][x], products):
+                raise Failure(f"{where}: the forward fold overflows, yet the run completed")
+            reversed_overflows = reversed_overflows or overflows(memory[root][x], list(reversed(products)))
+        if not reversed_overflows:
+            raise Failure(f"{where}: no cell's reversed fold overflows: the witness shows nothing")
+        counts["integer refutations replayed"] += 1
+        return
+    if plain and trivial["status"] != "PROVEN":
+        raise Failure(f"{where}: integer reorder Unknown on a plain 32-bit union: {fact['detail']}")
+    if blocked and trivial["status"] != "PROVEN":
+        counts["negative shapes checked"] += 1
 
 
 def check_refuted(spec, out, entry, verdict, segments, group_of_site, union_sites, counts, label):
@@ -554,7 +750,10 @@ def check_refuted(spec, out, entry, verdict, segments, group_of_site, union_site
         n = witness["parameters"][0]
         memory = {r: [hex_to_value(text, spec["element"]) if text is not None else 0 for text in cells]
                   for r, cells in enumerate(witness["memory"])}
-        events, actual = interpret(spec, n, memory)
+        try:
+            events, actual = interpret(spec, n, memory)
+        except Stopped:
+            raise Failure(f"{where}: the computation's witness run stops, so it is no witness")
         # Theorem 16's relation for the union: its events in execution order, from the initial
         # operands, against what the whole program made of the union's output roots.
         mine = [e for e in events if e["site"] in union_sites]
@@ -582,7 +781,8 @@ def check(spec, seed, driver, fills, counts):
     groups = model_groups(spec)
     group_of = {site: g for g, group in enumerate(groups) for site in group["sites"]}
     sets = ["all", "all-reversed"] + [str(g) for g in range(len(groups))]
-    names = [f"roots {i} and {j} are separate" for i in range(4) for j in range(i + 1, 4)]
+    roots = 5 if spec["fresh"] or spec.get("observer") else 4
+    names = [f"roots {i} and {j} are separate" for i in range(roots) for j in range(i + 1, roots)]
     out = run_driver(driver, spec, names, sets)
     if out.get("gate") != "OPEN":
         raise Failure(f"{spec['name']}: gate {out.get('gate')}: {out.get('reason')}")
@@ -619,10 +819,23 @@ def check(spec, seed, driver, fills, counts):
                     raise Failure(f"{spec['name']} {label}: the whole scope from a partial claim")
             if any(p["relation"] != "DISTINCT" for p in entry["finite"]["root_pairs"] + entry["symbolic"]["root_pairs"]):
                 raise Failure(f"{spec['name']} {label}: verified with roots that may alias")
-            if spec["shape"] == "interleaved" and label == "all":
-                raise Failure(f"{spec['name']}: interleaved groups verified")
-            if spec["shape"] == "reads_output" and label == "all":
-                raise Failure(f"{spec['name']}: a cross-group read verified")
+            # A cross-group read: at no verified point may an event of the union read a cell an
+            # earlier event of the union wrote (Theorem 16 reads the initial operands). The
+            # interleaved and reads_output shapes are refuted where their nests run together;
+            # at a point where the guarded nest does not run, a verdict at that point alone is
+            # right, so the check is at the verified points, not by shape.
+            verified_points = ([p[0] for p in verdict["points"]] if verdict["tier"] in ("POINT", "SCOPE_ENUMERATED")
+                               else list(range(spec["scope"][0], spec["scope"][1] + 1)))
+            for n in verified_points:
+                written = set()
+                for e in interpret(spec, n)[0]:
+                    if e["site"] not in union_sites:
+                        continue
+                    if e["a"] in written or e["b"] in written:
+                        raise Failure(f"{spec['name']} {label} n={n}: a cross-group read verified")
+                    written.add((e["root"], e["h"]))
+            if spec["shape"] in ("interleaved", "reads_output") and label == "all":
+                counts[f"{spec['shape']} union verified only where its nests do not meet"] += 1
             check_verified(spec, out, entry, verdict, segments, group_of, union_sites, rng, fills, counts, label)
         elif status == "REFUTED":
             check_refuted(spec, out, entry, verdict, segments, group_of, union_sites, counts, label)
@@ -641,6 +854,19 @@ def check(spec, seed, driver, fills, counts):
                     raise Failure(f"{spec['name']} group {k - 2}: Theorem 17 says {status} {tier}, Theorem 13 "
                                   f"{t13['status']} {t13['tier']} on the same request")
                 counts["one-group verdicts equal to Theorem 13"] += 1
+                # G5b-M4b-2a: the facts too, status and tier, where the verdict is verified. A
+                # set verdict refused or refuted before its facts are computed carries default
+                # facts (M4b-1), while Theorem 13 still reports the domain's trivial fact; there
+                # the set's integer and float facts must be Unknown.
+                theirs, mine = candidates[0].get("reorder", {}), verdict["reorder"]
+                if status == "VERIFIED":
+                    for name in ("trivial", "integer", "float"):
+                        if (theirs.get(name, {}).get("status"), theirs.get(name, {}).get("tier")) != (mine[name]["status"], mine[name]["tier"]):
+                            raise Failure(f"{spec['name']} group {k - 2}: the set's {name} fact {mine[name]['status']} "
+                                          f"{mine[name]['tier']} differs from Theorem 13's {theirs.get(name)}")
+                    counts["one-group facts equal to Theorem 13"] += 1
+                elif any(mine[name]["status"] != "UNKNOWN" for name in ("integer", "float")):
+                    raise Failure(f"{spec['name']} group {k - 2}: a reorder fact on a verdict that is not verified")
     counts[f"programs {spec['element']}"] += 1
 
 
@@ -650,6 +876,11 @@ MINIMUM = {
     "integer swaps checked": 20, "computation refutations replayed": 3, "domain refutations replayed": 3,
     "trivial proven checked": 5, "listings compared": 20, "one-group verdicts equal to Theorem 13": 20,
     "programs f64": 10, "programs i32": 10,
+    # G5b-M4b-2a. Plain integer unions with a shared cell are one program in eight, so the
+    # floors are low; a run that meets none of them proves nothing about the fact.
+    "integer proven by the rule, structure checked": 5, "programs compared in another order": 5,
+    "permutations folded": 50, "negative shapes checked": 5, "one-group facts equal to Theorem 13": 20,
+    "integer refutations replayed": 1,
 }
 
 

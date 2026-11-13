@@ -4381,7 +4381,10 @@ static void testSetReduction() {
     expect("case A", v, S::Verified, T::Symbolic);
     CHECK(v.fold() == FoldForm::ModularInteger && v.points().empty() && v.logicalTier() == T::Proposed);
     CHECK(v.trivialReorder().status == FactStatus::Refuted && v.trivialReorder().point.has_value());
-    CHECK(v.integerReorder().status == FactStatus::Unknown && v.floatReorder().status == FactStatus::Unknown);
+    // G5b-M4b-2a: the integer fact by Theorem 13's rule over the union, at the verdict's
+    // tier; the float fact stays Unknown (M4b-2b). Before M4b-2a both were Unknown here.
+    CHECK(v.integerReorder().status == FactStatus::Proven && v.integerReorder().tier == (int)T::Symbolic &&
+          v.floatReorder().status == FactStatus::Unknown);
     CHECK(!v.witness() && !v.failingPoint() && v.transformation().kind() == ProofStatus::Kind::Unknown);
     CHECK(v.groups().size() == 2 && v.binding().find("reduction|" + f.program.fingerprint + "|set|") == 0);
     CHECK(v.computationSymbolic().status() == S::Verified && v.domainSymbolic().status() == S::Verified);
@@ -4634,9 +4637,734 @@ static void testSetReduction() {
              stringifyFactStatus(one.trivialReorder().status));
     CHECK(same);
     CHECK(set.status() == S::Verified);
-    // The integer fact is where this milestone stops: Theorem 13 proves it by the integer
-    // rule, the set verdict leaves it Unknown until M4b-2.
-    CHECK(set.integerReorder().status == FactStatus::Unknown);
+    // G5b-M4b-2a: the integer fact too, by the same rule at the same tier (M4b-1 left it
+    // Unknown here); the float fact as well.
+    CHECK(set.integerReorder().status == one.integerReorder().status &&
+          set.integerReorder().tier == one.integerReorder().tier &&
+          set.integerReorder().detail == one.integerReorder().detail);
+    CHECK(set.floatReorder().status == one.floatReorder().status);
+  }
+}
+
+/// G5b-M4b-2a: programs for the integer reorder fact over a set. Each is two or three
+/// loops writing cells of one or two output roots, as sib_roots is, with one thing the
+/// integer rule must see: the element width, a flag, an observer, a stop on an accumulate
+/// load of the second root, a stop through loop-carried state, a float group, flags that
+/// differ between the groups, or distinct cells of one root.
+static const char *reorderSource = R"(func.func @set_i8(%a: memref<8xi8>, %b: memref<8xi8>, %c: memref<8xi8>, %d: memref<8xi8>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi8>
+    %yi = memref.load %b[%i] : memref<8xi8>
+    %zi = memref.load %c[%i] : memref<8xi8>
+    %mi = arith.muli %xi, %yi : i8
+    %si = arith.addi %zi, %mi : i8
+    memref.store %si, %c[%i] : memref<8xi8>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi8>
+    %yj = memref.load %d[%j] : memref<8xi8>
+    %zj = memref.load %c[%j] : memref<8xi8>
+    %mj = arith.muli %xj, %yj : i8
+    %sj = arith.addi %zj, %mj : i8
+    memref.store %sj, %c[%j] : memref<8xi8>
+  }
+  return
+}
+func.func @set_nsw(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi overflow<nsw> : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj overflow<nsw> : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_nuw(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi overflow<nuw> : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj overflow<nuw> : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_observer(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %e: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  %o = memref.load %c[%c0] : memref<8xi32>
+  memref.store %o, %e[%c0] : memref<8xi32>
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_stop_second(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %e: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %one = arith.constant 1 : i32
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  scf.for %k = %c0 to %n step %c1 {
+    %xk = memref.load %a[%k] : memref<8xi32>
+    %yk = memref.load %b[%k] : memref<8xi32>
+    %zk = memref.load %e[%k] : memref<8xi32>
+    %odd = arith.ori %zk, %one : i32
+    %q = arith.divui %one, %odd : i32
+    %mk = arith.muli %xk, %yk : i32
+    %sk = arith.addi %zk, %mk : i32
+    memref.store %sk, %e[%k] : memref<8xi32>
+  }
+  return
+}
+func.func @set_carried_stop(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %one = arith.constant 1 : i32
+  %h = arith.constant 100 : i32
+  %kk = arith.constant 23130 : i32
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  %r = scf.for %j = %c0 to %n step %c1 iter_args(%acc = %one) -> (i32) {
+    %ax = arith.xori %acc, %kk : i32
+    %dv = arith.divsi %h, %ax : i32
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+    scf.yield %sj : i32
+  }
+  return
+}
+func.func @set_mixed(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %e: memref<8xf64>, %g: memref<8xf64>, %h: memref<8xf64>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  scf.for %k = %c0 to %n step %c1 {
+    %xk = memref.load %g[%k] : memref<8xf64>
+    %yk = memref.load %h[%k] : memref<8xf64>
+    %zk = memref.load %e[%k] : memref<8xf64>
+    %mk = arith.mulf %xk, %yk : f64
+    %sk = arith.addf %zk, %mk : f64
+    memref.store %sk, %e[%k] : memref<8xf64>
+  }
+  return
+}
+func.func @set_mixed_flags(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi overflow<nsw> : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_guard(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %zero = arith.constant 0 : i32
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %g = memref.load %c[%c0] : memref<8xi32>
+    %on = arith.cmpi ne, %g, %zero : i32
+    scf.if %on {
+      %xj = memref.load %a[%j] : memref<8xi32>
+      %yj = memref.load %d[%j] : memref<8xi32>
+      %zj = memref.load %c[%j] : memref<8xi32>
+      %mj = arith.muli %xj, %yj : i32
+      %sj = arith.addi %zj, %mj : i32
+      memref.store %sj, %c[%j] : memref<8xi32>
+    }
+  }
+  return
+}
+func.func @set_guard_state(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %zero = arith.constant 0 : i32
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  %r = scf.for %j = %c0 to %n step %c1 iter_args(%acc = %zero) -> (i32) {
+    %on = arith.cmpi ne, %acc, %zero : i32
+    scf.if %on {
+      %xj = memref.load %a[%j] : memref<8xi32>
+      %yj = memref.load %d[%j] : memref<8xi32>
+      %zj = memref.load %c[%j] : memref<8xi32>
+      %mj = arith.muli %xj, %yj : i32
+      %sj = arith.addi %zj, %mj : i32
+      memref.store %sj, %c[%j] : memref<8xi32>
+    }
+    %zk = memref.load %c[%j] : memref<8xi32>
+    scf.yield %zk : i32
+  }
+  return
+}
+func.func @set_cells(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi : i32
+    %si = arith.addi %zi, %mi : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %j4 = arith.addi %j, %c4 : index
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j4] : memref<8xi32>
+    %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj : i32
+    memref.store %sj, %c[%j4] : memref<8xi32>
+  }
+  return
+}
+)";
+
+/// G5b-M4b-2a: the integer reorder fact over a set of groups, by Theorem 13's rule read
+/// over the union (every listed output root), after the verdict is final. The brief's
+/// cases: A, 8-bit modular addition in both orders; B, distinct cells; C, roots that may
+/// alias; D, overflow flags; E, wrong listings. Then each condition alone, the tiers, the
+/// witness replayed by the judge, bindings, scopes, limits, and a set of one group against
+/// Theorem 13.
+static void testSetReorder() {
+  Module m(std::string(setSource) + siblingSource + reductionSource + reorderSource);
+  Sort w = Sort::bv(16);
+  auto level = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, false, false};
+  };
+  // One segment per listed site, one loop variable each, over [0, n).
+  auto segments = [&](Fixture &f, std::vector<std::pair<unsigned, unsigned>> siteVars) {
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    for (auto [site, var] : siteVars)
+      r.segments.push_back(segmentOf(f.program, {site}, {level(f.program, var, zero, n)}));
+    return r;
+  };
+  auto verdict = [&](Fixture &f, std::vector<unsigned> groups, const DomainRequest &r, const DomainOptions &o,
+                     SmtBackend &backend) {
+    return checkSetReduction(f.program, f.proof(), f.enumeration, groups, r, o, backend);
+  };
+  auto say = [](const char *what, const SetReductionVerdict &v) {
+    printf("%s: %s %s (%s) refuted by %s; integer %s %s \"%s\"; float %s \"%s\"\n", what,
+           stringifyComputationStatus(v.status()), stringifyComputationTier(v.tier()), v.reason().c_str(),
+           stringifyRefutedBy(v.refutedBy()), stringifyFactStatus(v.integerReorder().status),
+           stringifyComputationTier((ComputationTier)v.integerReorder().tier), v.integerReorder().detail.c_str(),
+           stringifyFactStatus(v.floatReorder().status), v.floatReorder().detail.c_str());
+  };
+  auto expect = [&](const char *what, const SetReductionVerdict &v, ComputationStatus status, ComputationTier tier,
+                    RefutedBy by = RefutedBy::Nothing) {
+    bool ok = v.status() == status && v.tier() == tier && v.refutedBy() == by;
+    if (!ok)
+      say(what, v);
+    CHECK(ok);
+  };
+  // The integer fact as expected, in words. A verdict refused or refuted before the facts
+  // are computed carries the default fact, Unknown with no detail, as M4b-1's does.
+  auto integer = [&](const char *what, const SetReductionVerdict &v, FactStatus status, ComputationTier tier,
+                     const std::string &detail) {
+    const Fact &fact = v.integerReorder();
+    bool ok = fact.status == status &&
+              (fact.detail == detail || (status == FactStatus::Unknown && fact.detail.empty())) &&
+              (status != FactStatus::Proven || fact.tier == (int)tier);
+    if (!ok)
+      say(what, v);
+    CHECK(ok);
+  };
+  const std::string byRule = "wrapping addition with no flag, unobserved, at the computation's tier";
+  const std::string noClaim = "not an integer fold, or no claim";
+  const std::string flagged = "the reduction carries nsw or nuw, so a partial sum can stop the run";
+  const std::string observed = "another effect reads the output, so it can see a partial sum";
+  const std::string stopped = "a stop reads the output or memory-derived state, so a partial sum can decide it";
+  // An entry at n = `point` with every root's first cells as given, the rest zero.
+  auto entry = [&](const Fixture &f, unsigned point, std::vector<std::vector<uint64_t>> firstCells) {
+    EntryState out;
+    out.parameters = {APInt(16, point)};
+    for (unsigned r = 0; r < f.program.roots.size(); ++r) {
+      RootData data;
+      data.shape = {8};
+      unsigned width = f.program.roots[r].sort.width;
+      for (unsigned i = 0; i < 8; ++i) {
+        uint64_t value = r < firstCells.size() && i < firstCells[r].size() ? firstCells[r][i] : 0;
+        data.cells.push_back(APInt(width, value));
+      }
+      out.memory.push_back(data);
+    }
+    return out;
+  };
+  // The judge over the union, from the set's own replay at `point`.
+  auto judge = [&](Fixture &f, std::vector<unsigned> groups, unsigned point, const EntryState &e, std::string &detail,
+                   bool &ok) {
+    std::vector<const SiteGroup *> listed;
+    for (unsigned g : groups)
+      listed.push_back(&f.enumeration.groups[g]);
+    std::vector<int> groupOf;
+    std::string why;
+    std::optional<SiteGroup> united = unitedSiteGroup(f.program, listed, groupOf, why);
+    ok = united.has_value();
+    if (!united)
+      return false;
+    ReplayResult replay = replayGroupSet(f.program, *united, groupOf, listed.size(), {APInt(16, point)},
+                                         HerbrandLimits());
+    ok = replay.outcome == ReplayOutcome::Equal;
+    return reversalDiffers(f.program, *united, e, replay.prefix, detail);
+  };
+  auto cellOf = [](const RunResult &run, unsigned root, unsigned index) -> std::optional<APInt> {
+    if (run.status != RunStatus::Returned || run.memory.size() <= root || run.memory[root].cells.size() <= index)
+      return std::nullopt;
+    return run.memory[root].cells[index];
+  };
+
+  // Case A. Two groups write the same cells of C with 8-bit wrapping addition: Theorem 17
+  // symbolic, the fold modular, and the integer fact Proven at the symbolic tier by the
+  // rule. With C[0] = 250, A[0] = 10, B[0] = 1 and D[0] = 2 the program gives (250 + 10) +
+  // 20 = 24 mod 256; the other order (250 + 20) + 10 is 24 as well, and the judge finds
+  // no reversal that differs. The listing changes no fact.
+  {
+    Fixture f = fixture(m, "set_i8", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 2);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options, z3Backend);
+    expect("case A", v, S::Verified, T::Symbolic);
+    CHECK(v.fold() == FoldForm::ModularInteger && v.trivialReorder().status == FactStatus::Refuted);
+    integer("case A", v, FactStatus::Proven, T::Symbolic, byRule);
+    CHECK(v.floatReorder().status == FactStatus::Unknown && v.floatReorder().detail == "not a float fold, or no claim");
+    CHECK(!v.integerReorder().point && !v.integerReorder().memory);
+    EntryState e = entry(f, 1, {{10}, {1}, {250}, {2}});
+    RunResult run = runConcrete(f.program, e);
+    std::optional<APInt> c0 = cellOf(run, 2, 0);
+    CHECK(c0 && *c0 == APInt(8, 24));
+    APInt z(8, 250), p1(8, 10), p2(8, 20);
+    CHECK((z + p1 + p2) == APInt(8, 24) && (z + p2 + p1) == APInt(8, 24));
+    std::string detail;
+    bool ok = false;
+    CHECK(!judge(f, {0, 1}, 1, e, detail, ok) && ok);
+    SetReductionVerdict back = verdict(f, {1, 0}, r, f.options, z3Backend);
+    integer("case A, other listing", back, FactStatus::Proven, T::Symbolic, byRule);
+    CHECK(back.status() == v.status() && back.tier() == v.tier() && back.binding() == v.binding());
+    // The same at 32 bits: sib_roots with C[0] = -10, A[0] = 10, B[0] = 1, D[0] = 2 ends at 20.
+    Fixture g = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> gl = loops(g.program);
+    SetReductionVerdict s32 = verdict(g, {0, 1}, segments(g, {{0, gl[0]}, {1, gl[1]}}), g.options, z3Backend);
+    integer("sib_roots", s32, FactStatus::Proven, T::Symbolic, byRule);
+    EntryState e32 = entry(g, 1, {{10}, {1}, {0xFFFFFFF6u}, {2}});
+    std::optional<APInt> g0 = cellOf(runConcrete(g.program, e32), 2, 0);
+    CHECK(g0 && *g0 == APInt(32, 20));
+  }
+
+  // Tiers. The fact holds at the verdict's tier and never above it: with the domain's
+  // symbolic claim lost the verdict is the whole scope, and so is the fact; with a point
+  // removed both are Point.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    Selective noD1("; D1 ", SmtAnswer::Unknown);
+    SetReductionVerdict whole = verdict(f, {0, 1}, r, f.options, noD1);
+    CHECK(noD1.hits > 0);
+    expect("whole scope", whole, S::Verified, T::ScopeEnumerated);
+    integer("whole scope", whole, FactStatus::Proven, T::ScopeEnumerated, byRule);
+    DomainEnumeration trimmed = f.enumeration;
+    trimmed.points.pop_back();
+    SetReductionVerdict part = checkSetReduction(f.program, f.proof(), trimmed, {0, 1}, r, f.options, noD1);
+    expect("points", part, S::Verified, T::Point);
+    integer("points", part, FactStatus::Proven, T::Point, byRule);
+    // A solver limit of zero is no limit for the symbolic routes: both symbolic claims are
+    // Unknown, the verdict is the finite tier, which asks no solver, and so is the fact.
+    DomainOptions zero = f.options;
+    zero.termination.solver.timeoutMilliseconds = 0;
+    SetReductionVerdict none = verdict(f, {0, 1}, r, zero, z3Backend);
+    expect("zero limit", none, S::Verified, T::ScopeEnumerated);
+    CHECK(none.domainSymbolic().status() == S::Unknown && none.computationSymbolic().status() == S::Unknown);
+    integer("zero limit", none, FactStatus::Proven, T::ScopeEnumerated, byRule);
+  }
+
+  // Case D. Flags. With nsw on both adds the fact is never Proven: a partial sum can
+  // overflow and stop the run in one order and not the other. The verdict stands (the
+  // claim is about runs that complete). The search's fill sequence is fixed (Theorem 13's
+  // seed), so its outcome is a fact of the tree: it finds a memory at which the program
+  // completes and the reversal of a cell overflows, and the fact is Refuted with it, the
+  // witness judged again here over the union. A memory built by hand as well: C[0] =
+  // INT_MAX, A[0] = -1, B[0] = 1, D[0] = -1, so the contributions are -1 then +1: the
+  // program completes at INT_MAX, the reversal overflows at its first step. With nuw no
+  // reversal can overflow (unsigned partial sums only grow), and the fact stays Unknown.
+  {
+    Fixture f = fixture(m, "set_nsw", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options, z3Backend);
+    if (v.status() != S::Verified || v.integerReorder().status != FactStatus::Refuted)
+      say("nsw", v);
+    CHECK(v.status() == S::Verified && v.tier() == T::Symbolic && v.trivialReorder().status == FactStatus::Refuted);
+    // Refuted, by the search over the union: a search over one group alone finds nothing
+    // here, since each group writes each cell once (and each group alone has no claim).
+    CHECK(v.integerReorder().status == FactStatus::Refuted);
+    const Fact &fact = v.integerReorder();
+    CHECK(fact.point && fact.memory && fact.detail.find("overflows a flagged addition") != std::string::npos);
+    if (fact.point && fact.memory) {
+      CHECK(runConcrete(f.program, *fact.memory).status == RunStatus::Returned);
+      std::string detail;
+      bool ok = false;
+      CHECK(judge(f, {0, 1}, (*fact.point)[0].getZExtValue(), *fact.memory, detail, ok) && ok);
+    }
+    printf("nsw: integer %s: %s\n", stringifyFactStatus(v.integerReorder().status), v.integerReorder().detail.c_str());
+    EntryState e = entry(f, 1, {{0xFFFFFFFFu}, {1}, {0x7FFFFFFFu}, {0xFFFFFFFFu}});
+    RunResult run = runConcrete(f.program, e);
+    std::optional<APInt> c0 = cellOf(run, 2, 0);
+    CHECK(c0 && *c0 == APInt(32, 0x7FFFFFFFu));
+    std::string detail;
+    bool ok = false;
+    CHECK(judge(f, {0, 1}, 1, e, detail, ok) && ok && detail.find("overflows a flagged addition") != std::string::npos);
+    // The float fact is untouched by any of it.
+    CHECK(v.floatReorder().status == FactStatus::Unknown);
+    Fixture g = fixture(m, "set_nuw", 1, 3);
+    std::vector<unsigned> gl = loops(g.program);
+    SetReductionVerdict u = verdict(g, {0, 1}, segments(g, {{0, gl[0]}, {1, gl[1]}}), g.options, z3Backend);
+    CHECK(u.status() == S::Verified);
+    integer("nuw", u, FactStatus::Unknown, T::Proposed, flagged);
+  }
+
+  // Each condition alone. An observer: a load of C outside the groups, stored elsewhere.
+  {
+    Fixture f = fixture(m, "set_observer", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    if (v.status() != S::Verified)
+      say("observer", v);
+    CHECK(v.integerReorder().status != FactStatus::Proven);
+    if (v.status() == S::Verified)
+      integer("observer", v, FactStatus::Unknown, T::Proposed, observed);
+  }
+  // A stop on the accumulate load of the second output root: the union {C, E} refuses by
+  // that root, which a check of the first root alone would miss; the union {C} of the
+  // first two groups, whose stops read no root of theirs, is Proven.
+  {
+    Fixture f = fixture(m, "set_stop_second", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 3 && f.enumeration.groups.size() == 3);
+    SetReductionVerdict three = verdict(f, {0, 1, 2}, segments(f, {{0, l[0]}, {1, l[1]}, {2, l[2]}}), f.options,
+                                        z3Backend);
+    expect("stop on the second root", three, S::Verified, T::Symbolic);
+    integer("stop on the second root", three, FactStatus::Unknown, T::Proposed, stopped);
+    CHECK(three.trivialReorder().status == FactStatus::Refuted);
+    SetReductionVerdict two = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    expect("the first root alone", two, S::Verified, T::Symbolic);
+    integer("the first root alone", two, FactStatus::Proven, T::Symbolic, byRule);
+  }
+  // A partial sum carried in state decides a stop (the R3 regression, over a set).
+  {
+    Fixture f = fixture(m, "set_carried_stop", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() >= 2);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    if (v.status() != S::Verified)
+      say("carried stop", v);
+    CHECK(v.integerReorder().status != FactStatus::Proven);
+    if (v.status() == S::Verified)
+      integer("carried stop", v, FactStatus::Unknown, T::Proposed, stopped);
+  }
+  // IR-5 is a defence: a guard that reads the output root, directly or through loop-carried
+  // state, makes the trace depend on memory, and the obliviousness gate closes before any
+  // claim: the verdict is Unknown and so is every fact.
+  for (const char *name : {"set_guard", "set_guard_state"}) {
+    Fixture f = fixture(m, name, 1, 3);
+    CHECK(f.enumeration.gate != GateStatus::Open);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r;
+    if (l.size() >= 2)
+      r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options, z3Backend);
+    expect(name, v, S::Unknown, T::Proposed);
+    integer(name, v, FactStatus::Unknown, T::Proposed, noClaim);
+    CHECK(v.floatReorder().status == FactStatus::Unknown && v.trivialReorder().status == FactStatus::Unknown);
+  }
+  // A float group in the union makes the whole fold ordered: no integer fact; the two
+  // integer groups alone are Proven.
+  {
+    Fixture f = fixture(m, "set_mixed", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 3 && f.enumeration.groups.size() == 3);
+    SetReductionVerdict three = verdict(f, {0, 1, 2}, segments(f, {{0, l[0]}, {1, l[1]}, {2, l[2]}}), f.options,
+                                        z3Backend);
+    expect("mixed", three, S::Verified, T::Symbolic);
+    CHECK(three.fold() == FoldForm::OrderedFloat);
+    integer("mixed", three, FactStatus::Unknown, T::Proposed, noClaim);
+    CHECK(three.floatReorder().status == FactStatus::Unknown);
+    SetReductionVerdict two = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    integer("the integer groups alone", two, FactStatus::Proven, T::Symbolic, byRule);
+  }
+  // Flags that differ between the groups: not Proven (a flag), and the judge refuses to
+  // reverse a fold of two operations, so no refutation either.
+  {
+    Fixture f = fixture(m, "set_mixed_flags", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    CHECK(v.status() == S::Verified);
+    integer("mixed flags", v, FactStatus::Unknown, T::Proposed, flagged);
+    EntryState e = entry(f, 1, {{0xFFFFFFFFu}, {1}, {0x7FFFFFFFu}, {0xFFFFFFFFu}});
+    std::string detail;
+    bool ok = false;
+    CHECK(!judge(f, {0, 1}, 1, e, detail, ok) && ok);
+  }
+
+  // Case B. Distinct cells of one root: every cell has one contribution, the trivial fact
+  // proves the integer one, and the run shows the two cells apart.
+  {
+    Fixture f = fixture(m, "set_cells", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    if (v.status() != S::Verified)
+      say("cells", v);
+    CHECK(v.status() == S::Verified && v.trivialReorder().status == FactStatus::Proven);
+    CHECK(v.integerReorder().status == FactStatus::Proven && v.integerReorder().detail == v.trivialReorder().detail);
+    EntryState e = entry(f, 1, {{2}, {3}, {5, 0, 0, 0, 7}, {10}});
+    RunResult run = runConcrete(f.program, e);
+    std::optional<APInt> c0 = cellOf(run, 2, 0), c4 = cellOf(run, 2, 4);
+    CHECK(c0 && *c0 == APInt(32, 11) && c4 && *c4 == APInt(32, 27));
+  }
+
+  // Case C. Roots that may alias: without the names nothing is claimed, and no fact.
+  {
+    Fixture f = fixture(m, "case_b", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainOptions silent = f.options;
+    silent.authorized.clear();
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), silent, z3Backend);
+    expect("may alias", v, S::Unknown, T::Proposed);
+    integer("may alias", v, FactStatus::Unknown, T::Proposed, noClaim);
+    Fixture g = fixture(m, "set_i8", 1, 3);
+    std::vector<unsigned> gl = loops(g.program);
+    DomainOptions quiet = g.options;
+    quiet.authorized.clear();
+    SetReductionVerdict u = verdict(g, {0, 1}, segments(g, {{0, gl[0]}, {1, gl[1]}}), quiet, z3Backend);
+    CHECK(u.status() != S::Verified);
+    integer("operands may alias", u, FactStatus::Unknown, T::Proposed, noClaim);
+  }
+
+  // Case E. Wrong listings: the segments backwards, an event missing, a group twice, a
+  // writer left out, two groups in one block. Every verdict is as M4b-1 says, and no fact
+  // is Proven: a refuted order is never rescued by the algebra of wrapping addition.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), one = terms.bv(APInt(16, 1));
+    DomainRequest backward;
+    backward.segments = {segmentOf(f.program, {1}, {level(f.program, l[1], zero, n)}),
+                         segmentOf(f.program, {0}, {level(f.program, l[0], zero, n)})};
+    SetReductionVerdict wrong = verdict(f, {0, 1}, backward, f.options, z3Backend);
+    expect("backwards", wrong, S::Refuted, T::Proposed, RefutedBy::Domain);
+    integer("backwards", wrong, FactStatus::Unknown, T::Proposed, noClaim);
+    CHECK(wrong.floatReorder().status == FactStatus::Unknown && wrong.trivialReorder().status != FactStatus::Proven);
+    DomainRequest missing;
+    missing.segments = {segmentOf(f.program, {0}, {level(f.program, l[0], zero, n)}),
+                        segmentOf(f.program, {1}, {level(f.program, l[1], zero, terms.binary(TermOp::Sub, n, one))})};
+    SetReductionVerdict lost = verdict(f, {0, 1}, missing, f.options, z3Backend);
+    expect("a missing event", lost, S::Refuted, T::Proposed, RefutedBy::Domain);
+    integer("a missing event", lost, FactStatus::Unknown, T::Proposed, noClaim);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict twice = verdict(f, {0, 0}, r, f.options, z3Backend);
+    expect("a group twice", twice, S::Unknown, T::Proposed);
+    integer("a group twice", twice, FactStatus::Unknown, T::Proposed, noClaim);
+    Fixture third = fixture(m, "set_third", 1, 3);
+    std::vector<unsigned> tl = loops(third.program);
+    SetReductionVerdict left = verdict(third, {0, 1}, segments(third, {{0, tl[0]}, {1, tl[1]}}), third.options, z3Backend);
+    expect("a writer left out", left, S::Refuted, T::Proposed, RefutedBy::Computation);
+    integer("a writer left out", left, FactStatus::Unknown, T::Proposed, noClaim);
+    SetReductionVerdict all = verdict(third, {0, 1, 2}, segments(third, {{0, tl[0]}, {1, tl[1]}, {2, tl[2]}}),
+                                      third.options, z3Backend);
+    expect("all three writers", all, S::Verified, T::Symbolic);
+    integer("all three writers", all, FactStatus::Proven, T::Symbolic, byRule);
+    Fixture inter = fixture(m, "set_interleaved", 1, 3);
+    std::vector<unsigned> il = loops(inter.program);
+    SetReductionVerdict mixed = verdict(inter, {0, 1}, segments(inter, {{0, il[0]}, {1, il[0]}}), inter.options, z3Backend);
+    expect("interleaved", mixed, S::Refuted, T::Proposed, RefutedBy::Domain);
+    integer("interleaved", mixed, FactStatus::Unknown, T::Proposed, noClaim);
+    // Bindings and scopes: claims about something else join to nothing, and no fact.
+    ComputationOptions co;
+    co.scope = f.options.scope;
+    co.termination = f.options.termination;
+    co.authorized = f.options.authorized;
+    co.limits = f.options.computation;
+    CheckedComputation cf = checkGroupSetFinite(f.program, f.enumeration, {0, 1}, co);
+    std::vector<SiteGroup> both{f.enumeration.groups[0], f.enumeration.groups[1]};
+    CheckedComputation cs = checkGroupSetSymbolic(f.program, f.proof(), both, co, z3Backend);
+    CheckedSetDomain dfin = checkSetDomainFinite(f.program, f.enumeration, {0, 1}, r, f.options);
+    CheckedSetDomain dsym = checkSetDomainSymbolic(f.program, f.proof(), both, r, f.options, z3Backend);
+    SetReductionVerdict joined = joinSetReduction(f.program, f.enumeration, {0, 1}, r, f.options, cf, cs, dfin, dsym);
+    expect("joined", joined, S::Verified, T::Symbolic);
+    integer("joined", joined, FactStatus::Proven, T::Symbolic, byRule);
+    DomainOptions otherScope = f.options;
+    otherScope.scope = range(f.program, 1, 2);
+    SetReductionVerdict scoped = joinSetReduction(f.program, f.enumeration, {0, 1}, r, otherScope, cf, cs, dfin, dsym);
+    expect("another scope", scoped, S::Unknown, T::Proposed);
+    integer("another scope", scoped, FactStatus::Unknown, T::Proposed, noClaim);
+    CheckedComputation cf1 = checkGroupSetFinite(f.program, f.enumeration, {0}, co);
+    SetReductionVerdict sites = joinSetReduction(f.program, f.enumeration, {0, 1}, r, f.options, cf1, cs, dfin, dsym);
+    expect("another site set", sites, S::Unknown, T::Proposed);
+    integer("another site set", sites, FactStatus::Unknown, T::Proposed, noClaim);
+    // The computation's symbolic claim lost: the finite tier, and the fact at it.
+    SetReductionVerdict finite = joinSetReduction(f.program, f.enumeration, {0, 1}, r, f.options, cf,
+                                                  CheckedComputation::unknown("lost"), dfin, dsym);
+    expect("computation symbolic lost", finite, S::Verified, T::ScopeEnumerated);
+    integer("computation symbolic lost", finite, FactStatus::Proven, T::ScopeEnumerated, byRule);
+  }
+
+  // NB-2 where the composer does compute facts on a verdict that is not Verified: the claims
+  // meet at no tier (here the domain claims are Unknown, for a flat request, or lost by hand,
+  // while the computation claims are Verified), the verdict is Unknown, and no fact may rest
+  // on the computation claim alone. The frozen run of 2026-11-13 let the mutant `set integer
+  // fact on an unverified claim` survive for want of this assertion.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict flat = verdict(f, {0, 1}, DomainRequest(), f.options, z3Backend);
+    expect("a flat request", flat, S::Unknown, T::Proposed);
+    CHECK(flat.computationFinite().status() == S::Verified);
+    integer("a flat request", flat, FactStatus::Unknown, T::Proposed, noClaim);
+    CHECK(flat.floatReorder().status == FactStatus::Unknown && flat.trivialReorder().status == FactStatus::Unknown);
+    ComputationOptions co;
+    co.scope = f.options.scope;
+    co.termination = f.options.termination;
+    co.authorized = f.options.authorized;
+    co.limits = f.options.computation;
+    CheckedComputation cf = checkGroupSetFinite(f.program, f.enumeration, {0, 1}, co);
+    std::vector<SiteGroup> both{f.enumeration.groups[0], f.enumeration.groups[1]};
+    CheckedComputation cs = checkGroupSetSymbolic(f.program, f.proof(), both, co, z3Backend);
+    CHECK(cf.status() == S::Verified && cs.status() == S::Verified);
+    SetReductionVerdict lost = joinSetReduction(f.program, f.enumeration, {0, 1}, r, f.options, cf, cs,
+                                                CheckedSetDomain::unknown("lost"), CheckedSetDomain::unknown("lost"));
+    expect("domain claims lost", lost, S::Unknown, T::Proposed);
+    integer("domain claims lost", lost, FactStatus::Unknown, T::Proposed, noClaim);
+    CHECK(lost.floatReorder().status == FactStatus::Unknown && lost.trivialReorder().status == FactStatus::Unknown);
+  }
+
+  // A set of one group is Theorem 13 on the same request, facts included.
+  {
+    Fixture f = fixture(m, "sib_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    CoordinateFamily none;
+    SetReductionVerdict set = verdict(f, {0}, r, f.options, z3Backend);
+    ReductionVerdict one = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r, f.options, z3Backend);
+    CHECK(set.status() == S::Verified && one.status() == S::Verified);
+    bool same = set.integerReorder().status == one.integerReorder().status &&
+                set.integerReorder().tier == one.integerReorder().tier &&
+                set.integerReorder().detail == one.integerReorder().detail &&
+                set.floatReorder().status == one.floatReorder().status &&
+                set.trivialReorder().status == one.trivialReorder().status;
+    if (!same)
+      printf("one group: set integer %s \"%s\"; T13 integer %s \"%s\"\n", stringifyFactStatus(set.integerReorder().status),
+             set.integerReorder().detail.c_str(), stringifyFactStatus(one.integerReorder().status),
+             one.integerReorder().detail.c_str());
+    CHECK(same);
+    CHECK(one.integerReorder().status == FactStatus::Proven);
   }
 }
 
@@ -4660,6 +5388,7 @@ int main(int argc, char **argv) {
   run("identity", testIdentity);
   run("setdomain", testSetDomain);
   run("setreduction", testSetReduction);
+  run("setreorder", testSetReorder);
   run("proposer", testProposer);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);
