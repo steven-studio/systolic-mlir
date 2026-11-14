@@ -5,6 +5,7 @@
 #include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/bit.h"
 
@@ -238,9 +239,15 @@ bool reversalDiffers(const SemanticProgram &program, const SiteGroup &group,
       detail = "reversing " + cellName + " overflows a flagged addition";
       return true;
     }
-    // A NaN anywhere stops a run, so only finite and infinite values reach here.
+    // A NaN anywhere stops a run, so the forward fold is finite or infinite. A reversed
+    // fold that is NaN would stop that run: the runs that complete differ, which refutes
+    // as a changed value does, and is named (G5b-M4b-2b-1).
     if (isFloat && forward != backward) {
-      detail = "reversing " + cellName + " changes its final bits";
+      // The model's formats, as evalFloatBinary chooses them: binary32 at 32 bits, else binary64.
+      llvm::APFloat reversed(backward.getBitWidth() == 32 ? llvm::APFloat::IEEEsingle() : llvm::APFloat::IEEEdouble(),
+                             backward);
+      detail = "reversing " + cellName +
+               (reversed.isNaN() ? " gives NaN, so that run would stop" : " changes its final bits");
       return true;
     }
   }

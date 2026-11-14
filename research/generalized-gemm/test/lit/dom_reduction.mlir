@@ -32,14 +32,20 @@
 // READS: "status": "REFUTED"
 // READS-NEXT: "tier": "PROPOSED"
 // READS: "witness": {
-// Doubles: the fold's order is the claim, and the float reorder fact stays Unknown.
+// Doubles: the fold's order is the claim. G5b-M4b-2b-1: the float reorder fact is refuted
+// by the fixed fill sequence with a replayed witness (at n = 1: C[0] = -1, contributions
+// -0.001 then +0.001: the program gives -0.9999999999999999, the other order -1), printed
+// with the fact; the verdict is untouched. Nothing proves a float fold reorderable but trivial.
 // FLOAT: "reduction": {
 // FLOAT: "fold": "ORDERED_FLOAT"
 // FLOAT: "refuted_by": "NOTHING"
 // FLOAT: "reorder": {
 // FLOAT: "float": {
-// FLOAT-NEXT: "detail": "only trivial proves a float fold reorderable
-// FLOAT-NEXT: "status": "UNKNOWN"
+// FLOAT-NEXT: "detail": "reversing cell {{[0-9]+}} of root 2 changes its final bits"
+// FLOAT-NEXT: "memory": [
+// FLOAT: "status": "REFUTED"
+// FLOAT: "integer": {
+// FLOAT-NEXT: "detail": "not an integer fold, or no claim"
 // FLOAT: "status": "VERIFIED"
 // FLOAT-NEXT: "tier": "SYMBOLIC"
 // G5b-M4b-2a. The same two groups with nsw on both adds: the verdict stands (the claim
