@@ -2641,7 +2641,7 @@ static void testWhilePrograms() {
           std::string version() const override { return "selective"; }
         } selective(z3Backend, "variable s" + std::to_string(spec.carried[1 - k]) + "\n");
         std::vector<CheckedClosedForm> demotedByT = checkClosedForms(
-            p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &*fForm->program}}, scope, limits, selective);
+            p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &*fact->program}}, scope, limits, selective);
         CHECK(demotedByT.size() == 2 && demotedByT[0].status == ClosedFormStatus::Unknown);
         CHECK(demotedByT[1].discharged && demotedByT[1].status == ClosedFormStatus::Unknown);
         CHECK(demotedByT[1].reason.find("obligations discharged, but the substituted form of s") != std::string::npos);
