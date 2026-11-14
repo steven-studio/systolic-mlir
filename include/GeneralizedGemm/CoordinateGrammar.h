@@ -25,6 +25,15 @@ struct GrammarSpec {
   bool comparison = false, conditional = false, bits = false;
   unsigned maxSize = 1, maxOperands = 300, maxAtoms = 40;
   std::vector<llvm::APInt> extraConstants;
+  // Statement programs (IndexProgram.h): the bit-vector adaptation of the thesis's
+  // statement grammar, loop-free in this phase. A program is `if B then v := E
+  // else v := E ; return v` over the operands of the level, nested up to
+  // maxConditionals, lowered to a term and offered like any other. Off at every
+  // level: SynthesisOptions turns it on, and the default output does not change.
+  bool statements = false;
+  unsigned maxConditionals = 1, maxConditions = 400, maxPrograms = 4000;
+  // Program atoms have their own cap, so they never crowd out the terms.
+  unsigned maxProgramAtoms = 24;
 
   /// 0: state and access subterms. 1: add, subtract, constant multiples.
   /// 2: products, division, remainder. 3: comparison, if-then-else. 4: bits.
@@ -35,6 +44,10 @@ struct GrammarSpec {
 struct Atom {
   Term term = nullptr;
   unsigned size = 1;
+  // The statement program this term was lowered from, in the text of
+  // formatIndexProgram, when there is one. Documentation of the proposal, not
+  // evidence: the checkers judge the term.
+  std::string program;
   // One vector per domain, one value per event, compared for equality only.
   std::vector<std::vector<uint64_t>> values;
 };
@@ -42,6 +55,7 @@ struct Atom {
 struct AtomBank {
   std::vector<Atom> atoms;
   unsigned operands = 0;
+  unsigned programs = 0;  // Statement programs lowered and offered.
   std::string truncated; // Nonempty: a limit cut the enumeration short.
 };
 

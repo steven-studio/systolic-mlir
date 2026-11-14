@@ -16,6 +16,8 @@
 #include "GeneralizedGemm/CoordinateSynthesis.h"
 #include "GeneralizedGemm/SymbolicCandidateChecker.h"
 
+#include "llvm/ADT/StringRef.h"
+
 #include <string>
 #include <vector>
 
@@ -29,6 +31,10 @@ struct SynthesisOptions {
   SymbolicLimits2 symbolic;
   SynthesisLimits synthesis;
   std::optional<GrammarSpec> grammar; // A fixed grammar, instead of the levels.
+  // The statement productions of IndexProgram.h at every level tried: the
+  // bit-vector adaptation of the thesis's Appendix G grammar, loop-free in this
+  // phase. Off by default, and then nothing in the output changes.
+  bool statementGrammar = false;
   unsigned maxLevel = 3, maxSamples = 6, maxRefinements = 3;
   uint64_t referenceFill = 0;
 };
@@ -58,8 +64,20 @@ SynthesisResult synthesizeProgram(const SemanticProgram &program,
                                   const TerminationCertificate *certificate,
                                   const SynthesisOptions &options, SmtBackend &backend);
 
-/// Deterministic JSON. With `events`, the exact tables behind each point.
-std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events);
+/// Deterministic JSON. With `events`, the exact tables behind each point. Each
+/// extra adds a pre-rendered JSON value under its key.
+std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events,
+                   llvm::ArrayRef<std::pair<std::string, std::string>> extras = {});
+std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events,
+                   llvm::StringRef extraKey, llvm::StringRef extraJSON);
+
+/// Phase 4 (I1). JSON for the iteration counters of `instrumented` (LoopCounters.h):
+/// their state ids and headers, and the side-by-side replay of `original` and
+/// `instrumented` from every point (compareRuns), which is evidence for those
+/// points that the instrumentation changed no transition, event or return.
+std::string iterationCountersJSON(const SemanticProgram &original, const SemanticProgram &instrumented,
+                                  llvm::ArrayRef<std::vector<llvm::APInt>> points, uint64_t referenceFill,
+                                  const EnumerationLimits &limits);
 
 } // namespace mlir::generalized_gemm
 #endif

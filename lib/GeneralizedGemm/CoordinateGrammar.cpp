@@ -1,5 +1,7 @@
 #include "GeneralizedGemm/CoordinateGrammar.h"
 
+#include "GeneralizedGemm/IndexProgram.h"
+
 #include "llvm/ADT/DenseSet.h"
 
 #include <algorithm>
@@ -45,8 +47,10 @@ private:
     unsigned size;
   };
   bool offer(Term term, unsigned size);
+  std::optional<std::vector<uint64_t>> sample(Term term);
   void leaves();
   void grow(unsigned size);
+  void statements();
   void select();
   void collectConstants(Term term);
 
@@ -61,13 +65,12 @@ private:
   std::map<std::vector<uint64_t>, unsigned> seen;
   std::set<std::pair<unsigned, uint64_t>> constants;
   DenseSet<Term> visited;
+  std::map<Term, std::string> programText; // Terms lowered from statement programs.
 };
 
-bool Builder::offer(Term term, unsigned size) {
-  if (operands.size() >= spec.maxOperands) {
-    out.truncated = "the operand limit";
-    return false;
-  }
+/// The term's values at the sampled events, after its width; nullopt when it has
+/// no value or is undefined at a sample, which no coordinate may be.
+std::optional<std::vector<uint64_t>> Builder::sample(Term term) {
   Term defined = definedness(terms, term);
   std::vector<uint64_t> signature{term->sort.width};
   for (unsigned d = 0; d < evaluators.size(); ++d) {
@@ -75,15 +78,177 @@ bool Builder::offer(Term term, unsigned size) {
     for (size_t e = 0; e < evaluator.size(); e += strides[d]) {
       auto value = evaluator.value(term, e);
       auto ok = evaluator.value(defined, e);
-      // A term with no value, or undefined at a sample, cannot be a coordinate.
       if (!value || !ok || ok->isZero())
-        return true;
+        return std::nullopt;
       signature.push_back(value->getZExtValue());
     }
   }
-  if (seen.try_emplace(std::move(signature), operands.size()).second)
+  return signature;
+}
+
+bool Builder::offer(Term term, unsigned size) {
+  if (operands.size() >= spec.maxOperands) {
+    out.truncated = "the operand limit";
+    return false;
+  }
+  auto signature = sample(term);
+  if (!signature)
+    return true;
+  if (seen.try_emplace(std::move(*signature), operands.size()).second)
     operands.push_back({term, size});
   return true;
+}
+
+/// The statement productions, loop-free: `if B then v := E else v := E ; return
+/// v`, with B a comparison of operands and constants, its negation left out
+/// because swapping the arms gives it, and E any operand, a nested program
+/// included up to maxConditionals. Each program is lowered to a term by
+/// indexProgramTerm and offered like a grown term; the program's text is kept
+/// for the record. The interpreter of IndexProgram.h is the meaning, and the
+/// lowering is tested against it; neither is evidence of anything.
+void Builder::statements() {
+  if (!spec.statements)
+    return;
+  struct Test {
+    Term term;
+    unsigned size;
+  };
+  // Conditions over the operands present before any program, by signature on the
+  // samples. A condition constant on the samples decides nothing there.
+  std::vector<Test> tests;
+  std::set<std::vector<uint64_t>> testSeen;
+  std::vector<Operand> pool = operands;
+  auto constant = [&](unsigned width, uint64_t value) {
+    return terms.bv(APInt(width, value, /*isSigned=*/false, /*implicitTrunc=*/true));
+  };
+  auto addTest = [&](Term test, unsigned size) {
+    if (tests.size() >= spec.maxConditions)
+      return false;
+    auto signature = sample(test);
+    if (!signature)
+      return true;
+    bool allTrue = true, allFalse = true;
+    std::vector<uint64_t> complement{1};
+    for (size_t n = 1; n < signature->size(); ++n) {
+      allTrue = allTrue && (*signature)[n] == 1;
+      allFalse = allFalse && (*signature)[n] == 0;
+      complement.push_back(1 - (*signature)[n]);
+    }
+    if (allTrue || allFalse || testSeen.count(complement))
+      return true;
+    if (testSeen.insert(std::move(*signature)).second)
+      tests.push_back({test, size});
+    return true;
+  };
+  // The guards of the program first, as the slice of Section 4.4 holds them: a
+  // comparison the program itself branches on, read as a leaf of size 1.
+  std::vector<Term> guardTests;
+  DenseSet<Term> guardSeen;
+  std::function<void(Term)> guards = [&](Term t) {
+    if (!guardSeen.insert(t).second)
+      return;
+    if (t->op == TermOp::ICmp && t->args[0]->sort.width > 1)
+      guardTests.push_back(t);
+    for (Term arg : t->args)
+      guards(arg);
+  };
+  for (const Transition &t : program.transitions)
+    guards(t.guard);
+  for (Term test : guardTests)
+    if (!addTest(test, 1))
+      break;
+  for (const Operand &a : pool) {
+    for (const auto &[width, value] : constants) {
+      if (width != a.term->sort.width)
+        continue;
+      Term c = constant(width, value);
+      for (Predicate predicate : {Predicate::Eq, Predicate::Ult, Predicate::Ule})
+        if (!addTest(terms.icmp(predicate, a.term, c), a.size + 2))
+          break;
+    }
+    for (const Operand &b : pool) {
+      if (a.term == b.term || a.term->sort != b.term->sort)
+        continue;
+      for (Predicate predicate : {Predicate::Eq, Predicate::Ult, Predicate::Ule})
+        if (!addTest(terms.icmp(predicate, a.term, b.term), a.size + b.size + 1))
+          break;
+    }
+  }
+  std::stable_sort(tests.begin(), tests.end(),
+                   [](const Test &a, const Test &b) { return a.size < b.size; });
+  auto name = [&](Term input) { return formatTerm(input, 6); };
+  unsigned tried = 0;
+  for (unsigned round = 0; round < spec.maxConditionals; ++round) {
+    // Arms: every operand so far, the previous round's programs included.
+    std::vector<Operand> arms = operands;
+    std::stable_sort(arms.begin(), arms.end(),
+                     [](const Operand &a, const Operand &b) { return a.size < b.size; });
+    for (const Test &test : tests)
+      for (const Operand &a : arms)
+        for (const Operand &b : arms) {
+          if (a.term == b.term || a.term->sort != b.term->sort)
+            continue;
+          // Nesting a program under itself says nothing new.
+          if (round > 0 && !programText.count(a.term) && !programText.count(b.term))
+            continue;
+          if (tried++ >= spec.maxPrograms) {
+            if (out.truncated.empty())
+              out.truncated = "the program limit";
+            return;
+          }
+          IndexProgram program;
+          unsigned v = program.local(a.term->sort.width);
+          std::vector<Term> leaves;
+          std::function<void(Term)> collect = [&](Term t) {
+            if (t->op == TermOp::Const)
+              return;
+            if (!llvm::is_contained(leaves, t))
+              leaves.push_back(t);
+          };
+          // The test's operands and the arms are the inputs: terms the grammar
+          // already holds, read by the program as the thesis's t is read.
+          for (Term operand : test.term->args)
+            collect(operand);
+          collect(a.term);
+          collect(b.term);
+          std::map<Term, unsigned> inputOf;
+          for (Term leaf : leaves)
+            inputOf[leaf] = program.input(leaf);
+          auto leafExpr = [&](Term t) {
+            return t->op == TermOp::Const ? program.constant(t->value)
+                                          : program.inputExpr(inputOf.at(t));
+          };
+          unsigned lhs = leafExpr(test.term->args[0]), rhs = leafExpr(test.term->args[1]);
+          unsigned cond;
+          switch ((Predicate)test.term->aux) {
+          case Predicate::Eq: cond = program.eq(lhs, rhs); break;
+          case Predicate::Ne: cond = program.lnot(program.eq(lhs, rhs)); break;
+          case Predicate::Ult: cond = program.ult(lhs, rhs); break;
+          case Predicate::Ule: cond = program.ule(lhs, rhs); break;
+          case Predicate::Ugt: cond = program.ult(rhs, lhs); break;
+          case Predicate::Uge: cond = program.ule(rhs, lhs); break;
+          default: continue; // Signed comparisons are outside the grammar.
+          }
+          unsigned then = program.assign(v, leafExpr(a.term));
+          unsigned otherwise = program.assign(v, leafExpr(b.term));
+          program.body = program.ifThenElse(cond, then, otherwise);
+          program.result = program.localExpr(v);
+          auto lowered = indexProgramTerm(terms, program);
+          if (!lowered)
+            continue;
+          size_t before = operands.size();
+          if (!offer(*lowered, test.size + a.size + b.size + 1))
+            return;
+          if (operands.size() == before)
+            continue;
+          ++out.programs;
+          std::string text = formatIndexProgram(program, [&](Term input) {
+            auto found = programText.find(input);
+            return found != programText.end() ? "(" + found->second + ")" : name(input);
+          });
+          programText.emplace(*lowered, std::move(text));
+        }
+  }
 }
 
 void Builder::collectConstants(Term term) {
@@ -220,16 +385,27 @@ void Builder::grow(unsigned size) {
 }
 
 void Builder::select() {
+  unsigned termAtoms = 0, programAtoms = 0;
   std::vector<Operand> order = operands;
   std::stable_sort(order.begin(), order.end(),
                    [](const Operand &a, const Operand &b) { return a.size < b.size; });
-  std::set<std::vector<Partition>> kernels;
+  // Phase 4 (I1): two atoms with one kernel are one label, so the first is kept;
+  // except that an iteration counter (LoopCounters.h) takes the place of a term
+  // with its kernel, since its unit steps are what the symbolic tier's order
+  // needs and the finite verdict on the label is the same either way.
+  std::map<std::vector<Partition>, size_t> kernels;
+  auto isCounter = [&](Term term) {
+    return term->op == TermOp::State && term->index < program.state.size() &&
+           program.state[term->index].kind == StateVar::IterationCounter;
+  };
   for (const Operand &operand : order) {
     if (operand.term->op == TermOp::Param || stateSupport(operand.term).empty())
       continue;
     Atom atom;
     atom.term = operand.term;
     atom.size = operand.size;
+    if (auto found = programText.find(operand.term); found != programText.end())
+      atom.program = found->second;
     std::vector<Partition> kernel;
     bool usable = true, separates = false;
     for (EventEvaluator &evaluator : evaluators) {
@@ -250,13 +426,23 @@ void Builder::select() {
       kernel.push_back(std::move(labels));
     }
     // Only kernels matter to a label, and a constant separates nothing.
-    if (!usable || !separates || !kernels.insert(std::move(kernel)).second)
+    if (!usable || !separates)
       continue;
-    if (out.atoms.size() >= spec.maxAtoms) {
-      if (out.truncated.empty())
-        out.truncated = "the atom limit";
-      break;
+    auto [slot, fresh] = kernels.try_emplace(std::move(kernel), out.atoms.size());
+    if (!fresh) {
+      if (slot->second < out.atoms.size() && isCounter(atom.term) && !isCounter(out.atoms[slot->second].term) &&
+          out.atoms[slot->second].program.empty())
+        out.atoms[slot->second] = std::move(atom);
+      continue;
     }
+    bool fromProgram = !atom.program.empty();
+    unsigned &count = fromProgram ? programAtoms : termAtoms;
+    if (count >= (fromProgram ? spec.maxProgramAtoms : spec.maxAtoms)) {
+      if (out.truncated.empty())
+        out.truncated = fromProgram ? "the program atom limit" : "the atom limit";
+      continue;
+    }
+    ++count;
     out.atoms.push_back(std::move(atom));
   }
   out.operands = operands.size();
@@ -266,6 +452,8 @@ void Builder::run() {
   leaves();
   for (unsigned size = 3; size <= spec.maxSize && out.truncated.empty(); size += 2)
     grow(size);
+  if (out.truncated.empty())
+    statements();
   select();
 }
 

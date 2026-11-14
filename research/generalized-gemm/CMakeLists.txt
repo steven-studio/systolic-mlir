@@ -42,6 +42,7 @@ target_link_libraries(generalized-gemm PUBLIC
 add_library(generalized-gemm-checker STATIC
   "${GG_LIB_DIR}/ControlStructure.cpp"
   "${GG_LIB_DIR}/CutPaths.cpp"
+  "${GG_LIB_DIR}/LoopCounters.cpp"
   "${GG_LIB_DIR}/TerminationObligations.cpp"
   "${GG_LIB_DIR}/TerminationCertificate.cpp")
 target_link_libraries(generalized-gemm-checker PUBLIC generalized-gemm)
@@ -103,6 +104,8 @@ target_link_libraries(generalized-gemm-coordinate-report PRIVATE
 # neither of them, and the G3a checker stays the judge of every finite claim.
 add_library(generalized-gemm-tier-checker STATIC
   "${GG_LIB_DIR}/CoordinateFamily.cpp"
+  "${GG_LIB_DIR}/IndexProgram.cpp"
+  "${GG_LIB_DIR}/IndexSlice.cpp"
   "${GG_LIB_DIR}/SymbolicDomain.cpp"
   "${GG_LIB_DIR}/CoverageSimulation.cpp"
   "${GG_LIB_DIR}/SymbolicCandidateChecker.cpp")
@@ -110,6 +113,8 @@ target_link_libraries(generalized-gemm-tier-checker PUBLIC
   generalized-gemm-candidate-checker generalized-gemm-finite-domain)
 add_library(generalized-gemm-synthesis STATIC
   "${GG_LIB_DIR}/CoordinateGrammar.cpp"
+  "${GG_LIB_DIR}/IndexProgramSemgus.cpp"
+  "${GG_LIB_DIR}/ClosedFormSynthesis.cpp"
   "${GG_LIB_DIR}/CoordinateSynthesis.cpp"
   "${GG_LIB_DIR}/SynthesisAnalysis.cpp")
 target_link_libraries(generalized-gemm-synthesis PUBLIC
@@ -300,7 +305,15 @@ set_tests_properties(generalized-gemm-setreduction-programs PROPERTIES TIMEOUT 3
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
-set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 120)
+# Phase 4 added dom_phase4.mlir (about 30 s); the suite was at 109 s of 120.
+set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 300)
+
+# Phase 5: the table oracle recomputes every claim about the synthesized while and
+# table programs with its own parser and interpreter of the G.5 rules.
+add_test(NAME generalized-gemm-table-programs COMMAND "${Python3_EXECUTABLE}" -I
+  "${GG_FUZZ}/table_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
+  --cases 12 --seed 1)
+set_tests_properties(generalized-gemm-table-programs PROPERTIES TIMEOUT 900)
 
 add_custom_target(check-generalized-gemm
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"

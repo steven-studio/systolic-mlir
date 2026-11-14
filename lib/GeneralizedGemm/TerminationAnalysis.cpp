@@ -371,7 +371,8 @@ std::string toJSON(const SemanticProgram &program, const TerminationResult &resu
   for (const StateVar &s : program.state)
     state.push_back(json::Object{
         {"id", (int64_t)s.id},
-        {"kind", s.kind == StateVar::BlockArgument ? "argument" : "result"},
+        {"kind", s.kind == StateVar::BlockArgument ? "argument"
+                 : s.kind == StateVar::IterationCounter ? "counter" : "result"},
         {"location", (int64_t)s.location},
         {"position", (int64_t)s.position}});
   out["state"] = std::move(state);

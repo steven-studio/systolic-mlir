@@ -79,7 +79,10 @@ struct Parameter {
 };
 
 struct StateVar {
-  enum Kind { BlockArgument, CrossBlockResult };
+  // IterationCounter: added by LoopCounters.h after import, never by the importer.
+  // It counts the arrivals at `location` (a loop header) since the loop was last
+  // entered; nothing in the program reads it (invariant of the instrumentation).
+  enum Kind { BlockArgument, CrossBlockResult, IterationCounter };
   Kind kind = BlockArgument;
   unsigned id = 0;
   Sort sort;
@@ -194,6 +197,10 @@ struct SemanticProgram {
 
   // Named premises of this model. Never Proven (invariant I9).
   std::vector<ProofStatus> assumptions;
+
+  // State ids of IterationCounter kind (LoopCounters.h), in header order; empty
+  // for a freshly imported model.
+  std::vector<unsigned> iterationCounters;
 
   std::optional<UnsupportedReason> unsupported;
 

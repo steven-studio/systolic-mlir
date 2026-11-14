@@ -30,6 +30,10 @@ enum AxisIndex { AxisP = 0, AxisI = 1, AxisJ = 2, AxisK = 3 };
 struct CoordinateFamily {
   std::array<std::vector<Term>, 4> axes; // P, I, J, K. A tuple per axis.
   std::string origin;                    // Who proposed it. Not evidence.
+  // Parallel to axes when nonempty: the statement program each term was lowered
+  // from (IndexProgram.h), or "" for a term the grammar built directly. Text for
+  // the record; every checker reads the term and nothing else.
+  std::array<std::vector<std::string>, 4> programs;
 };
 
 /// One level of a lexicographic enumeration: lower <= value < upper, unsigned.
