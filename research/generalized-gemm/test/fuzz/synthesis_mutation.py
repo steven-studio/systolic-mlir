@@ -158,7 +158,7 @@ MUTANTS = [
     ("table template reads past the history", I, "!p.exprs.at(ix.b).value.isZero() && p.exprs.at(ix.b).value.ule(d);", "!p.exprs.at(ix.b).value.isZero();"),
     ("init not read through the entry definitions", L, "      Term here = defined(path->state[v]);", "      Term here = path->state[v];"),
     ("no rule counted as a cut run", L, "      if (run.status == IndexRunStatus::OutOfFuel) {", "      if (run.status != IndexRunStatus::Returned) {"),
-    ("table proof without the no-wrap premise", L, "          stepPremise = terms.logicalAnd(stepPremise, noWrap);\n", ""),
+    ("table bounds without the no-wrap premise", L, "                                         terms.logicalAnd(notLast, noWrap));", "                                         notLast);"),
     ("unmatched template proved", L, "    if (!shapeOk) {", "    if (false) {"),
     ("dependence fixpoint skipped", L, "      for (unsigned v : c.dependsOn) {", "      for (unsigned v : std::vector<unsigned>()) {"),
     ("free-leaf model called a refutation", L, "        satHasFree = !freed.empty()", "        satHasFree = false && !freed.empty()"),
@@ -176,6 +176,11 @@ EQUIVALENT = [
     ("definitions from any term", "the filter `terms_.size() == 1` in addDefinitions only saves "
      "queries: every proposed fact is proved by O3 and O4 or dropped, so a state with two "
      "definitions adds a query and no trust."),
+    ("table step without the no-wrap premise", "dropping `m < 2^w - d` from the premise of TT-step, "
+     "TT-shift and TT-init only asks them at more values of m; the extent's wrap is carried by "
+     "TT-bounds, which keeps the premise (its removal there is the mutant `table bounds without "
+     "the no-wrap premise`). A first run of the harness showed the stepPremise form of this "
+     "mutant surviving, which is this equivalence, not a test gap."),
 ]
 
 
