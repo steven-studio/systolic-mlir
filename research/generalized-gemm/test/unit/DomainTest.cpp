@@ -1,6 +1,7 @@
 // G5a: Theorem 12 and 13, the facts beside them, and what must never pass.
 // test/fuzz/domain_oracle.py recomputes the results with no library code.
 #include "GeneralizedGemm/DomainAnalysis.h"
+#include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/ReductionSemantics.h"
 #include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
@@ -4640,6 +4641,230 @@ static void testSetReduction() {
   }
 }
 
+static const char *phase4Source = R"(func.func @stepped(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi32>, %n: index) {
+  %zero = arith.constant 0 : index
+  cf.br ^outer(%zero : index)
+^outer(%j: index):
+  %two = arith.constant 2 : index
+  %g = arith.cmpi ult, %j, %two : index
+  cf.cond_br %g, ^start, ^exit
+^start:
+  %z0 = arith.constant 0 : index
+  cf.br ^inner(%z0 : index)
+^inner(%i: index):
+  %h = arith.cmpi ult, %i, %n : index
+  cf.cond_br %h, ^body, ^next
+^body:
+  %c0 = arith.constant 0 : index
+  %x = memref.load %a[%c0, %i] : memref<1x64xi32>
+  %y = memref.load %b[%i, %j] : memref<64x2xi32>
+  %w = memref.load %c[%c0, %j] : memref<1x2xi32>
+  %m = arith.muli %x, %y : i32
+  %s = arith.addi %w, %m : i32
+  memref.store %s, %c[%c0, %j] : memref<1x2xi32>
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c7 = arith.constant 7 : index
+  %r = arith.remui %i, %c2 : index
+  %even = arith.cmpi eq, %r, %c0 : index
+  %step = arith.select %even, %c7, %c3 : index
+  %ni = arith.addi %i, %step : index
+  cf.br ^inner(%ni : index)
+^next:
+  %one = arith.constant 1 : index
+  %nj = arith.addi %j, %one : index
+  cf.br ^outer(%nj : index)
+^exit:
+  return
+}
+func.func @rotated(%a: memref<9x9xi32>, %b: memref<9x2xi32>, %c: memref<9x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %two_n = arith.muli %n, %c2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %t = %c0 to %two_n step %c1 {
+      %p = arith.cmpi ult, %t, %n : index
+      scf.if %p {
+        %x = memref.load %a[%i, %t] : memref<9x9xi32>
+        %y = memref.load %b[%t, %c0] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c0] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<9x2xi32>
+      } else {
+        %u = arith.addi %t, %c1 : index
+        %v = arith.subi %u, %n : index
+        %r = arith.remui %v, %n : index
+        %x = memref.load %a[%i, %r] : memref<9x9xi32>
+        %y = memref.load %b[%r, %c1] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c1] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c1] : memref<9x2xi32>
+      }
+    }
+  }
+  return
+})";
+
+/// Phase 4 (I1 to I3, docs/GENERALIZED_GEMM_STATEMENT_BV.md Section 11): the closed
+/// forms and the counters through the whole pipeline, with the three questions kept
+/// apart: decomposition verified, views proved and affine, lowering eligible.
+static void testPhase4Views() {
+  // affineOverLevels is a syntactic test.
+  {
+    TermContext terms;
+    Term x = levelVariable(terms, 0, Sort::bv(8)), y = levelVariable(terms, 1, Sort::bv(8));
+    Term n = terms.param(0, Sort::bv(8)), two = terms.bv(APInt(8, 2));
+    CHECK(affineOverLevels(x));
+    CHECK(affineOverLevels(terms.binary(TermOp::Add, terms.binary(TermOp::Mul, two, x), n)));
+    CHECK(affineOverLevels(terms.binary(TermOp::Sub, terms.binary(TermOp::Mul, x, two), y)));
+    CHECK(!affineOverLevels(terms.binary(TermOp::Mul, x, y)));
+    CHECK(!affineOverLevels(terms.binary(TermOp::URem, x, two)));
+    CHECK(!affineOverLevels(terms.binary(TermOp::UDiv, x, two)));
+    CHECK(!affineOverLevels(terms.ite(terms.icmp(Predicate::Ult, x, n), x, y)));
+    CHECK(!affineOverLevels(terms.zext(x, 16)));
+  }
+  Module m(phase4Source);
+  // stepped with counters: K is the inner counter; the proved closed form i = f(c)
+  // becomes an identity, the certificate is strengthened with it and the counter's
+  // bounds, the domain and Theorem 13 are verified over the scope, the views A and B
+  // are proved and not affine, and lowering is not eligible. Without the option, the
+  // same family stops at the proposer.
+  {
+    SemanticProgram original = m.import("stepped", 8);
+    SemanticProgram p = original;
+    CHECK(addIterationCounters(p).reason.empty());
+    ParameterScope scope = range(p, 8, 40);
+    TerminationOptions termination;
+    termination.scope = scope;
+    termination.limits.solver = testSolver();
+    auto certificate = analyzeTermination(original, z3Backend, termination).certificate;
+    CHECK(certificate.has_value());
+    if (!certificate)
+      return;
+    DomainAnalysisRequest request;
+    request.synthesis.scope = scope;
+    request.synthesis.maxLevel = 0;
+    request.synthesis.synthesis.maxCandidates = 2;
+    request.synthesis.synthesis.solver = testSolver();
+    request.synthesis.termination.solver = testSolver();
+    request.synthesis.authorized = everyPair(p);
+    request.domain.scope = scope;
+    request.domain.termination.solver = testSolver();
+    request.domain.authorized = everyPair(p);
+    request.maxCandidates = 1;
+    for (bool views : {false, true}) {
+      request.closedFormViews = views;
+      request.closedForms.scope = scope;
+      request.closedForms.solver = testSolver();
+      DomainResult result = analyzeDomains(p, &*certificate, request, z3Backend);
+      CHECK(result.enumeration.gate == GateStatus::Open && result.groups.size() == 1 &&
+            result.groups[0].candidates.size() == 1);
+      if (result.groups.empty() || result.groups[0].candidates.empty())
+        continue;
+      const CandidateDomain &c = result.groups[0].candidates[0];
+      Term inner = p.terms->state(p.iterationCounters.back(), Sort::bv(8));
+      CHECK(llvm::is_contained(c.family.axes[AxisK], inner));
+      if (!views) {
+        CHECK(!result.closedForms.has_value() && result.identities.empty());
+        CHECK(!c.certificateStrengthened && c.invariantsAdded.empty());
+        // The guard needs the identity: the loop condition reads i, which is no level.
+        CHECK(!c.request.has_value());
+        CHECK(c.proposalReason.find("no guard") != std::string::npos);
+        CHECK(c.verdict.status() != ComputationStatus::Verified);
+        continue;
+      }
+      CHECK(result.closedForms.has_value() && result.identities.size() == 1);
+      if (!result.identities.empty()) {
+        CHECK(result.identities[0].state == 1 && result.identities[0].cut == 3);
+        CHECK(!affineOverLevels(result.identities[0].term));
+        CHECK(llvm::is_contained(stateSupport(result.identities[0].term), p.iterationCounters.back()));
+      }
+      CHECK(c.request.has_value());
+      CHECK(c.certificateStrengthened && c.invariantsAdded.size() == 2);
+      CHECK(c.certificateNote.find("accepts") != std::string::npos);
+      const ReductionVerdict &v = c.verdict;
+      CHECK(v.coordinateFinite().tier() == EvidenceTier::ScopeEnumerated);
+      CHECK(v.coordinateSymbolic().tier() != EvidenceTier::SymbolicExact); // No order bounds the counter.
+      CHECK(v.domainSymbolic().status() == ComputationStatus::Verified && v.domainSymbolic().exactOrder());
+      CHECK(v.status() == ComputationStatus::Verified && v.tier() == ComputationTier::Symbolic);
+      for (unsigned view = 0; view < 3; ++view) {
+        CHECK(!c.request->access[view].empty());
+        CHECK(v.domainSymbolic().access()[view].status == FactStatus::Proven);
+        CHECK(v.domainFinite().access()[view].status == FactStatus::Proven);
+      }
+      // C = (0, j) is affine; A = (0, f(c)) and B = (f(c), j) are not.
+      bool affineC = true, affineA = true, affineB = true;
+      for (Term t : c.request->access[0]) affineC = affineC && affineOverLevels(t);
+      for (Term t : c.request->access[1]) affineA = affineA && affineOverLevels(t);
+      for (Term t : c.request->access[2]) affineB = affineB && affineOverLevels(t);
+      CHECK(affineC && !affineA && !affineB);
+      std::string json = toJSON(p, result, false);
+      CHECK(json.find("\"lowering_eligible\": false") != std::string::npos);
+      CHECK(json.find("a view is not affine") != std::string::npos);
+      CHECK(json.find("\"decomposition\": \"VERIFIED at SYMBOLIC\"") != std::string::npos);
+      CHECK(json.find("\"authorizes_lowering\": false") != std::string::npos);
+      CHECK(json.find("\"authorizes_lowering\": true") == std::string::npos);
+      CHECK(json.find("\"strengthened\": true") != std::string::npos);
+    }
+  }
+  // rotated with the statement family (I2): the entry definition two_n = 2n lets the
+  // proposer bound t, the sample-checked views are the level variables (I, K), (K, J),
+  // (I, J), all affine, and the integer reorder fact holds: eligible under (V).
+  {
+    SemanticProgram p = m.import("rotated", 8);
+    ParameterScope scope = range(p, 2, 3);
+    TerminationOptions termination;
+    termination.scope = scope;
+    termination.limits.solver = testSolver();
+    auto certificate = analyzeTermination(p, z3Backend, termination).certificate;
+    CHECK(certificate.has_value());
+    if (!certificate)
+      return;
+    DomainAnalysisRequest request;
+    request.synthesis.scope = scope;
+    request.synthesis.maxLevel = 3;
+    request.synthesis.statementGrammar = true;
+    request.synthesis.synthesis.maxCandidates = 1;
+    request.synthesis.synthesis.solver = testSolver();
+    request.synthesis.termination.solver = testSolver();
+    request.synthesis.authorized = everyPair(p);
+    request.domain.scope = scope;
+    request.domain.termination.solver = testSolver();
+    request.domain.authorized = everyPair(p);
+    request.maxCandidates = 1;
+    request.closedFormViews = true;
+    request.closedForms.scope = scope;
+    request.closedForms.solver = testSolver();
+    DomainResult result = analyzeDomains(p, &*certificate, request, z3Backend);
+    CHECK(result.groups.size() == 1 && result.groups[0].candidates.size() == 1);
+    if (result.groups.empty() || result.groups[0].candidates.empty())
+      return;
+    const CandidateDomain &c = result.groups[0].candidates[0];
+    bool twoN = false;
+    for (const StateIdentity &identity : result.identities)
+      twoN = twoN || (identity.cut < 0 && identity.term->op == TermOp::Mul);
+    CHECK(twoN);
+    CHECK(c.request.has_value() && c.certificateStrengthened);
+    const ReductionVerdict &v = c.verdict;
+    CHECK(v.status() == ComputationStatus::Verified && v.tier() == ComputationTier::Symbolic);
+    CHECK(v.domainSymbolic().exactOrder());
+    for (unsigned view = 0; view < 3; ++view) {
+      CHECK(c.request->access[view].size() == 2);
+      for (Term t : c.request->access[view])
+        CHECK(levelOf(t).has_value()); // Each dimension is a level variable.
+      CHECK(v.domainSymbolic().access()[view].status == FactStatus::Proven);
+    }
+    CHECK(v.integerReorder().status == FactStatus::Proven);
+    std::string json = toJSON(p, result, false);
+    CHECK(json.find("\"lowering_eligible\": true") != std::string::npos);
+    CHECK(json.find("\"views_affine\": true") != std::string::npos);
+    CHECK(json.find("\"authorizes_lowering\": true") == std::string::npos);
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -4657,6 +4882,7 @@ int main(int argc, char **argv) {
              failures);
     }
   };
+  run("phase4", testPhase4Views);
   run("identity", testIdentity);
   run("setdomain", testSetDomain);
   run("setreduction", testSetReduction);
