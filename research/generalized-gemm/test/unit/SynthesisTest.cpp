@@ -2971,7 +2971,9 @@ static void testArrays() {
     CHECK(top.status == IndexRunStatus::NoRule && top.reason.find("write of T0 at index 1") != std::string::npos);
     // Not the template: a read T[r - 3] with depth 2; a return of T[m - 1]; a second array.
     IndexProgram q = p;
-    q.exprs[E].a = q.read(T, {q.sub(q.localExpr(r), k(3))});
+    // (The constant is built on q: `k` builds on p, and an index into p is no index into q;
+    // the mutation harness found the earlier form of this check read T[r - r].)
+    q.exprs[E].a = q.read(T, {q.sub(q.localExpr(r), q.constant(APInt(w, 3)))});
     CHECK(!matchTableTemplate(q, why).has_value() && why.find("T[r - j]") != std::string::npos);
     IndexProgram q2 = p;
     q2.result = q2.read(T, {q2.sub(q2.inputExpr(m), q2.constant(APInt(w, 1)))});
