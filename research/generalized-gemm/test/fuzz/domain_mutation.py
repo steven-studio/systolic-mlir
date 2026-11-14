@@ -33,6 +33,8 @@ import sys
 
 O = "GuardedOrbit.cpp"
 D = "DomainChecker.cpp"
+P = "DomainProposer.cpp"   # Phase 4 of the statement-level work: identities and sample-checked views.
+N = "DomainAnalysis.cpp"   # Certificate strengthening, affinity, eligibility.
 R = "ReductionSemantics.cpp"
 V = "CoverageSimulation.cpp"
 C = "ComputationChecker.cpp"
@@ -273,6 +275,12 @@ MUTANTS = [
     ("set reduction whole scope from the domain alone", D, "    bool whole = computationFinite.tier() == ComputationTier::ScopeEnumerated &&\n                 domainFinite.tier() == ComputationTier::ScopeEnumerated;", "    bool whole = domainFinite.tier() == ComputationTier::ScopeEnumerated;"),
     ("set reduction event count unchecked", D, "      if (counted != facts.events) {", "      if (false) {"),
     ("set reduction order contradiction unchecked", D, "      if (respects && found->second < computationFinite.groupPoints().size() &&\n          !computationFinite.groupPoints()[found->second].listedOrder) {", "      if (false) {"),
+    # Statement-level work, phase 4 (docs/GENERALIZED_GEMM_STATEMENT_BV.md Section 11).
+    ("identities not applied to guards", P, "    Term term = applyIdentities(terms, original, identities);", "    Term term = original;"),
+    ("views proposed without the sample check", P, "        if (fitsEvents(view, d, mapped))", "        if (true)"),
+    ("certificate never strengthened", N, "      if (certificate && entry.request && request.closedFormViews && !out.identities.empty()) {", "      if (false) {"),
+    ("eligibility ignores affinity", N, "                        allAffine && v.domainSymbolic().exactOrder() && reorder;", "                        v.domainSymbolic().exactOrder() && reorder;"),
+    ("products called affine", N, "      return (constantOnly(t->args[0]) && affine(t->args[1])) ||", "      return (affine(t->args[0]) && affine(t->args[1])) ||"),
 ]
 
 EQUIVALENT = [
@@ -458,7 +466,7 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("identity", "setdomain", "setreduction", "setreorder", "reviewed", "gaps", "multiplicity", "siblings",
+               ("phase4", "identity", "setdomain", "setreduction", "setreorder", "reviewed", "gaps", "multiplicity", "siblings",
                 "segments", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,

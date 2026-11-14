@@ -2621,6 +2621,31 @@ static void testWhilePrograms() {
           scope, limits, z3Backend);
       CHECK(demoted.size() == 2 && demoted[0].status != ClosedFormStatus::Proved &&
             demoted[1].status != ClosedFormStatus::Proved);
+      // Simultaneous induction: a's obligations hold with t's form substituted, but a
+      // backend that cannot decide t's obligations leaves t unproved, and a is then
+      // demoted: discharged, not PROVED.
+      {
+        struct SelectiveBackend : SmtBackend {
+          SmtBackend &inner;
+          std::string undecided;
+          SelectiveBackend(SmtBackend &inner, std::string undecided) : inner(inner), undecided(std::move(undecided)) {}
+          SmtResponse check(const std::string &script, const SmtLimits &limits, bool wantModel) override {
+            if (script.find(undecided) != std::string::npos) {
+              SmtResponse r;
+              r.answer = SmtAnswer::Unknown;
+              r.detail = "selectively undecided";
+              return r;
+            }
+            return inner.check(script, limits, wantModel);
+          }
+          std::string version() const override { return "selective"; }
+        } selective(z3Backend, "variable s" + std::to_string(spec.carried[1 - k]) + "\n");
+        std::vector<CheckedClosedForm> demotedByT = checkClosedForms(
+            p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &*fForm->program}}, scope, limits, selective);
+        CHECK(demotedByT.size() == 2 && demotedByT[0].status == ClosedFormStatus::Unknown);
+        CHECK(demotedByT[1].discharged && demotedByT[1].status == ClosedFormStatus::Unknown);
+        CHECK(demotedByT[1].reason.find("obligations discharged, but the substituted form of s") != std::string::npos);
+      }
       // Outside the template: a body that reads the bound m is refused at W-shape.
       IndexProgram readsBound = *fact->program;
       {
@@ -2955,6 +2980,10 @@ static void testArrays() {
     q3.array(w, w, {q3.inputExpr(m)});
     CHECK(!matchTableTemplate(q3, why).has_value() && why.find("exactly one array") != std::string::npos);
     CHECK(!matchTableTemplate(pl, why).has_value());
+    // An extent other than m + d (here m + 1 with d = 2) is not the template either.
+    IndexProgram q4 = p;
+    q4.exprs[q4.exprs[q4.arrays[0].extents[0]].b].value = APInt(w, 1);
+    CHECK(!matchTableTemplate(q4, why).has_value() && why.find("extent") != std::string::npos);
   }
 }
 
@@ -3066,6 +3095,12 @@ static void testTables() {
       unsigned kf = std::find(loop->spec.carried.begin(), loop->spec.carried.end(), fForm->variable) - loop->spec.carried.begin();
       CheckedClosedForm finite = checkProgramOnTraces(p, loop->spec, kf, wrong, traces, 1u << 12);
       CHECK(finite.status == ClosedFormStatus::Refuted);
+      // A table too small for its inits (extent m + 1 with d = 2) has no rule at m = 0:
+      // a definite failure at a sample, refuted, not a cut run.
+      IndexProgram narrow = *fForm->program;
+      narrow.exprs[narrow.exprs[narrow.arrays[0].extents[0]].b].value = APInt(8, 1);
+      CheckedClosedForm noRule = checkProgramOnTraces(p, loop->spec, kf, narrow, traces, 1u << 12);
+      CHECK(noRule.status == ClosedFormStatus::Refuted && noRule.reason.find("no rule applies") != std::string::npos);
       // And symbolically: TT-step has a model over the free chain, which is Unknown
       // with the model, never a refutation by itself.
       SmtLimits smt;

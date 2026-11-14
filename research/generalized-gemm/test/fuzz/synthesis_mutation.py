@@ -23,6 +23,10 @@ A = "SynthesisAnalysis.cpp"
 D = "FiniteDomain.cpp"
 K = "CandidateChecker.cpp"
 T = "SiteSets.cpp"  # G5b-M4-0: the group gate G3b, G4a and G5a share.
+I = "IndexProgram.cpp"       # Statement-level index programs (thesis App. G, bit-vector adaptation).
+L = "IndexSlice.cpp"         # Their specification and obligations.
+Z = "ClosedFormSynthesis.cpp"
+N = "LoopCounters.cpp"
 MUTANTS = [
     # Definedness and evaluation.
     ("division ignored", F, "case TermOp::UDiv: case TermOp::URem: case TermOp::SDiv: case TermOp::SRem: {", "case TermOp::SDiv: case TermOp::SRem: {"),
@@ -145,6 +149,26 @@ MUTANTS = [
     ("read root ignored by the enumerator", D, "    if (site.outputRead->root != site.output->root) {", "    if (false) {"),
     ("sample outside the scope", D, "      if (point.size() != program.parameters.size() ||\n          !parametersInScope(options.scope, point))", "      if (point.size() != program.parameters.size())"),
     ("sample not marked", D, "  out.sampled = !options.onlyPoints.empty();\n", "  bool sampling = !options.onlyPoints.empty();\n"),
+    # Statement-level index programs (docs/GENERALIZED_GEMM_STATEMENT_BV.md): the G.5
+    # rules, the two templates, the obligations, the counters.
+    ("unwritten element reads as zero", I, "      if (found == arrays[x.index].elements.end())\n        throw NoRuleApplies", "      if (found == arrays[x.index].elements.end())\n        return APInt::getZero(x.width);\n      if (false)\n        throw NoRuleApplies"),
+    ("array bounds unchecked", I, "      if (value.getActiveBits() > 64 || value.getZExtValue() >= table.extents[d])", "      if (false)"),
+    ("counter template body may read the bound", I, '  if (inputs.count(out.bound))\n    return fail("S reads the bound m");\n', ""),
+    ("table template takes any extent", I, '    if (!same)\n      return fail("the extent of T is not m + d");\n', ""),
+    ("table template reads past the history", I, "!p.exprs.at(ix.b).value.isZero() && p.exprs.at(ix.b).value.ule(d);", "!p.exprs.at(ix.b).value.isZero();"),
+    ("init not read through the entry definitions", L, "      Term here = defined(path->state[v]);", "      Term here = path->state[v];"),
+    ("no rule counted as a cut run", L, "      if (run.status == IndexRunStatus::OutOfFuel) {", "      if (run.status != IndexRunStatus::Returned) {"),
+    ("table proof without the no-wrap premise", L, "          stepPremise = terms.logicalAnd(stepPremise, noWrap);\n", ""),
+    ("unmatched template proved", L, "    if (!shapeOk) {", "    if (false) {"),
+    ("dependence fixpoint skipped", L, "      for (unsigned v : c.dependsOn) {", "      for (unsigned v : std::vector<unsigned>()) {"),
+    ("free-leaf model called a refutation", L, "        satHasFree = !freed.empty()", "        satHasFree = false && !freed.empty()"),
+    ("W-term skipped", L, '          obligations.push_back({"W-term"', '          if (false) obligations.push_back({"W-term"'),
+    ("TT-bounds skipped", L, '          obligations.push_back({"TT-bounds"', '          if (false) obligations.push_back({"TT-bounds"'),
+    ("TT-shift skipped", L, '            obligations.push_back({"TT-shift"', '            if (false) obligations.push_back({"TT-shift"'),
+    ("model entry taken for a known init", Z, "      if (at != spec.carried.end() && !spec.init[at - spec.carried.begin()])", "      if (at != spec.carried.end())"),
+    ("counter never takes over a kernel", G, "isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)", "false && isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)"),
+    ("counter bumped on every edge", N, "        t.assignments.push_back({var.id, inLoop[t.from] ? bumped : zero});", "        t.assignments.push_back({var.id, bumped});"),
+    ("replay ignores the counter", N, "      if (!value || *value != APInt(width, expected[c.header]", "      if (false && (!value || *value != APInt(width, expected[c.header]"),
 ]
 
 # Changes that no test can see, and why. Not run: a survivor here would mean nothing.
