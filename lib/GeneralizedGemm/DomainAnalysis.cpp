@@ -1,20 +1,134 @@
 //===- DomainAnalysis.cpp -------------------------------------------------===//
 #include "GeneralizedGemm/DomainAnalysis.h"
 
+#include "GeneralizedGemm/IndexSlice.h"
+
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <functional>
+#include <set>
 
 using llvm::APInt;
 namespace json = llvm::json;
 
 namespace mlir::generalized_gemm {
 
+bool affineOverLevels(Term term) {
+  std::function<bool(Term)> constantOnly = [&](Term t) {
+    if (t->op == TermOp::Const)
+      return true;
+    if (t->op == TermOp::Add || t->op == TermOp::Sub || t->op == TermOp::Mul)
+      return constantOnly(t->args[0]) && constantOnly(t->args[1]);
+    return false;
+  };
+  std::function<bool(Term)> affine = [&](Term t) -> bool {
+    switch (t->op) {
+    case TermOp::Const: case TermOp::State: case TermOp::Param:
+      return true;
+    case TermOp::Add: case TermOp::Sub:
+      return affine(t->args[0]) && affine(t->args[1]);
+    case TermOp::Mul:
+      return (constantOnly(t->args[0]) && affine(t->args[1])) ||
+             (constantOnly(t->args[1]) && affine(t->args[0]));
+    default:
+      return false;
+    }
+  };
+  return term && term->sort.kind == Sort::BV && affine(term);
+}
+
+namespace {
+
+/// Phase 4: the identities for the proposer, from proved closed forms over counters
+/// and from entry definitions. Fills out.identities, out.closedForms, out.identityReason.
+void gatherIdentities(const SemanticProgram &program, const DomainAnalysisRequest &request,
+                      SmtBackend &backend, DomainResult &out) {
+  TermContext &terms = *program.terms;
+  std::vector<std::vector<APInt>> points;
+  for (const PointEvidence &point : out.enumeration.points)
+    if (point.reason.empty())
+      points.push_back(point.parameters);
+  out.closedForms = synthesizeClosedForms(program, points, request.closedForms, backend);
+  auto counterOf = [&](unsigned header) -> std::optional<unsigned> {
+    for (unsigned id : program.iterationCounters)
+      if (program.state[id].location == header)
+        return id;
+    return std::nullopt;
+  };
+  std::set<unsigned> taken;
+  std::string notes;
+  auto note = [&](const std::string &text) {
+    if (notes.find(text) == std::string::npos)
+      notes += (notes.empty() ? "" : "; ") + text;
+  };
+  for (const SliceSynthesis &slice : out.closedForms->slices)
+    for (const LoopSynthesis &loop : slice.loops) {
+      if (!loop.spec.reason.empty())
+        continue;
+      for (const SynthesizedClosedForm &form : loop.forms) {
+        if (form.status != ClosedFormStatus::Proved)
+          continue;
+        if (!form.term) {
+          note("a proved " + form.kind + " program of s" + std::to_string(form.variable) +
+               " gives no term, so no identity");
+          continue;
+        }
+        auto counter = counterOf(loop.spec.header);
+        if (!counter) {
+          note("loop " + std::to_string(loop.spec.header) + " has no iteration counter");
+          continue;
+        }
+        bool entryLeaf = false;
+        for (Term leaf : loop.spec.entry)
+          entryLeaf = entryLeaf || terms.substitute(form.term, [&](Term l) -> Term {
+                                     return l == leaf ? terms.bv(APInt::getZero(l->sort.width)) : nullptr;
+                                   }) != form.term;
+        if (entryLeaf) {
+          note("the form of s" + std::to_string(form.variable) + " reads an entry value, which no level holds");
+          continue;
+        }
+        if (!taken.insert(form.variable).second)
+          continue;
+        Term counterLeaf = terms.state(*counter, program.state[*counter].sort);
+        if (counterLeaf->sort != loop.spec.iteration->sort) {
+          note("the counter's width differs from m's");
+          continue;
+        }
+        StateIdentity identity;
+        identity.state = form.variable;
+        identity.term = terms.substitute(form.term, [&](Term l) -> Term {
+          return l == loop.spec.iteration ? counterLeaf : nullptr;
+        });
+        identity.cut = loop.spec.header;
+        identity.origin = "proved closed form of s" + std::to_string(form.variable) + " over loop " +
+                          std::to_string(loop.spec.header) + ", m read as the counter s" +
+                          std::to_string(*counter) + " (" + form.reason + ")";
+        out.identities.push_back(std::move(identity));
+      }
+    }
+  std::string why;
+  for (const auto &[state, term] : entryDefinedState(program, request.closedForms.slice, why))
+    if (taken.insert(state).second) {
+      StateIdentity identity;
+      identity.state = state;
+      identity.term = term;
+      identity.origin = "defined by one term over parameters on every path from the entry";
+      out.identities.push_back(std::move(identity));
+    }
+  if (!why.empty())
+    note(why);
+  out.identityReason = notes;
+}
+
+} // namespace
+
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,
-                            const DomainAnalysisRequest &request, SmtBackend &backend) {
+                            const DomainAnalysisRequest &given, SmtBackend &backend) {
   DomainResult out;
+  DomainAnalysisRequest request = given;
   SynthesisResult search;
   if (request.family || request.segmented) {
     // No search: the given family stands in as the one candidate of each group.
@@ -50,6 +164,10 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
   enumeration.referenceFill = request.synthesis.referenceFill;
   enumeration.liveStatePoints = true;
   out.enumeration = enumerateDomain(program, certificate, enumeration, backend);
+  if (request.closedFormViews && program.isSupported()) {
+    gatherIdentities(program, request, backend, out);
+    request.proposal.identities = out.identities;
+  }
   for (const GroupSynthesis &found : search.groups) {
     GroupDomain group;
     group.group = found.group;
@@ -72,8 +190,70 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
                                                    request.proposal, entry.proposalReason)
                           : proposeDomain(program, out.enumeration, found.group, candidate.family, order,
                                           request.proposal, entry.proposalReason);
+      // Phase 4: the identities and the counter bounds as certificate invariants, if
+      // the certificate checker accepts them; the checkers below re-check whatever
+      // certificate they are handed.
+      const TerminationCertificate *use = certificate;
+      TerminationCertificate strengthened;
+      if (certificate && entry.request && request.closedFormViews && !out.identities.empty()) {
+        TermContext &terms = *program.terms;
+        strengthened = *certificate;
+        auto addAt = [&](int cut, Term fact, const std::string &text) {
+          bool placed = false;
+          for (auto &[at, invariant] : strengthened.invariants)
+            if (cut < 0 || (int)at == cut) {
+              invariant = terms.logicalAnd(invariant, fact);
+              placed = true;
+            }
+          if (placed)
+            entry.invariantsAdded.push_back(text);
+        };
+        for (const StateIdentity &identity : out.identities) {
+          Term leaf = terms.state(identity.state, program.state[identity.state].sort);
+          if (identity.term->sort != leaf->sort)
+            continue;
+          addAt(identity.cut, terms.icmp(Predicate::Eq, leaf, identity.term),
+                "s" + std::to_string(identity.state) + " = " + formatTerm(identity.term, 12) +
+                    (identity.cut < 0 ? " at every cut" : " at cut " + std::to_string(identity.cut)));
+        }
+        for (const GuardedLevel &level : entry.request->order.levels) {
+          Term value = level.value;
+          if (value->op != TermOp::State || value->index >= program.state.size() ||
+              program.state[value->index].kind != StateVar::IterationCounter)
+            continue;
+          if (!level.lower || !level.upper || !stateSupport(level.lower).empty() ||
+              !stateSupport(level.upper).empty() || level.lower->sort != value->sort ||
+              level.upper->sort != value->sort || level.isSigned)
+            continue;
+          // At the header the counter runs from lower to the exclusive bound itself,
+          // which is where the loop is left.
+          Term inRange = terms.logicalAnd(terms.icmp(Predicate::Ule, level.lower, value),
+                                          terms.icmp(Predicate::Ule, value, level.upper));
+          addAt(program.state[value->index].location, inRange,
+                formatTerm(level.lower, 12) + " <= s" + std::to_string(value->index) + " <= " +
+                    formatTerm(level.upper, 12) + " at cut " + std::to_string(program.state[value->index].location));
+        }
+        if (!entry.invariantsAdded.empty()) {
+          CheckOptions check;
+          check.scope = request.domain.scope;
+          check.limits = request.domain.termination;
+          check.authorized = request.domain.authorized;
+          CheckOutcome outcome = checkCertificate(program, strengthened, check, backend);
+          bool accepted = outcome.verdict.kind() == TerminationVerdict::ProvenTerminating ||
+                          outcome.verdict.kind() == TerminationVerdict::ProvenTerminatingIfDefined;
+          if (accepted) {
+            use = &strengthened;
+            entry.certificateStrengthened = true;
+            entry.certificateNote = "the certificate checker accepts the strengthened invariants: " +
+                                    outcome.verdict.reason();
+          } else {
+            entry.certificateNote = "the strengthened certificate was not accepted, the given one is used: " +
+                                    outcome.verdict.reason();
+          }
+        }
+      }
       if (entry.request)
-        entry.verdict = checkReduction(program, certificate, out.enumeration, found.group,
+        entry.verdict = checkReduction(program, use, out.enumeration, found.group,
                                        entry.family, order, *entry.request, request.domain, backend);
       group.candidates.push_back(std::move(entry));
     }
@@ -459,6 +639,23 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
         axes[names[axis]] = std::move(list);
       }
       json::Object entry{{"axes", std::move(axes)}, {"proposal_reason", c.proposalReason}};
+      bool anyProgram = false;
+      for (const auto &axis : c.family.programs)
+        for (const std::string &text : axis)
+          anyProgram = anyProgram || !text.empty();
+      if (anyProgram) {
+        // The statement programs behind the terms (docs/GENERALIZED_GEMM_STATEMENT_BV.md):
+        // text of the proposal, judged nowhere; "" marks a term built directly.
+        json::Object programs;
+        for (unsigned axis = 0; axis < 4; ++axis) {
+          json::Array texts;
+          for (const std::string &text : c.family.programs[axis])
+            texts.push_back(text);
+          programs[names[axis]] = std::move(texts);
+        }
+        entry["index_programs"] = std::move(programs);
+        entry["origin"] = c.family.origin;
+      }
       if (c.request)
         entry["request"] = requestJSON(*c.request);
       const ReductionVerdict &v = c.verdict;
@@ -488,6 +685,126 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
                                       {"float", factJSON(v.floatReorder())}};
       entry["transformation"] = v.transformation().name();
       entry["authorizes_lowering"] = false;
+      if (!result.identities.empty() || result.closedForms) {
+        // Phase 4 (I3): the three views as proposed, whether each is affine, and a
+        // summary that keeps three questions apart: is the decomposition verified,
+        // are the views proved and affine, and would Definition 4.5 (V) admit a
+        // lowering. The last is a statement about eligibility; this build
+        // authorizes nothing.
+        static const char *viewNames[] = {"C", "A", "B"};
+        json::Object views;
+        bool anyProposed = false, allProposed = true, allAffine = true, allProvedSymbolic = true, allProvedFinite = true;
+        bool anyIndexProgram = false;
+        // Phase 5 (G.5): a view dimension that is a slice variable with a while or table
+        // index program (no term, so no level identity) is recorded with that program
+        // and its status: a description of the view, judged by the closed-form checker
+        // at its own tier, not a proposal the domain checker proved.
+        auto programOf = [&](Term dimension) -> std::optional<json::Object> {
+          if (!result.closedForms || dimension->op != TermOp::State)
+            return std::nullopt;
+          for (const SliceSynthesis &slice : result.closedForms->slices)
+            for (const LoopSynthesis &loop : slice.loops)
+              for (const SynthesizedClosedForm &form : loop.forms)
+                if (form.variable == dimension->index && form.program && form.kind != "loop-free")
+                  return json::Object{{"kind", form.kind},
+                                      {"status", stringifyClosedFormStatus(form.status)},
+                                      {"program", form.text},
+                                      {"reason", form.reason},
+                                      {"loop", (int64_t)loop.spec.header}};
+          return std::nullopt;
+        };
+        unsigned siteOfGroup = group.group < enumeration.groups.size() && !enumeration.groups[group.group].sites.empty()
+                                   ? enumeration.groups[group.group].sites.front()
+                                   : UINT32_MAX;
+        for (unsigned view = 0; view < 3; ++view) {
+          json::Array forms;
+          bool affine = true, proposed = false;
+          if (c.request)
+            for (Term term : c.request->access[view]) {
+              proposed = true;
+              forms.push_back(termJSON(term));
+              affine = affine && affineOverLevels(term);
+            }
+          const Fact &symbolic = v.domainSymbolic().access()[view];
+          const Fact &finite = v.domainFinite().access()[view];
+          json::Object one{{"proposed", proposed}, {"forms", std::move(forms)},
+                           {"symbolic", factJSON(symbolic)}, {"finite", factJSON(finite)}};
+          one["affine"] = proposed ? json::Value(affine) : json::Value(nullptr);
+          if (siteOfGroup != UINT32_MAX) {
+            const MacSite &site = program.sites[siteOfGroup];
+            llvm::ArrayRef<Term> index = view == 0 ? (site.output ? llvm::ArrayRef<Term>(site.output->index) : llvm::ArrayRef<Term>())
+                                       : view == 1 ? llvm::ArrayRef<Term>(site.a.index)
+                                                   : llvm::ArrayRef<Term>(site.b.index);
+            json::Array programs;
+            bool anyProgram = false;
+            for (Term dimension : index) {
+              auto found = programOf(dimension);
+              anyProgram = anyProgram || found.has_value();
+              programs.push_back(found ? json::Value(std::move(*found)) : json::Value(nullptr));
+            }
+            if (anyProgram) {
+              anyIndexProgram = true;
+              one["index_programs"] = std::move(programs);
+              one["index_programs_note"] =
+                  "a dimension of this view is a slice variable described by a statement program with a "
+                  "loop or a table; such a view has no affine form, and the program's status is the "
+                  "closed-form checker's, not the domain checker's";
+            }
+          }
+          views[viewNames[view]] = std::move(one);
+          anyProposed = anyProposed || proposed;
+          allProposed = allProposed && proposed;
+          allAffine = allAffine && (proposed && affine);
+          allProvedSymbolic = allProvedSymbolic && symbolic.status == FactStatus::Proven;
+          allProvedFinite = allProvedFinite && finite.status == FactStatus::Proven;
+        }
+        entry["views"] = std::move(views);
+        bool decomposed = v.status() == ComputationStatus::Verified;
+        std::string decomposition = decomposed ? std::string("VERIFIED at ") + stringifyComputationTier(v.tier())
+                                               : stringifyComputationStatus(v.status());
+        std::string viewsProved = !anyProposed ? "NOT_PROPOSED"
+                                  : allProposed && allProvedSymbolic ? "PROVEN over the scope"
+                                  : allProposed && allProvedFinite ? "PROVEN at the enumerated points"
+                                                                   : "NOT_PROVEN";
+        bool reorder = (v.trivialReorder().status == FactStatus::Proven && v.trivialReorder().tier == (int)ComputationTier::Symbolic) ||
+                       (v.integerReorder().status == FactStatus::Proven && v.integerReorder().tier == (int)ComputationTier::Symbolic) ||
+                       (v.floatReorder().status == FactStatus::Proven && v.floatReorder().tier == (int)ComputationTier::Symbolic);
+        bool eligible = decomposed && v.tier() == ComputationTier::Symbolic && allProposed && allProvedSymbolic &&
+                        allAffine && v.domainSymbolic().exactOrder() && reorder;
+        std::string reason;
+        if (!decomposed)
+          reason = "the decomposition is not verified";
+        else if (v.tier() != ComputationTier::Symbolic)
+          reason = "the decomposition is verified at the enumerated points only";
+        else if (!allProposed && anyIndexProgram)
+          reason = "a view's dimension is a slice variable described by a statement program with a loop or a "
+                   "table (see views.*.index_programs), which has no affine form; Definition 4.5 (V) is not met";
+        else if (!allProposed)
+          reason = "a view has no proposed closed form";
+        else if (!allProvedSymbolic)
+          reason = "a view's closed form is not proved over the scope";
+        else if (!allAffine)
+          reason = "a view is not affine, which Definition 4.5 (V) requires";
+        else if (!v.domainSymbolic().exactOrder())
+          reason = "the order is not exact";
+        else if (!reorder)
+          reason = "no reorder fact (trivial, integer or float) is proved over the scope";
+        else
+          reason = "decomposition verified over the scope, every view proved and affine, a reorder fact proved; "
+                   "eligibility under Definition 4.5 (V), not an authorization";
+        json::Array added;
+        for (const std::string &text : c.invariantsAdded)
+          added.push_back(text);
+        entry["certificate"] = json::Object{{"strengthened", c.certificateStrengthened},
+                                            {"invariants_added", std::move(added)},
+                                            {"note", c.certificateNote}};
+        entry["recognition"] = json::Object{{"decomposition", decomposition},
+                                            {"views", viewsProved},
+                                            {"views_affine", allProposed ? json::Value(allAffine) : json::Value(nullptr)},
+                                            {"lowering_eligible", eligible},
+                                            {"reason", reason},
+                                            {"authorizes_lowering", false}};
+      }
       candidates.push_back(std::move(entry));
     }
     json::Object entry{{"group", (int64_t)group.group},
@@ -536,6 +853,20 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
     groups.push_back(std::move(entry));
   }
   out["groups"] = std::move(groups);
+  // Phase 4: printed only with closed-form views, so that no other output changes.
+  if (result.closedForms) {
+    json::Array identities;
+    for (const StateIdentity &identity : result.identities)
+      identities.push_back(json::Object{{"state", (int64_t)identity.state},
+                                        {"term", termJSON(identity.term)},
+                                        {"text", formatTerm(identity.term, 12)},
+                                        {"affine", affineOverLevels(identity.term)},
+                                        {"origin", identity.origin}});
+    out["identities"] = std::move(identities);
+    out["identity_notes"] = result.identityReason;
+    auto parsed = json::parse(closedFormsJSON(program, *result.closedForms));
+    out["closed_forms"] = parsed ? std::move(*parsed) : json::Value("unparsable");
+  }
   // G5b-M4a: printed only when sets were asked for, so that no other output changes.
   if (!result.sets.empty()) {
     json::Array sets;

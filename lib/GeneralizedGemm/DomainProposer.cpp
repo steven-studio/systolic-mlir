@@ -6,6 +6,7 @@
 #include "llvm/ADT/DenseSet.h"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <map>
 #include <set>
@@ -21,6 +22,10 @@ struct Sample {
   std::vector<APInt> parameters;
   std::vector<std::vector<APInt>> values; // [event][candidate]
   std::vector<std::vector<uint64_t>> cells;
+  // Phase 4 (I3): the recorded indices at each event, per view (0 output h, 1 A's f,
+  // 2 B's g), so that a proposed view can be checked against every sampled event of
+  // every site before it is proposed. Empty when the caller has none.
+  std::vector<std::array<std::vector<APInt>, 3>> access;
 };
 
 bool increasing(const GuardedOrder &order, const std::vector<unsigned> &use,
@@ -80,9 +85,10 @@ std::optional<GuardedOrder> directions(const std::vector<Term> &candidates,
   return order;
 }
 
-/// A bound fitted to one value per point: a constant, or a parameter plus a constant.
+/// A bound fitted to one value per point: a constant, a parameter plus a constant,
+/// or (phase 4) an identity's term over parameters alone plus a constant.
 Term fit(const SemanticProgram &program, const std::vector<std::pair<std::vector<APInt>, APInt>> &want,
-         unsigned width) {
+         unsigned width, const std::vector<StateIdentity> &identities = {}) {
   TermContext &terms = *program.terms;
   if (want.empty())
     return nullptr;
@@ -102,7 +108,42 @@ Term fit(const SemanticProgram &program, const std::vector<std::pair<std::vector
       return offset.isZero() ? terms.param(p.id, p.sort)
                              : terms.binary(TermOp::Add, terms.param(p.id, p.sort), terms.bv(offset));
   }
+  for (const StateIdentity &identity : identities) {
+    if (!identity.term || identity.term->sort != Sort::bv(width) || !stateSupport(identity.term).empty() ||
+        containsOp(identity.term, TermOp::Load))
+      continue;
+    std::optional<APInt> offset;
+    bool all = true;
+    for (const auto &[point, value] : want) {
+      auto base = evaluateLevelTerm(identity.term, point, {});
+      if (!base) {
+        all = false;
+        break;
+      }
+      APInt here = value - *base;
+      if (!offset)
+        offset = here;
+      all = all && *offset == here;
+    }
+    if (all && offset)
+      return offset->isZero() ? identity.term : terms.binary(TermOp::Add, identity.term, terms.bv(*offset));
+  }
   return nullptr;
+}
+
+/// Phase 4: reads every state variable with an identity as the identity's term, once
+/// (an identity's term may read a level, never another identified variable).
+Term applyIdentities(TermContext &terms, Term term, const std::vector<StateIdentity> &identities) {
+  if (identities.empty())
+    return term;
+  return terms.substitute(term, [&](Term leaf) -> Term {
+    if (leaf->op != TermOp::State)
+      return nullptr;
+    for (const StateIdentity &identity : identities)
+      if (identity.state == leaf->index && identity.term && identity.term->sort == leaf->sort)
+        return identity.term;
+    return nullptr;
+  });
 }
 
 /// Truth values of the program's conditions, as terms over level variables, from the
@@ -111,7 +152,8 @@ Term fit(const SemanticProgram &program, const std::vector<std::pair<std::vector
 /// proves or refutes like the rest. Congruences of each level by small moduli are
 /// added, for steps, where the level's width holds the modulus.
 std::vector<Term> conditionAtoms(const SemanticProgram &program, const GuardedOrder &order,
-                                 const std::map<unsigned, APInt> &constants, unsigned limit) {
+                                 const std::map<unsigned, APInt> &constants, unsigned limit,
+                                 const std::vector<StateIdentity> &identities = {}) {
   TermContext &terms = *program.terms;
   std::map<unsigned, unsigned> levelOfState;
   for (unsigned m = 0; m < order.levels.size(); ++m)
@@ -119,13 +161,14 @@ std::vector<Term> conditionAtoms(const SemanticProgram &program, const GuardedOr
       levelOfState[order.levels[m].value->index] = m;
   std::vector<Term> out;
   std::set<Term> seen;
-  std::function<void(Term)> collect = [&](Term term) {
-    if (out.size() >= limit || term->sort != Sort::bv(1) || !seen.insert(term).second)
+  std::function<void(Term)> collect = [&](Term original) {
+    if (out.size() >= limit || original->sort != Sort::bv(1) || !seen.insert(original).second)
       return;
-    if (term->op == TermOp::And || term->op == TermOp::Or || term->op == TermOp::Not ||
-        term->op == TermOp::Xor)
-      for (Term arg : term->args)
+    if (original->op == TermOp::And || original->op == TermOp::Or || original->op == TermOp::Not ||
+        original->op == TermOp::Xor)
+      for (Term arg : original->args)
         collect(arg);
+    Term term = applyIdentities(terms, original, identities);
     bool ok = true;
     for (unsigned id : stateSupport(term))
       ok = ok && (levelOfState.count(id) || constants.count(id));
@@ -303,7 +346,8 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
         failure = "no sample has events";
         return false;
       }
-      Term lower = fit(program, lows, width), upper = fit(program, highs, width);
+      Term lower = fit(program, lows, width, limits.identities),
+           upper = fit(program, highs, width, limits.identities);
       // A bound that moves with an outer level: for each value of that level the
       // extreme is the level's value plus one constant.
       auto fitOuter = [&](bool wantUpper) -> Term {
@@ -384,7 +428,7 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
       }
     }
     // The guard.
-    std::vector<Term> atoms = conditionAtoms(program, order, constants, limits.maxAtoms);
+    std::vector<Term> atoms = conditionAtoms(program, order, constants, limits.maxAtoms, limits.identities);
     auto holds = [&](Term atom, const Sample &s, size_t e) {
       std::vector<APInt> levels;
       for (unsigned c : use)
@@ -526,28 +570,72 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
       moving.push_back(m);
   }
   out.cellKey = moving.empty() ? std::vector<unsigned>{(unsigned)use.size() - 1} : moving;
-  // Access forms: the index terms, when they read only levels held in plain state.
+  // Access forms (views). First the index terms of the first site, with the
+  // identities applied, when they read only levels held in plain state; phase 4 adds
+  // a check of each proposed dimension against the recorded indices of every
+  // sampled event of every site, and, where the term fails or cannot be written over
+  // levels, the level whose values equal that dimension at every event. A view with a
+  // dimension no candidate fits is not proposed. All of it is a proposal.
   std::map<unsigned, unsigned> levelOfState;
   for (unsigned m = 0; m < out.order.levels.size(); ++m)
     if (out.order.levels[m].value->op == TermOp::State)
       levelOfState[out.order.levels[m].value->index] = m;
+  bool recorded = false;
+  for (const Sample &s : samples)
+    recorded = recorded || !s.access.empty();
+  auto fitsEvents = [&](unsigned view, unsigned d, Term form) {
+    if (!recorded)
+      return true;
+    for (const Sample &s : samples) {
+      if (s.access.size() != s.values.size())
+        return false;
+      for (size_t e = 0; e < s.values.size(); ++e) {
+        const std::vector<APInt> &index = s.access[e][view];
+        if (d >= index.size())
+          return false;
+        std::vector<APInt> levels;
+        for (unsigned c : use)
+          levels.push_back(s.values[e][c]);
+        auto value = evaluateLevelTerm(form, s.parameters, levels);
+        if (!value || *value != index[d])
+          return false;
+      }
+    }
+    return true;
+  };
   for (unsigned view = 0; view < 3 && site; ++view) {
     llvm::ArrayRef<Term> index = view == 0 ? llvm::ArrayRef<Term>(site->output->index)
                                : view == 1 ? llvm::ArrayRef<Term>(site->a.index)
                                            : llvm::ArrayRef<Term>(site->b.index);
     std::vector<Term> form;
     bool ok = true;
-    for (Term term : index) {
+    for (unsigned d = 0; d < index.size() && ok; ++d) {
+      Term term = applyIdentities(terms, index[d], limits.identities);
+      bool overLevels = !containsOp(term, TermOp::Load);
       for (unsigned id : stateSupport(term))
-        ok = ok && levelOfState.count(id);
-      if (!ok || containsOp(term, TermOp::Load))
-        break;
-      form.push_back(terms.substitute(term, [&](Term leaf) -> Term {
-        if (leaf->op != TermOp::State)
-          return nullptr;
-        unsigned m = levelOfState[leaf->index];
-        return levelVariable(terms, m, out.order.levels[m].value->sort);
-      }));
+        overLevels = overLevels && levelOfState.count(id);
+      Term chosen = nullptr;
+      if (overLevels) {
+        Term mapped = terms.substitute(term, [&](Term leaf) -> Term {
+          if (leaf->op != TermOp::State)
+            return nullptr;
+          unsigned m = levelOfState[leaf->index];
+          return levelVariable(terms, m, out.order.levels[m].value->sort);
+        });
+        if (fitsEvents(view, d, mapped))
+          chosen = mapped;
+      }
+      for (unsigned m = 0; !chosen && recorded && m < out.order.levels.size(); ++m) {
+        if (out.order.levels[m].value->sort != index[d]->sort)
+          continue;
+        Term y = levelVariable(terms, m, out.order.levels[m].value->sort);
+        if (fitsEvents(view, d, y))
+          chosen = y;
+      }
+      if (chosen)
+        form.push_back(chosen);
+      else
+        ok = false;
     }
     if (ok)
       out.access[view] = std::move(form);
@@ -607,10 +695,19 @@ std::optional<DomainRequest> proposeDomain(const SemanticProgram &program,
           row.push_back(value ? *value : APInt(term->sort.width, 0));
         }
         s.values.push_back(std::move(row));
+        const AccessEvent &event = domain.table().events()[e];
         std::vector<uint64_t> cell;
-        for (const APInt &value : domain.table().view(domain.table().events()[e].h))
+        for (const APInt &value : domain.table().view(event.h))
           cell.push_back(value.getZExtValue());
         s.cells.push_back(std::move(cell));
+        std::array<std::vector<APInt>, 3> access;
+        for (const APInt &value : domain.table().view(event.h))
+          access[0].push_back(value);
+        for (const APInt &value : domain.table().view(event.f))
+          access[1].push_back(value);
+        for (const APInt &value : domain.table().view(event.g))
+          access[2].push_back(value);
+        s.access.push_back(std::move(access));
       }
     }
     samples.push_back(std::move(s));
@@ -722,6 +819,7 @@ std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &progr
     unsigned site;
     std::vector<std::optional<APInt>> state;
     std::vector<uint64_t> cell;
+    std::array<std::vector<APInt>, 3> access; // h, f, g.
   };
   struct PointEvents {
     std::vector<APInt> parameters;
@@ -747,6 +845,9 @@ std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &progr
       row.state = states->states[e];
       for (const APInt &value : event.h)
         row.cell.push_back(value.getZExtValue());
+      row.access = {std::vector<APInt>(event.h.begin(), event.h.end()),
+                    std::vector<APInt>(event.f.begin(), event.f.end()),
+                    std::vector<APInt>(event.g.begin(), event.g.end())};
       pe.events.push_back(std::move(row));
       sequence.push_back(event.site);
     }
@@ -811,7 +912,7 @@ std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &progr
     // the ones it names; then other varying state as repeat candidates; state with one
     // value is a constant for the guards.
     auto coordinate = [&](const StateVar &s) {
-      return s.kind == StateVar::BlockArgument && s.loopCarried &&
+      return (s.kind == StateVar::BlockArgument || s.kind == StateVar::IterationCounter) && s.loopCarried &&
              (!logical || namedIn(*logical, terms.state(s.id, s.sort)));
     };
     for (const StateVar &s : program.state)
@@ -871,6 +972,7 @@ std::optional<DomainRequest> proposeSegmentedDomain(const SemanticProgram &progr
           row.push_back(*event.state[term->index]);
         s.values.push_back(std::move(row));
         s.cells.push_back(event.cell);
+        s.access.push_back(event.access);
       }
       samples.push_back(std::move(s));
     }

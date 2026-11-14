@@ -5,7 +5,9 @@
 //
 //===----------------------------------------------------------------------===//
 #include "GeneralizedGemm/PolynomialAdapter.h"
+#include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SemanticImport.h"
+#include "GeneralizedGemm/ClosedFormSynthesis.h"
 #include "GeneralizedGemm/SynthesisAnalysis.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 #include "GeneralizedGemm/Z3Backend.h"
@@ -39,10 +41,20 @@ static cl::opt<uint64_t> maxPoints("max-points", cl::init(256));
 static cl::opt<unsigned> maxLevel("max-level", cl::init(3));
 static cl::opt<int> fixedLevel("grammar-level", cl::init(-1),
                                cl::desc("use only this grammar level"));
+static cl::opt<bool> slicesFlag(
+    "slices", cl::init(false),
+    cl::desc("add the subscript slices, loop specifications and closed forms (phase 2)"));
+static cl::opt<bool> statementGrammar(
+    "statement-grammar", cl::init(false),
+    cl::desc("add the loop-free statement programs of Appendix G (bit-vector adaptation)"));
 static cl::opt<unsigned> maxCandidates("max-candidates", cl::init(5));
 static cl::opt<unsigned> maxRounds("max-rounds", cl::init(300));
 static cl::opt<uint64_t> referenceFill("reference-fill", cl::init(0));
 static cl::opt<bool> printEvents("print-events", cl::init(false));
+static cl::opt<bool> iterationCounters(
+    "iteration-counters", cl::init(false),
+    cl::desc("phase 4 (I1): add one ghost counter per loop header after the certificate is found; "
+             "the counters are state the search may choose"));
 static cl::opt<bool> noCertificate("no-certificate", cl::init(false),
                                    cl::desc("withhold the certificate, as a test"));
 static cl::opt<std::string> authorize(
@@ -125,17 +137,38 @@ int main(int argc, char **argv) {
     options.referenceFill = referenceFill;
     if (fixedLevel >= 0)
       options.grammar = GrammarSpec::atLevel(fixedLevel);
+    options.statementGrammar = statementGrammar;
     std::optional<TerminationCertificate> certificate;
     if (!noCertificate && program.isSupported()) {
       auto hints = polynomialRankHints(program, function, importOptions);
       certificate = analyzeTermination(program, backend, termination, hints).certificate;
     }
+    // Phase 4 (I1): the certificate is about the imported program; the counters are
+    // ghost state it never mentions, so it stays valid, and the checkers re-check it.
+    SemanticProgram original = program;
+    if (iterationCounters && program.isSupported())
+      addIterationCounters(program);
     SynthesisResult result = synthesizeProgram(
         program, certificate ? &*certificate : nullptr, options, backend);
     if (!first)
       llvm::outs() << ",\n";
     first = false;
-    llvm::outs() << toJSON(program, result, printEvents);
+    std::vector<std::pair<std::string, std::string>> extras;
+    std::vector<std::vector<llvm::APInt>> points;
+    for (const PointEvidence &point : result.enumeration.points)
+      points.push_back(point.parameters);
+    if (slicesFlag && program.isSupported()) {
+      ClosedFormOptions closed;
+      closed.scope = options.scope;
+      closed.solver = termination.limits.solver;
+      closed.referenceFill = referenceFill;
+      SliceSynthesisResult slices = synthesizeClosedForms(program, points, closed, backend);
+      extras.push_back({"closed_forms", closedFormsJSON(program, slices)});
+    }
+    if (iterationCounters && program.isSupported())
+      extras.push_back({"iteration_counters",
+                        iterationCountersJSON(original, program, points, referenceFill, options.limits)});
+    llvm::outs() << toJSON(program, result, printEvents, extras);
   }
   llvm::outs() << "\n]\n";
   return 0;

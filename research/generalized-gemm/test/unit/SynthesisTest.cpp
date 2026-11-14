@@ -3,6 +3,9 @@
 #include "GeneralizedGemm/SynthesisAnalysis.h"
 #include "GeneralizedGemm/CoordinateAnalysis.h"
 #include "GeneralizedGemm/CoverageSimulation.h"
+#include "GeneralizedGemm/ClosedFormSynthesis.h"
+#include "GeneralizedGemm/IndexProgramSemgus.h"
+#include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 #include "GeneralizedGemm/TerminationObligations.h"
@@ -323,6 +326,205 @@ func.func @two_loops(%a: memref<4xi32>, %b: memref<4xi32>, %c: memref<4xi32>) {
     %m = arith.muli %x, %y : i32
     %s = arith.addi %z, %m : i32
     memref.store %s, %c[%i] : memref<4xi32>
+  }
+  return
+}
+// Two phases of one counter t in [0, 2n): column 0 reduces in the order t, column
+// 1 in the order (t + 1 - n) mod n, so the reduction coordinate is the branch
+// K = if t < n then t else (t + 1 - n) mod n. The Appendix G example of this phase.
+func.func @rotated(%a: memref<9x9xi32>, %b: memref<9x2xi32>, %c: memref<9x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %two_n = arith.muli %n, %c2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %t = %c0 to %two_n step %c1 {
+      %p = arith.cmpi ult, %t, %n : index
+      scf.if %p {
+        %x = memref.load %a[%i, %t] : memref<9x9xi32>
+        %y = memref.load %b[%t, %c0] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c0] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<9x2xi32>
+      } else {
+        %u = arith.addi %t, %c1 : index
+        %v = arith.subi %u, %n : index
+        %r = arith.remui %v, %n : index
+        %x = memref.load %a[%i, %r] : memref<9x9xi32>
+        %y = memref.load %b[%r, %c1] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c1] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c1] : memref<9x2xi32>
+      }
+    }
+  }
+  return
+}
+// One counter, two phases, the second shifted: J = if t < n then 0 else 1 and
+// K = if t < n then t else t - n, which the expression grammar reaches at level 2 as
+// t div n and t mod n. The statement grammar reaches it at level 0, and the family
+// keeps a lexicographic order, so every later checker has its say on it.
+func.func @two_phase(%a: memref<9x9xi32>, %b: memref<9x2xi32>, %c: memref<9x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %two_n = arith.muli %n, %c2 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %t = %c0 to %two_n step %c1 {
+      %p = arith.cmpi ult, %t, %n : index
+      scf.if %p {
+        %x = memref.load %a[%i, %t] : memref<9x9xi32>
+        %y = memref.load %b[%t, %c0] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c0] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<9x2xi32>
+      } else {
+        %r = arith.subi %t, %n : index
+        %x = memref.load %a[%i, %r] : memref<9x9xi32>
+        %y = memref.load %b[%r, %c1] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c1] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c1] : memref<9x2xi32>
+      }
+    }
+  }
+  return
+}
+// Listing E.5 of the thesis as a reduction: the column i steps by 7 when even and
+// by 3 when odd, from 0, over k < n. Closed form i(m) = 5m + 2(m mod 2) (Prop. 4.3).
+func.func @parity(%a: memref<1x64xi32>, %b: memref<64x1xi32>, %c: memref<1x1xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c7 = arith.constant 7 : index
+  %i_final = scf.for %k = %c0 to %n step %c1 iter_args(%i = %c0) -> (index) {
+    %x = memref.load %a[%c0, %i] : memref<1x64xi32>
+    %y = memref.load %b[%i, %c0] : memref<64x1xi32>
+    %z = memref.load %c[%c0, %c0] : memref<1x1xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%c0, %c0] : memref<1x1xi32>
+    %r = arith.remui %i, %c2 : index
+    %even = arith.cmpi eq, %r, %c0 : index
+    %step = arith.select %even, %c7, %c3 : index
+    %next = arith.addi %i, %step : index
+    scf.yield %next : index
+  }
+  return
+}
+// Listing G.1 of the thesis as a reduction: a = (t + 1)! steps the column index
+// a mod 8 over t < n. No loop-free form of a is in the grammar; a while program is.
+func.func @factorial(%a: memref<1x8xi32>, %b: memref<8x1xi32>, %c: memref<1x1xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %c8 = arith.constant 8 : index
+  %final = scf.for %t = %c0 to %n step %c1 iter_args(%acc = %c1) -> (index) {
+    %col = arith.remui %acc, %c8 : index
+    %x = memref.load %a[%c0, %col] : memref<1x8xi32>
+    %y = memref.load %b[%col, %c0] : memref<8x1xi32>
+    %z = memref.load %c[%c0, %c0] : memref<1x1xi32>
+    %m = arith.muli %x, %y : i32
+    %s = arith.addi %z, %m : i32
+    memref.store %s, %c[%c0, %c0] : memref<1x1xi32>
+    %t2 = arith.addi %t, %c2 : index
+    %next = arith.muli %acc, %t2 : index
+    scf.yield %next : index
+  }
+  return
+}
+// A reduction loop with no plain counter: the column i steps by 7 when even and 3
+// when odd, from 0 while i < n, for each of two output columns j. K = i is a valid
+// label but no unit-step order; the iteration count m, with i = 5m + 2(m mod 2), is.
+func.func @history(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %j = %c0 to %c2 step %c1 {
+    %r:2 = scf.for %k = %c0 to %n step %c1 iter_args(%f = %c0, %g = %c0) -> (index, index) {
+      %x = memref.load %a[%c0, %f] : memref<1x64xi32>
+      %y = memref.load %b[%f, %j] : memref<64x2xi32>
+      %z = memref.load %c[%c0, %j] : memref<1x2xi32>
+      %m = arith.muli %x, %y : i32
+      %s = arith.addi %z, %m : i32
+      memref.store %s, %c[%c0, %j] : memref<1x2xi32>
+      %fg = arith.addi %f, %g : index
+      %nf = arith.addi %fg, %c1 : index
+      scf.yield %nf, %f : index, index
+    }
+  }
+  return
+}
+func.func @stepped(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi32>, %n: index) {
+  %zero = arith.constant 0 : index
+  cf.br ^outer(%zero : index)
+^outer(%j: index):
+  %two = arith.constant 2 : index
+  %g = arith.cmpi ult, %j, %two : index
+  cf.cond_br %g, ^start, ^exit
+^start:
+  %z0 = arith.constant 0 : index
+  cf.br ^inner(%z0 : index)
+^inner(%i: index):
+  %h = arith.cmpi ult, %i, %n : index
+  cf.cond_br %h, ^body, ^next
+^body:
+  %c0 = arith.constant 0 : index
+  %x = memref.load %a[%c0, %i] : memref<1x64xi32>
+  %y = memref.load %b[%i, %j] : memref<64x2xi32>
+  %w = memref.load %c[%c0, %j] : memref<1x2xi32>
+  %m = arith.muli %x, %y : i32
+  %s = arith.addi %w, %m : i32
+  memref.store %s, %c[%c0, %j] : memref<1x2xi32>
+  %c2 = arith.constant 2 : index
+  %c3 = arith.constant 3 : index
+  %c7 = arith.constant 7 : index
+  %r = arith.remui %i, %c2 : index
+  %even = arith.cmpi eq, %r, %c0 : index
+  %step = arith.select %even, %c7, %c3 : index
+  %ni = arith.addi %i, %step : index
+  cf.br ^inner(%ni : index)
+^next:
+  %one = arith.constant 1 : index
+  %nj = arith.addi %j, %one : index
+  cf.br ^outer(%nj : index)
+^exit:
+  return
+}
+// The same with the second half walked backwards: K = if t < n then t else 2n-1-t.
+// Here the expression grammar also has a coordinate, t * (2n-1-t), which the two
+// phases share: the statement grammar is not needed, and must not break anything.
+func.func @reversed(%a: memref<9x9xi32>, %b: memref<9x2xi32>, %c: memref<9x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %two_n = arith.muli %n, %c2 : index
+  %last = arith.subi %two_n, %c1 : index
+  scf.for %i = %c0 to %c2 step %c1 {
+    scf.for %t = %c0 to %two_n step %c1 {
+      %p = arith.cmpi ult, %t, %n : index
+      scf.if %p {
+        %x = memref.load %a[%i, %t] : memref<9x9xi32>
+        %y = memref.load %b[%t, %c0] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c0] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c0] : memref<9x2xi32>
+      } else {
+        %r = arith.subi %last, %t : index
+        %x = memref.load %a[%i, %r] : memref<9x9xi32>
+        %y = memref.load %b[%r, %c1] : memref<9x2xi32>
+        %z = memref.load %c[%i, %c1] : memref<9x2xi32>
+        %m = arith.muli %x, %y : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %c1] : memref<9x2xi32>
+      }
+    }
   }
   return
 }
@@ -1959,6 +2161,1517 @@ static void testSearch() {
       CHECK(independent[id]);
 }
 
+
+/// A backend that never decides: an unknown is never a proof.
+struct UnknownBackend : SmtBackend {
+  SmtResponse check(const std::string &, const SmtLimits &, bool) override {
+    SmtResponse r;
+    r.answer = SmtAnswer::Unknown;
+    r.detail = "stubbed";
+    return r;
+  }
+  std::string version() const override { return "unknown-stub"; }
+};
+/// A backend that claims a model it cannot show: sat with nothing in it.
+struct SatBackend : SmtBackend {
+  SmtResponse check(const std::string &, const SmtLimits &, bool) override {
+    SmtResponse r;
+    r.answer = SmtAnswer::Sat;
+    return r;
+  }
+  std::string version() const override { return "sat-stub"; }
+};
+
+/// Phase 2: the slice, the loop specification against the program, the closed
+/// forms against the specification, and what the three answers may be called.
+static void testSliceSpecification() {
+  Module m(programs);
+  auto evalForm = [](const SemanticProgram &p, const LoopSpecification &spec, Term form,
+                     uint64_t iteration, const std::vector<APInt> &parameters,
+                     const std::vector<APInt> &entry) -> std::optional<APInt> {
+    // The closed form's leaves: m, the entries; here no fixed variable is read.
+    EntryState e;
+    e.parameters = parameters;
+    Configuration c;
+    c.state.assign(p.state.size() + 1 + spec.carried.size(), std::nullopt);
+    c.shadow.assign(c.state.size(), false);
+    c.state[spec.iteration->index] = APInt(spec.iteration->sort.width, iteration);
+    for (unsigned k = 0; k < spec.entry.size(); ++k)
+      c.state[spec.entry[k]->index] = entry[k];
+    return evaluateTerm(p, e, c, form);
+  };
+
+  // gemm: three subscripts, each a loop variable; only the k loop is innermost.
+  {
+    SemanticProgram p = m.import("gemm", 8);
+    std::string why;
+    auto slices = sliceSubscripts(p, SliceLimits(), why);
+    CHECK(slices.has_value() && slices->size() == 3);
+    if (!slices)
+      return;
+    unsigned innermost = 0, outer = 0;
+    const IndexSlice *kSlice = nullptr;
+    const LoopSpecification *kSpec = nullptr;
+    for (const IndexSlice &slice : *slices) {
+      CHECK(slice.reason.empty() && slice.uses.size() == 2);
+      for (const LoopSpecification &spec : slice.loops) {
+        if (spec.reason.empty()) {
+          ++innermost;
+          kSlice = &slice;
+          kSpec = &spec;
+        } else {
+          CHECK(spec.reason == "the loop contains another loop" ||
+                spec.reason == "the loop assigns no variable of the slice");
+          ++outer;
+        }
+      }
+    }
+    // One innermost loop carries one slice variable: k.
+    CHECK(innermost == 1 && outer == 8);
+    if (!kSpec)
+      return;
+    CHECK(kSpec->innermost && kSpec->carried.size() == 1 && kSpec->paths.size() == 1);
+    // Nested, but entered with k := c0 on every path, and c0 is a materialized
+    // constant: phase 5 reads it as its definition, so the init is the constant 0
+    // (phase 2 had left it symbolic).
+    CHECK(kSpec->init[0] != nullptr && kSpec->init[0]->op == TermOp::Const && kSpec->init[0]->value.isZero());
+    CHECK(!kSpec->defined.empty());   // The step constant is read as its definition.
+    // The specification against the program: every arrival at the header obeys c
+    // and τ, and the subscript equals every recorded index.
+    ParameterScope scope = range(p, 1, 3);
+    uint64_t events = 0;
+    for (int64_t n = 1; n <= 3; ++n) {
+      EnumerationLimits limits;
+      auto states = eventStates(p, {APInt(8, n)}, 0, limits);
+      CHECK(states.has_value());
+      if (!states)
+        continue;
+      LoopReplay replay = replayLoop(p, *kSlice, *kSpec, states->entry, RunLimits());
+      CHECK(replay.status == RunStatus::Returned);
+      CHECK(replay.stepMismatches == 0 && replay.conditionMismatches == 0 && replay.undefined == 0);
+      CHECK(replay.subscriptMismatches == 0);
+      CHECK(replay.subscriptMatches == 2 * states->run.events.size()); // A's column and B's row.
+      CHECK(replay.traces.size() == (size_t)(3 * n)); // One activation per (i, j).
+      events += states->run.events.size();
+      // A forged specification is caught: a step off by one, a negated condition.
+      LoopSpecification forged = *kSpec;
+      forged.step[0] = p.terms->binary(TermOp::Add, forged.step[0], p.terms->bv(APInt(8, 1)));
+      LoopReplay off = replayLoop(p, *kSlice, forged, states->entry, RunLimits());
+      CHECK(off.stepMismatches == off.iterations && off.iterations > 0);
+      LoopSpecification negated = *kSpec;
+      negated.condition = p.terms->logicalNot(negated.condition);
+      LoopReplay wrong = replayLoop(p, *kSlice, negated, states->entry, RunLimits());
+      CHECK(wrong.conditionMismatches > 0);
+    }
+    CHECK(events > 0);
+    // Closed forms against (F.2): the right one, two wrong ones, and the answers
+    // that are not proofs.
+    TermContext &terms = *p.terms;
+    unsigned k = kSpec->carried[0];
+    // k = m is right (the init is 0). entry + m reads the entry leaf, which the
+    // known init leaves free: refuted at init with the entry in the model. 2m is
+    // refuted at the step.
+    Term right = kSpec->iteration;
+    Term withEntry = terms.binary(TermOp::Add, kSpec->entry[0], kSpec->iteration);
+    Term doubled = terms.binary(TermOp::Mul, kSpec->iteration, terms.bv(APInt(8, 2)));
+    SmtLimits limits;
+    auto checked = checkClosedForms(p, *kSpec, {{k, right}, {k, withEntry}, {k, doubled}}, scope,
+                                    limits, z3Backend);
+    CHECK(checked.size() == 3);
+    if (checked.size() == 3) {
+      CHECK(checked[0].status == ClosedFormStatus::Proved);
+      CHECK(checked[0].records.size() == 2 && checked[0].records[0].id == "CF-init" &&
+            checked[0].records[1].id == "CF-step" && checked[0].records[1].discharged);
+      CHECK(checked[0].reason.find("width 8") != std::string::npos);
+      CHECK(checked[1].status == ClosedFormStatus::Refuted && checked[1].reason.find("init") == 0);
+      bool entryInModel = false;
+      for (const auto &[name, value] : checked[1].model)
+        entryInModel = entryInModel || name == "entry_s" + std::to_string(k);
+      CHECK(entryInModel);
+      CHECK(checked[2].status == ClosedFormStatus::Refuted && checked[2].reason.find("step") == 0);
+      bool mInModel = false;
+      for (const auto &[name, value] : checked[2].model)
+        mInModel = mInModel || name == "m";
+      CHECK(mInModel);
+      // The refuting model, run through the specification, disagrees with the form.
+      if (mInModel) {
+        uint64_t mv = 0;
+        std::vector<APInt> entry{APInt(8, 0)}, parameters{APInt(8, 2)};
+        std::vector<APInt> fixedValues;
+        for (unsigned v : kSpec->fixed)
+          fixedValues.push_back(APInt::getZero(p.state[v].sort.width));
+        for (const auto &[name, value] : checked[2].model) {
+          if (name == "m") mv = value.getZExtValue();
+          if (name == "entry_s" + std::to_string(k)) entry[0] = value;
+          if (name == "p0") parameters[0] = value;
+          for (unsigned f = 0; f < kSpec->fixed.size(); ++f)
+            if (name == "s" + std::to_string(kSpec->fixed[f])) fixedValues[f] = value;
+        }
+        auto trace = runSpecification(p, *kSpec, parameters, entry, fixedValues, mv + 1);
+        CHECK(trace.has_value());
+        if (trace && trace->states.size() > mv + 1) {
+          auto predicted = evalForm(p, *kSpec, doubled, mv + 1, parameters, entry);
+          CHECK(predicted && *predicted != trace->states[mv + 1][0]);
+          auto rightValue = evalForm(p, *kSpec, right, mv + 1, parameters, entry);
+          CHECK(rightValue && *rightValue == trace->states[mv + 1][0]);
+        }
+      }
+    }
+    UnknownBackend unknown;
+    auto undecided = checkClosedForms(p, *kSpec, {{k, right}}, scope, limits, unknown);
+    CHECK(undecided.size() == 1 && undecided[0].status == ClosedFormStatus::Unknown);
+    CHECK(undecided.size() == 1 && undecided[0].records.size() == 2 &&
+          !undecided[0].records[0].discharged && undecided[0].records[0].evidence == "stubbed");
+    SatBackend sat;
+    auto claimed = checkClosedForms(p, *kSpec, {{k, right}}, scope, limits, sat);
+    CHECK(claimed.size() == 1 && claimed[0].status == ClosedFormStatus::Refuted &&
+          claimed[0].model.empty());
+    // A form for a variable the loop does not carry, and one of the wrong sort.
+    auto other = checkClosedForms(p, *kSpec, {{k + 100, right}}, scope, limits, z3Backend);
+    CHECK(other.size() == 1 && other[0].status == ClosedFormStatus::Unknown);
+
+    // The synthesizer finds and proves k = m from the sampled traces (the init is
+    // the constant 0, so no entry leaf is offered).
+    ClosedFormOptions options;
+    options.scope = scope;
+    std::vector<std::vector<APInt>> points{{APInt(8, 1)}, {APInt(8, 2)}, {APInt(8, 3)}};
+    SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+    CHECK(result.reason.empty() && result.slices.size() == 3);
+    unsigned proved = 0;
+    for (const SliceSynthesis &slice : result.slices)
+      for (const LoopSynthesis &loop : slice.loops)
+        for (const SynthesizedClosedForm &form : loop.forms) {
+          CHECK(form.status == ClosedFormStatus::Proved);
+          CHECK(form.rounds >= 1);
+          CHECK(form.text == "v0 := m ; return v0");
+          CHECK(loop.stepMismatches == 0 && loop.subscriptMismatches == 0 && loop.points == 3);
+          ++proved;
+        }
+    CHECK(proved == 1);
+    std::string json = closedFormsJSON(p, result);
+    CHECK(json.find("\"status\": \"PROVED\"") != std::string::npos);
+    CHECK(json.find("\"step_mismatches\": 0") != std::string::npos);
+    SynthesisResult none;
+    CHECK(toJSON(p, none, false, "closed_forms", json).find("\"closed_forms\": {") != std::string::npos);
+    CHECK(toJSON(p, none, false).find("closed_forms") == std::string::npos);
+    CHECK(toJSON(p, none, false, "closed_forms", "{not json").find("unparsable") != std::string::npos);
+  }
+
+  // parity: Listing E.5 as a loop at depth 0, so the init is the constant 0 and
+  // the closed form is the thesis's 5m + 2(m mod 2), here as a branch at width 8.
+  {
+    SemanticProgram p = m.import("parity", 8);
+    ParameterScope scope = range(p, 2, 6);
+    ClosedFormOptions options;
+    options.scope = scope;
+    std::vector<std::vector<APInt>> points;
+    for (int64_t n = 2; n <= 6; ++n)
+      points.push_back({APInt(8, n)});
+    SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+    CHECK(result.reason.empty());
+    const LoopSynthesis *loop = nullptr;
+    for (const SliceSynthesis &slice : result.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        if (l.spec.reason.empty() && l.spec.carried.size() == 2)
+          loop = &l;
+    CHECK(loop != nullptr);
+    if (!loop)
+      return;
+    CHECK(loop->stepMismatches == 0 && loop->conditionMismatches == 0 && loop->subscriptMismatches == 0);
+    CHECK(loop->subscriptMatches == 40 && loop->points == 5 && loop->activations == 5);
+    for (const SynthesizedClosedForm &form : loop->forms) {
+      CHECK(form.status == ClosedFormStatus::Proved);
+      CHECK(form.rounds == 1); // The samples alone determine both forms.
+    }
+    // Which variable is the column: the one whose form has the branch.
+    const SynthesizedClosedForm *column = nullptr;
+    for (const SynthesizedClosedForm &form : loop->forms)
+      if (form.text.find("if ") == 0)
+        column = &form;
+    CHECK(column != nullptr);
+    if (column) {
+      CHECK(column->text == "if (m mod 2) = 0 then (v0 := (5 * m)) else (v0 := (2 + (5 * m))) ; return v0");
+      uint64_t expected[] = {0, 7, 10, 17, 20, 27, 30};
+      for (uint64_t mv = 0; mv < 7; ++mv) {
+        auto value = evalForm(p, loop->spec, column->term, mv, {APInt(8, 6)},
+                              {APInt(8, 0), APInt(8, 0)});
+        CHECK(value && value->getZExtValue() == expected[mv]);
+      }
+      // 5m + 2(m mod 2) over the integers wraps at 8 bits from m = 51: the proof is
+      // at the width, where the program wraps the same way; it says nothing about Z.
+      auto wrapped = evalForm(p, loop->spec, column->term, 52, {APInt(8, 6)}, {APInt(8, 0), APInt(8, 0)});
+      CHECK(wrapped && wrapped->getZExtValue() == (5 * 52) % 256);
+    }
+    // The other form is the counter: m.
+    for (const SynthesizedClosedForm &form : loop->forms)
+      if (&form != column)
+        CHECK(form.text == "v0 := m ; return v0");
+    // Under a backend that never decides, nothing is proved and the record says so.
+    UnknownBackend unknown;
+    SliceSynthesisResult undecided = synthesizeClosedForms(p, points, options, unknown);
+    for (const SliceSynthesis &slice : undecided.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms) {
+          CHECK(form.status == ClosedFormStatus::Unknown);
+          CHECK(form.status != ClosedFormStatus::Proved);
+        }
+    std::string json = closedFormsJSON(p, undecided);
+    CHECK(json.find("PROVED") == std::string::npos && json.find("UNKNOWN") != std::string::npos);
+  }
+
+  // two_phase and rotated: the counter t of the inner loop, entry + m, proved; the
+  // slice of the rotated subscript names t and n.
+  for (const char *name : {"two_phase", "rotated"}) {
+    SemanticProgram p = m.import(name, 8);
+    ParameterScope scope = range(p, 2, 3);
+    ClosedFormOptions options;
+    options.scope = scope;
+    std::vector<std::vector<APInt>> points{{APInt(8, 2)}, {APInt(8, 3)}};
+    SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+    unsigned proved = 0, specs = 0;
+    for (const SliceSynthesis &slice : result.slices)
+      for (const LoopSynthesis &loop : slice.loops) {
+        if (!loop.spec.reason.empty())
+          continue;
+        ++specs;
+        CHECK(loop.stepMismatches == 0 && loop.conditionMismatches == 0 && loop.subscriptMismatches == 0);
+        CHECK(loop.spec.paths.size() == 2); // The two phases are two paths of one iteration.
+        for (const SynthesizedClosedForm &form : loop.forms)
+          proved += form.status == ClosedFormStatus::Proved;
+      }
+    CHECK(specs == 2 && proved == 2);
+  }
+}
+
+
+/// Phase 3: while programs for a carried variable with no loop-free form, judged at
+/// the finite tier by fuel-bounded execution; a cut run is Unknown and no status
+/// speaks of termination.
+static void testWhilePrograms() {
+  Module m(programs);
+  // factorial: a = (t + 1)!, Listing G.1 of the thesis. No loop-free form within the
+  // grammar; the while program r := 0 ; a := 1 ; while r < m do (a := a * (r + 2) ;
+  // r := r + 1) is found from the sampled steps and equals every sampled iteration.
+  SemanticProgram p = m.import("factorial", 16);
+  ParameterScope scope = range(p, 1, 5);
+  ClosedFormOptions options;
+  options.scope = scope;
+  std::vector<std::vector<APInt>> points;
+  for (int64_t n = 1; n <= 5; ++n)
+    points.push_back({APInt(16, n)});
+  SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+  const LoopSynthesis *loop = nullptr;
+  for (const SliceSynthesis &slice : result.slices)
+    for (const LoopSynthesis &l : slice.loops)
+      if (l.spec.reason.empty() && l.spec.carried.size() == 2)
+        loop = &l;
+  CHECK(loop != nullptr);
+  if (!loop)
+    return;
+  CHECK(loop->stepMismatches == 0 && loop->subscriptMismatches == 0 && loop->points == 5);
+  const SynthesizedClosedForm *fact = nullptr, *counter = nullptr;
+  for (const SynthesizedClosedForm &form : loop->forms)
+    (form.kind == "while" ? fact : counter) = &form;
+  CHECK(fact && counter);
+  if (!fact || !counter)
+    return;
+  // Phase 4: the program of the fixed-counter template passes W-shape, W-init,
+  // W-step and W-term, and the form of t it substitutes is proved, so it is PROVED.
+  CHECK(fact->status == ClosedFormStatus::Proved);
+  CHECK(fact->symbolicRounds == 1);
+  CHECK(fact->reason.find("shape, init, step and termination discharged") != std::string::npos);
+  CHECK(fact->reason.find("fixed-counter template") != std::string::npos);
+  CHECK(fact->records.size() == 4 && fact->records[0].id == "W-shape" && fact->records[0].expected == "structural" &&
+        fact->records[1].id == "W-init" && fact->records[2].id == "W-step" && fact->records[3].id == "W-term");
+  for (const ObligationRecord &record : fact->records)
+    CHECK(record.discharged);
+  CHECK(fact->program.has_value() && !fact->program->loopFree());
+  CHECK(fact->text.find("while v0 < m do") != std::string::npos);
+  CHECK(fact->rounds >= 2 && fact->counterexampleTraces >= 1); // CEGIS from the first point's seeds.
+  CHECK(fact->fuelCuts == 0);
+  // The program computes (m + 1)! at 16 bits on inputs the traces never had.
+  if (fact->program) {
+    uint64_t expected = 1;
+    for (uint64_t mv = 0; mv <= 7; ++mv) {
+      std::vector<APInt> inputs;
+      for (Term leaf : fact->program->inputs)
+        inputs.push_back(leaf == loop->spec.iteration ? APInt(16, mv) : APInt::getZero(leaf->sort.width));
+      IndexRun run = runIndexProgram(*fact->program, inputs);
+      CHECK(run.status == IndexRunStatus::Returned && run.value.getZExtValue() == expected);
+      expected *= mv + 2;
+    }
+    // 9! does not fit 16 bits: the program wraps as the machine does. 8! = 40320 fits.
+    std::vector<APInt> inputs;
+    for (Term leaf : fact->program->inputs)
+      inputs.push_back(leaf == loop->spec.iteration ? APInt(16, 8) : APInt::getZero(leaf->sort.width));
+    IndexRun run = runIndexProgram(*fact->program, inputs);
+    CHECK(run.status == IndexRunStatus::Returned && run.value.getZExtValue() == (362880 % 65536));
+  }
+  // The counter t: its loop-free form m is proved with a read as a free leaf (the
+  // obligation holds for every value of a, so for the actual one).
+  CHECK(counter->kind == "loop-free" && counter->status == ClosedFormStatus::Proved);
+  CHECK(counter->text == "v0 := m ; return v0");
+  // JSON names the kind, the status and the symbolic round.
+  std::string json = closedFormsJSON(p, result);
+  CHECK(json.find("\"kind\": \"while\"") != std::string::npos);
+  CHECK(json.find("\"status\": \"PROVED\"") != std::string::npos);
+  CHECK(json.find("\"symbolic_rounds\": 1") != std::string::npos);
+  CHECK(json.find("W-term") != std::string::npos);
+  // Not proved means not proved: a stub that never decides leaves the while
+  // program SAMPLE_CONSISTENT with the solver's word in the reason; a stub that
+  // says sat without a model refutes nothing and proves nothing.
+  {
+    UnknownBackend undecided;
+    SliceSynthesisResult u = synthesizeClosedForms(p, points, options, undecided);
+    unsigned whiles = 0;
+    for (const SliceSynthesis &slice : u.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms) {
+          CHECK(form.status != ClosedFormStatus::Proved);
+          if (form.kind == "while") {
+            ++whiles;
+            CHECK(form.status == ClosedFormStatus::SampleConsistent);
+            CHECK(form.reason.find("not a proof") != std::string::npos);
+            CHECK(form.reason.find("symbolic: the solver did not decide") != std::string::npos);
+            CHECK(form.symbolicRounds == 1);
+          }
+        }
+    CHECK(whiles == 1);
+    SatBackend liar;
+    SliceSynthesisResult sat = synthesizeClosedForms(p, points, options, liar);
+    for (const SliceSynthesis &slice : sat.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms)
+          CHECK(form.status != ClosedFormStatus::Proved);
+  }
+
+  // The finite-tier check itself: a wrong program is refuted at the first sampled
+  // iteration it misses, with that sample as the model; a run cut by the fuel is
+  // Unknown and not a refutation.
+  {
+    const LoopSpecification &spec = loop->spec;
+    unsigned k = fact->variable == spec.carried[0] ? 0 : 1;
+    std::vector<LoopTrace> traces;
+    EnumerationLimits limits;
+    for (const auto &point : points) {
+      auto states = eventStates(p, point, 0, limits);
+      CHECK(states.has_value());
+      if (!states)
+        continue;
+      LoopReplay replay = replayLoop(p, result.slices[1].slice, spec, states->entry, RunLimits());
+      for (LoopTrace &trace : replay.traces)
+        traces.push_back(std::move(trace));
+    }
+    CHECK(traces.size() == 5);
+    CheckedClosedForm good = checkProgramOnTraces(p, spec, k, *fact->program, traces, 1u << 12);
+    CHECK(good.status == ClosedFormStatus::SampleConsistent);
+    IndexProgram doubling;
+    for (Term leaf : fact->program->inputs)
+      doubling.input(leaf);
+    unsigned r = doubling.local(16), v = doubling.local(16);
+    unsigned mIn = 0;
+    for (unsigned n = 0; n < doubling.inputs.size(); ++n)
+      if (doubling.inputs[n] == spec.iteration)
+        mIn = n;
+    doubling.body = doubling.seq(
+        doubling.seq(doubling.assign(r, doubling.constant(APInt(16, 0))), doubling.assign(v, doubling.constant(APInt(16, 1)))),
+        doubling.whileDo(doubling.ult(doubling.localExpr(r), doubling.inputExpr(mIn)),
+                         doubling.seq(doubling.assign(v, doubling.mul(doubling.localExpr(v), doubling.constant(APInt(16, 2)))),
+                                      doubling.assign(r, doubling.add(doubling.localExpr(r), doubling.constant(APInt(16, 1)))))));
+    doubling.result = doubling.localExpr(v);
+    CheckedClosedForm wrong = checkProgramOnTraces(p, spec, k, doubling, traces, 1u << 12);
+    CHECK(wrong.status == ClosedFormStatus::Refuted);
+    bool mAtTwo = false;
+    for (const auto &[name, value] : wrong.model)
+      mAtTwo = mAtTwo || (name == "m" && value.getZExtValue() == 2); // 2! = 2 = 2^1 agrees; 3! = 6 != 4.
+    CHECK(mAtTwo);
+    CheckedClosedForm cut = checkProgramOnTraces(p, spec, k, *fact->program, traces, 3);
+    CHECK(cut.status == ClosedFormStatus::Unknown && cut.reason.find("fuel") != std::string::npos);
+    CHECK(cut.reason.find("no claim about termination") != std::string::npos);
+    // Phase 4, the W obligations themselves. The doubling program has the shape and
+    // the init; its step has a model (a free, r = m), which is reported as Unknown with
+    // the model, not as a refutation, until a run replays it. The template's
+    // termination obligation holds for any body.
+    {
+      SmtLimits limits;
+      ClosedForm tForm{spec.carried[1 - k], counter->term, nullptr};
+      std::vector<CheckedClosedForm> w =
+          checkClosedForms(p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &doubling}}, scope, limits, z3Backend);
+      CHECK(w.size() == 2 && w[1].status == ClosedFormStatus::Unknown && !w[1].model.empty());
+      CHECK(w[1].reason.find("free") != std::string::npos && w[1].reason.find("neither a proof nor a refutation") != std::string::npos);
+      CHECK(w[1].records.size() == 4 && w[1].records[0].discharged && w[1].records[1].discharged &&
+            !w[1].records[2].discharged && w[1].records[3].id == "W-term" && w[1].records[3].discharged);
+      CHECK(llvm::is_contained(w[1].freeLeaves, spec.carried[k]));
+      // The right program, alone: its step reads t, whose form is not given, so t is
+      // free as well, and the step still holds (a * (2 + m) against a * (t + 2) needs
+      // t = m): not proved, Unknown with a model.
+      std::vector<CheckedClosedForm> alone =
+          checkClosedForms(p, spec, {ClosedForm{spec.carried[k], nullptr, &*fact->program}}, scope, limits, z3Backend);
+      CHECK(alone.size() == 1 && alone[0].status != ClosedFormStatus::Proved);
+      // With t's form: proved, and it depends on t.
+      std::vector<CheckedClosedForm> with =
+          checkClosedForms(p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &*fact->program}}, scope, limits, z3Backend);
+      CHECK(with.size() == 2 && with[1].status == ClosedFormStatus::Proved && with[1].discharged);
+      CHECK(with[1].dependsOn == std::vector<unsigned>{spec.carried[1 - k]});
+      // With a wrong form of t substituted (t = 2m), a's own obligations fail or a's
+      // proof is demoted: never PROVED through an unproved dependence.
+      Term wrongT = p.terms->binary(TermOp::Mul, spec.iteration, p.terms->bv(APInt(16, 2)));
+      std::vector<CheckedClosedForm> demoted = checkClosedForms(
+          p, spec, {ClosedForm{spec.carried[1 - k], wrongT, nullptr}, ClosedForm{spec.carried[k], nullptr, &*fact->program}},
+          scope, limits, z3Backend);
+      CHECK(demoted.size() == 2 && demoted[0].status != ClosedFormStatus::Proved &&
+            demoted[1].status != ClosedFormStatus::Proved);
+      // Outside the template: a body that reads the bound m is refused at W-shape.
+      IndexProgram readsBound = *fact->program;
+      {
+        std::string why;
+        auto shape = matchCounterTemplate(readsBound, why);
+        CHECK(shape.has_value());
+        if (shape) {
+          unsigned mIn2 = shape->bound;
+          // v := v + m inside the body.
+          unsigned bump = readsBound.assign(shape->value, readsBound.add(readsBound.localExpr(shape->value),
+                                                                          readsBound.inputExpr(mIn2)));
+          unsigned loopStmt = readsBound.stmts[readsBound.body].b;
+          unsigned step = readsBound.stmts[loopStmt].a;
+          readsBound.stmts[step].a = readsBound.seq(readsBound.stmts[step].a, bump);
+          std::string again;
+          CHECK(!matchCounterTemplate(readsBound, again).has_value());
+          CHECK(again.find("reads the bound") != std::string::npos);
+          std::vector<CheckedClosedForm> refused = checkClosedForms(
+              p, spec, {tForm, ClosedForm{spec.carried[k], nullptr, &readsBound}}, scope, limits, z3Backend);
+          CHECK(refused.size() == 2 && refused[1].status == ClosedFormStatus::Unknown);
+          CHECK(refused[1].reason.find("not of a supported template") != std::string::npos);
+          CHECK(refused[1].records.size() == 1 && !refused[1].records[0].discharged);
+        }
+      }
+      // The coupling lemma on this program, as test evidence: the run on m + 1 is the
+      // run on m followed by one body step, for m = 0..6.
+      for (uint64_t mv = 0; mv <= 6; ++mv) {
+        std::vector<APInt> inputs, inputsNext;
+        for (Term leaf : fact->program->inputs) {
+          inputs.push_back(leaf == spec.iteration ? APInt(16, mv) : APInt::getZero(leaf->sort.width));
+          inputsNext.push_back(leaf == spec.iteration ? APInt(16, mv + 1) : APInt::getZero(leaf->sort.width));
+        }
+        IndexRun at = runIndexProgram(*fact->program, inputs), next = runIndexProgram(*fact->program, inputsNext);
+        CHECK(at.status == IndexRunStatus::Returned && next.status == IndexRunStatus::Returned);
+        CHECK(next.value == at.value * APInt(16, 2 + mv));
+      }
+    }
+    // A fuel too small for the search: no while program is consistent or proved;
+    // the loop-free form of t, which no fuel touches, is proved as before.
+    ClosedFormOptions starved = options;
+    starved.programFuel = 3;
+    SliceSynthesisResult cutResult = synthesizeClosedForms(p, points, starved, z3Backend);
+    for (const SliceSynthesis &slice : cutResult.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms) {
+          CHECK(form.status != ClosedFormStatus::SampleConsistent);
+          if (form.variable == fact->variable) {
+            CHECK(form.status != ClosedFormStatus::Proved);
+            if (form.kind == "while")
+              CHECK(form.fuelCuts > 0 || form.status == ClosedFormStatus::Unknown);
+          }
+        }
+    // Off: no while program is tried; a has no loop-free form and stays Unknown.
+    ClosedFormOptions off = options;
+    off.whilePrograms = false;
+    SliceSynthesisResult plain = synthesizeClosedForms(p, points, off, z3Backend);
+    for (const SliceSynthesis &slice : plain.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms) {
+          CHECK(form.kind == "loop-free");
+          if (form.variable == fact->variable)
+            CHECK(form.status == ClosedFormStatus::Unknown && form.term == nullptr);
+        }
+    // Symbolic proving off: the while program stays at the finite tier.
+    ClosedFormOptions finiteOnly = options;
+    finiteOnly.proveWhile = false;
+    SliceSynthesisResult finite = synthesizeClosedForms(p, points, finiteOnly, z3Backend);
+    for (const SliceSynthesis &slice : finite.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms)
+          if (form.kind == "while") {
+            CHECK(form.status == ClosedFormStatus::SampleConsistent && form.symbolicRounds == 0);
+            CHECK(form.reason.find("not a proof") != std::string::npos);
+          }
+  }
+
+  // stepped: the reduction loop has no plain counter and the entry into it is the
+  // constant 0 from the outer loop, so the init is known. Over a scope wide enough
+  // for five iterations, the loop-free branch 5m + 2(m mod 2) is proved and no while
+  // program is needed; over a narrow scope the samples underdetermine the form.
+  {
+    SemanticProgram q = m.import("stepped", 8);
+    ParameterScope wide = range(q, 8, 40);
+    ClosedFormOptions o;
+    o.scope = wide;
+    std::vector<std::vector<APInt>> pts;
+    for (int64_t n = 8; n <= 40; n += 4)
+      pts.push_back({APInt(8, n)});
+    SliceSynthesisResult r = synthesizeClosedForms(q, pts, o, z3Backend);
+    unsigned proved = 0;
+    for (const SliceSynthesis &slice : r.slices)
+      for (const LoopSynthesis &l : slice.loops) {
+        if (!l.spec.reason.empty())
+          continue;
+        CHECK(l.spec.init.size() == 1 && l.spec.init[0] != nullptr);
+        CHECK(l.stepMismatches == 0 && l.subscriptMismatches == 0);
+        for (const SynthesizedClosedForm &form : l.forms) {
+          CHECK(form.kind == "loop-free" && form.status == ClosedFormStatus::Proved);
+          CHECK(form.text.find("mod 2") != std::string::npos);
+          proved += form.status == ClosedFormStatus::Proved;
+        }
+      }
+    CHECK(proved == 1);
+    // A narrow scope, n in [8, 12]: three iterations at most, and the samples
+    // underdetermine the form. The loop-free candidate's step obligation has a
+    // model at an iteration the loop never reaches (m = 185 at n = 12); the
+    // specification's own run from that model agrees with the candidate, so the
+    // model refutes nothing and the candidate is UNKNOWN, neither PROVED nor REFUTED.
+    ParameterScope narrow = range(q, 8, 12);
+    ClosedFormOptions no;
+    no.scope = narrow;
+    std::vector<std::vector<APInt>> few;
+    for (int64_t n = 8; n <= 12; ++n)
+      few.push_back({APInt(8, n)});
+    SliceSynthesisResult nr = synthesizeClosedForms(q, few, no, z3Backend);
+    unsigned judged = 0;
+    for (const SliceSynthesis &slice : nr.slices)
+      for (const LoopSynthesis &l : slice.loops)
+        for (const SynthesizedClosedForm &form : l.forms)
+          if (l.spec.reason.empty()) {
+            ++judged;
+            CHECK(form.status != ClosedFormStatus::Proved);
+            CHECK(form.status == ClosedFormStatus::Unknown);
+            CHECK(form.reason.find("does not replay into a disagreement") != std::string::npos);
+          }
+    CHECK(judged == 1);
+  }
+}
+
+/// Phase 5, step 1 (Appendix G.5): arrays in the grammar and the semantics. The
+/// lattice program P_L of (G.4) is written by hand here, as the thesis wrote it,
+/// and checked against the rules: it is a REFERENCE for the semantics, not a
+/// synthesis result, and the record keeps the two apart.
+static void testArrays() {
+  TermContext terms;
+  const unsigned w = 32;
+  Term mIn = terms.param(0, Sort::bv(w)), nIn = terms.param(1, Sort::bv(w));
+  auto run = [&](const IndexProgram &p, std::vector<APInt> inputs, std::vector<IndexTable> tables = {},
+                 uint64_t fuel = 1u << 20) {
+    IndexRunLimits limits;
+    limits.fuel = fuel;
+    return runIndexProgram(p, inputs, limits, tables);
+  };
+  // P_L: i := 0; while i < M do (dp[i][0] := 1; i := i + 1);
+  //      j := 0; while j < N do (dp[0][j] := 1; j := j + 1);
+  //      i := 1; while i < M do (j := 1; while j < N do (dp[i][j] := dp[i-1][j] + dp[i][j-1]; j := j + 1); i := i + 1);
+  //      return dp[M-1][N-1]
+  auto lattice = [&](bool boundaryLoops, bool badWrite, bool badRank) {
+    IndexProgram p;
+    unsigned M = p.input(mIn), N = p.input(nIn);
+    unsigned i = p.local(w), j = p.local(w);
+    unsigned dp = p.array(w, w, {p.inputExpr(M), p.inputExpr(N)});
+    auto k = [&](uint64_t v) { return p.constant(APInt(w, v)); };
+    unsigned one = k(1);
+    unsigned rows = p.whileDo(p.ult(p.localExpr(i), p.inputExpr(M)),
+                              p.seq(p.write(dp, {p.localExpr(i), k(0)}, one),
+                                    p.assign(i, p.add(p.localExpr(i), k(1)))));
+    unsigned cols = p.whileDo(p.ult(p.localExpr(j), p.inputExpr(N)),
+                              p.seq(p.write(dp, {k(0), p.localExpr(j)}, one),
+                                    p.assign(j, p.add(p.localExpr(j), k(1)))));
+    unsigned cell = p.add(p.read(dp, {p.sub(p.localExpr(i), k(1)), p.localExpr(j)}),
+                          p.read(dp, {p.localExpr(i), p.sub(p.localExpr(j), k(1))}));
+    unsigned inner = p.whileDo(p.ult(p.localExpr(j), p.inputExpr(N)),
+                               p.seq(p.write(dp, {p.localExpr(i), p.localExpr(j)}, cell),
+                                     p.assign(j, p.add(p.localExpr(j), k(1)))));
+    unsigned outer = p.whileDo(p.ult(p.localExpr(i), p.inputExpr(M)),
+                               p.seq(p.seq(p.assign(j, k(1)), inner), p.assign(i, p.add(p.localExpr(i), k(1)))));
+    unsigned nest = p.seq(p.assign(i, k(1)), outer);
+    unsigned body = nest;
+    if (boundaryLoops)
+      body = p.seq(p.seq(p.seq(p.assign(i, k(0)), rows), p.seq(p.assign(j, k(0)), cols)), nest);
+    if (badWrite) // dp[M][0] := 1, index M outside [0, M).
+      body = p.seq(body, p.write(dp, {p.inputExpr(M), k(0)}, one));
+    if (badRank) // dp[0] with one index on an array of rank 2: refused by the builder.
+      p.read(dp, {k(0)});
+    p.body = body;
+    p.result = p.read(dp, {p.sub(p.inputExpr(M), k(1)), p.sub(p.inputExpr(N), k(1))});
+    return p;
+  };
+  IndexProgram pl = lattice(true, false, false);
+  CHECK(pl.usesArrays() && !pl.loopFree());
+  CHECK(!indexProgramTerm(terms, pl).has_value());
+  // Table: binom(M+N-2, M-1) for 1 <= M, N <= 8; every element (i, j) holds binom(i+j, i);
+  // M*N defined elements; M + N + (M-1)(N-1) writes, (0, 0) written twice.
+  auto binom = [](uint64_t n, uint64_t k) {
+    uint64_t r = 1;
+    for (uint64_t t = 1; t <= k; ++t)
+      r = r * (n - k + t) / t;
+    return r;
+  };
+  unsigned checkedCells = 0;
+  for (uint64_t M = 1; M <= 8; ++M)
+    for (uint64_t N = 1; N <= 8; ++N) {
+      IndexRun r = run(pl, {APInt(w, M), APInt(w, N)});
+      CHECK(r.status == IndexRunStatus::Returned);
+      if (r.status != IndexRunStatus::Returned)
+        continue;
+      CHECK(r.value.getZExtValue() == binom(M + N - 2, M - 1));
+      std::vector<uint64_t> shape{M, N};
+      CHECK(r.finalArrays.size() == 1 && r.finalArrays[0].extents == shape);
+      CHECK(r.finalArrays[0].elements.size() == M * N);
+      CHECK(r.writes == M + N + (M - 1) * (N - 1));
+      for (const auto &[k, v] : r.finalArrays[0].elements) {
+        CHECK(v.getZExtValue() == binom(k[0] + k[1], k[0]));
+        ++checkedCells;
+      }
+    }
+  CHECK(checkedCells == 1296); // Sum of M*N over 1..8 x 1..8 = 36 * 36.
+  // Machine integers: binom(i+j, i) fits unsigned 32 bits up to i + j = 34; at
+  // M = 18, N = 19 the top element is binom(35, 17), which does not, and the run
+  // holds it modulo 2^32 (the thesis's int bound, i + j <= 33, is the signed one).
+  {
+    IndexRun r = run(pl, {APInt(w, 18), APInt(w, 19)});
+    CHECK(r.status == IndexRunStatus::Returned);
+    uint64_t exact = binom(35, 17);
+    CHECK(exact > 0xFFFFFFFFull && r.value.getZExtValue() == (exact & 0xFFFFFFFFull));
+  }
+  // No rule: without the boundary loops the nest reads dp[0][1], an element without
+  // a value, at M = N = 2; dp[M][0] := 1 writes outside the extent; one index on a
+  // rank-2 array is refused before any run.
+  {
+    IndexRun r = run(lattice(false, false, false), {APInt(w, 2), APInt(w, 2)});
+    CHECK(r.status == IndexRunStatus::NoRule);
+    CHECK(r.reason.find("read of T0(0, 1), an element without a value") != std::string::npos);
+    IndexRun o = run(lattice(true, true, false), {APInt(w, 3), APInt(w, 2)});
+    CHECK(o.status == IndexRunStatus::NoRule);
+    CHECK(o.reason.find("write of T0 at index 3 in dimension 0, outside the extent 3") != std::string::npos);
+    CHECK_THROWS(lattice(true, false, true));
+    CHECK(std::string(stringifyIndexRunStatus(IndexRunStatus::NoRule)) == "NO_RULE");
+    // Extent 0: an empty table; the return reads dp[-1][-1] = (2^32-1, ...) outside it.
+    IndexRun z = run(pl, {APInt(w, 0), APInt(w, 1)});
+    CHECK(z.status == IndexRunStatus::NoRule && z.reason.find("outside the extent 0") != std::string::npos);
+    // Fuel still cuts: no value, no claim.
+    IndexRun cut = run(pl, {APInt(w, 8), APInt(w, 8)}, {}, 20);
+    CHECK(cut.status == IndexRunStatus::OutOfFuel);
+  }
+  // Text names the arrays and their extents.
+  {
+    std::string text = formatIndexProgram(pl, [&](Term t) { return t == mIn ? std::string("M") : std::string("N"); });
+    CHECK(text.rfind("array T0[M][N] ; ", 0) == 0);
+    CHECK(text.find("T0[v0][0] := 1") != std::string::npos);
+    CHECK(text.find("T0[v0][v1] := (T0[(v0 - 1)][v1] + T0[v0][(v1 - 1)])") != std::string::npos);
+    CHECK(text.find("return T0[(M - 1)][(N - 1)]") != std::string::npos);
+  }
+  // Input arrays (the a1 case of F.6): the value read at the counter; the table's
+  // extents must match the declaration; an element the table lacks has no rule.
+  {
+    IndexProgram p;
+    unsigned len = p.input(mIn), m = p.input(nIn);
+    unsigned a = p.array(w, w, {p.inputExpr(len)}, /*input=*/true);
+    p.body = p.skip();
+    p.result = p.read(a, {p.inputExpr(m)});
+    IndexTable table;
+    table.extents = {4};
+    for (uint64_t k = 0; k < 4; ++k)
+      table.elements[{k}] = APInt(w, 10 * k + 1);
+    IndexRun r = run(p, {APInt(w, 4), APInt(w, 2)}, {table});
+    CHECK(r.status == IndexRunStatus::Returned && r.value.getZExtValue() == 21);
+    IndexRun o = run(p, {APInt(w, 4), APInt(w, 4)}, {table});
+    CHECK(o.status == IndexRunStatus::NoRule && o.reason.find("outside the extent 4") != std::string::npos);
+    IndexRun bad = run(p, {APInt(w, 5), APInt(w, 2)}, {table});
+    CHECK(bad.status == IndexRunStatus::NoRule && bad.reason.find("extents differ") != std::string::npos);
+    table.elements.erase({2});
+    IndexRun hole = run(p, {APInt(w, 4), APInt(w, 2)}, {table});
+    CHECK(hole.status == IndexRunStatus::NoRule && hole.reason.find("without a value") != std::string::npos);
+    IndexRun none = run(p, {APInt(w, 4), APInt(w, 2)});
+    CHECK(none.status == IndexRunStatus::NoRule && none.reason.find("has no table") != std::string::npos);
+    CHECK(formatIndexProgram(p).rfind("input array T0[x0] ; ", 0) == 0);
+    // An extent over a local is refused; a program with arrays is not the counter template.
+    IndexProgram q;
+    q.input(mIn);
+    unsigned v = q.local(w);
+    CHECK_THROWS(q.array(w, w, {q.localExpr(v)}));
+    std::string why;
+    CHECK(!matchCounterTemplate(pl, why).has_value() && why.find("array") != std::string::npos);
+  }
+  // Frame and overwrite: a second write replaces the element; the other array and
+  // the scalars are untouched; the written set is exact.
+  {
+    IndexProgram p;
+    unsigned n = p.input(mIn);
+    unsigned v = p.local(w);
+    unsigned a = p.array(w, w, {p.inputExpr(n)}), b = p.array(w, w, {p.inputExpr(n)});
+    auto k = [&](uint64_t x) { return p.constant(APInt(w, x)); };
+    p.body = p.seq(p.seq(p.write(a, {k(1)}, k(5)), p.write(b, {k(1)}, k(7))),
+                   p.seq(p.write(a, {k(1)}, k(9)), p.assign(v, p.add(p.read(a, {k(1)}), p.read(b, {k(1)})))));
+    p.result = p.localExpr(v);
+    IndexRun r = run(p, {APInt(w, 3)});
+    CHECK(r.status == IndexRunStatus::Returned && r.value.getZExtValue() == 16);
+    CHECK(r.finalArrays[0].elements.size() == 1 && r.finalArrays[1].elements.size() == 1);
+    CHECK(r.finalArrays[0].elements.at({1}).getZExtValue() == 9 && r.finalArrays[1].elements.at({1}).getZExtValue() == 7);
+    CHECK(r.writes == 3);
+  }
+  // The history table template (phase 5), T of extent m + 2: T[0] := 0 ; T[1] := 1 ;
+  // r := 2 ; while r < m + 1 do (T[r] := T[r-1] + T[r-2] + 1 ; r := r + 1) ; return T[m].
+  {
+    IndexProgram p;
+    unsigned m = p.input(mIn);
+    unsigned r = p.local(w);
+    auto k = [&](uint64_t x) { return p.constant(APInt(w, x)); };
+    unsigned T = p.array(w, w, {p.add(p.inputExpr(m), k(2))}); // Extent m + d, d = 2.
+    unsigned E = p.add(p.add(p.read(T, {p.sub(p.localExpr(r), k(1))}), p.read(T, {p.sub(p.localExpr(r), k(2))})), k(1));
+    p.body = p.seq(p.seq(p.seq(p.write(T, {k(0)}, k(0)), p.write(T, {k(1)}, k(1))), p.assign(r, k(2))),
+                   p.whileDo(p.ult(p.localExpr(r), p.add(p.inputExpr(m), k(1))),
+                             p.seq(p.write(T, {p.localExpr(r)}, E), p.assign(r, p.add(p.localExpr(r), k(1))))));
+    p.result = p.read(T, {p.inputExpr(m)});
+    std::string why;
+    auto t = matchTableTemplate(p, why);
+    CHECK(t.has_value());
+    if (t) {
+      CHECK(t->depth() == 2 && t->counter == r && t->bound == m && t->value == E);
+    }
+    uint64_t expected[] = {0, 1, 2, 4, 7, 12, 20, 33, 54};
+    for (uint64_t mv = 0; mv < 9; ++mv) {
+      IndexRun run1 = run(p, {APInt(w, mv)});
+      CHECK(run1.status == IndexRunStatus::Returned && run1.value.getZExtValue() == expected[mv]);
+      if (run1.status == IndexRunStatus::Returned)
+        CHECK(run1.finalArrays[0].elements.size() == std::max<uint64_t>(mv + 1, 2)); // The inits, then T[2..m].
+    }
+    // At m = 2^32 - 1 the bound m + 1 wraps to 0: the loop does not run; the extent
+    // m + 2 wraps to 1, so the init write T[1] has no rule. No nontermination.
+    IndexRun top = run(p, {APInt::getAllOnes(w)});
+    CHECK(top.status == IndexRunStatus::NoRule && top.reason.find("write of T0 at index 1") != std::string::npos);
+    // Not the template: a read T[r - 3] with depth 2; a return of T[m - 1]; a second array.
+    IndexProgram q = p;
+    q.exprs[E].a = q.read(T, {q.sub(q.localExpr(r), k(3))});
+    CHECK(!matchTableTemplate(q, why).has_value() && why.find("T[r - j]") != std::string::npos);
+    IndexProgram q2 = p;
+    q2.result = q2.read(T, {q2.sub(q2.inputExpr(m), q2.constant(APInt(w, 1)))});
+    CHECK(!matchTableTemplate(q2, why).has_value() && why.find("return T[m]") != std::string::npos);
+    IndexProgram q3 = p;
+    q3.array(w, w, {q3.inputExpr(m)});
+    CHECK(!matchTableTemplate(q3, why).has_value() && why.find("exactly one array") != std::string::npos);
+    CHECK(!matchTableTemplate(pl, why).has_value());
+  }
+}
+
+/// Phase 5, step 2: synthesis of a table program (not a hand-written one) for a
+/// subscript held as a two-term recurrence, its proof by the TT obligations, and
+/// the controls that keep SAMPLE_CONSISTENT, REFUTED and UNKNOWN apart.
+static void testTables() {
+  Module m(programs);
+  SemanticProgram p = m.import("history", 8);
+  ParameterScope scope = range(p, 2, 9);
+  ClosedFormOptions options;
+  options.scope = scope;
+  std::vector<std::vector<APInt>> points;
+  for (int64_t n = 2; n <= 9; ++n)
+    points.push_back({APInt(8, n)});
+  SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+  const LoopSynthesis *loop = nullptr;
+  for (const SliceSynthesis &slice : result.slices)
+    for (const LoopSynthesis &l : slice.loops)
+      if (l.spec.reason.empty() && l.spec.carried.size() == 3)
+        loop = &l;
+  CHECK(loop != nullptr);
+  if (!loop)
+    return;
+  CHECK(loop->stepMismatches == 0 && loop->subscriptMismatches == 0 && loop->points == 8);
+  // k = m loop-free; f a table PROVED; g a table at the finite tier only.
+  const SynthesizedClosedForm *fForm = nullptr, *gForm = nullptr, *kForm = nullptr;
+  for (const SynthesizedClosedForm &form : loop->forms) {
+    if (form.kind == "loop-free")
+      kForm = &form;
+    else if (form.status == ClosedFormStatus::Proved)
+      fForm = &form;
+    else
+      gForm = &form;
+  }
+  CHECK(kForm && fForm && gForm);
+  if (!kForm || !fForm || !gForm)
+    return;
+  CHECK(kForm->status == ClosedFormStatus::Proved && kForm->text == "v0 := m ; return v0");
+  CHECK(fForm->kind == "table" && fForm->program.has_value() && fForm->program->usesArrays());
+  CHECK(fForm->text == "array T0[(m + 2)] ; T0[0] := 0 ; T0[1] := 1 ; v0 := 2 ; while v0 < (m + 1) do "
+                       "(T0[v0] := (1 + (T0[(v0 - 1)] + T0[(v0 - 2)])) ; v0 := (v0 + 1)) ; return T0[m]");
+  CHECK(fForm->history.size() == 1 && fForm->history[0] == gForm->variable);
+  CHECK(fForm->symbolicRounds == 1 && fForm->rounds >= 1);
+  CHECK(fForm->reason.find("shape, init, step, shift, bounds and termination discharged") != std::string::npos);
+  CHECK(fForm->reason.find("for m < 2^8 - 2") != std::string::npos);
+  CHECK(fForm->records.size() == 7);
+  for (const ObligationRecord &record : fForm->records)
+    CHECK(record.discharged);
+  if (fForm->records.size() == 7) {
+    CHECK(fForm->records[0].id == "TT-shape" && fForm->records[0].expected == "structural");
+    CHECK(fForm->records[1].id == "TT-init0" && fForm->records[2].id == "TT-init1" && fForm->records[3].id == "TT-step" &&
+          fForm->records[4].id == "TT-shift1" && fForm->records[5].id == "TT-bounds" && fForm->records[6].id == "TT-term");
+  }
+  // The synthesized program on values the traces never had: 0, 1, 2, 4, 7, 12, 20, 33,
+  // 54, 88 (n <= 9 keeps the sampled ones below 64); at m = 2^8 - 2 the extent wraps
+  // and the semantics has no rule, which is outside what was proved.
+  {
+    uint64_t expected[] = {0, 1, 2, 4, 7, 12, 20, 33, 54, 88, 143};
+    for (uint64_t mv = 0; mv < 11; ++mv) {
+      std::vector<APInt> inputs;
+      for (Term leaf : fForm->program->inputs)
+        inputs.push_back(leaf == loop->spec.iteration ? APInt(8, mv) : APInt::getZero(leaf->sort.width));
+      IndexRun run = runIndexProgram(*fForm->program, inputs);
+      CHECK(run.status == IndexRunStatus::Returned && run.value.getZExtValue() == (expected[mv] & 0xFF));
+    }
+    std::vector<APInt> inputs;
+    for (Term leaf : fForm->program->inputs)
+      inputs.push_back(leaf == loop->spec.iteration ? APInt(8, 254) : APInt::getZero(leaf->sort.width));
+    CHECK(runIndexProgram(*fForm->program, inputs).status == IndexRunStatus::NoRule);
+  }
+  // g = f(m - 1): a table program fits every sample, but no carried variable trails
+  // g, so the step cannot be stated over the loop's state: not proved, and said so.
+  CHECK(gForm->kind == "table" && gForm->status == ClosedFormStatus::SampleConsistent);
+  CHECK(gForm->reason.find("not a proof") != std::string::npos);
+  CHECK(gForm->reason.find("no carried variable trails the chain") != std::string::npos);
+  CHECK(gForm->history.empty());
+  // Reference versus synthesis: the hand-written template of testArrays is the same
+  // program text the search produced here, and that agreement is a test, not the
+  // proof; the proof is the seven obligations above.
+  // Controls.
+  {
+    // The TT obligations on a wrong body: T[r-1] + T[r-2] (no + 1) fits no sample
+    // beyond m = 1 and is refuted at the finite tier before any solver call.
+    IndexProgram wrong = *fForm->program;
+    std::string why;
+    auto shape = matchTableTemplate(wrong, why);
+    CHECK(shape.has_value());
+    if (shape) {
+      const IndexProgram::Expr &e = wrong.exprs[shape->value];
+      CHECK(e.kind == IndexExprKind::Add);
+      // Replace E by its right operand (the sum of the two reads).
+      unsigned sum = e.a;
+      if (wrong.exprs[sum].kind != IndexExprKind::Add)
+        sum = e.b;
+      for (IndexProgram::Stmt &st : wrong.stmts)
+        if (st.kind == IndexStmtKind::Write && st.expr == shape->value)
+          st.expr = sum;
+      std::vector<LoopTrace> traces;
+      EnumerationLimits limits;
+      for (const auto &point : points) {
+        auto states = eventStates(p, point, 0, limits);
+        if (!states)
+          continue;
+        LoopReplay replay = replayLoop(p, result.slices[1].slice, loop->spec, states->entry, RunLimits());
+        for (LoopTrace &trace : replay.traces)
+          traces.push_back(std::move(trace));
+      }
+      unsigned kf = std::find(loop->spec.carried.begin(), loop->spec.carried.end(), fForm->variable) - loop->spec.carried.begin();
+      CheckedClosedForm finite = checkProgramOnTraces(p, loop->spec, kf, wrong, traces, 1u << 12);
+      CHECK(finite.status == ClosedFormStatus::Refuted);
+      // And symbolically: TT-step has a model over the free chain, which is Unknown
+      // with the model, never a refutation by itself.
+      SmtLimits smt;
+      auto checked = checkClosedForms(p, loop->spec, {ClosedForm{fForm->variable, nullptr, &wrong, fForm->history}}, scope, smt, z3Backend);
+      CHECK(checked.size() == 1 && checked[0].status == ClosedFormStatus::Unknown && !checked[0].model.empty());
+      CHECK(checked[0].reason.find("TT-step has a model") != std::string::npos);
+      // A wrong init (T[1] := 2) is refuted at TT-init1 outright: no free leaf there.
+      IndexProgram wrongInit = *fForm->program;
+      for (IndexProgram::Stmt &st : wrongInit.stmts)
+        if (st.kind == IndexStmtKind::Write && wrongInit.exprs[st.indices[0]].kind == IndexExprKind::Const &&
+            wrongInit.exprs[st.indices[0]].value == 1 && wrongInit.exprs[st.expr].kind == IndexExprKind::Const)
+          st.expr = wrongInit.constant(APInt(8, 2));
+      auto init = checkClosedForms(p, loop->spec, {ClosedForm{fForm->variable, nullptr, &wrongInit, fForm->history}}, scope, smt, z3Backend);
+      CHECK(init.size() == 1 && init[0].status == ClosedFormStatus::Refuted && init[0].reason == "init1 has a counterexample");
+      // A chain proposal that is wrong (k instead of g) fails TT-shift and is not proved.
+      auto badChain = checkClosedForms(p, loop->spec, {ClosedForm{fForm->variable, nullptr, &*fForm->program, {kForm->variable}}}, scope, smt, z3Backend);
+      CHECK(badChain.size() == 1 && badChain[0].status != ClosedFormStatus::Proved);
+      // Not decided is not proved: the stub backend leaves the table SAMPLE_CONSISTENT.
+      UnknownBackend undecided;
+      SliceSynthesisResult u = synthesizeClosedForms(p, points, options, undecided);
+      for (const SliceSynthesis &slice : u.slices)
+        for (const LoopSynthesis &l : slice.loops)
+          for (const SynthesizedClosedForm &form : l.forms) {
+            CHECK(form.status != ClosedFormStatus::Proved);
+            if (form.kind == "table")
+              CHECK(form.status == ClosedFormStatus::SampleConsistent && form.reason.find("not a proof") != std::string::npos);
+          }
+      // Tables off: f and g stay without a program.
+      ClosedFormOptions off = options;
+      off.tablePrograms = false;
+      SliceSynthesisResult plain = synthesizeClosedForms(p, points, off, z3Backend);
+      for (const SliceSynthesis &slice : plain.slices)
+        for (const LoopSynthesis &l : slice.loops)
+          for (const SynthesizedClosedForm &form : l.forms)
+            if (form.variable == fForm->variable || form.variable == gForm->variable) {
+              CHECK(form.kind != "table" && form.status == ClosedFormStatus::Unknown);
+              CHECK(!form.program.has_value());
+            }
+    }
+  }
+  // SemGuS text for the table program: constructor form round trip over the skeleton,
+  // and the export carries every constructor the program uses with a rule each; it
+  // has NOT been read by any external tool, and the header says so.
+  {
+    std::string text = semgusTerm(*fForm->program);
+    CHECK(text.find("(write T0 ") != std::string::npos && text.find("(read T0 ") != std::string::npos);
+    std::string why;
+    auto back = parseSemgusTerm(text, *fForm->program, why);
+    CHECK(back.has_value());
+    if (back) {
+      CHECK(semgusTerm(*back) == text);
+      CHECK(formatIndexProgram(*back) == formatIndexProgram(*fForm->program));
+      for (uint64_t mv = 0; mv < 6; ++mv) {
+        std::vector<APInt> inputs;
+        for (Term leaf : back->inputs)
+          inputs.push_back(leaf == loop->spec.iteration ? APInt(8, mv) : APInt::getZero(leaf->sort.width));
+        IndexRun a = runIndexProgram(*back, inputs), b = runIndexProgram(*fForm->program, inputs);
+        CHECK(a.status == b.status && a.value == b.value);
+      }
+    }
+    SemgusProblem q;
+    q.width = 8;
+    for (unsigned n = 0; n < fForm->program->inputs.size(); ++n)
+      q.inputNames.push_back("x" + std::to_string(n));
+    q.locals = 1;
+    q.constants = {APInt(8, 0), APInt(8, 1), APInt(8, 2)};
+    SemgusArray T;
+    T.rank = 1;
+    T.extents = {"(bvadd x0 (_ bv2 8))"};
+    q.arrays.push_back(T);
+    q.candidate = &*fForm->program;
+    // The inductive specification (G.3) of f, as the two constraints, from the slice.
+    auto leafName = [&](Term leaf) { return closedFormLeafName(p, loop->spec, leaf); };
+    unsigned kf = std::find(loop->spec.carried.begin(), loop->spec.carried.end(), fForm->variable) - loop->spec.carried.begin();
+    auto condition = semgusTermText(loop->spec.condition, leafName), step = semgusTermText(loop->spec.step[kf], leafName);
+    CHECK(condition.has_value() && step.has_value());
+    if (condition && step) {
+      q.declaredVariables = {"m (_ BitVec 8)", "n (_ BitVec 8)"};
+      q.constraints = {"(P.Sem f (_ bv0 8) (_ bv0 8))", "(=> (and (P.Sem f m n) " + *condition + ") (P.Sem f (bvadd m (_ bv1 8)) " + *step + "))"};
+    }
+    std::string exported = exportSemgusProblem(q);
+    CHECK(exported.find("NOT read by any external SemGuS parser") != std::string::npos);
+    CHECK(exported.find("($read_T0 E)") != std::string::npos && exported.find("($write_T0 E E)") != std::string::npos);
+    CHECK(exported.find("(select W0 k1)") != std::string::npos && exported.find("(store T0 k1 n)") != std::string::npos);
+    CHECK(exported.find("(bvult k1 (bvadd x0 (_ bv2 8)))") != std::string::npos);
+    CHECK(exported.find("(declare-var m (_ BitVec 8))") != std::string::npos);
+    CHECK(semgusExportMissing(*fForm->program, exported).empty());
+    std::string wf;
+    CHECK(semgusExportWellFormed(exported, wf));
+    // A program the export's grammar does not have: a second array.
+    IndexProgram two = *fForm->program;
+    two.array(8, 8, {two.inputExpr(0)});
+    two.result = two.read(1, {two.inputExpr(0)});
+    auto missing = semgusExportMissing(two, exported);
+    CHECK(missing.size() == 1 && missing[0].find("$read_T1") == 0);
+  }
+}
+
+/// Phase 4 (I1): iteration counters as ghost state. The instrumented program runs
+/// as the original on every point, the counters count, the search takes the
+/// counter over the loop variable of equal kernel, and the entry definitions of
+/// rotated give the identity two_n = 2n.
+static void testCounters() {
+  Module m(programs);
+  SemanticProgram original = m.import("stepped", 8);
+  SemanticProgram p = original;
+  CounterInstrumentation added = addIterationCounters(p);
+  CHECK(added.reason.empty() && added.counters.size() == 2);
+  CHECK(p.state.size() == original.state.size() + 2 && p.iterationCounters.size() == 2);
+  for (const LoopCounter &c : added.counters) {
+    CHECK(p.state[c.state].kind == StateVar::IterationCounter && p.state[c.state].location == c.header);
+    CHECK(p.state[c.state].loopCarried && p.state[c.state].sort == Sort::bv(8));
+    CHECK(llvm::is_contained(c.body, c.header));
+  }
+  // Nothing reads a counter.
+  for (const Transition &t : p.transitions) {
+    for (const auto &[id, term] : t.assignments)
+      if (!llvm::is_contained(p.iterationCounters, id))
+        for (unsigned r : stateSupport(term))
+          CHECK(!llvm::is_contained(p.iterationCounters, r));
+    for (unsigned r : stateSupport(t.guard))
+      CHECK(!llvm::is_contained(p.iterationCounters, r));
+  }
+  // Twice: refused.
+  SemanticProgram again = p;
+  CHECK(!addIterationCounters(again).reason.empty() && again.state.size() == p.state.size());
+  // Replay: same transitions, events and returns at every point; the counters count
+  // the header arrivals, which the replay recomputes from the transitions taken.
+  uint64_t arrivals = 0;
+  for (int64_t n = 8; n <= 40; n += 3) {
+    EnumerationLimits limits;
+    auto states = eventStates(original, {APInt(8, n)}, 0, limits);
+    CHECK(states.has_value());
+    if (!states)
+      continue;
+    CounterReplay replay = compareRuns(original, p, added, states->entry, RunLimits());
+    CHECK(replay.equal);
+    CHECK(replay.events == states->run.events.size());
+    arrivals += replay.headerArrivals;
+    // The inner counter at each event equals the iteration index of the inner loop,
+    // read back from the instrumented run's state.
+    auto instrumented = eventStates(p, {APInt(8, n)}, 0, limits);
+    CHECK(instrumented.has_value());
+    if (!instrumented)
+      continue;
+    unsigned inner = added.counters.back().state, i = 1; // i is state 1 (the inner block argument).
+    for (size_t e = 0; e < instrumented->run.events.size(); ++e) {
+      const auto &state = instrumented->states[e];
+      CHECK(state[inner].has_value() && state[i].has_value());
+      if (!state[inner] || !state[i])
+        continue;
+      uint64_t mv = state[inner]->getZExtValue();
+      uint64_t expected = 5 * mv + 2 * (mv % 2); // The proved closed form of i.
+      CHECK(state[i]->getZExtValue() == expected);
+    }
+  }
+  CHECK(arrivals > 0);
+  // A forged instrumentation (a counter that is bumped from outside its loop) is
+  // caught by the replay.
+  {
+    SemanticProgram forged = original;
+    CounterInstrumentation wrong = addIterationCounters(forged);
+    unsigned inner = wrong.counters.back().state;
+    TermContext &terms = *forged.terms;
+    for (Transition &t : forged.transitions)
+      for (auto &[id, term] : t.assignments)
+        if (id == inner && term->op == TermOp::Const)
+          term = terms.bv(APInt(8, 1)); // Enter at 1 instead of 0.
+    EnumerationLimits limits;
+    auto states = eventStates(original, {APInt(8, 9)}, 0, limits);
+    CHECK(states.has_value());
+    if (states) {
+      CounterReplay replay = compareRuns(original, forged, wrong, states->entry, RunLimits());
+      CHECK(!replay.equal && replay.reason.find("does not count") != std::string::npos);
+    }
+  }
+  // The search: the inner counter has the kernel of i and takes its place as K.
+  {
+    ParameterScope scope = range(p, 8, 40);
+    auto proof = certify(original, scope);
+    CHECK(proof.has_value());
+    if (proof) {
+      SynthesisOptions options = synthesisOptions(scope, 0);
+      options.synthesis.maxCandidates = 8;
+      SynthesisResult plain = synthesizeProgram(original, &*proof, options, z3Backend);
+      SynthesisResult counted = synthesizeProgram(p, &*proof, options, z3Backend);
+      CHECK(plain.groups.size() == 1 && counted.groups.size() == 1);
+      Term inner = p.terms->state(added.counters.back().state, Sort::bv(8));
+      Term i = p.terms->state(1, Sort::bv(8));
+      bool plainK = false, countedK = false, countedI = false;
+      for (const VerifiedCandidate &c : plain.groups[0].candidates)
+        plainK = plainK || llvm::is_contained(c.family.axes[AxisK], i);
+      for (const VerifiedCandidate &c : counted.groups[0].candidates) {
+        countedK = countedK || llvm::is_contained(c.family.axes[AxisK], inner);
+        for (const auto &axis : c.family.axes)
+          countedI = countedI || llvm::is_contained(axis, i);
+        CHECK(c.finite.status() == FamilyStatus::Verified);
+        // The symbolic coordinate tier still has no bound for the counter: the number
+        // of iterations is not a parameter plus a shift. Not proved, not refuted.
+        CHECK(c.symbolic.tier() != EvidenceTier::SymbolicExact);
+      }
+      CHECK(plainK && countedK && !countedI);
+    }
+  }
+  // Entry definitions (I2): rotated's 2n bound, computed once before the loops, and
+  // its materialized constants; nothing a loop assigns.
+  {
+    SemanticProgram r = m.import("rotated", 8);
+    std::string why;
+    auto defined = entryDefinedState(r, SliceLimits(), why);
+    CHECK(why.empty() && !defined.empty());
+    bool twoN = false;
+    for (const auto &[id, term] : defined) {
+      CHECK(stateSupport(term).empty());
+      if (term->op == TermOp::Mul)
+        twoN = true;
+      for (const Transition &t : r.transitions)
+        for (const auto &[assigned, value] : t.assignments)
+          if (assigned == id)
+            CHECK(t.from == r.entryLocation); // Only the entry block defines it.
+    }
+    CHECK(twoN);
+  }
+}
+
+/// Full at some point, as the driver's preference reads it.
+static bool fullSomewhereForTest(const VerifiedCandidate &candidate) {
+  for (const PointFacts &point : candidate.finite.points())
+    if (point.report.structurallyFull)
+      return true;
+  return false;
+}
+
+/// Appendix G.2, one check per rule, at bit-vector widths; the lowering against
+/// the interpreter; the SemGuS-style text against itself.
+static void testIndexPrograms() {
+  TermContext terms;
+  const unsigned w = 32;
+  Term tIn = terms.param(0, Sort::bv(w));
+  auto run = [&](const IndexProgram &p, std::vector<APInt> inputs, uint64_t fuel = 1u << 16) {
+    IndexRunLimits limits;
+    limits.fuel = fuel;
+    return runIndexProgram(p, inputs, limits);
+  };
+  auto value = [&](const IndexProgram &p, int64_t t) {
+    IndexRun r = run(p, {APInt(w, t)});
+    CHECK(r.status == IndexRunStatus::Returned);
+    return r.status == IndexRunStatus::Returned ? r.value.getZExtValue() : UINT64_MAX;
+  };
+
+  // skip ; return x: locals start at 0, the input is read, nothing else moves.
+  {
+    IndexProgram p;
+    unsigned x = p.input(tIn);
+    unsigned v = p.local(w);
+    p.body = p.skip();
+    p.result = p.add(p.inputExpr(x), p.localExpr(v));
+    CHECK(value(p, 7) == 7);
+    IndexRun r = run(p, {APInt(w, 7)});
+    CHECK(r.finalLocals.size() == 1 && r.finalLocals[0].isZero());
+    CHECK(formatIndexProgram(p) == "skip ; return (x0 + v0)");
+  }
+  // v := e ; sequence ; both arms of if ; negation, products, div and mod, wrap.
+  {
+    IndexProgram p;
+    unsigned x = p.input(tIn);
+    unsigned v = p.local(w), u = p.local(w);
+    unsigned c3 = p.constant(APInt(w, 3));
+    unsigned s1 = p.assign(v, p.mul(p.inputExpr(x), c3));                   // v = 3x
+    unsigned s2 = p.assign(u, p.sub(p.localExpr(v), p.inputExpr(x)));       // u = 2x
+    unsigned cond = p.ult(p.localExpr(u), p.constant(APInt(w, 10)));        // 2x < 10
+    unsigned s3 = p.ifThenElse(cond, p.assign(v, p.modConst(p.localExpr(u), APInt(w, 3))),
+                               p.assign(v, p.divConst(p.localExpr(u), APInt(w, 3))));
+    p.body = p.seq(p.seq(s1, s2), s3);
+    p.result = p.neg(p.localExpr(v));
+    CHECK(value(p, 4) == (uint64_t)(uint32_t)(-(8 % 3)));   // then arm: 8 mod 3 = 2
+    CHECK(value(p, 6) == (uint64_t)(uint32_t)(-(12 / 3)));  // else arm: 12 div 3 = 4
+    // Wrapping is the value semantics: 3 * 0x60000000 wraps at 32 bits.
+    IndexRun r = run(p, {APInt(w, 0x60000000)});
+    CHECK(r.status == IndexRunStatus::Returned && r.finalLocals[1] == APInt(w, 0xC0000000u));
+    auto lowered = indexProgramTerm(terms, p);
+    CHECK(lowered.has_value());
+    SemanticProgram empty;
+    for (int64_t t : {0, 4, 5, 6, 100}) {
+      EntryState entry;
+      entry.parameters = {APInt(w, t)};
+      auto evaluated = evaluateTerm(empty, entry, Configuration(), *lowered);
+      CHECK(evaluated && evaluated->getZExtValue() == value(p, t));
+    }
+  }
+  // Listing G.1: r := 0; a := 1; while r < t do (a := a * (r + 2); r := r + 1); return a.
+  // Table G.1 at 32 bits, then the wrap that Section G.4 locates at t = 12.
+  {
+    IndexProgram p;
+    unsigned x = p.input(tIn);
+    unsigned r = p.local(w), a = p.local(w);
+    unsigned init = p.seq(p.assign(r, p.constant(APInt(w, 0))), p.assign(a, p.constant(APInt(w, 1))));
+    unsigned body = p.seq(p.assign(a, p.mul(p.localExpr(a), p.add(p.localExpr(r), p.constant(APInt(w, 2))))),
+                          p.assign(r, p.add(p.localExpr(r), p.constant(APInt(w, 1)))));
+    p.body = p.seq(init, p.whileDo(p.ult(p.localExpr(r), p.inputExpr(x)), body));
+    p.result = p.localExpr(a);
+    CHECK(!p.loopFree() && !indexProgramTerm(terms, p).has_value());
+    uint64_t expected[] = {1, 2, 6, 24, 120};
+    for (unsigned t = 0; t < 5; ++t)
+      CHECK(value(p, t) == expected[t]);
+    IndexRun four = run(p, {APInt(w, 4)});
+    CHECK(four.status == IndexRunStatus::Returned && four.finalLocals[0] == APInt(w, 4));
+    // 12! fits: the bit-vector run equals the integer; 13! does not, and the run
+    // holds 13! mod 2^32, which the integer reading does not. Neither is a claim
+    // about the thesis's K(t): the adaptation compares at the width, nothing else.
+    uint64_t factorial = 1;
+    for (uint64_t k = 2; k <= 12; ++k)
+      factorial *= k;
+    CHECK(value(p, 11) == factorial);
+    factorial *= 13;
+    CHECK(value(p, 12) == (factorial & 0xFFFFFFFFu) && value(p, 12) != factorial);
+    // Fuel: a cut run has no value and says nothing about termination.
+    IndexRun cut = run(p, {APInt(w, 1000)}, 50);
+    CHECK(cut.status == IndexRunStatus::OutOfFuel && cut.steps == 50);
+    CHECK(std::string(stringifyIndexRunStatus(cut.status)) == "OUT_OF_FUEL");
+    IndexProgram forever;
+    forever.input(tIn);
+    unsigned z = forever.local(w);
+    forever.body = forever.whileDo(forever.ule(forever.localExpr(z), forever.localExpr(z)), forever.skip());
+    forever.result = forever.localExpr(z);
+    CHECK(run(forever, {APInt(w, 0)}, 1000).status == IndexRunStatus::OutOfFuel);
+    CHECK(p.size() > 10 && forever.size() == 6); // while, skip; ule; three reads of v0
+  }
+  // Ill-sorted nodes are refused as TermContext refuses them.
+  {
+    IndexProgram p;
+    unsigned x = p.input(tIn);
+    unsigned narrow = p.constant(APInt(8, 1));
+    CHECK_THROWS(p.add(p.inputExpr(x), narrow));
+    CHECK_THROWS(p.divConst(p.inputExpr(x), APInt(w, 0)));
+    CHECK_THROWS(p.modConst(p.inputExpr(x), APInt(8, 2)));
+    CHECK_THROWS(p.assign(p.local(8), p.inputExpr(x)));
+    CHECK_THROWS(p.input(terms.boolean(true)));
+    CHECK_THROWS(runIndexProgram(p, {APInt(8, 1)}));
+  }
+  // The lowering agrees with the interpreter on random loop-free programs.
+  {
+    uint64_t seed = 12345;
+    auto next = [&] { seed = seed * 6364136223846793005ULL + 1442695040888963407ULL; return seed >> 33; };
+    Term y = terms.param(1, Sort::bv(8)), z = terms.param(2, Sort::bv(8));
+    unsigned agreements = 0;
+    for (unsigned trial = 0; trial < 300; ++trial) {
+      IndexProgram p;
+      unsigned x0 = p.input(y), x1 = p.input(z);
+      unsigned v0 = p.local(8), v1 = p.local(8);
+      std::function<unsigned(unsigned)> expr = [&](unsigned depth) -> unsigned {
+        switch (depth == 0 ? next() % 3 : next() % 9) {
+        case 0: return p.inputExpr(next() % 2 ? x0 : x1);
+        case 1: return p.localExpr(next() % 2 ? v0 : v1);
+        case 2: return p.constant(APInt(8, next() % 7));
+        case 3: return p.add(expr(depth - 1), expr(depth - 1));
+        case 4: return p.sub(expr(depth - 1), expr(depth - 1));
+        case 5: return p.neg(expr(depth - 1));
+        case 6: return p.mul(expr(depth - 1), expr(depth - 1));
+        case 7: return p.divConst(expr(depth - 1), APInt(8, 1 + next() % 5));
+        default: return p.modConst(expr(depth - 1), APInt(8, 1 + next() % 5));
+        }
+      };
+      std::function<unsigned(unsigned)> cond = [&](unsigned depth) -> unsigned {
+        switch (depth == 0 ? next() % 3 : next() % 6) {
+        case 0: return p.eq(expr(1), expr(1));
+        case 1: return p.ult(expr(1), expr(1));
+        case 2: return p.ule(expr(1), expr(1));
+        case 3: return p.lnot(cond(depth - 1));
+        case 4: return p.land(cond(depth - 1), cond(depth - 1));
+        default: return p.lor(cond(depth - 1), cond(depth - 1));
+        }
+      };
+      std::function<unsigned(unsigned)> stmt = [&](unsigned depth) -> unsigned {
+        switch (depth == 0 ? next() % 2 : next() % 4) {
+        case 0: return p.skip();
+        case 1: return p.assign(next() % 2 ? v0 : v1, expr(2));
+        case 2: return p.seq(stmt(depth - 1), stmt(depth - 1));
+        default: return p.ifThenElse(cond(1), stmt(depth - 1), stmt(depth - 1));
+        }
+      };
+      p.body = stmt(3);
+      p.result = expr(2);
+      auto lowered = indexProgramTerm(terms, p);
+      CHECK(lowered.has_value());
+      if (!lowered)
+        continue;
+      SemanticProgram empty;
+      for (unsigned sample = 0; sample < 8; ++sample) {
+        APInt a(8, next() % 256), b(8, next() % 256);
+        EntryState entry;
+        entry.parameters = {APInt(w, 0), a, b};
+        auto evaluated = evaluateTerm(empty, entry, Configuration(), *lowered);
+        IndexRun r = run(p, {a, b});
+        bool same = evaluated && r.status == IndexRunStatus::Returned && *evaluated == r.value;
+        CHECK(same);
+        agreements += same;
+      }
+      // Constructor form round trip: the parsed program runs the same.
+      std::string why;
+      auto parsed = parseSemgusTerm(semgusTerm(p), p.inputs, p.localWidths, why);
+      CHECK(parsed.has_value());
+      if (parsed) {
+        CHECK(semgusTerm(*parsed) == semgusTerm(p));
+        APInt a(8, next() % 256), b(8, next() % 256);
+        IndexRun r1 = run(p, {a, b}), r2 = run(*parsed, {a, b});
+        CHECK(r1.status == r2.status && r1.value == r2.value);
+      }
+    }
+    CHECK(agreements == 300 * 8);
+  }
+  // The SemGuS-style text: well formed by its own check, labelled as unchecked by
+  // any external tool, and the reader refuses what it does not know.
+  {
+    IndexProgram p;
+    unsigned x = p.input(tIn);
+    unsigned v = p.local(w);
+    p.body = p.ifThenElse(p.eq(p.inputExpr(x), p.constant(APInt(w, 0))),
+                          p.assign(v, p.add(p.inputExpr(x), p.constant(APInt(w, 1)))),
+                          p.assign(v, p.add(p.inputExpr(x), p.constant(APInt(w, 2)))));
+    p.result = p.localExpr(v);
+    CHECK(formatIndexProgram(p) == "if x0 = 0 then (v0 := (x0 + 1)) else (v0 := (x0 + 2)) ; return v0");
+    CHECK(value(p, 0) == 1 && value(p, 5) == 7);
+    SemgusProblem q;
+    q.width = w;
+    q.inputNames = {"t"};
+    q.constants = {APInt(w, 0), APInt(w, 1), APInt(w, 2)};
+    q.divisors = {APInt(w, 2)};
+    q.examples = {{{APInt(w, 0)}, APInt(w, 1)}, {{APInt(w, 5)}, APInt(w, 7)}};
+    q.candidate = &p;
+    std::string text = exportSemgusProblem(q), why;
+    CHECK(semgusExportWellFormed(text, why));
+    CHECK(text.find("NOT read by any external SemGuS parser") != std::string::npos);
+    CHECK(text.find("(declare-term-types") != std::string::npos);
+    CHECK(text.find("(define-funs-rec") != std::string::npos);
+    CHECK(text.find("($while B S)") != std::string::npos);
+    CHECK(text.find("(synth-fun f () P)") != std::string::npos);
+    CHECK(text.find("(constraint (P.Sem f (_ bv5 32) (_ bv7 32)))") != std::string::npos);
+    CHECK(text.find(semgusTerm(p)) != std::string::npos);
+    CHECK(!semgusExportWellFormed(text + "(check-sat)", why) && why.find("check-sat") != std::string::npos);
+    CHECK(!semgusExportWellFormed("(constraint (f", why));
+    CHECK(!semgusExportWellFormed("(constraint true)", why) && why == "no check-synth");
+    for (const char *bad : {"(return skip (shl x0 x0))", "(return skip x9)", "(return (assign x0 v0) v0)",
+                            "(return skip (div x0 (_ bv0 32)))", "(return skip (add x0 (_ bv1 8)))",
+                            "(return skip", "(return skip v0) v0", "(return (while (eq x0 x0)) v0)"})
+      CHECK(!parseSemgusTerm(bad, p.inputs, p.localWidths, why).has_value() && !why.empty());
+  }
+}
+
+/// The statement productions in the search: off by default and then absent, on by
+/// option, and then every candidate still goes through the same checkers.
+static void testStatementGrammar() {
+  for (unsigned level = 0; level <= GrammarSpec::MaxLevel; ++level)
+    CHECK(!GrammarSpec::atLevel(level).statements);
+  Module m(programs);
+  SemanticProgram p = m.import("rotated", 8);
+  ParameterScope scope = range(p, 2, 3);
+  auto proof = certify(p, scope);
+  CHECK(proof.has_value());
+  if (!proof)
+    return;
+
+  // The bank: no program without the option; with it, the branch on t < n with the
+  // two phases' subscripts as arms, lowered to an ite, text kept with the atom.
+  DomainEnumeration enumeration = liveDomains(p, *proof, scope);
+  CHECK(enumeration.gate == GateStatus::Open);
+  auto domains = domainsOf(enumeration);
+  GrammarSpec plain = GrammarSpec::atLevel(0);
+  AtomBank plainBank = buildAtoms(p, enumeration.groups[0], domains, plain);
+  CHECK(plainBank.programs == 0);
+  for (const Atom &atom : plainBank.atoms)
+    CHECK(atom.program.empty());
+  GrammarSpec withStatements = plain;
+  withStatements.statements = true;
+  withStatements.maxAtoms = 400;
+  withStatements.maxOperands = 4000;
+  AtomBank bank = buildAtoms(p, enumeration.groups[0], domains, withStatements);
+  CHECK(bank.programs > 0 && bank.atoms.size() > plainBank.atoms.size());
+  bool branchOnPhase = false;
+  for (const Atom &atom : bank.atoms) {
+    CHECK(atom.program.empty() == (atom.term->op != TermOp::Ite));
+    if (atom.term->op == TermOp::Ite && atom.program.find("if ") == 0 &&
+        atom.program.find(" then (v0 := ") != std::string::npos &&
+        atom.program.find(" ; return v0") != std::string::npos)
+      branchOnPhase = true;
+    if (getenv("GG_DEBUG_ATOMS") && !atom.program.empty())
+      fprintf(stderr, "atom size %u: %s\n", atom.size, atom.program.c_str());
+  }
+  CHECK(branchOnPhase);
+  // Every program atom means what its program means, at every event.
+  for (const Atom &atom : bank.atoms) {
+    if (atom.program.empty())
+      continue;
+    std::string why;
+    for (unsigned d = 0; d < domains.size(); ++d) {
+      EventEvaluator evaluator(p, *domains[d]);
+      for (size_t e = 0; e < evaluator.size(); ++e) {
+        auto v = evaluator.value(atom.term, e);
+        CHECK(v && v->getZExtValue() == atom.values[d][e]);
+      }
+    }
+  }
+
+  // The search. Without the option the expression grammar has no full family for
+  // this program within its levels; with it, the checkers accept one whose K is
+  // the branch, at the finite tier, and the record names the program.
+  SynthesisOptions off = synthesisOptions(scope, 3);
+  SynthesisResult without = synthesizeProgram(p, &*proof, off, z3Backend);
+  CHECK(without.groups.size() == 1);
+  bool fullWithout = false;
+  for (const VerifiedCandidate &c : without.groups[0].candidates)
+    fullWithout = fullWithout || fullSomewhereForTest(c);
+  CHECK(!fullWithout);
+  SynthesisOptions on = off;
+  on.statementGrammar = true;
+  SynthesisResult with = synthesizeProgram(p, &*proof, on, z3Backend);
+  CHECK(with.groups.size() == 1);
+  bool fullWith = false, branchK = false;
+  for (const VerifiedCandidate &c : with.groups[0].candidates) {
+    CHECK(c.finite.status() == FamilyStatus::Verified);
+    CHECK(c.finite.tier() == EvidenceTier::ScopeEnumerated);
+    if (!fullSomewhereForTest(c))
+      continue;
+    fullWith = true;
+    CHECK(c.family.origin == "selector search over statement programs");
+    CHECK(c.family.programs[AxisK].size() == c.family.axes[AxisK].size());
+    for (unsigned n = 0; n < c.family.axes[AxisK].size(); ++n)
+      if (c.family.axes[AxisK][n]->op == TermOp::Ite && !c.family.programs[AxisK][n].empty())
+        branchK = true;
+    if (getenv("GG_DEBUG_ATOMS"))
+      for (unsigned axis = 0; axis < 4; ++axis)
+        for (const std::string &text : c.family.programs[axis])
+          fprintf(stderr, "axis %u program: %s\n", axis, text.c_str());
+  }
+  CHECK(fullWith && branchK);
+  std::string json = toJSON(p, with, false);
+  CHECK(json.find("\"index_programs\"") != std::string::npos);
+  CHECK(json.find("if ") != std::string::npos);
+  CHECK(toJSON(p, without, false).find("index_programs") == std::string::npos);
+
+  // The same checkers judge the lowered term: a family with the program's term
+  // in K passes checkFamilyFinite, and one with the arms swapped at one phase fails.
+  for (const VerifiedCandidate &c : with.groups[0].candidates) {
+    if (!fullSomewhereForTest(c))
+      continue;
+    CheckedFamily again = checkFamilyFinite(p, with.enumeration, 0, c.family);
+    CHECK(again.status() == FamilyStatus::Verified);
+    CoordinateFamily forged = c.family;
+    for (Term &term : forged.axes[AxisK])
+      if (term->op == TermOp::Ite)
+        term = p.terms->ite(term->args[0], term->args[2], term->args[1]);
+    CheckedFamily forgedCheck = checkFamilyFinite(p, with.enumeration, 0, forged);
+    CHECK(forgedCheck.status() != FamilyStatus::Verified);
+    break;
+  }
+
+  // Two shifted phases: the expression grammar needs level 2 (t div n, t mod n), the
+  // statement grammar has the branch at level 0, and the family it returns reaches
+  // the symbolic tier through the unchanged checker.
+  SemanticProgram two = m.import("two_phase", 8);
+  ParameterScope twoScope = range(two, 2, 3);
+  auto twoProof = certify(two, twoScope);
+  CHECK(twoProof.has_value());
+  if (twoProof) {
+    SynthesisResult plainRun = synthesizeProgram(two, &*twoProof, off, z3Backend);
+    SynthesisOptions twoOn = off;
+    twoOn.statementGrammar = true;
+    SynthesisResult stmtRun = synthesizeProgram(two, &*twoProof, twoOn, z3Backend);
+    CHECK(plainRun.groups.size() == 1 && stmtRun.groups.size() == 1);
+    CHECK(plainRun.groups[0].status == RecoveryStatus::CandidateFound && plainRun.groups[0].level == 2);
+    CHECK(stmtRun.groups[0].status == RecoveryStatus::CandidateFound && stmtRun.groups[0].level == 0);
+    bool exact = false;
+    for (const VerifiedCandidate &c : stmtRun.groups[0].candidates) {
+      CHECK(c.finite.status() == FamilyStatus::Verified);
+      if (c.symbolic.tier() == EvidenceTier::SymbolicExact &&
+          c.symbolic.status() == FamilyStatus::Verified && fullSomewhereForTest(c)) {
+        exact = true;
+        CHECK(c.family.origin == "selector search over statement programs");
+        bool kProgram = false;
+        for (const std::string &text : c.family.programs[AxisK])
+          kProgram = kProgram || text.find("if ") == 0;
+        CHECK(kProgram);
+      }
+    }
+    CHECK(exact);
+  }
+
+  // A program where the expression grammar already has a coordinate: the option
+  // adds atoms and changes no verdict.
+  SemanticProgram rev = m.import("reversed", 8);
+  ParameterScope revScope = range(rev, 2, 3);
+  auto revProof = certify(rev, revScope);
+  CHECK(revProof.has_value());
+  if (revProof) {
+    SynthesisResult a = synthesizeProgram(rev, &*revProof, off, z3Backend);
+    SynthesisOptions revOn = off;
+    revOn.statementGrammar = true;
+    SynthesisResult b = synthesizeProgram(rev, &*revProof, revOn, z3Backend);
+    CHECK(a.groups.size() == 1 && b.groups.size() == 1);
+    CHECK(a.groups[0].status == RecoveryStatus::CandidateFound);
+    CHECK(b.groups[0].status == RecoveryStatus::CandidateFound);
+    for (const VerifiedCandidate &c : b.groups[0].candidates)
+      CHECK(c.finite.status() == FamilyStatus::Verified);
+  }
+}
+
 static void testSlices() {
   Module m(programs);
   SemanticProgram p = m.import("two_loops");
@@ -1998,11 +3711,37 @@ static void testSlices() {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
   mlir::MLIRContext local;
   configure(local);
   context = &local;
+  // An argument names the only tests to run, for a quick turn; CTest passes none.
+  if (argc > 1) {
+    for (int n = 1; n < argc; ++n) {
+      std::string name = argv[n];
+      if (name == "index") testIndexPrograms();
+      else if (name == "statements") testStatementGrammar();
+      else if (name == "slices") testSliceSpecification();
+      else if (name == "while") testWhilePrograms();
+      else if (name == "counters") testCounters();
+      else if (name == "arrays") testArrays();
+      else if (name == "tables") testTables();
+      else if (name == "grammar") testGrammar();
+      else if (name == "search") testSearch();
+      else if (name == "clauses") testClauses();
+      else { fprintf(stderr, "unknown test %s\n", argv[n]); return 2; }
+    }
+    printf("%d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+  }
   testGrammar();
+  testIndexPrograms();
+  testStatementGrammar();
+  testSliceSpecification();
+  testWhilePrograms();
+  testCounters();
+  testArrays();
+  testTables();
   testStructure();
   testLiveState();
   testSlices();

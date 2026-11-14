@@ -300,9 +300,17 @@ void Search::accept(const Selection &selection) {
     return;
   CoordinateFamily family;
   family.origin = "selector search";
+  bool fromPrograms = false;
   for (unsigned axis = 0; axis < 4; ++axis)
-    for (unsigned atom : selection[axis])
+    for (unsigned atom : selection[axis]) {
       family.axes[axis].push_back(bank.atoms[atom].term);
+      family.programs[axis].push_back(bank.atoms[atom].program);
+      fromPrograms = fromPrograms || !bank.atoms[atom].program.empty();
+    }
+  if (fromPrograms)
+    family.origin += " over statement programs";
+  else
+    family.programs = {};
   out.candidates.push_back(std::move(family));
 }
 

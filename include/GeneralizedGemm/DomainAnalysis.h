@@ -8,6 +8,7 @@
 #ifndef GENERALIZEDGEMM_DOMAINANALYSIS_H
 #define GENERALIZEDGEMM_DOMAINANALYSIS_H
 
+#include "GeneralizedGemm/ClosedFormSynthesis.h"
 #include "GeneralizedGemm/DomainChecker.h"
 #include "GeneralizedGemm/DomainProposer.h"
 #include "GeneralizedGemm/SynthesisAnalysis.h"
@@ -40,6 +41,15 @@ struct DomainAnalysisRequest {
   // each listed group's own segmented proposal, the segments then in program order by their
   // first site: untrusted, for the checker to judge. A proposer over unions is not here.
   std::vector<DomainSetRequest> groupSets;
+  // Phase 4 (I2, I3): run the closed-form synthesis of ClosedFormSynthesis.h over
+  // the enumerated points and hand the proposer state identities: every PROVED
+  // loop-free form of a loop whose header has an iteration counter
+  // (LoopCounters.h), with m read as that counter, and every variable defined on
+  // every path from the entry by one term over parameters. The proposer then
+  // writes guards, bounds and views over levels; the checkers judge them as any
+  // proposal. Off by default, and then nothing in the output changes.
+  bool closedFormViews = false;
+  ClosedFormOptions closedForms;
 };
 
 /// G5b-M4a: one set of groups, its request, and both routes' claims.
@@ -59,6 +69,15 @@ struct CandidateDomain {
   std::optional<DomainRequest> request;
   std::string proposalReason;
   ReductionVerdict verdict = ReductionVerdict::unknown("not checked");
+  // Phase 4: with closedFormViews, the termination certificate handed to the
+  // checkers is the given one strengthened by the identities as invariants at
+  // their cuts (v = f(c_h) at the loop header, the entry definitions everywhere)
+  // and by the proposed bounds of every counter level, when the certificate
+  // checker accepts the strengthened certificate; otherwise the given one. Either
+  // way every checker re-checks the certificate it is handed.
+  bool certificateStrengthened = false;
+  std::vector<std::string> invariantsAdded;
+  std::string certificateNote;
 };
 
 struct GroupDomain {
@@ -72,7 +91,20 @@ struct DomainResult {
   DomainEnumeration enumeration;
   std::vector<GroupDomain> groups;
   std::vector<SetDomain> sets; // G5b-M4a, one per listed set.
+  // Phase 4, only with closedFormViews: what the proposer was handed and where it
+  // came from. Proposals, not evidence.
+  std::vector<StateIdentity> identities;
+  std::optional<SliceSynthesisResult> closedForms;
+  std::string identityReason; // Why some identity could not be formed.
 };
+
+/// Phase 4 (I3). Whether a term over level variables, parameters and constants is
+/// affine: sums and differences of constant multiples of leaves and constants. An
+/// `ite`, a remainder, a division, a product of two non-constants, a comparison or a
+/// width change makes it non-affine. Definition 4.5 (V) of the thesis asks for an
+/// affine view; this is the syntactic test the record reports, not a proof of
+/// anything about the program.
+bool affineOverLevels(Term term);
 
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,
                             const DomainAnalysisRequest &request, SmtBackend &backend);

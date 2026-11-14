@@ -27,10 +27,24 @@
 
 namespace mlir::generalized_gemm {
 
+/// Phase 4 (I2, I3). A proposed identity v = term at every event, with `term` over
+/// state and parameters: a proved closed form of a loop variable with the iteration
+/// count read as the loop's counter (LoopCounters.h), or a variable every path from
+/// the entry defines by one term over parameters. The proposer substitutes it for v
+/// in guards, bounds and views so that they read levels alone. A proposal, never
+/// evidence: the checker proves or refutes whatever came of it.
+struct StateIdentity {
+  unsigned state = 0;
+  Term term = nullptr;
+  std::string origin;
+  int cut = -1; // The cut (loop header) at which it holds, or -1 for every cut.
+};
+
 struct ProposalLimits {
   unsigned maxAtoms = 64, maxDisjuncts = 32, maxRepeatLevels = 2;
   uint64_t maxBox = 1u << 20;
   EnumerationLimits events; // The run that reads the state at each event, for segments.
+  std::vector<StateIdentity> identities;
 };
 
 /// Untrusted, for tests of the proposer: the atoms a proposal's guard may use for `order`,

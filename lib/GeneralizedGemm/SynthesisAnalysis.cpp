@@ -1,5 +1,7 @@
 #include "GeneralizedGemm/SynthesisAnalysis.h"
 
+#include "GeneralizedGemm/LoopCounters.h"
+
 #include "GeneralizedGemm/CoordinateAnalysis.h"
 #include "GeneralizedGemm/TerminationObligations.h"
 
@@ -213,6 +215,7 @@ void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
   for (unsigned level = first; level <= last; ++level) {
     out.level = level;
     GrammarSpec spec = options.grammar ? *options.grammar : GrammarSpec::atLevel(level);
+    spec.statements = spec.statements || options.statementGrammar;
     for (unsigned attempt = 0; attempt <= options.maxRefinements; ++attempt) {
       auto domains = searchDomains(result.enumeration, g, options.maxSamples, must);
       if (domains.empty()) {
@@ -382,7 +385,77 @@ SynthesisResult synthesizeProgram(const SemanticProgram &program,
   return Driver(program, certificate, options, backend).run();
 }
 
-std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events) {
+std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events,
+                   StringRef extraKey, StringRef extraJSON) {
+  std::vector<std::pair<std::string, std::string>> extras;
+  if (!extraKey.empty())
+    extras.push_back({extraKey.str(), extraJSON.str()});
+  return toJSON(program, result, events, extras);
+}
+
+std::string iterationCountersJSON(const SemanticProgram &original, const SemanticProgram &instrumented,
+                                  ArrayRef<std::vector<APInt>> points, uint64_t referenceFill,
+                                  const EnumerationLimits &limits) {
+  json::Array state, headers;
+  CounterInstrumentation instrumentation;
+  for (unsigned id : instrumented.iterationCounters) {
+    state.push_back((int64_t)id);
+    headers.push_back((int64_t)instrumented.state[id].location);
+    LoopCounter counter;
+    counter.header = instrumented.state[id].location;
+    counter.state = id;
+    instrumentation.counters.push_back(counter);
+  }
+  // The natural loops, for compareRuns: a transition into the header from a block
+  // the counter's bump reads it on is a back edge.
+  for (LoopCounter &counter : instrumentation.counters)
+    for (const Transition &t : instrumented.transitions)
+      if (t.to == counter.header)
+        for (const auto &[id, term] : t.assignments)
+          if (id == counter.state && term->op != TermOp::Const)
+            counter.body.push_back(t.from);
+  for (LoopCounter &counter : instrumentation.counters) {
+    std::sort(counter.body.begin(), counter.body.end());
+    counter.body.erase(std::unique(counter.body.begin(), counter.body.end()), counter.body.end());
+  }
+  json::Array replays;
+  uint64_t equal = 0, compared = 0;
+  for (const std::vector<APInt> &point : points) {
+    auto states = eventStates(original, point, referenceFill, limits);
+    if (!states)
+      continue;
+    RunLimits run;
+    run.fuel = limits.fuel;
+    run.maxCells = limits.maxCells;
+    run.maxRecordedConfigurations = 0;
+    CounterReplay replay = compareRuns(original, instrumented, instrumentation, states->entry, run);
+    ++compared;
+    equal += replay.equal;
+    json::Array parameters;
+    for (const APInt &value : point)
+      parameters.push_back((int64_t)value.getSExtValue());
+    replays.push_back(json::Object{{"parameters", std::move(parameters)},
+                                   {"equal", replay.equal},
+                                   {"reason", replay.reason},
+                                   {"steps", (int64_t)replay.steps},
+                                   {"events", (int64_t)replay.events},
+                                   {"header_arrivals", (int64_t)replay.headerArrivals}});
+  }
+  json::Object out{{"state", std::move(state)},
+                   {"headers", std::move(headers)},
+                   {"replay_points", (int64_t)compared},
+                   {"replay_equal", (int64_t)equal},
+                   {"replays", std::move(replays)},
+                   {"note", "ghost state: nothing in the program reads a counter; the replay is evidence "
+                            "for the listed points only"}};
+  std::string text;
+  raw_string_ostream stream(text);
+  stream << formatv("{0:1}", json::Value(std::move(out)));
+  return stream.str();
+}
+
+std::string toJSON(const SemanticProgram &program, const SynthesisResult &result, bool events,
+                   ArrayRef<std::pair<std::string, std::string>> extras) {
   const DomainEnumeration &enumeration = result.enumeration;
   json::Object out{{"function", program.functionName},
                    {"fingerprint", program.fingerprint},
@@ -405,6 +478,22 @@ std::string toJSON(const SemanticProgram &program, const SynthesisResult &result
         axes[names[axis]] = std::move(terms);
       }
       entry["axes"] = std::move(axes);
+      bool anyProgram = false;
+      for (const auto &axis : candidate.family.programs)
+        for (const std::string &text : axis)
+          anyProgram = anyProgram || !text.empty();
+      if (anyProgram) {
+        // The statement programs the terms were lowered from: text of the proposal,
+        // judged nowhere. "" marks a term the grammar built directly.
+        json::Object programs;
+        for (unsigned axis = 0; axis < 4; ++axis) {
+          json::Array texts;
+          for (const std::string &text : candidate.family.programs[axis])
+            texts.push_back(text);
+          programs[names[axis]] = std::move(texts);
+        }
+        entry["index_programs"] = std::move(programs);
+      }
       if (candidate.order) {
         json::Array levels;
         for (const OrderLevel &level : candidate.order->levels)
@@ -471,6 +560,11 @@ std::string toJSON(const SemanticProgram &program, const SynthesisResult &result
     groups.push_back(std::move(entry));
   }
   out["groups"] = std::move(groups);
+  for (const auto &[extraKey, extraJSON] : extras) {
+    auto parsed = json::parse(extraJSON);
+    out[extraKey] = parsed ? std::move(*parsed)
+                           : json::Value("unparsable: " + toString(parsed.takeError()));
+  }
   std::string text;
   raw_string_ostream stream(text);
   stream << formatv("{0:1}", json::Value(std::move(out)));

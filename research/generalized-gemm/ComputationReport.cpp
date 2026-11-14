@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 #include "GeneralizedGemm/ComputationAnalysis.h"
 #include "GeneralizedGemm/PolynomialAdapter.h"
+#include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SemanticImport.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 #include "GeneralizedGemm/Z3Backend.h"
@@ -40,6 +41,9 @@ static cl::opt<uint64_t> maxPoints("max-points", cl::init(256));
 static cl::opt<unsigned> maxLevel("max-level", cl::init(3));
 static cl::opt<int> fixedLevel("grammar-level", cl::init(-1),
                                cl::desc("use only this grammar level"));
+static cl::opt<bool> statementGrammar(
+    "statement-grammar", cl::init(false),
+    cl::desc("add the loop-free statement programs of Appendix G (bit-vector adaptation)"));
 static cl::opt<unsigned> maxCandidates("max-candidates", cl::init(5));
 static cl::opt<unsigned> maxRounds("max-rounds", cl::init(300));
 static cl::opt<uint64_t> referenceFill("reference-fill", cl::init(0));
@@ -48,6 +52,10 @@ static cl::opt<bool> noSearch("no-search", cl::init(false),
 static cl::opt<uint64_t> replaySteps("replay-steps", cl::init(1u << 22));
 static cl::opt<uint64_t> replayNodes("replay-nodes", cl::init(1u << 23));
 static cl::opt<unsigned> maxQueries("max-queries", cl::init(4000));
+static cl::opt<bool> iterationCounters(
+    "iteration-counters", cl::init(false),
+    cl::desc("phase 4 (I1): add one ghost counter per loop header after the certificate is found; "
+             "the counters are state the search may choose"));
 static cl::opt<bool> noCertificate("no-certificate", cl::init(false),
                                    cl::desc("withhold the certificate, as a test"));
 static cl::opt<std::string> authorize(
@@ -163,11 +171,17 @@ int main(int argc, char **argv) {
     options.referenceFill = referenceFill;
     if (fixedLevel >= 0)
       options.grammar = GrammarSpec::atLevel(fixedLevel);
+    options.statementGrammar = statementGrammar;
     std::optional<TerminationCertificate> certificate;
     if (!noCertificate && program.isSupported()) {
       auto hints = polynomialRankHints(program, function, importOptions);
       certificate = analyzeTermination(program, backend, termination, hints).certificate;
     }
+    // Phase 4 (I1): the certificate is about the imported program; the counters are
+    // ghost state it never mentions, so it stays valid, and the checkers re-check it.
+    SemanticProgram original = program;
+    if (iterationCounters && program.isSupported())
+      addIterationCounters(program);
     ComputationRequest request;
     request.synthesis = options;
     request.search = !noSearch;
