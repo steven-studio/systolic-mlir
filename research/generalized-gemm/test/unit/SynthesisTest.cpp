@@ -460,6 +460,24 @@ func.func @history(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi3
   }
   return
 }
+func.func @fib_shift(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %j = %c0 to %c2 step %c1 {
+    %r:2 = scf.for %k = %c0 to %n step %c1 iter_args(%f = %c0, %g = %c1) -> (index, index) {
+      %x = memref.load %a[%c0, %f] : memref<1x64xi32>
+      %y = memref.load %b[%f, %j] : memref<64x2xi32>
+      %z = memref.load %c[%c0, %j] : memref<1x2xi32>
+      %m = arith.muli %x, %y : i32
+      %s = arith.addi %z, %m : i32
+      memref.store %s, %c[%c0, %j] : memref<1x2xi32>
+      %ng = arith.addi %f, %g : index
+      scf.yield %g, %ng : index, index
+    }
+  }
+  return
+}
 func.func @stepped(%a: memref<1x64xi32>, %b: memref<64x2xi32>, %c: memref<1x2xi32>, %n: index) {
   %zero = arith.constant 0 : index
   cf.br ^outer(%zero : index)
@@ -3201,6 +3219,35 @@ static void testTables() {
   }
 }
 
+/// Phase 5: the oracle's fib shape, g one step ahead of the subscript f (f' = g,
+/// g' = f + g). g's table (inits 1, 1, body T[r-1] + T[r-2], chain f) is PROVED. This
+/// is the case in which a replay from a solver model's entry value for a variable
+/// whose init is known started the specification in a state no run has and refuted
+/// the correct table (table_oracle.py found it); the fix in replayModel is what this
+/// test holds.
+static void testTablesFibShift() {
+  Module m(programs);
+  SemanticProgram p = m.import("fib_shift", 8);
+  ParameterScope scope = range(p, 2, 7);
+  ClosedFormOptions options;
+  options.scope = scope;
+  std::vector<std::vector<APInt>> points;
+  for (int64_t n = 2; n <= 7; ++n)
+    points.push_back({APInt(8, n)});
+  SliceSynthesisResult result = synthesizeClosedForms(p, points, options, z3Backend);
+  unsigned provedTables = 0;
+  for (const SliceSynthesis &slice : result.slices)
+    for (const LoopSynthesis &l : slice.loops)
+      for (const SynthesizedClosedForm &form : l.forms)
+        if (form.kind == "table" && form.status == ClosedFormStatus::Proved) {
+          ++provedTables;
+          CHECK(form.text.find("T0[0] := 1 ; T0[1] := 1 ;") != std::string::npos);
+          CHECK(form.text.find("T0[v0] := (T0[(v0 - 1)] + T0[(v0 - 2)])") != std::string::npos);
+          CHECK(form.history.size() == 1);
+        }
+  CHECK(provedTables == 1);
+}
+
 /// Phase 4 (I1): iteration counters as ghost state. The instrumented program runs
 /// as the original on every point, the counters count, the search takes the
 /// counter over the loop variable of equal kernel, and the entry definitions of
@@ -3762,7 +3809,7 @@ int main(int argc, char **argv) {
       else if (name == "while") testWhilePrograms();
       else if (name == "counters") testCounters();
       else if (name == "arrays") testArrays();
-      else if (name == "tables") testTables();
+      else if (name == "tables") { testTables(); testTablesFibShift(); }
       else if (name == "grammar") testGrammar();
       else if (name == "search") testSearch();
       else if (name == "clauses") testClauses();
@@ -3779,6 +3826,7 @@ int main(int argc, char **argv) {
   testCounters();
   testArrays();
   testTables();
+  testTablesFibShift();
   testStructure();
   testLiveState();
   testSlices();

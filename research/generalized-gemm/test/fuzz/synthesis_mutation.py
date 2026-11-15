@@ -168,7 +168,7 @@ MUTANTS = [
     ("model entry taken for a known init", Z, "      if (at != spec.carried.end() && !spec.init[at - spec.carried.begin()])", "      if (at != spec.carried.end())"),
     ("counter never takes over a kernel", G, "isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)", "false && isCounter(atom.term) && !isCounter(out.atoms[slot->second].term)"),
     ("counter bumped on every edge", N, "        t.assignments.push_back({var.id, inLoop[t.from] ? bumped : zero});", "        t.assignments.push_back({var.id, bumped});"),
-    ("replay ignores the counter", N, "      if (!value || *value != APInt(width, expected[c.header]", "      if (false && (!value || *value != APInt(width, expected[c.header]"),
+    ("replay ignores the counter", N, '      if (!value || *value != APInt(width, expected[c.header], /*isSigned=*/false, /*implicitTrunc=*/true)) {', "      if (false) {"),
 ]
 
 # Changes that no test can see, and why. Not run: a survivor here would mean nothing.
