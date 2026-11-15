@@ -2533,8 +2533,8 @@ static void testSegmentGates() {
         CHECK(out.singleContribution().status == FactStatus::Unknown);
       if (name == "; SH ")
         CHECK(out.sharedCells().status == FactStatus::Unknown);
-      if (name == "; C1 ")
-        CHECK(out.segments()[0].outputInjective.status == FactStatus::Unknown &&
+      if (name == "; C1 ") // A claim that is not Verified has no segment to read: the check then fails.
+        CHECK(!out.segments().empty() && out.segments()[0].outputInjective.status == FactStatus::Unknown &&
               out.outputInjective().status == FactStatus::Unknown);
     }
     // Limits and certificates, as for one order.
@@ -3031,11 +3031,18 @@ static void testSegments() {
                                              plain(f.program, l[2], zero, terms.binary(TermOp::Add, jVar, terms.bv(APInt(16, 1))))},
                             nullptr, {0, 1}, /*logical=*/1)};
     auto [fin, sym] = expectVerified("sib_repeat", f, r);
-    CHECK(fin.segments()[0].multiplicity == DomainMultiplicity::Unit);
-    CHECK(fin.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
-    CHECK(sym.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
+    // The checks below read the claims' segments by index. A claim that failed
+    // expectVerified has none, and reading one was undefined: a sanitized run of 2026-11-13
+    // stopped here, on a finite claim that the solver's limit had left Unknown. Each check
+    // names the size it needs and fails as a check without it; the term is read only where
+    // there is one.
+    CHECK(fin.segments().size() == 2 && fin.segments()[0].multiplicity == DomainMultiplicity::Unit);
+    CHECK(fin.segments().size() == 2 && fin.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
+    CHECK(sym.segments().size() == 2 && sym.segments()[1].multiplicity == DomainMultiplicity::LogicalBox);
     CHECK(fin.multiplicity() == DomainMultiplicity::Unknown && fin.multiplicityTerm() == nullptr);
-    auto mu = evaluateLevelTerm(sym.segments()[1].multiplicityTerm, {APInt(16, 3)}, {APInt(16, 2), APInt(16, 0)});
+    std::optional<APInt> mu;
+    if (sym.segments().size() == 2 && sym.segments()[1].multiplicityTerm)
+      mu = evaluateLevelTerm(sym.segments()[1].multiplicityTerm, {APInt(16, 3)}, {APInt(16, 2), APInt(16, 0)});
     CHECK(mu && mu->getZExtValue() == 3);
     // The proposer alone takes t for a coordinate (Unit over (j, t)); told that i and j
     // are the logical variables, it proposes the box, and the checker certifies it.
