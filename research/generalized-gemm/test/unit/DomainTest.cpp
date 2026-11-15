@@ -5511,6 +5511,8 @@ static void testPhase4Views() {
         CHECK(llvm::is_contained(stateSupport(result.identities[0].term), p.iterationCounters.back()));
       }
       CHECK(c.request.has_value());
+      if (!c.request)
+        continue; // A failed proposal: the checks below read it, and a mutant must die by a CHECK, not a crash.
       CHECK(c.certificateStrengthened && c.invariantsAdded.size() == 2);
       CHECK(c.certificateNote.find("accepts") != std::string::npos);
       const ReductionVerdict &v = c.verdict;
@@ -5576,6 +5578,8 @@ static void testPhase4Views() {
       twoN = twoN || (identity.cut < 0 && identity.term->op == TermOp::Mul);
     CHECK(twoN);
     CHECK(c.request.has_value() && c.certificateStrengthened);
+    if (!c.request)
+      return;
     const ReductionVerdict &v = c.verdict;
     CHECK(v.status() == ComputationStatus::Verified && v.tier() == ComputationTier::Symbolic);
     CHECK(v.domainSymbolic().exactOrder());
