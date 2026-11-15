@@ -1079,6 +1079,116 @@ admitted); mixed unions (one `addf` site, or flags that differ between the group
 refuses a fold of two operations); any fact on a verdict that is not Verified; everything
 M3, M4a and M4b-1 leave Unknown.
 
+## M4b-2b-1: the float reorder fact over a set, refuted by a witness (2026-11-14)
+
+Theorem 13's float fact, over the union of the listed groups, with the same two sides it has
+for one group: **Proven by `trivial` alone**, and **Refuted by a replayed witness**. Nothing else.
+For a cell with contributions p_1..p_k and start z, every reordering with k ≥ 2 is a
+reassociation of the left-nested fold ((z ⊕ p_π(1)) ⊕ p_π(2)) …, and IEEE-754 addition is not
+associative: (1e16 ⊕ 1) ⊕ −1e16 = 0 while (1e16 ⊕ −1e16) ⊕ 1 = 1. Swapping two contributions
+is not commutation (which would be p ⊕ z = z ⊕ p, the same sum); it is the associativity
+question with z as the third operand. No structural condition on the program constrains the
+values the operands take, so no rule proves a float fold reorderable, and none is admitted:
+not for two contributions, not for `reassoc`, `contract`, `arcp` or `afn` (the model evaluates
+the strict refinement and records that it did; a flag is no licence).
+
+**The model's arithmetic**, which the witness is judged in: binary32 at 32 bits, binary64
+otherwise (`evalFloatBinary`, `APFloat`), round to nearest even only (`roundingmode` is
+refused at import), exact denormals; a NaN result is an `Underspecified` stop, `nsz` makes a
+zero result a stop, `nnan`/`ninf` make NaN or Inf operands and results poison. Floating-point
+status flags are not modelled: the facts speak of values.
+
+**Refuted** by a witness: a point of the verdict and an initial memory at which the program
+completes and reversing one cell's contributions, each the product of the initial operands,
+gives different bits, or gives NaN, so that run would stop. The search is M4b-2a's
+(`reorderWitnessOver`: the set's own replay for the prefix constants, Theorem 13's fixed fill
+sequence, `reversalDiffers` over the union's events on every listed root); the judge now names a
+NaN reversal. A memory at which no difference shows is no evidence: Unknown, with what the
+search found. The verdict is untouched by the fact.
+
+| Memory (binary64 unless said; C[0] = z, A·B = p_1, A·D = p_2) | program order | reversed |
+| --- | --- | --- |
+| z = 1e16, p_1 = 1, p_2 = −1e16 | (1e16 ⊕ 1) ⊕ −1e16 = **0** | **1** |
+| z = 1e16, p_1 = −1e16, p_2 = 1 | (1e16 ⊕ −1e16) ⊕ 1 = **1** | **0** |
+| binary32: z = 2^24, p_1 = 1, p_2 = −2^24 | **0** (2^24 + 1 rounds to 2^24) | **1** |
+| binary32: z = 2^24, p_1 = −2^24, p_2 = 1 | **1** | **0** |
+| z = max, p_1 = max, p_2 = −max | (max ⊕ max) ⊕ −max = **+∞**, completes | **max** |
+| z = 1e308, p_1 = −∞ (B = −∞), p_2 = 1e308 | (1e308 ⊕ −∞) ⊕ 1e308 = **−∞**, completes | **NaN**: that run would stop |
+| z = ±0, p_1 = p_2 = −0 (A = −1, B = D = 0) | +0 from +0, −0 from −0 | the same: the sign of a zero sum under round to nearest even does not depend on the order; no witness |
+| the search's own, `set_float` at n = 1: z = −1, p_1 = −0.001, p_2 = 0.001 | −0.9999999999999999 | −1 |
+
+### Contract
+
+`joinSetReduction` (`DomainChecker.cpp`): the witness search of M4b-2a is one lambda for both
+folds; for an `OrderedFloat` verdict without `trivial` the float fact is its result, Refuted
+with the witness or Unknown with the search's detail. The integer branch is unchanged, and so is
+`checkReduction`: a set of one group has Theorem 13's float fact. `reversalDiffers` says
+"gives NaN, so that run would stop" where the reversed fold is NaN (the one judge, one wording;
+no present test or RUN line had a NaN reversal, so no one-group output changes).
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| FL-1 | Proven only by `trivial` (no rule, no flag, no "two contributions commute") | mutant `set float proven without a witness`; oracle F-2 |
+| FL-2 | Refuted only with a witness the judge confirms: the program completes, the reversed fold differs in bits or is NaN | unit replays (`runConcrete` + `reversalDiffers` over the union); oracle F-1 with its own binary64 and binary32 arithmetic and the NaN stop |
+| FL-3 | the witness is a finite statement: one point, one memory; nothing is concluded beyond it (Unknown stays Unknown without one) | `witnessFills = 0` → Unknown; `set_mixed` → Unknown by the judge's refusal |
+| FL-4 | the verdict, its claims, points and binding are unchanged by a refuted fact; a refuted order makes no fact | unit (both listings equal; computation claims Verified; backwards request → no fact); mutant `set refuted float fact refutes the verdict` |
+| FL-5 | the integer fact and every one-group output are unchanged; integer sets keep "not a float fold, or no claim" | byte-identity with `reorder.float` listed; `setreorder` unchanged in count |
+| FL-6 | the model's exact semantics: NaN names a stop, Inf and the sign of a zero are bits, binary32 at 32 bits; unsupported formats never reach the judge (import refuses them) | unit cases above; mutant `judge NaN reversal unnamed` |
+
+### How M4b-2b-1 is checked independently
+
+- **Unit.** The `setfloat` section (48 checks): the table above, each hand-built memory run by
+  `runConcrete` (the program's value) and judged over the union; the search's own witnesses for
+  `set_float` (binary64) and `set_float32` replayed; two operand roots of their own
+  (`set_float_roots`), three contributions to a cell (`set_float_repeat`), the listing, no fills,
+  the mixed fold, a refuted order, an integer set, a set of one float group against Theorem 13.
+  The M4b-1 case 9 (`setreduction`) now asserts the refutation it left Unknown, and the NB-2 cases
+  pin the float detail of a verdict the claims do not meet.
+- **Oracle.** Programs are binary32 as often as binary64 (`numpy.float32` for the arithmetic);
+  the interpreter stops on a NaN as the model does; every float refutation is replayed (F-1); an
+  integer program's float fact is Unknown with its one detail (F-5); the earlier rules stand.
+- **Mutation.** Four new mutants: the float witness dropped, Proven without a witness, a refuted
+  float fact refuting the verdict, the NaN reversal unnamed. `set integer fact on an unverified
+  claim`, equivalent in M4b-2a, is killable now (its branch would print another float detail) and
+  is no longer declared.
+- **Byte-identity.** Against the M4b-2a commit: every output identical except
+  `reduction.reorder.float` on Verified float set verdicts without `trivial`, each change listed.
+
+### What stays Unknown
+
+Every float fold with a cell of two contributions at which the fill sequence finds no
+difference (designed fills are M4b-2b-2); a fold of two operations; any set whose verdict is not
+Verified; everything M3, M4a, M4b-1 and M4b-2a leave Unknown.
+
+## Validation of M4b-2b-1 (2026-11-14 and 15, LLVM 24.0.0git, Z3 4.8.12, base c98571b)
+
+Every result below is from one frozen tree (hash `85a1741b…` over `include/`, `lib/` and
+`research/generalized-gemm`), with every subprocess under a limit, but **not from one
+uninterrupted run**. Part 1 (2026-11-14, 08:38:04 to 11:16:44) ran the build, the units and
+the six oracles; its next step, CTest, was interrupted at about 11:31:53, when the session that
+carried the run ended, and left no suite result. Part 2 (11:42:03 to 2026-11-15 03:28:54) ran
+CTest from its start, the byte comparisons, the sanitizers and the mutation harness. The hash
+was the same at the start of part 1, before part 2 and at the end. The binaries it is compared
+with were built from a snapshot of the M4b-2a commit. Times are local; a sub-step's end is its
+log's last write.
+
+| Check | Part, time | Exit | Result |
+| --- | --- | --- | --- |
+| Build, Debug | 1, 08:38:04 to 08:38:47 | 0 | 0 warnings |
+| G5a/G5b unit, core | 1, to 08:49:35 | 0 | 1,337 checks, 0 failures: `setfloat` 48 (new), `setreduction` 88 (86 and the two of case 9), `setreorder` 120 (118 and the two float details of the NB-2 cases), every other section's count as at the M4b-2a commit |
+| G4a, G3b and G3a units | 1, to 09:08:33 | 0 each | 3,658, 517 and 355 checks, 0 failures |
+| Theorem 17 oracle, seed 20261117 | 1, to 09:30:13 | 0 | 60 programs (30 integer, 15 binary64, 15 binary32), 0 failures: 103 symbolic and 29 whole-scope verdicts verified, 331 points and 1,811 folds against the program's cells, 68 computation and 14 domain refutations replayed, 25 Unknown verdicts, 110 one-group verdicts and 60 one-group fact sets equal to Theorem 13, 60 listings compared. Float: 14 refutations replayed (8 binary32, 6 binary64), 34 float facts left Unknown for want of a witness within the fills, 492 swaps of which 11 change the result. Integer, as in M4b-2a: 16 facts by the rule, 21 by `trivial`, 2 refutations replayed, 216 other-order comparisons, 546 permutation folds, 32 negatives. 175 fills whose run stops (a flagged overflow or a NaN) |
+| Set-domain, multi-group, G4a, domain and identity oracles | 1, to 11:16:44 | 0 each | 60 programs; 112 witnesses; 22 witnesses; 0 disagreements; 120 programs: 0 failures and 0 disagreements |
+| CTest, first attempt | 1, 11:16:44 to about 11:31:53 | none | interrupted with the session; no suite result |
+| `check-generalized-gemm` | 2, 11:42:03 to 13:54:21 | 0 | 22 of 22 CTest suites, `setreduction-programs` and `dom_reduction.mlir` with its `FLOAT` block among them |
+| Byte-identical against the M4b-2a commit | 2, to 14:07:54 | 0 | G1 42, G2a 14, G3a 14, G3b 14 outputs; G4a 18 functions; identity-report 6 outputs; 29 RUN lines, 0 differ: the 7 with `--groups` compared with `reduction.reorder.float` removed, and exactly 1 float fact changed, `set_float` of `dom_reduction.mlir`, Unknown to Refuted, "reversing cell 0 of root 2 changes its final bits"; every one-group output and every integer fact identical |
+| ASan, UBSan, leaks | 2, 14:07:54 to 17:07:30 | 0 each | 0 reports: the domain core, 1,337 checks, 0 failures (`segments` 1,057 s, every query within the solver limit this time); the G4a unit, 3,658 checks; 8 Theorem 17 oracle programs. The sanitized domain core was run once more after the run, alone (about 03:30 to 04:57:28): 1,337 checks, 0 failures, 0 reports; a repeat that this run did not need. The test-code index at `DomainTest.cpp:3032` recorded for M4b-2a is still in the tree and was not reached, no check before it having failed |
+| Mutation, domain harness, all 216, one worker | 2, 17:07:30 to 03:28:54 | 0 | 197 killed by a test's own assertion, 19 equivalent by the harness's list (which it records and does not execute), 0 survived, 0 timeouts, 0 resource limits, 0 harness errors, the baseline passing. The four new mutants are killed (`set float witness dropped` and `set refuted float fact refutes the verdict` by `setreduction`, `set float proven without a witness` by `setreorder`, `judge NaN reversal unnamed` by `setfloat`). `set integer fact on an unverified claim`, declared equivalent in M4b-2a, is killed by `setreorder` and no longer declared. No equivalence was declared in this milestone. Two declarations inherited from G5a in `ReductionSemantics.cpp` leave every status, tier and witness as it is but change an explanatory detail string: `integer unverified admitted` (no test pins that string) and `integer flags ignored` (which, by reading, `setreorder` has pinned since M4b-2a, so the mutant is killable and its entry stale); neither was executed |
+| Not run | | | A Release build of this milestone's sections; the G4a, G3b and G3a harnesses (no file of theirs changed); the four G3b and G3a mutants open since M4-0 stay open |
+| Outside the plan | 2, 11:42:55 to 11:42:57 | 0 | A 9-check run of the `binding` section of the same binary under a passive solver-query timer, which overlapped CTest's second suite (`relational`, passed) for about two seconds |
+
 ## Validation of M4b-2a (2026-11-13, LLVM 24.0.0git, Z3 4.8.12, base 184d0eb)
 
 Every result below is from one frozen tree (hash `2765d220…` over `include/`, `lib/` and

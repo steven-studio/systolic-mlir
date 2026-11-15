@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -4580,14 +4581,19 @@ static void testSetReduction() {
   }
   // 9. Floats: the fold's order is the claim. With C[0] = 1e16, A[0] = B[0] = 1 and
   // D[0] = -1e16 the program computes (1e16 + 1) + (-1e16) = 0 in segment order; the other
-  // order gives 1. Nothing reorders: trivial is refuted and the float fact Unknown.
+  // order gives 1. Nothing reorders: trivial is refuted, and (G5b-M4b-2b-1; M4b-1 left it
+  // Unknown) the float fact is refuted by the fixed fill sequence with a replayed witness.
   {
     Fixture f = fixture(m, "set_float", 1, 3);
     std::vector<unsigned> l = loops(f.program);
     SetReductionVerdict v = verdict(f, {0, 1}, twoSegments(f, 0, l[0], 1, l[1]), f.options, z3Backend);
     expect("float", v, S::Verified, T::Symbolic);
     CHECK(v.fold() == FoldForm::OrderedFloat && v.trivialReorder().status == FactStatus::Refuted &&
-          v.floatReorder().status == FactStatus::Unknown && v.integerReorder().status == FactStatus::Unknown);
+          v.floatReorder().status == FactStatus::Refuted && v.integerReorder().status == FactStatus::Unknown);
+    CHECK(v.floatReorder().point && v.floatReorder().memory &&
+          v.floatReorder().detail.find("changes its final bits") != std::string::npos);
+    if (v.floatReorder().memory)
+      CHECK(runConcrete(f.program, *v.floatReorder().memory).status == RunStatus::Returned);
     EntryState entry;
     entry.parameters = {APInt(16, 1)};
     auto bitsOf = [](double value) {
@@ -5330,6 +5336,7 @@ static void testSetReorder() {
     CHECK(flat.computationFinite().status() == S::Verified);
     integer("a flat request", flat, FactStatus::Unknown, T::Proposed, noClaim);
     CHECK(flat.floatReorder().status == FactStatus::Unknown && flat.trivialReorder().status == FactStatus::Unknown);
+    CHECK(flat.floatReorder().detail == "not a float fold, or no claim");
     ComputationOptions co;
     co.scope = f.options.scope;
     co.termination = f.options.termination;
@@ -5344,6 +5351,7 @@ static void testSetReorder() {
     expect("domain claims lost", lost, S::Unknown, T::Proposed);
     integer("domain claims lost", lost, FactStatus::Unknown, T::Proposed, noClaim);
     CHECK(lost.floatReorder().status == FactStatus::Unknown && lost.trivialReorder().status == FactStatus::Unknown);
+    CHECK(lost.floatReorder().detail == "not a float fold, or no claim");
   }
 
   // A set of one group is Theorem 13 on the same request, facts included.
@@ -5597,6 +5605,364 @@ static void testPhase4Views() {
   }
 }
 
+/// G5b-M4b-2b-1: programs for the float reorder fact over a set: binary32, two operand
+/// roots of their own, a repeat (three contributions to a cell), and one group over two
+/// loops.
+static const char *floatSource = R"(func.func @set_float32(%a: memref<8xf32>, %b: memref<8xf32>, %c: memref<8xf32>, %d: memref<8xf32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xf32>
+    %yi = memref.load %b[%i] : memref<8xf32>
+    %zi = memref.load %c[%i] : memref<8xf32>
+    %mi = arith.mulf %xi, %yi : f32
+    %si = arith.addf %zi, %mi : f32
+    memref.store %si, %c[%i] : memref<8xf32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xf32>
+    %yj = memref.load %d[%j] : memref<8xf32>
+    %zj = memref.load %c[%j] : memref<8xf32>
+    %mj = arith.mulf %xj, %yj : f32
+    %sj = arith.addf %zj, %mj : f32
+    memref.store %sj, %c[%j] : memref<8xf32>
+  }
+  return
+}
+func.func @set_float_roots(%a: memref<8xf64>, %b: memref<8xf64>, %c: memref<8xf64>, %d: memref<8xf64>, %e: memref<8xf64>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xf64>
+    %yi = memref.load %b[%i] : memref<8xf64>
+    %zi = memref.load %c[%i] : memref<8xf64>
+    %mi = arith.mulf %xi, %yi : f64
+    %si = arith.addf %zi, %mi : f64
+    memref.store %si, %c[%i] : memref<8xf64>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %d[%j] : memref<8xf64>
+    %yj = memref.load %e[%j] : memref<8xf64>
+    %zj = memref.load %c[%j] : memref<8xf64>
+    %mj = arith.mulf %xj, %yj : f64
+    %sj = arith.addf %zj, %mj : f64
+    memref.store %sj, %c[%j] : memref<8xf64>
+  }
+  return
+}
+func.func @set_float_repeat(%a: memref<8xf64>, %b: memref<8xf64>, %c: memref<8xf64>, %d: memref<8xf64>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xf64>
+    %yi = memref.load %b[%i] : memref<8xf64>
+    %zi = memref.load %c[%i] : memref<8xf64>
+    %mi = arith.mulf %xi, %yi : f64
+    %si = arith.addf %zi, %mi : f64
+    memref.store %si, %c[%i] : memref<8xf64>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    scf.for %k = %c0 to %c2 step %c1 {
+      %xj = memref.load %a[%j] : memref<8xf64>
+      %yj = memref.load %d[%j] : memref<8xf64>
+      %zj = memref.load %c[%j] : memref<8xf64>
+      %mj = arith.mulf %xj, %yj : f64
+      %sj = arith.addf %zj, %mj : f64
+      memref.store %sj, %c[%j] : memref<8xf64>
+    }
+  }
+  return
+}
+func.func @set_float_same(%a: memref<8xf64>, %b: memref<8xf64>, %c: memref<8xf64>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xf64>
+    %yi = memref.load %b[%i] : memref<8xf64>
+    %zi = memref.load %c[%i] : memref<8xf64>
+    %mi = arith.mulf %xi, %yi : f64
+    %si = arith.addf %zi, %mi : f64
+    memref.store %si, %c[%i] : memref<8xf64>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xf64>
+    %yj = memref.load %b[%j] : memref<8xf64>
+    %zj = memref.load %c[%j] : memref<8xf64>
+    %mj = arith.mulf %xj, %yj : f64
+    %sj = arith.addf %zj, %mj : f64
+    memref.store %sj, %c[%j] : memref<8xf64>
+  }
+  return
+}
+)";
+
+/// G5b-M4b-2b-1: the float reorder fact over a set, Refuted by a witness and never Proven
+/// but by `trivial`. binary64 in both orders (0 and 1), binary32 at 2^24, infinity in one
+/// order only, a NaN reversal (that run would stop), the sign of a zero (no difference under
+/// round to nearest even), two operand roots of their own, three contributions to a cell,
+/// the listing, no witness within the fills, a fold of two operations, a refuted order, a set
+/// of one group against Theorem 13, and the verdict untouched by a refuted fact.
+static void testSetFloat() {
+  Module m(std::string(setSource) + siblingSource + reductionSource + reorderSource + floatSource);
+  Sort w = Sort::bv(16);
+  auto level = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, false, false};
+  };
+  auto segments = [&](Fixture &f, std::vector<std::pair<unsigned, unsigned>> siteVars) {
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    for (auto [site, var] : siteVars)
+      r.segments.push_back(segmentOf(f.program, {site}, {level(f.program, var, zero, n)}));
+    return r;
+  };
+  auto verdict = [&](Fixture &f, std::vector<unsigned> groups, const DomainRequest &r, const DomainOptions &o,
+                     SmtBackend &backend) {
+    return checkSetReduction(f.program, f.proof(), f.enumeration, groups, r, o, backend);
+  };
+  auto say = [](const char *what, const SetReductionVerdict &v) {
+    printf("%s: %s %s (%s); float %s \"%s\"; integer %s \"%s\"\n", what, stringifyComputationStatus(v.status()),
+           stringifyComputationTier(v.tier()), v.reason().c_str(), stringifyFactStatus(v.floatReorder().status),
+           v.floatReorder().detail.c_str(), stringifyFactStatus(v.integerReorder().status),
+           v.integerReorder().detail.c_str());
+  };
+  auto expect = [&](const char *what, const SetReductionVerdict &v, ComputationStatus status, ComputationTier tier) {
+    bool ok = v.status() == status && v.tier() == tier;
+    if (!ok)
+      say(what, v);
+    CHECK(ok);
+  };
+  // The bits of a value at a root's width: binary64, or binary32 where the root is 32 bits.
+  auto bitsAt = [](unsigned width, double value) {
+    if (width == 32) {
+      float narrow = (float)value;
+      uint32_t raw;
+      std::memcpy(&raw, &narrow, sizeof raw);
+      return APInt(32, raw);
+    }
+    uint64_t raw;
+    std::memcpy(&raw, &value, sizeof raw);
+    return APInt(64, raw);
+  };
+  // An entry at n = `point` with every root's first cells as given (as doubles), the rest 0.
+  auto entry = [&](const Fixture &f, unsigned point, std::vector<std::vector<double>> firstCells) {
+    EntryState out;
+    out.parameters = {APInt(16, point)};
+    for (unsigned r = 0; r < f.program.roots.size(); ++r) {
+      RootData data;
+      data.shape = {8};
+      unsigned width = f.program.roots[r].sort.width;
+      for (unsigned i = 0; i < 8; ++i) {
+        double value = r < firstCells.size() && i < firstCells[r].size() ? firstCells[r][i] : 0.0;
+        data.cells.push_back(bitsAt(width, value));
+      }
+      out.memory.push_back(data);
+    }
+    return out;
+  };
+  // The judge over the union, from the set's own replay at `point`; `ok` says the union and
+  // its replay were there to judge against.
+  auto judge = [&](Fixture &f, std::vector<unsigned> groups, unsigned point, const EntryState &e, std::string &detail,
+                   bool &ok) {
+    std::vector<const SiteGroup *> listed;
+    for (unsigned g : groups)
+      listed.push_back(&f.enumeration.groups[g]);
+    std::vector<int> groupOf;
+    std::string why;
+    std::optional<SiteGroup> united = unitedSiteGroup(f.program, listed, groupOf, why);
+    ok = united.has_value();
+    if (!united)
+      return false;
+    ReplayResult replay = replayGroupSet(f.program, *united, groupOf, listed.size(), {APInt(16, point)},
+                                         HerbrandLimits());
+    ok = replay.outcome == ReplayOutcome::Equal;
+    return reversalDiffers(f.program, *united, e, replay.prefix, detail);
+  };
+  // The program's final value of C[0], as bits, when the run completes.
+  auto final0 = [&](Fixture &f, const EntryState &e) -> std::optional<APInt> {
+    RunResult run = runConcrete(f.program, e);
+    if (run.status != RunStatus::Returned || run.memory.size() <= 2 || run.memory[2].cells.empty())
+      return std::nullopt;
+    return run.memory[2].cells[0];
+  };
+  // A hand-built witness: the program completes with `programValue` in C[0]; the judge over
+  // the union finds the reversal different, with `words` in its detail.
+  auto witness = [&](const char *what, Fixture &f, std::vector<unsigned> groups, unsigned point, const EntryState &e,
+                     double programValue, const char *words) {
+    std::optional<APInt> c0 = final0(f, e);
+    unsigned width = f.program.roots[2].sort.width;
+    bool valueOk = c0 && *c0 == bitsAt(width, programValue);
+    std::string detail;
+    bool ok = false;
+    bool differs = judge(f, groups, point, e, detail, ok);
+    bool said = detail.find(words) != std::string::npos;
+    if (!(valueOk && ok && differs && said))
+      printf("%s: value %s, replay %s, differs %s, detail \"%s\"\n", what, valueOk ? "ok" : "WRONG", ok ? "ok" : "NOT EQUAL",
+             differs ? "yes" : "no", detail.c_str());
+    CHECK(valueOk && ok && differs && said);
+  };
+  const double inf = std::numeric_limits<double>::infinity(), big = std::numeric_limits<double>::max();
+  const std::string noFloat = "not a float fold, or no claim", noInteger = "not an integer fold, or no claim";
+
+  // binary64. The search's fixed fill sequence refutes set_float (as the setreduction section
+  // asserts); the witness is replayed and judged again over the union. Then the brief's two
+  // memories, in both orders: C[0] = 1e16 with A·B = 1 then A·D = −1e16 gives (1e16 ⊕ 1) ⊕
+  // −1e16 = 0, the other order 1; with the contributions exchanged the program gives
+  // (1e16 ⊕ −1e16) ⊕ 1 = 1, the other order 0.
+  {
+    Fixture f = fixture(m, "set_float", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options, z3Backend);
+    expect("binary64", v, S::Verified, T::Symbolic);
+    CHECK(v.fold() == FoldForm::OrderedFloat && v.trivialReorder().status == FactStatus::Refuted);
+    CHECK(v.floatReorder().status == FactStatus::Refuted && v.floatReorder().point && v.floatReorder().memory);
+    CHECK(v.integerReorder().status == FactStatus::Unknown && v.integerReorder().detail == noInteger);
+    if (v.floatReorder().point && v.floatReorder().memory) {
+      CHECK(runConcrete(f.program, *v.floatReorder().memory).status == RunStatus::Returned);
+      std::string detail;
+      bool ok = false;
+      CHECK(judge(f, {0, 1}, (*v.floatReorder().point)[0].getZExtValue(), *v.floatReorder().memory, detail, ok) && ok);
+    }
+    // The verdict is what M4b-1 says, fact or no fact: the computation claims stand.
+    CHECK(v.computationSymbolic().status() == S::Verified && v.computationFinite().status() == S::Verified &&
+          v.domainSymbolic().status() == S::Verified && v.points().empty() && !v.witness() && !v.failingPoint());
+    SetReductionVerdict back = verdict(f, {1, 0}, r, f.options, z3Backend);
+    CHECK(back.status() == v.status() && back.tier() == v.tier() && back.binding() == v.binding() &&
+          back.floatReorder().status == v.floatReorder().status && back.floatReorder().detail == v.floatReorder().detail &&
+          back.floatReorder().point == v.floatReorder().point);
+    // (1e16 ⊕ 1) ⊕ −1e16 = 0; reversed 1.
+    witness("1e16 + 1 - 1e16", f, {0, 1}, 1, entry(f, 1, {{1.0}, {1.0}, {1e16}, {-1e16}}), 0.0, "changes its final bits");
+    CHECK((1e16 + 1.0) + -1e16 == 0.0 && (1e16 + -1e16) + 1.0 == 1.0);
+    // (1e16 ⊕ −1e16) ⊕ 1 = 1; reversed 0.
+    witness("1e16 - 1e16 + 1", f, {0, 1}, 1, entry(f, 1, {{1.0}, {-1e16}, {1e16}, {1.0}}), 1.0, "changes its final bits");
+    // Infinity in one order only: (max ⊕ max) ⊕ −max = +∞ completes; (max ⊕ −max) ⊕ max = max.
+    witness("infinity", f, {0, 1}, 1, entry(f, 1, {{big}, {1.0}, {big}, {-1.0}}), inf, "changes its final bits");
+    CHECK((big + big) + -big == inf && (big + -big) + big == big);
+    // A NaN reversal: (1e308 ⊕ −∞) ⊕ 1e308 = −∞ completes; (1e308 ⊕ 1e308) ⊕ −∞ is NaN, and that
+    // run would stop. A = 1e308, B = −∞, D = 1.
+    witness("NaN reversal", f, {0, 1}, 1, entry(f, 1, {{1e308}, {-inf}, {1e308}, {1.0}}), -inf, "gives NaN, so that run would stop");
+    // The sign of a zero: with A = −1, B = D = 0 both contributions are −0; (+0 ⊕ −0) ⊕ −0 = +0 in
+    // either order, and from −0 both orders give −0. No difference, so no witness.
+    for (double start : {0.0, -0.0}) {
+      EntryState e = entry(f, 1, {{-1.0}, {0.0}, {start}, {0.0}});
+      std::optional<APInt> c0 = final0(f, e);
+      CHECK(c0 && *c0 == bitsAt(64, start));
+      std::string detail;
+      bool ok = false;
+      CHECK(!judge(f, {0, 1}, 1, e, detail, ok) && ok);
+    }
+    // No witness within the fills: Unknown, with what the search found, never Proven.
+    DomainOptions none = f.options;
+    none.limits.witnessFills = 0;
+    SetReductionVerdict open = verdict(f, {0, 1}, r, none, z3Backend);
+    expect("no fills", open, S::Verified, T::Symbolic);
+    CHECK(open.floatReorder().status == FactStatus::Unknown &&
+          open.floatReorder().detail == "no memory found at which a reversal differs");
+    // A refuted order: the verdict is refuted by the domain, and no fact is made.
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest backward;
+    backward.segments = {segmentOf(f.program, {1}, {level(f.program, l[1], zero, n)}),
+                         segmentOf(f.program, {0}, {level(f.program, l[0], zero, n)})};
+    SetReductionVerdict wrong = verdict(f, {0, 1}, backward, f.options, z3Backend);
+    CHECK(wrong.status() == S::Refuted && wrong.refutedBy() == RefutedBy::Domain &&
+          wrong.floatReorder().status == FactStatus::Unknown && wrong.integerReorder().status == FactStatus::Unknown);
+  }
+  // binary32: 2^24 + 1 rounds to 2^24, so (2^24 ⊕ 1) ⊕ −2^24 = 0 and the other order 1; with
+  // the contributions exchanged, 1 and 0. The search's outcome is a fact of the fill
+  // sequence; whatever it is, the fact is never Proven, and a refutation is replayed.
+  {
+    Fixture f = fixture(m, "set_float32", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options, z3Backend);
+    expect("binary32", v, S::Verified, T::Symbolic);
+    CHECK(v.fold() == FoldForm::OrderedFloat && v.floatReorder().status != FactStatus::Proven);
+    printf("binary32: float %s: %s\n", stringifyFactStatus(v.floatReorder().status), v.floatReorder().detail.c_str());
+    if (v.floatReorder().status == FactStatus::Refuted) {
+      CHECK(v.floatReorder().point && v.floatReorder().memory);
+      if (v.floatReorder().point && v.floatReorder().memory) {
+        CHECK(runConcrete(f.program, *v.floatReorder().memory).status == RunStatus::Returned);
+        std::string detail;
+        bool ok = false;
+        CHECK(judge(f, {0, 1}, (*v.floatReorder().point)[0].getZExtValue(), *v.floatReorder().memory, detail, ok) && ok);
+      }
+    }
+    const double two24 = 16777216.0;
+    witness("2^24 + 1 - 2^24", f, {0, 1}, 1, entry(f, 1, {{1.0}, {1.0}, {two24}, {-two24}}), 0.0, "changes its final bits");
+    witness("2^24 - 2^24 + 1", f, {0, 1}, 1, entry(f, 1, {{1.0}, {-two24}, {two24}, {1.0}}), 1.0, "changes its final bits");
+    CHECK((float)((float)(two24 + 1.0f) + -two24) == 0.0f && (float)((float)(two24 + -two24) + 1.0f) == 1.0f);
+  }
+  // Two operand roots of their own (A·B then D·E), and three contributions to a cell (the
+  // second group's repeat): the same memories refute.
+  {
+    Fixture f = fixture(m, "set_float_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    expect("roots of their own", v, S::Verified, T::Symbolic);
+    CHECK(v.floatReorder().status != FactStatus::Proven);
+    witness("roots of their own", f, {0, 1}, 1, entry(f, 1, {{1.0}, {1.0}, {1e16}, {1.0}, {-1e16}}), 0.0,
+            "changes its final bits");
+    Fixture g = fixture(m, "set_float_repeat", 1, 3);
+    std::vector<unsigned> gl = loops(g.program);
+    CHECK(gl.size() == 3);
+    TermContext &terms = *g.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), two = terms.bv(APInt(16, 2));
+    DomainRequest r;
+    r.segments = {segmentOf(g.program, {0}, {level(g.program, gl[0], zero, n)}),
+                  segmentOf(g.program, {1}, {level(g.program, gl[1], zero, n), level(g.program, gl[2], zero, two)})};
+    SetReductionVerdict u = verdict(g, {0, 1}, r, g.options, z3Backend);
+    expect("repeat", u, S::Verified, T::Symbolic);
+    CHECK(u.floatReorder().status != FactStatus::Proven);
+    // (1e16 ⊕ 1) ⊕ −5e15 ⊕ −5e15 = 0; reversed (1e16 ⊕ −5e15 ⊕ −5e15) ⊕ 1 = 1.
+    witness("repeat", g, {0, 1}, 1, entry(g, 1, {{1.0}, {1.0}, {1e16}, {-5e15}}), 0.0, "changes its final bits");
+  }
+  // A fold of two operations (set_mixed: two integer groups and a float group): the judge
+  // refuses to reverse it, so no witness and no fact; the verdict stands.
+  {
+    Fixture f = fixture(m, "set_mixed", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1, 2}, segments(f, {{0, l[0]}, {1, l[1]}, {2, l[2]}}), f.options, z3Backend);
+    expect("mixed", v, S::Verified, T::Symbolic);
+    CHECK(v.fold() == FoldForm::OrderedFloat && v.floatReorder().status == FactStatus::Unknown &&
+          v.floatReorder().detail == "no memory found at which a reversal differs" &&
+          v.integerReorder().status == FactStatus::Unknown && v.integerReorder().detail == noInteger);
+  }
+  // Integer sets keep their float fact as it was.
+  {
+    Fixture f = fixture(m, "sib_roots", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    CHECK(v.status() == S::Verified && v.integerReorder().status == FactStatus::Proven &&
+          v.floatReorder().status == FactStatus::Unknown && v.floatReorder().detail == noFloat);
+  }
+  // A set of one float group is Theorem 13 on the same request, facts included.
+  {
+    Fixture f = fixture(m, "set_float_same", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    CoordinateFamily none;
+    SetReductionVerdict set = verdict(f, {0}, r, f.options, z3Backend);
+    ReductionVerdict one = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r, f.options, z3Backend);
+    bool same = set.status() == one.status() && set.tier() == one.tier() &&
+                set.floatReorder().status == one.floatReorder().status &&
+                set.floatReorder().detail == one.floatReorder().detail &&
+                set.floatReorder().point == one.floatReorder().point &&
+                set.integerReorder().status == one.integerReorder().status &&
+                set.trivialReorder().status == one.trivialReorder().status;
+    if (!same)
+      printf("one float group: set %s float %s \"%s\"; T13 %s float %s \"%s\"\n", stringifyComputationStatus(set.status()),
+             stringifyFactStatus(set.floatReorder().status), set.floatReorder().detail.c_str(),
+             stringifyComputationStatus(one.status()), stringifyFactStatus(one.floatReorder().status),
+             one.floatReorder().detail.c_str());
+    CHECK(same);
+    CHECK(set.status() == S::Verified);
+    printf("one float group: %s: %s\n", stringifyFactStatus(set.floatReorder().status), set.floatReorder().detail.c_str());
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -5619,6 +5985,7 @@ int main(int argc, char **argv) {
   run("setdomain", testSetDomain);
   run("setreduction", testSetReduction);
   run("setreorder", testSetReorder);
+  run("setfloat", testSetFloat);
   run("proposer", testProposer);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);

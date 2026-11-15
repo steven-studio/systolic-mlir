@@ -1858,8 +1858,13 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
   // The reorder facts, computed from the verdict above and never read back into it:
   // `trivial` from the domain claim, root-aware there; the integer fact by Theorem 13's
   // rule over the union (G5b-M4b-2a), every listed output root checked, at the verdict's
-  // own tier, or refuted by a witness over the union; the float fact only as `trivial`
-  // implies it (M4b-2b). A fact is never a licence, and a Refuted fact refutes nothing.
+  // own tier, or refuted by a witness over the union; the float fact Proven by `trivial`
+  // alone and Refuted by the same witness search (G5b-M4b-2b-1): a memory at which the
+  // program completes and reversing one cell's contributions changes its final bits, or
+  // makes a NaN, so that run would stop. No float fold is ever proven reorderable by its
+  // structure: every reordering of two contributions is a reassociation, and IEEE-754
+  // addition is not associative. A fact is never a licence, and a Refuted fact refutes
+  // nothing.
   if (ds && domainSymbolic.status() == ComputationStatus::Verified &&
       domainSymbolic.singleContribution().status == FactStatus::Proven)
     out.trivial = domainSymbolic.singleContribution();
@@ -1873,29 +1878,15 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
   if (out.claim == ComputationStatus::Verified && out.trivial.status == FactStatus::Proven) {
     out.integer = isFloat ? unknownFact("not an integer fold") : out.trivial;
     out.floating = isFloat ? out.trivial : unknownFact("not a float fold");
-  } else if (out.claim != ComputationStatus::Verified || isFloat) {
+  } else if (out.claim != ComputationStatus::Verified) {
     out.integer = unknownFact("not an integer fold, or no claim");
-    out.floating = unknownFact(out.claim != ComputationStatus::Verified
-                                   ? "not a float fold, or no claim"
-                                   : "only trivial proves a float fold reorderable; not yet generalized to a set (M4b-2)");
-  } else {
     out.floating = unknownFact("not a float fold, or no claim");
-    // The claim the verdict's tier came from: Theorem 16 over the set at that tier. The
-    // fact holds at the verdict's tier, never above it.
-    const CheckedComputation &values =
-        out.claimTier == ComputationTier::Symbolic ? computationSymbolic : computationFinite;
-    std::vector<unsigned> outputs;
-    for (const SiteGroup *group : canonical)
-      if (group->output)
-        outputs.push_back(*group->output);
-    std::sort(outputs.begin(), outputs.end());
-    outputs.erase(std::unique(outputs.begin(), outputs.end()), outputs.end());
-    std::string why;
-    if (integerReorderConditionsOver(program, outputs, values, why)) {
-      out.integer = proven("wrapping addition with no flag, unobserved, at the computation's tier", out.claimTier);
-    } else {
-      // A witness, looked for at the verdict's own points: the listed ones of a finite
-      // verdict, or the enumerated points where a listed group has a domain.
+  } else {
+    // A witness, looked for at the verdict's own points: the listed ones of a finite
+    // verdict, or the enumerated points where a listed group has a domain. The same
+    // search for both folds: it reverses one cell's contributions over the union's events
+    // on every listed root, and a memory at which no difference shows is no evidence.
+    auto searchWitness = [&]() {
       std::set<std::vector<uint64_t>> verdictPoints;
       for (const std::vector<APInt> &point : out.at)
         verdictPoints.insert(pointKey(point));
@@ -1915,7 +1906,33 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
         if (found.status == FactStatus::Refuted)
           break;
       }
-      out.integer = found.status == FactStatus::Refuted ? found : unknownFact(why);
+      return found;
+    };
+    if (isFloat) {
+      // G5b-M4b-2b-1. Proven only by `trivial`, above; here Refuted by a witness, or
+      // Unknown with what the search found. Nothing about a float fold's structure, and no
+      // fast-math flag, ever proves it reorderable.
+      out.integer = unknownFact("not an integer fold, or no claim");
+      out.floating = searchWitness();
+    } else {
+      out.floating = unknownFact("not a float fold, or no claim");
+      // The claim the verdict's tier came from: Theorem 16 over the set at that tier. The
+      // fact holds at the verdict's tier, never above it.
+      const CheckedComputation &values =
+          out.claimTier == ComputationTier::Symbolic ? computationSymbolic : computationFinite;
+      std::vector<unsigned> outputs;
+      for (const SiteGroup *group : canonical)
+        if (group->output)
+          outputs.push_back(*group->output);
+      std::sort(outputs.begin(), outputs.end());
+      outputs.erase(std::unique(outputs.begin(), outputs.end()), outputs.end());
+      std::string why;
+      if (integerReorderConditionsOver(program, outputs, values, why)) {
+        out.integer = proven("wrapping addition with no flag, unobserved, at the computation's tier", out.claimTier);
+      } else {
+        Fact found = searchWitness();
+        out.integer = found.status == FactStatus::Refuted ? found : unknownFact(why);
+      }
     }
   }
   return out;

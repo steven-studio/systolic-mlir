@@ -41,6 +41,11 @@ entry is recomputed with no library code:
   and the witness is run here: the program completes, and the reversed fold of some cell
   overflows a signed 32-bit addition. A plain 32-bit union with two contributions to a cell
   is never left Unknown; a knob never lets the rule prove.
+- G5b-M4b-2b-1, the float fact: PROVEN only with `trivial`; REFUTED only with a witness, which
+  is run here: the program completes on it (a NaN product or sum would stop it, and the
+  interpreter stops too), and the reversed fold of some cell, in the element's own arithmetic
+  (binary64, or binary32 through numpy.float32), differs in bits from the forward fold or is
+  NaN. An integer program's float fact is Unknown. Programs are binary32 as often as binary64.
 
 Every driver run has a time limit and an address-space limit, and a timeout fails the run.
 """
@@ -50,12 +55,15 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import reduce
 import itertools
 import json
+import math
 import random
 import resource
 import struct
 import subprocess
 import sys
 import tempfile
+
+import numpy as np  # binary32 arithmetic, exactly: Python's own floats are binary64.
 
 TIMEOUT = 1200
 MEMORY = 4 << 30
@@ -90,6 +98,19 @@ def wrap(value, width):
 def signed(value, width):
     value = wrap(value, width)
     return value - (1 << width) if value >> (width - 1) else value
+
+
+def fmul(e, a, b):
+    """The element's own multiplication: binary64 in Python's floats, binary32 in numpy's."""
+    return float(np.float32(a) * np.float32(b)) if e == "f32" else a * b
+
+
+def fadd(e, a, b):
+    return float(np.float32(a) + np.float32(b)) if e == "f32" else a + b
+
+
+def is_float(e):
+    return e in ("f64", "f32")
 
 
 PREDICATES = {0: lambda a, b, w: a == b, 1: lambda a, b, w: a != b,
@@ -190,7 +211,7 @@ def gen_nest(rng, number, roots, shape):
 
 def gen_spec(rng, index):
     shape = ["shared_out", "distinct_out", "same_triple", "reads_output", "interleaved", "repeat", "fresh_out"][index % 7]
-    element = "f64" if index % 2 else "i32"
+    element = ["i32", "f64", "i32", "f32"][index % 4]
     # G5b-M4b-2a: one thing the integer rule must see, on integer programs: an overflow
     # flag on every add, a load of an output root between the nests stored to a root e of
     # its own, or a stop on the second nest's accumulate load. An observer's root is root 4,
@@ -264,7 +285,7 @@ def sites_of(spec):
 def print_function(spec):
     e = spec["element"]
     t = f"memref<{SIZE}x{e}>"
-    mul, add = ("arith.mulf", "arith.addf") if e == "f64" else ("arith.muli", "arith.addi")
+    mul, add = ("arith.mulf", "arith.addf") if is_float(e) else ("arith.muli", "arith.addi")
     observer = f", %e: {t}" if spec.get("observer") else ""
     lines = [f"func.func @{spec['name']}(%a: {t}, %b: {t}, %c: {t}, %d: {t}{observer}, %n: index) {{",
              "  %c0 = arith.constant 0 : index", "  %c1 = arith.constant 1 : index",
@@ -273,7 +294,7 @@ def print_function(spec):
         lines.append("  %one = arith.constant 1 : i32")
     flag = " overflow<nsw>" if spec.get("flags") == "nsw" else ""
     if spec["fresh"]:
-        zero = "arith.constant 0.0 : f64" if e == "f64" else "arith.constant 0 : i32"
+        zero = f"arith.constant 0.0 : {e}" if is_float(e) else "arith.constant 0 : i32"
         lines += [f"  %f = memref.alloc() : {t}", f"  %zero = {zero}", f"  %size = arith.constant {SIZE} : index",
                   "  scf.for %w = %c0 to %size step %c1 {", f"    memref.store %zero, %f[%w] : {t}", "  }"]
     count = [0]
@@ -354,8 +375,12 @@ def interpret(spec, n, memory=None):
         return env[h[1]] + h[2]
 
     def combine(z, a, b):
-        if e == "f64":
-            return z + a * b
+        if is_float(e):
+            product = fmul(e, a, b)
+            total = fadd(e, z, product)
+            if math.isnan(product) or math.isnan(total):
+                raise Stopped()  # A NaN result is an Underspecified stop in the model.
+            return total
         product = wrap(a * b, 32)
         total = wrap(z + product, 32)
         if spec.get("flags") == "nsw" and signed(z, 32) + signed(product, 32) != signed(total, 32):
@@ -409,14 +434,14 @@ def designed_memory(spec):
     operand only the second nest reads holds -2^53; every other operand holds 1. A cell at
     2^53 taking +1 then -2^53 ends at 0, and taking -2^53 then +1 ends at 1. For integers the
     same roles get 2^31, 2^32 - 1 and 1, wrapped."""
-    big = 9007199254740992.0
+    big = 16777216.0 if spec["element"] == "f32" else 9007199254740992.0
     sites = sites_of(spec)
     outs = {ROOTS[site["out"]] for _, site in sites}
     first_ops = {ROOTS[sites[0][1][k]] for k in "ab"}
     second_ops = {ROOTS[site[k]] for nest, site in sites if nest == 1 for k in "ab"}
     memory = {}
     for r in range(4):
-        if spec["element"] == "f64":
+        if is_float(spec["element"]):
             value = big if r in outs else -big if r in second_ops - first_ops else 1.0
         elif spec.get("flags") == "nsw":
             # Outputs at INT_MAX, an operand only the first nest reads at -1, the rest 1:
@@ -426,16 +451,16 @@ def designed_memory(spec):
             value = (1 << 31) if r in outs else ((1 << 32) - 1) if r in second_ops - first_ops else 1
         memory[r] = [value] * SIZE
     if spec["fresh"] or spec.get("observer"):
-        memory[4] = [0.0 if spec["element"] == "f64" else 0] * SIZE
+        memory[4] = [0.0 if is_float(spec["element"]) else 0] * SIZE
     return memory
 
 
 def random_memory(spec, rng):
     """Every argument root filled at random; the fresh root as the program leaves it, zero."""
-    if spec["element"] == "f64":
-        # Operands near one and at 2^53, outputs at 0 and 2^53: a sum that rounds away a
-        # small contribution in one order and keeps it in the other.
-        big = 9007199254740992.0
+    if is_float(spec["element"]):
+        # Operands near one and at 2^53 (2^24 for binary32), outputs at 0 and that power: a
+        # sum that rounds away a small contribution in one order and keeps it in the other.
+        big = 16777216.0 if spec["element"] == "f32" else 9007199254740992.0
         operands = [1.0, 1.0, -1.0, big, -big, 0.5, 3.0]
         outputs = [0.0, 1.0, big, -big, 0.75, 2.0]
         memory = {ROOTS[r]: [rng.choice(operands) for _ in range(SIZE)] for r in "ab"}
@@ -443,13 +468,15 @@ def random_memory(spec, rng):
     else:
         memory = {ROOTS[r]: [rng.randrange(1 << 32) for _ in range(SIZE)] for r in "abcd"}
     if spec["fresh"] or spec.get("observer"):
-        memory[4] = [0.0 if spec["element"] == "f64" else 0] * SIZE
+        memory[4] = [0.0 if is_float(spec["element"]) else 0] * SIZE
     return memory
 
 
 def bits(value, element):
     if element == "f64":
         return struct.pack("<d", value)
+    if element == "f32":
+        return struct.pack("<f", value)
     return struct.pack("<I", wrap(value, 32))
 
 
@@ -457,6 +484,8 @@ def hex_to_value(text, element):
     raw = int(text, 16)
     if element == "f64":
         return struct.unpack("<d", struct.pack("<Q", raw))[0]
+    if element == "f32":
+        return struct.unpack("<f", struct.pack("<I", raw))[0]
     return wrap(raw, 32)
 
 
@@ -541,9 +570,11 @@ def theorem17_fold(spec, memory, ordered):
     final = {r: list(cells) for r, cells in memory.items()}
     for event in ordered:
         (ra, ia), (rb, ib) = event["a"], event["b"]
-        product = memory[ra][ia] * memory[rb][ib]
         root, x = event["root"], event["h"]
-        final[root][x] = final[root][x] + product if e == "f64" else wrap(final[root][x] + wrap(product, 32), 32)
+        if is_float(e):
+            final[root][x] = fadd(e, final[root][x], fmul(e, memory[ra][ia], memory[rb][ib]))
+        else:
+            final[root][x] = wrap(final[root][x] + wrap(memory[ra][ia] * memory[rb][ib], 32), 32)
     return final
 
 
@@ -626,8 +657,57 @@ def check_verified(spec, out, entry, verdict, segments, group_of_site, union_sit
     if fact["status"] == "PROVEN" and trivial["status"] != "PROVEN":
         raise Failure(f"{where}: float reorder proven without trivial")
     if fact["status"] == "REFUTED":
-        raise Failure(f"{where}: a float reorder refutation, which M4b-2a does not make")
+        check_float_refutation(spec, fact, segments, maps, counts, where)
+    # An integer program's float fact: Unknown, "not a float fold" where trivial is Proven (the
+    # fact block's first branch), "not a float fold, or no claim" otherwise.
+    if spec["element"] == "i32" and (fact["status"] != "UNKNOWN" or
+                                     fact["detail"] not in ("not a float fold", "not a float fold, or no claim")):
+        raise Failure(f"{where}: an integer program with a float fact {fact['status']} {fact['detail']!r}")
+    if is_float(spec["element"]) and fact["status"] == "UNKNOWN" and trivial["status"] != "PROVEN":
+        counts["float facts left Unknown, no witness within the fills"] += 1
     check_integer_fact(spec, verdict, trivial, points, segments, maps, rng, fills, counts, where, label, union_sites)
+
+
+def check_float_refutation(spec, fact, segments, maps, counts, where):
+    """G5b-M4b-2b-1: a refuted float fact carries a witness, which is run here. The program
+    completes on it (the interpreter stops on a NaN as the model does), and in the element's
+    own arithmetic the reversed fold of some cell differs in bits from the forward fold, or is
+    NaN (that run would stop), while the forward fold is not NaN."""
+    e = spec["element"]
+    if not is_float(e):
+        raise Failure(f"{where}: a float refutation on {e}")
+    if not fact.get("memory") or not fact.get("point"):
+        raise Failure(f"{where}: a float refutation without its witness")
+    n = fact["point"][0]
+    memory = {r: [hex_to_value(text, e) if text is not None else 0.0 for text in cells]
+              for r, cells in enumerate(fact["memory"])}
+    try:
+        interpret(spec, n, memory)
+    except Stopped:
+        raise Failure(f"{where}: the float witness run stops, so it is no witness")
+    ordered, wrong = ordered_events(spec, n, segments, maps)
+    if wrong:
+        raise Failure(f"{where} n={n}: {wrong}")
+    cells = {}
+    for event in ordered:
+        (ra, ia), (rb, ib) = event["a"], event["b"]
+        cells.setdefault((event["root"], event["h"]), []).append(fmul(e, memory[ra][ia], memory[rb][ib]))
+    differs = False
+    for (root, x), products in cells.items():
+        if len(products) < 2:
+            continue
+        forward = reduce(lambda acc, p: fadd(e, acc, p), products, memory[root][x])
+        reverse = reduce(lambda acc, p: fadd(e, acc, p), reversed(products), memory[root][x])
+        if math.isnan(forward):
+            raise Failure(f"{where}: the forward fold is NaN, yet the run completed")
+        if math.isnan(reverse) or bits(forward, e) != bits(reverse, e):
+            differs = True
+            if math.isnan(reverse) and "NaN" not in fact["detail"]:
+                raise Failure(f"{where}: a NaN reversal not named: {fact['detail']!r}")
+    if not differs:
+        raise Failure(f"{where}: no cell's reversed fold differs: the witness shows nothing")
+    counts[f"float refutations replayed, {e}"] += 1
+    counts["float refutations replayed"] += 1
 
 
 def overflows(start, products):
@@ -875,7 +955,9 @@ MINIMUM = {
     "Theorem 17 folds": 400, "float swaps checked": 20, "float swaps that change the result": 3,
     "integer swaps checked": 20, "computation refutations replayed": 3, "domain refutations replayed": 3,
     "trivial proven checked": 5, "listings compared": 20, "one-group verdicts equal to Theorem 13": 20,
-    "programs f64": 10, "programs i32": 10,
+    "programs f64": 5, "programs f32": 5, "programs i32": 10,
+    # G5b-M4b-2b-1.
+    "float refutations replayed": 1,
     # G5b-M4b-2a. Plain integer unions with a shared cell are one program in eight, so the
     # floors are low; a run that meets none of them proves nothing about the fact.
     "integer proven by the rule, structure checked": 5, "programs compared in another order": 5,
