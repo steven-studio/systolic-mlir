@@ -169,6 +169,22 @@ add_executable(generalized-gemm-identity-report IdentityReport.cpp)
 target_link_libraries(generalized-gemm-identity-report PRIVATE
   generalized-gemm-domain generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
+# Stage 1 of docs/GENERALIZED_GEMM_SCOPE.md: one record per loop nest. The outliner copies a
+# nest into a function of its own, and the record reads what the analyses above say of
+# the copy. No target above links this library, so none of their results can depend on it.
+add_library(generalized-gemm-nest STATIC
+  "${GG_LIB_DIR}/NestOutline.cpp"
+  "${GG_LIB_DIR}/NestRecord.cpp")
+target_link_libraries(generalized-gemm-nest PUBLIC
+  generalized-gemm-domain generalized-gemm-polynomial-adapter)
+target_compile_options(generalized-gemm-nest PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(generalized-gemm-nest-report NestReport.cpp)
+target_link_libraries(generalized-gemm-nest-report PRIVATE generalized-gemm-nest generalized-gemm-z3)
+add_executable(generalized-gemm-nest-test test/unit/NestTest.cpp)
+target_link_libraries(generalized-gemm-nest-test PRIVATE generalized-gemm-nest generalized-gemm-z3)
+add_test(NAME generalized-gemm-nest COMMAND generalized-gemm-nest-test)
+set_tests_properties(generalized-gemm-nest PROPERTIES TIMEOUT 900)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -303,10 +319,34 @@ add_test(NAME generalized-gemm-setreduction-programs COMMAND "${Python3_EXECUTAB
   --programs 30 --fills 6 --seed 1 --jobs 2)
 set_tests_properties(generalized-gemm-setreduction-programs PROPERTIES TIMEOUT 3600)
 
+# Stage 1: records of loop nests, recomputed from the printed programs, and composition in
+# place against the function's own run. The existing domain driver is read for the
+# whole-function claims of the same programs.
+add_test(NAME generalized-gemm-nest-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4)
+set_tests_properties(generalized-gemm-nest-programs PROPERTIES TIMEOUT 3600)
+
+# Stage 1: a nest's record against the production affine recognizer's report, field by
+# field. The production tool is not built here: point GG_SYSTOLIC_OPT at one built from
+# the same sources, and the test exists. It is only run.
+set(GG_SYSTOLIC_OPT "" CACHE FILEPATH "systolic-opt of this source tree, to compare nest records with")
+if(GG_SYSTOLIC_OPT)
+  add_test(NAME generalized-gemm-nest-affine COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_affine_compare.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --index-bit-width 64
+    --functions mm,strict,mmi,offsets,offsetsi,allocated,restrict --twin mmi=mm --twin offsetsi=offsets
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/lit/nest_product.mlir")
+  set_tests_properties(generalized-gemm-nest-affine PROPERTIES TIMEOUT 1200)
+endif()
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
-# Phase 4 added dom_phase4.mlir (about 30 s); the suite was at 109 s of 120.
-set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 300)
+# Phase 4 added dom_phase4.mlir (about 30 s); the suite was at 109 s of 120. Stage 1 of
+# docs/GENERALIZED_GEMM_SCOPE.md added six nest_*.mlir files, each a few analyses of ten
+# seconds: the limit is for a loaded machine, and no check depends on it.
+set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 900)
 
 # Phase 5: the table oracle recomputes every claim about the synthesized while and
 # table programs with its own parser and interpreter of the G.5 rules.
@@ -323,4 +363,5 @@ add_custom_target(check-generalized-gemm
     generalized-gemm-synthesis-report generalized-gemm-synthesis-test
     generalized-gemm-computation-report generalized-gemm-computation-test
     generalized-gemm-domain-report generalized-gemm-domain-test
-    generalized-gemm-identity-report)
+    generalized-gemm-identity-report
+    generalized-gemm-nest-report generalized-gemm-nest-test)
