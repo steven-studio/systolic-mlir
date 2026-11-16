@@ -1643,13 +1643,25 @@ ReductionVerdict checkReduction(const SemanticProgram &program,
   auto witness = [&]() {
     Fact found = unknownFact("no point to look at");
     unsigned looked = 0;
+    std::vector<const PointEvidence *> lookedAt;
     for (const PointEvidence &point : enumeration.points) {
       if (!point.reason.empty() || !point.domains[g] || looked++ >= 4)
         continue;
+      lookedAt.push_back(&point);
       found = reorderWitness(program, group, point.parameters, options.limits.witnessFills,
                              options.limits.witnessCells);
       if (found.status == FactStatus::Refuted)
         return found;
+    }
+    // G5b-M4b-2b-2: the fill sequence found nothing at any of those points, so every
+    // witness it finds is the one it found before. Then the designed memories, at the same
+    // points and judged by the same judge; where none shows a difference the fact is what
+    // the fill sequence left, Unknown.
+    for (const PointEvidence *point : lookedAt) {
+      Fact designed = designedWitness(program, group, point->parameters, options.limits.witnessFills,
+                                      options.limits.witnessCells);
+      if (designed.status == FactStatus::Refuted)
+        return designed;
     }
     return found;
   };
@@ -1892,6 +1904,7 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
         verdictPoints.insert(pointKey(point));
       Fact found = unknownFact("no point to look at");
       unsigned looked = 0;
+      std::vector<const PointEvidence *> lookedAt;
       for (const PointEvidence &point : enumeration.points) {
         if (!point.reason.empty() || looked >= 4)
           continue;
@@ -1901,11 +1914,25 @@ SetReductionVerdict joinSetReduction(const SemanticProgram &program, const Domai
         if (!listedPoint)
           continue;
         ++looked;
+        lookedAt.push_back(&point);
         found = reorderWitnessOver(program, listed, point.parameters, options.limits.witnessFills,
                                    options.limits.witnessCells);
         if (found.status == FactStatus::Refuted)
           break;
       }
+      // G5b-M4b-2b-2: only where the fill sequence found nothing at any of those points,
+      // the designed memories over the union, at the same points and by the same judge.
+      // One that shows no difference is no evidence: the fact is then what the fill
+      // sequence left.
+      if (found.status != FactStatus::Refuted)
+        for (const PointEvidence *point : lookedAt) {
+          Fact designed = designedWitnessOver(program, listed, point->parameters, options.limits.witnessFills,
+                                              options.limits.witnessCells);
+          if (designed.status == FactStatus::Refuted) {
+            found = designed;
+            break;
+          }
+        }
       return found;
     };
     if (isFloat) {

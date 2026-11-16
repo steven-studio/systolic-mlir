@@ -46,6 +46,20 @@ entry is recomputed with no library code:
   interpreter stops too), and the reversed fold of some cell, in the element's own arithmetic
   (binary64, or binary32 through numpy.float32), differs in bits from the forward fold or is
   NaN. An integer program's float fact is Unknown. Programs are binary32 as often as binary64.
+- G5b-M4b-2b-2, designed memories. Some programs more, after the generated ones and drawn from
+  a stream of their own, carry nsw on the multiplication as well as on the addition, as signed
+  arithmetic does: a product of two drawn values then overflows, the fill sequence finds
+  nothing, and only a designed memory can refute. The family is built here again, from its
+  documentation and this file's own trace: the first three cells with two contributions, in
+  the order of their first events and outside the fresh root; INT_MAX with -1 then +1 and
+  INT_MIN with +1 then -1 (2^p with 1 then -2^p and the largest finite value with itself then
+  its negation, for floats); each of the first and the last contribution in its second
+  operand, then in its first, the other operand 1, every other cell zero; a memory that gives
+  a cell two values, sets the fresh root, or is already listed is left out. Each member is
+  run and judged here. A fact refuted "at a designed memory" must carry exactly the first
+  member that is a witness, at the first point looked at that has one; a fact left Unknown
+  must have no member that is a witness at any point looked at. Every refutation is replayed
+  as before, whatever found it.
 
 Every driver run has a time limit and an address-space limit, and a timeout fails the run.
 """
@@ -79,7 +93,8 @@ class Failure(Exception):
 
 
 class Stopped(Exception):
-    """The interpreted run stopped: a flagged addition overflowed. Outside every claim."""
+    """The interpreted run stopped: a flagged addition or multiplication overflowed, or a float
+    result was NaN. Outside every claim."""
 
 
 def limit():
@@ -249,10 +264,42 @@ def gen_spec(rng, index):
             "flags": "nsw" if knob == "nsw" else None, "observer": knob == "observer", "stop": knob == "stop"}
 
 
+def designed_spec(rng, index):
+    """G5b-M4b-2b-2: signed arithmetic, nsw on the multiplication and on the addition of 32-bit
+    integers, in two nests over n that write the same cells of one argument root. A product of
+    two drawn values overflows, so only a designed memory can refute. By shape: the second
+    nest reads the first's second operand and a root of its own (A*B then B*D: the family's
+    first member is a witness); it also repeats (three contributions, the last two one
+    product: the family has members and none is a witness); or it is the first nest again
+    (one product twice: nothing is designed). The nests are plain, one loop each, so that
+    the solver's 32-bit multiplications stay far inside its limits."""
+    shape = ["shared_out", "repeat", "shared_out", "same_triple", "shared_out", "repeat"][index % 6]
+    out = rng.choice(["c", "d"])
+    other = "d" if out == "c" else "c"
+    offset = rng.choice([0, 0, 1])
+    second = ("a", "b") if shape == "same_triple" else ("b", other)
+    nests = [{"loops": [("v0_0", ("n",))], "when": None,
+              "sites": [{"out": out, "a": "a", "b": "b", "h": ("var", "v0_0", offset)}]},
+             {"loops": [("v1_0", ("n",))] + ([("v1_r", ("const", 2))] if shape == "repeat" else []), "when": None,
+              "sites": [{"out": out, "a": second[0], "b": second[1], "h": ("var", "v1_0", offset)}]}]
+    lo = rng.choice([1, 1, 2])
+    return {"name": f"s{index}", "element": "i32", "fresh": False, "nests": nests, "scope": (lo, lo + 1),
+            "shape": shape, "flags": "nsw", "observer": False, "stop": False, "mul_flags": "nsw"}
+
+
+def extra_specs(seed, programs):
+    """G5b-M4b-2b-2: the programs of designed_spec, one for every five generated ones and never
+    fewer than two, drawn from a stream of their own, so that the generated programs and the
+    seeds of their checks are what they were."""
+    rng = random.Random(seed * 7919 + 17)
+    specs = [designed_spec(rng, i) for i in range(max(2, programs // 5))]
+    return specs, [rng.randrange(1 << 30) for _ in specs]
+
+
 def knobs(spec):
     """The knobs set on this program: the flag, the observer, the stop."""
-    return [k for k in (spec.get("flags"), "observer" if spec.get("observer") else None,
-                        "stop" if spec.get("stop") else None) if k]
+    return [k for k in (spec.get("flags"), "nsw on the product" if spec.get("mul_flags") else None,
+                        "observer" if spec.get("observer") else None, "stop" if spec.get("stop") else None) if k]
 
 
 def blockers(spec, union_sites):
@@ -293,6 +340,7 @@ def print_function(spec):
     if spec.get("stop"):
         lines.append("  %one = arith.constant 1 : i32")
     flag = " overflow<nsw>" if spec.get("flags") == "nsw" else ""
+    mul_flag = " overflow<nsw>" if spec.get("mul_flags") == "nsw" else ""
     if spec["fresh"]:
         zero = f"arith.constant 0.0 : {e}" if is_float(e) else "arith.constant 0 : i32"
         lines += [f"  %f = memref.alloc() : {t}", f"  %zero = {zero}", f"  %size = arith.constant {SIZE} : index",
@@ -343,7 +391,7 @@ def print_function(spec):
                 # every run completes, and the integer rule must still refuse.
                 odd, q = name("o"), name("q")
                 lines += [f"{indent}{odd} = arith.ori {z}, %one : i32", f"{indent}{q} = arith.divui %one, {odd} : i32"]
-            lines += [f"{indent}{m} = {mul} {x}, {y} : {e}",
+            lines += [f"{indent}{m} = {mul} {x}, {y}{mul_flag} : {e}",
                       f"{indent}{s} = {add} {z}, {m}{flag} : {e}",
                       f"{indent}memref.store {s}, %{site['out']}[{index}] : {t}"]
         for _ in range(closing):
@@ -382,6 +430,8 @@ def interpret(spec, n, memory=None):
                 raise Stopped()  # A NaN result is an Underspecified stop in the model.
             return total
         product = wrap(a * b, 32)
+        if spec.get("mul_flags") == "nsw" and signed(a, 32) * signed(b, 32) != signed(product, 32):
+            raise Stopped()
         total = wrap(z + product, 32)
         if spec.get("flags") == "nsw" and signed(z, 32) + signed(product, 32) != signed(total, 32):
             raise Stopped()
@@ -666,6 +716,10 @@ def check_verified(spec, out, entry, verdict, segments, group_of_site, union_sit
     if is_float(spec["element"]) and fact["status"] == "UNKNOWN" and trivial["status"] != "PROVEN":
         counts["float facts left Unknown, no witness within the fills"] += 1
     check_integer_fact(spec, verdict, trivial, points, segments, maps, rng, fills, counts, where, label, union_sites)
+    # G5b-M4b-2b-2: the fact a search made, against the designed family built here.
+    searched = fact if is_float(spec["element"]) else verdict["reorder"]["integer"]
+    if is_float(spec["element"]) or spec.get("flags"):
+        check_designed(spec, verdict, searched, trivial, points, union_sites, counts, where)
 
 
 def check_float_refutation(spec, fact, segments, maps, counts, where):
@@ -818,6 +872,146 @@ def check_integer_fact(spec, verdict, trivial, points, segments, maps, rng, fill
         counts["negative shapes checked"] += 1
 
 
+# ---------------------------------------------------------------------------------------
+# G5b-M4b-2b-2: designed memories, built here from the documentation.
+
+DESIGNED_TARGETS = 3
+POINTS_LOOKED_AT = 4
+
+
+def zero_memory(spec):
+    """Every cell an entry sets at zero; the fresh root as the program leaves it, zero too."""
+    zero = 0.0 if is_float(spec["element"]) else 0
+    memory = {r: [zero] * SIZE for r in range(4)}
+    if spec["fresh"] or spec.get("observer"):
+        memory[4] = [zero] * SIZE
+    return memory
+
+
+def designed_family(spec, n, union_sites):
+    """The designed memories of the union at n, in the order they are judged."""
+    e = spec["element"]
+    if e == "i32" and spec.get("flags") != "nsw":
+        return []  # Without nsw no reversal overflows.
+    if is_float(e):
+        big = 16777216.0 if e == "f32" else 9007199254740992.0
+        largest = float(np.finfo(np.float32).max) if e == "f32" else sys.float_info.max
+        patterns = [(big, 1.0, -big, 1.0), (largest, largest, -largest, 1.0)]
+    else:
+        patterns = [((1 << 31) - 1, (1 << 32) - 1, 1, 1), (1 << 31, 1, (1 << 32) - 1, 1)]
+    fresh = 4 if spec["fresh"] else None  # Its cells hold a constant before any event, and no entry sets them.
+    order, cells = [], {}
+    for event in interpret(spec, n)[0]:
+        if event["site"] not in union_sites:
+            continue
+        key = (event["root"], event["h"])
+        if key not in cells:
+            cells[key] = []
+            order.append(key)
+        cells[key].append(event)
+    out, listed, targets = [], [], 0
+    for key in order:
+        if len(cells[key]) < 2 or key[0] == fresh:
+            continue
+        if targets == DESIGNED_TARGETS:
+            break
+        targets += 1
+        first, last = cells[key][0], cells[key][-1]
+        for start, first_value, last_value, one in patterns:
+            for first_in_second in (True, False):
+                for last_in_second in (True, False):
+                    assigned, consistent = {}, True
+                    for cell, value in ((key, start),
+                                        (first["b"] if first_in_second else first["a"], first_value),
+                                        (first["a"] if first_in_second else first["b"], one),
+                                        (last["b"] if last_in_second else last["a"], last_value),
+                                        (last["a"] if last_in_second else last["b"], one)):
+                        if cell[0] == fresh or (cell in assigned and bits(assigned[cell], e) != bits(value, e)):
+                            consistent = False
+                            break
+                        assigned[cell] = value
+                    if not consistent or assigned in listed:
+                        continue
+                    listed.append(assigned)
+                    memory = zero_memory(spec)
+                    for (root, x), value in assigned.items():
+                        memory[root][x] = value
+                    out.append(memory)
+    return out
+
+
+def reversal_shows(spec, n, memory, union_sites):
+    """The judge, here: the run completes, and reversing the contributions of some cell the
+    union writes overflows a flagged addition (integers) or changes a bit or gives NaN
+    (floats). Contributions are the products of the operands in the order the events happen."""
+    e = spec["element"]
+    try:
+        events, _ = interpret(spec, n, memory)
+    except Stopped:
+        return False
+    cells = {}
+    for event in events:
+        if event["site"] not in union_sites:
+            continue
+        (ra, ia), (rb, ib) = event["a"], event["b"]
+        product = fmul(e, memory[ra][ia], memory[rb][ib]) if is_float(e) else wrap(memory[ra][ia] * memory[rb][ib], 32)
+        cells.setdefault((event["root"], event["h"]), []).append(product)
+    for (root, x), products in cells.items():
+        if len(products) < 2:
+            continue
+        start = memory[root][x]
+        if is_float(e):
+            forward = reduce(lambda acc, p: fadd(e, acc, p), products, start)
+            reverse = reduce(lambda acc, p: fadd(e, acc, p), reversed(products), start)
+            if math.isnan(reverse) or bits(forward, e) != bits(reverse, e):
+                return True
+        elif spec.get("flags") == "nsw" and not overflows(start, products) and overflows(start, list(reversed(products))):
+            return True
+    return False
+
+
+def check_designed(spec, verdict, fact, trivial, points, union_sites, counts, where):
+    """The designed search against this file's family. `points` are the verdict's own, in
+    order; the search looks at the first POINTS_LOOKED_AT of them, the fill sequence at each
+    and then, where it found nothing at any, the family at each."""
+    e = spec["element"]
+    looked = [n for n in sorted(points) if any(ev["site"] in union_sites for ev in interpret(spec, n)[0])]
+    looked = looked[:POINTS_LOOKED_AT]
+    first = None
+    for n in looked:
+        family = designed_family(spec, n, union_sites)
+        if len(family) > DESIGNED_TARGETS * 8:
+            raise Failure(f"{where}: {len(family)} designed memories at n={n}, more than the bound")
+        counts["designed memories judged here"] += len(family)
+        for member in family:
+            if reversal_shows(spec, n, member, union_sites):
+                first = (n, member)
+                break
+        if first:
+            break
+    if fact["status"] == "REFUTED" and "designed" in fact["detail"]:
+        if not fact["detail"].endswith(", at a designed memory"):
+            raise Failure(f"{where}: a designed refutation named otherwise: {fact['detail']!r}")
+        if first is None:
+            raise Failure(f"{where}: refuted at a designed memory, and no member of the family is a witness here")
+        n, member = first
+        theirs = {r: [hex_to_value(text, e) if text is not None else (0.0 if is_float(e) else 0) for text in cells]
+                  for r, cells in enumerate(fact["memory"])}
+        same = fact["point"][0] == n and all(bits(theirs[r][i], e) == bits(member[r][i], e)
+                                             for r in member for i in range(SIZE))
+        if not same:
+            raise Failure(f"{where}: the designed witness at n={fact['point'][0]} is not the family's first witness, "
+                          f"which is at n={n}\n{print_function(spec)}")
+        counts["designed refutations equal to the family's first witness"] += 1
+        counts[f"designed refutations, {e}"] += 1
+    elif fact["status"] == "UNKNOWN" and trivial["status"] != "PROVEN":
+        if first is not None:
+            raise Failure(f"{where}: a designed memory at n={first[0]} is a witness, and the fact is Unknown\n"
+                          f"{print_function(spec)}")
+        if any(designed_family(spec, n, union_sites) for n in looked):
+            counts["facts left Unknown with a designed family that shows nothing"] += 1
+
+
 def check_refuted(spec, out, entry, verdict, segments, group_of_site, union_sites, counts, label):
     where = f"{spec['name']} {label}"
     by = verdict["refuted_by"]
@@ -963,6 +1157,9 @@ MINIMUM = {
     "integer proven by the rule, structure checked": 5, "programs compared in another order": 5,
     "permutations folded": 50, "negative shapes checked": 5, "one-group facts equal to Theorem 13": 20,
     "integer refutations replayed": 1,
+    # G5b-M4b-2b-2: the designed search, both ways, or this run says nothing about it.
+    "designed refutations equal to the family's first witness": 4,
+    "facts left Unknown with a designed family that shows nothing": 2,
 }
 
 
@@ -981,6 +1178,9 @@ def main():
     rng = random.Random(args.seed)
     specs = [gen_spec(rng, i) for i in range(args.programs)]
     seeds = [rng.randrange(1 << 30) for _ in specs]
+    # G5b-M4b-2b-2: after them, and from another stream: the generated programs are unchanged.
+    more, more_seeds = extra_specs(args.seed, args.programs)
+    specs, seeds = specs + more, seeds + more_seeds
     counts, failures = Counter(), []
 
     def one(item):

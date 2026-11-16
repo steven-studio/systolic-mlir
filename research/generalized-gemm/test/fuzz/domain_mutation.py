@@ -276,6 +276,35 @@ MUTANTS = [
     ("set float proven without a witness", D, "      out.floating = searchWitness();", "      out.floating = searchWitness().status == FactStatus::Refuted ? searchWitness() : proven(\"addition is associative\", out.claimTier);"),
     ("set refuted float fact refutes the verdict", D, "      out.floating = searchWitness();", "      out.floating = searchWitness();\n      if (out.floating.status == FactStatus::Refuted)\n        out.claim = ComputationStatus::Refuted;"),
     ("judge NaN reversal unnamed", R, "               (reversed.isNaN() ? \" gives NaN, so that run would stop\" : \" changes its final bits\");", "               \" changes its final bits\";"),
+    # G5b-M4b-2b-2: designed memories. The search: only after the fill sequence, only when fills were asked,
+    # only by the judge, at every point looked at, over the whole union.
+    ("designed search with no fills asked", R, "  if (!fills || replay.outcome != ReplayOutcome::Equal)\n    return out;\n  for (EntryState &designed", "  if (replay.outcome != ReplayOutcome::Equal)\n    return out;\n  for (EntryState &designed"),
+    ("designed memory not judged", R, "    if (!reversalDiffers(program, group, designed, replay.prefix, detail))\n      continue;\n", "    (void)reversalDiffers(program, group, designed, replay.prefix, detail);\n"),
+    ("designed witness not named", R, "    out.detail = detail + \", at a designed memory\";", "    out.detail = detail;"),
+    ("designed witness memory dropped", R, "    out.memory = std::move(designed);\n", ""),
+    ("designed set witness judges the first group", R, "  return searchDesigned(program, *united, replay, parameters, fills, maxCells);", "  return searchDesigned(program, *listed.front(), replay, parameters, fills, maxCells);"),
+    ("T13 designed search dropped", D, "      if (designed.status == FactStatus::Refuted)\n        return designed;\n", "      (void)designed;\n"),
+    ("T13 designed witness replaces a drawn one", D, "      if (found.status == FactStatus::Refuted)\n        return found;\n    }\n    // G5b-M4b-2b-2:", "      if (found.status == FactStatus::Refuted)\n        break;\n    }\n    // G5b-M4b-2b-2:"),
+    ("set designed search dropped", D, "          if (designed.status == FactStatus::Refuted) {\n            found = designed;\n            break;\n          }\n", "          (void)designed;\n"),
+    ("set designed witness replaces a drawn one", D, "      if (found.status != FactStatus::Refuted)\n        for (const PointEvidence *point : lookedAt) {", "      if (true)\n        for (const PointEvidence *point : lookedAt) {"),
+    ("set designed search at the first point only", D, "          if (designed.status == FactStatus::Refuted) {\n            found = designed;\n            break;\n          }\n", "          if (designed.status == FactStatus::Refuted)\n            found = designed;\n          break;\n"),
+    ("set designed search over the first group", D, "          Fact designed = designedWitnessOver(program, listed, point->parameters, options.limits.witnessFills,", "          Fact designed = designedWitnessOver(program, llvm::ArrayRef<const SiteGroup *>(listed).take_front(1), point->parameters, options.limits.witnessFills,"),
+    # The family: where it applies, its targets, its patterns, the operand roles, what is left out.
+    ("designed without nsw", R, "  if (!isFloat && (!(leader.reductionFlags & FlagNSW) || (leader.reductionFlags & FlagNUW)))", "  if (!isFloat && (leader.reductionFlags & FlagNUW))"),
+    ("designed with nuw", R, "  if (!isFloat && (!(leader.reductionFlags & FlagNSW) || (leader.reductionFlags & FlagNUW)))", "  if (!isFloat && !(leader.reductionFlags & FlagNSW))"),
+    ("designed sites of two flag sets", R, "    if (!site.output || site.reduction != leader.reduction || site.reductionFlags != leader.reductionFlags ||\n        site.multiplyFlags != leader.multiplyFlags)", "    if (!site.output || site.reduction != leader.reduction)"),
+    ("designed cell with a constant aimed at", R, "    if (folded.size() < 2 || prefix.count(target))\n      continue;\n", "    if (folded.size() < 2)\n      continue;\n"),
+    ("designed cell of one contribution counted", R, "    if (folded.size() < 2 || prefix.count(target))\n      continue;\n", "    if (prefix.count(target))\n      continue;\n"),
+    ("designed first target only", R, "    if (targets++ == designedTargets)\n      break;\n", "    if (targets++ == 1)\n      break;\n"),
+    ("designed maximum weakened", R, "    auto maximum = [](unsigned w) { return APInt::getSignedMaxValue(w); };", "    auto maximum = [](unsigned w) { return APInt::getSignedMaxValue(w) - 1; };"),
+    ("designed minimum pattern dropped", R, "    return {{maximum, minus, plus, plus}, {minimum, plus, minus, plus}};", "    return {{maximum, minus, plus, plus}};"),
+    ("designed binary32 at 2^53", R, "  double big = foldWidth == 32 ? 16777216.0 : 9007199254740992.0;", "  double big = 9007199254740992.0;"),
+    ("designed largest pattern dropped", R, "  return {{value(big), value(1.0), value(-big), value(1.0)},\n          {value(largest), value(largest), value(-largest), value(1.0)}};", "  return {{value(big), value(1.0), value(-big), value(1.0)}};"),
+    ("designed first contribution in the second operand only", R, "      for (bool firstInSecondOperand : {true, false})", "      for (bool firstInSecondOperand : {true})"),
+    ("designed last contribution in the second operand only", R, "        for (bool lastInSecondOperand : {true, false}) {", "        for (bool lastInSecondOperand : {true}) {"),
+    ("designed operand in a fresh root set", R, "            if (!settable(key)) {\n              consistent = false;\n              return;\n            }\n", ""),
+    ("designed memory of two values kept", R, "          if (!consistent || std::find(listed.begin(), listed.end(), cells) != listed.end())", "          if (std::find(listed.begin(), listed.end(), cells) != listed.end())"),
+    ("designed memory listed twice", R, "          if (!consistent || std::find(listed.begin(), listed.end(), cells) != listed.end())", "          if (!consistent)"),
     ("set wrapping algebra rescues a refuted order", D, "      out.claim = ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;", "      out.claim = computationFinite.fold() == FoldForm::ModularInteger ? ComputationStatus::Verified : ComputationStatus::Refuted;\n      out.refuted = RefutedBy::Domain;"),
     ("set reduction whole scope from the domain alone", D, "    bool whole = computationFinite.tier() == ComputationTier::ScopeEnumerated &&\n                 domainFinite.tier() == ComputationTier::ScopeEnumerated;", "    bool whole = domainFinite.tier() == ComputationTier::ScopeEnumerated;"),
     ("set reduction event count unchecked", D, "      if (counted != facts.events) {", "      if (false) {"),
@@ -463,8 +492,8 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("phase4", "identity", "setdomain", "setreduction", "setreorder", "setfloat", "reviewed", "gaps", "multiplicity",
-                "siblings", "segments", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
+               ("phase4", "identity", "setdomain", "setreduction", "setreorder", "setfloat", "designed", "reviewed", "gaps",
+                "multiplicity", "siblings", "segments", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
                                  "--programs", "6", "--fills", "6", "--seed", "41", "--jobs", "1"]))
@@ -476,7 +505,13 @@ class Worker:
         out.append(("setreduction-programs", [sys.executable, fuzz / "setreduction_oracle.py", "--driver", report,
                                               "--programs", "6", "--fills", "3", "--seed", "41", "--jobs", "1",
                                               "--no-minimum"]))
-        return out
+        # --first: the named tests before the others, in the order given. A kill is a kill by
+        # any test, so the order changes which test is named and how long a run takes, nothing else.
+        first = [label for label in self.args.first.split(",") if label]
+        unknown = sorted(set(first) - {label for label, _ in out})
+        if unknown:
+            raise RuntimeError(f"--first names no test: {unknown}")
+        return sorted(out, key=lambda item: first.index(item[0]) if item[0] in first else len(first))
 
     def trial(self, name, filename, old, new):
         self.restore()
@@ -518,6 +553,8 @@ def main():
     parser.add_argument("--only", default="", help="mutant names, comma-separated, or semicolon-separated "
                         "when a name holds a comma")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--first", default="", help="tests to run before the others, comma-separated, for a run "
+                        "of a few mutants whose killers are known; the tests and the results are the same")
     parser.add_argument("--results", required=True, help="a JSON-lines file, appended to")
     args = parser.parse_args()
     if args.workers > 2:

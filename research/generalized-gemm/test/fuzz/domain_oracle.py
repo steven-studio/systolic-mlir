@@ -10,7 +10,10 @@ driver, and every claim is recomputed here with no library code:
 - Theorem 13, with random fills: each cell's final value is the fold of its
   contributions, from the initial operands, in the order of the key.
 - Reorder facts: a proven integer fact against random permutations; every witness
-  replayed.
+  replayed. G5b-M4b-2b-2: after every other program, some with nsw on the multiplication as
+  well as on the addition, as signed arithmetic has it: a product of two drawn values
+  overflows, so the fill sequence finds nothing and only a designed memory refutes. Its
+  witness is replayed like any other, and here a flagged multiplication stops the run too.
 - A refuted domain claim: the events and the set differ at its point.
 - Multiplicity (Theorem 14): a spec may name repeat loops. It then runs again with the
   family of its other loops given to the driver, and the emitted μ term is evaluated here
@@ -131,6 +134,8 @@ def nests(spec):
         nest["element"] = spec["element"]
         if spec.get("nsw"):
             nest["nsw"] = True
+        if spec.get("mul_nsw"):
+            nest["mul_nsw"] = True
         out.append(nest)
     return out
 
@@ -167,6 +172,8 @@ def interpret_nest(spec, n, mem, events, segment):
                     raise Stop("NaN")
             else:
                 m = wrap(a * b, 32)
+                if spec.get("mul_nsw") and signed(a, 32) * signed(b, 32) != signed(m, 32):
+                    raise Stop("poison")
                 u = wrap(z + m, 32)
                 if spec.get("nsw") and signed(z, 32) + signed(m, 32) != signed(u, 32):
                     raise Stop("poison")
@@ -263,9 +270,10 @@ def print_nest(spec, em, names, body, t, tag):
         em.lines = []
         add, mul = ("arith.addf", "arith.mulf") if element == "f64" else ("arith.addi", "arith.muli")
         flags = " overflow<nsw>" if spec.get("nsw") else ""
+        mul_flags = " overflow<nsw>" if spec.get("mul_nsw") else ""
         s = suffix + tag
         body.extend([f"%x{s} = memref.load %a[{f}] : {t}", f"%y{s} = memref.load %b[{g}] : {t}",
-                     f"%z{s} = memref.load %c[{h}] : {t}", f"%m{s} = {mul} %x{s}, %y{s} : {element}",
+                     f"%z{s} = memref.load %c[{h}] : {t}", f"%m{s} = {mul} %x{s}, %y{s}{mul_flags} : {element}",
                      f"%s{s} = {add} %z{s}, %m{s}{flags} : {element}", f"memref.store %s{s}, %c[{h}] : {t}"])
 
     guard = spec.get("guard")
@@ -901,9 +909,11 @@ def check_witness(spec, fact, tally):
             backward = fold(spec, memory["c"][cell], products, reverse=True)
         except Stop:
             tally["witnesses replayed"] += 1
+            tally["designed witnesses replayed"] += "designed" in fact["detail"]
             return
         if bits(backward, spec["element"]) != bits(final["c"][cell], spec["element"]):
             tally["witnesses replayed"] += 1
+            tally["designed witnesses replayed"] += "designed" in fact["detail"]
             return
     raise SystemExit(f"{spec['name']}: a reorder witness does not replay")
 
@@ -1066,6 +1076,19 @@ def catalogue():
     ]
 
 
+def designed_catalogue():
+    """G5b-M4b-2b-2: signed arithmetic, nsw on the multiplication and on the addition. A matrix
+    product in one nest, three contributions to a cell; and two sibling nests writing one
+    row with other cells of A, C[j, 0] += A[j, 0] * B[0, j] then A[j, 1] * B[0, j], whose
+    contributions share B[0, j], so that the first goes into A[j, 0]. Only a designed memory
+    refutes either. They come after every other program, so the others run as they did."""
+    return [
+        S("signed", IJK, ["i", "j"], ["i", "k"], ["k", "j"], scope=(1, 2), nsw=True, mul_nsw=True),
+        G("seg_signed", [ROW("i", 0), N([("j", 0, "n", 1)], ["j", 0], ["j", 1], [0, "j"])], scope=(1, 2),
+          nsw=True, mul_nsw=True),
+    ]
+
+
 def N(loops, h, f, g, **more):
     """A nest of a segmented spec."""
     return dict(loops=loops, h=h, f=f, g=g, **more)
@@ -1166,6 +1189,7 @@ def main():
     rng = random.Random(args.seed)
     specs = catalogue() + [random_spec(rng, f"p{i}") for i in range(args.programs)]
     specs += segmented_catalogue() + [random_segmented_spec(rng, f"g{i}") for i in range(args.programs)]
+    specs += designed_catalogue()
 
     def one(spec):
         try:
@@ -1217,6 +1241,10 @@ def main():
         raise SystemExit("shared cells were not checked both ways")
     if tally["segment multiplicity LOGICAL_BOX"] < 1 or tally["cells folded across segments"] < 1:
         raise SystemExit("no segment box or cross-segment fold was checked")
+    # G5b-M4b-2b-2: a designed witness must have been replayed, one group in one nest and
+    # one over two, or this run says nothing about designed memories.
+    if tally["designed witnesses replayed"] < 2:
+        raise SystemExit("fewer than 2 designed witnesses were replayed")
     print("0 disagreements")
 
 

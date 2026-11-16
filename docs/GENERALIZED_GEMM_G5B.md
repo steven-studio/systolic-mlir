@@ -1162,6 +1162,196 @@ Every float fold with a cell of two contributions at which the fill sequence fin
 difference (designed fills are M4b-2b-2); a fold of two operations; any set whose verdict is not
 Verified; everything M3, M4a, M4b-1 and M4b-2a leave Unknown.
 
+## M4b-2b-2: designed memories for the witness search (2026-11-16)
+
+The fill sequence draws its memories, and what it draws cannot refute signed arithmetic. With
+`nsw` on the multiplication as well as on the addition, which is what signed integer source
+compiles to, a product of two drawn values overflows unless one of them is small, the run stops,
+and a stopped run is no witness: 64 fills at every point find nothing, and the integer fact of a
+fold that a two-line memory refutes stayed Unknown. M4b-2b-2 adds **designed memories**: a small
+fixed family, built from the trace at the point, judged by the same judge.
+
+A designed memory is a place to look and never evidence. The fact is Refuted only when
+`reversalDiffers` finds, on that memory, that the program completes and the reversed fold of a
+cell overflows a flagged addition, differs in bits, or is NaN; a designed memory that shows no
+difference says nothing, and the fact is what the fill sequence left, Unknown. No rule that
+proves a fact is touched, no tier, no verdict; `lowering_eligible` reads Proven facts only, and
+`authorizes_lowering` is false as before.
+
+### The search
+
+1. The fill sequence, as before: at each of the first four points looked at, Theorem 13's 64
+   fills from the fixed seed. A witness it finds is the fact, and is the witness it found before
+   this milestone, memory for memory.
+2. Only where it found nothing at **any** of those points: the designed memories, at the same
+   points in the same order, each judged by `reversalDiffers` against the replay's prefix
+   constants. The first that shows a difference is the witness; its detail is the judge's, then
+   ", at a designed memory".
+3. `witnessFills = 0` asks for no search, drawn or designed: Unknown, as before.
+
+Both callers do this: Theorem 13's own search over one group (`checkReduction`) and Theorem 17's
+over the union of the listed groups (`joinSetReduction`), with the group's replay and the set's.
+
+### The family
+
+A function of the program, the sites and the point: nothing is drawn. The trace is read from the
+run of the memory that is zero in every cell an entry sets. A **target** is a cell with two
+contributions or more that holds no constant before its first event: the first three, in the
+order of their first events. For each target, with every other cell zero:
+
+| Fold | The target cell | Its first contribution | Its last | In the program's order | Reversed |
+| --- | --- | --- | --- | --- | --- |
+| integer, w bits, the reduction `nsw` and not `nuw` | INT_MAX | −1 | +1 | INT_MAX − 1, then INT_MAX: completes | INT_MAX + 1 overflows |
+| the same | INT_MIN | +1 | −1 | INT_MIN + 1, then INT_MIN: completes | INT_MIN − 1 overflows |
+| float (p = 53 for binary64, 24 for binary32) | 2^p | 1 | −2^p | (2^p ⊕ 1) ⊕ −2^p = 0: 2^p + 1 is a tie and rounds to the even significand | (2^p ⊕ −2^p) ⊕ 1 = 1 |
+| the same | the largest finite value, max | max | −max | (max ⊕ max) ⊕ −max = +∞, completes | (max ⊕ −max) ⊕ max = max |
+
+A contribution is a product, so it is given its value by one operand cell holding the value and
+the other holding 1 (the product is then exact, and no flag of the multiplication can stop it).
+Which operand holds it is tried both ways for the first contribution and for the last: the second
+operand, then the first, four memories for each pattern. A memory is **left out** when it would
+give one cell two values (the two contributions share an operand cell, or the target is an
+operand), when it would set a cell no entry sets (a root the program allocates), or when it is
+already listed. Contributions between the first and the last are whatever the memory makes them,
+zero unless they read a cell the memory sets; the judge decides. At most 3 · 2 · 4 = 24 memories
+at a point (`designedFillsAtMost`); since ±1 is also the other operand's value, at most 12 for
+integers and 18 for floats are ever distinct.
+
+### Where it applies
+
+| Condition | Otherwise |
+| --- | --- |
+| the listed sites are one operation with one set of flags | nothing designed: the judge reverses one operation |
+| an integer fold whose reduction carries `nsw` and not `nuw`; or a float fold | nothing designed: without `nsw` no reversal overflows; with `nuw` −1 is the largest unsigned value and both patterns stop the program itself |
+| the zero memory runs to the end at the point | nothing designed |
+| a cell with two contributions that holds no constant before its first event | no target: a cell the program initialises (a fresh allocation set to zero, a stored constant) starts its fold at that constant, whatever the entry holds |
+| the operand cells of the first and of the last contribution can be set, and consistently | that memory is left out |
+| `witnessFills > 0`, and the fill sequence found nothing at any point looked at | not tried |
+
+One group and several are the same search: `designedWitness` over a group with the group's
+replay, `designedWitnessOver` over the union with the set's, as `reorderWitness` and
+`reorderWitnessOver` are.
+
+### What it does not find
+
+Stated because Unknown here is not "no witness exists":
+
+- A cell that starts at a constant. From zero a reversal of two contributions overflows exactly
+  when the program does; with three, −1, +1, INT_MAX is a witness the family does not hold.
+- Contributions that are one product. Two that read the same operand cells cannot be told apart
+  by any memory. A second nest that runs twice gives p, q, q: both integer patterns then overflow
+  in the program's own order (−1, +1, +1 from INT_MAX; +1, −1, −1 from INT_MIN), while INT_MAX
+  with −2, +1, +1 is a witness outside the family.
+- An operand in a root the program fills: the family sets argument cells only.
+- `nuw`, alone or with `nsw`. No reversal overflows an unsigned sum of a run that completed; a
+  signed witness under both flags needs a memory of another shape.
+- Targets after the third, and pairs of contributions other than the first and the last.
+
+Each stays Unknown with the reason the rule gave, as before.
+
+### Contract
+
+`ReductionSemantics`: `designedReversalFills(program, group, prefix, parameters, maxCells)` lists
+the family, for the checker and the tests; `designedWitness` and `designedWitnessOver` judge it
+(`searchDesigned`), with `fills` only as the switch of item 3. `searchReversal`, `randomEntry`
+and `reversalDiffers` are unchanged, byte for byte. `DomainChecker`: the two search lambdas
+remember the points they looked at and, where the fill sequence refuted at none, ask the designed
+search at each. The Unknown fact of a search that finds nothing has the detail it had.
+
+### Obligations
+
+| ID | Obligation | On failure |
+| --- | --- | --- |
+| DM-1 | designed memories are judged only after the fill sequence found nothing at every point looked at: a witness the fill sequence finds is unchanged | unit (`set_float`, `set_nsw`, `d_floats`: the fact is the drawn memory, cell for cell, and no member of the family); the output comparison; mutants `… designed witness replaces a drawn one` |
+| DM-2 | no search without fills | unit (`witnessFills = 0`, and the two functions with `fills = 0`); mutant `designed search with no fills asked` |
+| DM-3 | Refuted only by the judge, on that memory | unit (every refuted fact run and judged again; `d_repeat`, whose two members both stop, stays Unknown); both oracles replay the witness with their own interpreters; mutant `designed memory not judged` |
+| DM-4 | the family is fixed and is the documented one | unit (members compared cell for cell: `d_set`, `d_shared`, `d_late`, `d_gemm`, binary64, binary32); the Theorem 17 oracle builds it again from this section and demands the very memory; 15 mutants of the family |
+| DM-5 | Unknown where no member is a witness, never Proven | unit (`d_repeat`, `d_both`); oracle (a fact left Unknown has no witness in the oracle's family) |
+| DM-6 | every point looked at is tried, in order, over the whole union | unit (`d_constant`: the witness is at the second point); mutants `… at the first point only`, `… over the first group`, `… judges the first group` |
+| DM-7 | the verdict, its claims, tiers, points and binding, every Proven fact and every lowering field are unchanged | the output comparison admits one change only, a reorder fact Unknown to Refuted with a point and a memory; unit (claims Verified, no refutation of the verdict) |
+
+### How M4b-2b-2 is checked independently
+
+- **Unit.** The `designed` section (140 checks), on sixteen-bit integers, where the solver's
+  multiplications are small and the search is the same: two groups in signed arithmetic, which
+  the fill sequence leaves Unknown at every point of the scope and the first designed memory
+  refutes; the family member by member; a shared operand cell; a target after cells of one
+  contribution; a target after a cell that gets one product twice, by Theorem 13 and as a set of
+  one group; a stored constant, and the witness at the second point; a matrix product in one
+  group with the proposer's request; binary64 and binary32 with one fill; a family with no
+  witness; no fills; drawn witnesses unchanged on both search paths; where nothing is designed.
+- **Oracle, Theorem 17.** After the generated programs, which are unchanged with their seeds,
+  one program in six is signed arithmetic in 32 bits, from a stream of its own. The family is
+  built again in Python from this section and the oracle's own trace, each member run and judged
+  by the oracle's interpreter, which now stops on a flagged multiplication too. A fact refuted at
+  a designed memory must carry the first member that is a witness, at the first point that has
+  one; a fact left Unknown must have none. Every refutation is replayed as before.
+- **Oracle, domain.** Two programs more, after all others: a matrix product and two sibling
+  nests whose contributions share an operand cell, in signed arithmetic. Their witnesses are
+  replayed by `check_witness`, and a run with fewer than two designed witnesses fails.
+- **lit.** `dom_reduction.mlir`, `SIGNED`: the printed fact, its words and its memory.
+- **Mutation.** 26 new mutants: 11 of the search and 15 of the family.
+- **Output comparison** against `dd2432e`: every driver output byte for byte, or equal but for
+  reorder facts that were Unknown and are Refuted with a point and a memory, each listed.
+
+### What stays Unknown
+
+What "What it does not find" lists; a fold of two operations; a float fold whose every cell has
+one product twice; any set whose verdict is not Verified; everything the earlier milestones
+leave Unknown.
+
+## Validation of M4b-2b-2 (2026-11-16, LLVM 24.0.0git, Z3 4.8.12, base dd2432e)
+
+Every result below is from one frozen tree (hash `b3a5fdf4…` over `include/GeneralizedGemm`,
+`lib/GeneralizedGemm` and `research/generalized-gemm`), the same at the start, after each phase
+and at the end, with every subprocess under a limit. Four phases, one after the other. It is a
+targeted validation, as the milestone was authorized: what the change reaches, not the whole
+baseline again. The binaries it is compared with were built from `dd2432e` before any edit.
+Times are local.
+
+| Check | Time | Exit | Result |
+| --- | --- | --- | --- |
+| Build, Debug | 03:20:14 | 0 | 0 warnings |
+| CTest, the five suites the change reaches | 03:20:14 to 04:01:45 | 0 | 5 of 5: `domain` (the unit core), `domain-programs`, `setdomain-programs`, `setreduction-programs`, `lit` |
+| G5a/G5b unit, core (in CTest) | 899 s | 0 | 1,545 checks, 0 failures: `designed` 140 (new); the other sections are untouched (the file has no line removed or altered) and count as before: `setreduction` 88, `setreorder` 120, `setfloat` 48, `segments` 228, `phase4` 68 |
+| lit (in CTest) | 201 s | 0 | 29 of 29, `dom_reduction.mlir` with its `SIGNED` block among them |
+| Theorem 17 oracle, seed 1 (in CTest) | 977 s | 0 | 36 programs (the 30 generated, unchanged with their seeds, and 6 in signed arithmetic), 0 failures: 72 symbolic, 13 whole-scope and 2 point verdicts verified, 202 points and 988 folds, 32 computation and 8 domain refutations replayed. Designed: 68 memories of the oracle's own family run and judged; 6 facts refuted at a designed memory, each the family's first witness at the first point that has one, cell for cell; 4 facts left Unknown whose family has members and no witness. 8 integer refutations replayed (2 drawn, 6 designed), 8 float (4 binary32, 4 binary64); 26 float facts left Unknown, none with a witness in the family |
+| Domain oracle, seed 1 (in CTest) | 2,490 s | 0 | 116 programs, 0 disagreements; 33 witnesses replayed, 4 of them designed |
+| Set-domain oracle, seed 1 (in CTest) | 1,132 s | 0 | 30 programs, 0 failures |
+| Output comparison against `dd2432e`, the oracles' programs | 04:08:31 to 04:58:37 | 0 each | The Theorem 17 oracle's 36 programs: 33 byte-identical, 3 differ only in admissible facts (6). The domain oracle's 116: 113 byte-identical, 3 differ only in admissible facts (3) |
+| Output comparison against `dd2432e`, lit | 08:54:58 to 08:58:28 | 0 | 88 RUN lines of every driver, each test run as lit runs it: 87 byte-identical, 1 differs only in an admissible fact, `set_signed`. This is the third run of this comparison. The first (04:02:07 to 04:08:31, the same counts) ran each line bare: ten lines of the termination and G1 drivers that use lit's `%t` were compared without their inputs or by an emptied output, which compares nothing, and one of them wrote a file `%t.before` into the repository root. The second (08:51:02) gave the old and the new binaries temporary directories of their own and reported eight differences in `term_widths.mlir`, all the program fingerprint, which reads the input file's path; on the same paths there is none |
+| Output comparison, in all | | | 240 driver runs: 233 byte-identical; 7 differ only in reorder facts that were Unknown and are Refuted with a point and a memory, 10 facts, all at a designed memory; nothing else differs. Of programs that existed before: 87 of 87 RUN lines, 30 of 30 and 113 of 114 identical; the one change is the domain oracle's `p28` |
+| Domain oracle, seed 20261116 | 04:02:07 to 04:30:21 | 0 | 76 programs, 0 disagreements; 13 witnesses replayed, 2 designed |
+| Theorem 17 oracle, seed 20261116, 30 programs | 04:02:07 to 04:20:37 | **1** | 36 programs, 0 disagreements, and one floor of the oracle not met: 2 float swaps that change the result where 3 are asked. Not a pass. The floor is about the oracle's own fold check, predates this milestone, and is missed alike by the `dd2432e` oracle on the `dd2432e` binary at this seed (04:31:05 to 04:47:37, exit 1, the same line): 30 programs are too few at this seed. The floor was not lowered |
+| Theorem 17 oracle, seed 20261116, 60 programs | 04:31:05 to 05:02:26 | 0 | 72 programs (42 integer, 15 binary64, 15 binary32), 0 failures, every floor met: 120 symbolic and 36 whole-scope verdicts, 368 points and 1,777 folds; 148 designed memories judged, 12 designed refutations equal to the family's first witness, 8 facts left Unknown with a family that shows nothing; 16 integer and 10 float refutations replayed |
+| Mutation, domain harness, the 55 mutants on the reorder search and the reorder facts, two workers, nothing else running | 05:02:46 to 06:53:55 | 0 | 51 run, 51 killed by a test's own assertion; 0 survived, 0 timeouts, 0 resource limits, 0 harness errors; the baseline passing (every section, the 512-program sweep and the four oracles, about an hour). The 26 new mutants are killed by `designed`. Of the 25 that existed (the 11 of `ReductionSemantics.cpp` that are run and 14 of `DomainChecker.cpp`'s fact blocks), 13 are killed by `designed`, 9 by `setreorder`, 2 by `setreduction`, 1 by `setfloat`: `designed` was run first (`--first`), which decides the test that is named and nothing else. 4 of the 55 are declared equivalent by the harness's list, which records its 19 entries and executes none; the caveats recorded for two of them in M4b-2b-1 stand (`integer flags ignored` is stale, `integer unverified admitted` changes a detail string). No equivalence was declared or removed |
+| ASan, UBSan, leaks: the domain core, once, alone on the machine | 06:54:14 to 08:49:19 | 0 | 0 reports; 1,545 checks, 0 failures, in 114 min 38 s (`designed` 430 s; `segments` 1,250 s, every query within the solver limit) |
+| Not run | | | The CTest suites and harnesses of the other phases (G1 to G4a, synthesis, termination, identity, the 512-program sweep as a suite): no file of theirs changed; the sweep and the identity oracle ran once as the mutation baseline. A Release build. The 192 mutants this run did not name (177 that run, 15 declared equivalent): with the four G3b and G3a mutants open since M4-0 and the mutants not rerun at `9bb3cf0`, they stay as recorded |
+
+The ten facts, each Unknown ("the reduction carries nsw or nuw, so a partial sum can stop the
+run") before and Refuted ("reversing cell … overflows a flagged addition, at a designed memory")
+after:
+
+| Program | Fact | Point | The memory (every other cell zero) |
+| --- | --- | --- | --- |
+| `set_signed` of `dom_reduction.mlir` (new) | the set {0, 1} | n = 1 | A[0] = 1, B[0] = −1, C[0] = INT_MAX, D[0] = 1 |
+| Theorem 17 oracle `s0` (new), both listings | the set | n = 2 | A[1] = −1, B[1] = 1, C[1] = INT_MAX, D[1] = 1 |
+| `s2` (new), both listings | the set | n = 1 | A[0] = −1, B[0] = 1, C[0] = 1, D[0] = INT_MAX (D is the output) |
+| `s4` (new), both listings | the set | n = 1 | A[0] = −1, B[0] = 1, C[0] = INT_MAX, D[0] = 1 |
+| domain oracle `p28` (**existing**: a matrix product run twice, `nsw` on the addition, six contributions to a cell, which 64 fills at each of three points did not refute) | Theorem 13 | n = 1 | A[0, 0] = A[0, 2] = 1, B[0, 0] = −1, B[2, 0] = 1, C[0, 0] = INT_MAX |
+| domain oracle `signed` (new) | Theorem 13 | n = 1 | the same memory |
+| domain oracle `seg_signed` (new) | Theorem 13 | n = 1 | A[0, 0] = −1, A[0, 1] = 1, B[0, 0] = 1, C[0, 0] = INT_MAX |
+
+No expected output, assertion or test that existed was changed, removed or weakened. The lit
+file, the unit test and the oracles gained lines (the unit file has no line removed). The nine
+lines rewritten in the three scripts are two doc strings, a label, two format strings that
+print a flag only where a program has one, the harness's list of sections and its return of
+the test list. The solver cost of signed 32-bit products is recorded with the tests: the unit
+programs are sixteen bits wide (a fixture of the 32-bit form took 13.6 s against 2.3 s), and a
+first form of the oracle's new programs, three nests with nested loops, lost its termination
+certificate to the solver limit on a loaded machine and was replaced by plain two-nest ones.
+
+
 ## Validation of M4b-2b-1 (2026-11-14 and 15, LLVM 24.0.0git, Z3 4.8.12, base c98571b)
 
 Every result below is from one frozen tree (hash `85a1741b…` over `include/`, `lib/` and

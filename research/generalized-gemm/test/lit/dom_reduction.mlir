@@ -2,6 +2,7 @@
 // RUN: %domreport %s --function=set_reads --lower-structured --index-bit-width=16 --scope=0:1:2 --segments --max-level=1 --candidates-per-group=1 --rlimit=2000000 --timeout-ms=3000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" --groups="all" | FileCheck %s --check-prefix=READS
 // RUN: %domreport %s --function=set_float --lower-structured --index-bit-width=16 --scope=0:1:2 --segments --max-level=1 --candidates-per-group=1 --rlimit=2000000 --timeout-ms=3000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" --groups="all" | FileCheck %s --check-prefix=FLOAT
 // RUN: %domreport %s --function=set_nsw --lower-structured --index-bit-width=16 --scope=0:1:2 --segments --max-level=1 --candidates-per-group=1 --rlimit=2000000 --timeout-ms=3000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" --groups="all" | FileCheck %s --check-prefix=NSW
+// RUN: %domreport %s --function=set_signed --lower-structured --index-bit-width=16 --scope=0:1:2 --segments --max-level=1 --candidates-per-group=1 --rlimit=2000000 --timeout-ms=3000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" --groups="all" | FileCheck %s --check-prefix=SIGNED
 // G5b-M4b-1. Theorem 17 over the union of two groups writing the same cells of C: the
 // computation over the set (M3) and the domain over the set (M4a) both symbolic, so the
 // verdict is symbolic, a modular fold; the trivial fact is refuted at a point (two
@@ -62,6 +63,45 @@
 // NSW: "trivial": {
 // NSW: "status": "VERIFIED"
 // NSW-NEXT: "tier": "SYMBOLIC"
+// G5b-M4b-2b-2. Signed arithmetic: nsw on the multiplication as well. A product of two
+// drawn values overflows, so the fill sequence finds no memory at either point, and before
+// designed memories this fact was Unknown. The first designed memory is then judged: at
+// n = 1, C[0] = INT_MAX, A[0] = 1, B[0] = -1 and D[0] = 1, every other cell zero. The
+// program adds -1 then +1 and completes at INT_MAX; reversed, INT_MAX + 1 overflows. The
+// fact says the memory was designed and prints it; the verdict is untouched, and nothing
+// is authorized.
+// SIGNED: "reduction": {
+// SIGNED-NEXT: "authorizes_lowering": false,
+// SIGNED: "fold": "MODULAR_INTEGER"
+// SIGNED: "refuted_by": "NOTHING"
+// SIGNED: "reorder": {
+// SIGNED: "integer": {
+// SIGNED-NEXT: "detail": "reversing cell 0 of root 2 overflows a flagged addition, at a designed memory"
+// SIGNED-NEXT: "memory": [
+// SIGNED-NEXT: [
+// SIGNED-NEXT: "1",
+// SIGNED-NEXT: "0",
+// SIGNED: ],
+// SIGNED-NEXT: [
+// SIGNED-NEXT: "FFFFFFFF",
+// SIGNED-NEXT: "0",
+// SIGNED: ],
+// SIGNED-NEXT: [
+// SIGNED-NEXT: "7FFFFFFF",
+// SIGNED-NEXT: "0",
+// SIGNED: ],
+// SIGNED-NEXT: [
+// SIGNED-NEXT: "1",
+// SIGNED-NEXT: "0",
+// SIGNED: "point": [
+// SIGNED-NEXT: 1
+// SIGNED-NEXT: ],
+// SIGNED-NEXT: "status": "REFUTED"
+// SIGNED-NEXT: "tier": "PROPOSED"
+// SIGNED: "trivial": {
+// SIGNED: "status": "VERIFIED"
+// SIGNED-NEXT: "tier": "SYMBOLIC"
+// SIGNED-NEXT: "transformation": "UNKNOWN"
 func.func @set_a(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -143,6 +183,27 @@ func.func @set_nsw(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: 
     %yj = memref.load %d[%j] : memref<8xi32>
     %zj = memref.load %c[%j] : memref<8xi32>
     %mj = arith.muli %xj, %yj : i32
+    %sj = arith.addi %zj, %mj overflow<nsw> : i32
+    memref.store %sj, %c[%j] : memref<8xi32>
+  }
+  return
+}
+func.func @set_signed(%a: memref<8xi32>, %b: memref<8xi32>, %c: memref<8xi32>, %d: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xi = memref.load %a[%i] : memref<8xi32>
+    %yi = memref.load %b[%i] : memref<8xi32>
+    %zi = memref.load %c[%i] : memref<8xi32>
+    %mi = arith.muli %xi, %yi overflow<nsw> : i32
+    %si = arith.addi %zi, %mi overflow<nsw> : i32
+    memref.store %si, %c[%i] : memref<8xi32>
+  }
+  scf.for %j = %c0 to %n step %c1 {
+    %xj = memref.load %a[%j] : memref<8xi32>
+    %yj = memref.load %d[%j] : memref<8xi32>
+    %zj = memref.load %c[%j] : memref<8xi32>
+    %mj = arith.muli %xj, %yj overflow<nsw> : i32
     %sj = arith.addi %zj, %mj overflow<nsw> : i32
     memref.store %sj, %c[%j] : memref<8xi32>
   }

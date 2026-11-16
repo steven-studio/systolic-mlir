@@ -5970,6 +5970,598 @@ static void testSetFloat() {
   }
 }
 
+struct DesignedNest {
+  std::string out, a, b;
+  bool repeat = false;
+  std::string bIndex;   // The second operand's index; the loop variable when empty.
+  std::string outIndex; // The output's index; the loop variable when empty.
+};
+
+/// G5b-M4b-2b-2. A program of nests run one after the other over roots of eight cells. Each
+/// nest is `for v in [0, n)`, with `repeat` around an inner loop of two, and holds the site
+/// out[v or outIndex] += a[v] * b[v or bIndex]; `flag` goes on the multiplication and on the addition,
+/// as signed arithmetic puts nsw on both. The integer programs are sixteen bits wide: the
+/// solver's multiplications are then small, and the search is the same at every width.
+static std::string designedProgram(const std::string &name, const std::string &element, const std::string &flag,
+                                   const std::vector<DesignedNest> &nests, const std::string &before = "") {
+  bool isFloat = element[0] == 'f';
+  std::string type = "memref<8x" + element + ">", mul = isFloat ? "arith.mulf" : "arith.muli",
+              add = isFloat ? "arith.addf" : "arith.addi";
+  std::string out = "func.func @" + name + "(%a: " + type + ", %b: " + type + ", %c: " + type + ", %d: " + type +
+                    ", %n: index) {\n  %c0 = arith.constant 0 : index\n  %c1 = arith.constant 1 : index\n"
+                    "  %c2 = arith.constant 2 : index\n" + before;
+  for (size_t k = 0; k < nests.size(); ++k) {
+    const DesignedNest &nest = nests[k];
+    std::string s = std::to_string(k), v = "%v" + s, in = nest.repeat ? "      " : "    ";
+    std::string h = nest.outIndex.empty() ? v : nest.outIndex;
+    out += "  scf.for " + v + " = %c0 to %n step %c1 {\n";
+    if (nest.repeat)
+      out += "    scf.for %r" + s + " = %c0 to %c2 step %c1 {\n";
+    out += in + "%x" + s + " = memref.load %" + nest.a + "[" + v + "] : " + type + "\n" + in + "%y" + s +
+           " = memref.load %" + nest.b + "[" + (nest.bIndex.empty() ? v : nest.bIndex) + "] : " + type + "\n" + in +
+           "%z" + s + " = memref.load %" + nest.out + "[" + h + "] : " + type + "\n" + in + "%m" + s + " = " + mul +
+           " %x" + s + ", %y" + s + flag + " : " + element + "\n" + in + "%s" + s + " = " + add + " %z" + s + ", %m" +
+           s + flag + " : " + element + "\n" + in + "memref.store %s" + s + ", %" + nest.out + "[" + h + "] : " +
+           type + "\n";
+    if (nest.repeat)
+      out += "    }\n";
+    out += "  }\n";
+  }
+  return out + "  return\n}\n";
+}
+
+static std::string designedSource() {
+  const std::string nsw = " overflow<nsw>";
+  std::string out;
+  // Two groups write C[i]: A*B, then A*D.
+  out += designedProgram("d_set", "i16", nsw, {{"c", "a", "b"}, {"c", "a", "d"}});
+  // The second group's first operand is the first group's second: A*B, then B*D.
+  out += designedProgram("d_shared", "i16", nsw, {{"c", "a", "b"}, {"c", "b", "d"}});
+  // The second group runs twice: A*B, then A*D and A*D again.
+  out += designedProgram("d_repeat", "i16", nsw, {{"c", "a", "b"}, {"c", "a", "d", true}});
+  // One group, two sites: A[i]*B[0], then A[j]*B[j]. Cell 0 gets one product twice.
+  out += designedProgram("d_second", "i16", nsw, {{"c", "a", "b", false, "%c0"}, {"c", "a", "b"}});
+  // The second group adds every product to C[3]: at n = 4 cells 0, 1 and 2 get one
+  // contribution each, and cell 3 five.
+  out += designedProgram("d_late", "i16", nsw, {{"c", "a", "b"}, {"c", "a", "d", false, "", "%c3"}},
+                         "  %c3 = arith.constant 3 : index\n");
+  // C[0] is set to a constant before any event.
+  out += designedProgram("d_constant", "i16", nsw, {{"c", "a", "b"}, {"c", "a", "d"}},
+                         "  %five = arith.constant 5 : i16\n  memref.store %five, %c[%c0] : memref<8xi16>\n");
+  // One float group of two sites: A[i]*B[0], then A[j]*B[j].
+  out += designedProgram("d_floats", "f64", "", {{"c", "a", "b", false, "%c0"}, {"c", "a", "b"}});
+  // nsw and nuw on both operations.
+  out += designedProgram("d_both", "i16", " overflow<nsw, nuw>", {{"c", "a", "b"}, {"c", "a", "d"}});
+  // The first group's second operand is a root the program allocates and fills with ones.
+  out += designedProgram("d_fresh_operand", "i16", nsw, {{"c", "a", "f"}, {"c", "a", "d"}},
+                         "  %f = memref.alloc() : memref<8xi16>\n  %one = arith.constant 1 : i16\n"
+                         "  %c8 = arith.constant 8 : index\n  scf.for %w = %c0 to %c8 step %c1 {\n"
+                         "    memref.store %one, %f[%w] : memref<8xi16>\n  }\n");
+  // One group, one site, three contributions to a cell: a matrix product, C[i, j] += A[i, k] * B[k, j].
+  out += R"(func.func @d_gemm(%a: memref<8x8xi16>, %b: memref<8x8xi16>, %c: memref<8x8xi16>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      scf.for %k = %c0 to %c3 step %c1 {
+        %x = memref.load %a[%i, %k] : memref<8x8xi16>
+        %y = memref.load %b[%k, %j] : memref<8x8xi16>
+        %z = memref.load %c[%i, %j] : memref<8x8xi16>
+        %m = arith.muli %x, %y overflow<nsw> : i16
+        %s = arith.addi %z, %m overflow<nsw> : i16
+        memref.store %s, %c[%i, %j] : memref<8x8xi16>
+      }
+    }
+  }
+  return
+}
+)";
+  return out;
+}
+
+/// G5b-M4b-2b-2: designed memories. They are judged only where the fill sequence found
+/// nothing at any point looked at, and only by the judge: signed C arithmetic over two
+/// groups, which the fill sequence cannot refute and the first designed memory does; the
+/// family as documented, member by member; an operand cell two contributions share; a cell
+/// the family cannot aim at and the next that it can; a matrix product in one group, by
+/// Theorem 13; binary64 and binary32 with one fill; a family none of whose members is a
+/// witness, which leaves Unknown; no fills, which asks for no search; what the fill
+/// sequence finds, which stays what it found; and where nothing is designed.
+static void testDesignedFills() {
+  Module m(std::string(setSource) + siblingSource + reductionSource + reorderSource + floatSource + designedSource());
+  Sort w = Sort::bv(16);
+  auto level = [&](const SemanticProgram &p, unsigned var, Term lower, Term upper) {
+    return LevelSpec{p.terms->state(var, w), lower, upper, false, false};
+  };
+  auto segments = [&](Fixture &f, std::vector<std::pair<unsigned, unsigned>> siteVars) {
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w);
+    DomainRequest r;
+    for (auto [site, var] : siteVars)
+      r.segments.push_back(segmentOf(f.program, {site}, {level(f.program, var, zero, n)}));
+    return r;
+  };
+  auto verdict = [&](Fixture &f, std::vector<unsigned> groups, const DomainRequest &r, const DomainOptions &o) {
+    return checkSetReduction(f.program, f.proof(), f.enumeration, groups, r, o, z3Backend);
+  };
+  auto say = [](const char *what, const SetReductionVerdict &v) {
+    printf("%s: %s %s (%s); integer %s \"%s\"; float %s \"%s\"\n", what, stringifyComputationStatus(v.status()),
+           stringifyComputationTier(v.tier()), v.reason().c_str(), stringifyFactStatus(v.integerReorder().status),
+           v.integerReorder().detail.c_str(), stringifyFactStatus(v.floatReorder().status),
+           v.floatReorder().detail.c_str());
+  };
+  // The union of the listed groups and its replay at n = `point`, as the search takes them.
+  struct Union {
+    std::optional<SiteGroup> united;
+    ReplayResult replay;
+    std::vector<const SiteGroup *> listed;
+  };
+  auto unionAt = [&](Fixture &f, std::vector<unsigned> groups, unsigned point) {
+    Union out;
+    for (unsigned g : groups)
+      out.listed.push_back(&f.enumeration.groups[g]);
+    std::vector<int> groupOf;
+    std::string why;
+    out.united = unitedSiteGroup(f.program, out.listed, groupOf, why);
+    if (out.united)
+      out.replay = replayGroupSet(f.program, *out.united, groupOf, out.listed.size(), {APInt(16, point)},
+                                  HerbrandLimits());
+    return out;
+  };
+  const uint64_t cellLimit = DomainLimits().witnessCells;
+  // The designed memories over the union at n = `point`.
+  auto family = [&](Fixture &f, std::vector<unsigned> groups, unsigned point) {
+    Union u = unionAt(f, groups, point);
+    CHECK(u.united.has_value());
+    if (!u.united)
+      return std::vector<EntryState>();
+    return designedReversalFills(f.program, *u.united, u.replay.prefix, {APInt(16, point)}, cellLimit);
+  };
+  // The judge over the union at n = `point`.
+  auto judge = [&](Fixture &f, std::vector<unsigned> groups, unsigned point, const EntryState &e, std::string &detail) {
+    Union u = unionAt(f, groups, point);
+    if (!u.united || u.replay.outcome != ReplayOutcome::Equal)
+      return false;
+    return reversalDiffers(f.program, *u.united, e, u.replay.prefix, detail);
+  };
+  // What the fill sequence alone finds over the union at n = `point`, with `fills` fills.
+  auto drawn = [&](Fixture &f, std::vector<unsigned> groups, unsigned point, unsigned fills) {
+    std::vector<const SiteGroup *> listed;
+    for (unsigned g : groups)
+      listed.push_back(&f.enumeration.groups[g]);
+    return reorderWitnessOver(f.program, listed, {APInt(16, point)}, fills, cellLimit);
+  };
+  // The cells of a memory that are set and not zero: root, row-major offset, bits.
+  using Cells = std::vector<std::tuple<unsigned, uint64_t, uint64_t>>;
+  auto cellsOf = [](const EntryState &e) {
+    Cells out;
+    for (unsigned r = 0; r < e.memory.size(); ++r)
+      for (uint64_t i = 0; i < e.memory[r].cells.size(); ++i)
+        if (e.memory[r].cells[i] && !e.memory[r].cells[i]->isZero())
+          out.emplace_back(r, i, e.memory[r].cells[i]->getZExtValue());
+    return out;
+  };
+  auto sameMemory = [&](const EntryState &a, const EntryState &b) {
+    if (a.parameters != b.parameters || a.memory.size() != b.memory.size())
+      return false;
+    for (unsigned r = 0; r < a.memory.size(); ++r)
+      if (a.memory[r].shape != b.memory[r].shape || a.memory[r].cells != b.memory[r].cells)
+        return false;
+    return true;
+  };
+  auto show = [&](const char *what, const std::vector<EntryState> &entries) {
+    for (size_t k = 0; k < entries.size(); ++k) {
+      printf("%s: designed memory %zu:", what, k);
+      for (auto [root, at, bits] : cellsOf(entries[k]))
+        printf(" %u[%llu]=%llx", root, (unsigned long long)at, (unsigned long long)bits);
+      printf("\n");
+    }
+  };
+  auto bits64 = [](double value) {
+    uint64_t raw;
+    std::memcpy(&raw, &value, sizeof raw);
+    return raw;
+  };
+  auto bits32 = [](float value) {
+    uint32_t raw;
+    std::memcpy(&raw, &value, sizeof raw);
+    return (uint64_t)raw;
+  };
+  const uint64_t intMax = 0x7FFF, intMin = 0x8000, minusOne = 0xFFFF;
+  const std::string flagged = "the reduction carries nsw or nuw, so a partial sum can stop the run";
+  const std::string overflows = " overflows a flagged addition, at a designed memory";
+  const std::string changes = " changes its final bits, at a designed memory";
+  const std::string noMemory = "no memory found at which a reversal differs";
+  // A fact refuted by the designed memory `expected` at n = `point`: its words, its point,
+  // its memory cell for cell, the program completing on it, and the judge again.
+  auto designed = [&](const char *what, Fixture &f, std::vector<unsigned> groups, const Fact &fact, unsigned point,
+                      const std::string &words, const Cells &expected) {
+    bool ok = fact.status == FactStatus::Refuted && fact.detail == words && fact.point && fact.memory &&
+              *fact.point == std::vector<APInt>{APInt(16, point)} && cellsOf(*fact.memory) == expected;
+    std::string detail;
+    bool judged = ok && runConcrete(f.program, *fact.memory).status == RunStatus::Returned &&
+                  judge(f, groups, point, *fact.memory, detail) && detail + ", at a designed memory" == fact.detail;
+    if (!ok || !judged) {
+      printf("%s: %s \"%s\"%s%s\n", what, stringifyFactStatus(fact.status), fact.detail.c_str(),
+             fact.point ? "" : ", no point", judged ? "" : ", not judged a witness");
+      if (fact.memory)
+        show(what, {*fact.memory});
+    }
+    CHECK(ok && judged);
+  };
+
+  // Signed arithmetic: nsw on the multiplication and on the addition, two groups writing
+  // C[i]. A product of two drawn values overflows unless one of them is small, so the fill
+  // sequence finds no memory at any point of the scope: before designed memories this fact
+  // was Unknown. The first designed memory is C[0] = INT_MAX, A[0] = 1, B[0] = -1, D[0] = 1:
+  // the program adds -1 then +1 and completes at INT_MAX; reversed, INT_MAX + 1 overflows.
+  {
+    Fixture f = fixture(m, "d_set", 1, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 2);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    for (unsigned n : {1u, 2u, 3u}) {
+      Fact alone = drawn(f, {0, 1}, n, DomainLimits().witnessFills);
+      CHECK(alone.status == FactStatus::Unknown && alone.detail == noMemory && !alone.memory);
+    }
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options);
+    if (v.status() != S::Verified || v.integerReorder().status != FactStatus::Refuted)
+      say("signed", v);
+    CHECK(v.status() == S::Verified && v.tier() == T::Symbolic && v.fold() == FoldForm::ModularInteger &&
+          v.trivialReorder().status == FactStatus::Refuted);
+    designed("signed", f, {0, 1}, v.integerReorder(), 1, "reversing cell 0 of root 2" + overflows,
+             {{0, 0, 1}, {1, 0, minusOne}, {2, 0, intMax}, {3, 0, 1}});
+    CHECK(v.floatReorder().status == FactStatus::Unknown && v.floatReorder().detail == "not a float fold, or no claim");
+    // The verdict is what it was: a refuted fact refutes nothing, and no claim moved.
+    CHECK(v.computationSymbolic().status() == S::Verified && v.domainSymbolic().status() == S::Verified &&
+          v.refutedBy() == RefutedBy::Nothing && !v.witness() && !v.failingPoint());
+    // The family at n = 1, member by member: INT_MAX with -1 then +1, INT_MIN with +1 then
+    // -1. The other operand choices give a cell two values (A[0] is read by both
+    // contributions) or a memory already listed. Each member is a witness here.
+    std::vector<EntryState> members = family(f, {0, 1}, 1);
+    CHECK(members.size() == 2 && members.size() <= designedFillsAtMost);
+    if (members.size() == 2) {
+      CHECK(cellsOf(members[0]) == Cells({{0, 0, 1}, {1, 0, minusOne}, {2, 0, intMax}, {3, 0, 1}}));
+      CHECK(cellsOf(members[1]) == Cells({{0, 0, 1}, {1, 0, 1}, {2, 0, intMin}, {3, 0, minusOne}}));
+      CHECK(v.integerReorder().memory && sameMemory(*v.integerReorder().memory, members[0]));
+      for (const EntryState &member : members) {
+        std::string detail;
+        RunResult run = runConcrete(f.program, member);
+        CHECK(run.status == RunStatus::Returned && judge(f, {0, 1}, 1, member, detail) &&
+              detail == "reversing cell 0 of root 2 overflows a flagged addition");
+        // The program ends where it started: -1 then +1, or +1 then -1.
+        CHECK(run.status == RunStatus::Returned && run.memory[2].cells[0] == member.memory[2].cells[0]);
+      }
+    } else {
+      show("signed", members);
+    }
+    // At n = 2 there are two targets, each with its two members.
+    CHECK(family(f, {0, 1}, 2).size() == 4);
+    // No fills asks for no search, designed or drawn: Unknown, with the rule's reason.
+    DomainOptions none = f.options;
+    none.limits.witnessFills = 0;
+    SetReductionVerdict open = verdict(f, {0, 1}, r, none);
+    CHECK(open.status() == S::Verified && open.integerReorder().status == FactStatus::Unknown &&
+          open.integerReorder().detail == flagged && !open.integerReorder().point && !open.integerReorder().memory);
+    Union u = unionAt(f, {0, 1}, 1);
+    Fact unasked = designedWitnessOver(f.program, u.listed, {APInt(16, 1)}, 0, cellLimit);
+    CHECK(unasked.status == FactStatus::Unknown && !unasked.point && !unasked.memory);
+    // One fill is enough to ask, and the listing changes nothing: the same memory either way.
+    Fact asked = designedWitnessOver(f.program, u.listed, {APInt(16, 1)}, 1, cellLimit);
+    Union reversed = unionAt(f, {1, 0}, 1);
+    Fact back = designedWitnessOver(f.program, reversed.listed, {APInt(16, 1)}, 1, cellLimit);
+    for (const Fact *fact : {&asked, &back})
+      CHECK(fact->status == FactStatus::Refuted && fact->detail == v.integerReorder().detail && fact->memory &&
+            v.integerReorder().memory && sameMemory(*fact->memory, *v.integerReorder().memory));
+  }
+
+  // An operand cell two contributions share: A*B then B*D. With B[0] holding the first
+  // contribution it cannot be 1 for the last, so the first goes into A[0]: C[0] = INT_MAX,
+  // A[0] = -1, B[0] = 1, D[0] = 1.
+  {
+    Fixture f = fixture(m, "d_shared", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 2);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options);
+    if (v.status() != S::Verified || v.integerReorder().status != FactStatus::Refuted)
+      say("shared operand", v);
+    CHECK(v.status() == S::Verified);
+    designed("shared operand", f, {0, 1}, v.integerReorder(), 1, "reversing cell 0 of root 2" + overflows,
+             {{0, 0, minusOne}, {1, 0, 1}, {2, 0, intMax}, {3, 0, 1}});
+    std::vector<EntryState> members = family(f, {0, 1}, 1);
+    CHECK(members.size() == 2);
+    if (members.size() == 2)
+      CHECK(cellsOf(members[1]) == Cells({{0, 0, 1}, {1, 0, 1}, {2, 0, intMin}, {3, 0, minusOne}}));
+    else
+      show("shared operand", members);
+  }
+
+  // A family none of whose members is a witness. The second group runs twice, so the last
+  // two contributions are one product: -1, +1, +1 from INT_MAX overflows in the program's
+  // own order, and +1, -1, -1 from INT_MIN does too, so both runs stop and show nothing. A
+  // witness exists (C[0] = INT_MAX with -2, +1, +1) and is not in the family: the fact
+  // stays Unknown, with the rule's reason, and never becomes Proven.
+  {
+    Fixture f = fixture(m, "d_repeat", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 3 && f.enumeration.groups.size() == 2);
+    TermContext &terms = *f.program.terms;
+    Term zero = terms.bv(APInt(16, 0)), n = terms.param(0, w), two = terms.bv(APInt(16, 2));
+    DomainRequest r;
+    r.segments = {segmentOf(f.program, {0}, {level(f.program, l[0], zero, n)}),
+                  segmentOf(f.program, {1}, {level(f.program, l[1], zero, n), level(f.program, l[2], zero, two)})};
+    SetReductionVerdict v = verdict(f, {0, 1}, r, f.options);
+    if (v.status() != S::Verified || v.integerReorder().status != FactStatus::Unknown)
+      say("repeat", v);
+    CHECK(v.status() == S::Verified && v.trivialReorder().status == FactStatus::Refuted);
+    CHECK(v.integerReorder().status == FactStatus::Unknown && v.integerReorder().detail == flagged &&
+          !v.integerReorder().point && !v.integerReorder().memory);
+    std::vector<EntryState> members = family(f, {0, 1}, 1);
+    CHECK(members.size() == 2);
+    for (const EntryState &member : members) {
+      std::string detail;
+      CHECK(runConcrete(f.program, member).status != RunStatus::Returned && !judge(f, {0, 1}, 1, member, detail));
+    }
+    // The witness the family does not hold, judged: the fact could be refuted, and is not claimed.
+    EntryState e = members.empty() ? EntryState() : members[0];
+    if (!members.empty()) {
+      e.memory[0].cells[0] = APInt(16, 1);
+      e.memory[1].cells[0] = APInt(16, 0xFFFE);
+      e.memory[2].cells[0] = APInt(16, intMax);
+      e.memory[3].cells[0] = APInt(16, 1);
+      std::string detail;
+      CHECK(runConcrete(f.program, e).status == RunStatus::Returned && judge(f, {0, 1}, 1, e, detail));
+    }
+  }
+
+  // One group, two sites, by Theorem 13 and as a set of one group. Cell 0 gets A[0]*B[0]
+  // twice, one product, so no memory is designed for it; cell 1 gets A[1]*B[0] then
+  // A[1]*B[1]: C[1] = INT_MAX, A[1] = 1, B[0] = -1, B[1] = 1, at n = 2, the first point of
+  // the scope. A[0] stays zero, so cell 0 adds nothing.
+  {
+    Fixture f = fixture(m, "d_second", 2, 3);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 1);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    CoordinateFamily none;
+    ReductionVerdict one = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr, r, f.options, z3Backend);
+    SetReductionVerdict set = verdict(f, {0}, r, f.options);
+    if (one.status() != S::Verified || set.status() != S::Verified)
+      say("second target", set);
+    CHECK(one.status() == S::Verified && set.status() == S::Verified);
+    const Cells expected{{0, 1, 1}, {1, 0, minusOne}, {1, 1, 1}, {2, 1, intMax}};
+    designed("second target, Theorem 13", f, {0}, one.integerReorder(), 2, "reversing cell 1 of root 2" + overflows,
+             expected);
+    designed("second target, a set of one", f, {0}, set.integerReorder(), 2, "reversing cell 1 of root 2" + overflows,
+             expected);
+    // What Theorem 13's own search judges is the group itself, with the group's replay.
+    if (one.integerReorder().memory) {
+      ReplayResult replay = replayGroup(f.program, f.enumeration.groups[0], {APInt(16, 2)}, HerbrandLimits());
+      std::string detail;
+      CHECK(reversalDiffers(f.program, f.enumeration.groups[0], *one.integerReorder().memory, replay.prefix, detail));
+      Fact direct = designedWitness(f.program, f.enumeration.groups[0], {APInt(16, 2)}, 1, cellLimit);
+      CHECK(direct.status == FactStatus::Refuted && direct.detail == one.integerReorder().detail && direct.memory &&
+            sameMemory(*direct.memory, *one.integerReorder().memory));
+      CHECK(reorderWitness(f.program, f.enumeration.groups[0], {APInt(16, 2)}, DomainLimits().witnessFills, cellLimit)
+                .status == FactStatus::Unknown);
+    }
+    // Two members at n = 2, both for cell 1: cell 0 has none.
+    std::vector<EntryState> members = family(f, {0}, 2);
+    CHECK(members.size() == 2);
+    for (const EntryState &member : members)
+      CHECK(member.memory[2].cells[0] && member.memory[2].cells[0]->isZero() && member.memory[2].cells[1] &&
+            !member.memory[2].cells[1]->isZero());
+  }
+
+  // Cells of one contribution are no targets and do not count as one. At n = 4 the first
+  // group writes cells 0 to 3 once each and the second adds four products to C[3]: the
+  // fourth cell written is the first target. C[3] = INT_MAX, A[3] = 1, B[3] = -1 (the first
+  // contribution) and D[3] = 1 (the last, j = 3; the three before it add A[j] * D[j] = 0).
+  {
+    Fixture f = fixture(m, "d_late", 4, 4);
+    CHECK(f.enumeration.groups.size() == 2);
+    std::vector<EntryState> members = family(f, {0, 1}, 4);
+    CHECK(members.size() == 2);
+    if (!members.empty()) {
+      CHECK(cellsOf(members[0]) == Cells({{0, 3, 1}, {1, 3, minusOne}, {2, 3, intMax}, {3, 3, 1}}));
+      std::string detail;
+      CHECK(runConcrete(f.program, members[0]).status == RunStatus::Returned &&
+            judge(f, {0, 1}, 4, members[0], detail) && detail == "reversing cell 3 of root 2 overflows a flagged addition");
+    } else {
+      show("late target", members);
+    }
+  }
+
+  // A cell that holds a constant before its first event starts its fold there, whatever
+  // the entry holds: it is no target. C[0] is 5, so at n = 1 nothing is designed; at n = 2
+  // cell 1 is aimed at, and the witness is at the second point looked at.
+  {
+    Fixture f = fixture(m, "d_constant", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 2);
+    CHECK(family(f, {0, 1}, 1).empty());
+    Union u = unionAt(f, {0, 1}, 1);
+    CHECK(u.replay.outcome == ReplayOutcome::Equal && u.replay.prefix.count({2, 0}) == 1 &&
+          u.replay.prefix.at({2, 0}) == APInt(16, 5));
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options);
+    if (v.status() != S::Verified || v.integerReorder().status != FactStatus::Refuted)
+      say("constant start", v);
+    CHECK(v.status() == S::Verified);
+    designed("constant start", f, {0, 1}, v.integerReorder(), 2, "reversing cell 1 of root 2" + overflows,
+             {{0, 1, 1}, {1, 1, minusOne}, {2, 1, intMax}, {3, 1, 1}});
+  }
+
+  // A matrix product in one group, by Theorem 13 with the proposer's request: three
+  // contributions to every cell. The first target is C[0, 0]: it at INT_MAX, A[0, 0] = 1
+  // and B[0, 0] = -1 for k = 0, A[0, 2] = 1 and B[2, 0] = 1 for k = 2; k = 1 adds 0.
+  {
+    Fixture f = fixture(m, "d_gemm", 1, 2);
+    CoordinateFamily ijkFamily = ijk(f.program);
+    std::string why;
+    auto request = propose(f, ijkFamily, why);
+    CHECK(request.has_value());
+    if (request) {
+      ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, 0, ijkFamily, nullptr, *request,
+                                          f.options, z3Backend);
+      CHECK(v.status() == S::Verified && v.tier() == T::Symbolic);
+      designed("matrix product", f, {0}, v.integerReorder(), 1, "reversing cell 0 of root 2" + overflows,
+               {{0, 0, 1}, {0, 2, 1}, {1, 0, minusOne}, {1, 16, 1}, {2, 0, intMax}});
+      CHECK(reorderWitness(f.program, f.enumeration.groups[0], {APInt(16, 1)}, DomainLimits().witnessFills, cellLimit)
+                .status == FactStatus::Unknown);
+    }
+    // Three targets, C[0, 0], C[0, 1] and C[0, 2], four members each: the bound is never passed.
+    std::vector<EntryState> members = family(f, {0}, 1);
+    CHECK(members.size() == 12 && members.size() <= designedFillsAtMost);
+    CHECK(family(f, {0}, 2).size() == 12);
+  }
+
+  // Floats. With one fill the drawn memory shows nothing, and the first designed memory
+  // does: C[0] = 2^53, A[0] = B[0] = 1, D[0] = -2^53, where (2^53 + 1) - 2^53 = 0 and
+  // (2^53 - 2^53) + 1 = 1. The second member is the largest finite value: (max + max) - max
+  // is +infinity, (max - max) + max is max. With the default fills the fill sequence refutes
+  // first, and its witness is the one it found before designed memories existed.
+  {
+    Fixture f = fixture(m, "set_float", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    const double big = 9007199254740992.0, largest = std::numeric_limits<double>::max();
+    for (unsigned n : {1u, 2u})
+      CHECK(drawn(f, {0, 1}, n, 1).status == FactStatus::Unknown);
+    DomainOptions one = f.options;
+    one.limits.witnessFills = 1;
+    SetReductionVerdict v = verdict(f, {0, 1}, r, one);
+    CHECK(v.status() == S::Verified && v.fold() == FoldForm::OrderedFloat);
+    designed("binary64", f, {0, 1}, v.floatReorder(), 1, "reversing cell 0 of root 2" + changes,
+             {{0, 0, bits64(1.0)}, {1, 0, bits64(1.0)}, {2, 0, bits64(big)}, {3, 0, bits64(-big)}});
+    CHECK(v.integerReorder().status == FactStatus::Unknown && v.integerReorder().detail == "not an integer fold, or no claim");
+    std::vector<EntryState> members = family(f, {0, 1}, 1);
+    CHECK(members.size() == 2);
+    if (members.size() == 2) {
+      CHECK(cellsOf(members[1]) == Cells({{0, 0, bits64(1.0)}, {1, 0, bits64(largest)}, {2, 0, bits64(largest)},
+                                           {3, 0, bits64(-largest)}}));
+      std::string detail;
+      RunResult run = runConcrete(f.program, members[1]);
+      CHECK(run.status == RunStatus::Returned &&
+            run.memory[2].cells[0] == APInt(64, bits64(std::numeric_limits<double>::infinity())) &&
+            judge(f, {0, 1}, 1, members[1], detail) && detail == "reversing cell 0 of root 2 changes its final bits");
+    } else {
+      show("binary64", members);
+    }
+    // No fills: no search of either kind (the verdict of it is in the setfloat section).
+    Fact unasked = designedWitnessOver(f.program, unionAt(f, {0, 1}, 1).listed, {APInt(16, 1)}, 0, cellLimit);
+    CHECK(unasked.status == FactStatus::Unknown && !unasked.memory);
+    // The default: what the fill sequence finds is the fact, memory for memory, and it is
+    // not a designed one.
+    SetReductionVerdict full = verdict(f, {0, 1}, r, f.options);
+    const Fact &fact = full.floatReorder();
+    CHECK(fact.status == FactStatus::Refuted && fact.point && fact.memory &&
+          fact.detail.find("designed") == std::string::npos);
+    if (fact.point && fact.memory) {
+      Fact alone = drawn(f, {0, 1}, (*fact.point)[0].getZExtValue(), DomainLimits().witnessFills);
+      CHECK(alone.status == FactStatus::Refuted && alone.detail == fact.detail && alone.memory &&
+            sameMemory(*alone.memory, *fact.memory));
+      for (const EntryState &member : family(f, {0, 1}, (*fact.point)[0].getZExtValue()))
+        CHECK(!sameMemory(member, *fact.memory));
+    }
+  }
+  // binary32: 2^24 in place of 2^53, and the largest finite binary32.
+  {
+    Fixture f = fixture(m, "set_float32", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    DomainRequest r = segments(f, {{0, l[0]}, {1, l[1]}});
+    const float big = 16777216.0f, largest = std::numeric_limits<float>::max();
+    for (unsigned n : {1u, 2u})
+      CHECK(drawn(f, {0, 1}, n, 1).status == FactStatus::Unknown);
+    DomainOptions one = f.options;
+    one.limits.witnessFills = 1;
+    SetReductionVerdict v = verdict(f, {0, 1}, r, one);
+    CHECK(v.status() == S::Verified && v.fold() == FoldForm::OrderedFloat);
+    designed("binary32", f, {0, 1}, v.floatReorder(), 1, "reversing cell 0 of root 2" + changes,
+             {{0, 0, bits32(1.0f)}, {1, 0, bits32(1.0f)}, {2, 0, bits32(big)}, {3, 0, bits32(-big)}});
+    std::vector<EntryState> members = family(f, {0, 1}, 1);
+    CHECK(members.size() == 2);
+    if (members.size() == 2) {
+      CHECK(cellsOf(members[1]) == Cells({{0, 0, bits32(1.0f)}, {1, 0, bits32(largest)}, {2, 0, bits32(largest)},
+                                           {3, 0, bits32(-largest)}}));
+      std::string detail;
+      CHECK(judge(f, {0, 1}, 1, members[1], detail) && detail == "reversing cell 0 of root 2 changes its final bits");
+    } else {
+      show("binary32", members);
+    }
+  }
+
+  // What the fill sequence finds stays what it found: set_nsw, whose multiplication carries
+  // no flag, is refuted by a drawn memory, the same one, and no designed memory is judged.
+  {
+    Fixture f = fixture(m, "set_nsw", 1, 2);
+    std::vector<unsigned> l = loops(f.program);
+    SetReductionVerdict v = verdict(f, {0, 1}, segments(f, {{0, l[0]}, {1, l[1]}}), f.options);
+    const Fact &fact = v.integerReorder();
+    CHECK(fact.status == FactStatus::Refuted && fact.point && fact.memory &&
+          fact.detail.find("designed") == std::string::npos);
+    if (fact.point && fact.memory) {
+      Fact alone = drawn(f, {0, 1}, (*fact.point)[0].getZExtValue(), DomainLimits().witnessFills);
+      CHECK(alone.status == FactStatus::Refuted && alone.detail == fact.detail && alone.memory &&
+            sameMemory(*alone.memory, *fact.memory));
+      // Designed memories exist here and are witnesses too; the search never reached them.
+      std::vector<EntryState> members = family(f, {0, 1}, (*fact.point)[0].getZExtValue());
+      CHECK(!members.empty());
+      for (const EntryState &member : members)
+        CHECK(!sameMemory(member, *fact.memory));
+    }
+  }
+
+  // The same for Theorem 13's own search: one float group of two sites, A[i]*B[0] then
+  // A[j]*B[j], whose cell 1 the fill sequence refutes at n = 2.
+  {
+    Fixture f = fixture(m, "d_floats", 2, 2);
+    std::vector<unsigned> l = loops(f.program);
+    CHECK(l.size() == 2 && f.enumeration.groups.size() == 1);
+    CoordinateFamily none;
+    ReductionVerdict v = checkReduction(f.program, f.proof(), f.enumeration, 0, none, nullptr,
+                                        segments(f, {{0, l[0]}, {1, l[1]}}), f.options, z3Backend);
+    const Fact &fact = v.floatReorder();
+    CHECK(v.status() == S::Verified && fact.status == FactStatus::Refuted && fact.point && fact.memory &&
+          fact.detail.find("designed") == std::string::npos);
+    if (fact.point && fact.memory) {
+      Fact alone = reorderWitness(f.program, f.enumeration.groups[0], *fact.point, DomainLimits().witnessFills, cellLimit);
+      CHECK(alone.status == FactStatus::Refuted && alone.detail == fact.detail && alone.memory &&
+            sameMemory(*alone.memory, *fact.memory));
+      std::vector<EntryState> members = family(f, {0}, 2);
+      CHECK(!members.empty());
+      for (const EntryState &member : members)
+        CHECK(!sameMemory(member, *fact.memory));
+    }
+  }
+
+  // Where nothing is designed. An integer fold with no nsw (no reversal overflows), and
+  // with nsw and nuw together (both patterns would stop the program: -1 is the largest
+  // unsigned value); sites of two operations, and of two sets of flags, which the judge
+  // does not reverse; two contributions that are one product; an operand in a root the
+  // program allocates, which no entry sets.
+  {
+    for (const char *name : {"sib_roots", "set_mixed_flags"}) {
+      Fixture f = fixture(m, name, 1, 2);
+      CHECK(f.enumeration.groups.size() == 2);
+      CHECK(family(f, {0, 1}, 1).empty() && family(f, {0, 1}, 2).empty());
+    }
+    Fixture mixed = fixture(m, "set_mixed", 1, 2);
+    CHECK(mixed.enumeration.groups.size() == 3 && family(mixed, {0, 1, 2}, 1).empty());
+    Fixture same = fixture(m, "set_float_same", 1, 2);
+    CHECK(same.enumeration.groups.size() == 1 && family(same, {0}, 1).empty() && family(same, {0}, 2).empty());
+    Fixture fresh = fixture(m, "d_fresh_operand", 1, 2);
+    CHECK(fresh.enumeration.groups.size() == 2 && family(fresh, {0, 1}, 1).empty());
+    // nsw and nuw together: nothing designed, and the fact Unknown, as with nuw alone.
+    Fixture both = fixture(m, "d_both", 1, 2);
+    CHECK(both.enumeration.groups.size() == 2 && family(both, {0, 1}, 1).empty() && family(both, {0, 1}, 2).empty());
+    std::vector<unsigned> l = loops(both.program);
+    SetReductionVerdict v = verdict(both, {0, 1}, segments(both, {{0, l[0]}, {1, l[1]}}), both.options);
+    CHECK(v.status() == S::Verified && v.integerReorder().status == FactStatus::Unknown &&
+          v.integerReorder().detail == flagged);
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -5993,6 +6585,7 @@ int main(int argc, char **argv) {
   run("setreduction", testSetReduction);
   run("setreorder", testSetReorder);
   run("setfloat", testSetFloat);
+  run("designed", testDesignedFills);
   run("proposer", testProposer);
   run("catalogue", testCatalogue);
   run("adversarial", testAdversarial);

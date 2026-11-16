@@ -18,6 +18,11 @@
 // set (replayGroupSet) and judges the reversal of every cell the union's events write.
 // The one-group functions are the union forms over one group, byte for byte.
 //
+// G5b-M4b-2b-2: designed memories. Where the fill sequence found nothing at any point a
+// caller looked at, a small fixed family of memories built from the trace at the point is
+// judged by the same judge. A designed memory is a place to look and never evidence: one
+// that shows no difference says nothing, and the fact stays Unknown.
+//
 //===----------------------------------------------------------------------===//
 #ifndef GENERALIZEDGEMM_REDUCTIONSEMANTICS_H
 #define GENERALIZEDGEMM_REDUCTIONSEMANTICS_H
@@ -71,6 +76,51 @@ Fact reorderWitnessOver(const SemanticProgram &program, llvm::ArrayRef<const Sit
 bool reversalDiffers(const SemanticProgram &program, const SiteGroup &group,
                      const EntryState &entry, const std::map<CellKey, llvm::APInt> &prefix,
                      std::string &detail);
+
+/// G5b-M4b-2b-2: how many cells the designed memories aim at, and the most there are at a
+/// point: two patterns for each cell, each with the two operands of its first and of its
+/// last contribution in either role.
+constexpr unsigned designedTargets = 3, designedFillsAtMost = designedTargets * 2 * 4;
+
+/// G5b-M4b-2b-2: the designed memories at `parameters`, in the order they are judged. They
+/// are a function of the program, the sites and the point alone: nothing is drawn.
+///
+/// The trace is read from the run of the memory that is zero in every cell an entry sets. A
+/// target is a cell with two contributions or more that holds no constant before its first
+/// event (`prefix`): the first `designedTargets` of them in the order of their first events.
+/// For a target, with every other cell zero:
+///
+///   integers, where the reduction carries nsw and not nuw (w bits):
+///     the cell at INT_MAX, its first contribution -1 and its last +1;
+///     the cell at INT_MIN, its first contribution +1 and its last -1;
+///   floats (p = 53 for binary64, 24 for binary32):
+///     the cell at 2^p, its first contribution 1 and its last -2^p;
+///     the cell at the largest finite value, its first contribution that value and its
+///     last its negation.
+///
+/// A contribution is given its value by one operand cell holding it and the other holding
+/// 1: the second operand holds it, then the first, for the first contribution and for the
+/// last (four memories). A memory that would give one cell two values, or set a cell no
+/// entry sets (a root the program allocates), is left out, and so is one already listed.
+/// Contributions between the first and the last are what the memory makes them; the judge
+/// decides. Empty where nothing applies: sites of two operations or two sets of flags, an
+/// integer fold with no nsw or with nuw, the zero memory not running to the end, no target.
+std::vector<EntryState> designedReversalFills(const SemanticProgram &program, const SiteGroup &group,
+                                              const std::map<CellKey, llvm::APInt> &prefix,
+                                              const std::vector<llvm::APInt> &parameters, uint64_t maxCells);
+
+/// G5b-M4b-2b-2: reorderWitness over the designed memories in place of the fill sequence,
+/// for a caller whose fill sequence found nothing at any point it looked at. Each memory is
+/// judged by reversalDiffers against the replay's prefix constants, and the first that shows
+/// a difference is the witness; the detail says it was designed. Nothing is tried when
+/// `fills` is zero: a caller that asks for no search gets none.
+Fact designedWitness(const SemanticProgram &program, const SiteGroup &group,
+                     const std::vector<llvm::APInt> &parameters, unsigned fills, uint64_t maxCells);
+
+/// G5b-M4b-2b-2: designedWitness over the union of the listed groups, as reorderWitnessOver
+/// is reorderWitness over it.
+Fact designedWitnessOver(const SemanticProgram &program, llvm::ArrayRef<const SiteGroup *> listed,
+                         const std::vector<llvm::APInt> &parameters, unsigned fills, uint64_t maxCells);
 
 } // namespace mlir::generalized_gemm
 #endif

@@ -9,8 +9,11 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/bit.h"
 
+#include <algorithm>
 #include <functional>
+#include <limits>
 #include <random>
+#include <set>
 
 using llvm::APInt;
 using llvm::ArrayRef;
@@ -305,6 +308,219 @@ Fact reorderWitnessOver(const SemanticProgram &program, ArrayRef<const SiteGroup
   ReplayResult replay =
       replayGroupSet(program, *united, groupOfSite, listed.size(), parameters, HerbrandLimits());
   return searchReversal(program, *united, replay, parameters, fills, maxCells);
+}
+
+// ---- G5b-M4b-2b-2: designed memories.
+
+namespace {
+
+/// The memory that is zero in every cell an entry sets, in the shapes randomEntry gives.
+std::optional<EntryState> zeroEntry(const SemanticProgram &program, const std::vector<APInt> &parameters,
+                                    uint64_t maxCells) {
+  EntryState out;
+  out.parameters = parameters;
+  for (const MemoryRoot &root : program.roots) {
+    RootData data;
+    uint64_t cells = 1;
+    for (unsigned d = 0; d < root.extents.size(); ++d) {
+      int64_t extent = root.extents[d];
+      if (extent < 0) {
+        if (parameters[root.dimensionParameter[d]].isNegative())
+          return std::nullopt;
+        extent = parameters[root.dimensionParameter[d]].getZExtValue();
+      }
+      data.shape.push_back(extent);
+      if (extent && cells > maxCells / extent)
+        return std::nullopt;
+      cells *= extent;
+    }
+    if (root.origin == MemoryRoot::FunctionArgument)
+      data.cells.assign(cells, APInt(root.sort.width, 0));
+    else
+      data.cells.assign(cells, std::nullopt);
+    out.memory.push_back(std::move(data));
+  }
+  return out;
+}
+
+/// A value of the model's float format at `width`, as bits: binary32 at 32 bits, else
+/// binary64, as evalFloatBinary reads them.
+APInt floatBits(unsigned width, double value) {
+  if (width == 32)
+    return APInt(32, (uint64_t)llvm::bit_cast<uint32_t>((float)value));
+  return APInt(64, llvm::bit_cast<uint64_t>(value));
+}
+
+/// What a designed memory puts in the target cell and makes of its first and its last
+/// contribution, each as bits at a root's width.
+struct DesignedPattern {
+  std::function<APInt(unsigned)> start, first, last, one;
+};
+
+std::vector<DesignedPattern> designedPatterns(bool isFloat, unsigned foldWidth) {
+  if (!isFloat) {
+    auto maximum = [](unsigned w) { return APInt::getSignedMaxValue(w); };
+    auto minimum = [](unsigned w) { return APInt::getSignedMinValue(w); };
+    auto plus = [](unsigned w) { return APInt(w, 1); };
+    auto minus = [](unsigned w) { return APInt::getAllOnes(w); };
+    // INT_MAX - 1 + 1 completes and INT_MAX + 1 overflows; INT_MIN + 1 - 1 completes and
+    // INT_MIN - 1 overflows.
+    return {{maximum, minus, plus, plus}, {minimum, plus, minus, plus}};
+  }
+  // 2^p is the first power of two whose successor the format cannot hold: 2^p + 1 rounds
+  // back to 2^p (the tie goes to the even significand), so (2^p + 1) - 2^p is 0 and
+  // (2^p - 2^p) + 1 is 1. The largest finite value added to itself is +infinity, which
+  // stays through a finite addend, and less itself is 0.
+  double big = foldWidth == 32 ? 16777216.0 : 9007199254740992.0;
+  double largest = foldWidth == 32 ? (double)std::numeric_limits<float>::max() : std::numeric_limits<double>::max();
+  auto value = [](double v) { return [v](unsigned w) { return floatBits(w, v); }; };
+  return {{value(big), value(1.0), value(-big), value(1.0)},
+          {value(largest), value(largest), value(-largest), value(1.0)}};
+}
+
+} // namespace
+
+std::vector<EntryState> designedReversalFills(const SemanticProgram &program, const SiteGroup &group,
+                                              const std::map<CellKey, APInt> &prefix,
+                                              const std::vector<APInt> &parameters, uint64_t maxCells) {
+  std::vector<EntryState> out;
+  if (group.sites.empty())
+    return out;
+  // One operation, as the judge asks: where the sites differ it reverses nothing.
+  const MacSite &leader = program.sites[group.sites.front()];
+  for (unsigned id : group.sites) {
+    const MacSite &site = program.sites[id];
+    if (!site.output || site.reduction != leader.reduction || site.reductionFlags != leader.reductionFlags ||
+        site.multiplyFlags != leader.multiplyFlags)
+      return out;
+  }
+  bool isFloat = leader.reduction == ReductionOp::FAdd;
+  unsigned foldWidth = program.roots[leader.output->root].sort.width;
+  // Without nsw no reversal of an integer fold overflows. With nuw as well both patterns
+  // stop the program itself: -1 is the largest unsigned value.
+  if (!isFloat && (!(leader.reductionFlags & FlagNSW) || (leader.reductionFlags & FlagNUW)))
+    return out;
+  std::optional<EntryState> zero = zeroEntry(program, parameters, maxCells);
+  if (!zero)
+    return out;
+  // The trace at this point, from the zero memory: which cells each event of the sites
+  // writes and reads. Where that run stops, nothing is designed.
+  RunResult trace = runConcrete(program, *zero);
+  if (trace.status != RunStatus::Returned)
+    return out;
+  auto cellOf = [&](unsigned root, llvm::ArrayRef<APInt> index) {
+    uint64_t at = 0;
+    for (unsigned i = 0; i < index.size(); ++i)
+      at = at * zero->memory[root].shape[i] + index[i].getZExtValue();
+    return CellKey{root, at};
+  };
+  struct Contribution {
+    CellKey a, b;
+  };
+  std::set<unsigned> members(group.sites.begin(), group.sites.end());
+  std::vector<CellKey> written; // In the order of their first events.
+  std::map<CellKey, std::vector<Contribution>> contributions;
+  for (const MacEvent &event : trace.events) {
+    if (!members.count(event.site))
+      continue;
+    const MacSite &site = program.sites[event.site];
+    CellKey key = cellOf(site.output->root, event.h);
+    auto [slot, added] = contributions.try_emplace(key);
+    if (added)
+      written.push_back(key);
+    slot->second.push_back({cellOf(site.a.root, event.f), cellOf(site.b.root, event.g)});
+  }
+  auto settable = [&](const CellKey &key) {
+    return program.roots[key.first].origin == MemoryRoot::FunctionArgument;
+  };
+  auto widthOf = [&](const CellKey &key) { return program.roots[key.first].sort.width; };
+
+  std::vector<std::map<CellKey, APInt>> listed;
+  unsigned targets = 0;
+  for (const CellKey &target : written) {
+    const std::vector<Contribution> &folded = contributions[target];
+    // The cell's start must be the entry's to choose: no constant stored before its first
+    // event. (A cell no entry sets is refused below, with the operands.)
+    if (folded.size() < 2 || prefix.count(target))
+      continue;
+    if (targets++ == designedTargets)
+      break;
+    for (const DesignedPattern &pattern : designedPatterns(isFloat, foldWidth))
+      for (bool firstInSecondOperand : {true, false})
+        for (bool lastInSecondOperand : {true, false}) {
+          std::map<CellKey, APInt> cells;
+          bool consistent = true;
+          auto put = [&](const CellKey &key, const std::function<APInt(unsigned)> &value) {
+            if (!settable(key)) {
+              consistent = false;
+              return;
+            }
+            APInt bits = value(widthOf(key));
+            auto [slot, added] = cells.try_emplace(key, bits);
+            consistent = consistent && (added || slot->second == bits);
+          };
+          put(target, pattern.start);
+          const Contribution &first = folded.front(), &last = folded.back();
+          put(firstInSecondOperand ? first.b : first.a, pattern.first);
+          put(firstInSecondOperand ? first.a : first.b, pattern.one);
+          put(lastInSecondOperand ? last.b : last.a, pattern.last);
+          put(lastInSecondOperand ? last.a : last.b, pattern.one);
+          if (!consistent || std::find(listed.begin(), listed.end(), cells) != listed.end())
+            continue;
+          listed.push_back(cells);
+          EntryState entry = *zero;
+          for (const auto &[key, bits] : cells)
+            entry.memory[key.first].cells[key.second] = bits;
+          out.push_back(std::move(entry));
+        }
+  }
+  return out;
+}
+
+namespace {
+
+/// The designed memories judged in order against the replay's prefix constants. One that
+/// shows no difference is no evidence, as with the fill sequence.
+Fact searchDesigned(const SemanticProgram &program, const SiteGroup &group, const ReplayResult &replay,
+                    const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
+  Fact out;
+  out.detail = "no designed memory at which a reversal differs";
+  if (!fills || replay.outcome != ReplayOutcome::Equal)
+    return out;
+  for (EntryState &designed : designedReversalFills(program, group, replay.prefix, parameters, maxCells)) {
+    std::string detail;
+    if (!reversalDiffers(program, group, designed, replay.prefix, detail))
+      continue;
+    out.status = FactStatus::Refuted;
+    out.detail = detail + ", at a designed memory";
+    out.point = parameters;
+    out.memory = std::move(designed);
+    return out;
+  }
+  return out;
+}
+
+} // namespace
+
+Fact designedWitness(const SemanticProgram &program, const SiteGroup &group,
+                     const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
+  ReplayResult replay = replayGroup(program, group, parameters, HerbrandLimits());
+  return searchDesigned(program, group, replay, parameters, fills, maxCells);
+}
+
+Fact designedWitnessOver(const SemanticProgram &program, ArrayRef<const SiteGroup *> listed,
+                         const std::vector<APInt> &parameters, unsigned fills, uint64_t maxCells) {
+  std::vector<int> groupOfSite;
+  std::string why;
+  std::optional<SiteGroup> united = unitedSiteGroup(program, listed, groupOfSite, why);
+  if (!united) {
+    Fact out;
+    out.detail = why;
+    return out;
+  }
+  ReplayResult replay =
+      replayGroupSet(program, *united, groupOfSite, listed.size(), parameters, HerbrandLimits());
+  return searchDesigned(program, *united, replay, parameters, fills, maxCells);
 }
 
 } // namespace mlir::generalized_gemm
