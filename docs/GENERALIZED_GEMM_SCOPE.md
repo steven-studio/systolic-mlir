@@ -561,9 +561,38 @@ reference in C by the numeric contract of stage 2.
    operand's matrix) and the gathered matrices are temporaries the size of the operands.
 6. As in stage 2: records are files written by the research tool; C kernels get no option.
 
-**Validation.** @@VALIDATION3@@
+**Validation.** On one frozen state (`11208045…`: the checkpoint `548aea3` and the one file
+changed after it, the mutation harness; this document excepted, which no test or build reads),
+each phase refusing to start on another state and recording that it ended on the same one. The
+baseline binary is built from `5c38c23`, before stage 2: with both options off, the tool is the
+one before stage 2.
 
-**Not run.** @@NOTRUN3@@
+| Check | Result |
+| --- | --- |
+| Production lit, the whole suite | 193 of 195; the 2 failures (`Systolic/general_affine_domains.mlir`, `SystolicCC/general_affine.c`) fail at the baseline too, with the same messages. The five gate tests pass |
+| Option off | every `systolic-opt` command of the production tests, run with the baseline binary and with the new one: 200 byte for byte the same (output, messages, files written), 54 the same once the addresses of values are masked (they differ between two runs of the baseline too), 0 different; 120 commands that pass nest-records or record-driven are new. A first run counted 1 different, the command that passes record-driven without nest-records: both binaries refuse it, the baseline as an unknown option. The comparison now leaves out record-driven as it left out nest-records (both runs kept) |
+| Production unit binaries that link the changed library | `tensor-space-dependencies-test`, `rank-partition-presburger-test`: pass, with the baseline's output |
+| Records | the seven records files equal what the research tool says today (CTest) |
+| End to end, stage 3 | 180 runs, 0 failures: 146 with every bit kept, 34 with lowered cells that differ, each within its bound; 10 lowered modules, their calls in program order |
+| End to end, stage 2 | 144 runs, 0 failures: 104 with every bit kept, 40 within their bound, as at stage 2 |
+| Against the production report | 63 fields, 60 equal, 3 differences of policy, 0 failures, as at stage 2 |
+| Gate mutation | 107 mutants (stage 2's 48 and 59 new), 107 KILLED by the tests' own checks: 100 by a check that fails, 7 by a check whose input is empty (the remark or error it expects never came; the harness counts this as a kill since this stage, once each such run's output was seen to hold FileCheck's empty-input error for that check and no crash; before, it was a harness error); 0 crashes; 8 declared equivalent, each with its reason |
+| ASan and UBSan | the five gate tests and both end-to-end runs with the sanitized `systolic-opt`: no report |
+| Warnings | the three production sources this stage changes or adds, with `-Wall -Wextra -Wpedantic`: none |
+
+**Not run.** The research unit binary, lit suite, oracle and nest mutation: no research
+source changed in this stage (its build has nothing to do), only test scripts and the list of
+CTests. The other research suites; every historical mutation run (the open G3b and G3a mutants,
+the stale EQUIVALENT entries and the mutants not rerun at `9bb3cf0` stand as recorded); the
+production unit binaries that link no changed code; `systolic-cc` beyond the production lit
+suite; cosimulation and the board. Not mutated: the guards that stand only between a malformed
+input and a crash (a null loop in the band walk, a band of another size reaching the role
+lookup, a role of -1, the evaluator's missing value and its division by zero, an operand's
+missing index forms, `admit` of no operation, and the exclusion of the nests stage 2 lowers,
+without which stage 3 would read a nest stage 2 has already erased), since removing one makes the tool crash, which is
+no valid kill; and the check that the tiles partition the box exactly, which no plan the planner
+makes can fail. Not built: tables at run time, and a `scf.for` nest through this path (the
+research verifies none).
 
 ## The thesis
 

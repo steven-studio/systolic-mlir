@@ -378,6 +378,11 @@ def main():
                              r"line after the previous match|excluded string found in input|found here)", text)
         if mismatch:
             return "KILLED", f"{mismatch.group(1)}: {mismatch.group(2)}"
+        # A check whose input is empty: what it expects (a remark, an error) was never printed.
+        empty = re.search(r"FileCheck error: '<stdin>' is empty\.\s*(?:#\s*\|?\s*)*FileCheck command line: [^\n]*"
+                          r"--check-prefix=([A-Z][A-Z0-9]*)", text)
+        if empty:
+            return "KILLED", f"{empty.group(1)}: the input is empty, what the check expects never came"
         return "HARNESS_ERROR", f"exit {code} with no check that failed: " + text[-1500:].replace("\n", " | ")
 
     if "BASELINE" not in done:
