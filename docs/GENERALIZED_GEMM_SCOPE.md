@@ -2,8 +2,8 @@
 
 A planning record, written at `d974400` from the documents and the code, with nothing built
 or run. Where an earlier document lists M4c, M4d, G6 or G7 as the next step, this one takes
-precedence. Stages 1, 2 and 3 of the plan were then built: their sections say what was built,
-what was checked and what was not.
+precedence. Stages 1, 2 and 3 of the plan were then built, and stage 3 was carried to GEMMs
+written with scf.for: their sections say what was built, what was checked and what was not.
 
 ## The decision
 
@@ -593,6 +593,123 @@ without which stage 3 would read a nest stage 2 has already erased), since remov
 no valid kill; and the check that the tiles partition the box exactly, which no plan the planner
 makes can fail. Not built: tables at run time, and a `scf.for` nest through this path (the
 research verifies none).
+
+### Stage 3 on scf.for: GEMMs written with scf.for (built 2026-11-17)
+
+**The request.** A GEMM written with `scf.for` goes the whole way: the research recognizes and
+verifies it, writes the nest's record, and the record-driven lowering turns it into tiles and
+runtime calls, with no rewriting into `affine.for` asked of the programmer.
+
+**Where it failed, stage by stage.** One GEMM (16 x 8 x 12, `memref.load` and `memref.store`,
+the counters as indices, `reassoc`) written with `affine.for` and with `scf.for`:
+
+| Stage | affine.for | scf.for, before |
+| --- | --- | --- |
+| Importer (affine and scf lowered to control flow) | modelled | modelled; the bounds and steps are values defined before the nest, which the importer keeps in state, each set once on entry, where `affine.for`'s lowering sets them as each loop starts |
+| Outline (a private copy of the nest) | outlined | outlined, the five constants copied in |
+| Termination | proven if defined | proven if defined |
+| Coordinate search (G3b) | 1 candidate | none: UNKNOWN |
+| Domain, computation, Theorem 13, views | verified, symbolic | not reached |
+| Binding | the nest's | the nest's |
+| Production | stage 2 (the recognizer) | stage 3 refused it: "scf.for is no affine.for" |
+
+The coordinate search tells operands apart by their values at a thin sample of the events
+(one in `events/128`, here one in 12). The innermost loop runs 12 times, so at every sample its
+counter is 0, the value of the bound `%c0` that `scf.for` keeps in state and that is offered
+first: the counter was dropped as a copy of `%c0`, and `%c0` as a constant. No three coordinates
+were left, at any grammar level. When that was mended, a GEMM whose bounds do not start at 0
+still failed: the coordinates' range (obligation V3) could not be proved, because the
+termination certificate had no lower bound for a counter that starts at a state holding a
+constant (`affine.for` starts it at the literal).
+
+**What changed.** No check was weakened; nothing was normalized: the nest is read as written,
+its record is of the nest as written (its binding), and no affine form is assumed of it.
+
+1. `CoordinateGrammar` (research): a state variable that the thin sample cannot tell from an
+   earlier operand is compared on every event; if the two differ there, it is kept under
+   `GrammarSpec::exactLeaves` and counted as lost without it. The grammar is a guess; the
+   checkers decide.
+2. `SynthesisAnalysis` (research): a group's search runs as before. It runs once more, with
+   `exactLeaves`, only when the scope is enumerated whole (a search then adds nothing to the
+   driver's state), the first search lost a state variable, and it verified no candidate at the
+   symbolic tier; the second outcome is taken only when it verifies one. Every other search says
+   what it said, at the same cost (the synthesis unit test: 556 s, 553 s at the baseline).
+3. `TerminationProposers` (research): a state that no loop carries and that takes one closed
+   value stands for that value inside another state's value, so a counter that starts at an
+   entry-block constant held in state gets the facts a literal start gets (`j >= 1`). These are
+   proposals: each fact is checked like any other, and kept only if it holds on every path.
+4. `NestRecordLowering` (production): the band is `affine.for` or `scf.for` loops. For
+   `scf.for`: bounds that are constants (`arith.constant`), step 1, an unsigned comparison only
+   of bounds that are not negative; between two loops, constants only. A loop of the nest that
+   carries values (`iter_args`) is refused before the band is read. Everything after the band is
+   stage 3's: the record by itself, the levels, the body, the operands, the formulas or tables,
+   the alias gate, the floating-point policy.
+
+**Acceptance.** `nest_records_scf.mlir`: one GEMM written with `scf.for`, with `affine.for` and
+`affine.load` (stage 2) and with `affine.for` and `memref.load` (stage 3), each with its own
+record and tiles; `scf.for` nests lowered by formulas (bounds before the nest or between the
+loops, B transposed with the loops permuted, flat arrays, offsets and a scale, bounds that do not
+start at 0) and by tables (flat arrays whose index constants are defined before the nest, A's
+rows in the order `(5 i) mod 16`); two `scf.for` nests on one output; a nest that reads what the
+one before wrote (T = T + A B, then C = C + T D), the second GEMM begun after T is written back;
+and the refusal of the floating-point policy. `nest_records_scf_refusals.mlir`: on the research
+tool's own records, the alias gate, the status of the records the research does not verify
+(`iter_args`, a read outside A, a second write, a call, a bound known at run time, a step of 2,
+`scf.parallel`, unsigned loops from or to a negative bound), the floating-point contract; and on
+records transplanted onto each nest, the refusal of each check of the band and of the body
+(`iter_args`, a bound that is no constant, a step other than 1, unsigned from and to a negative
+bound, `scf.parallel`, a second store, a call, a read outside A by the formulas). Refused nests
+stay as written. `nest_scf_e2e.py`: thirteen functions x the five variants of stage 3 x
+synchronous and asynchronous lowering x two data sets, run on the software runtime model and
+compared with a reference in C that the original program meets too (the variant with no
+records runs it). Research: `nest_scf.mlir` (the search and the record of the `scf.for` GEMM,
+the shifted one, and a search the second pass leaves as it was); the nest oracle with every
+product written with `scf.for` (`generalized-gemm-nest-programs-scf`).
+
+**Limits.**
+
+1. `scf.for` with a step other than 1 is refused; the research proposes the coordinates of a
+   step of 2 but does not verify them symbolically.
+2. Bounds known only at run time are refused (the research does not check Theorem 13 for them).
+3. `iter_args` (a reduction held in a value) is refused; the research makes no claim of such a
+   nest ("a scalar accumulator has no exact output view").
+4. `scf.parallel`, `scf.while` and other loops are refused; an unsigned `scf.for` is taken only
+   when its bounds are not negative.
+5. The limits of stage 3 hold: one f32 multiply-accumulate, three loops, static shapes, no batch.
+
+**Validation.** On one frozen state (`b9bb409d…`: HEAD `7547bbb` and every file this stage
+changes or adds, this document excepted), each phase refusing to start on another state and
+recording that it ended on the same one. A first freeze (`e461b243…`) was abandoned in its
+research phase: the synthesis unit test, 553 s alone at the baseline against its limit of 600
+s, timed out beside another test, and the second search, then run after every search that
+verified nothing symbolically, cost such searches 40 to 50 per cent; it was gated as said above
+(556 s afterwards). The termination, coordinate and identity binaries are byte-identical in the
+two freezes, so their CTests' results in the first stand.
+
+| Check | Result |
+| --- | --- |
+| Production lit, the whole suite | 195 of 197; the 2 failures (`Systolic/general_affine_domains.mlir`, `SystolicCC/general_affine.c`) fail at the baseline too, with the same messages; the seven `nest_records` tests pass |
+| Option off, against HEAD (`7547bbb`, built from its archive) | every `systolic-opt` command of the production tests that does not pass record-driven: 259 byte for byte the same, 54 the same once the addresses of values are masked, 0 different; 79 pass record-driven |
+| Production unit binaries | `tensor-space-dependencies-test`, `rank-partition-presburger-test`: the baseline's output |
+| Research lit | 36 of 36 (`nest_scf.mlir` among them) |
+| Research CTests the change reaches | 18 rerun on this freeze: all pass, `generalized-gemm-synthesis` (alone, 472 s), the four nest oracles and end-to-end runs among them; from the first freeze, binaries unchanged: 6 pass, `generalized-gemm-termination` fails as at the baseline (the same 3 of 119442 checks: `t3_swap` UNKNOWN at 8 bits) |
+| Records | the nine records files equal what the research tool says today |
+| End to end | the three CTests pass with the plain tool; their counts, from the same scripts run with the sanitized tool: stage 2, 144 runs, 0 failures; stage 3, 180, 0; `scf.for`, 260 runs, 0 failures, 210 with every bit kept, 50 with lowered cells that differ within their bound, 10 lowered modules with their calls in program order |
+| The nest oracle, products written with `scf.for` | 30 programs, 0 failures |
+| Research outputs against the baseline | 101 research lit commands: 97 byte for byte the same; 3 are `nest_scf.mlir`'s `scf.for` searches; `dom_phase4.mlir`'s `@rotated`, itself an `scf.for` program, is the same once term numbers are masked |
+| Gate mutation | 29 mutants (12 new, 2 brought to the new code, 5 others of the band and level checks, 10 that stage 3's changed checks had killed): 29 KILLED by the tests' own checks |
+| Search mutation | 13 mutants of the search change: 10 KILLED by `nest_scf.mlir`'s checks; 3 SURVIVED, all three about when the second search runs and what it carries (a state variable equal on every event counted as lost; the second search run after a symbolic first one; run on a sampled scope): the second outcome is still taken only when the unchanged checkers verify it symbolically, so they bear on cost and completeness, not on a check, but no test pins them and their equivalence is not proved; 2 declared equivalent with their reasons |
+| ASan and UBSan | the seven `nest_records` tests and the three end-to-end runs with the sanitized `systolic-opt`; the sanitized nest driver remade the nine records files, each equal to the file in the tree, and the sanitized drivers passed the checks of `nest_scf.mlir`: no report |
+| Warnings | the four sources this stage changes, with `-Wall -Wextra -Wpedantic`: none, as at HEAD |
+
+**Not run.** The research CTests the change does not reach (`generalized-gemm-unit`,
+`-relational`, `-oracle-fuzz`, `-native-differential`: their binaries hold none of the changed
+sources) and the polynomial suites; the 89 other gate mutants of stages 2 and 3 (killed at
+`7547bbb`; neither their code nor the checks that killed them changed) and every historical
+mutation run; the research's older mutation harnesses (`synthesis_mutation.py` and the others
+count any failure as a kill, a crash included, and build with more jobs than this stage
+allowed); `systolic-cc` beyond the production lit suite; cosimulation and the board. Not built:
+steps other than 1, bounds known only at run time, `iter_args`, `scf.parallel` and `scf.while`.
 
 ## The thesis
 

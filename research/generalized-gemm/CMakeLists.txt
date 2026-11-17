@@ -330,6 +330,14 @@ add_test(NAME generalized-gemm-nest-programs COMMAND "${Python3_EXECUTABLE}"
   --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
   --programs 30 --fills 4 --seed 1 --jobs 4)
 set_tests_properties(generalized-gemm-nest-programs PROPERTIES TIMEOUT 3600)
+# The same programs with every product written with scf.for (bounds and steps arith.constant
+# values before the nest, memref.load and memref.store, indices by arith in the body): each
+# product over roots apart from its output must have the same complete, VERIFIED record.
+add_test(NAME generalized-gemm-nest-programs-scf COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4 --loops scf)
+set_tests_properties(generalized-gemm-nest-programs-scf PROPERTIES TIMEOUT 3600)
 
 # Stage 1: a nest's record against the production affine recognizer's report, field by
 # field. The production tool is not built here: point GG_SYSTOLIC_OPT at one built from
@@ -368,6 +376,13 @@ if(GG_SYSTOLIC_OPT AND GG_LLC)
     --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
     --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
   set_tests_properties(generalized-gemm-nest-driven-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3 on scf.for, end to end: GEMMs written with scf.for, verified by the research,
+  # lowered from their records (formulas and tables), run, and compared with the original.
+  add_test(NAME generalized-gemm-nest-scf-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_scf_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-scf-e2e PROPERTIES TIMEOUT 3600)
 endif()
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)

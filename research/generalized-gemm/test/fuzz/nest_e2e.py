@@ -63,17 +63,21 @@ class Failure(Exception):
 # The programs.
 
 def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, access="affine",
-            constants="inside"):
+            constants="inside", loops="affine", bounds_at="outside"):
     """`access`: "affine" reads and writes with affine.load and affine.store; "memref" with
     memref.load and memref.store, each index computed by arith (a counter times its scale plus
     its constant; a flat array's index is row * columns + column). A view entry is (role,
     scale, constant), or ("perm", role, multiplier, modulus): (role * multiplier) mod modulus,
     by arith.remsi. `constants` ("inside" or "outside", memref access only): where the index
-    constants are defined, in the loop body or before the nest."""
+    constants are defined, in the loop body or before the nest. `loops` (memref access only):
+    "affine" for affine.for, "scf" for scf.for, whose bounds and step are arith.constant
+    values, all defined before the nest (`bounds_at` "outside") or each loop's in the body of
+    the loop around it ("inside"; the outermost loop's before the nest)."""
     views = views or {"c": [("i", 1, 0), ("j", 1, 0)], "a": [("i", 1, 0), ("k", 1, 0)],
                       "b": [("k", 1, 0), ("j", 1, 0)]}
     return {"kind": "product", "c": c, "a": a, "b": b, "bounds": bounds, "order": order, "views": views,
-            "flag": flag, "first": first, "access": access, "constants": constants}
+            "flag": flag, "first": first, "access": access, "constants": constants, "loops": loops,
+            "bounds_at": bounds_at}
 
 
 def move(source, target):
@@ -236,9 +240,25 @@ def mlir_function(function):
                 lines += ["  " + c for c in constants]
             else:
                 body = [pad + c for c in constants] + body
+            scf = statement.get("loops", "affine") == "scf"
+            def bound_constants(role):
+                low, high = bounds[role]
+                return [f"%{role}lo{number} = arith.constant {low} : index",
+                        f"%{role}hi{number} = arith.constant {high} : index",
+                        f"%{role}st{number} = arith.constant 1 : index"]
+            if scf and statement.get("bounds_at", "outside") == "outside":
+                for role in statement["order"]:
+                    lines += ["  " + c for c in bound_constants(role)]
             for depth, role in enumerate(statement["order"]):
                 low, high = bounds[role]
-                lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
+                indent = "  " * (depth + 1)
+                if not scf:
+                    lines.append(indent + f"affine.for %{role}{number} = {low} to {high} {{")
+                    continue
+                if statement.get("bounds_at", "outside") == "inside":
+                    lines += [indent + c for c in bound_constants(role)]
+                lines.append(indent + f"scf.for %{role}{number} = %{role}lo{number} to %{role}hi{number} "
+                             f"step %{role}st{number} {{")
             lines += body
             for depth in reversed(range(3)):
                 lines.append("  " * (depth + 1) + "}")
@@ -410,8 +430,10 @@ def must(command, what, cwd=None):
     return done
 
 
-def records(args, source, out, authorize):
-    roots = max(len(f["arrays"]) for f in FUNCTIONS)
+def records(args, source, out, authorize, roots=None):
+    """`roots`: authorize every pair among this many roots (by default, as many as the
+    functions of this file have arrays at most)."""
+    roots = roots or max(len(f["arrays"]) for f in FUNCTIONS)
     pairs = ",".join(f"roots {a} and {b} are separate" for a in range(roots) for b in range(a + 1, roots))
     command = [args.nest_driver, source, "--index-bit-width=64"] + SOLVER + ([f"--authorize={pairs}"] if authorize else [])
     done = must(command, "the nest driver")
@@ -426,7 +448,7 @@ def statement_lines(text):
         if found:
             function = found.group(1)
             continue
-        found = re.match(r"  affine\.for %[a-z]+(\d+) = ", line)
+        found = re.match(r"  (?:affine|scf)\.for %[a-z]+(\d+) = ", line)
         if found:
             places[(function, int(found.group(1)))] = line_number
     return places

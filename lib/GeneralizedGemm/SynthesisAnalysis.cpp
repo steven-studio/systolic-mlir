@@ -119,6 +119,7 @@ public:
 private:
   EnumerationOptions enumerationOptions(const std::vector<std::vector<APInt>> &points) const;
   void synthesizeGroup(unsigned g, GroupSynthesis &out);
+  void searchGroup(unsigned g, bool exact, GroupSynthesis &out);
   bool addPoint(const std::vector<APInt> &point, std::vector<std::vector<APInt>> &must,
                 std::string &closed);
   void verifySymbolic(unsigned g, VerifiedCandidate &candidate,
@@ -200,7 +201,7 @@ void Driver::verifySymbolic(unsigned g, VerifiedCandidate &candidate,
   }
 }
 
-void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
+void Driver::searchGroup(unsigned g, bool exact, GroupSynthesis &out) {
   out.group = g;
   if (!result.enumeration.groups[g].unsupported.empty()) {
     out.status = RecoveryStatus::Unsupported;
@@ -216,6 +217,7 @@ void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
     out.level = level;
     GrammarSpec spec = options.grammar ? *options.grammar : GrammarSpec::atLevel(level);
     spec.statements = spec.statements || options.statementGrammar;
+    spec.exactLeaves = exact;
     for (unsigned attempt = 0; attempt <= options.maxRefinements; ++attempt) {
       auto domains = searchDomains(result.enumeration, g, options.maxSamples, must);
       if (domains.empty()) {
@@ -231,6 +233,7 @@ void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
           }
       AtomBank bank = buildAtoms(program, result.enumeration.groups[g], domains, spec);
       out.atoms = bank.atoms.size();
+      out.lostLeaves += bank.lostLeaves;
       SynthesisOutcome outcome =
           synthesizeCoordinates(program, bank, domains, options.synthesis, backend);
       out.rounds += outcome.rounds;
@@ -285,6 +288,29 @@ void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
   }
   out.status = RecoveryStatus::CandidateFound;
   out.reason = "the checkers accept these candidates at the stated tiers";
+}
+
+/// The search of group g: once with the grammar's thin sample telling operands apart, and once
+/// more with each leaf the sample cannot tell from an earlier operand compared on every event
+/// (GrammarSpec::exactLeaves) when all of these hold: the scope is enumerated whole (the
+/// driver samples nothing, so a search adds no point to its enumeration and leaves its state as
+/// it found it); the first search's sample lost a leaf that differs from the operand it was
+/// taken for at some event (otherwise the second search would repeat the first); and the first
+/// search verifies no candidate at the symbolic tier. The second outcome is taken only when it
+/// has a candidate verified at the symbolic tier. So every other search says what it said.
+void Driver::synthesizeGroup(unsigned g, GroupSynthesis &out) {
+  auto symbolic = [](const GroupSynthesis &found) {
+    return llvm::any_of(found.candidates, [](const VerifiedCandidate &candidate) {
+      return candidate.symbolic.tier() == EvidenceTier::SymbolicExact;
+    });
+  };
+  searchGroup(g, /*exact=*/false, out);
+  if (sampling || out.lostLeaves == 0 || symbolic(out) || !result.enumeration.groups[g].unsupported.empty())
+    return;
+  GroupSynthesis again;
+  searchGroup(g, /*exact=*/true, again);
+  if (symbolic(again))
+    out = std::move(again);
 }
 
 SynthesisResult Driver::run() {

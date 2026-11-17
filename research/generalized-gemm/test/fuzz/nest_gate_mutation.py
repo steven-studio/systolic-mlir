@@ -5,8 +5,9 @@ lib/Systolic/Transforms/NestRecordGate.cpp, of NestRecordLowering.cpp, of the pa
 AffineMatmulToSystolic.cpp, or of the binding in NestBinding.cpp, in a copy of the production
 sources built in a scratch directory; the copy unmodified must pass first. The tests are the
 production tests of the gate and of the lowering from records: test/Systolic/nest_records.mlir,
-nest_records_refusals.mlir, nest_records_belts.mlir, nest_records_driven.mlir and
-nest_records_driven_refusals.mlir. Every result is one of:
+nest_records_refusals.mlir, nest_records_belts.mlir, nest_records_driven.mlir,
+nest_records_driven_refusals.mlir, and, for scf.for nests, nest_records_scf.mlir and
+nest_records_scf_refusals.mlir. Every result is one of:
 
   KILLED          a test failed by its own check (FileCheck), and nothing crashed.
   SURVIVED        both tests passed.
@@ -142,15 +143,38 @@ MUTANTS = [
     ("the operands not gathered", P, "        copy(x, /*scatter=*/false);\n", "        (void)x;\n"),
     ("C not scattered back", P, "      copy(2, /*scatter=*/true);\n", ""),
     # Stage 3, the nest's own checks (NestRecordLowering.cpp).
-    ("a loop with bounds that are no constants, a step or results read", L,
-     "    if (!loop.hasConstantLowerBound() || !loop.hasConstantUpperBound() || loop.getStepAsInt() != 1 ||\n"
-     "        loop.getNumResults() != 0)\n", "    if (false)\n"),
+    ("an affine.for with bounds that are no constants or a step read", L,
+     "      if (!a.hasConstantLowerBound() || !a.hasConstantUpperBound() || a.getStepAsInt() != 1)\n",
+     "      if (false)\n"),
+    # scf.for bands.
+    ("a loop carrying values not refused first", L, "    if (!carrying && loop->getNumResults() != 0)\n",
+     "    if (false)\n"),
+    ("an scf.for not taken for a loop of the band", L, "    } else if (auto f = dyn_cast<scf::ForOp>(op)) {\n",
+     "    } else if (auto f = dyn_cast<scf::ForOp>(op); false) {\n"),
+    ("an scf.for's lower bound not read", L,
+     "      std::optional<int64_t> lo = getConstantIntValue(f.getLowerBound());\n",
+     "      std::optional<int64_t> lo = std::optional<int64_t>(0);\n"),
+    ("an scf.for's upper bound not read", L,
+     "      std::optional<int64_t> hi = getConstantIntValue(f.getUpperBound());\n",
+     "      std::optional<int64_t> hi = getConstantIntValue(f.getLowerBound());\n"),
+    ("an scf.for step other than 1 read", L, "      if (!step || *step != 1)\n", "      if (!step)\n"),
+    ("an unsigned scf.for from a negative bound read", L,
+     "      if (f.getUnsignedCmp() && (*lo < 0 || *hi < 0))\n", "      if (f.getUnsignedCmp() && *hi < 0)\n"),
+    ("an unsigned scf.for to a negative bound read", L,
+     "      if (f.getUnsignedCmp() && (*lo < 0 || *hi < 0))\n", "      if (f.getUnsignedCmp() && *lo < 0)\n"),
+    ("an scf.for's counter not read", L, "      loop.counter = f.getInductionVar();\n", "      loop.counter = Value();\n"),
+    ("a constant between two loops refused", L, "      } else if (!isa<arith::ConstantOp>(child)) {\n",
+     "      } else {\n"),
+    ("anything between two loops taken for a constant", L, "      } else if (!isa<arith::ConstantOp>(child)) {\n",
+     "      } else if (false) {\n"),
+    ("the outermost loop's body read for the update", L, "  Block *body = band.back().body;\n",
+     "  Block *body = band.front().body;\n"),
     ("more than three loops read", L, "    if (band.size() > 3)\n", "    if (false)\n"),
     ("a band that is no perfect nest read", L, "    if (nested > 1 || others != 0)\n", "    if (false)\n"),
     ("the record's level count not compared", L, "  if (levels->size() != 3)\n", "  if (false)\n"),
     ("a level not compared with its loop", L,
-     "    if (a == 3 || seen[a] || *descending || *lo != band[l].getConstantLowerBound() ||\n"
-     "        *hi != band[l].getConstantUpperBound() || *hi <= *lo)\n", "    if (a == 3)\n"),
+     "    if (a == 3 || seen[a] || *descending || *lo != band[l].lower || *hi != band[l].upper || *hi <= *lo)\n",
+     "    if (a == 3)\n"),
     ("an axis not compared with its level", L, "    if (!listed || *listed != (int64_t)l)\n", "    if (!listed)\n"),
     ("a batch axis read", L, "  if (const json::Array *batch = axes->getArray(\"P\"); batch && !batch->empty())\n",
      "  if (false)\n"),
@@ -311,6 +335,7 @@ def main():
     parser.add_argument("--mlir-dir", required=True)
     parser.add_argument("--lit", required=True)
     parser.add_argument("--results", required=True)
+    parser.add_argument("--jobs", type=int, default=4, help="build jobs")
     parser.add_argument("--only", default="")
     args = parser.parse_args()
     root = Path(args.source).resolve()
@@ -363,7 +388,7 @@ def main():
         sys.exit("cmake failed:\n" + text[-2000:])
 
     def build_tools():
-        return run(["ninja", "-C", build, "-j4", "systolic-opt", "systolic-translate", "systolic-cost"],
+        return run(["ninja", "-C", build, f"-j{args.jobs}", "systolic-opt", "systolic-translate", "systolic-cost"],
                    timeout=BUILD_SECONDS)
 
     def tests():

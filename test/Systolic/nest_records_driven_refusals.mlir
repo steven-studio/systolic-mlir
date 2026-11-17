@@ -7,11 +7,12 @@
 //
 // The research tool's own records: the lowering's alias gate (no llvm.noalias), the status
 // of the records the research does not verify, an explicit view that runs backwards,
-// binary64; and a permutation (5 i) mod 16 of A's rows, which the tables lower.
+// binary64; and a permutation (5 i) mod 16 of A's rows, which the tables lower, and the
+// scf.for nest, which the formulas lower (nest_records_scf.mlir has the scf.for cases).
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_driven_refusals.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=HONEST
 // HONEST: remark: GEMM not lowered from its record: nest 0 of noalias_missing: A may overlap C; declare the arguments llvm.noalias (C restrict) or pass assume-no-alias
 // HONEST: remark: GEMM not lowered from its record: nest 0 of stepped: the record's status is VERIFIED_NOT_MAPPED
-// HONEST: remark: GEMM not lowered from its record: nest 0 of scf: the record's status is NOT_VERIFIED
+// HONEST: remark: GEMM 16x8x12 of nest 0 of scf lowered from its record as 5 exact region(s) (formulas:
 // HONEST: remark: GEMM 16x8x12 of nest 0 of permuted_formulas lowered from its record as 5 exact region(s) (tables:
 // HONEST: remark: GEMM not lowered from its record: nest 0 of backwards: the view of A has the element stride -12 along I, and an explicit view takes positive strides
 // HONEST: remark: GEMM not lowered from its record: nest 0 of in_f64: the update is not in f32, the device's binary32
@@ -19,8 +20,8 @@
 // A record with @formulas' verified content on the nest's own binding (transplant): every
 // check on the record passes, and a check on the nest refuses.
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_driven_refusals.json transplant-scf %S/Inputs/nest_records_driven.json formulas > %t.scf.0.json
-// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.scf.0.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=SCF
-// SCF: remark: GEMM not lowered from its record: nest 0 of scf: the nest's loop scf.for is no affine.for, the only loop the record's lowering takes
+// RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.scf.0.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=SCF
+// SCF: remark: GEMM 16x8x12 of nest 0 of scf lowered from its record as 5 exact region(s) (formulas:
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_driven_refusals.json transplant-stepped %S/Inputs/nest_records_driven.json formulas > %t.step.0.json
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.step.0.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=STEP
 // STEP: remark: GEMM not lowered from its record: nest 0 of stepped: a loop of the nest has no constant bounds, a step other than 1, or results
@@ -228,7 +229,7 @@ func.func @stepped(%a: memref<32x12xf32>, %b: memref<12x8xf32>, %c: memref<32x8x
   }
   return
 }
-// scf.for loops: the research proposes no candidate, and the lowering takes affine.for only.
+// scf.for loops: the research verifies the nest, and the lowering takes scf.for as affine.for.
 func.func @scf(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index

@@ -9,6 +9,8 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -528,41 +530,83 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   const json::Object &record = *at.record;
 
   // ---------------------------------------------------------------------------------
-  // The band: a perfect nest of affine.for loops, constant bounds, step 1.
+  // The band: a perfect nest of affine.for or scf.for loops, each with constant bounds, step 1
+  // and no value carried from one iteration to the next. Between two loops, integer and
+  // float constants only (an scf.for's bounds are often defined there); they compute nothing
+  // the GEMM depends on but the bounds, which are read here.
   // ---------------------------------------------------------------------------------
-  SmallVector<affine::AffineForOp, 3> band;
+  // A loop that carries values from one iteration to the next (iter_args of scf.for or
+  // affine.for) holds its reduction in a value, not in memory: refused before the band is
+  // read, since it is why such a nest is no band of the kind below.
+  Operation *carrying = nullptr;
+  anchor->walk([&](LoopLikeOpInterface loop) {
+    if (!carrying && loop->getNumResults() != 0)
+      carrying = loop;
+  });
+  if (carrying)
+    return refuse(std::string("a loop of the nest (") + carrying->getName().getStringRef().str() +
+                  ") carries values from one iteration to the next (iter_args): its reduction is held in a value, "
+                  "not in memory, and the record's lowering takes reductions in memory only");
+  struct BandLoop {
+    Operation *op = nullptr;
+    Value counter;
+    int64_t lower = 0, upper = 0;
+    Block *body = nullptr;
+  };
+  SmallVector<BandLoop, 3> band;
   for (Operation *op = anchor;;) {
-    auto loop = dyn_cast<affine::AffineForOp>(op);
-    if (!loop)
+    BandLoop loop;
+    loop.op = op;
+    if (auto a = dyn_cast<affine::AffineForOp>(op)) {
+      if (!a.hasConstantLowerBound() || !a.hasConstantUpperBound() || a.getStepAsInt() != 1)
+        return refuse("a loop of the nest has no constant bounds, a step other than 1, or results");
+      loop.counter = a.getInductionVar();
+      loop.lower = a.getConstantLowerBound();
+      loop.upper = a.getConstantUpperBound();
+      loop.body = a.getBody();
+    } else if (auto f = dyn_cast<scf::ForOp>(op)) {
+      std::optional<int64_t> lo = getConstantIntValue(f.getLowerBound());
+      std::optional<int64_t> hi = getConstantIntValue(f.getUpperBound());
+      if (!lo || !hi)
+        return refuse("a loop of the nest has a bound that is no constant: the scf.for's bounds are known only "
+                      "at run time");
+      std::optional<int64_t> step = getConstantIntValue(f.getStep());
+      if (!step || *step != 1)
+        return refuse("a loop of the nest has a step other than 1");
+      if (f.getUnsignedCmp() && (*lo < 0 || *hi < 0))
+        return refuse("a loop of the nest compares its bounds unsigned, and a bound is negative");
+      loop.counter = f.getInductionVar();
+      loop.lower = *lo;
+      loop.upper = *hi;
+      loop.body = f.getBody();
+    } else {
       return refuse(std::string("the nest's loop ") + op->getName().getStringRef().str() +
-                    " is no affine.for, the only loop the record's lowering takes");
-    if (!loop.hasConstantLowerBound() || !loop.hasConstantUpperBound() || loop.getStepAsInt() != 1 ||
-        loop.getNumResults() != 0)
-      return refuse("a loop of the nest has no constant bounds, a step other than 1, or results");
+                    " is neither affine.for nor scf.for, the loops the record's lowering takes");
+    }
     band.push_back(loop);
     if (band.size() > 3)
       return refuse("the nest has more than three loops, and the record's GEMM is a box of three");
     Operation *inner = nullptr;
     unsigned nested = 0, others = 0;
-    for (Operation &child : loop.getBody()->without_terminator()) {
+    for (Operation &child : loop.body->without_terminator()) {
       if (isa<LoopLikeOpInterface>(child)) {
         ++nested;
         inner = &child;
-      } else {
+      } else if (!isa<arith::ConstantOp>(child)) {
         ++others;
       }
     }
     if (nested == 0)
       break; // the innermost loop: its body is read below
     if (nested > 1 || others != 0)
-      return refuse("the nest is no perfect band: a loop's body holds more than the next loop");
+      return refuse("the nest is no perfect band: a loop's body holds more than the next loop and constants");
     op = inner;
   }
   if (band.size() != 3)
     return refuse("the nest has " + std::to_string(band.size()) + " loops, and the record's GEMM is a box of three");
   SmallVector<Value, 3> counters;
-  for (affine::AffineForOp loop : band)
-    counters.push_back(loop.getInductionVar());
+  for (const BandLoop &loop : band)
+    counters.push_back(loop.counter);
 
   // ---------------------------------------------------------------------------------
   // The record's levels, axes and extents are the band's loops.
@@ -590,8 +634,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     unsigned a = 0;
     while (a < 3 && *axis != kAxisName[a])
       ++a;
-    if (a == 3 || seen[a] || *descending || *lo != band[l].getConstantLowerBound() ||
-        *hi != band[l].getConstantUpperBound() || *hi <= *lo)
+    if (a == 3 || seen[a] || *descending || *lo != band[l].lower || *hi != band[l].upper || *hi <= *lo)
       return refuse("level " + std::to_string(l) + " of the record is not loop " + std::to_string(l) +
                     " of the nest: axis, direction or bounds differ");
     seen[a] = true;
@@ -620,7 +663,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   // ---------------------------------------------------------------------------------
   // The body: one multiply-accumulate, and index arithmetic.
   // ---------------------------------------------------------------------------------
-  Block *body = band.back().getBody();
+  Block *body = band.back().body;
   SmallVector<Operation *, 3> loads;
   SmallVector<Operation *, 1> stores;
   SmallVector<arith::MulFOp, 1> products;
@@ -1024,7 +1067,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   if (!iterations || *iterations > tableBudget)
     return refuse("the domain has more than " + std::to_string(tableBudget) +
                   " iterations, the most the tables are built for at compile time");
-  Evaluator evaluator(counters, band.front());
+  Evaluator evaluator(counters, band.front().op);
   std::array<const Access *, 4> evaluated = {&access[0], &access[1], &access[2], &*c};
   static const char *const accessName[] = {"the address of A", "the address of B", "the address of C (stored)",
                                            "the address of C (read)"};
@@ -1126,9 +1169,9 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   table[1].assign(extent[2] * extent[1], -1);
   table[2].assign(extent[0] * extent[1], -1);
   std::array<int64_t, 3> point{};
-  for (point[0] = band[0].getConstantLowerBound(); point[0] < band[0].getConstantUpperBound(); ++point[0])
-    for (point[1] = band[1].getConstantLowerBound(); point[1] < band[1].getConstantUpperBound(); ++point[1])
-      for (point[2] = band[2].getConstantLowerBound(); point[2] < band[2].getConstantUpperBound(); ++point[2]) {
+  for (point[0] = band[0].lower; point[0] < band[0].upper; ++point[0])
+    for (point[1] = band[1].lower; point[1] < band[1].upper; ++point[1])
+      for (point[2] = band[2].lower; point[2] < band[2].upper; ++point[2]) {
         std::string failure;
         if (!evaluator.run(point, failure))
           return refuse(failure);

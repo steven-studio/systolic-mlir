@@ -138,6 +138,36 @@ std::vector<Term> Proposer::invariantCandidates(unsigned cut) {
           values[id].size() < 3 && !llvm::is_contained(values[id], value))
         values[id].push_back(value);
     }
+  // A state that no loop carries and that takes one closed value (an entry-block constant
+  // kept in state: an scf.for bound defined before the nest) stands for that value inside
+  // another state's value: a counter that starts at such a bound starts at the constant.
+  // Proposals only: each fact made of them is checked like any other.
+  llvm::DenseMap<unsigned, Term> constantOf;
+  for (unsigned id = 0; id < program.state.size(); ++id)
+    if (!program.state[id].loopCarried && program.state[id].sort.kind == Sort::BV && values[id].size() == 1)
+      constantOf[id] = values[id].front();
+  if (!constantOf.empty())
+    for (const CutPath &path : in.set.paths)
+      for (unsigned id = 0; id < program.state.size(); ++id) {
+        Term value = path.state[id];
+        if (!value || closed(value) || program.state[id].sort.kind != Sort::BV || values[id].size() >= 3 ||
+            readsMemory(value) || containsOp(value, TermOp::Shadow) ||
+            llvm::any_of(stateSupport(value), [&](unsigned other) { return !constantOf.count(other); }))
+          continue; // only a value of such states and constants is rebuilt, so no other term is made
+        Term replaced = nullptr;
+        try {
+          replaced = terms.substitute(value, [&](Term leaf) -> Term {
+            if (leaf->op != TermOp::State)
+              return nullptr;
+            auto found = constantOf.find(leaf->index);
+            return found == constantOf.end() ? nullptr : found->second;
+          });
+        } catch (const TermError &) {
+          continue;
+        }
+        if (closed(replaced) && !llvm::is_contained(values[id], replaced))
+          values[id].push_back(replaced);
+      }
   auto stateTerm = [&](unsigned id) {
     return terms.state(id, program.state[id].sort);
   };

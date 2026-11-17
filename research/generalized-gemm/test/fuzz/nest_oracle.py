@@ -73,6 +73,11 @@ SIZE = 6
 SOLVER = ["--timeout-ms=20000", "--rlimit=2000000", "--max-level=1", "--candidates-per-group=1"]
 ARGUMENTS = "abcde"
 FRESH = "t"  # Root 5 when the function has it.
+# How the products' loops are printed: "affine" (affine.for, affine.load and affine.store) or
+# "scf" (scf.for whose bounds and step are arith.constant values defined before the nest,
+# memref.load and memref.store, each index computed by arith in the loop body). The programs
+# and their meaning are the same either way; fills and copies stay affine.
+LOOPS = "affine"
 ROLES = {"c": "ij", "a": "ik", "b": "kj"}
 
 
@@ -265,6 +270,24 @@ def index_text(view, number):
     return ", ".join(parts)
 
 
+def index_values(view, number, tag, pad, lines):
+    """The indices of a view as SSA values computed by arith (scf.for products), appended to
+    `lines`; the names carry `tag`, one per access, so that two accesses do not clash."""
+    names = []
+    for d, (role, scale, constant) in enumerate(view):
+        value = f"%{role}{number}"
+        if scale != 1:
+            lines.append(f"{pad}%{tag}sc{d}n{number} = arith.constant {scale} : index")
+            lines.append(f"{pad}%{tag}s{d}n{number} = arith.muli {value}, %{tag}sc{d}n{number} : index")
+            value = f"%{tag}s{d}n{number}"
+        if constant:
+            lines.append(f"{pad}%{tag}oc{d}n{number} = arith.constant {constant} : index")
+            lines.append(f"{pad}%{tag}o{d}n{number} = arith.addi {value}, %{tag}oc{d}n{number} : index")
+            value = f"%{tag}o{d}n{number}"
+        names.append(value)
+    return ", ".join(names)
+
+
 def print_function(spec):
     e = spec["element"]
     memref = f"memref<{SIZE}x{SIZE}x{e}>"
@@ -280,19 +303,42 @@ def print_function(spec):
             if statement["zeroed"] or statement["extra"]:
                 value = 0 if statement["zeroed"] else statement["extra"][1]
                 lines.append(f"  %o{number} = arith.constant {constant(value)} : {e}")
+            scf = LOOPS == "scf"
+            if scf:
+                for role in statement["order"]:
+                    low, high = statement["bounds"][role]
+                    lines += [f"  %{role}lo{number} = arith.constant {low} : index",
+                              f"  %{role}hi{number} = arith.constant {high} : index",
+                              f"  %{role}st{number} = arith.constant 1 : index"]
             for depth, role in enumerate(statement["order"]):
                 if depth == 2 and statement["zeroed"]:
-                    lines.append(f"      affine.store %o{number}, %{statement['c']}"
-                                 f"[{index_text(statement['views']['c'], number)}] : {memref}")
+                    if scf:
+                        where = index_values(statement["views"]["c"], number, "zc", "      ", lines)
+                        lines.append(f"      memref.store %o{number}, %{statement['c']}[{where}] : {memref}")
+                    else:
+                        lines.append(f"      affine.store %o{number}, %{statement['c']}"
+                                     f"[{index_text(statement['views']['c'], number)}] : {memref}")
                 low, high = statement["bounds"][role]
-                lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
+                if scf:
+                    lines.append("  " * (depth + 1) + f"scf.for %{role}{number} = %{role}lo{number} to "
+                                 f"%{role}hi{number} step %{role}st{number} {{")
+                else:
+                    lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
             pad = "        "
             if statement["extra"]:
-                lines.append(f"{pad}affine.store %o{number}, %{statement['extra'][0]}"
-                             f"[{index_text(statement['views']['c'], number)}] : {memref}")
+                if scf:
+                    where = index_values(statement["views"]["c"], number, "ec", pad, lines)
+                    lines.append(f"{pad}memref.store %o{number}, %{statement['extra'][0]}[{where}] : {memref}")
+                else:
+                    lines.append(f"{pad}affine.store %o{number}, %{statement['extra'][0]}"
+                                 f"[{index_text(statement['views']['c'], number)}] : {memref}")
             for name, operand in (("x", "a"), ("y", "b"), ("z", "c")):
-                lines.append(f"{pad}%{name}{number} = affine.load %{statement[operand]}"
-                             f"[{index_text(statement['views'][operand], number)}] : {memref}")
+                if scf:
+                    where = index_values(statement["views"][operand], number, name, pad, lines)
+                    lines.append(f"{pad}%{name}{number} = memref.load %{statement[operand]}[{where}] : {memref}")
+                else:
+                    lines.append(f"{pad}%{name}{number} = affine.load %{statement[operand]}"
+                                 f"[{index_text(statement['views'][operand], number)}] : {memref}")
             if is_float(e):
                 lines.append(f"{pad}%m{number} = arith.mulf %x{number}, %y{number} : {e}")
                 operands = f"%z{number}, %m{number}" if statement["first"] else f"%m{number}, %z{number}"
@@ -301,8 +347,12 @@ def print_function(spec):
                 lines.append(f"{pad}%m{number} = arith.muli %x{number}, %y{number} : {e}")
                 operands = f"%z{number}, %m{number}" if statement["first"] else f"%m{number}, %z{number}"
                 lines.append(f"{pad}%s{number} = arith.addi {operands} : {e}")
-            lines.append(f"{pad}affine.store %s{number}, %{statement['c']}"
-                         f"[{index_text(statement['views']['c'], number)}] : {memref}")
+            if LOOPS == "scf":
+                where = index_values(statement["views"]["c"], number, "w", pad, lines)
+                lines.append(f"{pad}memref.store %s{number}, %{statement['c']}[{where}] : {memref}")
+            else:
+                lines.append(f"{pad}affine.store %s{number}, %{statement['c']}"
+                             f"[{index_text(statement['views']['c'], number)}] : {memref}")
             for depth in reversed(range(3)):
                 lines.append("  " * (depth + 1) + "}")
         elif kind == "fill":
@@ -896,7 +946,7 @@ WHOLE_MINIMUM = {
 
 
 def main():
-    global MEMORY
+    global MEMORY, LOOPS
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", required=True)
     parser.add_argument("--domain-driver", default="")
@@ -907,8 +957,11 @@ def main():
     parser.add_argument("--no-minimum", action="store_true")
     parser.add_argument("--memory-limit-gb", type=int, default=MEMORY >> 30)
     parser.add_argument("--print", type=int, default=-1, help="print program N and stop")
+    parser.add_argument("--loops", choices=["affine", "scf"], default="affine",
+                        help="print the products' loops as affine.for or as scf.for")
     args = parser.parse_args()
     MEMORY = args.memory_limit_gb << 30
+    LOOPS = args.loops
     rng = random.Random(args.seed)
     specs = [gen_spec(rng, i) for i in range(args.programs)]
     seeds = [rng.randrange(1 << 30) for _ in specs]
