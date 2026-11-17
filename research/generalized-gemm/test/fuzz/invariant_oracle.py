@@ -98,6 +98,11 @@ class Program:
         """('return', value, poison) | ('arrive', args, poisons) | ('ub',) | ('fuel',)."""
         env = dict(zip(self.params, params))
         poison = {p: False for p in self.params}
+        if block != 0:
+            # Values the entry block defines (constants, pure arithmetic) are in scope
+            # at every later block.
+            for line in self.blocks[0][2]:
+                self.op(line, env, poison)
         name, names, ops, term = self.blocks[block]
         for n, (v, q) in zip(names, args):
             env[n], poison[n] = v, q
@@ -305,6 +310,21 @@ def program_text(width, a, b, c, pre, nsw, early):
     return "\n".join(lines) + "\n"
 
 
+def coupled_text(width, c, nsw):
+    """x += c, y += x (old x): y = y0 + N*x0 + c*N*(N-1)/2."""
+    t = f"i{width}"
+    f = " overflow<nsw>" if nsw else ""
+    return "\n".join([
+        f"func.func @f(%n: {t}, %x0: {t}, %g0: {t}) -> {t} {{",
+        f"  %c0 = arith.constant 0 : {t}", f"  %one = arith.constant 1 : {t}", f"  %cc = arith.constant {c} : {t}",
+        f"  cf.br ^header(%c0, %x0, %g0 : {t}, {t}, {t})",
+        f"^header(%i: {t}, %x: {t}, %g: {t}):",
+        f"  %more = arith.cmpi slt, %i, %n : {t}", "  cf.cond_br %more, ^body, ^done", "^body:",
+        f"  %x1 = arith.addi %x, %cc{f} : {t}", f"  %g1 = arith.addi %g, %x{f} : {t}",
+        f"  %i1 = arith.addi %i, %one{f} : {t}",
+        f"  cf.br ^header(%i1, %x1, %g1 : {t}, {t}, {t})", "^done:", f"  return %g : {t}", "}"]) + "\n"
+
+
 def candidate(a, b, c, pre):
     """g0 + sum over k < N of a * x_k + b, with x_k = x0 + c*k (post) or x0 + c*(k+1) (pre)."""
     if (a, b, c) == (2, 1, 1):
@@ -333,6 +353,22 @@ def cases(seed, count):
                                else candidate(a, b, c, not pre)}[kind]
         out.append(dict(width=width, a=a, b=b, c=c, pre=pre, nsw=nsw, early=early, kind=kind,
                         candidate=text, scope=None if early else f"0:0:{(1 << (width - 1)) - 1}"))
+    # Two coupled variables (M1), and cases with no formula at all (mode B: the formula
+    # is synthesized and then checked here like any other).
+    for k in range(max(4, count // 3)):
+        width = 3 if k % 2 == 0 else 4
+        c = rnd.choice((0, 2))
+        nsw = rnd.random() < 0.3
+        right = f"p2 + p0 * p1 + {c // 2} * p0 * (p0 - 1)"
+        kind = rnd.choice(["right", "wrong-constant", "auto", "auto"])
+        text = {"right": right, "wrong-constant": f"({right}) + 1", "auto": None}[kind]
+        out.append(dict(width=width, a=0, b=0, c=c, pre=False, nsw=nsw, early=False, kind="coupled " + kind,
+                        candidate=text, scope=f"0:0:{(1 << (width - 1)) - 1}", coupled=True))
+    for k in range(max(2, count // 6)):
+        width = 3 if k % 2 == 0 else 4
+        a, b, c = rnd.choice([(1, 0, 0), (2, 1, 0), (1, 1, 2), (3, 0, 0)])
+        out.append(dict(width=width, a=a, b=b, c=c, pre=False, nsw=False, early=False, kind="auto",
+                        candidate=None, scope=f"0:0:{(1 << (width - 1)) - 1}"))
     # Given certificates: the request's (right) and broken ones, at width 3.
     inv = "(0 <=s s0) && (s0 <=s p0) && (s1 == p1 + s0) && (s2 - p2 == s1 * s1 - p1 * p1)"
     for name, text in [("request", inv),
@@ -359,33 +395,51 @@ def scope_points(width, scope, nparams):
 
 
 def header_map(spec, program):
-    """s<id> -> index of the header block argument, from the record's own description."""
+    """s<id> -> ("arg", block, index) for a block argument, or ("const", value) for a
+    constant defined by an arith.constant op, from the record's own description of the
+    variable and this oracle's own reading of the program."""
     out = {}
     for var in spec["variables"]:
+        sid = int(var["name"][1:])
         m = re.fullmatch(r"argument (\d+) of block (\d+)", var["is"])
+        if m:
+            out[sid] = ("arg", int(m.group(2)), int(m.group(1)))
+            continue
+        m = re.fullmatch(r"result of op (\d+) of block (\d+)", var["is"])
         if not m:
             return None
-        out[int(var["name"][1:])] = (int(m.group(2)), int(m.group(1)))
+        ops = program.blocks[int(m.group(2))][2]
+        k = int(m.group(1))
+        c = re.match(r"%\w+ = arith\.constant (-?\d+) : i\d+", ops[k]) if k < len(ops) else None
+        if not c:
+            return None
+        out[sid] = ("const", program.mask(int(c.group(1))))
     return out
 
 
 def brute_force(program, spec, atoms, cand, scope, failures, label, expect):
-    """INV-init, INV-step and INV-exit over every state and parameter, at width 3."""
+    """INV-init, INV-step and INV-exit over every header state and parameter, at width 3."""
     width = program.width
     hm = header_map(spec, program)
     if hm is None:
-        return "skipped: a variable is not a block argument"
-    header = {b for (b, _) in hm.values()}
-    if len(header) != 1:
+        return "skipped: a variable is neither a block argument nor a constant"
+    blocks = {v[1] for v in hm.values() if v[0] == "arg"}
+    if len(blocks) != 1:
         return "skipped"
-    header = header.pop()
-    ids = sorted(hm)
+    header = blocks.pop()
+    arity = len(program.blocks[header][1])
+    args_ids = sorted(i for i, v in hm.items() if v[0] == "arg")
+    if sorted(hm[i][2] for i in args_ids) != list(range(arity)):
+        return "skipped: a header argument is not in the record"
+    consts = {i: v[1] for i, v in hm.items() if v[0] == "const"}
     trees = [parse_term(a) for a in atoms]
     f = parse_term(cand)
     nvals = 1 << width
 
     def inv(state, shadow, params):
-        return all(evaluate(t, width, state, shadow, params) for t in trees)
+        full = {**consts, **state}
+        fullshadow = {**{i: False for i in consts}, **shadow}
+        return all(evaluate(t, width, full, fullshadow, params) for t in trees)
 
     broken = {"INV-init": 0, "INV-step": 0, "INV-exit": 0}
     points = list(scope_points(width, scope, len(program.params)))
@@ -393,22 +447,22 @@ def brute_force(program, spec, atoms, cand, scope, failures, label, expect):
         # INV-init: the state at the first arrival.
         r = program.run_from(0, [], params, 1000, stop_at=header)
         if r[0] == "arrive":
-            state = {i: r[1][hm[i][1]][0] for i in ids}
-            shadow = {i: r[1][hm[i][1]][1] for i in ids}
+            state = {i: r[1][hm[i][2]][0] for i in args_ids}
+            shadow = {i: r[1][hm[i][2]][1] for i in args_ids}
             if not inv(state, shadow, params):
                 broken["INV-init"] += 1
-        for values in itertools.product(range(nvals), repeat=len(ids)):
-            state = dict(zip(ids, values))
-            shadow = {i: False for i in ids}
+        for values in itertools.product(range(nvals), repeat=len(args_ids)):
+            state = dict(zip(args_ids, values))
+            shadow = {i: False for i in args_ids}
             if not inv(state, shadow, params):
                 continue
-            args = [None] * len(ids)
-            for i in ids:
-                args[hm[i][1]] = (state[i], False)
+            args = [None] * arity
+            for i in args_ids:
+                args[hm[i][2]] = (state[i], False)
             r = program.run_from(header, args, params, 1000, stop_at=header)
             if r[0] == "arrive":
-                nstate = {i: r[1][hm[i][1]][0] for i in ids}
-                nshadow = {i: r[1][hm[i][1]][1] for i in ids}
+                nstate = {i: r[1][hm[i][2]][0] for i in args_ids}
+                nshadow = {i: r[1][hm[i][2]][1] for i in args_ids}
                 if not inv(nstate, nshadow, params):
                     broken["INV-step"] += 1
             elif r[0] == "return":
@@ -421,19 +475,24 @@ def brute_force(program, spec, atoms, cand, scope, failures, label, expect):
 
 def check(driver, case, failures, stats, keep):
     width = case["width"]
-    text = program_text(width, case["a"], case["b"], case["c"], case["pre"], case["nsw"], case["early"])
+    if case.get("coupled"):
+        text = coupled_text(width, case["c"], case["nsw"])
+    else:
+        text = program_text(width, case["a"], case["b"], case["c"], case["pre"], case["nsw"], case["early"])
     program = Program(text, width)
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "loop.mlir"
         path.write_text(text)
-        command = [driver, str(path), "--loop-invariants", f"--loop-function=0:{case['candidate']}",
-                   "--timeout-ms=20000"]
+        command = [driver, str(path), "--loop-invariants", "--timeout-ms=20000"]
+        if case["candidate"] is not None:
+            command.append(f"--loop-function=0:{case['candidate']}")
         if case["scope"]:
             command.append(f"--scope={case['scope']}")
         if case.get("invariant"):
             command.append(f"--loop-invariant={case['invariant']}")
         done = subprocess.run(command, capture_output=True, text=True, timeout=1800)
     label = f"{case['kind']} w{width} a{case['a']} b{case['b']} c{case['c']}" + \
+            (" coupled" if case.get("coupled") else "") + \
             (" pre" if case["pre"] else "") + (" nsw" if case["nsw"] else "") + (" early" if case["early"] else "")
     if done.returncode:
         failures.append(f"FAIL {label}: the report exited {done.returncode}: {done.stderr[-300:]}")
@@ -441,7 +500,19 @@ def check(driver, case, failures, stats, keep):
     record = json.loads(done.stdout)[0]["loop_invariant"]
     status = record["status"]
     stats[status] = stats.get(status, 0) + 1
-    f = parse_term(case["candidate"])
+    formula = case["candidate"]
+    if formula is None:
+        # Mode B: the formula the report synthesized, when it has one.
+        results = record.get("function", {}).get("results", [])
+        if not results:
+            keep.append(dict(label=label, status=status, truth="no formula"))
+            if status in ("PROVED_BY_INVARIANT", "REFUTED"):
+                failures.append(f"FAIL {label}: {status} without a formula")
+            return
+        formula = results[0]["candidate"]
+        stats["synthesized formulas"] = stats.get("synthesized formulas", 0) + 1
+    case = dict(case, candidate=formula)
+    f = parse_term(formula)
     # The truth, by running every input of the scope.
     runs, mismatch, returns_all, poisoned = 0, None, True, False
     for params in scope_points(width, case["scope"], 3):

@@ -921,6 +921,8 @@ checker's or a run's.
    still proves, and still excludes poison where it did) and checked once more. A
    confirmed run: F refuted. Otherwise the next level; after the last, `UNKNOWN`, which
    says nothing about invariants outside the template.
+   Since M1 (§13.9) the null-space levels (degree 1, then 2) run first and these
+   term-collision levels after them; `--loop-invariant-candidates` selects one source.
 6. Without a given F, the closed-form grammar over the parameters and their monomials
    (size ≤ 5) proposes one from the sampled results; a refuting run's parameters join
    the samples and the next F is sought (up to 4 rounds).
@@ -952,7 +954,9 @@ claimed to be absent; only the program's loop is not unrolled.
 
 CLI: `--loop-invariants` on the synthesis report, with `--loop-function=j:term`,
 `--loop-invariant=conjunction` (check instead of search), `--loop-invariant-scripts`,
-`--loop-invariant-levels`. Without `--loop-invariants` the output is unchanged.
+`--loop-invariant-levels`, and since M1 `--loop-invariant-degrees=d[,d...]` and
+`--loop-invariant-candidates=both|nullspace|collisions`. Without `--loop-invariants` the
+output is unchanged.
 
 ### 13.6 Results (2026-11-17, g++ 15.2, CMake 4.2.3, Z3 4.13.3)
 
@@ -1005,3 +1009,99 @@ checks.
   are excluded only when INV-poison says so.
 - Not run on this version: the earlier synthesis, computation and domain mutation
   catalogues and the other unit sections, which this change does not touch.
+
+### 13.8 M0: a fixed baseline with public benchmarks (2026-11-17)
+
+Scripts, programs and results live outside the repository, in
+`~/work/semgus-invariant-validation/coverage` (`catalogue.py`, `nla.py`,
+`m0-baseline.jsonl`, `m1.jsonl`, `m0-vs-m1.txt`, `degree3.txt`); the baseline binary is
+a8d8910 built with the same tools (`baseline-m0/`).
+
+The catalogue holds the 17 earlier loops plus 8 programs translated from SV-COMP
+`c/nla-digbench` (sosy-lab/sv-benchmarks, `master`): ps2, ps3, cohencu, mannadiv,
+prodbin, sqrt1, geo1, divbin. The translation is by hand and follows fixed rules: C `int`
+becomes i32 with wrapping operations (no nsw), each nondeterministic input becomes a
+parameter, each `assume` becomes the `--scope`, and the function returns the variable
+the benchmark's postcondition names. The SV-COMP property (a reachability assertion
+over mathematical integers) is therefore not what is checked here; what is checked is
+that the returned bits equal a formula modulo 2^32.
+
+Each loop runs three ways: A, with a formula written by hand (the formula is an input,
+not a result); B, with nothing given (the closed-form grammar proposes the formula, the
+search proposes the invariant); C, with wrong formulas. They are counted apart, and a
+proof under A is never counted as automatic synthesis:
+
+| Bucket | M0 (a8d8910) | M1 |
+| --- | --- | --- |
+| formula and invariant both found (B `PROVED_BY_INVARIANT`) | 8: step_const, step_param, step_precomputed, countdown, unsigned_guard, sum_of_i, branch_same, nla_prodbin | the same 8 |
+| formula given by hand, invariant found (A proved, B not) | 2: odd_sum, nsw_odd_sum | 3: odd_sum, nsw_odd_sum, **two_vars** |
+| neither: UNKNOWN, SAMPLE_CONSISTENT (tests only) or UNSUPPORTED | 15 | 14 |
+| wrong formulas (C) refuted by a confirmed run | 24 of 24 | 24 of 24 |
+
+### 13.9 M1: null-space equality candidates
+
+`nullSpaceEqualities` (`InvariantSynthesis.h`) reads each sampled header state as a row:
+the values of the monomials of degree ≤ d over the header variables and the parameters,
+each value read as a signed integer and multiplied exactly (`llvm::DynamicAPInt`). A
+variable that holds one constant at every sample is folded: it gets the atom `v == c`
+and leaves the matrix. Fraction-free Gauss–Jordan elimination over Q gives a basis of
+the null space, one vector per free column, scaled to coprime integers; each becomes the
+bit-vector atom `(positive part) == (negative part)` at the variables' width, with the
+free column last so that the checker's elimination can solve for it. A vector with a
+coefficient of magnitude ≥ 2^(w−1) is skipped and counted. At most 128 columns.
+
+The same samples answer differently over Z/2^w: a relation over Q read modulo 2^w still
+holds at the samples, but is only a candidate. Nothing about the null space is used as
+evidence. The atoms enter Houdini like any other, and the checker's INV-init,
+INV-step, INV-exit, RET-bypass and poison obligations are unchanged. An INV-init model
+is an initial state the samples missed: its parameters (re-asked with every parameter
+in [−64, 64] when the model's are large, so that the run does not wrap) become a new
+sampled run, the falsified atoms are excluded for good, and the level is offered again
+(at most 8 times; Sharma et al., Theorem 3). Nothing here covers every invariant modulo
+2^w: one with an even coefficient, or one that holds only because values wrap, is
+outside it.
+
+Measured (Release, Z3 4.13.3):
+
+- two_vars (`x += 2; y += x`), which neither level of the old template proved: degree 2,
+  28 columns, 254 rows, rank 20, basis 8, 2 folded; proved with 27 atoms in about 5 s.
+- Degree 3, with the formula given, against degrees 1 and 2 (`degree3.txt`): two_vars
+  4.7 s either way; cubic 0.3 s → 15 s; nla_ps3 0.2 s → 18 s; nla_cohencu 57 s, 375 MB
+  → 495 s, 2.3 GB, 56 columns, basis 34. None of the three is proved at degree 3, so
+  degree 3 is not in the default; `--loop-invariant-degrees=1,2,3` asks for it.
+- A regression the catalogue found and the unit section now checks: capping each
+  refinement run at 64 states first skipped a run altogether once the 512-state budget
+  was full, and the function CEGIS then refit without the refuting run's return
+  (unsigned_guard, mode B, ended `REFUTED` on a wrong synthesized formula). Every added
+  point is now run; only its states are capped.
+
+What stops the rest, case by case (M1):
+
+- Formula search (B: "no term of the grammar returns result 0 at every sampled run"):
+  init_param, stride3, odd_sum, nsw_odd_sum, two_vars, scaled_sum, cubic, branch_param,
+  branch_min, doubling, nla_ps3, nla_cohencu, nla_mannadiv, nla_sqrt1, nla_geo1. The
+  closed-form grammar (size ≤ 5) has no such term; M1 does not change it.
+- Invariant search, formula given (A: an INV-exit model no run confirms, so the
+  invariant found is too weak): init_param, stride3, branch_min, nla_ps3 (needs degree 3
+  and a division by 6), nla_cohencu (degree 3 offered 34 equalities and still did not
+  prove; not analyzed further), nla_mannadiv (needs a quotient and remainder relation).
+- Solver: nla_ps2, whose invariant `2·s2 = s0² + s0` is offered at degree 2, but
+  INV-step is not decided (rlimit 20M: canceled; without the limit, 120 s per query: a
+  timeout). The even coefficient means it cannot be eliminated. branch_param: INV-exit
+  canceled.
+- Formula: scaled_sum's hand-written formula is wrong modulo 2^32 and stays `REFUTED`
+  by a run.
+- Shape: nla_divbin has two loops, `UNSUPPORTED`.
+
+Validation: unit sections `invariants` and `nullspace` 144 checks, 0 failures (129 s,
+846 MB); lit `synth_invariants.mlir` passes; `invariant_oracle.py`, extended with
+two-variable loops and formula-free cases, 40 cases, 0 problems, on both a8d8910 and M1.
+ctest `generalized-gemm-invariant-programs` passes. Mutation (Debug, `--unit-only`): 4 of 4
+new mutants (constant column dropped, folded atom dropped, sign of a basis entry lost,
+INV-init models never run) killed by failing checks in the `nullspace` section, and the
+two search mutants whose code M1 touched (Houdini keeps falsified atoms, sampled runs
+refute nothing) killed again by the `invariants` section. Sanitizer (Debug,
+ASan+UBSan): `nullspace invariants` 142 checks, 0 failures, no report (80 min, 2.1 GB)
+before the regression fix; `nullspace` again after it, 35 checks, 0 failures, no
+report (33 min, 1.9 GB). Not rerun: the other unit sections and the earlier mutation
+catalogues, which this change does not touch.

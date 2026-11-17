@@ -13,7 +13,7 @@
 // The search's certificate: N symbolic, no iteration run by the proof, the claim joined
 // with the G2a termination proof.
 // SEARCH: "certificate": {
-// SEARCH: "origin": "search: Houdini over the template
+// SEARCH: "origin": "search: Houdini over the null space of the sample matrix
 // SEARCH: "claim": "total correctness over the scope: every run returns, and returns the candidate's value modulo 2^32
 // SEARCH: "counterexample": null
 // SEARCH: "poison": "excluded"

@@ -74,6 +74,12 @@ static cl::opt<std::string> loopInvariant(
 static cl::opt<bool> loopInvariantScripts(
     "loop-invariant-scripts", cl::init(false),
     cl::desc("print every obligation's complete SMT-LIB script"));
+static cl::opt<std::string> loopDegrees(
+    "loop-invariant-degrees", cl::init(""),
+    cl::desc("d[,d...]: monomial degrees of the null-space candidates (default 1,2)"));
+static cl::opt<std::string> loopCandidates(
+    "loop-invariant-candidates", cl::init("both"),
+    cl::desc("both | nullspace | collisions: where equality candidates come from"));
 static cl::opt<std::string> loopLevels(
     "loop-invariant-levels", cl::init(""),
     cl::desc("degree:size[,degree:size...]: the template's levels (default 1:5,2:3,2:5)"));
@@ -192,6 +198,24 @@ int main(int argc, char **argv) {
       search.check.scope = options.scope;
       search.check.solver = termination.limits.solver;
       search.check.scripts = loopInvariantScripts;
+      if (loopCandidates != "both" && loopCandidates != "nullspace" && loopCandidates != "collisions") {
+        llvm::errs() << "malformed --loop-invariant-candidates\n";
+        return 2;
+      }
+      search.equalityCandidates = loopCandidates;
+      if (!loopDegrees.empty()) {
+        search.nullSpaceDegrees.clear();
+        llvm::SmallVector<llvm::StringRef> items;
+        llvm::StringRef(loopDegrees).split(items, ',');
+        for (llvm::StringRef item : items) {
+          unsigned degree;
+          if (item.getAsInteger(10, degree) || !degree || degree > 4) {
+            llvm::errs() << "malformed --loop-invariant-degrees\n";
+            return 2;
+          }
+          search.nullSpaceDegrees.push_back(degree);
+        }
+      }
       if (!loopLevels.empty()) {
         search.levels.clear();
         llvm::SmallVector<llvm::StringRef> items;

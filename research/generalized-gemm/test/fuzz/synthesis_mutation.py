@@ -182,6 +182,11 @@ MUTANTS = [
     ("poison excluded without a query", P, "    if (response.answer != SmtAnswer::Unsat) {\n      excluded = false;", "    if (false) {\n      excluded = false;"),
     ("Houdini keeps falsified atoms", Q, "        if (!drop.count(k))\n          kept.push_back(atoms[k]);", "        kept.push_back(atoms[k]);"),
     ("sampled runs refute nothing", Q, "      if (refuteOnSamples(out.function)) {", "      if (false) {"),
+    # M1: null-space candidates. Killed by the `nullspace` section.
+    ("null space without the constant column", Q, "    std::vector<std::vector<size_t>> monomials{{}};", "    std::vector<std::vector<size_t>> monomials;"),
+    ("folded variables lose their atom", Q, "    atoms.push_back(terms.icmp(Predicate::Eq, terms.state(v, program.state[v].sort),\n                               terms.bv(rows.front()[i])));", "    (void)v;"),
+    ("null-space sign lost", Q, "          add(negative, scaled(k, -x[k]));", "          add(positive, scaled(k, -x[k]));"),
+    ("INV-init models never become runs", Q, '      if (nullSpace && result.falsifiedBy == "INV-init" && !result.initialParameters.empty() &&', '      if (false && result.falsifiedBy == "INV-init" && !result.initialParameters.empty() &&'),
 ]
 
 # Changes that no test can see, and why. Not run: a survivor here would mean nothing.

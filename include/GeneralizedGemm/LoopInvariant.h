@@ -134,6 +134,9 @@ struct CheckedLoopInvariant {
   // Atoms whose own obligation the solver did not decide (unknown or a limit), when
   // the conjunction was split atom by atom: not refuted, not proved.
   std::vector<unsigned> undecided;
+  // For an INV-init model: its parameters (an initial state, so a reachable one). A
+  // proposer may run the program from them for more data; it proves nothing.
+  std::vector<llvm::APInt> initialParameters;
   LoopFunctionVerdict function = LoopFunctionVerdict::Unknown;
   std::string functionReason;
   std::optional<LoopCounterexample> counterexample; // Only for Refuted.

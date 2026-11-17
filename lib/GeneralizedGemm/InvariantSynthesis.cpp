@@ -3,10 +3,13 @@
 #include "GeneralizedGemm/TerminationObligations.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/DynamicAPInt.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/JSON.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <functional>
 #include <map>
@@ -156,6 +159,8 @@ private:
   bool refuteOnSamples(const LoopFunction &function);
   std::optional<LoopFunction> synthesizeFunction(std::string &why);
   void addPoint(const std::vector<APInt> &point);
+  std::vector<APInt> smallInitialState(const std::vector<Term> &atoms,
+                                       const std::vector<APInt> &model);
   std::vector<Term> equalities(unsigned degree, unsigned size);
   std::vector<Term> bounds();
   std::vector<Term> poisonAtoms();
@@ -184,7 +189,15 @@ void Search::sample() {
 
 void Search::addPoint(const std::vector<APInt> &point) {
   points.push_back(point);
-  LoopSamples more = sampleLoop(program, out.loop, {point}, options.sampleRun, options.maxSamples);
+  // One run adds at most 64 states, so a long run (a model with a large bound) cannot
+  // take the whole sample budget and starve the next refinement. The run itself always
+  // happens (sampleLoop skips a point when its cap is 0): its return value is what the
+  // function CEGIS refits to, whether or not the state budget has room left.
+  size_t room = options.maxSamples > out.samples.states.size()
+                    ? std::min<size_t>(64, options.maxSamples - out.samples.states.size())
+                    : 0;
+  room = std::max<size_t>(room, 1);
+  LoopSamples more = sampleLoop(program, out.loop, {point}, options.sampleRun, room);
   for (auto &row : more.states)
     if (out.samples.states.size() < options.maxSamples)
       out.samples.states.push_back(row);
@@ -198,6 +211,54 @@ void Search::addPoint(const std::vector<APInt> &point) {
   out.samples.arrivals += more.arrivals;
   out.samples.maxArrivals = std::max(out.samples.maxArrivals, more.maxArrivals);
   ++out.samplePoints;
+}
+
+/// The null space is taken over Q, so its rows must be states of runs that did not
+/// wrap. A solver's INV-init model may have any parameters; when one is large, ask (as a
+/// proposer: the answer is data, not a verdict) for an initial state that falsifies the
+/// same conjunction with every parameter in [-64, 64]. Nothing found: the model as it is.
+std::vector<APInt> Search::smallInitialState(const std::vector<Term> &atoms,
+                                             const std::vector<APInt> &model) {
+  bool small = true;
+  for (const APInt &v : model)
+    small = small && v.getSignificantBits() <= 7;
+  if (small)
+    return model;
+  std::string why;
+  Term scope = scopeFormula(program, options.check.scope, why);
+  if (!scope)
+    return model;
+  Term inv = terms.boolean(true);
+  for (Term atom : atoms)
+    inv = terms.logicalAnd(inv, atom);
+  Term bounded = terms.boolean(true);
+  for (const Parameter &p : program.parameters) {
+    unsigned w = p.sort.width;
+    if (w < 8)
+      continue;
+    Term v = terms.param(p.id, p.sort);
+    bounded = terms.logicalAnd(bounded,
+                               terms.logicalAnd(terms.icmp(Predicate::Sge, v, terms.bv(APInt(w, -64, true))),
+                                                terms.icmp(Predicate::Sle, v, terms.bv(APInt(w, 64, true)))));
+  }
+  for (unsigned id : out.loop.entry) {
+    const CutPath &path = out.loop.set.paths[id];
+    Term formula = terms.logicalAnd(invariantViolation(program, scope, path, terms.boolean(true), inv), bounded);
+    SmtResponse response = backend.check(obligationScript("proposal: small initial state", formula),
+                                         options.check.solver, /*wantModel=*/true);
+    ++out.queries;
+    if (response.answer != SmtAnswer::Sat)
+      continue;
+    std::vector<APInt> parameters;
+    for (const Parameter &p : program.parameters) {
+      auto value = response.model.find("p" + std::to_string(p.id));
+      parameters.push_back(value == response.model.end() ? APInt::getZero(p.sort.width)
+                                                         : APInt(p.sort.width, value->second, 10));
+    }
+    if (parametersInScope(options.check.scope, parameters))
+      return parameters;
+  }
+  return model;
 }
 
 /// A sampled run that returns another value refutes the candidate: it is a run of
@@ -485,26 +546,78 @@ CheckedLoopInvariant Search::check(const std::vector<Term> &atoms, const LoopFun
 }
 
 /// Houdini over the template's levels; minimization of a proof; the final check.
+/// Houdini over the template's levels; minimization of a proof; the final check.
+/// Null-space levels also turn INV-init models into new sampled runs (an initial state
+/// is reachable, so its run is data; Sharma et al., Section 4, Theorem 3) and offer the
+/// recomputed candidates again. An INV-step model is only an implication pair (ICE,
+/// Section 1): it drops atoms and never becomes data.
 bool Search::searchCertificate(const LoopFunction &function) {
-  std::vector<Term> bound = bounds(), poison = poisonAtoms();
-  std::vector<Term> equalitySoFar;
+  // "nullspace": the null-space levels; "collisions": the term-collision levels; "both"
+  // (the default): the null-space levels, then the collision levels. The null space is
+  // taken over Q from runs that did not wrap; at small widths most runs wrap, and the
+  // collision template, which works modulo 2^w, still finds what the null space cannot.
+  struct Level {
+    unsigned degree, size;
+    bool nullSpace;
+  };
+  std::vector<Level> plan;
+  if (options.equalityCandidates != "collisions")
+    for (unsigned degree : options.nullSpaceDegrees)
+      plan.push_back({degree, 0, true});
+  if (options.equalityCandidates != "nullspace")
+    for (auto [degree, size] : options.levels)
+      plan.push_back({degree, size, false});
+  std::vector<Term> equalitySoFar; // The collision template accumulates its levels.
   DenseSet<Term> known;
   CheckedLoopInvariant last;
   std::vector<Term> lastAtoms;
-  for (auto [degree, size] : options.levels) {
+  for (const Level &step : plan) {
+    bool nullSpace = step.nullSpace;
     InvariantSearchLevel level;
-    level.degree = degree;
-    level.size = size;
-    for (Term atom : equalities(degree, size))
-      if (known.insert(atom).second)
-        equalitySoFar.push_back(atom);
-    level.equalities = equalitySoFar.size();
-    level.bounds = bound.size();
-    level.poison = poison.size();
-    std::vector<Term> atoms = bound;
-    atoms.insert(atoms.end(), equalitySoFar.begin(), equalitySoFar.end());
-    atoms.insert(atoms.end(), poison.begin(), poison.end());
-    level.offered = atoms.size();
+    level.method = nullSpace ? "nullspace" : "collisions";
+    level.degree = step.degree;
+    level.size = step.size;
+    auto offer = [&]() {
+      std::vector<Term> equalities;
+      if (nullSpace) {
+        NullSpaceStats stats;
+        equalities = nullSpaceEqualities(program, out.loop, out.samples.states, step.degree,
+                                         options.maxColumns, stats);
+        if (equalities.size() > options.maxEqualities)
+          equalities.resize(options.maxEqualities);
+        level.columns = stats.columns;
+        level.rows = stats.rows;
+        level.rank = stats.rank;
+        level.basis = stats.basis;
+        level.skipped = stats.skipped;
+        level.folded = stats.folded;
+      } else {
+        for (Term atom : this->equalities(step.degree, step.size))
+          if (known.insert(atom).second)
+            equalitySoFar.push_back(atom);
+        equalities = equalitySoFar;
+      }
+      std::vector<Term> bound = bounds(), poison = poisonAtoms();
+      level.equalities = equalities.size();
+      level.bounds = bound.size();
+      level.poison = poison.size();
+      std::vector<Term> atoms = bound;
+      atoms.insert(atoms.end(), equalities.begin(), equalities.end());
+      atoms.insert(atoms.end(), poison.begin(), poison.end());
+      level.offered = atoms.size();
+      return atoms;
+    };
+    // Atoms an INV-init model falsified are false at a reachable state: never offered
+    // again, whatever the samples say.
+    DenseSet<Term> refuted;
+    auto fresh = [&](std::vector<Term> atoms) {
+      std::vector<Term> kept;
+      for (Term atom : atoms)
+        if (!refuted.count(atom))
+          kept.push_back(atom);
+      return kept;
+    };
+    std::vector<Term> atoms = offer();
     CheckedLoopInvariant result;
     for (unsigned round = 0;; ++round) {
       if (round >= options.maxHoudiniChecks) {
@@ -513,8 +626,29 @@ bool Search::searchCertificate(const LoopFunction &function) {
       }
       result = check(atoms, function, /*final=*/false);
       ++level.checks;
+      if (getenv("GG_DEBUG_INVARIANTS")) {
+        fprintf(stderr, "[degree %u round %u] %s by %s:", step.degree, round,
+                stringifyInvariantVerdict(result.invariant), result.falsifiedBy.c_str());
+        for (unsigned k : result.falsified)
+          fprintf(stderr, " drop %s;", formatLoopTerm(atoms[k]).c_str());
+        fprintf(stderr, "\n");
+        if (round == 0)
+          for (Term atom : atoms)
+            fprintf(stderr, "  offered %s\n", formatLoopTerm(atom).c_str());
+      }
       if (result.invariant == InvariantVerdict::Inductive)
         break;
+      if (nullSpace && result.falsifiedBy == "INV-init" && !result.initialParameters.empty() &&
+          level.refinements < options.maxRefinements) {
+        // The model is an initial state the samples missed: run from it, and offer
+        // the candidates the larger sample supports.
+        ++level.refinements;
+        for (unsigned k : result.falsified)
+          refuted.insert(atoms[k]);
+        addPoint(smallInitialState(atoms, result.initialParameters));
+        atoms = fresh(offer());
+        continue;
+      }
       std::set<unsigned> drop(result.falsified.begin(), result.falsified.end());
       drop.insert(result.undecided.begin(), result.undecided.end());
       if (drop.empty()) {
@@ -545,10 +679,11 @@ bool Search::searchCertificate(const LoopFunction &function) {
       if (options.minimize)
         minimize(atoms, function, result.poison);
       CheckedLoopInvariant proof = check(atoms, function, /*final=*/true);
-      out.certificate = InvariantCertificate{atoms, "search: Houdini over the template, level degree " +
-                                                        std::to_string(degree) + " size " +
-                                                        std::to_string(size) +
-                                                        (options.minimize ? ", minimized" : "")};
+      std::string where = nullSpace ? "null space of the sample matrix, degree " + std::to_string(step.degree)
+                                    : "term-collision template, degree " + std::to_string(step.degree) +
+                                          " size " + std::to_string(step.size);
+      out.certificate = InvariantCertificate{
+          atoms, "search: Houdini over the " + where + (options.minimize ? ", minimized" : "")};
       out.check = proof;
       return proof.function == LoopFunctionVerdict::Proved;
     }
@@ -719,6 +854,213 @@ json::Value counterexampleJSON(const LoopCounterexample &cex) {
 
 } // namespace
 
+std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const InvariantLoop &loop,
+                                      ArrayRef<std::vector<APInt>> rows, unsigned degree,
+                                      size_t maxColumns, NullSpaceStats &stats) {
+  using Big = DynamicAPInt;
+  TermContext &terms = *program.terms;
+  std::vector<Term> atoms;
+  stats = NullSpaceStats();
+  if (rows.empty())
+    return atoms;
+  size_t nv = loop.variables.size();
+  // Folding: a header variable with one value at every row is that constant. Its atom
+  // goes to the checker like any other; the variable leaves the monomials, where it
+  // would only add multiples of the same fact.
+  std::vector<bool> folded(nv, false);
+  for (size_t i = 0; i < nv; ++i) {
+    bool same = true;
+    for (const auto &row : rows)
+      same = same && row[i] == rows.front()[i];
+    if (!same)
+      continue;
+    folded[i] = true;
+    ++stats.folded;
+    unsigned v = loop.variables[i];
+    atoms.push_back(terms.icmp(Predicate::Eq, terms.state(v, program.state[v].sort),
+                               terms.bv(rows.front()[i])));
+  }
+  // Leaves per width: parameters first, then the unfolded header variables, so that a
+  // variable the others determine is a late (free) column and its basis vector reads
+  // "variable = combination of earlier columns".
+  struct Leaf {
+    Term term;
+    size_t column;
+    bool state;
+  };
+  std::map<unsigned, std::vector<Leaf>> byWidth;
+  for (size_t j = 0; j < loop.parameters.size(); ++j) {
+    const Parameter &p = program.parameters[loop.parameters[j]];
+    if (p.sort.width <= 64)
+      byWidth[p.sort.width].push_back({terms.param(p.id, p.sort), 2 * nv + j, false});
+  }
+  for (size_t i = 0; i < nv; ++i) {
+    unsigned v = loop.variables[i];
+    if (!folded[i] && program.state[v].sort.width <= 64)
+      byWidth[program.state[v].sort.width].push_back(
+          {terms.state(v, program.state[v].sort), i, true});
+  }
+  for (auto &[width, leaves] : byWidth) {
+    // Monomials of degree 0..degree as non-decreasing index tuples; the ones with only
+    // parameters first, then those that read a header variable, the linear header
+    // variables last.
+    std::vector<std::vector<size_t>> monomials{{}};
+    std::function<void(std::vector<size_t> &, size_t, unsigned)> grow =
+        [&](std::vector<size_t> &tuple, size_t from, unsigned left) {
+          if (!tuple.empty())
+            monomials.push_back(tuple);
+          if (!left)
+            return;
+          for (size_t k = from; k < leaves.size(); ++k) {
+            tuple.push_back(k);
+            grow(tuple, k, left - 1);
+            tuple.pop_back();
+          }
+        };
+    std::vector<size_t> tuple;
+    grow(tuple, 0, degree);
+    auto readsState = [&](const std::vector<size_t> &m) {
+      for (size_t k : m)
+        if (leaves[k].state)
+          return true;
+      return false;
+    };
+    auto linearState = [&](const std::vector<size_t> &m) {
+      return m.size() == 1 && leaves[m[0]].state;
+    };
+    std::stable_sort(monomials.begin(), monomials.end(), [&](const auto &a, const auto &b) {
+      auto key = [&](const std::vector<size_t> &m) { return linearState(m) ? 2 : readsState(m) ? 1 : 0; };
+      return key(a) < key(b);
+    });
+    size_t columns = monomials.size();
+    stats.columns += columns;
+    if (columns > maxColumns)
+      continue; // Too many monomials for this level: nothing offered, and the level says so.
+    // The rows of the matrix, each value read as a signed integer, products exact.
+    std::set<std::vector<Big>> distinct;
+    for (const auto &row : rows) {
+      std::vector<Big> line;
+      line.reserve(columns);
+      for (const auto &m : monomials) {
+        Big value(1);
+        for (size_t k : m)
+          value *= Big(row[leaves[k].column]);
+        line.push_back(value);
+      }
+      distinct.insert(std::move(line));
+    }
+    stats.rows += distinct.size();
+    // Fraction-free Gauss-Jordan elimination, rows kept primitive (gcd 1).
+    auto primitive = [](std::vector<Big> &v) {
+      Big g(0);
+      for (const Big &x : v)
+        g = gcd(g, abs(x));
+      if (g > Big(1))
+        for (Big &x : v)
+          x /= g;
+    };
+    std::vector<std::vector<Big>> echelon;
+    std::vector<size_t> pivots;
+    for (std::vector<Big> line : distinct) {
+      for (size_t r = 0; r < echelon.size(); ++r) {
+        size_t c = pivots[r];
+        if (line[c] == Big(0))
+          continue;
+        Big a = echelon[r][c], b = line[c];
+        for (size_t k = 0; k < columns; ++k)
+          line[k] = line[k] * a - echelon[r][k] * b;
+        primitive(line);
+      }
+      size_t lead = 0;
+      while (lead < columns && line[lead] == Big(0))
+        ++lead;
+      if (lead == columns)
+        continue;
+      // Clear the new pivot column from the rows above.
+      for (size_t r = 0; r < echelon.size(); ++r) {
+        if (echelon[r][lead] == Big(0))
+          continue;
+        Big a = line[lead], b = echelon[r][lead];
+        for (size_t k = 0; k < columns; ++k)
+          echelon[r][k] = echelon[r][k] * a - line[k] * b;
+        primitive(echelon[r]);
+      }
+      primitive(line);
+      echelon.push_back(std::move(line));
+      pivots.push_back(lead);
+    }
+    stats.rank += echelon.size();
+    // One basis vector of the null space per free column f: x_f = L and, for each row
+    // r with pivot p, x_p = -A[r][f] * L / A[r][p], with L a common multiple of the pivots.
+    std::vector<bool> isPivot(columns, false);
+    for (size_t c : pivots)
+      isPivot[c] = true;
+    Big limit(int64_t(1));
+    for (unsigned b = 0; b + 1 < width; ++b)
+      limit *= Big(2);
+    for (size_t f = 0; f < columns; ++f) {
+      if (isPivot[f])
+        continue;
+      Big L(1);
+      for (size_t r = 0; r < echelon.size(); ++r)
+        if (echelon[r][f] != Big(0))
+          L = lcm(L, abs(echelon[r][pivots[r]]));
+      std::vector<Big> x(columns, Big(0));
+      x[f] = L;
+      for (size_t r = 0; r < echelon.size(); ++r)
+        if (echelon[r][f] != Big(0))
+          x[pivots[r]] = -(echelon[r][f] * (L / echelon[r][pivots[r]]));
+      primitive(x);
+      if (x[f] < Big(0))
+        for (Big &v : x)
+          v = -v;
+      ++stats.basis;
+      bool fits = true;
+      for (const Big &c : x)
+        fits = fits && abs(c) < limit;
+      if (!fits) {
+        ++stats.skipped;
+        continue;
+      }
+      // sum(c_k * m_k) = 0 as  (positive part) == (negative part), with the free
+      // column last on its side when it is a header variable with coefficient 1, so
+      // the checker can solve the atom for it.
+      auto monomialTerm = [&](size_t k) -> Term {
+        if (monomials[k].empty())
+          return nullptr;
+        Term t = leaves[monomials[k][0]].term;
+        for (size_t i = 1; i < monomials[k].size(); ++i)
+          t = terms.binary(TermOp::Mul, t, leaves[monomials[k][i]].term);
+        return t;
+      };
+      auto scaled = [&](size_t k, const Big &magnitude) -> Term {
+        APInt value(width, int64_t(magnitude), /*isSigned=*/true);
+        Term m = monomialTerm(k);
+        if (!m)
+          return terms.bv(value);
+        if (magnitude == Big(1))
+          return m;
+        return terms.binary(TermOp::Mul, terms.bv(value), m);
+      };
+      Term positive = nullptr, negative = nullptr;
+      auto add = [&](Term &side, Term t) { side = side ? terms.binary(TermOp::Add, side, t) : t; };
+      for (size_t k = 0; k < columns; ++k) {
+        if (k == f || x[k] == Big(0))
+          continue;
+        if (x[k] > Big(0))
+          add(positive, scaled(k, x[k]));
+        else
+          add(negative, scaled(k, -x[k]));
+      }
+      add(positive, scaled(f, x[f])); // x[f] > 0 by the sign normalization.
+      if (!negative)
+        negative = terms.bv(APInt::getZero(width));
+      atoms.push_back(terms.icmp(Predicate::Eq, positive, negative));
+    }
+  }
+  return atoms;
+}
+
 LoopInvariantSearch proveLoopFunction(const SemanticProgram &program, const LoopFunction *given,
                                       const InvariantCertificate *givenCertificate,
                                       const InvariantSearchOptions &options, SmtBackend &backend) {
@@ -868,7 +1210,8 @@ std::string loopInvariantJSON(const SemanticProgram &program, const LoopInvarian
                "(runs here only confirm an INV-exit model)"}};
   json::Array levels;
   for (const InvariantSearchLevel &level : result.levels)
-    levels.push_back(json::Object{{"degree", (int64_t)level.degree},
+    levels.push_back(json::Object{{"method", level.method},
+                                  {"degree", (int64_t)level.degree},
                                   {"size", (int64_t)level.size},
                                   {"equalities", (int64_t)level.equalities},
                                   {"bounds", (int64_t)level.bounds},
@@ -876,14 +1219,34 @@ std::string loopInvariantJSON(const SemanticProgram &program, const LoopInvarian
                                   {"offered", (int64_t)level.offered},
                                   {"kept", (int64_t)level.kept},
                                   {"checks", (int64_t)level.checks},
+                                  {"columns", (int64_t)level.columns},
+                                  {"rows", (int64_t)level.rows},
+                                  {"rank", (int64_t)level.rank},
+                                  {"basis", (int64_t)level.basis},
+                                  {"skipped_large_coefficients", (int64_t)level.skipped},
+                                  {"folded_constants", (int64_t)level.folded},
+                                  {"refinements", (int64_t)level.refinements},
                                   {"outcome", level.outcome}});
   std::string levelText;
   for (auto [degree, size] : options.levels)
     levelText += (levelText.empty() ? "" : ", ") + std::string("(degree ") + std::to_string(degree) +
                  ", size " + std::to_string(size) + ")";
+  std::string degreeText;
+  for (unsigned d : options.nullSpaceDegrees)
+    degreeText += (degreeText.empty() ? "" : ", ") + std::to_string(d);
+  std::string equalityText =
+      options.equalityCandidates != "collisions"
+          ? "equalities: first a basis of the null space over Q of the matrix of all monomials of degree <= d "
+            "(d in " + degreeText + ", at most " + std::to_string(options.maxColumns) +
+            " monomials) over the header variables and parameters at the sampled states, each "
+            "vector scaled to coprime integers and stated at the program's width (a candidate "
+            "only), after folding variables that hold one constant at every sample; then, "
+            "unless only the null space is asked for, the term-collision template below; "
+          : "";
   root["search"] = json::Object{
+      {"equality_candidates", options.equalityCandidates},
       {"template",
-       "conjunctions of: equalities E = E between sums of monomials over the header variables and "
+       equalityText + "conjunctions of: equalities E = E between sums of monomials over the header variables and "
        "parameters (+, -, constant *, constants 0..8 and the program's literals), offered when equal "
        "at every sampled header state and not an identity; comparisons <=s <s <=u <u between two of "
        "them or 0, and the loop's own comparisons; not-poison per variable. Levels " + levelText +

@@ -4233,6 +4233,7 @@ static void testInvariants() {
   CHECK(st.certificate && st.certificate->atoms.empty());
   InvariantSearchOptions linear = search;
   linear.levels = {{1, 5}};
+  linear.nullSpaceDegrees = {1};
   LoopInvariantSearch lin = proveLoopFunction(p, &f, nullptr, linear, z3Backend);
   CHECK(lin.status == "SAMPLE_CONSISTENT" && lin.check.function == LoopFunctionVerdict::Unknown);
   CHECK(lin.check.invariant == InvariantVerdict::Inductive && !lin.check.unconfirmedExitModel.empty());
@@ -4334,6 +4335,160 @@ static void testInvariants() {
   }
 }
 
+/// M1: loops for the null-space candidates. Constants live in the entry block, so they
+/// are header state the generator must fold.
+static const char *nullSpaceLoops = R"(
+func.func @unsigned_guard(%n: i32, %a: i32, %s0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c3 = arith.constant 3 : i32
+  cf.br ^header(%c0, %s0 : i32, i32)
+^header(%i: i32, %s: i32):
+  %more = arith.cmpi ult, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %s1 = arith.addi %s, %c3 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %s1 : i32, i32)
+^done:
+  return %s : i32
+}
+func.func @two_vars(%n: i32, %a: i32, %s0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  cf.br ^header(%c0, %a, %s0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %y: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %x1 = arith.addi %x, %c2 : i32
+  %y1 = arith.addi %y, %x : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1, %y1 : i32, i32, i32)
+^done:
+  return %y : i32
+}
+func.func @offset(%n: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c3 = arith.constant 3 : i32
+  %c5 = arith.constant 5 : i32
+  cf.br ^header(%c0, %c5 : i32, i32)
+^header(%i: i32, %x: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %x1 = arith.addi %x, %c3 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1 : i32, i32)
+^done:
+  return %x : i32
+}
+)";
+
+/// M1: equality candidates from the null space of the sample matrix (Sharma et al.,
+/// ESOP 2013, Section 4), constant folding, and what the checker does with them.
+static void testInvariantNullSpace() {
+  Module m(nullSpaceLoops);
+  SemanticProgram p = m.import("two_vars", 32);
+  InvariantLoop loop = invariantLoop(p);
+  CHECK(loop.supported());
+  ParameterScope natural = scopeOf(p, {{0, 0, INT32_MAX}});
+  bool exhaustive = false;
+  auto points = loopPoints(p, natural, 48, exhaustive);
+  LoopSamples samples = sampleLoop(p, loop, points, RunLimits(), 512);
+  CHECK(!samples.states.empty());
+  NullSpaceStats stats;
+  std::vector<Term> atoms = nullSpaceEqualities(p, loop, samples.states, 2, 128, stats);
+  // Every header variable that holds one constant at every sample is folded, with its
+  // atom; the rest of the matrix has rank + basis = columns.
+  CHECK(stats.folded >= 1);
+  CHECK(stats.rank + stats.basis == stats.columns);
+  CHECK(atoms.size() == stats.folded + stats.basis - stats.skipped);
+  // Each atom holds at every sample (it comes from them) and is not an identity: some
+  // state outside the samples falsifies it.
+  size_t nv = loop.variables.size();
+  for (Term atom : atoms) {
+    bool holds = true;
+    for (const auto &row : samples.states) {
+      EntryState entry;
+      Configuration config;
+      config.state.assign(p.state.size(), std::nullopt);
+      config.shadow.assign(p.state.size(), false);
+      for (size_t i = 0; i < nv; ++i)
+        config.state[loop.variables[i]] = row[i];
+      for (unsigned j = 0; j < loop.parameters.size(); ++j)
+        entry.parameters.push_back(row[2 * nv + j]);
+      auto value = evaluateTerm(p, entry, config, atom);
+      holds = holds && value && value->isOne();
+    }
+    CHECK(holds);
+    EntryState entry;
+    entry.parameters = {APInt(32, 7), APInt(32, 1234567), APInt(32, 89)};
+    Configuration config;
+    config.state.assign(p.state.size(), APInt(32, 424242));
+    config.shadow.assign(p.state.size(), false);
+    auto random = evaluateTerm(p, entry, config, atom);
+    CHECK(random && random->isZero());
+  }
+  // The search with these candidates proves the coupled pair, which the term-collision
+  // template did not (coverage run of 2026-11-17).
+  LoopFunction f = loopFunctionOf(p, "p2 + p0 * p1 + p0 * (p0 - 1)");
+  InvariantSearchOptions search;
+  search.check.scope = natural;
+  search.equalityCandidates = "nullspace"; // This section tests the null space alone.
+  LoopInvariantSearch proved = proveLoopFunction(p, &f, nullptr, search, z3Backend);
+  CHECK(proved.status == "PROVED_BY_INVARIANT");
+  CHECK(proved.certificate && proved.certificate->origin.find("null space") != std::string::npos);
+  CHECK(proved.check.confirmationRuns == 0);
+  InvariantSearchOptions collisions = search;
+  collisions.equalityCandidates = "collisions";
+  CHECK(proveLoopFunction(p, &f, nullptr, collisions, z3Backend).status != "PROVED_BY_INVARIANT");
+  // A relation with a constant term needs the constant column: x = 5 + 3i.
+  SemanticProgram o = m.import("offset", 32);
+  LoopFunction of = loopFunctionOf(o, "5 + 3 * p0");
+  InvariantSearchOptions offsetSearch = search;
+  offsetSearch.check.scope = scopeOf(o, {{0, 0, INT32_MAX}});
+  CHECK(proveLoopFunction(o, &of, nullptr, offsetSearch, z3Backend).status == "PROVED_BY_INVARIANT");
+  // Too few samples give spurious candidates (with N <= 1, i*i = i). They are only
+  // candidates: the checker refuses each one that is not inductive.
+  auto few = loopPoints(p, scopeOf(p, {{0, 0, 1}, {1, 0, 0}, {2, 0, 0}}), 4, exhaustive);
+  LoopSamples thin = sampleLoop(p, loop, few, RunLimits(), 512);
+  NullSpaceStats thinStats;
+  std::vector<Term> spurious = nullSpaceEqualities(p, loop, thin.states, 2, 128, thinStats);
+  InvariantCheckOptions checking;
+  checking.scope = natural;
+  unsigned refused = 0;
+  for (Term atom : spurious) {
+    CheckedLoopInvariant one =
+        checkLoopInvariant(p, loop, InvariantCertificate{{atom}, "one"}, f, checking, z3Backend);
+    refused += one.invariant == InvariantVerdict::NotInductive;
+  }
+  CHECK(refused > 0);
+  // INV-init models become runs (Sharma et al., Theorem 3): with 8 sample points the
+  // first candidates are too weak, and the runs from the models' initial states make
+  // the difference (measured 2026-11-17: 8 points prove with 1 refinement, 0 without).
+  InvariantSearchOptions sparse = search;
+  sparse.samplePoints = 8;
+  LoopInvariantSearch refined = proveLoopFunction(p, &f, nullptr, sparse, z3Backend);
+  unsigned refinements = 0;
+  for (const InvariantSearchLevel &level : refined.levels)
+    refinements += level.refinements;
+  CHECK(refined.status == "PROVED_BY_INVARIANT" && refinements > 0);
+  sparse.maxRefinements = 0;
+  CHECK(proveLoopFunction(p, &f, nullptr, sparse, z3Backend).status != "PROVED_BY_INVARIANT");
+
+  // Function CEGIS with a full state budget: no scope, so the first sampled runs (large
+  // unsigned bounds) fill the 512 states. The run from a refuting model must still be
+  // executed, or the refit never sees its return (regression found by the M1 catalogue,
+  // 2026-11-17: the run was skipped and a wrong synthesized formula ended the search).
+  SemanticProgram guard = m.import("unsigned_guard", 32);
+  LoopInvariantSearch cegis = proveLoopFunction(guard, nullptr, nullptr, InvariantSearchOptions(), z3Backend);
+  CHECK(cegis.status == "PROVED_BY_INVARIANT");
+  CHECK(!cegis.refutedFunctions.empty());
+}
+
 int main(int argc, char **argv) {
   mlir::MLIRContext local;
   configure(local);
@@ -4353,6 +4508,7 @@ int main(int argc, char **argv) {
       else if (name == "search") testSearch();
       else if (name == "clauses") testClauses();
       else if (name == "invariants") testInvariants();
+      else if (name == "nullspace") testInvariantNullSpace();
       else { fprintf(stderr, "unknown test %s\n", argv[n]); return 2; }
     }
     printf("%d checks, %d failures\n", checks, failures);
@@ -4379,6 +4535,7 @@ int main(int argc, char **argv) {
   testClauses();
   testSearch();
   testInvariants();
+  testInvariantNullSpace();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

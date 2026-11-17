@@ -56,7 +56,19 @@ struct InvariantSearchOptions {
   uint64_t samplePoints = 48;
   RunLimits sampleRun;
   size_t maxSamples = 512;
-  // The template: (monomial degree, expression size) per level, in order.
+  // Where equality candidates come from. "nullspace" (M1, the default): every
+  // polynomial equality of degree <= d over the header variables and parameters that
+  // all sampled states satisfy, as a basis of the null space of the sample matrix over
+  // Q (Sharma et al., ESOP 2013, Section 4; Nguyen et al., ICSE 2012, Section III-A),
+  // with variables that hold one constant at every sample folded first. "collisions":
+  // the earlier term-collision template of the closed-form enumerator, at `levels`.
+  // Either way the result is a set of candidates for the checker, never a proof.
+  // "both" (the default): the null-space levels first, then the collision levels.
+  std::string equalityCandidates = "both";
+  std::vector<unsigned> nullSpaceDegrees = {1, 2};
+  size_t maxColumns = 128;       // Monomials per sample matrix; a level above is skipped.
+  unsigned maxRefinements = 8;   // INV-init models turned into new sampled runs.
+  // The collision template: (monomial degree, expression size) per level, in order.
   std::vector<std::pair<unsigned, unsigned>> levels = {{1, 5}, {2, 3}, {2, 5}};
   size_t maxTerms = 200000;
   size_t maxEqualities = 400;
@@ -76,11 +88,32 @@ struct InvariantSearchOptions {
 };
 
 struct InvariantSearchLevel {
+  std::string method;  // "nullspace" or "collisions"
   unsigned degree = 0, size = 0;
   size_t equalities = 0, bounds = 0, poison = 0, offered = 0, kept = 0;
   unsigned checks = 0;
+  // Null-space levels: matrix shape, rank, basis vectors offered, basis vectors whose
+  // coefficients do not fit the width, variables folded to constants, INV-init models
+  // that became new samples.
+  size_t columns = 0, rows = 0, rank = 0, basis = 0, skipped = 0, folded = 0;
+  unsigned refinements = 0;
   std::string outcome;
 };
+
+/// The null-space generator, exposed for tests. `rows` are sample rows as LoopSamples
+/// lays them out. Returns atoms: `v == c` for a header variable holding one constant c
+/// at every row (folded out of the monomials), then one equality per basis vector of
+/// the null space over Q of the matrix of all monomials of degree <= `degree` over the
+/// remaining header variables and the parameters (one width at a time; values read as
+/// signed integers, products exact). Each vector, scaled to coprime integers, becomes
+/// sum(c_k * m_k) = 0 at the program's width: an integer identity that holds on every
+/// sample holds there modulo 2^w as well, but that is all; the checker decides.
+struct NullSpaceStats {
+  size_t columns = 0, rows = 0, rank = 0, basis = 0, skipped = 0, folded = 0;
+};
+std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const InvariantLoop &loop,
+                                      llvm::ArrayRef<std::vector<llvm::APInt>> rows,
+                                      unsigned degree, size_t maxColumns, NullSpaceStats &stats);
 
 struct LoopInvariantSearch {
   InvariantLoop loop;

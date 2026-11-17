@@ -996,6 +996,17 @@ bool InvariantChecker::induction(bool step) {
                                   : ": an initial state violates the invariant");
       out.falsifiedBy = id;
       out.falsified = falsified;
+      if (!step) {
+        // An initial state: its parameters, for a proposer that wants a run from them.
+        for (const Parameter &param : program.parameters) {
+          auto value = response.model.find("p" + std::to_string(param.id));
+          out.initialParameters.push_back(value == response.model.end()
+                                              ? APInt::getZero(param.sort.width)
+                                              : APInt(param.sort.width, value->second, 10));
+        }
+        if (!parametersInScope(options.scope, out.initialParameters))
+          out.initialParameters.clear();
+      }
       return false;
     }
     // Undecided together: one atom at a time.
