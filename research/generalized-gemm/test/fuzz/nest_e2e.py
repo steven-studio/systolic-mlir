@@ -62,11 +62,18 @@ class Failure(Exception):
 # ---------------------------------------------------------------------------------------
 # The programs.
 
-def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True):
+def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, access="affine",
+            constants="inside"):
+    """`access`: "affine" reads and writes with affine.load and affine.store; "memref" with
+    memref.load and memref.store, each index computed by arith (a counter times its scale plus
+    its constant; a flat array's index is row * columns + column). A view entry is (role,
+    scale, constant), or ("perm", role, multiplier, modulus): (role * multiplier) mod modulus,
+    by arith.remsi. `constants` ("inside" or "outside", memref access only): where the index
+    constants are defined, in the loop body or before the nest."""
     views = views or {"c": [("i", 1, 0), ("j", 1, 0)], "a": [("i", 1, 0), ("k", 1, 0)],
                       "b": [("k", 1, 0), ("j", 1, 0)]}
     return {"kind": "product", "c": c, "a": a, "b": b, "bounds": bounds, "order": order, "views": views,
-            "flag": flag, "first": first}
+            "flag": flag, "first": first, "access": access, "constants": constants}
 
 
 def move(source, target):
@@ -134,10 +141,72 @@ def index(view, number):
     return ", ".join(parts)
 
 
+def memref_of(function, name):
+    """An array's MLIR type: rows x columns, or one dimension of rows * columns for the arrays
+    the function lists as flat (the C driver keeps every array rows x columns, row-major)."""
+    rows, cols = next((r, c) for n, r, c, _ in function["arrays"] if n == name)
+    if name in function.get("flat", ()):
+        return f"memref<{rows * cols}x{function['element']}>"
+    return memref(rows, cols, function["element"])
+
+
+def memref_body(function, statement, number, pad, constants):
+    """The innermost body of a product read and written with memref.load and memref.store,
+    every index computed by arith from the counters. The index constants are appended to
+    `constants` (the caller puts them in the body or before the nest)."""
+    e = function["element"]
+    shapes = {name: (rows, cols) for name, rows, cols, _ in function["arrays"]}
+    lines = []
+    def constant_value(name, value):
+        constants.append(f"%{name} = arith.constant {value} : index")
+        return f"%{name}"
+    def indices(operand):
+        array = statement[operand]
+        names = []
+        for d, entry in enumerate(statement["views"][operand]):
+            if entry[0] == "perm":
+                _, role, multiplier, modulus = entry
+                m = constant_value(f"{operand}m{d}c{number}", multiplier)
+                q = constant_value(f"{operand}q{d}c{number}", modulus)
+                lines.append(f"{pad}%{operand}p{d}{number} = arith.muli %{role}{number}, {m} : index")
+                lines.append(f"{pad}%{operand}r{d}{number} = arith.remsi %{operand}p{d}{number}, {q} : index")
+                names.append(f"%{operand}r{d}{number}")
+                continue
+            role, scale, offset = entry
+            value = f"%{role}{number}"
+            if scale != 1:
+                c = constant_value(f"{operand}s{d}c{number}", scale)
+                lines.append(f"{pad}%{operand}s{d}{number} = arith.muli {value}, {c} : index")
+                value = f"%{operand}s{d}{number}"
+            if offset:
+                c = constant_value(f"{operand}o{d}c{number}", offset)
+                lines.append(f"{pad}%{operand}o{d}{number} = arith.addi {value}, {c} : index")
+                value = f"%{operand}o{d}{number}"
+            names.append(value)
+        if array in function.get("flat", ()):
+            cols = shapes[array][1]
+            w = constant_value(f"{operand}w{number}", cols)
+            lines.append(f"{pad}%{operand}r{number} = arith.muli {names[0]}, {w} : index")
+            lines.append(f"{pad}%{operand}x{number} = arith.addi %{operand}r{number}, {names[1]} : index")
+            return f"%{operand}x{number}"
+        return ", ".join(names)
+    where = {operand: indices(operand) for operand in ("c", "a", "b")}
+    for name, operand in (("z", "c"), ("x", "a"), ("y", "b")):
+        array = statement[operand]
+        lines.append(f"{pad}%{name}{number} = memref.load %{array}[{where[operand]}] : {memref_of(function, array)}")
+    mul, addition = ("arith.mulf", "arith.addf") if e == "f32" else ("arith.muli", "arith.addi")
+    lines.append(f"{pad}%m{number} = {mul} %x{number}, %y{number} : {e}")
+    operands = f"%z{number}, %m{number}" if statement["first"] else f"%m{number}, %z{number}"
+    flag = " fastmath<reassoc>" if statement["flag"] else ""
+    lines.append(f"{pad}%s{number} = {addition} {operands}{flag} : {e}")
+    lines.append(f"{pad}memref.store %s{number}, %{statement['c']}[{where['c']}] : {memref_of(function, statement['c'])}")
+    return lines
+
+
 def mlir_function(function):
     e = function["element"]
     shapes = {name: (rows, cols) for name, rows, cols, _ in function["arrays"]}
-    arguments = ", ".join(f"%{name}: {memref(rows, cols, e)}" + (" {llvm.noalias}" if noalias else "")
+    arguments = ", ".join(f"%{name}: {memref_of(function, name)}" + (" {llvm.noalias}" if noalias else "")
                           for name, rows, cols, noalias in function["arrays"])
     lines = [f"func.func @{function['name']}({arguments}) {{"]
     for number, statement in enumerate(function["statements"]):
@@ -159,10 +228,24 @@ def mlir_function(function):
                       "    }", "  }"]
             continue
         bounds = statement["bounds"]
+        pad = "        "
+        if statement.get("access", "affine") == "memref":
+            constants = []
+            body = memref_body(function, statement, number, pad, constants)
+            if statement.get("constants", "inside") == "outside":
+                lines += ["  " + c for c in constants]
+            else:
+                body = [pad + c for c in constants] + body
+            for depth, role in enumerate(statement["order"]):
+                low, high = bounds[role]
+                lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
+            lines += body
+            for depth in reversed(range(3)):
+                lines.append("  " * (depth + 1) + "}")
+            continue
         for depth, role in enumerate(statement["order"]):
             low, high = bounds[role]
             lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
-        pad = "        "
         for name, operand in (("z", "c"), ("x", "a"), ("y", "b")):
             array = statement[operand]
             lines.append(f"{pad}%{name}{number} = affine.load %{array}[{index(statement['views'][operand], number)}]"
@@ -202,8 +285,10 @@ def c_driver(specs, lowered):
         name, e = function["name"], function["element"]
         ctype = "float" if e == "f32" else "int32_t"
         shapes = {array: (rows, cols) for array, rows, cols, _ in function["arrays"]}
-        prototype = ", ".join(f"{ctype} *, {ctype} *, int64_t, int64_t, int64_t, int64_t, int64_t"
-                              for _ in function["arrays"])
+        flat = function.get("flat", ())
+        prototype = ", ".join(f"{ctype} *, {ctype} *, int64_t, int64_t, int64_t" if array in flat else
+                              f"{ctype} *, {ctype} *, int64_t, int64_t, int64_t, int64_t, int64_t"
+                              for array, _, _, _ in function["arrays"])
         out.append(f"void {name}({prototype});")
         out.append(f"static void run_{name}(int exact) {{")
         for array, rows, cols, _ in function["arrays"]:
@@ -216,7 +301,8 @@ def c_driver(specs, lowered):
             else:
                 out.append(f"    {array}[r][s] = (int32_t)((int)(next_unit() * 7.0) - 3);")
             out.append(f"    ref_{array}[r][s] = {array}[r][s]; err_{array}[r][s] = 0.0; }}")
-        arguments = ", ".join(f"&{array}[0][0], &{array}[0][0], 0, {rows}, {cols}, {cols}, 1"
+        arguments = ", ".join(f"&{array}[0][0], &{array}[0][0], 0, {rows * cols}, 1" if array in flat else
+                              f"&{array}[0][0], &{array}[0][0], 0, {rows}, {cols}, {cols}, 1"
                               for array, rows, cols, _ in function["arrays"])
         out.append("  systolic_offload_stats_t before, after; systolic_offload_stats(&before);")
         out.append(f"  {name}({arguments});")
@@ -250,7 +336,13 @@ def c_driver(specs, lowered):
                 out.append(f"{pad}for (int {role} = {low}; {role} < {high}; ++{role})")
                 pad += "  "
             def at(operand):
-                return "][".join(f"{role} * {scale} + {constant}" for role, scale, constant in statement["views"][operand])
+                def one(entry):
+                    if entry[0] == "perm":
+                        _, role, multiplier, modulus = entry
+                        return f"({role} * {multiplier}) % {modulus}"
+                    role, scale, constant = entry
+                    return f"{role} * {scale} + {constant}"
+                return "][".join(one(entry) for entry in statement["views"][operand])
             ca, cb, cc = at("a"), at("b"), at("c")
             out.append(f"{pad}{{")
             if e == "f32":
@@ -348,19 +440,32 @@ def lowered_set(remarks, places):
         key = by_line.get(line)
         if key is None:
             continue
-        found = re.match(r"affine GEMM \d+x\d+x\d+ lowered as (\d+) exact region", text)
+        found = re.match(r"(?:affine GEMM \d+x\d+x\d+|GEMM \d+x\d+x\d+ of nest \d+ of \w+) lowered (?:from its record )?"
+                         r"as (\d+) exact region", text)
         if found:
             lowered.add(key)
             regions[key] = int(found.group(1))
-        elif text.startswith("affine GEMM not lowered"):
+        elif text.startswith("affine GEMM not lowered") or text.startswith("GEMM not lowered from its record"):
             refused[key] = text
     return lowered, regions, refused
 
 
-def check_calls(specs, text, asynchronous, lowered):
+def tabled_set(remarks, places):
+    """The products lowered from their record by tables (stage 3): gathers, the GEMM, a scatter."""
+    by_line = {line: key for key, line in places.items()}
+    out = set()
+    for match in re.finditer(r":(\d+):\d+: remark: (.*)", remarks):
+        key = by_line.get(int(match.group(1)))
+        if key is not None and " lowered from its record " in match.group(2) and "(tables:" in match.group(2):
+            out.add(key)
+    return out
+
+
+def check_calls(specs, text, asynchronous, lowered, tabled=frozenset()):
     """In the lowered module, each function's statements in order: a lowered GEMM is its runtime
     calls and the write-back of C (asynchronously: begin, submits, wait, write-back) with
-    nothing of the program between them, where the nest stood."""
+    nothing of the program between them, where the nest stood. A GEMM lowered by tables (stage
+    3) is the gathers of A, B and C, the GEMM, and the scatter of C, in that order."""
     patterns = ((r"@fpga_gemm_begin", "begin"), (r"@fpga_tile_submit", "submit"), (r"@fpga_gemm_wait", "wait"),
                 (r"@fpga_matmul_tiled_auto_scheduled", "call"), (r"materialize_in_destination", "writeback"),
                 (r"memref\.load ", "load"), (r"memref\.store ", "store"), (r"(affine|scf)\.for ", "loop"))
@@ -407,19 +512,21 @@ def check_calls(specs, text, asynchronous, lowered):
                 expected += ["load", "store"]
             elif statement["kind"] == "fill":
                 expected.append("loop")
+            elif (name, number) in lowered and (name, number) in tabled:
+                expected += ["loop", "loop", "loop", "gemm", "loop"]
             else:
                 expected.append("gemm" if (name, number) in lowered else "loop")
         if squeezed != expected:
             raise Failure(f"{name}: statements and calls in the lowered module are {squeezed}, expected {expected}")
 
 
-def variant(args, work, name, specs, records_path, expected_lowered, counts):
+def variant(args, work, name, specs, records_path, expected_lowered, counts, extra_option="", expected_tabled=None):
     directory = work / name
     directory.mkdir()
     source = directory / "module.mlir"
     source_text = mlir_module(specs)
     source.write_text(source_text)
-    option = "report=true" + (f" nest-records={records_path}" if records_path else "")
+    option = "report=true" + (f" nest-records={records_path}" if records_path else "") + extra_option
     done = must([args.systolic_opt, source, FLEET, f"--affine-matmul-to-systolic={option}", "-o", directory / "40.mlir"],
                 f"{name}: the pass")
     (directory / "remarks.txt").write_text(done.stderr)
@@ -427,6 +534,9 @@ def variant(args, work, name, specs, records_path, expected_lowered, counts):
     lowered, regions, refused = lowered_set(done.stderr, places)
     if lowered != expected_lowered:
         raise Failure(f"{name}: lowered {sorted(lowered)}, expected {sorted(expected_lowered)}; refusals: {refused}")
+    tabled = tabled_set(done.stderr, places)
+    if expected_tabled is not None and tabled != expected_tabled:
+        raise Failure(f"{name}: lowered by tables {sorted(tabled)}, expected {sorted(expected_tabled)}")
     tiles = (directory / "40.mlir").read_text()
     for function in specs:
         body = re.search(rf"func\.func @{function['name']}\(.*?\n  \}}\n", tiles, re.S).group(0)
@@ -447,7 +557,7 @@ def variant(args, work, name, specs, records_path, expected_lowered, counts):
         lowering = f"--lower-systolic-matmul-tile-to-fpga=phys-k-max-8x8={K_MAX} phys-k-max-4x4={K_MAX}" + \
                    (" async=true" if asynchronous else "")
         must([args.systolic_opt, directory / "40.mlir", lowering, "-o", directory / f"50-{mode}.mlir"], f"{name}: FPGA lowering")
-        check_calls(specs, (directory / f"50-{mode}.mlir").read_text(), asynchronous, lowered)
+        check_calls(specs, (directory / f"50-{mode}.mlir").read_text(), asynchronous, lowered, tabled)
         counts["lowered modules with calls in program order"] += 1
         must([args.systolic_opt, directory / f"50-{mode}.mlir", "--systolic-runtime-to-llvm", "-o",
               directory / f"60-{mode}.mlir"], f"{name}: to LLVM")

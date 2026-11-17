@@ -2,7 +2,7 @@
 
 A planning record, written at `d974400` from the documents and the code, with nothing built
 or run. Where an earlier document lists M4c, M4d, G6 or G7 as the next step, this one takes
-precedence. Stages 1 and 2 of the plan were then built: their sections say what was built,
+precedence. Stages 1, 2 and 3 of the plan were then built: their sections say what was built,
 what was checked and what was not.
 
 ## The decision
@@ -155,7 +155,11 @@ points of the decision hold.
 | 2 | The pass takes the records behind an option that is off by default: a nest is lowered only where a record for it exists and agrees | the same two cases through the partitioner to `systolic.matmul_tile` and the runtime calls, in place and in order; a missing or disagreeing record leaves the nest on the host. The first change to production code |
 | 3 | Lowering driven by the record, for a nest the affine recognizer refuses and whose views are affine | the generalized recognizer adding a case, within limits 1 to 6 |
 
-Stages 1 and 2 are built (below). Stage 3 is not started.
+Stages 1, 2 and 3 are built (below). Stage 3's goal was adjusted when it was started
+(2026-11-17): the lowering is driven by the research recognizer's verified coordinates and
+operand mappings, and the production recognizer's success is not a condition; where the
+research has no affine closed form for a view, tables of the nest's addresses over a finite,
+verified domain take its place.
 
 ### Stage 1: one verified record per nest (built 2026-11-16)
 
@@ -463,6 +467,103 @@ stale EQUIVALENT entries and the mutants not rerun at `9bb3cf0` stand as recorde
 production unit binaries that link no changed code; `systolic-cc` beyond the production lit
 suite; cosimulation and the board; a Release build of the research side. Since stage 1 the
 machine's compiler changed (g++ 13 to 15): the suites not run here have not run with it.
+
+### Stage 3: the GEMM lowered from its record (built 2026-11-17)
+
+With `--affine-matmul-to-systolic="nest-records=FILE record-driven=true"` (both off by default),
+a loop nest in which the production recognizer finds no GEMM is lowered from its record. The
+record is checked by itself exactly as in stage 2 (`checkRecordAtNest`, shared); what stage 2
+then compared with the production recognizer is compared here with the nest itself, read from
+its IR (`Systolic/NestRecordLowering.h`, `lib/Systolic/Transforms/NestRecordLowering.cpp`).
+Nests the production recognizer does find stay with stage 2. Without `record-driven` nothing of
+this runs; `record-driven` without `nest-records` is an error.
+
+| File | What it is |
+| --- | --- |
+| `include/Systolic/NestRecordLowering.h`, `lib/Systolic/Transforms/NestRecordLowering.cpp` | the nest's own checks, the formulas, the tables |
+| `include/Systolic/NestRecordGate.h`, `lib/Systolic/Transforms/NestRecordGate.cpp` | the record checks split out of stage 2's gate (`checkRecordAtNest`), and the one relaxation the tables need |
+| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the options `record-driven` and `record-table-budget`, the entry after stage 2's loop, and the emission |
+| `test/Systolic/nest_records_driven.mlir`, `nest_records_driven_refusals.mlir`, `Inputs/nest_records_driven*.json` | the production tests and their records |
+| `research/generalized-gemm/test/fuzz/nest_driven_e2e.py` | end to end: the lowered program run against the software runtime model and compared with the original |
+
+**The first supported case.** A nest of `affine.for` loops whose body reads and writes with
+`memref.load` and `memref.store`, its indices computed by `arith`. The production recognizer
+reads `affine.load` and `affine.store` only, so it finds no GEMM in it and leaves it as written;
+the research recognizer verifies it (I, J and K on the three loops, the views of A, B and C).
+`scf.for` nests are not this case: the research recognizer proposes no candidate for them
+today (the search of its coordinate families finds none), so no record of one is VERIFIED.
+
+**What the lowering checks of the nest.** A perfect band of three `affine.for` loops, constant
+bounds and step 1, the record's levels in order with the record's bounds, axes and extents; a
+body of one multiply-accumulate (three loads, one `arith.mulf` of two of them, one `arith.addf`
+of the product and the third, one store of the sum to the memref the third was read from) and
+index arithmetic only; f32 (the device is binary32); the record's element type, update,
+accumulator side and flags are the nest's; the operands are roots of the function, the record's,
+of static shape and the identity layout; the separations the record rests on are proofs by an
+allocation or (A, C) and (B, C). Then the lowering's own alias gate and floating-point policy,
+as on the dense path, and an exact partition of the box by the plan's tiles.
+
+**Formulas**, where the record proves an affine closed form of every view. Each index the nest
+computes is read as an affine form of its loop counters (constants, the counters, `addi`,
+`subi`, `muli` by a constant, `affine.apply` of such) and must be the record's form, dimension
+by dimension, with as many dimensions as the memref, reading only the operand's two roles.
+The C load's index must be the store's. Each dimension's indices over the box must lie inside
+the memref. An operand whose two dimensions read one role each is a subview (transposed when
+the roles are stored the other way), any other an explicit view (one `reinterpret_cast`, element
+strides positive) whose C is checked one to one exactly over the box. Then the dense path's
+planner and tile emitter.
+
+**Tables**, where the record is VERIFIED but for the affine closed forms of some views (its
+every refusal says that a view has no proposed closed form, or that a dimension of the one
+proposed is not affine, as `(5 i) mod 16`), and the domain has at most `record-table-budget`
+iterations (default 2^20). At compile time every iteration of the nest's static domain is
+visited and the addresses of its four accesses evaluated by the nest's own index arithmetic,
+in checked 64-bit arithmetic: no load, no store, no multiply-accumulate is executed, and an
+address that depends on memory, on an argument or on a value computed before the nest, or that
+overflows or divides by zero, is refused. The tables hold only if A's address is one per (I, K)
+whatever J, B's one per (K, J), C's one per (I, J), the C load's the store's at every iteration,
+every address inside its memref, no two cells (I, J) of C at one address, and the record's
+proved affine forms, where it has them, agree. The forward map takes an iteration to (I, J, K)
+(the counters from their lower bounds); every point has one iteration, so the map is a bijection
+and each contribution is counted once. The lowering emits the tables as constant globals of
+element offsets, gathers A, B and C into matrices, runs the tiles on them, and scatters C back.
+A table is built at compile time for the one static domain of the nest, which every run has:
+nothing is sampled and nothing is said of another domain. Tables built at run time are not made.
+
+**Acceptance.** `nest_records_driven.mlir`: eleven nests the production recognizer leaves as
+written are lowered from their records (formulas: the counters as indices, a transposed B with
+the loops permuted, flat arrays, offsets and a scale, `affine.apply`; tables: flat arrays the
+research gives no closed form for, A's rows in the order `(5 i) mod 16` by `arith` and by an
+`affine.load` map; two nests on one output; a stage 3 nest after a stage 2 nest on one output),
+and the one with no `reassoc` is refused by the floating-point policy. `nest_records_driven_refusals.mlir`:
+32 nests one change away from a GEMM the lowering takes, 62 refusals, each in its own words: 5
+on the research tool's own records (no `llvm.noalias`, two statuses, an explicit view that runs
+backwards, binary64) and 57 with a record transplanted onto the nest's binding or edited so that
+every check before the one under test passes; and one table lowering on the research's own
+record (`(5 i) mod 16`). `nest_driven_e2e.py`: nine functions × five variants (the records with
+`record-driven`; without it; no records; the program changed after the records; no pair
+authorized) × synchronous and asynchronous lowering × two data sets, each run compared with a
+reference in C by the numeric contract of stage 2.
+
+**Limits.**
+
+1. Only `affine.for` bands of three loops with constant bounds and step 1; `scf.for` and other
+   loops, batches and reduction batches are refused (and the research verifies no `scf.for`
+   nest today).
+2. The body is one multiply-accumulate in f32 and index arithmetic; assignments, scalar
+   accumulators, other element types are refused.
+3. Formulas: explicit views with a negative or zero element stride are refused (a view that
+   runs backwards is lowered by a subview when each dimension reads one role).
+4. Tables: static domains of at most `record-table-budget` iterations; addresses computed from
+   the counters and constants by the admitted operations in index or i64; the program's index
+   width 64. No run-time tables: a domain or an address known only at run time is refused.
+5. The tables are constant globals in the binary (one 64-bit offset per element of each
+   operand's matrix) and the gathered matrices are temporaries the size of the operands.
+6. As in stage 2: records are files written by the research tool; C kernels get no option.
+
+**Validation.** @@VALIDATION3@@
+
+**Not run.** @@NOTRUN3@@
 
 ## The thesis
 

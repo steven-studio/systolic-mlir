@@ -13,6 +13,8 @@ test/Systolic/Inputs, written by this script from the tool's own output and noth
                                   reassoc: a record of an older version of the nest
   nest_records_belts.json         what it says of test/Systolic/nest_records_belts.mlir,
                                   every pair of roots authorized, at a 64-bit index
+  nest_records_driven.json        of test/Systolic/nest_records_driven.mlir (stage 3), the same way
+  nest_records_driven_refusals.json  of test/Systolic/nest_records_driven_refusals.mlir, the same way
 
 Each file holds the tool's JSON, one function object per line. The solver's resource limit,
 not its time limit, decides every query, so the tool says the same of the same input on a
@@ -33,11 +35,14 @@ import tempfile
 
 TEST = "test/Systolic/nest_records.mlir"
 BELTS = "test/Systolic/nest_records_belts.mlir"
+DRIVEN = "test/Systolic/nest_records_driven.mlir"
+DRIVEN_REFUSALS = "test/Systolic/nest_records_driven_refusals.mlir"
 INPUTS = "test/Systolic/Inputs"
 OPTIONS = ["--max-level=1", "--candidates-per-group=1", "--timeout-ms=120000", "--rlimit=20000000"]
 EVERY_PAIR = "--authorize=" + ",".join(f"roots {a} and {b} are separate" for a in range(5) for b in range(a + 1, 5))
 NAMES = ["nest_records.json", "nest_records_unauthorized.json", "nest_records_width16.json",
-         "nest_records_stale.json", "nest_records_belts.json"]
+         "nest_records_stale.json", "nest_records_belts.json", "nest_records_driven.json",
+         "nest_records_driven_refusals.json"]
 
 
 def records(driver, cwd, arguments, test=TEST):
@@ -68,7 +73,9 @@ def make(driver, root, out):
                 (root, ["--function=single", "--index-bit-width=64"]),
                 (root, ["--function=single", "--index-bit-width=16", EVERY_PAIR]),
                 (older, ["--function=single", "--index-bit-width=64", EVERY_PAIR]),
-                (root, ["--index-bit-width=64", EVERY_PAIR], BELTS)]
+                (root, ["--index-bit-width=64", EVERY_PAIR], BELTS),
+                (root, ["--index-bit-width=64", EVERY_PAIR], DRIVEN),
+                (root, ["--index-bit-width=64", EVERY_PAIR], DRIVEN_REFUSALS)]
         with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
             texts = list(pool.map(lambda job: records(driver, *job), jobs))
     for name, text in zip(NAMES, texts):

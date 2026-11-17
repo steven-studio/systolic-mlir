@@ -25,46 +25,7 @@ namespace json = llvm::json;
 
 namespace {
 
-/// Reads the fields of a record, and says which one is missing or ill-formed. The first
-/// failure is kept.
-struct Fields {
-  std::string &why;
-
-  void fail(const llvm::Twine &text) {
-    if (why.empty())
-      why = text.str();
-  }
-  const json::Object *object(const json::Object &in, StringRef key, StringRef where) {
-    const json::Object *value = in.getObject(key);
-    if (!value)
-      fail("the record is incomplete: `" + where + "." + key + "` is no object");
-    return value;
-  }
-  const json::Array *array(const json::Object &in, StringRef key, StringRef where) {
-    const json::Array *value = in.getArray(key);
-    if (!value)
-      fail("the record is incomplete: `" + where + "." + key + "` is no array");
-    return value;
-  }
-  std::optional<StringRef> string(const json::Object &in, StringRef key, StringRef where) {
-    std::optional<StringRef> value = in.getString(key);
-    if (!value)
-      fail("the record is incomplete: `" + where + "." + key + "` is no string");
-    return value;
-  }
-  std::optional<int64_t> integer(const json::Object &in, StringRef key, StringRef where) {
-    std::optional<int64_t> value = in.getInteger(key);
-    if (!value)
-      fail("the record is incomplete: `" + where + "." + key + "` is no integer");
-    return value;
-  }
-  std::optional<bool> boolean(const json::Object &in, StringRef key, StringRef where) {
-    std::optional<bool> value = in.getBoolean(key);
-    if (!value)
-      fail("the record is incomplete: `" + where + "." + key + "` is no boolean");
-    return value;
-  }
-};
+using Fields = NestRecordFields;
 
 const char *const kAxisName[] = {"I", "J", "K"};
 
@@ -75,6 +36,29 @@ std::string elementName(Type type) {
   if (auto i = dyn_cast<IntegerType>(type))
     return "bv" + std::to_string(i.getWidth());
   return "?";
+}
+
+/// The research tool's refusals (NestRecord.cpp, mappingRefusals) that say only that a view
+/// has no affine closed form: none was proposed, or a dimension of the one proposed is not
+/// affine. Stage 3's tables read such views off the nest itself. Every other refusal about a
+/// view (no root, not proved, a parameter, a coordinate that is no role) is no such refusal.
+bool isUnmappedViewRefusal(StringRef text) {
+  for (StringRef name : {"A", "B", "C"}) {
+    if (text == ("the view of " + name + " has no proposed closed form").str())
+      return true;
+    StringRef rest = text;
+    if (!rest.consume_front("dimension "))
+      continue;
+    size_t digits = 0;
+    while (digits < rest.size() && llvm::isDigit(rest[digits]))
+      ++digits;
+    if (digits == 0)
+      continue;
+    rest = rest.drop_front(digits);
+    if (rest.consume_front((" of the view of " + name + " is not affine: ").str()))
+      return true;
+  }
+  return false;
 }
 
 /// The research tool's names of the fast-math flags, in its order.
@@ -217,16 +201,16 @@ const FunctionRoots *BoundNests::roots(func::FuncOp function) const {
   return found == rootsOf.end() ? nullptr : &found->second;
 }
 
-NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests &bound,
-                                   const LogicalMatmul &matmul, unsigned indexWidth) {
-  NestRecordDecision out;
+RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bound, Operation *anchor,
+                               unsigned indexWidth, bool unmappedViews) {
+  RecordAtNest out;
   std::string &why = out.why;
   Fields fields{why};
   // The first reason is kept: a field that is missing has already said so. Once the nest
   // is located, every reason names it.
   std::string prefix;
   auto refuse = [&](const llvm::Twine &text) {
-    out.agrees = false;
+    out.usable = false;
     if (why.empty()) {
       why = text.str();
       if (why.empty())
@@ -239,7 +223,6 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
   // ---------------------------------------------------------------------------------
   // Which record: the nest as it stood at the pass's input, by function and position.
   // ---------------------------------------------------------------------------------
-  Operation *anchor = matmul.anchor;
   auto function = anchor->getParentOfType<func::FuncOp>();
   if (!function)
     return refuse("the GEMM is in no function");
@@ -328,7 +311,19 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
   const json::Array *scope = fields.array(*record, "scope", "nest");
   if (!status || !orderedFold || !refusals || !scope)
     return refuse("");
-  if (*status != "VERIFIED") {
+  // Stage 3's tables (unmappedViews): a record VERIFIED_NOT_MAPPED only because the research
+  // proposed no closed form for some view; the lowering then reads those views off the nest
+  // itself, over its whole static domain.
+  bool viewsUnmapped = false;
+  if (unmappedViews && *status == "VERIFIED_NOT_MAPPED" && !refusals->empty()) {
+    viewsUnmapped = true;
+    for (const json::Value &value : *refusals) {
+      std::optional<StringRef> text = value.getAsString();
+      if (!text || !isUnmappedViewRefusal(*text))
+        viewsUnmapped = false;
+    }
+  }
+  if (*status != "VERIFIED" && !viewsUnmapped) {
     std::string first;
     if (!refusals->empty())
       if (std::optional<StringRef> text = (*refusals)[0].getAsString())
@@ -337,7 +332,7 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
   }
   if (!*orderedFold)
     return refuse("the record does not verify the ordered fold");
-  if (!refusals->empty())
+  if (!refusals->empty() && !viewsUnmapped)
     return refuse("the record has refusals");
   if (!scope->empty())
     return refuse("the record's claims hold for a range of arguments only, and the lowering is for every value");
@@ -368,6 +363,49 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
   if (!*box || *guard != "true")
     return refuse("the record's domain is no box");
 
+  out.usable = true;
+  out.where = where;
+  out.nest = nest;
+  out.function = function;
+  out.roots = roots;
+  out.functionRecord = functionRecord;
+  out.record = record;
+  out.gemm = gemm;
+  out.holdsFor = holdsFor->str();
+  out.viewsUnmapped = viewsUnmapped;
+  return out;
+}
+
+
+NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests &bound,
+                                   const LogicalMatmul &matmul, unsigned indexWidth) {
+  NestRecordDecision out;
+  RecordAtNest at = checkRecordAtNest(file, bound, matmul.anchor, indexWidth, /*unmappedViews=*/false);
+  if (!at.usable) {
+    out.why = at.why;
+    return out;
+  }
+  std::string &why = out.why;
+  Fields fields{why};
+  // The record is located and checked by itself; every reason below names the nest.
+  std::string prefix = at.where + ": ";
+  auto refuse = [&](const llvm::Twine &text) {
+    out.agrees = false;
+    if (why.empty()) {
+      why = text.str();
+      if (why.empty())
+        why = "the record is incomplete";
+    }
+    why = prefix + why;
+    return out;
+  };
+  Operation *anchor = matmul.anchor;
+  const std::string &where = at.where;
+  const BoundNests::Nest *nest = at.nest;
+  const FunctionRoots *roots = at.roots;
+  const json::Object *record = at.record;
+  const json::Object *gemm = at.gemm;
+  const std::string &holdsFor = at.holdsFor;
   // ---------------------------------------------------------------------------------
   // What the production recognizer found, in the same terms.
   // ---------------------------------------------------------------------------------
@@ -621,7 +659,7 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
 
   out.agrees = true;
   out.summary = where + " (binding " + nest->binding->sha256.substr(0, 12) + ", index width " +
-                std::to_string(indexWidth) + "): VERIFIED for " + holdsFor->str() + "; " +
+                std::to_string(indexWidth) + "): VERIFIED for " + holdsFor + "; " +
                 std::to_string(dense->extent[0]) + "x" + std::to_string(dense->extent[1]) + "x" +
                 std::to_string(dense->extent[2]) +
                 ", the loops of I, J and K, the roots and views of A, B and C, the element type, the update and "
@@ -630,5 +668,9 @@ NestRecordDecision checkNestRecord(const NestRecordFile &file, const BoundNests 
                 ", which the lowering's alias gate checks itself";
   return out;
 }
+
+std::string nestRecordElementName(Type type) { return elementName(type); }
+
+std::vector<std::string> nestRecordFlagNames(arith::FastMathFlags flags) { return flagNames(flags); }
 
 } // namespace mlir::systolic

@@ -4,18 +4,23 @@ nest_records_refusals.mlir. Each edit makes a record that must not let a lowerin
 ahead; the edits are made here, on the research tool's own output, because the tool
 never writes such a record. Usage: edit_nest_records.py FILE EDIT.
 
-transplant-NAME, for nest_records_belts.mlir: FILE is nest_records_belts.json, and the
-output is function NAME's object from it with one record, of its nest 0: @single's record
-from nest_records.json beside it (complete and VERIFIED), with nest 0's own binding. The
-function's roots are its own. Every check on the record then passes, and what refuses is a
-check on the nest itself."""
+transplant-NAME [TEMPLATE FUNCTION], for nest_records_belts.mlir and stage 3's tests: the
+output is function NAME's object from FILE with one record, of its nest 0: the record of nest
+0 of FUNCTION in TEMPLATE (by default @single's in nest_records.json beside FILE: complete and
+VERIFIED), with NAME's own binding. The function's roots are its own. Every check on the
+record then passes, and what refuses is a check on the nest itself.
+
+EDIT@FUNCTION edits nest 0 of FUNCTION instead of @single's."""
 import json
 from pathlib import Path
 import sys
 
 
+TARGET = "single"
+
+
 def single(functions):
-    return next(f for f in functions if f["function"] == "single")
+    return next(f for f in functions if f["function"] == TARGET)
 
 
 def nest(functions):
@@ -114,15 +119,42 @@ def edit(functions, name):
             function["schema"] = "generalized-gemm-nest/1"
     elif name == "duplicate":
         functions.append(json.loads(json.dumps(single(functions))))
+    elif name == "verify":
+        record["status"] = "VERIFIED"
+        record["refusals"] = []
+    elif name == "extra-refusal":
+        record["refusals"] = record["refusals"] + ["the view of A is not proved over the scope: UNKNOWN"]
+    elif name == "batch-axis":
+        gemm["axes"]["P"] = [0]
+    elif name == "c-root":
+        gemm["views"]["C"]["root"]["root"] = 0
+    elif name == "a-root-c":
+        gemm["views"]["A"]["root"]["root"] = gemm["views"]["C"]["root"]["root"]
+    elif name == "parameter":
+        gemm["views"]["A"]["dimensions"][0]["parameters"] = [{"argument": 0, "coefficient": 1}]
+    elif name == "unmapped-only":
+        # Only the refusals that say a view has no affine closed form.
+        record["refusals"] = [r for r in record["refusals"]
+                              if r.startswith("the view of ") or (" of the view of " in r and " is not affine: " in r)]
+    elif name == "a-reads-j":
+        # A's second dimension read as k + j, as the nest reads it.
+        gemm["views"]["A"]["dimensions"][1]["levels"] = [{"level": 2, "coefficient": 1}, {"level": 1, "coefficient": 1}]
+    elif name == "table-form":
+        # A proved, affine closed form of A that is one element off the nest's addresses.
+        gemm["views"]["A"]["proved"] = True
+        gemm["views"]["A"]["proposed"] = True
+        gemm["views"]["A"]["dimensions"] = [{"affine": True, "constant": 1, "parameters": [],
+                                             "levels": [{"level": 0, "coefficient": 12}, {"level": 2, "coefficient": 1}]}]
     else:
         sys.exit(f"no edit named {name}")
 
 
-def transplant(path, target):
+def transplant(path, target, template_at=None):
     with open(path) as source:
         functions = json.load(source)
-    with open(Path(path).parent / "nest_records.json") as source:
-        template = single(json.load(source))["nests"][0]
+    file, function = template_at or (Path(path).parent / "nest_records.json", "single")
+    with open(file) as source:
+        template = next(f for f in json.load(source) if f["function"] == function)["nests"][0]
     function = next(f for f in functions if f["function"] == target)
     own = next(n for n in function["nests"] if n["nest"] == 0)
     record = json.loads(json.dumps(template))
@@ -132,10 +164,14 @@ def transplant(path, target):
 
 
 def main():
+    global TARGET
     path, name = sys.argv[1], sys.argv[2]
     if name.startswith("transplant-"):
-        print(json.dumps(transplant(path, name[len("transplant-"):])))
+        template = sys.argv[3:5] if len(sys.argv) >= 5 else None
+        print(json.dumps(transplant(path, name[len("transplant-"):], template)))
         return
+    if "@" in name:
+        name, TARGET = name.split("@", 1)
     with open(path) as source:
         functions = json.load(source)
     edit(functions, name)

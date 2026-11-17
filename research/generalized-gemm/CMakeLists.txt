@@ -361,6 +361,13 @@ if(GG_SYSTOLIC_OPT AND GG_LLC)
     --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
     --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
   set_tests_properties(generalized-gemm-nest-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3, end to end: nests the production recognizer finds no GEMM in, lowered from their
+  # records (formulas and tables), run, and compared with the original.
+  add_test(NAME generalized-gemm-nest-driven-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_driven_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-driven-e2e PROPERTIES TIMEOUT 3600)
 endif()
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)

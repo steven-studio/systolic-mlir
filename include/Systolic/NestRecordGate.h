@@ -26,6 +26,10 @@
 // here is called. Anything missing, stale, malformed or different leaves the nest as it
 // is, with a remark that says which.
 //
+// Stage 3 (Systolic/NestRecordLowering.h) reads the same records for nests the production
+// recognizer finds no GEMM in: checkRecordAtNest is the checks of a record by itself, shared
+// by both; what stage 2 then compares with the recognizer, stage 3 compares with the nest.
+//
 //===----------------------------------------------------------------------===//
 #ifndef SYSTOLIC_NESTRECORDGATE_H
 #define SYSTOLIC_NESTRECORDGATE_H
@@ -33,6 +37,7 @@
 #include "Systolic/AffineMatmulAnalysis.h"
 #include "Systolic/NestBinding.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
@@ -41,6 +46,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace mlir::systolic {
 
@@ -86,6 +92,80 @@ private:
   llvm::DenseMap<Operation *, Nest> nestOf;
   llvm::DenseMap<Operation *, FunctionRoots> rootsOf;
 };
+
+/// Reads the fields of a record, and says which one is missing or ill-formed. The first
+/// failure is kept.
+struct NestRecordFields {
+  std::string &why;
+
+  void fail(const llvm::Twine &text) {
+    if (why.empty())
+      why = text.str();
+  }
+  const llvm::json::Object *object(const llvm::json::Object &in, StringRef key, StringRef where) {
+    const llvm::json::Object *value = in.getObject(key);
+    if (!value)
+      fail("the record is incomplete: `" + where + "." + key + "` is no object");
+    return value;
+  }
+  const llvm::json::Array *array(const llvm::json::Object &in, StringRef key, StringRef where) {
+    const llvm::json::Array *value = in.getArray(key);
+    if (!value)
+      fail("the record is incomplete: `" + where + "." + key + "` is no array");
+    return value;
+  }
+  std::optional<StringRef> string(const llvm::json::Object &in, StringRef key, StringRef where) {
+    std::optional<StringRef> value = in.getString(key);
+    if (!value)
+      fail("the record is incomplete: `" + where + "." + key + "` is no string");
+    return value;
+  }
+  std::optional<int64_t> integer(const llvm::json::Object &in, StringRef key, StringRef where) {
+    std::optional<int64_t> value = in.getInteger(key);
+    if (!value)
+      fail("the record is incomplete: `" + where + "." + key + "` is no integer");
+    return value;
+  }
+  std::optional<bool> boolean(const llvm::json::Object &in, StringRef key, StringRef where) {
+    std::optional<bool> value = in.getBoolean(key);
+    if (!value)
+      fail("the record is incomplete: `" + where + "." + key + "` is no boolean");
+    return value;
+  }
+};
+
+/// A record located for a nest and checked by itself (checkRecordAtNest).
+struct RecordAtNest {
+  bool usable = false;
+  std::string why;   // When it is not: the first check that failed, naming the nest once found.
+  std::string where; // "nest N of F"
+  const BoundNests::Nest *nest = nullptr;
+  func::FuncOp function;
+  const FunctionRoots *roots = nullptr;
+  const llvm::json::Object *functionRecord = nullptr;
+  const llvm::json::Object *record = nullptr;
+  const llvm::json::Object *gemm = nullptr;
+  std::string holdsFor;
+  // With unmappedViews: the record is VERIFIED_NOT_MAPPED, and its every refusal is that the
+  // research proposed no closed form for a view.
+  bool viewsUnmapped = false;
+};
+
+/// The record of the nest whose outermost loop is `anchor`, and the checks of the record by
+/// itself: `anchor` is an outermost loop of its function as the pass received it, with a
+/// binding; the file has a record of that nest; the function's roots are the record's; no
+/// record claims to authorize; the binding's scheme and hash are the nest's and the claims are
+/// at `indexWidth`; VERIFIED, ordered fold verified, no refusals, no scope, Theorem 13 VERIFIED
+/// at SYMBOLIC with logical tier SYMBOLIC, no other write, a box with no guard. With
+/// `unmappedViews` (stage 3's tables), a record VERIFIED_NOT_MAPPED passes too when its every
+/// refusal says only that a view has no affine closed form: none was proposed, or a dimension
+/// of the one proposed is not affine.
+RecordAtNest checkRecordAtNest(const NestRecordFile &file, const BoundNests &bound, Operation *anchor,
+                               unsigned indexWidth, bool unmappedViews);
+
+/// The research tool's names: of an element type (f32, f64, bvN) and of fast-math flags.
+std::string nestRecordElementName(Type type);
+std::vector<std::string> nestRecordFlagNames(arith::FastMathFlags flags);
 
 struct NestRecordDecision {
   bool agrees = false;
