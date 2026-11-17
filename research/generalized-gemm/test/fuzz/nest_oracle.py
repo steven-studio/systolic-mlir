@@ -58,6 +58,7 @@ from concurrent.futures import ThreadPoolExecutor
 import itertools
 import json
 import random
+import re
 import resource
 import struct
 import subprocess
@@ -750,10 +751,23 @@ def check(spec, seed, driver, domain_driver, fills, counts):
     counts["programs " + e] += 1
     counts["programs of shape " + spec["shape"]] += 1
     complete = {}
+    bindings = set()
     for statement, record in zip(nests, out["nests"]):
         where = f"{name} nest {record['nest']}"
         if record["function"] != name or record["authorizes_lowering"] is not False:
             raise Failure(f"{where}: the record's header")
+        # Stage 2: every record names the loop it is about and the width of its claims, and is
+        # restricted to no range of any argument (none was given). Two nests are two loops: the
+        # function's name and the nest's position are in the binding, so no two are equal.
+        binding = record.get("binding")
+        if not isinstance(binding, dict) or binding.get("scheme") != "generalized-gemm-nest-binding/1" or \
+                not re.fullmatch(r"[0-9a-f]{64}", str(binding.get("sha256"))) or \
+                binding.get("index_width") != spec["width"] or record.get("scope") != []:
+            raise Failure(f"{where}: the record's binding or scope: {binding} {record.get('scope')}")
+        if binding["sha256"] in bindings:
+            raise Failure(f"{where}: two nests have one binding")
+        bindings.add(binding["sha256"])
+        counts["bindings checked"] += 1
         counts["records"] += 1
         counts["records " + record["status"]] += 1
         check_separation(spec, statement, record, counts)
@@ -857,6 +871,7 @@ def check(spec, seed, driver, domain_driver, fills, counts):
 MINIMUM = {
     "programs i32": 6, "programs f32": 4, "programs f64": 2,
     "orders recomputed": 24, "dependence lists recomputed": 24, "dependences": 30, "separation lists recomputed": 50,
+    "bindings checked": 50,
     "separations by a proof": 4,
     "products with every field equal to the program's": 30,
     "nests against their record's fold": 100,

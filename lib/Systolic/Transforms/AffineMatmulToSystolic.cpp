@@ -56,6 +56,7 @@
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
 #include "Systolic/KernelCosetLowering.h"
+#include "Systolic/NestRecordGate.h"
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
 #include "Systolic/Passes.h"
@@ -73,6 +74,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -2640,6 +2642,20 @@ struct AffineMatmulToSystolicPass
                      "allow-fp-reassociation"),
       llvm::cl::init(false)};
 
+  // Stage 2 of docs/GENERALIZED_GEMM_SCOPE.md (Systolic/NestRecordGate.h). Off by default:
+  // empty, nothing below reads a record and the pass runs as it always has.
+  Option<std::string> nestRecords{
+      *this, "nest-records",
+      llvm::cl::desc("A file of the research recognizer's records of loop nests "
+                     "(generalized-gemm-nest-report, format generalized-gemm-nest/2). A GEMM "
+                     "is then lowered only where its nest has a record that is about this "
+                     "nest of this input, complete, verified, and in agreement with what "
+                     "this pass recognizes, and the lowering's own checks still run. Only "
+                     "the dense path reads records: the other paths and the steps that "
+                     "rewrite nests are not run with it (docs/GENERALIZED_GEMM_SCOPE.md, "
+                     "stage 2)"),
+      llvm::cl::init("")};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     // Phase 5.4.3d-3b-5: the guarded MAC replacement creates scf.if and
     // arith operations in a module that may contain none.
@@ -3095,7 +3111,95 @@ struct AffineMatmulToSystolicPass
     m.anchor->erase();
     return success();
   }
+  /// Stage 2 of docs/GENERALIZED_GEMM_SCOPE.md: the dense path, gated by the records of
+  /// nest-records (Systolic/NestRecordGate.h). A record is about a nest as the input has
+  /// it, so nothing rewrites a nest before its gate: the steps that do (last-write-wins,
+  /// the untiling of written tilings, the normalization of parallelotope domains, the
+  /// hoisting of repetition loops) are not run, and neither are the paths that read no
+  /// records. Each GEMM that passes its gate is lowered by lowerOne, with every check it
+  /// makes without records, where it stands and in program order.
+  void runWithNestRecords() {
+    ModuleOp module = getOperation();
+    if (generalAffine || kernelCosetOffload || certifiedOffloadFirst || commonFiberOffload || fpDistribute) {
+      module.emitError() << "affine-matmul-to-systolic: nest-records is read on the dense path "
+                            "only; general-affine, kernel-coset-offload, certified-offload-first, "
+                            "common-fiber-offload and fp-distribute take other paths, which read "
+                            "no records";
+      signalPassFailure();
+      return;
+    }
+    FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);
+    if (failed(fleet)) {
+      signalPassFailure();
+      return;
+    }
+    std::string error;
+    FailureOr<mlir::systolic::NestRecordFile> records =
+        mlir::systolic::NestRecordFile::load(nestRecords, error);
+    if (failed(records)) {
+      module.emitError() << "affine-matmul-to-systolic: nest-records: " << error;
+      signalPassFailure();
+      return;
+    }
+    const unsigned indexWidth =
+        DataLayout(module).getTypeSizeInBits(IndexType::get(module.getContext())).getFixedValue();
+    // Every outermost loop's binding, before anything is lowered.
+    const mlir::systolic::BoundNests bound(module);
+    nextGemmIndex = nextSystolicGemmIndex(module);
+
+    SmallVector<AffineMatmulCandidate> candidates;
+    collectAffineMatmulCandidates(module.getOperation(), candidates);
+    SmallVector<LogicalMatmul, 1> matmuls;
+    for (AffineMatmulCandidate candidate : candidates) {
+      AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten = true;
+      recognition.reductionBatches = reductionBatches;
+      std::string notRecognized;
+      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
+      auto result = recognizeLogicalMatmul(candidate, &notRecognized,
+                                           &notRecognizedClass, recognition);
+      if (failed(result))
+        continue;
+      if (llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
+            return m.outputStore == result->outputStore;
+          }))
+        continue;
+      matmuls.push_back(*result);
+    }
+    for (const LogicalMatmul &matmul : matmuls) {
+      mlir::systolic::NestRecordDecision decision =
+          mlir::systolic::checkNestRecord(*records, bound, matmul, indexWidth);
+      if (!decision.agrees) {
+        auto remark = matmul.anchor->emitRemark()
+                      << "affine GEMM not lowered to systolic.matmul_tile: nest record: "
+                      << decision.why;
+        if (classify)
+          remark << " [" << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
+        continue;
+      }
+      if (report)
+        matmul.anchor->emitRemark() << "nest record agrees: " << decision.summary;
+      std::string why;
+      GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
+      bool hardError = false;
+      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError)))
+        continue;
+      if (hardError) {
+        signalPassFailure();
+        return;
+      }
+      auto remark = matmul.anchor->emitRemark()
+                    << "affine GEMM not lowered to systolic.matmul_tile: " << why;
+      if (classify)
+        remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
+    }
+  }
+
   void runOnOperation() override {
+    if (!nestRecords.empty()) {
+      runWithNestRecords();
+      return;
+    }
     ModuleOp module = getOperation();
 
     FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);

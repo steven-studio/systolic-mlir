@@ -2,8 +2,8 @@
 
 A planning record, written at `d974400` from the documents and the code, with nothing built
 or run. Where an earlier document lists M4c, M4d, G6 or G7 as the next step, this one takes
-precedence. Stage 1 of the plan was then built, on the research side only: its section says
-what was built, what was checked and what was not.
+precedence. Stages 1 and 2 of the plan were then built: their sections say what was built,
+what was checked and what was not.
 
 ## The decision
 
@@ -155,7 +155,7 @@ points of the decision hold.
 | 2 | The pass takes the records behind an option that is off by default: a nest is lowered only where a record for it exists and agrees | the same two cases through the partitioner to `systolic.matmul_tile` and the runtime calls, in place and in order; a missing or disagreeing record leaves the nest on the host. The first change to production code |
 | 3 | Lowering driven by the record, for a nest the affine recognizer refuses and whose views are affine | the generalized recognizer adding a case, within limits 1 to 6 |
 
-Stage 1 is built (below). Stage 2 is the first change to production code and is not started.
+Stages 1 and 2 are built (below). Stage 3 is not started.
 
 ### Stage 1: one verified record per nest (built 2026-11-16)
 
@@ -231,7 +231,8 @@ refusals; and two summaries that are kept apart:
 site), NOT_VERIFIED, VERIFIED_NOT_MAPPED (the fold is verified; the nest is no constant box
 with three proved affine views) or VERIFIED. Every reason short of VERIFIED is in `refusals`.
 `authorizes_lowering` is false in every record and in every function object, which names
-its format (`"schema": "generalized-gemm-nest/1"`).
+its format (`"schema": "generalized-gemm-nest/1"`; `/2` since stage 2, which added the binding,
+the index width and the scope).
 
 **Acceptance.**
 
@@ -331,6 +332,137 @@ The lit suite was rerun because every lit test reads the changed configuration.
 - Records at index widths other than 16 (unit, lit), 16 and 32 (the oracle) and 64 (the
   comparison with production).
 - Stage 2 and stage 3 are not started. Nothing is merged across loops. Nothing is pushed.
+
+### Stage 2: the pass reads the records, behind an option (built 2026-11-17)
+
+The first change to production code, off by default. With
+`--affine-matmul-to-systolic="nest-records=FILE"`, a GEMM is lowered only where FILE, written by
+`generalized-gemm-nest-report`, has a record of its loop nest that is about this nest of this
+input, complete, verified, and in agreement with what the pass recognizes; the lowering then
+makes every check it makes without records. A record is a gate and nothing more: it never
+replaces a check of the lowering, and it can only take a lowering away.
+
+| File | What it is |
+| --- | --- |
+| `include/Systolic/NestBinding.h`, `lib/Systolic/Transforms/NestBinding.cpp` | which loop of which input a record is about. One piece of code, compiled into the pass and into the research tool |
+| `include/Systolic/NestRecordGate.h`, `lib/Systolic/Transforms/NestRecordGate.cpp` | the file of records, the bindings of the module's nests, and the decision for one GEMM |
+| `lib/Systolic/Transforms/AffineMatmulToSystolic.cpp` | the option, and the gated path: one branch at the top of `runOnOperation` |
+| `test/Systolic/nest_records.mlir`, `nest_records_refusals.mlir`, `nest_records_belts.mlir`, `Inputs/nest_records*.json`, `Inputs/edit_nest_records.py` | the production tests, and the records they read |
+| `research/generalized-gemm/test/fuzz/nest_gate_records.py` | writes those records from the research tool's output, and checks they are still what it says |
+| `research/generalized-gemm/test/fuzz/nest_e2e.py` | end to end: records, the pass, the FPGA lowering, a run against the software runtime model |
+| `research/generalized-gemm/test/fuzz/nest_gate_mutation.py` | mutants of the gate, run against the production tests |
+
+**The binding.** A record is about one outermost loop of one function as it stood in the input
+the record was made from. Its binding is the SHA-256 of a canonical text: the scheme, the
+function's name, the loop's position among the function's outermost loops, one line for each
+value the loop reads (a root by its number, as argument or allocation, with `llvm.noalias`; a
+scalar argument; a value the function computes, by the name of its operation), and the loop
+copied into a function of its own, constants copied in, printed in the generic form without
+locations. The research tool computes it of every nest and writes it into the record (format
+`generalized-gemm-nest/2`, with the index width of the claims and the ranges of arguments
+they are restricted to); the pass computes it of every outermost loop of the module before
+anything is lowered. A different file name or line keeps the binding; any change of the
+nest's operations, attributes or types, of what it reads, of the function's name or of the
+nest's position changes it.
+
+**The gate**, for one GEMM the dense recognizer found, in this order; the first that fails is
+the remark, which names the nest:
+
+1. The GEMM's outermost loop is one of the outermost loops of its function at the pass's
+   input, with a binding; the file has a record of that function and of that nest.
+2. The function's roots are the record's: number, argument or allocation, argument number,
+   `llvm.noalias`, type.
+3. No record claims to authorize a lowering. The binding's scheme is this one and its SHA-256
+   is the nest's. The record's claims are at this program's index width (64 here).
+4. The record is complete (every field read is there and well formed) and verified: status
+   VERIFIED, ordered fold verified, no refusals, no range of any argument, Theorem 13 VERIFIED
+   at SYMBOLIC with its logical tier SYMBOLIC, no other write in the frame, a box with no guard.
+5. It agrees with the recognizer: no batch or demoted loop, an accumulation, three loops of
+   constant bounds and step 1 from the anchor to the store, each of I, J and K the counter of
+   one loop; M, N and K; the loop of each coordinate; each level's axis, direction and bounds;
+   each operand's root; per dimension the loop, the scale and the constant; the element type;
+   one site of `fadd` over `fmul`; the place of the accumulator in the addition; the flags of
+   both operations; the source's `reassoc` flag.
+6. The separations the record rests on are proofs (an allocation in this function) or the
+   pairs (A, C) and (B, C), which the lowering's alias gate checks itself.
+
+Only the dense path reads records. With the option, the steps that rewrite nests before
+recognition (last-write-wins, the untiling of written tilings, the normalization of
+parallelotope domains, the hoisting of repetition loops) are not run, since a record is about
+a nest as written; and `general-affine`, `kernel-coset-offload`, `certified-offload-first`,
+`common-fiber-offload` and `fp-distribute`, which read no records, are an error. A file that is
+no file of records (another format, two objects of one function, two records of one nest, no
+JSON, no file) is an error. Without the option nothing of this runs.
+
+**In place, in order.** Each GEMM that passes is lowered by `lowerOne` where its nest stood, in
+program order, as without records: two nests on one output stay two GEMMs, and the statements
+between two nests stay between them. In the asynchronous lowering each GEMM's wait and the
+write-back of its C come before the next statement (the test checks it for every function).
+
+**Acceptance.**
+
+| Case | Result |
+| --- | --- |
+| A. One product, binary32 with `reassoc`; the same with no flag; 32-bit integers; offsets, a scale, a transposed operand and a permuted loop order | lowered with a record (5 tiles); with no flag the record agrees and the floating-point policy refuses, as without records; integers are not recognized by the dense path and stay on the host |
+| B. Two nests on one output; the same with the output zeroed by a loop before both | two GEMMs, in order, each with its record; the zeroing loop is no GEMM and stays where it is, the first GEMM reads C after it, and the two GEMMs are nests 1 and 2 of their function, as their records say |
+| C. A value of C stored into D between two nests; a nest reading the other's output; three nests in a chain | each nest lowered by its own record; the load and the store stay between the two GEMMs; each GEMM is waited for before the next statement |
+| D. Refusals | a stale record (an older version of the nest), a record made with no pair authorized (NOT_VERIFIED, where the lowering alone would lower by `llvm.noalias`), a record at a 16-bit index, a missing function, a missing nest, and one edited field for each check on the record (29 edits): each refused in words, the nest left as written. Another format, two objects of one function, a nest with no number, two records of one nest, no JSON, no file, and a path that reads no records: an error |
+| D'. Nests of another shape | seven nests the lowering takes without records: batches, an assignment, K = 1 over two loops, a loop of step 2, a coordinate I = i + 1, a coordinate I = 2 i, a run-time offset. With the research tool's records five are refused as not VERIFIED, and the two it verifies (I = i + 1, I = 2 i) because a coordinate is no loop's counter. Each with a record carrying @single's verified content on the nest's own binding: every check on the record passes, and the check on the nest's shape refuses, in its own words |
+| E. Execution | `nest_e2e.py`: four variants of records (the records; none authorized; the program changed after the records; no option) × synchronous and asynchronous lowering × 9 functions × 2 data sets, 144 runs of a function against a reference in C |
+
+The numeric contract, by nest. Integers, and floating point left on the host: the same bits as
+the reference. Floating point lowered with reassociation permitted: the device sums each tile
+from zero and adds the sum to C, another order of additions, so each cell may differ from the
+reference by at most 2 γ(T+2) (|c| + Σ|a b|) for its T contributions, carried through every later
+statement that reads it. With small integer data every sum is exact in any order and every
+cell keeps its bits; with data in [−1, 1) cells differ, and every difference is within its bound.
+
+**Why the C compiler gets no option.** The C front end gives every array parameter an open
+leading extent (`memref<?xKxf32>`). The research analysis can claim nothing of such a nest
+without a finite range for that extent, so a record of it is restricted to a range, and the
+gate refuses a record restricted to a range: lowering for every extent on a claim about some
+would be an extrapolation. A C kernel therefore never passes the gate today, and `systolic-cc`
+is unchanged; the end-to-end check runs MLIR with static shapes through the same pipeline
+(`systolic-opt`, `mlir-translate`, `llc`, the software runtime model) instead. What would lift
+this: a research proof that a claim does not depend on an extent that only bounds the accesses,
+or a front end that knows the extent.
+
+**Limits.**
+
+1. Only the dense path reads records; the guarded, certified and kernel-coset paths do not,
+   and are refused with the option.
+2. Nests that a rewriting step would have made recognizable are not lowered with the option.
+3. One GEMM per record; batches and reduction batches are not mapped (stage 1's limits stand).
+4. Records are files written by the research tool; the production build does not run it. The
+   tests read records checked into the tree, which `nest_gate_records.py --check` keeps equal
+   to the tool's output.
+5. The binding is about the nest and what it reads, not about the code around it: that is part
+   of the memory and the values at the nest's entry, over which every record's claim ranges.
+
+**Validation.** On one frozen state (`b7a30aba…`: HEAD `5c38c23` and every file this stage changes or adds,
+this document excepted, which no test or build reads), each phase refusing to start on another
+state and recording that it ended on the same one. Two earlier freezes were abandoned and
+count for nothing: the first lacked the zeroed shared output, and the second's mutation list
+declared six checks equivalent that an edited record reaches (now `nest_records_belts.mlir`).
+
+| Check | Result |
+| --- | --- |
+| Production lit, the whole suite | 191 of 193; the 2 failures (`Systolic/general_affine_domains.mlir`, `SystolicCC/general_affine.c`) fail at the baseline too, with the same messages. The three gate tests pass |
+| Option off | every `systolic-opt` command of the production tests, run with the baseline binary and with the new one: 199 byte for byte the same (output, messages, files written), 54 the same once the addresses of values are masked (they differ between two runs of the baseline too), 0 different; 55 commands that pass nest-records are new |
+| Production unit binaries that link the changed library | `tensor-space-dependencies-test`, `rank-partition-presburger-test`: pass, with the baseline's output |
+| Records | the five records files equal what the research tool says today (CTest) |
+| End to end | 144 runs, 0 failures: 104 with every bit kept, 40 with lowered cells that differ, each within its bound (at most 0.232 of it) |
+| Gate mutation | 48 mutants, 48 KILLED by the production tests' own checks, 1 declared equivalent |
+| Research | alone on the machine (the existing lit tests use 3-second solver limits): unit 839 checks, 0 failures (53 of the binding); lit 35 of 35; the oracle, 30 functions at seeds 1 and 20261116, 0 failures, 75 bindings checked at each; against the production report, 63 fields, 60 equal, 3 differences of policy, 0 failures; mutation 68 mutants, 68 KILLED, 4 declared equivalent |
+| ASan and UBSan | the gate's three tests and the end-to-end run with the sanitized `systolic-opt`; the research unit binary (839 checks, 0 failures) and the records check with the sanitized driver: no report |
+| Warnings | the six sources this stage changes or adds, with `-Wall -Wextra -Wpedantic`: none but g++ 15's `-Wdangling-pointer` at the end of `toJSON(NestRecord)`, which it gives the file at `5c38c23` too |
+
+**Not run.** The other research suites (22 `generalized-gemm-*`, 9 `polynomial-*`), whose binaries
+this stage does not rebuild; every historical mutation run (the open G3b and G3a mutants, the
+stale EQUIVALENT entries and the mutants not rerun at `9bb3cf0` stand as recorded); the
+production unit binaries that link no changed code; `systolic-cc` beyond the production lit
+suite; cosimulation and the board; a Release build of the research side. Since stage 1 the
+machine's compiler changed (g++ 13 to 15): the suites not run here have not run with it.
 
 ## The thesis
 

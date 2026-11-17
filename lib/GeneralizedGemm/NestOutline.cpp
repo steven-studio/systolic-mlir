@@ -6,6 +6,8 @@
 //===----------------------------------------------------------------------===//
 #include "GeneralizedGemm/NestOutline.h"
 
+#include "Systolic/NestBinding.h"
+
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -456,6 +458,31 @@ struct Outliner {
       out.order.clear();
       return;
     }
+    // Stage 2: the binding of each nest, by the code the production pass uses
+    // (Systolic/NestBinding.h). It numbers roots and nests by its own walk; when either
+    // numbering differs from the one above, a record would name other roots or another
+    // nest than the binding does, and no nest gets a binding.
+    mlir::systolic::FunctionRoots shared = mlir::systolic::numberFunctionRoots(function);
+    SmallVector<Operation *> sharedLoops = mlir::systolic::outermostLoops(function);
+    std::string disagreement;
+    if (shared.roots.size() != out.roots.size()) {
+      disagreement = "the binding numbers " + std::to_string(shared.roots.size()) + " roots and the outliner " +
+                     std::to_string(out.roots.size());
+    } else {
+      for (unsigned id = 0; id < out.roots.size() && disagreement.empty(); ++id) {
+        const FunctionRoot &mine = out.roots[id];
+        const mlir::systolic::FunctionRoot &theirs = shared.roots[id];
+        bool argument = mine.origin == FunctionRoot::FunctionArgument;
+        if (argument != theirs.argument || (argument && (mine.argument != theirs.argNumber ||
+                                                         mine.restrictArgument != theirs.noalias)) ||
+            mine.type != theirs.type)
+          disagreement = "root " + std::to_string(id) + " is another root for the binding";
+      }
+    }
+    if (disagreement.empty() && (sharedLoops.size() != loops.size() ||
+                                 !std::equal(loops.begin(), loops.end(), sharedLoops.begin())))
+      disagreement = "the binding numbers the function's outermost loops otherwise";
+
     // The position of each nest, from its entry in the order.
     for (const OrderEntry &entry : out.order) {
       if (entry.kind != OrderEntry::Nest)
@@ -468,6 +495,17 @@ struct Outliner {
       nest.function = out.function;
       nest.loop = loop->getName().getStringRef().str();
       nest.location = locationText(loop->getLoc(), &nest.line, &nest.column);
+      if (!disagreement.empty()) {
+        nest.bindingRefusal = disagreement;
+      } else {
+        std::string why;
+        FailureOr<mlir::systolic::NestBinding> binding =
+            mlir::systolic::computeNestBinding(function, loop, entry.nest, shared, why);
+        if (succeeded(binding))
+          nest.bindingSha = binding->sha256;
+        else
+          nest.bindingRefusal = why;
+      }
       outline(loop, nest);
       out.nests.push_back(std::move(nest));
     }

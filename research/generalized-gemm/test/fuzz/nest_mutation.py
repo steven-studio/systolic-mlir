@@ -160,7 +160,23 @@ MUTANTS = [
 ]
 
 # Not run. Each is a check that no input reaches while the code above it is as it is.
+# Stage 2: what a record says of the loop it is about.
+MUTANTS += [
+    ("the binding left out of the record", N, "  r.bindingSha = nest.bindingSha;\n", "  (void)nest.bindingSha;\n"),
+    ("the index width left out of the record", N, "  r.indexWidth = options.indexBitWidth;\n", "  r.indexWidth = 0;\n"),
+    ("the scope left out of the record", N, "          r.scope.push_back(entry);\n", "          (void)entry;\n"),
+    ("the record's scope printed empty", N, "  out[\"scope\"] = std::move(scopeEntries);\n",
+     "  out[\"scope\"] = json::Array();\n"),
+    ("the binding of the next nest", O,
+     "            mlir::systolic::computeNestBinding(function, loop, entry.nest, shared, why);\n",
+     "            mlir::systolic::computeNestBinding(function, loop, entry.nest + 1, shared, why);\n"),
+]
+
 EQUIVALENT = [
+    ("a disagreement of the two numberings ignored", O, "      if (!disagreement.empty()) {\n        nest.bindingRefusal = disagreement;\n",
+     "      if (false) {\n        nest.bindingRefusal = disagreement;\n",
+     "the outliner and the binding number roots and outermost loops by the same rules, so the two "
+     "numberings never differ and the check guards the rules themselves"),
     ("the copy may read the function", O, "    if (escapes) {\n", "    if (false) {\n",
      "every value the nest reads and does not define is collected and mapped before the clone, so no operand "
      "of the copy is outside it: the check guards the collection itself"),
@@ -311,6 +327,7 @@ def main():
     unit = build / "generalized-gemm-nest-test"
     oracle = root / "research" / "generalized-gemm" / "test" / "fuzz" / "nest_oracle.py"
     tests = [("unit outline", "unit", [unit, "outline"]),
+             ("unit binding", "unit", [unit, "binding"]),
              ("unit mapping", "unit", [unit, "mapping"]),
              ("unit composition", "unit", [unit, "composition"]),
              ("lit nest_outline", "lit", [args.lit, "-v", build / "lit", "--filter", "nest_outline"]),

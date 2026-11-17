@@ -111,6 +111,11 @@ struct OutlinedNest {
   /// Every pair of the nest's roots, in order.
   std::vector<NestSeparation> separations;
 
+  /// Stage 2: which loop of which input the nest is (Systolic/NestBinding.h): the SHA-256 of
+  /// the binding the production pass computes with the same code. Empty, with the reason in
+  /// `bindingRefusal`, when no binding can be computed. Set whether or not the nest has a copy.
+  std::string bindingSha, bindingRefusal;
+
   func::FuncOp outlined() const;
 };
 

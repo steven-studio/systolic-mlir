@@ -23,6 +23,14 @@
 // SYMBOLIC: "refusals": [
 // SYMBOLIC-NEXT: "no constant extent: the upper bound of level 0 (axis I) is (param:bv16 0); it reads parameter 0 (argument 3 of the function)"
 // SYMBOLIC-NEXT: ],
+// Stage 2: the range of the scope, as data: a reader that lowers for every value refuses it.
+// SYMBOLIC-NEXT: "scope": [
+// SYMBOLIC-NEXT: {
+// SYMBOLIC-NEXT: "argument": 3,
+// SYMBOLIC-NEXT: "lower": 1,
+// SYMBOLIC-NEXT: "upper": 2
+// SYMBOLIC-NEXT: }
+// SYMBOLIC-NEXT: ],
 // SYMBOLIC: "status": "VERIFIED_NOT_MAPPED"
 //
 // A view that is not affine: A[i * i, k]. The fold is verified and the view is proved,

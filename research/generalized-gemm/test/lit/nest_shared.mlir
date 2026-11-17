@@ -53,7 +53,8 @@
 // SHARED: "name": "roots 2 and 3 are separate",
 // SHARED: "statement": 1,
 // SHARED-NEXT: "status": "VERIFIED"
-// SHARED: "schema": "generalized-gemm-nest/1",
+// Stage 2 added the binding, the index width and the scope to every record: format /2.
+// SHARED: "schema": "generalized-gemm-nest/2",
 // SHARED-NEXT: "status": "OUTLINED"
 // The whole function, as the existing driver sees it today: the claim over both groups is
 // verified, and each group's own claim is refuted, since the other nest writes the same

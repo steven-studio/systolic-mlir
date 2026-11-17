@@ -172,9 +172,12 @@ target_link_libraries(generalized-gemm-identity-report PRIVATE
 # Stage 1 of docs/GENERALIZED_GEMM_SCOPE.md: one record per loop nest. The outliner copies a
 # nest into a function of its own, and the record reads what the analyses above say of
 # the copy. No target above links this library, so none of their results can depend on it.
+# Stage 2: the binding of a nest is computed by the production pass's own file, compiled here
+# as it is, so that both sides compute it with one piece of code.
 add_library(generalized-gemm-nest STATIC
   "${GG_LIB_DIR}/NestOutline.cpp"
-  "${GG_LIB_DIR}/NestRecord.cpp")
+  "${GG_LIB_DIR}/NestRecord.cpp"
+  "${GG_ROOT}/lib/Systolic/Transforms/NestBinding.cpp")
 target_link_libraries(generalized-gemm-nest PUBLIC
   generalized-gemm-domain generalized-gemm-polynomial-adapter)
 target_compile_options(generalized-gemm-nest PRIVATE -Wall -Wextra -Wpedantic)
@@ -339,6 +342,25 @@ if(GG_SYSTOLIC_OPT)
     --functions mm,strict,mmi,offsets,offsetsi,allocated,restrict --twin mmi=mm --twin offsetsi=offsets
     "${CMAKE_CURRENT_SOURCE_DIR}/test/lit/nest_product.mlir")
   set_tests_properties(generalized-gemm-nest-affine PROPERTIES TIMEOUT 1200)
+endif()
+
+# Stage 2: the records the production gate's tests read (test/Systolic/Inputs/nest_records*.json)
+# must be what the research tool says of their input today.
+add_test(NAME generalized-gemm-nest-gate-records COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_gate_records.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --root "${GG_ROOT}" --check)
+set_tests_properties(generalized-gemm-nest-gate-records PROPERTIES TIMEOUT 1800)
+
+# Stage 2, end to end: records, the production pass with nest-records, the FPGA lowering, a
+# run against the software runtime model, results by each nest's numeric contract. Needs the
+# production systolic-opt of this source tree (GG_SYSTOLIC_OPT, above); it is only run.
+find_program(GG_LLC llc HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH)
+if(GG_SYSTOLIC_OPT AND GG_LLC)
+  add_test(NAME generalized-gemm-nest-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-e2e PROPERTIES TIMEOUT 3600)
 endif()
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)

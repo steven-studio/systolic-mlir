@@ -14,6 +14,14 @@
 // MM: "function": "mm",
 // MM-NEXT: "nests": [
 // MM: "authorizes_lowering": false,
+// Stage 2: which loop of which input the record is about (Systolic/NestBinding.h), and the
+// index width of its claims. The production pass reads a record only with the binding it
+// computes itself of the nest in front of it.
+// MM-NEXT: "binding": {
+// MM-NEXT: "index_width": 16,
+// MM-NEXT: "reason": "",
+// MM-NEXT: "scheme": "generalized-gemm-nest-binding/1",
+// MM-NEXT: "sha256": "{{[0-9a-f]+}}"
 // MM: "accumulator_first": true,
 // MM-NEXT: "element": "f32",
 // MM-NEXT: "fold": "ORDERED_FLOAT",
@@ -64,6 +72,7 @@
 // MM-NEXT: "source_flag_reassoc": true
 // MM: "reassociation_permitted": true,
 // MM-NEXT: "refusals": [],
+// MM-NEXT: "scope": [],
 // MM: "kind": "assumption",
 // MM-NEXT: "name": "roots 0 and 2 are separate",
 // MM: "used": true

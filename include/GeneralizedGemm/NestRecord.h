@@ -144,6 +144,12 @@ struct NestRecord {
   std::optional<bool> sourceFlagReassoc; // Float folds only.
 
   std::vector<std::string> assumptions, refusals;
+
+  // Stage 2: what a reader needs to tell that the record is about the loop in front of it,
+  // and under which premises its claims hold, as data rather than words.
+  std::string bindingSha, bindingRefusal; // Systolic/NestBinding.h; see OutlinedNest.
+  unsigned indexWidth = 0;                // The width every claim is made at.
+  std::vector<NestScopeEntry> scope;      // Ranges of the function's arguments; empty: every value.
 };
 
 const char *stringifyNestStatus(NestRecord::Status status);

@@ -5,6 +5,7 @@
 #include "GeneralizedGemm/NestRecord.h"
 #include "GeneralizedGemm/SiteSets.h"
 #include "GeneralizedGemm/Z3Backend.h"
+#include "Systolic/NestBinding.h"
 
 #include "TestSupport.h"
 
@@ -775,6 +776,185 @@ static void composes(const std::string &text, const char *name, std::vector<int6
   }
 }
 
+/// Stage 2: the binding of a nest (Systolic/NestBinding.h), computed by the code the
+/// production pass shares with the outliner. Which loop of which input a record is about:
+/// the same nest of the same input gives the same binding wherever the file is, and any
+/// change of the nest, of what it reads, of the function's name or of the nest's position
+/// gives another.
+static const char *kBound = R"mlir(
+func.func @f(%a: memref<4x4xf32>, %b: memref<4x4xf32>, %c: memref<4x4xf32> {llvm.noalias}, %n: index) {
+  %t = memref.alloc() : memref<4x4xf32>
+  %c1 = arith.constant 1 : index
+  %m = arith.addi %n, %c1 : index
+  affine.for %i = 0 to 4 {
+    affine.for %j = 0 to 4 {
+      %x = affine.load %a[%i, %j] : memref<4x4xf32>
+      affine.store %x, %t[%i, %j] : memref<4x4xf32>
+    }
+  }
+  scf.for %k = %c1 to %m step %c1 {
+    %y = memref.load %t[%k, %k] : memref<4x4xf32>
+    memref.store %y, %c[%k, %k] : memref<4x4xf32>
+  }
+  return
+}
+)mlir";
+
+static std::vector<std::string> shas(const std::string &text, const char *name = "f") {
+  Module m(text);
+  FunctionOutline outline = outlineNests(m.function(name), {});
+  std::vector<std::string> out;
+  for (const OutlinedNest &nest : outline.nests)
+    out.push_back(nest.bindingSha);
+  return out;
+}
+
+static std::string replaced(std::string text, const std::string &from, const std::string &to) {
+  size_t at = text.find(from);
+  CHECK(at != std::string::npos);
+  if (at != std::string::npos)
+    text.replace(at, from.size(), to);
+  return text;
+}
+
+static void testBinding() {
+  Module m(kBound);
+  mlir::func::FuncOp function = m.function("f");
+  FunctionOutline outline = outlineNests(function, {});
+  CHECK(outline.nests.size() == 2);
+  mlir::systolic::FunctionRoots roots = mlir::systolic::numberFunctionRoots(function);
+  llvm::SmallVector<mlir::Operation *> loops = mlir::systolic::outermostLoops(function);
+  CHECK(loops.size() == 2 && roots.roots.size() == 4);
+  // The outliner's numbering is the binding's: every nest has a binding, and it is the
+  // production code's own result for that loop.
+  for (unsigned k = 0; k < outline.nests.size() && k < loops.size(); ++k) {
+    const OutlinedNest &nest = outline.nests[k];
+    CHECK(nest.bindingRefusal.empty());
+    CHECK(nest.bindingSha.size() == 64 &&
+          nest.bindingSha.find_first_not_of("0123456789abcdef") == std::string::npos);
+    std::string why;
+    llvm::FailureOr<mlir::systolic::NestBinding> binding =
+        mlir::systolic::computeNestBinding(function, loops[k], k, roots, why);
+    CHECK(mlir::succeeded(binding));
+    if (mlir::succeeded(binding)) {
+      CHECK(binding->sha256 == nest.bindingSha);
+      // What the text says the nest reads, in its order: roots by number, then scalars.
+      if (k == 1) {
+        const std::string &text = binding->text;
+        CHECK(text.rfind("generalized-gemm-nest-binding/1\nfunction: f\nnest: 1\n", 0) == 0);
+        CHECK(text.find("argument 0: root 2, argument 2, llvm.noalias : memref<4x4xf32>\n") != std::string::npos);
+        CHECK(text.find("argument 1: root 3, allocation : memref<4x4xf32>\n") != std::string::npos);
+        CHECK(text.find("argument 2: scalar, computed by arith.addi : index\n") != std::string::npos);
+        CHECK(text.find("argument 3:") == std::string::npos);
+        // The constant is copied in; no location is printed.
+        CHECK(text.find("\"arith.constant\"() <{value = 1 : index}>") != std::string::npos);
+        CHECK(text.find("loc(") == std::string::npos);
+      }
+    }
+  }
+  CHECK(outline.nests.size() == 2 && outline.nests[0].bindingSha != outline.nests[1].bindingSha);
+
+  // The same nest of the same input: the same binding, parsed again, and with locations.
+  std::vector<std::string> base = shas(kBound);
+  CHECK(shas(kBound) == base);
+  CHECK(shas(replaced(kBound, "affine.store %x, %t[%i, %j] : memref<4x4xf32>",
+                      "affine.store %x, %t[%i, %j] : memref<4x4xf32> loc(\"elsewhere.c\":7:7)")) == base);
+  CHECK(shas(replaced(kBound, "%c1 = arith.constant 1 : index", "%c1 = arith.constant 1 : index loc(\"x\":1:2)")) ==
+        base);
+  // A change of the first nest changes its binding only.
+  std::vector<std::string> bound = shas(replaced(kBound, "affine.for %j = 0 to 4", "affine.for %j = 0 to 3"));
+  CHECK(bound.size() == 2 && bound[0] != base[0] && bound[1] == base[1]);
+  // The roots' attributes are part of what a nest reads: C's llvm.noalias is the second
+  // nest's only.
+  std::vector<std::string> plain =
+      shas(replaced(kBound, "%c: memref<4x4xf32> {llvm.noalias}", "%c: memref<4x4xf32>"));
+  CHECK(plain.size() == 2 && plain[0] == base[0] && plain[1] != base[1]);
+  // A and B exchanged: the first nest reads another argument.
+  std::vector<std::string> exchanged = shas(replaced(kBound, "%x = affine.load %a[", "%x = affine.load %b["));
+  CHECK(exchanged.size() == 2 && exchanged[0] != base[0] && exchanged[1] == base[1]);
+  // The function's name, and the nest's position, are in every binding.
+  std::string renamed = replaced(kBound, "func.func @f(", "func.func @g(");
+  std::vector<std::string> other = shas(renamed, "g");
+  CHECK(other.size() == 2 && other[0] != base[0] && other[1] != base[1]);
+  std::vector<std::string> later = shas(replaced(kBound, "  affine.for %i = 0 to 4 {",
+                                                 "  affine.for %q = 0 to 1 {\n  }\n  affine.for %i = 0 to 4 {"));
+  CHECK(later.size() == 3 && later[1] != base[0] && later[2] != base[1]);
+  // A computed scalar is any value: what computes it, other than its operation, is not read.
+  CHECK(shas(replaced(kBound, "%m = arith.addi %n, %c1 : index", "%m = arith.addi %c1, %n : index")) == base);
+  CHECK(shas(replaced(kBound, "%m = arith.addi %n, %c1 : index", "%m = arith.muli %n, %c1 : index"))[1] != base[1]);
+
+  // A memref that is no root of the function: no binding, and the reason.
+  Module viewed(R"mlir(
+func.func @v(%a: memref<4xf32>, %b: memref<4xf32>) {
+  %w = memref.cast %a : memref<4xf32> to memref<?xf32>
+  affine.for %i = 0 to 4 {
+    %x = affine.load %w[%i] : memref<?xf32>
+    affine.store %x, %b[%i] : memref<4xf32>
+  }
+  return
+}
+)mlir");
+  FunctionOutline refused = outlineNests(viewed.function("v"), {});
+  CHECK(refused.nests.size() == 1);
+  if (refused.nests.size() == 1) {
+    CHECK(refused.nests[0].bindingSha.empty());
+    CHECK(refused.nests[0].bindingRefusal == "the loop reads a memref that is no root of the function");
+  }
+
+  // The record carries the binding, the index width of its claims and its scope as data.
+  NestAnalysisOptions options;
+  options.indexBitWidth = 16;
+  options.timeoutMs = 20000;
+  options.resourceLimit = 2000000;
+  options.maxLevel = 1;
+  options.candidatesPerGroup = 1;
+  options.scope.push_back({3, 1, 2});
+  NestRecord record = analyzeNest(outline.nests[1], options, z3Backend);
+  CHECK(record.bindingSha == outline.nests[1].bindingSha && record.bindingRefusal.empty());
+  CHECK(record.indexWidth == 16);
+  CHECK(record.scope.size() == 0); // The second nest reads no argument: %m is a computed value.
+  NestRecord first = analyzeNest(outline.nests[0], options, z3Backend);
+  CHECK(first.bindingSha == outline.nests[0].bindingSha);
+  llvm::json::Object json = toJSON(record, outline.roots);
+  const llvm::json::Object *printed = json.getObject("binding");
+  CHECK(printed != nullptr);
+  if (printed) {
+    CHECK(printed->getString("sha256") == std::optional<llvm::StringRef>(outline.nests[1].bindingSha));
+    CHECK(printed->getInteger("index_width") == std::optional<int64_t>(16));
+    CHECK(printed->getString("scheme") == std::optional<llvm::StringRef>(mlir::systolic::kNestBindingScheme));
+  }
+  CHECK(json.getArray("scope") && json.getArray("scope")->empty());
+  // A scalar argument read by the nest, in scope: the range is printed as data.
+  Module scoped(R"mlir(
+func.func @s(%a: memref<8xi32>, %c: memref<8xi32>, %n: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %x = memref.load %a[%i] : memref<8xi32>
+    memref.store %x, %c[%i] : memref<8xi32>
+  }
+  return
+}
+)mlir");
+  FunctionOutline withScalar = outlineNests(scoped.function("s"), {});
+  CHECK(withScalar.nests.size() == 1);
+  if (withScalar.nests.size() == 1) {
+    NestAnalysisOptions narrow = options;
+    narrow.scope = {{2, 1, 3}};
+    NestRecord r = analyzeNest(withScalar.nests[0], narrow, z3Backend);
+    CHECK(r.scope.size() == 1 && r.scope[0].argument == 2 && r.scope[0].lower == 1 && r.scope[0].upper == 3);
+    llvm::json::Object j = toJSON(r, withScalar.roots);
+    const llvm::json::Array *list = j.getArray("scope");
+    CHECK(list && list->size() == 1);
+    if (list && list->size() == 1) {
+      const llvm::json::Object *entry = (*list)[0].getAsObject();
+      CHECK(entry && entry->getInteger("argument") == std::optional<int64_t>(2) &&
+            entry->getInteger("lower") == std::optional<int64_t>(1) &&
+            entry->getInteger("upper") == std::optional<int64_t>(3));
+    }
+  }
+}
+
 static void testComposition() {
   // Two nests on one output; a nest that reads what the other wrote, as an operand and
   // as the cell it accumulates into; three nests; binary32; a bound that is an argument.
@@ -1114,7 +1294,7 @@ static void testNests() {
       CHECK(!says(shared[1].assumptions, "roots 1 and 2 are separate"));
       llvm::json::Object json = toJSON(outline, shared);
       CHECK(json.getBoolean("authorizes_lowering") == std::optional<bool>(false));
-      CHECK(json.getString("schema") == std::optional<llvm::StringRef>("generalized-gemm-nest/1"));
+      CHECK(json.getString("schema") == std::optional<llvm::StringRef>("generalized-gemm-nest/2"));
       const llvm::json::Array *nests = json.getArray("nests");
       CHECK(nests && nests->size() == 2);
       const llvm::json::Array *dependences = json.getArray("dependences");
@@ -1654,6 +1834,7 @@ int main(int argc, char **argv) {
     }
   };
   run("outline", testOutline);
+  run("binding", testBinding);
   run("mapping", testMapping);
   run("composition", testComposition);
   run("product", testProduct);

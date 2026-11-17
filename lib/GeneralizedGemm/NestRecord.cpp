@@ -8,6 +8,7 @@
 #include "GeneralizedGemm/NestRecord.h"
 
 #include "GeneralizedGemm/PolynomialAdapter.h"
+#include "Systolic/NestBinding.h"
 #include "GeneralizedGemm/SemanticImport.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
 
@@ -242,6 +243,9 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
   r.roots = nest.roots;
   r.separations = nest.separations;
   r.separationUsed.assign(nest.separations.size(), false);
+  r.bindingSha = nest.bindingSha;
+  r.bindingRefusal = nest.bindingRefusal;
+  r.indexWidth = options.indexBitWidth;
   if (!nest.unsupported.empty()) {
     r.outlineRefusal = nest.unsupported;
     r.refusals.push_back("the nest has no faithful copy: " + nest.unsupported);
@@ -286,6 +290,7 @@ NestRecord analyzeNest(const OutlinedNest &nest, const NestAnalysisOptions &opti
             return r;
           }
           scope.ranges.push_back({parameter.id, low.trunc(width), high.trunc(width)});
+          r.scope.push_back(entry);
           r.assumptions.push_back("argument " + std::to_string(entry.argument) + " of the function is in [" +
                                   std::to_string(entry.lower) + ", " + std::to_string(entry.upper) +
                                   "]: the scope of every claim");
@@ -802,6 +807,19 @@ json::Object toJSON(const NestRecord &r, const std::vector<FunctionRoot> &roots)
                    {"status", stringifyNestStatus(r.status)},
                    {"authorizes_lowering", false}};
 
+  // Stage 2: which loop of which input the record is about (Systolic/NestBinding.h), the
+  // index width of its claims, and the ranges of arguments they are restricted to (empty:
+  // every value). A reader that cannot recompute the binding has no record.
+  json::Array scopeEntries;
+  for (const NestScopeEntry &entry : r.scope)
+    scopeEntries.push_back(
+        json::Object{{"argument", (int64_t)entry.argument}, {"lower", entry.lower}, {"upper", entry.upper}});
+  out["binding"] = json::Object{{"scheme", mlir::systolic::kNestBindingScheme},
+                                {"sha256", r.bindingSha.empty() ? json::Value(nullptr) : json::Value(r.bindingSha)},
+                                {"reason", r.bindingRefusal},
+                                {"index_width", (int64_t)r.indexWidth}};
+  out["scope"] = std::move(scopeEntries);
+
   // The copy and its inputs.
   json::Array inputRoots, inputScalars, separations;
   for (const NestRoot &root : r.roots) {
@@ -958,7 +976,7 @@ json::Object toJSON(const NestRecord &r, const std::vector<FunctionRoot> &roots)
 
 json::Object toJSON(const FunctionOutline &outline, const std::vector<NestRecord> &records) {
   json::Object out{{"function", outline.function},
-                   {"schema", "generalized-gemm-nest/1"},
+                   {"schema", "generalized-gemm-nest/2"},
                    {"status", outline.unsupported.empty() ? "OUTLINED" : "UNSUPPORTED"},
                    {"reason", outline.unsupported},
                    {"authorizes_lowering", false},
