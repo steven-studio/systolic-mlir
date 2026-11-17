@@ -20,6 +20,7 @@
 
 #include "GeneralizedGemm/IndexSlice.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,45 @@ struct SliceSynthesisResult {
 SliceSynthesisResult synthesizeClosedForms(const SemanticProgram &program,
                                            llvm::ArrayRef<std::vector<llvm::APInt>> points,
                                            const ClosedFormOptions &options, SmtBackend &backend);
+
+/// The closed-form grammar's bottom-up enumerator (Section 7), shared with the
+/// inductive invariant path (Section 13). Constants first (0 to 8, the program's
+/// literals of the width, `extraConstants`), then the leaves of the width, then
+/// terms by size with +, − and ×, and udiv and urem by a constant above one, up to
+/// `maxTermSize`, keeping one term per distinct value vector on the first `keyRows`
+/// rows (observational equivalence), at most `maxTerms` of them. The defaults are
+/// the closed-form search's own; nothing below changes it.
+struct GrammarTerm {
+  Term term = nullptr;
+  unsigned size = 0;
+  std::vector<llvm::APInt> values; // Per row.
+};
+struct TermGrammar {
+  unsigned maxTermSize = 5;
+  size_t maxTerms = 200000;
+  std::vector<llvm::APInt> extraConstants;
+  bool division = true; // udiv and urem by a constant above one.
+  // The invariant path's polynomial template: a product only of a constant (on the
+  // left) and another term, so a term's degree is the largest degree of its leaves;
+  // and each sum once, not again with its operands swapped.
+  bool polynomial = false;
+  // Report a later term whose key equals an earlier term's when the two differ on a
+  // row past `keyRows` (a witness row): an equality the key rows show that is not an
+  // identity. At most `collisionsPerTerm` per earlier term.
+  bool collisions = false;
+  unsigned collisionsPerTerm = 2;
+};
+struct GrammarEnumeration {
+  std::vector<GrammarTerm> pool;
+  std::vector<unsigned> constants;                // Indices into pool.
+  std::map<std::vector<uint64_t>, unsigned> seen; // Key -> index into pool.
+  std::vector<std::pair<unsigned, GrammarTerm>> collisions; // Earlier index, later term.
+};
+/// `leafValues[l]` holds one value per row for `leaves[l]`; rows past `keyRows` are
+/// witness rows. Widths up to 64.
+GrammarEnumeration enumerateGrammar(const SemanticProgram &program, llvm::ArrayRef<Term> leaves,
+                                    llvm::ArrayRef<std::vector<llvm::APInt>> leafValues,
+                                    size_t keyRows, unsigned width, const TermGrammar &grammar);
 
 /// Deterministic JSON of the result.
 std::string closedFormsJSON(const SemanticProgram &program, const SliceSynthesisResult &result);

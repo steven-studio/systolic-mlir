@@ -5,6 +5,7 @@
 #include "GeneralizedGemm/CoverageSimulation.h"
 #include "GeneralizedGemm/ClosedFormSynthesis.h"
 #include "GeneralizedGemm/IndexProgramSemgus.h"
+#include "GeneralizedGemm/InvariantSynthesis.h"
 #include "GeneralizedGemm/LoopCounters.h"
 #include "GeneralizedGemm/SymbolicDomain.h"
 #include "GeneralizedGemm/TerminationAnalysis.h"
@@ -13,9 +14,11 @@
 
 #include "TestSupport.h"
 
+#include <climits>
 #include <functional>
 #include <map>
 #include <set>
+#include <tuple>
 
 using namespace mlir::generalized_gemm;
 using llvm::APInt;
@@ -3795,6 +3798,542 @@ static void testSlices() {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// The inductive invariant path (docs/GENERALIZED_GEMM_STATEMENT_BV.md, Section 13).
+//===----------------------------------------------------------------------===//
+
+/// Scalar loops of one cut. odd_sum is the request's loop,
+///   for (int i = 0; i < N; i++) g += 2 * x++ + 1;  return g;
+/// the others vary one thing each.
+static const char *scalarLoops = R"(
+func.func @odd_sum(%n: i32, %x0: i32, %g0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  cf.br ^header(%c0, %x0, %g0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %g: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %twice = arith.muli %c2, %x : i32
+  %odd = arith.addi %twice, %c1 : i32
+  %g1 = arith.addi %g, %odd : i32
+  %x1 = arith.addi %x, %c1 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1, %g1 : i32, i32, i32)
+^done:
+  return %g : i32
+}
+func.func @odd_sum_nsw(%n: i32, %x0: i32, %g0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  cf.br ^header(%c0, %x0, %g0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %g: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %twice = arith.muli %c2, %x overflow<nsw> : i32
+  %odd = arith.addi %twice, %c1 overflow<nsw> : i32
+  %g1 = arith.addi %g, %odd overflow<nsw> : i32
+  %x1 = arith.addi %x, %c1 overflow<nsw> : i32
+  %i1 = arith.addi %i, %c1 overflow<nsw> : i32
+  cf.br ^header(%i1, %x1, %g1 : i32, i32, i32)
+^done:
+  return %g : i32
+}
+func.func @odd_sum_pre(%n: i32, %x0: i32, %g0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  cf.br ^header(%c0, %x0, %g0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %g: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %x1 = arith.addi %x, %c1 : i32
+  %twice = arith.muli %c2, %x1 : i32
+  %odd = arith.addi %twice, %c1 : i32
+  %g1 = arith.addi %g, %odd : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1, %g1 : i32, i32, i32)
+^done:
+  return %g : i32
+}
+func.func @odd_sum_early(%n: i32, %x0: i32, %g0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %negative = arith.cmpi slt, %n, %c0 : i32
+  cf.cond_br %negative, ^early, ^start
+^early:
+  return %g0 : i32
+^start:
+  cf.br ^header(%c0, %x0, %g0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %g: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %twice = arith.muli %c2, %x : i32
+  %odd = arith.addi %twice, %c1 : i32
+  %g1 = arith.addi %g, %odd : i32
+  %x1 = arith.addi %x, %c1 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1, %g1 : i32, i32, i32)
+^done:
+  return %g : i32
+}
+func.func @odd_sum_two(%n: i32, %x0: i32, %g0: i32, %c: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  cf.br ^header(%c0, %x0, %g0 : i32, i32, i32)
+^header(%i: i32, %x: i32, %g: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %sel = arith.cmpi ne, %c, %c0 : i32
+  cf.cond_br %sel, ^mul, ^add
+^mul:
+  %twice = arith.muli %c2, %x : i32
+  %odd = arith.addi %twice, %c1 : i32
+  %g1 = arith.addi %g, %odd : i32
+  %x1 = arith.addi %x, %c1 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %x1, %g1 : i32, i32, i32)
+^add:
+  %sum = arith.addi %x, %x : i32
+  %odd2 = arith.addi %sum, %c1 : i32
+  %g2 = arith.addi %g, %odd2 : i32
+  %x2 = arith.addi %x, %c1 : i32
+  %i2 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i2, %x2, %g2 : i32, i32, i32)
+^done:
+  return %g : i32
+}
+func.func @scaled(%n: i32, %a: i32, %s0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %a2 = arith.muli %c2, %a : i32
+  cf.br ^header(%c0, %s0 : i32, i32)
+^header(%i: i32, %s: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %s1 = arith.addi %s, %a2 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %s1 : i32, i32)
+^done:
+  return %s : i32
+}
+func.func @step2(%n: i32, %s0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  cf.br ^header(%c0, %s0 : i32, i32)
+^header(%i: i32, %s: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %s1 = arith.addi %s, %c2 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %s1 : i32, i32)
+^done:
+  return %s : i32
+}
+func.func @odd_sum_for(%n: i32, %x0: i32, %g0: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  %c2 = arith.constant 2 : i32
+  %r:2 = scf.for %i = %c0 to %n step %c1 iter_args(%x = %x0, %g = %g0) -> (i32, i32) : i32 {
+    %twice = arith.muli %c2, %x : i32
+    %odd = arith.addi %twice, %c1 : i32
+    %g1 = arith.addi %g, %odd : i32
+    %x1 = arith.addi %x, %c1 : i32
+    scf.yield %x1, %g1 : i32, i32
+  }
+  return %r#1 : i32
+}
+func.func @memory(%m: memref<4xi32>, %n: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %z = arith.constant 0 : index
+  cf.br ^header(%c0, %c0 : i32, i32)
+^header(%i: i32, %s: i32):
+  %more = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %more, ^body, ^done
+^body:
+  %v = memref.load %m[%z] : memref<4xi32>
+  %s1 = arith.addi %s, %v : i32
+  %c1 = arith.constant 1 : i32
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^header(%i1, %s1 : i32, i32)
+^done:
+  return %s : i32
+}
+func.func @twice(%n: i32) -> i32 {
+  %c0 = arith.constant 0 : i32
+  %c1 = arith.constant 1 : i32
+  cf.br ^h1(%c0 : i32)
+^h1(%i: i32):
+  %m1 = arith.cmpi slt, %i, %n : i32
+  cf.cond_br %m1, ^b1, ^mid
+^b1:
+  %i1 = arith.addi %i, %c1 : i32
+  cf.br ^h1(%i1 : i32)
+^mid:
+  cf.br ^h2(%c0 : i32)
+^h2(%j: i32):
+  %m2 = arith.cmpi slt, %j, %n : i32
+  cf.cond_br %m2, ^b2, ^x
+^b2:
+  %j1 = arith.addi %j, %c1 : i32
+  cf.br ^h2(%j1 : i32)
+^x:
+  return %j : i32
+}
+)";
+
+static const char *oddSum = "p2 + (p1 + p0) * (p1 + p0) - p1 * p1";
+/// The request's certificate, over odd_sum's header arguments s0 = i, s1 = x, s2 = g.
+static const char *requestInvariant =
+    "(0 <=s s0) && (s0 <=s p0) && (s1 == p1 + s0) && (s2 - p2 == s1 * s1 - p1 * p1)";
+
+static ParameterScope scopeOf(const SemanticProgram &p,
+                              std::vector<std::tuple<unsigned, int64_t, int64_t>> ranges) {
+  ParameterScope scope;
+  scope.allParameters = false;
+  for (auto [id, low, high] : ranges) {
+    unsigned w = p.parameters[id].sort.width;
+    scope.ranges.push_back({id, APInt(w, low, true), APInt(w, high, true)});
+  }
+  return scope;
+}
+
+static Term loopTerm(const SemanticProgram &p, const std::string &text) {
+  std::string why;
+  Term t = parseLoopTerm(p, text, why);
+  if (!t) {
+    fprintf(stderr, "cannot parse %s: %s\n", text.c_str(), why.c_str());
+    exit(2);
+  }
+  return t;
+}
+
+static LoopFunction loopFunctionOf(const SemanticProgram &p, const std::string &text) {
+  LoopFunction f;
+  f.origin = "given";
+  f.results = {loopTerm(p, text)};
+  return f;
+}
+
+static InvariantCertificate certificateOf(const SemanticProgram &p, const std::string &text) {
+  return InvariantCertificate{conjuncts(loopTerm(p, text)), "given"};
+}
+
+static bool hasRecord(const CheckedLoopInvariant &r, const std::string &id, const std::string &result) {
+  for (const ObligationRecord &record : r.records)
+    if (record.id == id && record.result == result)
+      return true;
+  return false;
+}
+
+static unsigned countRecords(const CheckedLoopInvariant &r, const std::string &id) {
+  unsigned n = 0;
+  for (const ObligationRecord &record : r.records)
+    n += record.id == id;
+  return n;
+}
+
+/// A backend that leaves the named obligation undecided and asks z3 about the rest.
+/// With `atoms`, also the obligation's atom-by-atom queries.
+struct Undecided : SmtBackend {
+  std::string prefix;
+  bool atoms;
+  explicit Undecided(std::string prefix, bool atoms = false) : prefix(std::move(prefix)), atoms(atoms) {}
+  SmtResponse check(const std::string &script, const SmtLimits &limits, bool wantModel) override {
+    if (script.rfind("; " + prefix + " ", 0) == 0 || (atoms && script.rfind("; " + prefix + "[", 0) == 0)) {
+      SmtResponse r;
+      r.detail = "stubbed";
+      return r;
+    }
+    return z3Backend.check(script, limits, wantModel);
+  }
+  std::string version() const override { return "undecided-stub"; }
+};
+
+/// The inductive invariant path: Pre, G, T and Post read off the program; INV-init,
+/// INV-step and INV-exit; what a model of each may refute; the search; the fallback.
+static void testInvariants() {
+  const auto npos = std::string::npos;
+  Module m(scalarLoops);
+  SemanticProgram p = m.import("odd_sum", 32);
+  InvariantLoop loop = invariantLoop(p);
+  CHECK(loop.supported());
+  CHECK(loop.entry.size() == 1 && loop.iterate.size() == 1 && loop.leave.size() == 1);
+  CHECK(loop.bypass.empty() && loop.variables == std::vector<unsigned>({0, 1, 2}));
+  ParameterScope natural = scopeOf(p, {{0, 0, INT32_MAX}}); // N >= 0
+  LoopFunction f = loopFunctionOf(p, oddSum);
+
+  // Pre, T with its frame, X and Post are the program's: x++ reads x before the
+  // update, the counter steps on the back edge, the exit tests i < N.
+  std::string spec = invariantSpecificationJSON(p, loop, f, natural);
+  CHECK(spec.find("\"s2'\":\"(s2 + ((2 * s1) + 1))\"") != npos);
+  CHECK(spec.find("\"s1'\":\"(s1 + 1)\"") != npos && spec.find("\"s0'\":\"(s0 + 1)\"") != npos);
+  CHECK(spec.find("\"s1'\":\"p1\"") != npos && spec.find("\"s2'\":\"p2\"") != npos);
+  CHECK(spec.find("(!(s0 <s p0) && !sp0)") != npos);
+  CHECK(spec.find("\"post\":[\"r0 == ((p2 + ((p1 + p0) * (p1 + p0))) - (p1 * p1))\"]") != npos);
+
+  // The request's certificate: every obligation unsat, N symbolic, no run.
+  InvariantCheckOptions checking;
+  checking.scope = natural;
+  checking.failFast = false;
+  CheckedLoopInvariant given =
+      checkLoopInvariant(p, loop, certificateOf(p, requestInvariant), f, checking, z3Backend);
+  CHECK(given.invariant == InvariantVerdict::Inductive);
+  CHECK(given.function == LoopFunctionVerdict::Proved);
+  CHECK(hasRecord(given, "INV-init", "unsat") && hasRecord(given, "INV-step", "unsat"));
+  CHECK(hasRecord(given, "INV-exit-eq", "unsat") && hasRecord(given, "INV-exit", "unsat"));
+  CHECK(llvm::is_contained(given.lemmas, std::string("s0 == p0")));
+  CHECK(given.confirmationRuns == 0 && given.confirmationSteps == 0);
+  // Each script stands alone: replayed, it gives the recorded answer.
+  for (const ObligationRecord &record : given.records) {
+    CHECK(record.script.find("(check-sat)") != npos);
+    SmtResponse again = z3Backend.check(record.script, checking.solver, false);
+    CHECK(std::string(stringifySmtAnswer(again.answer)) == record.result);
+  }
+  // N = 0 alone, and N up to 10: the same obligations of the same size. Nothing in
+  // them depends on how many iterations a run makes.
+  for (int64_t high : {int64_t(0), int64_t(10)}) {
+    InvariantCheckOptions narrow = checking;
+    narrow.scope = scopeOf(p, {{0, 0, high}});
+    CheckedLoopInvariant r =
+        checkLoopInvariant(p, loop, certificateOf(p, requestInvariant), f, narrow, z3Backend);
+    CHECK(r.function == LoopFunctionVerdict::Proved);
+    CHECK(r.queries == given.queries && r.records.size() == given.records.size());
+    // Only the scope's bound differs: its literal may print a few characters longer.
+    CHECK(r.scriptBytes + 64 * r.queries >= given.scriptBytes &&
+          given.scriptBytes + 64 * given.queries >= r.scriptBytes);
+    CHECK(r.confirmationSteps == 0);
+  }
+  {
+    // N = 0 is in the scope: the run returns g0 and the candidate gives g0.
+    EntryState e;
+    e.parameters = {APInt(32, 0), APInt(32, 7), APInt(32, 5)};
+    RunResult run = runConcrete(p, e);
+    CHECK(run.status == RunStatus::Returned && run.returns[0] == APInt(32, 5));
+  }
+
+  // The search finds a certificate itself; the checker, asked again, accepts it.
+  InvariantSearchOptions search;
+  search.check.scope = natural;
+  LoopInvariantSearch found = proveLoopFunction(p, &f, nullptr, search, z3Backend);
+  CHECK(found.status == "PROVED_BY_INVARIANT");
+  CHECK(found.certificate && !found.certificate->atoms.empty());
+  CHECK(found.check.confirmationRuns == 0 && found.finite.points == 0);
+  CHECK(found.check.poison == "excluded"); // wrapping: no flag, no poison
+  CHECK(found.samples.maxArrivals <= 13 && found.samples.runs > 0);
+  CHECK(checkLoopInvariant(p, loop, *found.certificate, f, checking, z3Backend).function ==
+        LoopFunctionVerdict::Proved);
+  {
+    // The same search for N up to 2^31 - 1 and for N up to 10^6 takes the same samples:
+    // what is run for candidates does not grow with the bound.
+    InvariantSearchOptions small = search;
+    small.check.scope = scopeOf(p, {{0, 0, 1000000}});
+    LoopInvariantSearch r = proveLoopFunction(p, &f, nullptr, small, z3Backend);
+    CHECK(r.status == "PROVED_BY_INVARIANT");
+    CHECK(r.samples.runs == found.samples.runs && r.samples.arrivals == found.samples.arrivals);
+  }
+  std::string json = loopInvariantJSON(p, found, search, "PROVEN_TERMINATING", "O0-O7", false);
+  CHECK(json.find("\"unrolling_omitted\":true") != npos);
+  CHECK(json.find("total correctness") != npos);
+  std::string partial = loopInvariantJSON(p, found, search, "", "", false);
+  CHECK(partial.find("partial correctness only") != npos && partial.find("total correctness") == npos);
+  std::string ifDefined = loopInvariantJSON(p, found, search, "PROVEN_TERMINATING_IF_DEFINED", "", false);
+  CHECK(ifDefined.find("stops on a side condition") != npos);
+  std::string unknownTermination = loopInvariantJSON(p, found, search, "UNKNOWN", "", false);
+  CHECK(unknownTermination.find("partial correctness only") != npos);
+
+  // A wrong invariant is refused: false at an initial state (the -x0^2 is missing) ...
+  CheckedLoopInvariant wrongInit = checkLoopInvariant(
+      p, loop, certificateOf(p, "(0 <=s s0) && (s0 <=s p0) && (s1 == p1 + s0) && (s2 - p2 == s1 * s1)"),
+      f, checking, z3Backend);
+  CHECK(wrongInit.invariant == InvariantVerdict::NotInductive && wrongInit.falsifiedBy == "INV-init");
+  CHECK(wrongInit.falsified == std::vector<unsigned>({3}));
+  CHECK(wrongInit.function != LoopFunctionVerdict::Proved);
+  // ... or true there and not preserved by a step.
+  CheckedLoopInvariant wrongStep = checkLoopInvariant(
+      p, loop, certificateOf(p, "(0 <=s s0) && (s0 <=s p0) && (s1 == p1 + 2 * s0)"), f, checking, z3Backend);
+  CHECK(wrongStep.invariant == InvariantVerdict::NotInductive && wrongStep.falsifiedBy == "INV-step");
+  CHECK(wrongStep.function != LoopFunctionVerdict::Proved);
+
+  // A wrong function candidate gets no certificate. A sampled run refutes it ...
+  LoopFunction wrong = loopFunctionOf(p, "p2 + (p1 + p0) * (p1 + p0)");
+  LoopInvariantSearch refuted = proveLoopFunction(p, &wrong, nullptr, search, z3Backend);
+  CHECK(refuted.status == "REFUTED" && refuted.finite.counterexample.has_value());
+  // ... and, with the right invariant, INV-exit has a model that a run confirms.
+  CheckedLoopInvariant byExit =
+      checkLoopInvariant(p, loop, certificateOf(p, requestInvariant), wrong, checking, z3Backend);
+  CHECK(byExit.function == LoopFunctionVerdict::Refuted && byExit.counterexample.has_value());
+  if (byExit.counterexample) {
+    EntryState e;
+    e.parameters = byExit.counterexample->parameters;
+    RunResult run = runConcrete(p, e);
+    CHECK(run.status == RunStatus::Returned && run.returns[0] == byExit.counterexample->returned[0]);
+    CHECK(byExit.counterexample->expected[0] && *byExit.counterexample->expected[0] != run.returns[0]);
+  }
+  // A candidate equal to the program at every sample and wrong at x0 = 1000: no run
+  // the search makes sees it; INV-exit does, and a run from a small N confirms it.
+  LoopFunction hidden = loopFunctionOf(p, std::string("(") + oddSum + ") + ite(p1 == 1000, 1, 0)");
+  LoopInvariantSearch hiddenResult = proveLoopFunction(p, &hidden, nullptr, search, z3Backend);
+  CHECK(hiddenResult.status == "REFUTED");
+  CHECK(hiddenResult.check.function == LoopFunctionVerdict::Refuted);
+  CHECK(hiddenResult.check.counterexample &&
+        hiddenResult.check.counterexample->parameters[1] == APInt(32, 1000));
+  CHECK(!hiddenResult.finite.counterexample);
+
+  // A weak invariant (no bounds on i): inductive, and its INV-exit model is a state
+  // no run reaches. Runs from that model's parameters return the candidate's value,
+  // so the candidate is not refuted, and nothing is proved.
+  InvariantCertificate weak = certificateOf(p, "(s1 == p1 + s0) && (s2 - p2 == s1 * s1 - p1 * p1)");
+  CheckedLoopInvariant weakCheck = checkLoopInvariant(p, loop, weak, f, checking, z3Backend);
+  CHECK(weakCheck.invariant == InvariantVerdict::Inductive);
+  CHECK(weakCheck.function == LoopFunctionVerdict::Unknown && !weakCheck.counterexample);
+  CHECK(!weakCheck.unconfirmedExitModel.empty() && weakCheck.confirmationRuns >= 1);
+  LoopInvariantSearch weakResult = proveLoopFunction(p, &f, &weak, search, z3Backend);
+  CHECK(weakResult.status == "SAMPLE_CONSISTENT");
+  CHECK(loopInvariantJSON(p, weakResult, search, "", "", false).find("\"unrolling_omitted\":false") != npos);
+
+  // Nothing is proved from an unknown, from a sat with no model, or from a template
+  // that does not hold the invariant; the fallback says what it is.
+  UnknownBackend unknown;
+  LoopInvariantSearch u = proveLoopFunction(p, &f, nullptr, search, unknown);
+  CHECK(u.status == "SAMPLE_CONSISTENT" && u.check.function != LoopFunctionVerdict::Proved);
+  for (const ObligationRecord &record : u.check.records)
+    CHECK(!record.discharged);
+  SatBackend liar;
+  LoopInvariantSearch s = proveLoopFunction(p, &f, nullptr, search, liar);
+  CHECK(s.status != "PROVED_BY_INVARIANT" && s.status != "REFUTED");
+  Undecided noExit("INV-exit");
+  LoopInvariantSearch e = proveLoopFunction(p, &f, nullptr, search, noExit);
+  CHECK(e.status == "SAMPLE_CONSISTENT" && e.check.function == LoopFunctionVerdict::Unknown);
+  CHECK(hasRecord(e.check, "INV-exit", "unknown"));
+  // INV-step undecided together, decided atom by atom: every atom alone is unsat, which
+  // proves the conjunction, and the records say so.
+  Undecided conjunctionStep("INV-step");
+  LoopInvariantSearch split = proveLoopFunction(p, &f, nullptr, search, conjunctionStep);
+  CHECK(split.status == "PROVED_BY_INVARIANT" && hasRecord(split.check, "INV-step", "unknown"));
+  CHECK(hasRecord(split.check, "INV-step[atom 0]", "unsat"));
+  // INV-step undecided both ways: nothing is proved.
+  Undecided noStep("INV-step", /*atoms=*/true);
+  LoopInvariantSearch st = proveLoopFunction(p, &f, nullptr, search, noStep);
+  // (Houdini drops every undecided atom; the empty conjunction, true, is inductive and
+  // proves nothing.)
+  CHECK(st.status != "PROVED_BY_INVARIANT" && st.check.function != LoopFunctionVerdict::Proved);
+  CHECK(st.certificate && st.certificate->atoms.empty());
+  InvariantSearchOptions linear = search;
+  linear.levels = {{1, 5}};
+  LoopInvariantSearch lin = proveLoopFunction(p, &f, nullptr, linear, z3Backend);
+  CHECK(lin.status == "SAMPLE_CONSISTENT" && lin.check.function == LoopFunctionVerdict::Unknown);
+  CHECK(lin.check.invariant == InvariantVerdict::Inductive && !lin.check.unconfirmedExitModel.empty());
+  {
+    // A finite scope run to the end is the complete bounded check, and says so.
+    InvariantSearchOptions box = linear;
+    box.check.scope = scopeOf(p, {{0, 0, 3}, {1, -2, 2}, {2, 0, 1}});
+    LoopInvariantSearch b = proveLoopFunction(p, &f, nullptr, box, z3Backend);
+    CHECK(b.status == "SCOPE_ENUMERATED" && b.finite.exhaustive && b.finite.points == 40);
+    CHECK(loopInvariantJSON(p, b, box, "", "", false).find("complete bounded check") != npos);
+  }
+
+  // Outside stage 1: memory, two loops. No claim.
+  SemanticProgram memory = m.import("memory", 16);
+  LoopInvariantSearch ms = proveLoopFunction(memory, nullptr, nullptr, search, z3Backend);
+  CHECK(ms.status == "UNSUPPORTED" && ms.reason.find("memory") != npos);
+  SemanticProgram twice = m.import("twice", 16);
+  LoopInvariantSearch ts = proveLoopFunction(twice, nullptr, nullptr, search, z3Backend);
+  CHECK(ts.status == "UNSUPPORTED" && ts.reason.find("loop headers") != npos);
+
+  // The frame: a2 = 2a is computed before the loop and no path around it writes it.
+  SemanticProgram scaled = m.import("scaled", 32);
+  LoopFunction sf = loopFunctionOf(scaled, "p2 + 2 * p1 * p0");
+  InvariantSearchOptions scaledSearch = search;
+  scaledSearch.check.scope = scopeOf(scaled, {{0, 0, INT32_MAX}});
+  LoopInvariantSearch sr = proveLoopFunction(scaled, &sf, nullptr, scaledSearch, z3Backend);
+  CHECK(sr.status == "PROVED_BY_INVARIANT");
+  CHECK(invariantSpecificationJSON(scaled, sr.loop, sf, scaledSearch.check.scope).find("' = s") != npos);
+
+  // Execution order: g += 2 * ++x + 1 is another function. The post-increment
+  // candidate is refuted on it, and its own is proved.
+  SemanticProgram pre = m.import("odd_sum_pre", 32);
+  InvariantSearchOptions preSearch = search;
+  preSearch.check.scope = scopeOf(pre, {{0, 0, INT32_MAX}});
+  LoopFunction post = loopFunctionOf(pre, oddSum);
+  CHECK(proveLoopFunction(pre, &post, nullptr, preSearch, z3Backend).status == "REFUTED");
+  LoopFunction preF = loopFunctionOf(pre, "p2 + (p1 + p0 + 1) * (p1 + p0 + 1) - (p1 + 1) * (p1 + 1)");
+  CHECK(proveLoopFunction(pre, &preF, nullptr, preSearch, z3Backend).status == "PROVED_BY_INVARIANT");
+
+  // A return that bypasses the loop (N < 0 returns g0): RET-bypass. The program's own
+  // test gives the precondition, so no scope is needed.
+  SemanticProgram early = m.import("odd_sum_early", 32);
+  InvariantSearchOptions open = search;
+  open.check.scope = ParameterScope();
+  LoopFunction earlyF = loopFunctionOf(early, std::string("ite(p0 <s 0, p2, ") + oddSum + ")");
+  LoopInvariantSearch er = proveLoopFunction(early, &earlyF, nullptr, open, z3Backend);
+  CHECK(er.status == "PROVED_BY_INVARIANT");
+  CHECK(hasRecord(er.check, "RET-bypass", "unsat"));
+  LoopFunction earlyWrong = loopFunctionOf(early, oddSum);
+  LoopInvariantSearch ew = proveLoopFunction(early, &earlyWrong, nullptr, open, z3Backend);
+  CHECK(ew.status == "REFUTED");
+
+  // Two paths around the loop: one INV-step per path.
+  SemanticProgram two = m.import("odd_sum_two", 32);
+  InvariantSearchOptions twoSearch = search;
+  twoSearch.check.scope = scopeOf(two, {{0, 0, INT32_MAX}});
+  LoopFunction twoF = loopFunctionOf(two, oddSum);
+  LoopInvariantSearch tr = proveLoopFunction(two, &twoF, nullptr, twoSearch, z3Backend);
+  CHECK(tr.status == "PROVED_BY_INVARIANT" && tr.loop.iterate.size() == 2);
+  CHECK(countRecords(tr.check, "INV-step") == 2);
+
+  // scf.for, lowered by the importer: the same proof.
+  SemanticProgram forLoop = m.import("odd_sum_for", 32);
+  InvariantSearchOptions forSearch = search;
+  forSearch.check.scope = scopeOf(forLoop, {{0, 0, INT32_MAX}});
+  LoopFunction forF = loopFunctionOf(forLoop, oddSum);
+  CHECK(proveLoopFunction(forLoop, &forF, nullptr, forSearch, z3Backend).status == "PROVED_BY_INVARIANT");
+
+  // C's int (nsw): the bits are proved; a returned value may be poison (an overflow,
+  // undefined in C), and the claim says so.
+  SemanticProgram nsw = m.import("odd_sum_nsw", 32);
+  InvariantSearchOptions nswSearch = search;
+  nswSearch.check.scope = scopeOf(nsw, {{0, 0, INT32_MAX}});
+  LoopFunction nswF = loopFunctionOf(nsw, oddSum);
+  LoopInvariantSearch nr = proveLoopFunction(nsw, &nswF, nullptr, nswSearch, z3Backend);
+  CHECK(nr.status == "PROVED_BY_INVARIANT" && nr.check.poison == "not excluded");
+  CHECK(loopInvariantJSON(nsw, nr, nswSearch, "PROVEN_TERMINATING", "", false)
+            .find("not shown free of poison") != npos);
+
+  // No candidate given: the closed-form grammar proposes one from the sampled runs.
+  SemanticProgram step2 = m.import("step2", 32);
+  InvariantSearchOptions stepSearch = search;
+  stepSearch.check.scope = scopeOf(step2, {{0, 0, INT32_MAX}});
+  LoopInvariantSearch s2 = proveLoopFunction(step2, nullptr, nullptr, stepSearch, z3Backend);
+  CHECK(s2.status == "PROVED_BY_INVARIANT");
+  CHECK(s2.function.origin.rfind("synthesized", 0) == 0);
+
+  // The text of terms: printed, read back, refused when malformed.
+  for (const char *text : {requestInvariant, oddSum, "ite((p0 <u 3), (s1 *nsw 2), -1)",
+                           "!(s0 == p0) || (sp1 && (p2 >=s -5))", "zext64(s0) + 1", "(s1 /u 3) %u 2"}) {
+    Term t = loopTerm(p, text);
+    std::string why;
+    Term back = parseLoopTerm(p, formatLoopTerm(t), why);
+    CHECK(back == t);
+  }
+  for (const char *bad : {"s9 + 1", "p0 + ", "(p0 == 1", "4294967296 + p0", "zext8(p0)", "p0 + q1", "1 + 2"}) {
+    std::string why;
+    CHECK(parseLoopTerm(p, bad, why) == nullptr && !why.empty());
+  }
+}
+
 int main(int argc, char **argv) {
   mlir::MLIRContext local;
   configure(local);
@@ -3813,6 +4352,7 @@ int main(int argc, char **argv) {
       else if (name == "grammar") testGrammar();
       else if (name == "search") testSearch();
       else if (name == "clauses") testClauses();
+      else if (name == "invariants") testInvariants();
       else { fprintf(stderr, "unknown test %s\n", argv[n]); return 2; }
     }
     printf("%d checks, %d failures\n", checks, failures);
@@ -3838,6 +4378,7 @@ int main(int argc, char **argv) {
   testCoverageAlone();
   testClauses();
   testSearch();
+  testInvariants();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

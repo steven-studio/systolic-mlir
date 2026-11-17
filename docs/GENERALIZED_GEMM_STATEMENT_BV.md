@@ -415,6 +415,9 @@ as before.
 4. Done: Section 11.
 5. Done for one template, with the rest listed as not done: Section 12.
 
+Separately from the numbered phases, Section 13 adds an inductive invariant path for
+the result of a scalar function's one loop.
+
 ## 11. Phase 4: proofs for while candidates, counters as coordinates, views
 
 Phase 4 adds the symbolic obligations for the while candidates of phase 3, including
@@ -820,3 +823,185 @@ table), the overfitted while bodies (e.g. `if 1 < v1 then (5·v1) div 3 else ...
   the header of every export says so, and nothing here is an external integration.
 - **Widths.** Everything is at the program's widths; `PROVED` for a table is for
   m < 2^w − d; the thesis's integer statements are not what is proved.
+
+## 13. The inductive invariant path for a scalar loop
+
+Before this section the architecture had no verification path for the value a scalar
+loop computes. The synthesis report refused such a function ("the program has no MAC
+site"); the slice, the loop specification and every obligation above start from a MAC
+subscript. Where the existing parts work, the record is:
+
+| Concern | Where | What it does |
+| --- | --- | --- |
+| Enumerating candidate expressions | `enumerateGrammar` (`ClosedFormSynthesis`), the `Synthesizer`, `WhileSynthesizer`, `TableSynthesizer`; `CoordinateGrammar` for coordinates | bottom-up by size, one term per value vector on the samples |
+| Enumerating inputs and states | the report's scope enumeration (`FiniteDomain`), `replayLoop`, `runConcrete`; here `loopPoints` and `sampleLoop` | concrete runs at parameter points |
+| Unrolling a loop iteration by iteration | `runConcrete` and every concrete replay; `runIndexProgram` with its fuel (`checkProgramOnTraces`, the finite tier of while candidates); `TT-init_j` unrolls d ≤ 3 steps symbolically | executed, or symbolically unrolled, per iteration |
+| Symbolic verification | `checkClosedForms` (CF, W, TT), `checkCertificate` (G2a O0–O7), the symbolic coordinate and domain tiers; here `checkLoopInvariant` | SMT-LIB text to `SmtBackend` (Z3 as a library), unsat is the only proof |
+
+The new path reuses all four and adds one checker and one search; it builds no
+separate SyGuS pipeline.
+
+### 13.1 What is proved, from what
+
+`invariantLoop` (`LoopInvariant.h`) reads the function's cut paths (`CutPaths.h`).
+Stage 1: integer parameters and results, no memory root, no float, exactly one cut.
+Paths split into entry → header (Pre), header → header (G and T, one per path),
+header → return (X and the returned values, composed with `extendSymbolicPath`), and
+entry → return without the header (a bypass). The terms are the program's own: the
+operations of each block in their order (so `x++` reads x before the update), the
+counter's update on the back edge, the guards, the no-stop conditions of every block
+passed, and a variable no path assigns is unchanged (the frame; the specification
+JSON lists it as `s' = s`).
+
+For a function candidate F (one term over the parameters per returned value) and an
+invariant Inv (a conjunction over the header variables, their poison bits and the
+parameters), `checkLoopInvariant` asks, at the program's widths and under the scope:
+
+```
+INV-init    scope ∧ Pre(s) ∧ ¬Inv(s)                     per entry path
+INV-step    scope ∧ Inv(s) ∧ G(s) ∧ T(s,s') ∧ ¬Inv(s')     per iterate path (T by substitution)
+INV-exit    scope ∧ Inv(s) ∧ X(s) ∧ ¬Post(s)               per leaving path
+RET-bypass  scope ∧ X(s) ∧ ¬Post(s)                        per bypass path
+```
+
+All unsat is `PROVED` partial correctness: a run in the scope that returns, returns F.
+X is the leaving path's condition, not ¬G: ¬G also holds where a run is stuck on a
+side condition, which returns nothing.
+
+Two devices keep the queries decidable in practice, both sound and recorded:
+
+- **Elimination.** An atom v = t (or v ± u = t, u − v = t; v a header variable not in
+  t) is a premise wherever Inv is, so the query is stated with v replaced by t. The
+  substituted query is equisatisfiable with the literal one. Applied only where Inv
+  is a premise (INV-step, INV-exit, INV-poison from the header).
+- **INV-exit-eq.** For each comparison in X, `scope ∧ Inv ∧ X ∧ a ≠ b` is asked first;
+  an unsat makes a = b a lemma, solved the same way. For the request's loop this is
+  i = N.
+
+Measured on Z3 4.8.12, before this machine's system upgrade of 2026-11-17, the literal
+exit query of the request's loop at 32 bits timed out at 60 s and the eliminated one
+took 9 ms (the scratch logs of that measurement were lost with a reboot; it is not
+re-run here). With Z3 4.13.3 the search's proof of that loop is 5 queries (13.6).
+
+### 13.2 What a model means
+
+- INV-init sat: an initial state violates Inv. The invariant candidate is wrong.
+- INV-step sat: Inv is not inductive; the model's state need not be reachable. The
+  invariant candidate fails; the function candidate is untouched.
+- INV-exit sat: the model may sit where no run goes (the invariant may be too weak).
+  It refutes F only through a run: `runConcrete` from the model's parameters must
+  return another value. When that run cannot decide (fuel, a stop, the same value),
+  the query is asked again with every parameter in [−8, 8], then [−64, 64], then one
+  parameter at a time in those ranges, and each model is run. No run that disagrees
+  → F stays `UNKNOWN`, with the model kept as `unconfirmed_exit_model`.
+- Unknown, a timeout, a resource limit: nothing. An undecided conjunction is split atom
+  by atom (each atom alone unsat proves the conjunction).
+
+### 13.3 The search and the CEGIS loop
+
+`proveLoopFunction` (`InvariantSynthesis.h`) proposes; every verdict above is the
+checker's or a run's.
+
+1. Samples: complete runs at small parameter points of the scope (`loopPoints`), the
+   header state at each arrival. They choose candidates only; no obligation reads one.
+2. A sampled run that returns another value refutes F at once (a run of the program).
+3. The template, by levels (degree, size) = (1, 5), (2, 3), (2, 5): equalities between
+   sums of monomials of degree ≤ d over the header variables and parameters (the
+   closed-form enumerator over monomial leaves, + and − and constant ×, constants 0 to 8
+   and the program's literals, `size` counting leaves and operators), offered when two
+   terms agree at every sampled state and differ at a random witness state, and only
+   when linearly independent of those already offered; comparisons ≤s <s ≤u <u between
+   two variables or a variable and 0, and the loop's own comparisons and their
+   non-strict forms; not-poison per variable. A conjunction only: no disjunction, no
+   quantifier, no division, at most 400 equalities and 200 000 terms.
+4. Houdini: check; drop the atoms a model of INV-init or INV-step falsifies (and those
+   left undecided); repeat. The result is the strongest inductive conjunction of the
+   offered atoms.
+5. INV-exit unsat: proved; the certificate is minimized (each atom dropped if the rest
+   still proves, and still excludes poison where it did) and checked once more. A
+   confirmed run: F refuted. Otherwise the next level; after the last, `UNKNOWN`, which
+   says nothing about invariants outside the template.
+6. Without a given F, the closed-form grammar over the parameters and their monomials
+   (size ≤ 5) proposes one from the sampled results; a refuting run's parameters join
+   the samples and the next F is sought (up to 4 rounds).
+
+### 13.4 Semantics, poison and termination
+
+Bit vectors at the program's widths; values wrap; nsw, nuw and exact set poison bits
+and a branch on poison is a stop (`SemanticTerm.h`, I2). Post compares bits, so
+`PROVED` says the returned bits equal F's modulo 2^w; no statement over the integers is
+made. For the C loop with `int` (nsw on every operation) the bits are proved; whether a
+returned value can be poison is the informational INV-poison query, and the claim says
+"not shown free of poison" when it is not excluded (for nsw it is not: g can overflow).
+
+An invariant proves partial correctness only. The report joins it with the G2a verdict:
+`PROVEN_TERMINATING` gives total correctness over the scope;
+`PROVEN_TERMINATING_IF_DEFINED` gives "returns F or stops on a side condition"; anything
+else leaves partial correctness only.
+
+### 13.5 Fallback and labels
+
+When nothing is proved and nothing refuted, the finite tier runs the program at the
+scope's points, every iteration executed (`checkLoopFunctionOnRuns`): `SCOPE_ENUMERATED`
+when every point of a finite scope ran and agreed (a complete bounded check of that
+scope), `SAMPLE_CONSISTENT` otherwise (tests only), `REFUTED` with the run. Only
+`PROVED_BY_INVARIANT` reports `"unrolling_omitted": true`. The proof's own queries do not
+depend on N: the same certificate checked for N ≤ 0, N ≤ 10 and N ≤ 2^31 − 1 gives the
+same obligations, and `proof.program_runs` is 0. The SMT solver's internal search is not
+claimed to be absent; only the program's loop is not unrolled.
+
+CLI: `--loop-invariants` on the synthesis report, with `--loop-function=j:term`,
+`--loop-invariant=conjunction` (check instead of search), `--loop-invariant-scripts`,
+`--loop-invariant-levels`. Without `--loop-invariants` the output is unchanged.
+
+### 13.6 Results (2026-11-17, g++ 15.2, CMake 4.2.3, Z3 4.13.3)
+
+The request's loop, `for (int i = 0; i < N; i++) g += 2 * x++ + 1;`, candidate
+`p2 + (p1 + p0)·(p1 + p0) − p1·p1`, scope N ∈ [0, 2^31 − 1], i32:
+
+| | Result |
+| --- | --- |
+| request's certificate, given | INV-init, INV-step, INV-exit-eq (i = N), INV-exit unsat; 5 queries, 0 program runs |
+| search | `PROVED_BY_INVARIANT` in about 5 s: `s0 ≤u p0`, `p1 = s1 − s0`, `s2 + p1·p1 = p2 + s1·s1`, `¬sp1`, `¬sp2` (minimized from 15 atoms); proof 5 queries, 0 runs; samples 48 runs, at most 13 header arrivals each |
+| termination (G2a) | `PROVEN_TERMINATING`, so the claim is total correctness over the scope at width 32 |
+| nsw (C int) | bits proved; poison not excluded, and the claim says so |
+| wrong candidate (no −x0²) | `REFUTED` by a sampled run; with the right certificate, by INV-exit and a run from its model |
+| candidate wrong only at x0 = 1000 | no sampled run sees it; INV-exit's model, re-asked with N small, gives a run that refutes it |
+| weak certificate (no bounds on i) | inductive, INV-exit models no run reaches; not refuted, `SAMPLE_CONSISTENT` |
+
+Validation of this version: unit section `invariants` 109 checks, 0 failures (101 s,
+608 MB peak); the sections that use the shared enumerator (`index statements slices
+while counters arrays tables`) 6460 checks, 0 failures; every existing lit RUN line of
+the synthesis, computation and domain reports byte-identical to d974400 built with the
+same tools (51 of 51); lit `synth_invariants.mlir` passes; `invariant_oracle.py` (ctest
+`generalized-gemm-invariant-programs`) 28 cases, 0 problems: 17 of 17 wrong candidates
+refuted by runs the oracle replays, 4 proofs confirmed over every input and, at width 3,
+2 certificates by brute force, 2 refused certificates' violations found by brute force.
+Sanitizer (Debug, `-fsanitize=address,undefined -fno-sanitize-recover=undefined`): the
+`invariants` section 109 checks, 0 failures, no ASan or UBSan report (40 min under a
+machine load near 11, 1.9 GB peak).
+Mutation (`synthesis_mutation.py`, Debug, the `invariants` section as judge): 10 of 10
+new mutants killed by failing checks. In the first pass three of them ended in the 900 s
+command timeout under a machine load near 13; a timeout is not counted as a kill here,
+and those three were run again with `--timeout 3600` at low load, each killed by failing
+checks.
+
+### 13.7 Limits and what stays UNKNOWN
+
+- One loop, scalar integers only: memory, floats, nested or consecutive loops are
+  `UNSUPPORTED` with the reason; nothing is claimed.
+- The template is a conjunction of polynomial equalities of degree ≤ 2 and simple
+  comparisons. An invariant that needs a disjunction, a quantifier, division, a
+  bit operation, or a relation outside the levels leaves `UNKNOWN` (the INV-exit model
+  is kept). At widths 3 and 4 the oracle's catalogue has 4 right candidates of 8 left
+  unproved this way: relations that hold only modulo 8 or 16 crowd the offered
+  equalities; the same loop at 32 bits is proved (`g − g0 = i + 2·i·x0`).
+- Without a given candidate the closed-form grammar (size ≤ 5 over the parameters and
+  their monomials) proposes one; the request's own candidate is larger and is not found
+  that way, so it is given.
+- A solver unknown, a timeout or a resource limit on any obligation leaves `UNKNOWN`; an
+  INV-exit model no run confirms leaves `UNKNOWN`, never `REFUTED`.
+- Partial correctness only, unless G2a's termination verdict is joined; poison returns
+  are excluded only when INV-poison says so.
+- Not run on this version: the earlier synthesis, computation and domain mutation
+  catalogues and the other unit sections, which this change does not touch.

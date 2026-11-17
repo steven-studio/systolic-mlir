@@ -106,6 +106,7 @@ add_library(generalized-gemm-tier-checker STATIC
   "${GG_LIB_DIR}/CoordinateFamily.cpp"
   "${GG_LIB_DIR}/IndexProgram.cpp"
   "${GG_LIB_DIR}/IndexSlice.cpp"
+  "${GG_LIB_DIR}/LoopInvariant.cpp"
   "${GG_LIB_DIR}/SymbolicDomain.cpp"
   "${GG_LIB_DIR}/CoverageSimulation.cpp"
   "${GG_LIB_DIR}/SymbolicCandidateChecker.cpp")
@@ -115,6 +116,7 @@ add_library(generalized-gemm-synthesis STATIC
   "${GG_LIB_DIR}/CoordinateGrammar.cpp"
   "${GG_LIB_DIR}/IndexProgramSemgus.cpp"
   "${GG_LIB_DIR}/ClosedFormSynthesis.cpp"
+  "${GG_LIB_DIR}/InvariantSynthesis.cpp"
   "${GG_LIB_DIR}/CoordinateSynthesis.cpp"
   "${GG_LIB_DIR}/SynthesisAnalysis.cpp")
 target_link_libraries(generalized-gemm-synthesis PUBLIC
@@ -314,6 +316,13 @@ add_test(NAME generalized-gemm-table-programs COMMAND "${Python3_EXECUTABLE}" -I
   "${GG_FUZZ}/table_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
   --cases 12 --seed 1)
 set_tests_properties(generalized-gemm-table-programs PROPERTIES TIMEOUT 900)
+
+# The inductive invariant path (Section 13): every claim against an interpreter of its
+# own, every input of the scope at widths 3 and 4, certificates by brute force at width 3.
+add_test(NAME generalized-gemm-invariant-programs COMMAND "${Python3_EXECUTABLE}" -I
+  "${GG_FUZZ}/invariant_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
+  --cases 24 --seed 1)
+set_tests_properties(generalized-gemm-invariant-programs PROPERTIES TIMEOUT 1800)
 
 add_custom_target(check-generalized-gemm
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"

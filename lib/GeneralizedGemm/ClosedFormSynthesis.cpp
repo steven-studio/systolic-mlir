@@ -27,11 +27,7 @@ struct Sample {
   std::vector<APInt> targets;    // Parallel to spec.carried.
 };
 
-struct Entry {
-  Term term;
-  unsigned size;
-  std::vector<APInt> values; // Per sample.
-};
+using Entry = GrammarTerm; // Values per sample.
 
 /// Goal-directed enumeration of one variable's closed form over the samples.
 class Synthesizer {
@@ -45,7 +41,6 @@ public:
   std::optional<Term> find(unsigned k, std::string &why);
 
 private:
-  void offer(Term term, unsigned size, std::vector<APInt> values);
   void enumerate(unsigned width);
   std::optional<Term> branch(unsigned k, std::string &why);
 
@@ -61,109 +56,23 @@ private:
   bool enumerated = false;
 };
 
-void Synthesizer::offer(Term term, unsigned size, std::vector<APInt> values) {
-  if (pool.size() >= options.maxTerms)
-    return;
-  std::vector<uint64_t> key;
-  key.reserve(values.size());
-  for (const APInt &v : values)
-    key.push_back(v.getZExtValue());
-  if (!seen.try_emplace(std::move(key), pool.size()).second)
-    return;
-  pool.push_back({term, size, std::move(values)});
-}
-
 void Synthesizer::enumerate(unsigned width) {
   if (enumerated)
     return;
   enumerated = true;
-  // Constants first: 0 to 8, the program's literals of the width, the extras. A
-  // leaf that only ever holds one of them, such as a materialized constant, then
-  // falls to the same signature and the constant node stands for it.
-  std::set<uint64_t> literal;
-  for (uint64_t c = 0; c <= 8; ++c)
-    literal.insert(c);
-  std::function<void(Term)> collect = [&](Term t) {
-    if (t->op == TermOp::Const && t->sort.kind == Sort::BV && t->sort.width == width)
-      literal.insert(t->value.getZExtValue());
-    for (Term a : t->args)
-      collect(a);
-  };
-  for (const Transition &t : program.transitions) {
-    collect(t.guard);
-    for (const auto &[id, term] : t.assignments)
-      if (term->sort.kind == Sort::BV)
-        collect(term);
-  }
-  for (const APInt &extra : options.extraConstants)
-    if (extra.getBitWidth() == width)
-      literal.insert(extra.getZExtValue());
-  for (uint64_t c : literal) {
-    APInt value(width, c, /*isSigned=*/false, /*implicitTrunc=*/true);
-    size_t before = pool.size();
-    offer(terms.bv(value), 1, std::vector<APInt>(samples.size(), value));
-    if (pool.size() > before)
-      constants.push_back(before);
-  }
-  // Leaves of the width.
-  for (unsigned l = 0; l < leaves.size(); ++l) {
-    if (leaves[l]->sort.width != width)
-      continue;
-    std::vector<APInt> values;
+  std::vector<std::vector<APInt>> leafValues(leaves.size());
+  for (unsigned l = 0; l < leaves.size(); ++l)
     for (const Sample &s : samples)
-      values.push_back(s.leafValues[l]);
-    offer(leaves[l], 1, std::move(values));
-  }
-  std::set<unsigned> constantSet(constants.begin(), constants.end());
-  auto isConstant = [&](unsigned n) { return constantSet.count(n) != 0; };
-  auto combine = [&](TermOp op, unsigned a, unsigned b) {
-    std::vector<APInt> values;
-    values.reserve(samples.size());
-    for (size_t s = 0; s < samples.size(); ++s) {
-      const APInt &x = pool[a].values[s], &y = pool[b].values[s];
-      switch (op) {
-      case TermOp::Add: values.push_back(x + y); break;
-      case TermOp::Sub: values.push_back(x - y); break;
-      case TermOp::Mul: values.push_back(x * y); break;
-      case TermOp::UDiv: values.push_back(x.udiv(y)); break;
-      case TermOp::URem: values.push_back(x.urem(y)); break;
-      default: return;
-      }
-    }
-    offer(terms.binary(op, pool[a].term, pool[b].term), pool[a].size + pool[b].size + 1,
-          std::move(values));
-  };
-  // By size: a node of size s joins operands of sizes adding to s - 1.
-  std::vector<std::vector<unsigned>> bySize(options.maxTermSize + 1);
-  for (unsigned n = 0; n < pool.size(); ++n)
-    bySize[1].push_back(n);
-  for (unsigned size = 3; size <= options.maxTermSize; size += 2) {
-    size_t start = pool.size();
-    for (unsigned left = 1; left + 1 < size; ++left) {
-      unsigned right = size - 1 - left;
-      if (right > options.maxTermSize)
-        continue;
-      for (unsigned a : bySize[left])
-        for (unsigned b : bySize[right]) {
-          if (pool.size() >= options.maxTerms)
-            break;
-          if (isConstant(a) && isConstant(b))
-            continue;
-          if (pool[a].term->sort.width != width || pool[b].term->sort.width != width)
-            continue;
-          combine(TermOp::Add, a, b);
-          combine(TermOp::Sub, a, b);
-          combine(TermOp::Mul, a, b);
-          // Division and remainder by a constant above one only.
-          if (isConstant(b) && pool[b].values[0].ugt(1)) {
-            combine(TermOp::UDiv, a, b);
-            combine(TermOp::URem, a, b);
-          }
-        }
-    }
-    for (unsigned n = start; n < pool.size(); ++n)
-      bySize[size].push_back(n);
-  }
+      leafValues[l].push_back(s.leafValues[l]);
+  TermGrammar grammar;
+  grammar.maxTermSize = options.maxTermSize;
+  grammar.maxTerms = options.maxTerms;
+  grammar.extraConstants = options.extraConstants;
+  GrammarEnumeration enumeration =
+      enumerateGrammar(program, leaves, leafValues, samples.size(), width, grammar);
+  pool = std::move(enumeration.pool);
+  seen = std::move(enumeration.seen);
+  constants = std::move(enumeration.constants);
 }
 
 std::optional<Term> Synthesizer::find(unsigned k, std::string &why) {
@@ -1214,6 +1123,135 @@ SliceSynthesisResult synthesizeClosedForms(const SemanticProgram &program,
       entry.loops.push_back(std::move(loop));
     }
     out.slices.push_back(std::move(entry));
+  }
+  return out;
+}
+
+GrammarEnumeration enumerateGrammar(const SemanticProgram &program, ArrayRef<Term> leaves,
+                                    ArrayRef<std::vector<APInt>> leafValues, size_t keyRows,
+                                    unsigned width, const TermGrammar &grammar) {
+  GrammarEnumeration out;
+  std::vector<GrammarTerm> &pool = out.pool;
+  size_t rows = keyRows;
+  for (const std::vector<APInt> &values : leafValues)
+    rows = std::max(rows, values.size());
+  std::vector<unsigned> recorded; // Collisions reported per pool entry.
+  TermContext &terms = *program.terms;
+  auto offer = [&](Term term, unsigned size, std::vector<APInt> values) {
+    if (pool.size() >= grammar.maxTerms)
+      return;
+    std::vector<uint64_t> key;
+    key.reserve(keyRows);
+    for (size_t r = 0; r < keyRows; ++r)
+      key.push_back(values[r].getZExtValue());
+    auto [slot, fresh] = out.seen.try_emplace(std::move(key), pool.size());
+    if (!fresh) {
+      unsigned earlier = slot->second;
+      if (grammar.collisions && recorded[earlier] < grammar.collisionsPerTerm) {
+        bool identity = true;
+        for (size_t r = keyRows; r < values.size() && identity; ++r)
+          identity = values[r] == pool[earlier].values[r];
+        if (!identity) {
+          ++recorded[earlier];
+          out.collisions.push_back({earlier, GrammarTerm{term, size, std::move(values)}});
+        }
+      }
+      return;
+    }
+    pool.push_back({term, size, std::move(values)});
+    recorded.push_back(0);
+  };
+  // Constants first: 0 to 8, the program's literals of the width, the extras. A
+  // leaf that only ever holds one of them, such as a materialized constant, then
+  // falls to the same signature and the constant node stands for it.
+  std::set<uint64_t> literal;
+  for (uint64_t c = 0; c <= 8; ++c)
+    literal.insert(c);
+  std::function<void(Term)> collect = [&](Term t) {
+    if (t->op == TermOp::Const && t->sort.kind == Sort::BV && t->sort.width == width)
+      literal.insert(t->value.getZExtValue());
+    for (Term a : t->args)
+      collect(a);
+  };
+  for (const Transition &t : program.transitions) {
+    collect(t.guard);
+    for (const auto &[id, term] : t.assignments)
+      if (term->sort.kind == Sort::BV)
+        collect(term);
+  }
+  for (const APInt &extra : grammar.extraConstants)
+    if (extra.getBitWidth() == width)
+      literal.insert(extra.getZExtValue());
+  for (uint64_t c : literal) {
+    APInt value(width, c, /*isSigned=*/false, /*implicitTrunc=*/true);
+    size_t before = pool.size();
+    offer(terms.bv(value), 1, std::vector<APInt>(rows, value));
+    if (pool.size() > before)
+      out.constants.push_back(before);
+  }
+  // Leaves of the width.
+  for (unsigned l = 0; l < leaves.size(); ++l) {
+    if (leaves[l]->sort.width != width)
+      continue;
+    offer(leaves[l], 1, leafValues[l]);
+  }
+  std::set<unsigned> constantSet(out.constants.begin(), out.constants.end());
+  auto isConstant = [&](unsigned n) { return constantSet.count(n) != 0; };
+  auto combine = [&](TermOp op, unsigned a, unsigned b) {
+    std::vector<APInt> values;
+    values.reserve(rows);
+    for (size_t s = 0; s < rows; ++s) {
+      const APInt &x = pool[a].values[s], &y = pool[b].values[s];
+      switch (op) {
+      case TermOp::Add: values.push_back(x + y); break;
+      case TermOp::Sub: values.push_back(x - y); break;
+      case TermOp::Mul: values.push_back(x * y); break;
+      case TermOp::UDiv: values.push_back(x.udiv(y)); break;
+      case TermOp::URem: values.push_back(x.urem(y)); break;
+      default: return;
+      }
+    }
+    offer(terms.binary(op, pool[a].term, pool[b].term), pool[a].size + pool[b].size + 1,
+          std::move(values));
+  };
+  // By size: a node of size s joins operands of sizes adding to s - 1.
+  std::vector<std::vector<unsigned>> bySize(grammar.maxTermSize + 1);
+  for (unsigned n = 0; n < pool.size(); ++n)
+    bySize[1].push_back(n);
+  for (unsigned size = 3; size <= grammar.maxTermSize; size += 2) {
+    size_t start = pool.size();
+    for (unsigned left = 1; left + 1 < size; ++left) {
+      unsigned right = size - 1 - left;
+      if (right > grammar.maxTermSize)
+        continue;
+      for (unsigned a : bySize[left])
+        for (unsigned b : bySize[right]) {
+          if (pool.size() >= grammar.maxTerms)
+            break;
+          if (isConstant(a) && isConstant(b))
+            continue;
+          if (pool[a].term->sort.width != width || pool[b].term->sort.width != width)
+            continue;
+          if (!grammar.polynomial) {
+            combine(TermOp::Add, a, b);
+            combine(TermOp::Sub, a, b);
+            combine(TermOp::Mul, a, b);
+          } else {
+            if (left < right || (left == right && a <= b))
+              combine(TermOp::Add, a, b);
+            combine(TermOp::Sub, a, b);
+            if (isConstant(a) && !isConstant(b))
+              combine(TermOp::Mul, a, b);
+          }
+          // Division and remainder by a constant above one only.
+          if (grammar.division && isConstant(b) && pool[b].values[0].ugt(1)) {
+            combine(TermOp::UDiv, a, b);
+            combine(TermOp::URem, a, b);
+          }
+        }
+    }
+    for (unsigned n = start; n < pool.size(); ++n)
+      bySize[size].push_back(n);
   }
   return out;
 }
