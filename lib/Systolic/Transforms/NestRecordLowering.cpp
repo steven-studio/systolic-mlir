@@ -91,15 +91,21 @@ std::string formText(const Form &form) {
 }
 
 /// The value of an index as an affine form of the band's counters, read from the nest's own
-/// operations: the counters, integer constants, addi, subi, muli by a constant, and
-/// affine.apply of such. Nothing else is read as a form.
+/// operations: the counters, the indices its loops carry and step by a constant, integer
+/// constants, addi, subi, muli by a constant, and affine.apply of such. Nothing else is read
+/// as a form.
 class Forms {
 public:
-  explicit Forms(ArrayRef<Value> counters) : counters(counters.begin(), counters.end()) {}
+  /// `carried`: each index a loop of the band carries and steps by a constant, as the form of
+  /// the counters the band's reader found for it (IndexRecurrence).
+  Forms(ArrayRef<Value> counters, const llvm::DenseMap<Value, Form> &carried)
+      : counters(counters.begin(), counters.end()), carried(carried) {}
 
   std::optional<Form> of(Value value, unsigned depth = 0) {
     if (depth > 64)
       return std::nullopt;
+    if (auto found = carried.find(value); found != carried.end())
+      return found->second;
     for (unsigned p = 0; p < counters.size(); ++p)
       if (value == counters[p]) {
         Form form;
@@ -180,6 +186,7 @@ public:
 
 private:
   SmallVector<Value, 3> counters;
+  const llvm::DenseMap<Value, Form> &carried;
 };
 
 // ---------------------------------------------------------------------------------------
@@ -209,16 +216,24 @@ std::optional<int64_t> ceilDivision(int64_t a, int64_t b) {
 
 /// The nest's index arithmetic, evaluated at iterations of the band: the backward slice of
 /// the addresses is checked once (admit), then run per iteration (run). Admitted: the band's
-/// counters, integer constants of 64 bits, and arith and affine integer operations on index
+/// counters, the indices its loops carry and step by a constant, integer constants of 64 bits, and arith and affine integer operations on index
 /// and i64 values. Refused: a load (the address would depend on memory), a value from outside
 /// the nest that is no constant (an argument: known only at run time), any other operation,
 /// any other type.
 class Evaluator {
 public:
-  Evaluator(ArrayRef<Value> counters, Operation *band) : band(band) {
+  /// `carried`: each index a loop of the band carries and steps by a constant, as its form of
+  /// the counters; its value at an iteration is that form's, as a counter's is the point's.
+  Evaluator(ArrayRef<Value> counters, Operation *band, const llvm::DenseMap<Value, Form> &carried)
+      : band(band) {
     for (auto [p, counter] : llvm::enumerate(counters))
       slot[counter] = p;
     values.assign(counters.size(), 0);
+    for (const auto &entry : carried) {
+      slot[entry.first] = values.size();
+      derived.push_back({(unsigned)values.size(), entry.second});
+      values.push_back(0);
+    }
   }
 
   /// Takes `value`'s slice into the program, or says why it cannot be evaluated.
@@ -286,6 +301,18 @@ public:
   bool run(ArrayRef<int64_t> point, std::string &why) {
     for (unsigned p = 0; p < point.size(); ++p)
       values[p] = point[p];
+    for (const auto &[at, form] : derived) {
+      std::optional<int64_t> value = form.constant;
+      for (unsigned p = 0; p < point.size() && value; ++p) {
+        std::optional<int64_t> term = llvm::checkedMul(form.coefficient[p], point[p]);
+        value = term ? llvm::checkedAdd(*value, *term) : std::nullopt;
+      }
+      if (!value) {
+        why = "a carried index overflows 64-bit arithmetic at the iteration (" + pointText(point) + ")";
+        return false;
+      }
+      values[at] = *value;
+    }
     for (Operation *op : program) {
       std::optional<int64_t> result = evaluate(op);
       if (!result) {
@@ -457,16 +484,116 @@ private:
   llvm::DenseMap<Value, unsigned> slot;
   SmallVector<int64_t> values;
   SmallVector<Operation *> program;
+  SmallVector<std::pair<unsigned, Form>> derived; // the carried indices: slot and form
 };
+
+// ---------------------------------------------------------------------------------------
+// An index a loop carries and steps by a constant.
+// ---------------------------------------------------------------------------------------
+
+/// An index recurrence of a loop of the band: a value of index type the loop carries from one
+/// iteration to the next, started at an arith.constant on every entry of the loop, whose next
+/// value is itself plus or minus a constant (an arith.addi or arith.subi of the loop's body),
+/// and whose last value, the loop's result, has no use. The loop's counter steps by 1 from its
+/// lower bound, so at the iteration whose counter is k the value is
+/// start + step * (k - lower): an affine form of the counter, read here from the IR and never
+/// from the record. (The record's view must then be that form, as for any index.)
+struct IndexRecurrence {
+  Value inBody;                // the value the body reads
+  int64_t start = 0, step = 0;
+  Operation *update = nullptr; // the addi or subi whose result is handed to the next iteration
+};
+
+/// The constant by which `next` steps `carried`, or nothing.
+std::optional<int64_t> constantStep(Value next, Value carried, Operation *&update) {
+  if (auto add = next.getDefiningOp<arith::AddIOp>()) {
+    update = add.getOperation();
+    if (add.getLhs() == carried)
+      return getConstantIntValue(add.getRhs());
+    if (add.getRhs() == carried)
+      return getConstantIntValue(add.getLhs());
+    return std::nullopt;
+  }
+  if (auto sub = next.getDefiningOp<arith::SubIOp>()) {
+    update = sub.getOperation();
+    std::optional<int64_t> by = sub.getLhs() == carried ? getConstantIntValue(sub.getRhs()) : std::nullopt;
+    if (!by || *by == std::numeric_limits<int64_t>::min())
+      return std::nullopt;
+    return -*by;
+  }
+  return std::nullopt;
+}
+
+/// Carried value `n` of a loop as an index recurrence, or nothing and why not (`what` names the
+/// loop). `init` is what the loop starts it at, `inBody` what the body reads, `next` what the
+/// body hands to the next iteration, `result` the loop's result for it.
+std::optional<IndexRecurrence> readIndexRecurrence(unsigned n, Value init, Value inBody, Value next, Value result,
+                                                   std::string &why) {
+  std::string value = "value " + std::to_string(n);
+  if (!inBody.getType().isIndex()) {
+    std::string type;
+    llvm::raw_string_ostream(type) << inBody.getType();
+    why = value + " has type " + type + ", and the record's lowering takes a carried index only";
+    return std::nullopt;
+  }
+  IndexRecurrence out;
+  out.inBody = inBody;
+  std::optional<int64_t> start = getConstantIntValue(init);
+  if (!start) {
+    why = value + " starts at a value that is no constant: known only at run time";
+    return std::nullopt;
+  }
+  out.start = *start;
+  std::optional<int64_t> step = constantStep(next, inBody, out.update);
+  if (!step) {
+    why = value + " is not stepped by a constant: the loop hands on another value than itself plus or minus "
+                  "a constant";
+    return std::nullopt;
+  }
+  out.step = *step;
+  if (!result.use_empty()) {
+    why = value + " has its last value read by the code after the loop, and the lowering would remove the loop "
+                  "that makes it";
+    return std::nullopt;
+  }
+  return out;
+}
+
+/// The index recurrences of an scf.for that carries values, or nothing and why not.
+std::optional<SmallVector<IndexRecurrence, 2>> readCarriedIndices(scf::ForOp loop, std::string &why) {
+  SmallVector<IndexRecurrence, 2> out;
+  Operation *yield = loop.getBody()->getTerminator();
+  for (unsigned n = 0, e = loop.getInitArgs().size(); n < e; ++n) {
+    Value inBody = loop.getRegionIterArgs()[n];
+    if (!inBody.getType().isIntOrIndex()) {
+      why = "a loop of the nest (scf.for) carries values from one iteration to the next (iter_args): its "
+            "reduction is held in a value, not in memory, and the record's lowering takes reductions in memory "
+            "only";
+      return std::nullopt;
+    }
+    std::string reason;
+    std::optional<IndexRecurrence> one =
+        readIndexRecurrence(n, loop.getInitArgs()[n], inBody, yield->getOperand(n), loop->getResult(n), reason);
+    if (!one) {
+      why = "a loop of the nest (scf.for) carries values from one iteration to the next (iter_args), and the "
+            "record's lowering takes of them an index started at a constant and stepped by a constant only: " +
+            reason;
+      return std::nullopt;
+    }
+    out.push_back(*one);
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------
 // A counting scf.while.
 // ---------------------------------------------------------------------------------------
 
-/// What an scf.while is to the band when it is a counting loop. Its one carried value is the
-/// counter, of index type, started at the constant `lower`. Its before region holds constants,
-/// one comparison of the counter with a constant, and scf.condition handing the counter on
-/// as it is. The comparison is counter < upper (slt or ult with the counter first, sgt or ugt
+/// What an scf.while is to the band when it is a counting loop. One of its carried values is
+/// the counter, of index type, started at the constant `lower`: the one its comparison reads
+/// (the only one, when it carries one value). Every other carried value is an index recurrence
+/// (IndexRecurrence). Its before region holds constants, one comparison of the counter with a
+/// constant, and scf.condition handing every carried value on as it is. The comparison is counter < upper (slt or ult with the counter first, sgt or ugt
 /// with the bound first), or counter != upper (ne, either way round) with lower <= upper. Its
 /// after region, whose argument is the counter the body reads, yields counter + 1, by an
 /// arith.addi of that region. Its result, the counter's last value, has no use. Such a loop
@@ -479,6 +606,7 @@ struct CountingWhile {
   Value counter;                  // the after region's argument
   int64_t lower = 0, upper = 0;
   Operation *increment = nullptr; // the arith.addi whose result is yielded
+  SmallVector<IndexRecurrence, 2> carried; // the other carried values
 };
 
 /// Each value an scf.while carries from one iteration to the next, said for what it is.
@@ -520,18 +648,38 @@ std::optional<CountingWhile> readCountingWhile(scf::WhileOp loop, std::string &w
   if (loop.getInits().empty())
     return refuse("carries no value from one iteration to the next: it has no counter, and the record's lowering "
                   "takes a counting loop");
-  if (loop.getInits().size() != 1)
-    return refuse("carries " + llvm::Twine(loop.getInits().size()) +
-                  " values from one iteration to the next, and the record's lowering takes a counting loop, "
-                  "which carries its counter only: " + describeCarried(loop));
   Block *before = loop.getBeforeBody(), *after = loop.getAfterBody();
-  Value counter = before->getArgument(0);
+  const unsigned count = loop.getInits().size();
+  auto notCounting = [&](const llvm::Twine &text) {
+    return refuse("carries " + llvm::Twine(count) +
+                  " values from one iteration to the next, and the record's lowering takes a counting loop, "
+                  "which carries its counter and indices stepped by a constant only: " + text);
+  };
+  // The counter: the carried value the before region's comparison reads; with one carried value,
+  // that one (and the checks below say what is wrong with it).
+  unsigned c = 0;
+  if (count != 1) {
+    SmallVector<unsigned, 2> read;
+    unsigned comparisons = 0;
+    for (Operation &op : before->without_terminator())
+      if (auto cmp = dyn_cast<arith::CmpIOp>(op)) {
+        ++comparisons;
+        for (unsigned n = 0; n < count; ++n)
+          if (cmp.getLhs() == before->getArgument(n) || cmp.getRhs() == before->getArgument(n))
+            read.push_back(n);
+      }
+    if (comparisons != 1 || read.size() != 1)
+      return notCounting("its before region's comparison does not read exactly one of them, the counter, and "
+                         "a constant; " + describeCarried(loop));
+    c = read[0];
+  }
+  Value counter = before->getArgument(c);
   if (!counter.getType().isIndex()) {
     std::string type;
     llvm::raw_string_ostream(type) << counter.getType();
     return refuse("carries a value of type " + type + ", and a counting loop's counter is an index");
   }
-  std::optional<int64_t> lower = getConstantIntValue(loop.getInits()[0]);
+  std::optional<int64_t> lower = getConstantIntValue(loop.getInits()[c]);
   if (!lower)
     return refuse("starts its counter at a value that is no constant: known only at run time");
   // The before region: constants, one comparison, scf.condition.
@@ -548,7 +696,7 @@ std::optional<CountingWhile> readCountingWhile(scf::WhileOp loop, std::string &w
   }
   if (!compare || condition.getCondition() != compare.getResult())
     return refuse("does not go on by one comparison of its counter with a constant");
-  if (condition.getArgs().size() != 1 || condition.getArgs()[0] != counter)
+  if (condition.getArgs().size() != count || condition.getArgs()[c] != counter)
     return refuse("does not hand its counter to its body as it is: scf.condition forwards another value");
   std::optional<int64_t> upper;
   bool isUnsigned = false, isNotEqual = false;
@@ -575,19 +723,35 @@ std::optional<CountingWhile> readCountingWhile(scf::WhileOp loop, std::string &w
   if (isNotEqual && *lower > *upper)
     return refuse("goes on while its counter differs from a bound below its start: it does not stop at the bound");
   // The after region: its argument is the counter, and counter + 1 is yielded.
-  Value inBody = after->getArgument(0);
+  Value inBody = after->getArgument(c);
   Operation *yield = after->getTerminator();
-  auto add = yield->getOperand(0).getDefiningOp<arith::AddIOp>();
+  auto add = yield->getOperand(c).getDefiningOp<arith::AddIOp>();
   // (An addition of the after region's argument is an operation of that region: no other can
   // read the argument and be read by the region's scf.yield.)
   bool plusOne = add && ((add.getLhs() == inBody && getConstantIntValue(add.getRhs()) == std::optional<int64_t>(1)) ||
                          (add.getRhs() == inBody && getConstantIntValue(add.getLhs()) == std::optional<int64_t>(1)));
   if (!plusOne)
     return refuse("does not step its counter by 1: its after region yields another value than counter + 1");
-  if (!loop->use_empty())
+  if (!loop->getResult(c).use_empty())
     return refuse("gives its counter's last value to the code after it, and the lowering would remove the loop "
                   "that makes it");
   CountingWhile out;
+  // The other carried values: index recurrences, handed to the body as they are.
+  for (unsigned n = 0; n < count; ++n) {
+    if (n == c)
+      continue;
+    std::string reason;
+    std::optional<IndexRecurrence> one;
+    if (condition.getArgs()[n] != before->getArgument(n))
+      reason = "value " + std::to_string(n) + " is not handed to the body as it is: scf.condition forwards "
+               "another value";
+    else
+      one = readIndexRecurrence(n, loop.getInits()[n], after->getArgument(n), yield->getOperand(n),
+                                loop->getResult(n), reason);
+    if (!one)
+      return notCounting(reason + "; " + describeCarried(loop));
+    out.carried.push_back(*one);
+  }
   out.counter = inBody;
   out.lower = *lower;
   out.upper = *upper;
@@ -667,17 +831,18 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
 
   // ---------------------------------------------------------------------------------
   // The band: a perfect nest of affine.for, scf.for or counting scf.while loops, each with
-  // constant bounds and step 1; a for loop carries no value from one iteration to the next, an
-  // scf.while its counter only (readCountingWhile). Between two loops, integer and float
-  // constants only (an scf.for's or scf.while's bounds are often defined there) and, in an
-  // scf.while, the addition that steps its counter; they compute nothing the GEMM depends on
-  // but the bounds and the counters, which are read here.
+  // constant bounds and step 1; an scf.for carries index recurrences only, an scf.while its
+  // counter and index recurrences (readCountingWhile), an affine.for nothing. Between two
+  // loops, integer and float constants only (an scf.for's or scf.while's bounds are often
+  // defined there) and the additions that step what a loop carries; they compute nothing the
+  // GEMM depends on but the bounds, the counters and the carried indices, which are read here.
   // ---------------------------------------------------------------------------------
   // What the loops of the nest carry from one iteration to the next, before the band is read,
-  // since it is why such a nest is no band of the kind below. A for loop's carried values
-  // (iter_args of scf.for or affine.for) hold its reduction in a value, not in memory: refused.
-  // An scf.while carries its counter, which the band reads; with any other number of carried
-  // values it is no counting loop, and each value is said for what it is.
+  // since it is why such a nest is no band of the kind below. An scf.for's carried values
+  // (iter_args) are index recurrences (IndexRecurrence), which the band reads as forms of its
+  // counter; any other (a reduction held in a value, not in memory) is refused, as is every
+  // carried value of an affine.for. An scf.while carries its counter and index recurrences;
+  // otherwise it is no counting loop, and each value is said for what it is.
   std::string carried;
   anchor->walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (!carried.empty() || !isa<LoopLikeOpInterface>(op))
@@ -685,10 +850,16 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     if (auto w = dyn_cast<scf::WhileOp>(op)) {
       if (w.getInits().size() != 1)
         readCountingWhile(w, carried);
+    } else if (auto f = dyn_cast<scf::ForOp>(op)) {
+      if (op->getNumResults() != 0)
+        readCarriedIndices(f, carried);
     } else if (op->getNumResults() != 0) {
       carried = std::string("a loop of the nest (") + op->getName().getStringRef().str() +
-                ") carries values from one iteration to the next (iter_args): its reduction is held in a value, "
-                "not in memory, and the record's lowering takes reductions in memory only";
+                ") carries values from one iteration to the next (iter_args)";
+      carried += llvm::all_of(op->getResultTypes(), [](Type type) { return type.isIntOrIndex(); })
+                     ? ", and the record's lowering reads the carried indices of an scf.for or an scf.while only"
+                     : ": its reduction is held in a value, not in memory, and the record's lowering takes "
+                       "reductions in memory only";
     }
   });
   if (!carried.empty())
@@ -699,6 +870,11 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     int64_t lower = 0, upper = 0;
     Block *body = nullptr;
     Operation *increment = nullptr; // scf.while: the addition whose result its after region yields
+    SmallVector<IndexRecurrence, 2> carried; // the indices it carries and steps by a constant
+    bool steps(Operation *child) const {
+      return child == increment ||
+             llvm::any_of(carried, [&](const IndexRecurrence &r) { return r.update == child; });
+    }
   };
   SmallVector<BandLoop, 3> band;
   for (Operation *op = anchor;;) {
@@ -726,6 +902,13 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       loop.lower = *lo;
       loop.upper = *hi;
       loop.body = f.getBody();
+      if (op->getNumResults() != 0) {
+        std::string reason;
+        std::optional<SmallVector<IndexRecurrence, 2>> indices = readCarriedIndices(f, reason);
+        if (!indices)
+          return refuse(reason);
+        loop.carried = std::move(*indices);
+      }
     } else if (auto w = dyn_cast<scf::WhileOp>(op)) {
       std::string reason;
       std::optional<CountingWhile> counting = readCountingWhile(w, reason);
@@ -736,6 +919,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       loop.upper = counting->upper;
       loop.body = w.getAfterBody();
       loop.increment = counting->increment;
+      loop.carried = std::move(counting->carried);
     } else {
       return refuse(std::string("the nest's loop ") + op->getName().getStringRef().str() +
                     " is none of affine.for, scf.for and scf.while, the loops the record's lowering takes");
@@ -749,7 +933,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       if (isa<LoopLikeOpInterface>(child)) {
         ++nested;
         inner = &child;
-      } else if (!isa<arith::ConstantOp>(child) && &child != loop.increment) {
+      } else if (!isa<arith::ConstantOp>(child) && !loop.steps(&child)) {
         ++others;
       }
     }
@@ -758,7 +942,8 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
     if (nested > 1 || others != 0)
       return refuse(std::string("the nest is no perfect band: a loop's body holds more than the next loop and "
                                 "constants") +
-                    (loop.increment ? " and the step of its counter" : ""));
+                    (!loop.carried.empty() ? " and the steps of what it carries"
+                                            : loop.increment ? " and the step of its counter" : ""));
     op = inner;
   }
   if (band.size() != 3)
@@ -766,6 +951,25 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   SmallVector<Value, 3> counters;
   for (const BandLoop &loop : band)
     counters.push_back(loop.counter);
+  // Each carried index as a form of its loop's counter: start + step * (counter - lower). The
+  // loop is entered with lower < upper (the record's levels, below), and neither the form's
+  // constant nor the value handed on by the last iteration leaves 64 bits, so no value of the
+  // recurrence wraps.
+  llvm::DenseMap<Value, Form> carriedForms;
+  for (unsigned p = 0; p < 3; ++p)
+    for (const IndexRecurrence &r : band[p].carried) {
+      std::optional<int64_t> trips = llvm::checkedSub(band[p].upper, band[p].lower);
+      std::optional<int64_t> span = trips ? llvm::checkedMul(r.step, *trips) : std::nullopt;
+      std::optional<int64_t> last = span ? llvm::checkedAdd(r.start, *span) : std::nullopt;
+      std::optional<int64_t> back = llvm::checkedMul(r.step, band[p].lower);
+      std::optional<int64_t> constant = back ? llvm::checkedSub(r.start, *back) : std::nullopt;
+      if (!last || !constant)
+        return refuse("an index loop " + std::to_string(p) + " of the nest carries overflows 64-bit arithmetic");
+      Form form;
+      form.coefficient[p] = r.step;
+      form.constant = *constant;
+      carriedForms[r.inBody] = form;
+    }
 
   // ---------------------------------------------------------------------------------
   // The record's levels, axes and extents are the band's loops.
@@ -1062,7 +1266,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   // Formulas: the record's closed forms, checked against the nest's index arithmetic.
   // ---------------------------------------------------------------------------------
   if (!at.viewsUnmapped) {
-    Forms forms(counters);
+    Forms forms(counters, carriedForms);
     auto indexForms = [&](const Access &a, SmallVector<Form, 2> &result) -> bool {
       result.clear();
       if (a.map) {
@@ -1226,7 +1430,7 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   if (!iterations || *iterations > tableBudget)
     return refuse("the domain has more than " + std::to_string(tableBudget) +
                   " iterations, the most the tables are built for at compile time");
-  Evaluator evaluator(counters, band.front().op);
+  Evaluator evaluator(counters, band.front().op, carriedForms);
   std::array<const Access *, 4> evaluated = {&access[0], &access[1], &access[2], &*c};
   static const char *const accessName[] = {"the address of A", "the address of B", "the address of C (stored)",
                                            "the address of C (read)"};

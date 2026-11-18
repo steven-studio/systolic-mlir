@@ -789,8 +789,8 @@ arrays, the alias gate and the floating-point policy.
 | --- | --- | --- |
 | its counter only, as above | VERIFIED | taken |
 | nothing (it goes on by a flag read from memory) | no claim: the trace depends on memory contents | refused: no counter |
-| a second index stepped by a constant, never read (`@second_induction`) | VERIFIED | refused: "value 1 (index) is stepped by a constant" |
-| a second index handed round unchanged, the bound (`@invariant`) | VERIFIED | refused: "value 1 (index) is carried unchanged" |
+| a second index stepped by a constant, never read (`@second_induction`) | VERIFIED | refused at `acb801a`: "value 1 (index) is stepped by a constant". Taken since the lowering reads carried indices (below, "Subscripts a loop carries") |
+| a second index handed round unchanged, the bound (`@invariant`) | VERIFIED | refused: the comparison reads two carried values; "value 1 (index) is carried unchanged" |
 | the reduction, in an f32 beside the counter (`@accumulator`) | no claim: a scalar accumulator has no exact output view | refused: "value 1 (f32) is updated by the loop: a reduction or datum held in a value, not in memory" |
 | a counter of type `i64`, cast to `index` for the accesses (`@i64`) | VERIFIED | refused: the counter is no `index` |
 | a counter whose last value is used after the loop (`@result_used`, `@inner_result_used`) | refused: no faithful copy, or a write in the frame | refused: the lowering would remove the loop that makes it |
@@ -927,6 +927,30 @@ neither their code nor the checks that killed them changed) and the 13 other sea
 the stage 2 and stage 3 end-to-end runs under the sanitizers (run with the plain tool); the
 research's older mutation harnesses; `systolic-cc` beyond the production lit suite;
 cosimulation and the board. Not built: the forms recorded apart and the limits above.
+
+### Subscripts a loop carries (integration branch, 2026-11-18)
+
+Not on this line: on `integrate/index-invariants-into-nest-records`, which merged `acb801a`
+and the index invariants of `docs/GENERALIZED_GEMM_STATEMENT_BV.md`, Section 14.
+
+The lowering takes a second kind of index beside a counter: one that an `scf.for`
+(`iter_args`) or a counting `scf.while` carries, of type `index`, started at a constant,
+stepped by a constant (plus or minus), its last value unread. It reads the recurrence from
+the IR as start + step * (counter - lower bound) and treats the value as an affine form of
+the counter, in the formulas (the record's view must be that form) and in the tables (the
+nest's own addresses are evaluated with it). The record never supplies the recurrence.
+
+What decides whether such a nest is lowered is therefore the record's status, and for the
+2-D arrays that needs the research run with `--index-invariants`: without it the search
+proposes no view of a carried subscript and the record is NOT_VERIFIED. The cases, the
+refusals, the limit on a subscript the research takes for a level, and the validation are
+in Section 14.9 of that document. Tests: `nest_records_carried.mlir`,
+`nest_records_carried_refusals.mlir`, `nest_records_carried_tables.mlir`,
+`nest_carried_e2e.py`.
+
+Changed for the tests of the stage above: `@second_induction` is lowered; the messages of
+`@invariant` and `@accumulator` are reworded. An `affine.for` with `iter_args` is still
+refused.
 
 ## The thesis
 

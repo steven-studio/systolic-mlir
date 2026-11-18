@@ -409,6 +409,15 @@ if(GG_SYSTOLIC_OPT AND GG_LLC)
     --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
     --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
   set_tests_properties(generalized-gemm-nest-while-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3 on subscripts a loop carries, end to end: GEMMs whose K, or I, subscripts are
+  # carried by an scf.for (iter_args) or an scf.while, verified by the research with index
+  # invariants (--index-invariants), lowered from their records, run, and compared with the
+  # original.
+  add_test(NAME generalized-gemm-nest-carried-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_carried_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-carried-e2e PROPERTIES TIMEOUT 3600)
 endif()
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)

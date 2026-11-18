@@ -1,6 +1,6 @@
 // GEMMs written with scf.while that the lowering from records refuses (stage 3 of
-// docs/GENERALIZED_GEMM_SCOPE.md, on scf.while loops), each with its reason. A refused nest
-// stays as it is. Each case is the research tool's own record of a nest
+// docs/GENERALIZED_GEMM_SCOPE.md, on scf.while loops), each with its reason, and one it takes.
+// A refused nest stays as it is. Each case is the research tool's own record of a nest
 // (Inputs/nest_records_while_refusals.json, written by
 // research/generalized-gemm/test/fuzz/nest_gate_records.py), or a record with @whl_gemm's
 // verified content (Inputs/nest_records_while.json) transplanted onto the nest's own binding
@@ -10,9 +10,9 @@
 // The research tool's own records: the status of each record the research does not verify (a
 // loop that never ends or has no termination certificate, a wrong update, another condition, a
 // side effect, a read outside A, a bound or a start known at run time, a result used after the
-// loop, a reduction carried in a value), the alias gate, the floating-point contract, and four
-// nests the research verifies and the lowering does not read as counting loops: arithmetic in
-// the before region, a second carried induction, a carried invariant, a counter of type i64.
+// loop, a reduction carried in a value), the alias gate, the floating-point contract, three nests
+// the research verifies and the lowering does not read as counting loops (arithmetic in the before
+// region, a carried invariant, a counter of type i64), and a second carried induction, taken.
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_while_refusals.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=HONEST
 // HONEST: remark: GEMM not lowered from its record: nest 0 of step_first: the record's status is NOT_VERIFIED: no claim was made about the nest: the gate is UNKNOWN (no termination certificate)
 // HONEST: remark: GEMM not lowered from its record: nest 0 of no_step: the record's status is NOT_VERIFIED: no claim was made about the nest: the gate is UNKNOWN (no termination certificate)
@@ -40,8 +40,8 @@
 // HONEST: remark: GEMM not lowered from its record: nest 0 of unsigned_negative_upper: the record's status is NOT_VERIFIED
 // HONEST: remark: GEMM not lowered from its record: nest 0 of ne_below: the record's status is NOT_VERIFIED
 // HONEST: remark: GEMM not lowered from its record: nest 0 of accumulator: the record's status is NOT_VERIFIED: no claim was made about the nest: the gate is {{UNSUPPORTED}} (a scalar accumulator has no exact output view)
-// HONEST: remark: GEMM not lowered from its record: nest 0 of second_induction: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter only: value 0 (index) is stepped by a constant; value 1 (index) is stepped by a constant
-// HONEST: remark: GEMM not lowered from its record: nest 0 of invariant: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter only: value 0 (index) is stepped by a constant; value 1 (index) is carried unchanged
+// HONEST: remark: GEMM 16x8x12 of nest 0 of second_induction lowered from its record as 5 exact region(s) (formulas:
+// HONEST: remark: GEMM not lowered from its record: nest 0 of invariant: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter and indices stepped by a constant only: its before region's comparison does not read exactly one of them, the counter, and a constant; value 0 (index) is stepped by a constant; value 1 (index) is carried unchanged
 // HONEST: remark: GEMM not lowered from its record: nest 0 of i64: a loop of the nest (scf.while) carries a value of type i64, and a counting loop's counter is an index
 // HONEST: remark: GEMM not lowered from its record: nest 0 of no_carried: the record's status is NOT_VERIFIED
 // HONEST-NOT: remark:
@@ -153,9 +153,9 @@
 // KEPT: scf.while
 // KEPT: scf.while
 // KEPT-LABEL: func.func @second_induction(
-// KEPT: scf.while
-// KEPT: scf.while
-// KEPT: scf.while
+// KEPT-COUNT-5: systolic.matmul_tile
+// (@second_induction is taken since the lowering reads carried indices: its tiles, no loop;
+// nest_records_carried.mlir has the nests whose subscripts are carried.)
 // KEPT-LABEL: func.func @invariant(
 // KEPT: scf.while
 // KEPT: scf.while
@@ -256,7 +256,7 @@
 // NEBELOW-NOT: remark:
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_while_refusals.json transplant-accumulator %S/Inputs/nest_records_while.json whl_gemm > %t.accumulator.json
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.accumulator.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=ACCUMULATOR
-// ACCUMULATOR: remark: GEMM not lowered from its record: nest 0 of accumulator: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter only: value 0 (index) is stepped by a constant; value 1 (f32) is updated by the loop: a reduction or datum held in a value, not in memory
+// ACCUMULATOR: remark: GEMM not lowered from its record: nest 0 of accumulator: a loop of the nest (scf.while) carries 2 values from one iteration to the next, and the record's lowering takes a counting loop, which carries its counter and indices stepped by a constant only: value 1 has type f32, and the record's lowering takes a carried index only; value 0 (index) is stepped by a constant; value 1 (f32) is updated by the loop: a reduction or datum held in a value, not in memory
 // ACCUMULATOR-NOT: remark:
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_while_refusals.json transplant-no_carried %S/Inputs/nest_records_while.json whl_gemm > %t.nocarried.json
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.nocarried.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOCARRIED
@@ -1290,7 +1290,7 @@ func.func @accumulator(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<1
   return
 }
 // A second carried index stepped with K and never read: another induction. The research verifies
-// the nest; the lowering takes a loop that carries its counter only.
+// the nest, and the lowering takes it: the loop carries its counter and an index recurrence.
 func.func @second_induction(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
@@ -1331,7 +1331,7 @@ func.func @second_induction(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: mem
   return
 }
 // A second carried index that never changes, the bound handed round the loop. The research verifies
-// the nest; the lowering takes a loop that carries its counter only.
+// the nest; the lowering takes a loop whose comparison reads its counter and a constant.
 func.func @invariant(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index

@@ -43,6 +43,13 @@ def edit(functions, name):
         swap_axes(functions)
     elif name == "view":
         gemm["views"]["A"]["dimensions"][0]["constant"] = 1
+    elif name == "k-offset":
+        # A's column and B's row one further on: the views of another recurrence's start.
+        gemm["views"]["A"]["dimensions"][1]["constant"] += 1
+        gemm["views"]["B"]["dimensions"][0]["constant"] += 1
+    elif name == "k-step":
+        # A's column stepping by 2 with K: the view of another recurrence's step.
+        gemm["views"]["A"]["dimensions"][1]["levels"][0]["coefficient"] = 2
     elif name == "root":
         gemm["views"]["A"]["root"]["root"] = 1
     elif name == "flags":

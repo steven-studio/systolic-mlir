@@ -1497,4 +1497,111 @@ both shapes: a loop that carries values, and an `scf.while` that carries more th
 counter. Reading a carried index as start + step * counter from the IR, and comparing
 that with the record's view, is the remaining wiring; it sits in the band reader the
 other line is changing, and waits for that. Plan and acceptance programs:
-`~/work/semgus-invariant-validation/gemm-index/integration/WIRING_PLAN.md`.
+`~/work/semgus-invariant-validation/gemm-index/integration/WIRING_PLAN.md`. That was the
+state at 3c3f49e; Section 14.9 is the wiring.
+
+### 14.9 Lowered from the record (integration branch, 2026-11-18)
+
+On `integrate/index-invariants-into-nest-records`, after the merge of the lowering line's
+committed `acb801a` (stage 3 on `scf.while`; merge `e3eb7f2`, no conflict) and nothing of
+its uncommitted work.
+
+**What the lowering reads.** `NestRecordLowering.cpp` now takes, beside a loop's counter,
+an *index recurrence*: a value an `scf.for` (`iter_args`) or a counting `scf.while` carries
+that has type `index`, starts at an `arith.constant` on every entry of the loop, is handed
+on as itself plus or minus an `arith.constant` (`arith.addi` either way round,
+`arith.subi`), and whose last value nothing after the loop reads. The lowering reads these
+four facts from the IR and writes the value as
+
+    start + step * (counter - lower bound)
+
+an affine form of the loop's counter, checked for 64-bit overflow at both ends. It is then
+an index like any other: the formulas path compares the form of each subscript with the
+record's view, and the tables path evaluates the nest's own addresses with it at every
+iteration. An `scf.while`'s counter is the carried value its comparison reads; the others
+must be forwarded in place and be recurrences.
+
+**What it does not take from the record.** Nothing of the recurrence. The record's
+`index_invariants` field is not read by the pass; the record's views are compared with
+what the IR says, as before, and the binding is checked, as before. A record with the
+right status and a view the IR does not have is refused (below).
+
+**The four statements, apart.**
+
+| | Where it is established | Carried-index GEMMs |
+| --- | --- | --- |
+| index proved | `findIndexInvariants`, Section 14.3 (research, Z3) | the invariant x == start + step * counter |
+| GEMM verified | the record's status, read off the checkers (14.8) | `VERIFIED` with affine views, or `VERIFIED_NOT_MAPPED` for flat arrays |
+| meets the lowering's conditions | `analyzeRecordDrivenNest`: binding, recurrence read from the IR, record form == IR form, alias gate, floating-point policy | the remark "lowered from its record" or the refusal with its reason |
+| lowered, linked, run, compared | `nest_carried_e2e.py` | the numbers below |
+
+**Measured** (production Release `systolic-opt`, records from
+`generalized-gemm-nest-report --index-bit-width=64`, 16x8x12 f32 nests):
+
+| Nest | Record with `--index-invariants` | Lowering | Record without | Lowering |
+| --- | --- | --- | --- | --- |
+| K subscript by `iter_args` from 2 (`car_iter`, `offset_iter`) | VERIFIED | formulas | NOT_VERIFIED (search UNKNOWN) | refused |
+| the same by a second value of an `scf.while` (`car_while`, `offset_while`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| mixed `affine.for` / `scf.while` / `scf.for`, the innermost carrying (`car_mixed`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| the outermost loop carries the row of C and A from 1 (`car_outer`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| step 2 from 1 (`car_step2`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| lower bounds 2, 1, 3 (`car_shifted`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| counting down by `arith.subi` from 13 (`down`) | VERIFIED | formulas | NOT_VERIFIED | refused |
+| `scf.while`'s second index stepped and never read (`@second_induction` of the other line's refusals) | VERIFIED (no search needed) | formulas; refused at `acb801a` | | |
+| flat arrays, carried from 2 by 1 and from 1 by 2 (`car_tables_iter`, `car_tables_while`) | VERIFIED_NOT_MAPPED | tables | NOT_VERIFIED (fold not checked) | refused |
+| flat arrays, carried from 0 by 1, the counter's twin (`car_tables_twin`) | VERIFIED_NOT_MAPPED | tables | VERIFIED_NOT_MAPPED | tables |
+| no `reassoc` (`car_strict`) | VERIFIED | refused: floating-point policy | NOT_VERIFIED | refused |
+
+**Refused, each by its own check** (`nest_records_carried_refusals.mlir`): a start or a
+step known only at run time, a value doubled each iteration, an index carried through the
+j loop, a carried reduction, an `scf.while` that forwards another value or steps by its
+counter (all NOT_VERIFIED in the record); and, with a record that is VERIFIED
+(VERIFIED_NOT_MAPPED for the second), a last value read after the loop, an index handed
+round unchanged, a carried `i64`, an `affine.for` with `iter_args`: these four are refused
+by the lowering's own reading of the IR. Eight records transplanted from a verified twin
+onto the NOT_VERIFIED functions (the twin's record under the function's name and binding)
+are refused by that reading too, each with the reason its IR gives. An edited view (K + 3
+for K + 2; step 2 for step 1) is refused by "dimension 1 of the record's view of A is not
+the nest's index: 1 * loop 2 + 2". A program whose start constant changed after the record
+was made is refused by the binding.
+
+**A limit that is older than this change, and not loosened.** When the subscript `k + 2`
+is computed in the loop body with its constant defined there, or when a carried index is
+stepped *before* it is used, the research takes the subscript itself for the K level of
+the record (from 2 to 14), and the lowering refuses: "level 2 of the record is not loop 2
+of the nest: axis, direction or bounds differ". The record is VERIFIED; the nest stays on
+the host (`car_plain`, the control of the end-to-end run; `offset_while_second`;
+`step_then_use`). The fix belongs to the record's level convention, not to the lowering's
+comparison.
+
+**Validation** (2 processes at most; logs under
+`~/work/semgus-invariant-validation/gemm-index/logs/`, `low-*`):
+
+| Check | Result |
+| --- | --- |
+| Production lit, `Systolic/nest_records*` | 12 of 12: the 9 older files and `nest_records_carried.mlir`, `nest_records_carried_refusals.mlir`, `nest_records_carried_tables.mlir`. The rest of the production suite was not run |
+| End to end, carried (`nest_carried_e2e.py`, 11 functions, 10 carrying, 6 variants) | 264 function runs compared with the reference in plain C, 0 failures; 228 with every bit kept, 36 with lowered cells that differ within their bound; 12 lowered modules with their calls in program order. Records: 8 VERIFIED and 3 VERIFIED_NOT_MAPPED with index invariants; without, none of the 10 carrying nests VERIFIED, one VERIFIED_NOT_MAPPED (`car_tables_twin`) and lowered by tables |
+| End to end, the stages merged | `scf.for`: 260 runs, 0 failures; `scf.while`: 440 runs, 0 failures (as at `acb801a`) |
+| Records | the 16 record files equal what the research tool says today, byte for byte (14 in one run, the two of the tables file in a second) |
+| Research, merged tree | nest unit test 917 checks, 0 failures; domain unit test 2092 checks, 0 failures; lit 39 of 39 |
+| Gate mutation (a kill only by a test's own FileCheck) | 26 mutants run: 23 of the recurrence reader and the band around it (5 of them older ones repaired for the new code), 3 of the tables' carried indices: 26 KILLED, none by a crash or a timeout |
+
+The first run of the carried harness failed, on the harness: it expected `car_plain` to be
+lowered. The lowering's refusal (the limit above) was looked into and kept; the harness now
+expects the nest on the host.
+
+**Behaviour the other line's tests see.** `nest_records_while_refusals.mlir`:
+`@second_induction` is now lowered (it was the refusal "value 1 (index) is stepped by a
+constant"); the refusals of `@invariant` and `@accumulator` say the same thing in the new
+wording ("which carries its counter and indices stepped by a constant only"). No other
+expectation of the eleven older files changed, and their record files are byte for byte
+what the tool says.
+
+**Not done, not run.** The whole mutation catalogue (161 mutants; the ones run are
+named above); sanitizers on the new code; the nest oracle; cosimulation and the board; the
+research CTest registration `generalized-gemm-nest-carried-e2e` was added and not run
+through `ctest` (the harness was run directly). No test reaches the lowering's overflow
+check of a recurrence's form. Not built: a start or step that is a function argument
+(the invariant is proved, the record says "a symbolic offset is not mapped"), an index
+carried across two loops, and the level convention above. Scalar invariants M2 to M4 and
+external SemGuS: not started.
