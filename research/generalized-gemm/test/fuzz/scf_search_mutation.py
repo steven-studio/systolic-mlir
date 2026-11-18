@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Mutation test of the second search for scf.for nests (docs/GENERALIZED_GEMM_SCOPE.md, stage 3
-on scf.for): GrammarSpec::exactLeaves in CoordinateGrammar.cpp and the search that turns it on
-in SynthesisAnalysis.cpp. Each mutant weakens one thing, the unmodified tree must pass first,
-and every result is one of:
+"""Mutation test of the research changes for scf.for and scf.while nests
+(docs/GENERALIZED_GEMM_SCOPE.md, stage 3 on scf.for and on scf.while): GrammarSpec::exactLeaves
+in CoordinateGrammar.cpp and the search that turns it on in SynthesisAnalysis.cpp, the
+proposer of the termination certificate's lower bounds in TerminationProposers.cpp, and the
+proposer of the views in DomainProposer.cpp, which reads an scf.while body's counter as its
+level. Each mutant weakens one thing, the unmodified tree must pass first, and every result is
+one of:
 
   KILLED          a test failed by its own check (FileCheck), and nothing crashed.
   SURVIVED        every test ran to the end and passed.
@@ -26,6 +29,7 @@ import sys
 G = "lib/GeneralizedGemm/CoordinateGrammar.cpp"
 A = "lib/GeneralizedGemm/SynthesisAnalysis.cpp"
 T = "lib/GeneralizedGemm/TerminationProposers.cpp"
+D = "lib/GeneralizedGemm/DomainProposer.cpp"
 
 MUTANTS = [
     ("a state variable the sample lost not kept by the second search", G,
@@ -57,6 +61,13 @@ MUTANTS = [
      "      return candidate.symbolic.tier() == EvidenceTier::SymbolicExact;\n",
      "      return candidate.symbolic.tier() != EvidenceTier::SymbolicExact;\n"),
     ("a counter's start through a constant state not proposed", T, "  if (!constantOf.empty())\n", "  if (false)\n"),
+    # scf.while: a view's index over the after region's argument, a state that is no level.
+    ("a state that is no level never read as a level", D,
+     "      } else if (recorded && !containsOp(term, TermOp::Load) && !containsOp(term, TermOp::Shadow)) {\n",
+     "      } else if (false) {\n"),
+    ("a reading of such a state taken without the events", D,
+     "          if (fitsEvents(view, d, mapped))\n            chosen = mapped;\n",
+     "          if (true)\n            chosen = mapped;\n"),
 ]
 
 EQUIVALENT = [

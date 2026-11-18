@@ -674,7 +674,8 @@ product written with `scf.for` (`generalized-gemm-nest-programs-scf`).
 3. `iter_args` (a reduction held in a value) is refused; the research makes no claim of such a
    nest ("a scalar accumulator has no exact output view").
 4. `scf.parallel`, `scf.while` and other loops are refused; an unsigned `scf.for` is taken only
-   when its bounds are not negative.
+   when its bounds are not negative. (Counting `scf.while` loops are taken since the next stage,
+   below.)
 5. The limits of stage 3 hold: one f32 multiply-accumulate, three loops, static shapes, no batch.
 
 **Validation.** On one frozen state (`b9bb409d…`: HEAD `7547bbb` and every file this stage
@@ -709,7 +710,223 @@ sources) and the polynomial suites; the 89 other gate mutants of stages 2 and 3 
 mutation run; the research's older mutation harnesses (`synthesis_mutation.py` and the others
 count any failure as a kill, a crash included, and build with more jobs than this stage
 allowed); `systolic-cc` beyond the production lit suite; cosimulation and the board. Not built:
-steps other than 1, bounds known only at run time, `iter_args`, `scf.parallel` and `scf.while`.
+steps other than 1, bounds known only at run time, `iter_args`, `scf.parallel` and `scf.while`
+(`scf.while`: the next stage).
+
+### Stage 3 on scf.while: GEMMs written with scf.while (built 2026-11-18)
+
+**Request.** After `scf.for`, a GEMM written with `scf.while` must go the same way to the end:
+verified by the research, recorded, lowered from its record, tiled, run. The first target: three
+counting `scf.while` loops with constant bounds and step 1, `memref.load` and `memref.store`, the
+f32 multiply-accumulate under the existing floating-point contract, bounds that do not start at
+0, and nests that mix `scf.while` with for loops; nobody rewrites the loops as `affine.for`.
+What an `scf.while` carries from one iteration to the next is part of its meaning and is read,
+not refused wholesale: its counter is taken, and every other carried value is judged for what
+it is. Nothing is normalized: the nest is read as written, in both tools, so the record stays
+bound to the input.
+
+**Where it stopped.** One GEMM written three ways (`@whl_gemm`, `@whl_twin_scf`,
+`@whl_twin_affine` of `nest_records_while.mlir`), stage by stage, at `771b700`:
+
+| Stage | `scf.while` |
+| --- | --- |
+| Importer | lowers `scf.while` to control flow as it does `scf.for`. The after region's argument is one more state variable, which no loop carries and which holds the counter in the body |
+| Outline | one nest per outermost loop (`"loop": "scf.while"`); a loop whose result is used after it has no faithful copy and is refused |
+| Termination | a certificate (guard distance) for `counter < bound` loops; for `counter != bound` loops too, where the accesses bound the counter (limit 1) |
+| Coordinate search, domain and computation checkers | VERIFIED, with the second search of the `scf.for` stage; bounds that do not start at 0 and mixed nests included |
+| Views | **gap.** The body's indices are written over the after region's argument, a state that is no level. A counter used as it is got its level by the events; an index computed in the body (an offset, a scale, a flat array's `row * columns + column`) got no closed form: VERIFIED_NOT_MAPPED |
+| Record and binding | as for any nest |
+| Production lowering | **gap.** Every loop with a result was refused as carrying values (`iter_args`), the counter of an `scf.while` with them |
+
+**The changes.**
+
+1. `NestRecordLowering` (production): a loop of the band may be a counting `scf.while`
+   (`readCountingWhile`), read as the loop it is:
+   - it carries one value, of type `index`, its counter, started at an `arith.constant`;
+   - its before region holds constants and one `arith.cmpi`; `scf.condition` goes on by that
+     comparison and hands the region's argument, the counter, on as it is;
+   - the comparison is `counter < bound` (`slt` or `ult`, the counter first) or
+     `bound > counter` (`sgt` or `ugt`, the bound first); the bound is an `arith.constant`; an
+     unsigned comparison is taken only when neither the start nor the bound is negative. (The
+     reader also reads `counter != bound`, with start <= bound; that is no supported form, and
+     is recorded apart below);
+   - its after region, whose argument is the counter the body reads, yields `counter + 1`, an
+     `arith.addi` of that argument and the constant 1 (either way round) in that region;
+   - its result, the counter's last value, has no use.
+   Each condition that fails refuses the nest with its own reason. The addition that steps the
+   counter is the one operation, beside constants, that a loop's body may hold next to the
+   inner loop. Everything after the band is stage 3's, unchanged: the record by itself, the
+   levels, the body, the operands, the formulas or tables, the alias gate, the floating-point
+   policy, the emission.
+2. `DomainProposer` (research): a view's index term that reads a state that is no level (at
+   most three) is tried with each such state read as each level of its sort, and the first
+   reading under which the term is the recorded index at every sampled event of every site is
+   proposed. It is a proposal like the others: the checker proves the form over the scope, or
+   the view is not proved (and the nest goes by tables, or not at all).
+3. Nothing else changed: the importer, the outline, the termination certificate, the search,
+   the checkers and the binding are `771b700`'s.
+
+**Why this keeps the meaning.** The lowering replaces the nest by tiles over the box of its
+counters. For a loop read as above: the before region has no effect (constants and one
+comparison); the body sees exactly the compared value; the counter starts at `lower`, grows by
+1, and the loop stops the first time the comparison fails, so the body runs once for each value
+`lower, ..., upper - 1`, in that order, and no value of the counter leaves `[lower, upper]`, so
+nothing wraps (with `ne`, because start <= bound; unsigned, because neither is negative); the
+loop's only result is unused, so removing the loop removes nothing the program reads. That is
+what an `scf.for` from `lower` to `upper` with step 1 does to memory, which stage 3 lowers. No
+operation is rewritten to reach this reading, so the binding (the function's name, its roots,
+the nest's own text and location) is computed on the input in both tools, and a record made
+for another text does not bind. What allows the replacement is proved, not sampled, on the
+`scf.while` program itself: the termination certificate (invariants and ranks checked on every
+path), the coordinates' validity and coverage over the scope, the views' closed forms, the
+ordered fold (Theorem 13), the frame (no other write), on the research side; and, read again
+from the IR by the lowering, the band, the one multiply-accumulate, the accesses inside their
+arrays, the alias gate and the floating-point policy.
+
+**Carried values, one by one.**
+
+| The loop carries | Research | Lowering |
+| --- | --- | --- |
+| its counter only, as above | VERIFIED | taken |
+| nothing (it goes on by a flag read from memory) | no claim: the trace depends on memory contents | refused: no counter |
+| a second index stepped by a constant, never read (`@second_induction`) | VERIFIED | refused: "value 1 (index) is stepped by a constant" |
+| a second index handed round unchanged, the bound (`@invariant`) | VERIFIED | refused: "value 1 (index) is carried unchanged" |
+| the reduction, in an f32 beside the counter (`@accumulator`) | no claim: a scalar accumulator has no exact output view | refused: "value 1 (f32) is updated by the loop: a reduction or datum held in a value, not in memory" |
+| a counter of type `i64`, cast to `index` for the accesses (`@i64`) | VERIFIED | refused: the counter is no `index` |
+| a counter whose last value is used after the loop (`@result_used`, `@inner_result_used`) | refused: no faithful copy, or a write in the frame | refused: the lowering would remove the loop that makes it |
+
+**Acceptance.** `nest_records_while.mlir` (22 functions): the GEMM written with `scf.while`,
+`scf.for` and `affine.for`, each lowered from its own record; pure `scf.while` nests with the
+bounds before the nest or in the loop bodies; mixed nests (`scf.for` around `scf.while` around
+`scf.for`, `scf.while` around `scf.for` around `scf.while`, `affine.for` around `scf.while`
+around `scf.for`); the other spellings of the counting loop (`bound > counter` with
+`1 + counter`, unsigned comparisons, the bound a constant of the before region); bounds that
+do not start at 0, pure and mixed; B stored transposed with the loops in the order k, i, j;
+flat arrays and offsets with a scale, by formulas; tables (flat
+arrays whose index constants are defined before the nest, A's rows in the order `(5 i) mod 16`);
+two `scf.while` nests on one output; a nest that reads what the one before wrote (T = T + A B,
+then C = C + T D), the second GEMM begun after T is written back; and the nest the
+floating-point policy keeps as written. Those are 20 functions; the two others, `@whl_en` and
+`@whl_ne_shifted`, are the `!=` loops recorded apart below, and are no part of the acceptance.
+`nest_records_while_refusals.mlir` (30 functions, each one change away from the GEMM): on the
+research tool's own records, a loop that never ends, wrong updates, other conditions, side
+effects, reads outside A, bounds known at run time, results used after the loop, other carried
+values, the alias gate and the floating-point contract; and, on a verified record transplanted
+onto each nest, the refusal of each check of the counting loop and of the band. Refused nests
+stay as written. `nest_while_e2e.py`: the 22 functions x the five variants of stage 3 x
+synchronous and asynchronous lowering x two data sets, run on the software runtime model and
+compared with a reference in C that the original program meets too (the variant with no
+records runs it). Research: `nest_while.mlir` (the record of the `scf.while` GEMM, shifted,
+mixed, with computed indices; and the forms it does not verify); the nest oracle with every
+product written with `scf.while`, and with each loop one of the three kinds
+(`generalized-gemm-nest-programs-while`, `-mixed`): every nest is held to its own record there,
+two nests on one output and a nest that reads what the one before wrote included.
+
+**Recorded apart: forms that are not supported.** They do not bear on the acceptance above, and
+nothing here is to be read as support.
+
+1. *Loops that go on by `counter != bound`.* The lowering's reader reads them (start <= bound).
+   The research verifies one only where the accesses bound the counters as the loops do: a
+   start of 0 and bounds that are the arrays' own sizes (`@whl_en`: an access outside its array
+   stops the run, which gives the range), and such a nest is then lowered, every check having
+   passed. With another start (`@whl_ne_shifted`, `@while_ne_shifted`) or arrays larger than
+   the loops' bounds, the research has no candidate and the nest stays as written: that the
+   counter stays inside its bounds needs the fact that it stays at or below its bound, which
+   the termination certificate does not hold for a `!=` loop.
+2. *A counter stepped before the inner loop* (`@step_first`, `@while_step_first`). The lowering's
+   reader reads it (the addition may stand anywhere in the loop's body). The research has no
+   termination certificate: the stepped value is held across the inner loop, and no invariant
+   ties it to the counter. The nest stays as written.
+
+**Limits.**
+
+1. Carried values other than the counter are refused, as in the table above: the research
+   verifies three of those forms (a second induction, an invariant, an `i64` counter) and the
+   lowering does not read them; a reduction carried in a value is not modelled by the research.
+2. Arithmetic in the before region (`@before_compute`: the research verifies it), conditions
+   other than the two above (`<=`, `>=`, a counter counted down), steps other than 1, bounds
+   or starts known only at run time: refused.
+3. A view whose index reads constants defined before the nest still has no closed form (the
+   constant is a state, as in the `scf.for` stage) and goes by tables.
+4. A function of several `scf.while` nests has no termination certificate *as a whole* (below),
+   so the whole-function driver makes no claim over two nests on one output (UNKNOWN; with for
+   loops, VERIFIED). No record and no lowering rests on that claim: each nest is outlined and
+   verified by itself, and `@whl_shared` and `@whl_chain` are lowered nest by nest. The nest
+   oracle counts such a claim under its own name, as no verification, and asks instead, in
+   every mode, for two nests on one output each with its own complete VERIFIED record.
+5. A nest with a loop of one iteration has no complete record, as with for loops (stage 1's
+   limit); for one such product of the nest oracle the research stops earlier with `scf.while`
+   (NOT_VERIFIED, Theorem 13 not checked) than with `scf.for` (VERIFIED_NOT_MAPPED). Neither is
+   lowered.
+6. The limits of stage 3 hold: one f32 multiply-accumulate, three loops, static shapes, no batch.
+
+**For the invariant work, when it is joined.** The two forms recorded apart and limit 4 are the
+termination certificate's proposer (`Proposer::invariantCandidates`, `TerminationProposers.cpp`)
+not proposing a fact. The certificate checks every proposed conjunct on every path and drops
+what does not hold, and the finished certificate is checked again by itself, so the interface
+is a list of candidate conjuncts per cut, from any source; no check changes. Each was tried on
+a scratch copy of the tree, which is no part of this stage (patches, inputs and outputs are
+kept with the stage's report, under `followups/`):
+
+| Case | What is missing | Candidate | With it, on the scratch copy |
+| --- | --- | --- | --- |
+| `@whl_ne_shifted`, `@while_ne_shifted` (and `!=` loops in arrays larger than their bounds) | `counter <= bound` for a `!=` loop | for a path condition `x != y`: `x <= y` and `y <= x`, signed and unsigned, at every cut | `counter <= bound` and `counter >= start` are kept; `@whl_ne_shifted` is VERIFIED |
+| `@step_first`, `@while_step_first` | `temporary = counter + step` | for a state given the sum of two other states along a path: that equality | `PROVEN_TERMINATING_IF_DEFINED`; the nest is VERIFIED |
+| a function of two `scf.while` nests (the nest oracle's `p0`, `p10`, `p20` with `--loops while`, `p10` with `--loops mixed`; `@whl_shared`, `@whl_chain` taken whole) | in an `scf.while` body, `after region's argument = counter` | for a state that a path gives exactly another state's value: that equality, before the orderings | all six terminate with both limits as they are; the claim over both groups is VERIFIED in the oracle's four programs |
+
+The third was measured (`followups/candidate-limit/`). An `scf.while` has two variables that a
+loop carries, its counter and the after region's argument, and the rank needs their equality in
+the body. The proposer has that fact only among its orderings of pairs of such variables: it
+makes them last, cuts the list at 600 candidates, and orders the first eight such variables
+only. The oracle's `p0` written with `scf.for`: 6 such variables, 514 candidates, none cut,
+terminating. Written with `scf.while`: 12, of which 8 are ordered; 764 candidates, 164 cut, all
+of them orderings (the second nest's outer loop keeps none); no rank at L10. With the limit at
+2000 alone the failure moves to L12 (the second nest's inner loops are not ordered at all);
+with 16 ordered variables alone more is cut (1372 candidates) and L10 fails as before; with
+both, it terminates. So the cut at 600 is the first obstacle and not the only one, and raising
+limits is not the remedy: 20 equalities, made before the orderings, do it with both limits
+unchanged. A single nest stays inside both limits (171 to 402 candidates over the 20 single
+nests of `nest_records_while.mlir`, none cut), which is why every record above is verified.
+A reduction carried in a value (`@accumulator`) needs more than an invariant: a model of the
+carried reduction as the output's cell.
+
+**Validation.** On one frozen state (`dae79d79…`: HEAD `771b700` and the 16 files this stage
+changes or adds, this document excepted), each phase refusing to start on another state and
+recording that it ended on the same one. A first freeze (`40f21efc…`) was stopped by hand after
+two minutes, three phases in: two comment lines of the new test files named a script that is not
+in the repository; they were rewritten and the tree frozen again. Builds, scripts and logs are in
+a directory outside the repository (`~/work/integration-backups-20261118/gemm-while`), two build
+jobs at most.
+
+| Check | Result |
+| --- | --- |
+| Production lit, the whole suite | 197 of 199; the 2 failures (`Systolic/general_affine_domains.mlir`, `SystolicCC/general_affine.c`) fail at HEAD too, with the same messages; the nine `nest_records` tests pass |
+| Against HEAD (`771b700`, built from its archive) | every `systolic-opt` command of the production tests HEAD has, the records they read from temporaries made first: without record-driven, 259 byte for byte the same, 54 the same once the addresses of values are masked (they differ between two runs of HEAD's tool too), 0 different; with record-driven, 78 the same and 1 different, the message that names the loops the lowering takes (`scf.parallel`'s refusal); the 32 commands of the two new files are not compared |
+| Production unit binaries | `tensor-space-dependencies-test`, `rank-partition-presburger-test`: HEAD's output |
+| Research lit | 37 of 37, alone on the machine (`nest_while.mlir` among them) |
+| Research CTests the change reaches | 16, all pass: `nest`, `domain`, `domain-holes` (the unit tests of the two changed drivers), `domain-programs`, `setdomain-programs`, `setreduction-programs`, the nest oracle four times, `nest-affine`, `nest-gate-records`, the four end-to-end runs |
+| Records | the eleven records files equal what the research tool says today (and what the sanitized driver says) |
+| End to end, plain tool | `scf.while`: 440 function runs, 0 failures, 362 with every bit kept, 78 with lowered cells that differ within their bound, 10 lowered modules with their calls in program order; the 20 functions of the supported scope are 400 of the runs, the two `!=` functions 40. Unchanged from the stages before: stage 2, 144 runs, 0 failures; stage 3, 180, 0; `scf.for`, 260, 0 |
+| The nest oracle, 30 programs, each spelling of the loops | `affine.for`, `scf.for`, `scf.while`, mixed: 0 failures each; in all four, 47 records VERIFIED with every field the program's, 188 nests equal to their record's fold, 120 compositions in place equal to the function, 3 shared outputs with each nest verified by its own record. The joint claim over a shared output: verified 3, 3, 0, 2; not made (counted apart, no verification) 0, 0, 3, 1. One product with a loop of one iteration differs (limit 5) |
+| Research outputs against the baseline | 111 research lit commands, baseline binaries (HEAD's sources) against the new: 110 byte for byte the same; the one that differs is `nest_while.mlir`'s `@while_offsets`, VERIFIED_NOT_MAPPED before (no proposed closed form) and VERIFIED with three proved views now |
+| Gate mutation | 38 mutants of the band (24 new, of the `scf.while` reader; 3 brought to the new code; 11 others of the band): 38 KILLED by the tests' own checks, none by a crash |
+| Mutation of the research change | 2 mutants of the proposer's new reading: 2 KILLED (`nest_while.mlir`'s OFFSETS; `dom_tables.mlir` and `nest_while.mlir`) |
+| ASan and UBSan | the nine `nest_records` tests, the `scf.while` and `scf.for` end-to-end runs (440 and 260 runs, 0 failures) with the sanitized `systolic-opt`; the sanitized nest driver remade the eleven records files, each equal to the file in the tree, and passed the ten commands of `nest_while.mlir`: no report |
+| Warnings | the two sources this stage changes, with `-Wall -Wextra -Wpedantic`: none, as at HEAD |
+
+**Open, from the stage before.** The three search mutants that survived at `771b700` (a state
+variable equal on every event counted as lost; the second search run after a symbolic first one;
+run on a sampled scope) are as they were: this stage changes neither their code nor a test that
+bears on them, they were not rerun, and no test pins them yet.
+
+**Not run.** The research CTests the change does not reach (`unit`, `relational`, `termination`,
+`coordinates`, `synthesis`, `computation`, the oracles of those drivers and `table-programs`:
+their binaries hold none of the changed sources; `termination` fails at the baseline, as said
+above) and the polynomial suites; the 104 other gate mutants (killed at `771b700` or before;
+neither their code nor the checks that killed them changed) and the 13 other search mutants;
+the stage 2 and stage 3 end-to-end runs under the sanitizers (run with the plain tool); the
+research's older mutation harnesses; `systolic-cc` beyond the production lit suite;
+cosimulation and the board. Not built: the forms recorded apart and the limits above.
 
 ## The thesis
 
