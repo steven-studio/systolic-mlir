@@ -1185,6 +1185,7 @@ built from `075c047`.
 | Invariants into a nest's record | the nest unit test 917 checks, the domain unit test 1580, their sections `indexinvariants` and `indexwiring` among them; the two invariant oracles; `synth_index_invariants.mlir` and `synth_invariants.mlir`: all pass |
 | Research outputs against both parents | 138 research lit commands, each run with the drivers of `d3f3337`, of `075c047` and of the merged tree: 114 the same from all three; 9 as `d3f3337` gives them (the nine of the relations); 15 as `075c047` gives them (commands of the two files that this line's drivers do not know); none that neither parent gives |
 | Gate mutation: the band, the carried indices, the levels | 68 mutants, 68 KILLED, each by a test's own FileCheck (61 by an expected line that is absent, 7 by a remark that never came); none by a crash or a time limit |
+| Gate mutation: the rest of `NestRecordLowering.cpp` | the 40 other mutants of the source the other line changed, which neither line had run since: 40 KILLED the same way (35 and 5). Run after the rest, on the commit that adds this section (the same tree but for this document) |
 | Mutation of the index-invariant checker and search | 21 mutants, 21 KILLED, each by failed checks of the unit section `indexinv`, which passes unmutated (216 checks); judged outside the catalogue's own harness, which counts a crash or a timeout as a kill |
 | Mutation of the relations | 9 mutants, 9 KILLED by the checks of `term_relations.mlir` and `nest_while.mlir` |
 | Mutation of the wiring of index invariants into a nest's record | 7 mutants, 7 KILLED by failed checks of the unit sections written for them: 3 of the domain catalogue (the identities not handed to the proposer, not gathered from the search; the certificate handed on unstrengthened) by `indexwiring`, 4 of the nest catalogue (the search never run; the certificate handed on as it was, or without the identities; copies given no identity) by `indexinvariants` |
@@ -1205,10 +1206,11 @@ pattern of one older domain mutant (`views proposed without the sample check`), 
 twice in `DomainProposer.cpp` since `acb801a` at both parents; the joint claim over two larger
 `scf.while` nests, which is not made.
 
-**Not run.** The polynomial suites (no source of theirs is changed by either line); the 98
-other gate mutants, the 15 other mutants of the search harness, and the older research
-catalogues but for the mutants named above; sanitized unit binaries; `systolic-cc` beyond the
-production lit suite; cosimulation and the board.
+**Not run.** The polynomial suites (no source of theirs is changed by either line); the 58
+other gate mutants (of `NestRecordGate.cpp`, `NestBinding.cpp` and the pass, which neither
+line has changed since `acb801a`), the 15 other mutants of the search harness, and the older
+research catalogues but for the mutants named above; sanitized unit binaries; `systolic-cc`
+beyond the production lit suite; cosimulation and the board.
 
 ## The thesis
 
