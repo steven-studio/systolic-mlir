@@ -46,8 +46,9 @@ private:
     Term term;
     unsigned size;
   };
-  bool offer(Term term, unsigned size);
+  bool offer(Term term, unsigned size, bool leaf = false);
   std::optional<std::vector<uint64_t>> sample(Term term);
+  std::optional<std::vector<uint64_t>> everyEvent(Term term);
   void leaves();
   void grow(unsigned size);
   void statements();
@@ -86,7 +87,22 @@ std::optional<std::vector<uint64_t>> Builder::sample(Term term) {
   return signature;
 }
 
-bool Builder::offer(Term term, unsigned size) {
+/// The term's values at every event, after its width; nullopt as for sample().
+std::optional<std::vector<uint64_t>> Builder::everyEvent(Term term) {
+  Term defined = definedness(terms, term);
+  std::vector<uint64_t> values{term->sort.width};
+  for (EventEvaluator &evaluator : evaluators)
+    for (size_t e = 0; e < evaluator.size(); ++e) {
+      auto value = evaluator.value(term, e);
+      auto ok = evaluator.value(defined, e);
+      if (!value || !ok || ok->isZero())
+        return std::nullopt;
+      values.push_back(value->getZExtValue());
+    }
+  return values;
+}
+
+bool Builder::offer(Term term, unsigned size, bool leaf) {
   if (operands.size() >= spec.maxOperands) {
     out.truncated = "the operand limit";
     return false;
@@ -94,8 +110,24 @@ bool Builder::offer(Term term, unsigned size) {
   auto signature = sample(term);
   if (!signature)
     return true;
-  if (seen.try_emplace(std::move(*signature), operands.size()).second)
+  auto [slot, fresh] = seen.try_emplace(std::move(*signature), operands.size());
+  if (fresh) {
     operands.push_back({term, size});
+    return true;
+  }
+  // A state variable that the thin sample cannot tell from an earlier operand is compared on
+  // every event: if they differ there, it is kept with GrammarSpec::exactLeaves, and counted as
+  // lost without.
+  if (leaf) {
+    auto mine = everyEvent(term);
+    auto theirs = everyEvent(operands[slot->second].term);
+    if (mine && (!theirs || *mine != *theirs)) {
+      if (spec.exactLeaves)
+        operands.push_back({term, size});
+      else
+        ++out.lostLeaves;
+    }
+  }
   return true;
 }
 
@@ -264,7 +296,7 @@ void Builder::leaves() {
   // State first: a coordinate is about the iteration.
   for (const StateVar &s : program.state)
     if (s.sort.kind == Sort::BV)
-      offer(terms.state(s.id, s.sort), 1);
+      offer(terms.state(s.id, s.sort), 1, /*leaf=*/true);
 
   // The subterms of the accesses: what the program itself computes.
   std::function<void(Term)> subterms = [&](Term term) {

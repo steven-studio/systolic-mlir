@@ -56,6 +56,8 @@
 #include "Systolic/AffineMatmulPartitioning.h"
 #include "Systolic/GeneralAffineMatmul.h"
 #include "Systolic/KernelCosetLowering.h"
+#include "Systolic/NestRecordGate.h"
+#include "Systolic/NestRecordLowering.h"
 #include "Systolic/RankPartitionDeviceJobLowering.h"
 #include "Systolic/RankPartitionRecognizedMacAdapter.h"
 #include "Systolic/Passes.h"
@@ -73,6 +75,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -2640,6 +2643,37 @@ struct AffineMatmulToSystolicPass
                      "allow-fp-reassociation"),
       llvm::cl::init(false)};
 
+  // Stage 2 of docs/GENERALIZED_GEMM_SCOPE.md (Systolic/NestRecordGate.h). Off by default:
+  // empty, nothing below reads a record and the pass runs as it always has.
+  Option<std::string> nestRecords{
+      *this, "nest-records",
+      llvm::cl::desc("A file of the research recognizer's records of loop nests "
+                     "(generalized-gemm-nest-report, format generalized-gemm-nest/2). A GEMM "
+                     "is then lowered only where its nest has a record that is about this "
+                     "nest of this input, complete, verified, and in agreement with what "
+                     "this pass recognizes, and the lowering's own checks still run. Only "
+                     "the dense path reads records: the other paths and the steps that "
+                     "rewrite nests are not run with it (docs/GENERALIZED_GEMM_SCOPE.md, "
+                     "stage 2)"),
+      llvm::cl::init("")};
+
+  // Stage 3 of docs/GENERALIZED_GEMM_SCOPE.md (Systolic/NestRecordLowering.h). Off by default;
+  // read only with nest-records.
+  Option<bool> recordDriven{
+      *this, "record-driven",
+      llvm::cl::desc("With nest-records: a loop nest in which this pass's recognizer finds no "
+                     "GEMM is lowered from its record (the research recognizer's verified "
+                     "coordinates and operand mappings), when the record's checks and the "
+                     "nest's own checks pass: by the record's closed forms of the views, or by "
+                     "tables of the nest's addresses over its static domain, gathered and "
+                     "scattered (docs/GENERALIZED_GEMM_SCOPE.md, stage 3)"),
+      llvm::cl::init(false)};
+  Option<int64_t> recordTableBudget{
+      *this, "record-table-budget",
+      llvm::cl::desc("With record-driven: the most iterations a nest's domain may have for the "
+                     "tables of its addresses to be built at compile time"),
+      llvm::cl::init(mlir::systolic::kDefaultRecordTableBudget)};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     // Phase 5.4.3d-3b-5: the guarded MAC replacement creates scf.if and
     // arith operations in a module that may contain none.
@@ -3095,7 +3129,378 @@ struct AffineMatmulToSystolicPass
     m.anchor->erase();
     return success();
   }
+  /// Stage 3 of docs/GENERALIZED_GEMM_SCOPE.md: the GEMM of a nest the recognizer found no
+  /// GEMM in, from its record (Systolic/NestRecordLowering.h). The alias gate, the
+  /// floating-point policy and the plan are the dense path's; the operands are views of their
+  /// memrefs by the record's formulas, or matrices gathered by the tables and C scattered back.
+  LogicalResult lowerRecordDriven(const RecordDrivenGemm &g, const SystolicFleet &fleet,
+                                  std::string &why, bool &hardError) {
+    Operation *anchor = g.anchor;
+    const int64_t M = g.M, N = g.N, K = g.K;
+    const std::array<std::array<int64_t, 2>, 3> shapeOf = {{{M, K}, {K, N}, {M, N}}};
+    Value A = g.operands[0].memref, B = g.operands[1].memref, C = g.operands[2].memref;
+    Type elementType = cast<MemRefType>(C.getType()).getElementType();
+
+    for (auto [operand, name] : {std::pair{A, "A"}, std::pair{B, "B"}}) {
+      if (!provablyDisjointFromOutput(operand, C, assumeNoAlias)) {
+        why = (llvm::Twine(name) +
+               " may overlap C; declare the arguments llvm.noalias (C restrict) or pass "
+               "assume-no-alias")
+                  .str();
+        return failure();
+      }
+    }
+    if (!g.reassoc && !allowFpReassociation) {
+      why = "floating-point reassociation is not permitted: the systolic execution sums each "
+            "tile from zero and adds the sum to C, a different order of IEEE additions than "
+            "the loop's (mark the accumulation reassoc, or pass allow-fp-reassociation)";
+      return failure();
+    }
+
+    std::optional<SystolicTilePlan> plan;
+    SmallVector<LogicalBox> boxes;
+    if (!fleet.resources.empty()) {
+      SystolicOptimizerOptions options;
+      options.sharedReadBytesPerCycle = sharedReadBytesPerCycle;
+      if (!parseCostModelVersion(costModel, options.costModel) ||
+          (operandPath != "v1" && operandPath != "v2")) {
+        why = "cost-model and operand-path must each be v1 or v2";
+        hardError = true;
+        return failure();
+      }
+      options.beatWideOperandPath = operandPath == "v2";
+      FailureOr<SystolicTilePlan> planned = planSystolicMatmul(anchor, M, N, K, fleet, options);
+      if (failed(planned)) {
+        hardError = true;
+        return failure();
+      }
+      plan = std::move(*planned);
+      for (const SystolicTileBlock &block : plan->blocks)
+        for (const SystolicTileInvocation &inv : block.invocations) {
+          LogicalBox box;
+          box.lower = {block.row, block.column, inv.k0};
+          box.extent = {block.m, block.n, inv.k};
+          boxes.push_back(box);
+        }
+    } else {
+      LogicalBox whole;
+      whole.extent = {M, N, K};
+      boxes.push_back(whole);
+    }
+    // The tiles are an exact partition of the box: inside it, pairwise disjoint, and as many
+    // points as it has (a domain counted from 0 along I, J and K).
+    {
+      const std::array<int64_t, 3> extent{M, N, K};
+      std::optional<int64_t> volume = int64_t(0);
+      for (auto [b, box] : llvm::enumerate(boxes)) {
+        for (unsigned a = 0; a < 3; ++a)
+          if (box.lower[a] < 0 || box.extent[a] <= 0 || box.lower[a] + box.extent[a] > extent[a]) {
+            why = "the partition is not exact: a tile leaves the box";
+            return failure();
+          }
+        for (unsigned o = 0; o < b; ++o) {
+          bool apart = false;
+          for (unsigned a = 0; a < 3; ++a)
+            apart = apart || boxes[o].lower[a] + boxes[o].extent[a] <= box.lower[a] ||
+                    box.lower[a] + box.extent[a] <= boxes[o].lower[a];
+          if (!apart) {
+            why = "the partition is not exact: two tiles overlap";
+            return failure();
+          }
+        }
+        std::optional<int64_t> v = llvm::checkedMul(box.extent[0], box.extent[1]);
+        v = v ? llvm::checkedMul(*v, box.extent[2]) : std::nullopt;
+        volume = volume && v ? llvm::checkedAdd(*volume, *v) : std::nullopt;
+      }
+      std::optional<int64_t> whole = llvm::checkedMul(M, N);
+      whole = whole ? llvm::checkedMul(*whole, K) : std::nullopt;
+      if (!volume || !whole || *volume != *whole) {
+        why = "the partition is not exact: the tiles do not cover the box";
+        return failure();
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Materialize. Every check is done; from here on the nest is replaced.
+    // ------------------------------------------------------------------
+    OpBuilder builder(anchor);
+    Location loc = anchor->getLoc();
+    auto asTensor = [&](Value memref, ArrayRef<int64_t> shape, bool writable) -> Value {
+      auto ty = RankedTensorType::get(shape, elementType);
+      return bufferization::ToTensorOp::create(builder, loc, ty, memref,
+                                               /*restrict=*/true, writable);
+    };
+    auto runTiles = [&](Value aTensor, Value bTensor, Value cTensor) -> Value {
+      if (plan)
+        return emitSystolicTilePlan(builder, loc, aTensor, bTensor, cTensor, *plan, fleet,
+                                    nextGemmIndex++);
+      return MatmulTileOp::create(builder, loc, cTensor.getType(), aTensor, bTensor, cTensor,
+                                  builder.getI64IntegerAttr(M), builder.getI64IntegerAttr(N),
+                                  builder.getI64IntegerAttr(K), /*device=*/FlatSymbolRefAttr(),
+                                  /*est_cycles=*/IntegerAttr(), /*start_cycle=*/IntegerAttr());
+    };
+
+    if (!g.tables) {
+      // The record's formulas: each operand a view of its memref.
+      std::array<LogicalOperand, 3> operand;
+      for (unsigned x = 0; x < 3; ++x) {
+        const DrivenOperand &d = g.operands[x];
+        const unsigned rank = cast<MemRefType>(d.memref.getType()).getRank();
+        LogicalOperand &o = operand[x];
+        o.memref = d.memref;
+        o.offsets.assign(rank, 0);
+        o.sizes.assign(rank, 1);
+        o.strides.assign(rank, 1);
+        if (d.explicitView) {
+          o.explicitView = true;
+          o.roleDim = {-1, -1};
+          o.elementOffset = d.elementOffset;
+          o.elementStrides = d.elementStrides;
+          o.shape = shapeOf[x];
+          continue;
+        }
+        for (auto [dim, dd] : llvm::enumerate(d.dimensions)) {
+          o.roleDim[dd.role] = dim;
+          o.offsets[dim] = dd.offset;
+          o.sizes[dim] = shapeOf[x][dd.role];
+          o.strides[dim] = dd.scale;
+        }
+        o.shape = shapeOf[x];
+      }
+      llvm::DenseMap<AffineMap, Value> applies;
+      auto view = [&](const LogicalOperand &o) -> Value {
+        return materializeOperandView(builder, loc, o, {}, {}, applies);
+      };
+      const bool sharedInput = operand[0].sameView(operand[1]);
+      Value aTensor = asTensor(view(operand[0]), operand[0].shape, /*writable=*/false);
+      Value bTensor = sharedInput ? aTensor
+                                  : asTensor(view(operand[1]), operand[1].shape, /*writable=*/false);
+      Value cView = view(operand[2]);
+      Value cTensor = asTensor(cView, operand[2].shape, /*writable=*/true);
+      Value result = runTiles(aTensor, bTensor, cTensor);
+      auto writeBack = bufferization::MaterializeInDestinationOp::create(builder, loc, result, cView);
+      writeBack.setRestrict(true);
+      writeBack.setWritable(true);
+    } else {
+      // The tables: constant globals of element offsets; A, B and C gathered into matrices,
+      // the tiles on those, C scattered back.
+      ModuleOp module = getOperation();
+      MLIRContext *ctx = builder.getContext();
+      auto symbolName = [&](StringRef base) {
+        std::string name = base.str();
+        for (unsigned n = 1; SymbolTable::lookupSymbolIn(module, name); ++n)
+          name = base.str() + "_" + std::to_string(n);
+        return name;
+      };
+      std::string stem = "__nest_table_" + g.where;
+      for (char &ch : stem)
+        if (!llvm::isAlnum(ch) && ch != '_')
+          ch = '_';
+      std::array<Value, 3> table, flat, matrix;
+      static const char *const kName[] = {"A", "B", "C"};
+      for (unsigned x = 0; x < 3; ++x) {
+        auto tableTy = MemRefType::get(shapeOf[x], builder.getI64Type());
+        auto values = DenseElementsAttr::get(RankedTensorType::get(shapeOf[x], builder.getI64Type()),
+                                             ArrayRef<int64_t>(g.operands[x].table));
+        std::string name = symbolName(stem + "_" + kName[x]);
+        {
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPointToStart(module.getBody());
+          memref::GlobalOp::create(builder, loc, name, builder.getStringAttr("private"), tableTy,
+                                   values, /*constant=*/true, /*alignment=*/IntegerAttr());
+        }
+        table[x] = memref::GetGlobalOp::create(builder, loc, tableTy, name);
+        auto memTy = cast<MemRefType>(g.operands[x].memref.getType());
+        const int64_t elements = memTy.getNumElements();
+        auto flatTy = MemRefType::get({elements}, elementType);
+        flat[x] = memref::ReinterpretCastOp::create(
+            builder, loc, flatTy, g.operands[x].memref, /*offset=*/builder.getIndexAttr(0),
+            ArrayRef<OpFoldResult>{builder.getIndexAttr(elements)},
+            ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+        matrix[x] = memref::AllocOp::create(builder, loc, MemRefType::get(shapeOf[x], elementType));
+      }
+      (void)ctx;
+      // matrix[x][r][c] = operand x at table[x][r][c], or the reverse for the scatter.
+      auto copy = [&](unsigned x, bool scatter) {
+        auto rows = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][0], 1);
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(rows.getBody());
+        auto columns = affine::AffineForOp::create(builder, loc, 0, shapeOf[x][1], 1);
+        builder.setInsertionPointToStart(columns.getBody());
+        SmallVector<Value, 2> rc{rows.getInductionVar(), columns.getInductionVar()};
+        Value offset64 = affine::AffineLoadOp::create(builder, loc, table[x], rc);
+        Value offset = arith::IndexCastOp::create(builder, loc, builder.getIndexType(), offset64);
+        if (!scatter) {
+          Value v = memref::LoadOp::create(builder, loc, flat[x], ValueRange{offset});
+          affine::AffineStoreOp::create(builder, loc, v, matrix[x], rc);
+        } else {
+          Value v = affine::AffineLoadOp::create(builder, loc, matrix[x], rc);
+          memref::StoreOp::create(builder, loc, v, flat[x], ValueRange{offset});
+        }
+      };
+      for (unsigned x = 0; x < 3; ++x)
+        copy(x, /*scatter=*/false);
+      Value aTensor = asTensor(matrix[0], shapeOf[0], /*writable=*/false);
+      Value bTensor = asTensor(matrix[1], shapeOf[1], /*writable=*/false);
+      Value cTensor = asTensor(matrix[2], shapeOf[2], /*writable=*/true);
+      Value result = runTiles(aTensor, bTensor, cTensor);
+      auto writeBack = bufferization::MaterializeInDestinationOp::create(builder, loc, result, matrix[2]);
+      writeBack.setRestrict(true);
+      writeBack.setWritable(true);
+      copy(2, /*scatter=*/true);
+      // No dealloc: --systolic-runtime-to-llvm's buffer deallocation frees the three matrices
+      // (an explicit dealloc of a buffer given to to_tensor is refused there).
+    }
+
+    if (report) {
+      auto remark = anchor->emitRemark()
+                    << "GEMM " << M << "x" << N << "x" << K << " of " << g.where
+                    << " lowered from its record as " << boxes.size() << " exact region(s) ("
+                    << g.summary << ")";
+      if (plan)
+        remark << " on " << fleet.resources.size()
+               << " accelerator(s): makespan = " << plan->optimization.makespan
+               << " cycles (read + compute + write), " << plan->blocks.size()
+               << " output block(s)";
+    }
+    anchor->erase();
+    return success();
+  }
+
+  /// Stage 2 of docs/GENERALIZED_GEMM_SCOPE.md: the dense path, gated by the records of
+  /// nest-records (Systolic/NestRecordGate.h). A record is about a nest as the input has
+  /// it, so nothing rewrites a nest before its gate: the steps that do (last-write-wins,
+  /// the untiling of written tilings, the normalization of parallelotope domains, the
+  /// hoisting of repetition loops) are not run, and neither are the paths that read no
+  /// records. Each GEMM that passes its gate is lowered by lowerOne, with every check it
+  /// makes without records, where it stands and in program order.
+  void runWithNestRecords() {
+    ModuleOp module = getOperation();
+    if (generalAffine || kernelCosetOffload || certifiedOffloadFirst || commonFiberOffload || fpDistribute) {
+      module.emitError() << "affine-matmul-to-systolic: nest-records is read on the dense path "
+                            "only; general-affine, kernel-coset-offload, certified-offload-first, "
+                            "common-fiber-offload and fp-distribute take other paths, which read "
+                            "no records";
+      signalPassFailure();
+      return;
+    }
+    FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);
+    if (failed(fleet)) {
+      signalPassFailure();
+      return;
+    }
+    std::string error;
+    FailureOr<mlir::systolic::NestRecordFile> records =
+        mlir::systolic::NestRecordFile::load(nestRecords, error);
+    if (failed(records)) {
+      module.emitError() << "affine-matmul-to-systolic: nest-records: " << error;
+      signalPassFailure();
+      return;
+    }
+    const unsigned indexWidth =
+        DataLayout(module).getTypeSizeInBits(IndexType::get(module.getContext())).getFixedValue();
+    // Every outermost loop's binding, before anything is lowered.
+    const mlir::systolic::BoundNests bound(module);
+    nextGemmIndex = nextSystolicGemmIndex(module);
+
+    SmallVector<AffineMatmulCandidate> candidates;
+    collectAffineMatmulCandidates(module.getOperation(), candidates);
+    SmallVector<LogicalMatmul, 1> matmuls;
+    for (AffineMatmulCandidate candidate : candidates) {
+      AffineMatmulRecognitionOptions recognition;
+      recognition.countersAsWritten = true;
+      recognition.reductionBatches = reductionBatches;
+      std::string notRecognized;
+      GemmMappingClass notRecognizedClass = GemmMappingClass::ProvenInvalid;
+      auto result = recognizeLogicalMatmul(candidate, &notRecognized,
+                                           &notRecognizedClass, recognition);
+      if (failed(result))
+        continue;
+      if (llvm::any_of(matmuls, [&](const LogicalMatmul &m) {
+            return m.outputStore == result->outputStore;
+          }))
+        continue;
+      matmuls.push_back(*result);
+    }
+    // Stage 3: the outermost loops in which the recognizer found no GEMM, in program order,
+    // taken now, while every anchor is in place.
+    SmallVector<Operation *> drivenNests;
+    if (recordDriven)
+      module.walk([&](func::FuncOp function) {
+        for (Operation *loop : mlir::systolic::outermostLoops(function))
+          if (bound.find(loop) && llvm::none_of(matmuls, [&](const LogicalMatmul &m) {
+                return m.anchor == loop || loop->isAncestor(m.anchor);
+              }))
+            drivenNests.push_back(loop);
+      });
+    for (const LogicalMatmul &matmul : matmuls) {
+      mlir::systolic::NestRecordDecision decision =
+          mlir::systolic::checkNestRecord(*records, bound, matmul, indexWidth);
+      if (!decision.agrees) {
+        auto remark = matmul.anchor->emitRemark()
+                      << "affine GEMM not lowered to systolic.matmul_tile: nest record: "
+                      << decision.why;
+        if (classify)
+          remark << " [" << stringifyGemmMappingClass(GemmMappingClass::Unknown) << "]";
+        continue;
+      }
+      if (report)
+        matmul.anchor->emitRemark() << "nest record agrees: " << decision.summary;
+      std::string why;
+      GemmMappingClass mappingClass = GemmMappingClass::ProvenValid;
+      bool hardError = false;
+      if (succeeded(lowerOne(matmul, *fleet, why, mappingClass, hardError)))
+        continue;
+      if (hardError) {
+        signalPassFailure();
+        return;
+      }
+      auto remark = matmul.anchor->emitRemark()
+                    << "affine GEMM not lowered to systolic.matmul_tile: " << why;
+      if (classify)
+        remark << " [" << stringifyGemmMappingClass(mappingClass) << "]";
+    }
+    for (Operation *loop : drivenNests) {
+      std::string why;
+      FailureOr<mlir::systolic::RecordDrivenGemm> driven = mlir::systolic::analyzeRecordDrivenNest(
+          *records, bound, loop, indexWidth, recordTableBudget, why);
+      // A refusal is said where the research found a multiply-accumulate in the nest (its
+      // record has a GEMM), or always with report=true; other loops stay as they are, silently.
+      auto worthSaying = [&]() {
+        if (report)
+          return true;
+        const mlir::systolic::BoundNests::Nest *nest = bound.find(loop);
+        const llvm::json::Object *record =
+            nest ? records->nest(func::FuncOp(nest->function).getSymName(), nest->ordinal) : nullptr;
+        return record && record->getObject("gemm");
+      };
+      if (failed(driven)) {
+        if (worthSaying())
+          loop->emitRemark() << "GEMM not lowered from its record: " << why;
+        continue;
+      }
+      bool hardError = false;
+      if (succeeded(lowerRecordDriven(*driven, *fleet, why, hardError)))
+        continue;
+      if (hardError) {
+        signalPassFailure();
+        return;
+      }
+      loop->emitRemark() << "GEMM not lowered from its record: " << driven->where << ": " << why;
+    }
+  }
+
   void runOnOperation() override {
+    if (recordDriven && nestRecords.empty()) {
+      getOperation().emitError() << "affine-matmul-to-systolic: record-driven reads the records of "
+                                    "nest-records, and none is given";
+      signalPassFailure();
+      return;
+    }
+    if (!nestRecords.empty()) {
+      runWithNestRecords();
+      return;
+    }
     ModuleOp module = getOperation();
 
     FailureOr<SystolicFleet> fleet = collectSystolicFleet(module);

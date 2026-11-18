@@ -173,6 +173,25 @@ add_executable(generalized-gemm-identity-report IdentityReport.cpp)
 target_link_libraries(generalized-gemm-identity-report PRIVATE
   generalized-gemm-domain generalized-gemm-polynomial-adapter generalized-gemm-z3)
 
+# Stage 1 of docs/GENERALIZED_GEMM_SCOPE.md: one record per loop nest. The outliner copies a
+# nest into a function of its own, and the record reads what the analyses above say of
+# the copy. No target above links this library, so none of their results can depend on it.
+# Stage 2: the binding of a nest is computed by the production pass's own file, compiled here
+# as it is, so that both sides compute it with one piece of code.
+add_library(generalized-gemm-nest STATIC
+  "${GG_LIB_DIR}/NestOutline.cpp"
+  "${GG_LIB_DIR}/NestRecord.cpp"
+  "${GG_ROOT}/lib/Systolic/Transforms/NestBinding.cpp")
+target_link_libraries(generalized-gemm-nest PUBLIC
+  generalized-gemm-domain generalized-gemm-polynomial-adapter)
+target_compile_options(generalized-gemm-nest PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(generalized-gemm-nest-report NestReport.cpp)
+target_link_libraries(generalized-gemm-nest-report PRIVATE generalized-gemm-nest generalized-gemm-z3)
+add_executable(generalized-gemm-nest-test test/unit/NestTest.cpp)
+target_link_libraries(generalized-gemm-nest-test PRIVATE generalized-gemm-nest generalized-gemm-z3)
+add_test(NAME generalized-gemm-nest COMMAND generalized-gemm-nest-test)
+set_tests_properties(generalized-gemm-nest PROPERTIES TIMEOUT 900)
+
 add_executable(generalized-gemm-report SemanticReport.cpp)
 target_link_libraries(generalized-gemm-report PRIVATE generalized-gemm)
 
@@ -308,10 +327,75 @@ add_test(NAME generalized-gemm-setreduction-programs COMMAND "${Python3_EXECUTAB
   --programs 30 --fills 6 --seed 1 --jobs 2)
 set_tests_properties(generalized-gemm-setreduction-programs PROPERTIES TIMEOUT 3600)
 
+# Stage 1: records of loop nests, recomputed from the printed programs, and composition in
+# place against the function's own run. The existing domain driver is read for the
+# whole-function claims of the same programs.
+add_test(NAME generalized-gemm-nest-programs COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4)
+set_tests_properties(generalized-gemm-nest-programs PROPERTIES TIMEOUT 3600)
+# The same programs with every product written with scf.for (bounds and steps arith.constant
+# values before the nest, memref.load and memref.store, indices by arith in the body): each
+# product over roots apart from its output must have the same complete, VERIFIED record.
+add_test(NAME generalized-gemm-nest-programs-scf COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4 --loops scf)
+set_tests_properties(generalized-gemm-nest-programs-scf PROPERTIES TIMEOUT 3600)
+
+# Stage 1: a nest's record against the production affine recognizer's report, field by
+# field. The production tool is not built here: point GG_SYSTOLIC_OPT at one built from
+# the same sources, and the test exists. It is only run.
+set(GG_SYSTOLIC_OPT "" CACHE FILEPATH "systolic-opt of this source tree, to compare nest records with")
+if(GG_SYSTOLIC_OPT)
+  add_test(NAME generalized-gemm-nest-affine COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_affine_compare.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --index-bit-width 64
+    --functions mm,strict,mmi,offsets,offsetsi,allocated,restrict --twin mmi=mm --twin offsetsi=offsets
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/lit/nest_product.mlir")
+  set_tests_properties(generalized-gemm-nest-affine PROPERTIES TIMEOUT 1200)
+endif()
+
+# Stage 2: the records the production gate's tests read (test/Systolic/Inputs/nest_records*.json)
+# must be what the research tool says of their input today.
+add_test(NAME generalized-gemm-nest-gate-records COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_gate_records.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --root "${GG_ROOT}" --check)
+set_tests_properties(generalized-gemm-nest-gate-records PROPERTIES TIMEOUT 1800)
+
+# Stage 2, end to end: records, the production pass with nest-records, the FPGA lowering, a
+# run against the software runtime model, results by each nest's numeric contract. Needs the
+# production systolic-opt of this source tree (GG_SYSTOLIC_OPT, above); it is only run.
+find_program(GG_LLC llc HINTS "${LLVM_TOOLS_BINARY_DIR}" NO_DEFAULT_PATH)
+if(GG_SYSTOLIC_OPT AND GG_LLC)
+  add_test(NAME generalized-gemm-nest-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3, end to end: nests the production recognizer finds no GEMM in, lowered from their
+  # records (formulas and tables), run, and compared with the original.
+  add_test(NAME generalized-gemm-nest-driven-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_driven_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-driven-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3 on scf.for, end to end: GEMMs written with scf.for, verified by the research,
+  # lowered from their records (formulas and tables), run, and compared with the original.
+  add_test(NAME generalized-gemm-nest-scf-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_scf_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-scf-e2e PROPERTIES TIMEOUT 3600)
+endif()
+
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)
 add_test(NAME generalized-gemm-lit COMMAND "${GG_LIT}" -v "${CMAKE_CURRENT_BINARY_DIR}/lit")
-# Phase 4 added dom_phase4.mlir (about 30 s); the suite was at 109 s of 120.
-set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 300)
+# Phase 4 added dom_phase4.mlir (about 30 s); the suite was at 109 s of 120. Stage 1 of
+# docs/GENERALIZED_GEMM_SCOPE.md added six nest_*.mlir files, each a few analyses of ten
+# seconds: the limit is for a loaded machine, and no check depends on it.
+set_tests_properties(generalized-gemm-lit PROPERTIES TIMEOUT 900)
 
 # Phase 5: the table oracle recomputes every claim about the synthesized while and
 # table programs with its own parser and interpreter of the G.5 rules.
@@ -342,4 +426,5 @@ add_custom_target(check-generalized-gemm
     generalized-gemm-synthesis-report generalized-gemm-synthesis-test
     generalized-gemm-computation-report generalized-gemm-computation-test
     generalized-gemm-domain-report generalized-gemm-domain-test
-    generalized-gemm-identity-report)
+    generalized-gemm-identity-report
+    generalized-gemm-nest-report generalized-gemm-nest-test)

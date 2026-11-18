@@ -53,6 +53,9 @@ struct GroupSynthesis {
   std::vector<VerifiedCandidate> candidates;
   unsigned level = 0, atoms = 0, rounds = 0, clauses = 0, proposals = 0, refuted = 0;
   bool exhausted = false;
+  // Leaves the grammar's thin sample lost in this search (AtomBank::lostLeaves), summed over
+  // its banks. Not printed: it decides whether the search runs a second time.
+  unsigned lostLeaves = 0;
 };
 
 struct SynthesisResult {

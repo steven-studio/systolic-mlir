@@ -34,6 +34,17 @@ struct GrammarSpec {
   unsigned maxConditionals = 1, maxConditions = 400, maxPrograms = 4000;
   // Program atoms have their own cap, so they never crowd out the terms.
   unsigned maxProgramAtoms = 24;
+  // Operands are told apart by their values at a thin sample of the events, and an operand
+  // equal to an earlier one there is dropped. With exactLeaves, a state variable equal to an
+  // earlier operand on the sample is compared on every event, and kept unless they are equal
+  // there: a sample that meets an innermost loop at one
+  // phase sees its counter constant, equal there to a constant held in state (an scf.for bound
+  // defined before the nest), and would lose the counter. Without it, such leaves are counted
+  // (AtomBank::lostLeaves). The search turns it on only when its search with the thin sample lost
+  // such a state variable and verified no candidate at the symbolic tier, on a scope enumerated
+  // whole, and keeps what it finds only when it verifies one there (SynthesisAnalysis.cpp,
+  // synthesizeGroup).
+  bool exactLeaves = false;
 
   /// 0: state and access subterms. 1: add, subtract, constant multiples.
   /// 2: products, division, remainder. 3: comparison, if-then-else. 4: bits.
@@ -56,6 +67,9 @@ struct AtomBank {
   std::vector<Atom> atoms;
   unsigned operands = 0;
   unsigned programs = 0;  // Statement programs lowered and offered.
+  // State variables the thin sample took for an earlier operand they differ from at some
+  // event, and dropped (without GrammarSpec::exactLeaves; with it, they are kept).
+  unsigned lostLeaves = 0;
   std::string truncated; // Nonempty: a limit cut the enumeration short.
 };
 
