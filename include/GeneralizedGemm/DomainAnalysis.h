@@ -50,6 +50,12 @@ struct DomainAnalysisRequest {
   // proposal. Off by default, and then nothing in the output changes.
   bool closedFormViews = false;
   ClosedFormOptions closedForms;
+  // Section 14: identities from proved index invariants (IndexInvariantSynthesis.h),
+  // handed to the proposer beside the ones above, so that a view can be written over
+  // the levels where a subscript is a carried variable. Proposals: the domain checker
+  // proves each view, under the certificate it is handed, or does not. The certificate
+  // is the caller's to strengthen; nothing is added to it here for these.
+  std::vector<StateIdentity> indexIdentities;
 };
 
 /// G5b-M4a: one set of groups, its request, and both routes' claims.
@@ -96,6 +102,8 @@ struct DomainResult {
   std::vector<StateIdentity> identities;
   std::optional<SliceSynthesisResult> closedForms;
   std::string identityReason; // Why some identity could not be formed.
+  // Section 14: the request's indexIdentities, as handed to the proposer.
+  std::vector<StateIdentity> indexIdentities;
 };
 
 /// Phase 4 (I3). Whether a term over level variables, parameters and constants is

@@ -857,13 +857,21 @@ json::Value counterexampleJSON(const LoopCounterexample &cex) {
 std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const InvariantLoop &loop,
                                       ArrayRef<std::vector<APInt>> rows, unsigned degree,
                                       size_t maxColumns, NullSpaceStats &stats) {
+  return nullSpaceEqualities(program, loop.variables, loop.parameters, rows, degree, maxColumns,
+                             stats, /*truncations=*/false);
+}
+
+std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, ArrayRef<unsigned> variables,
+                                      ArrayRef<unsigned> parameters,
+                                      ArrayRef<std::vector<APInt>> rows, unsigned degree,
+                                      size_t maxColumns, NullSpaceStats &stats, bool truncations) {
   using Big = DynamicAPInt;
   TermContext &terms = *program.terms;
   std::vector<Term> atoms;
   stats = NullSpaceStats();
   if (rows.empty())
     return atoms;
-  size_t nv = loop.variables.size();
+  size_t nv = variables.size();
   // Folding: a header variable with one value at every row is that constant. Its atom
   // goes to the checker like any other; the variable leaves the monomials, where it
   // would only add multiples of the same fact.
@@ -876,7 +884,7 @@ std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const Inva
       continue;
     folded[i] = true;
     ++stats.folded;
-    unsigned v = loop.variables[i];
+    unsigned v = variables[i];
     atoms.push_back(terms.icmp(Predicate::Eq, terms.state(v, program.state[v].sort),
                                terms.bv(rows.front()[i])));
   }
@@ -887,18 +895,40 @@ std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const Inva
     Term term;
     size_t column;
     bool state;
+    unsigned narrow; // Nonzero: the leaf is the column's value truncated to this width.
   };
   std::map<unsigned, std::vector<Leaf>> byWidth;
-  for (size_t j = 0; j < loop.parameters.size(); ++j) {
-    const Parameter &p = program.parameters[loop.parameters[j]];
+  for (size_t j = 0; j < parameters.size(); ++j) {
+    const Parameter &p = program.parameters[parameters[j]];
     if (p.sort.width <= 64)
-      byWidth[p.sort.width].push_back({terms.param(p.id, p.sort), 2 * nv + j, false});
+      byWidth[p.sort.width].push_back({terms.param(p.id, p.sort), 2 * nv + j, false, 0});
   }
   for (size_t i = 0; i < nv; ++i) {
-    unsigned v = loop.variables[i];
+    unsigned v = variables[i];
     if (!folded[i] && program.state[v].sort.width <= 64)
       byWidth[program.state[v].sort.width].push_back(
-          {terms.state(v, program.state[v].sort), i, true});
+          {terms.state(v, program.state[v].sort), i, true, 0});
+  }
+  if (truncations) {
+    // A narrower width also reads every wider leaf truncated to it: a recurrence carried
+    // at 8 bits beside a 16-bit counter satisfies x8 == trunc8(k) + x0 whether or not it
+    // wraps, and no relation between leaves of one width can say that. The truncations
+    // come after the parameters and before the width's own state, so that a variable of
+    // the width they determine is still a late column.
+    std::map<unsigned, std::vector<Leaf>> extra;
+    for (const auto &[width, own] : byWidth)
+      for (bool state : {false, true})
+        for (const auto &[wider, source] : byWidth)
+          if (wider > width)
+            for (const Leaf &leaf : source)
+              if (leaf.state == state)
+                extra[width].push_back({terms.trunc(leaf.term, width), leaf.column, state, width});
+    for (auto &[width, list] : extra) {
+      std::vector<Leaf> &leaves = byWidth[width];
+      auto firstState =
+          std::find_if(leaves.begin(), leaves.end(), [](const Leaf &leaf) { return leaf.state; });
+      leaves.insert(firstState, list.begin(), list.end());
+    }
   }
   for (auto &[width, leaves] : byWidth) {
     // Monomials of degree 0..degree as non-decreasing index tuples; the ones with only
@@ -943,8 +973,10 @@ std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const Inva
       line.reserve(columns);
       for (const auto &m : monomials) {
         Big value(1);
-        for (size_t k : m)
-          value *= Big(row[leaves[k].column]);
+        for (size_t k : m) {
+          const APInt &cell = row[leaves[k].column];
+          value *= leaves[k].narrow ? Big(cell.trunc(leaves[k].narrow)) : Big(cell);
+        }
         line.push_back(value);
       }
       distinct.insert(std::move(line));

@@ -107,6 +107,7 @@ add_library(generalized-gemm-tier-checker STATIC
   "${GG_LIB_DIR}/IndexProgram.cpp"
   "${GG_LIB_DIR}/IndexSlice.cpp"
   "${GG_LIB_DIR}/LoopInvariant.cpp"
+  "${GG_LIB_DIR}/IndexInvariant.cpp"
   "${GG_LIB_DIR}/SymbolicDomain.cpp"
   "${GG_LIB_DIR}/CoverageSimulation.cpp"
   "${GG_LIB_DIR}/SymbolicCandidateChecker.cpp")
@@ -117,6 +118,7 @@ add_library(generalized-gemm-synthesis STATIC
   "${GG_LIB_DIR}/IndexProgramSemgus.cpp"
   "${GG_LIB_DIR}/ClosedFormSynthesis.cpp"
   "${GG_LIB_DIR}/InvariantSynthesis.cpp"
+  "${GG_LIB_DIR}/IndexInvariantSynthesis.cpp"
   "${GG_LIB_DIR}/CoordinateSynthesis.cpp"
   "${GG_LIB_DIR}/SynthesisAnalysis.cpp")
 target_link_libraries(generalized-gemm-synthesis PUBLIC
@@ -212,7 +214,8 @@ add_executable(generalized-gemm-synthesis-test test/unit/SynthesisTest.cpp)
 target_link_libraries(generalized-gemm-synthesis-test PRIVATE
   generalized-gemm-synthesis generalized-gemm-termination generalized-gemm-z3)
 add_test(NAME generalized-gemm-synthesis COMMAND generalized-gemm-synthesis-test)
-set_tests_properties(generalized-gemm-synthesis PROPERTIES TIMEOUT 600)
+# 502 s in Release on 2026-11-18, with the invariant, null-space and index sections.
+set_tests_properties(generalized-gemm-synthesis PROPERTIES TIMEOUT 900)
 
 add_executable(generalized-gemm-computation-test test/unit/ComputationTest.cpp)
 target_link_libraries(generalized-gemm-computation-test PRIVATE
@@ -323,6 +326,13 @@ add_test(NAME generalized-gemm-invariant-programs COMMAND "${Python3_EXECUTABLE}
   "${GG_FUZZ}/invariant_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
   --cases 24 --seed 1)
 set_tests_properties(generalized-gemm-invariant-programs PROPERTIES TIMEOUT 1800)
+
+# Index invariants for a GEMM's subscripts (Section 14): every claim of --index-invariants
+# against an interpreter of its own, at every point of each scope.
+add_test(NAME generalized-gemm-index-invariant-programs COMMAND "${Python3_EXECUTABLE}" -I
+  "${GG_FUZZ}/index_invariant_oracle.py" --driver $<TARGET_FILE:generalized-gemm-synthesis-report>
+  --programs 12 --seed 1)
+set_tests_properties(generalized-gemm-index-invariant-programs PROPERTIES TIMEOUT 1800)
 
 add_custom_target(check-generalized-gemm
   COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^generalized-gemm-"

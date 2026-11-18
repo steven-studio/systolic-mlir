@@ -4,6 +4,7 @@
 #include "GeneralizedGemm/CoordinateAnalysis.h"
 #include "GeneralizedGemm/CoverageSimulation.h"
 #include "GeneralizedGemm/ClosedFormSynthesis.h"
+#include "GeneralizedGemm/IndexInvariantSynthesis.h"
 #include "GeneralizedGemm/IndexProgramSemgus.h"
 #include "GeneralizedGemm/InvariantSynthesis.h"
 #include "GeneralizedGemm/LoopCounters.h"
@@ -4489,6 +4490,575 @@ static void testInvariantNullSpace() {
   CHECK(!cegis.refutedFunctions.empty());
 }
 
+// Section 14: index invariants for a GEMM whose K subscript is a scalar recurrence.
+static const char *indexPrograms = R"(
+func.func @gemm_x(%a: memref<8x16xi32>, %b: memref<16x3xi32>, %c: memref<8x3xi32>,
+                  %n: index, %kk: index, %x0: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %x0) -> (index) {
+        %p = memref.load %a[%i, %x] : memref<8x16xi32>
+        %q = memref.load %b[%x, %j] : memref<16x3xi32>
+        %z = memref.load %c[%i, %j] : memref<8x3xi32>
+        %m = arith.muli %p, %q : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %j] : memref<8x3xi32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+    }
+  }
+  return
+}
+func.func @carried(%a: memref<8x16xi32>, %b: memref<16x3xi32>, %c: memref<8x3xi32>,
+                   %n: index, %kk: index, %x0: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    %xo = scf.for %j = %c0 to %c3 step %c1 iter_args(%xj = %x0) -> (index) {
+      %xf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %xj) -> (index) {
+        %p = memref.load %a[%i, %x] : memref<8x16xi32>
+        %q = memref.load %b[%x, %j] : memref<16x3xi32>
+        %z = memref.load %c[%i, %j] : memref<8x3xi32>
+        %m = arith.muli %p, %q : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %j] : memref<8x3xi32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+      scf.yield %xf : index
+    }
+  }
+  return
+}
+func.func @bump(%a: memref<64xi32>, %b: memref<64xi32>, %c: memref<64xi32>,
+                %n: index, %m: index, %kk: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %raf, %rcf = scf.for %i = %c0 to %n step %c1 iter_args(%ra = %c0, %rc = %c0) -> (index, index) {
+    scf.for %j = %c0 to %m step %c1 {
+      %cj = arith.addi %rc, %j : index
+      %xf, %yf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %ra, %y = %j) -> (index, index) {
+        %p = memref.load %a[%x] : memref<64xi32>
+        %q = memref.load %b[%y] : memref<64xi32>
+        %z = memref.load %c[%cj] : memref<64xi32>
+        %mm = arith.muli %p, %q : i32
+        %s = arith.addi %z, %mm : i32
+        memref.store %s, %c[%cj] : memref<64xi32>
+        %x1 = arith.addi %x, %c1 : index
+        %y1 = arith.addi %y, %m : index
+        scf.yield %x1, %y1 : index, index
+      }
+    }
+    %ra1 = arith.addi %ra, %kk : index
+    %rc1 = arith.addi %rc, %m : index
+    scf.yield %ra1, %rc1 : index, index
+  }
+  return
+}
+func.func @narrow(%a: memref<4x256xi32>, %b: memref<256x3xi32>, %c: memref<4x3xi32>,
+                  %n: index, %kk: index, %x0: i8) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %one = arith.constant 1 : i8
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %x0) -> (i8) {
+        %xi = arith.index_castui %x : i8 to index
+        %p = memref.load %a[%i, %xi] : memref<4x256xi32>
+        %q = memref.load %b[%xi, %j] : memref<256x3xi32>
+        %z = memref.load %c[%i, %j] : memref<4x3xi32>
+        %m = arith.muli %p, %q : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %j] : memref<4x3xi32>
+        %x1 = arith.addi %x, %one : i8
+        scf.yield %x1 : i8
+      }
+    }
+  }
+  return
+}
+func.func @narrow_nsw(%a: memref<4x256xi32>, %b: memref<256x3xi32>, %c: memref<4x3xi32>,
+                      %n: index, %kk: index, %x0: i8) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  %one = arith.constant 1 : i8
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %x0) -> (i8) {
+        %xi = arith.index_castui %x : i8 to index
+        %p = memref.load %a[%i, %xi] : memref<4x256xi32>
+        %q = memref.load %b[%xi, %j] : memref<256x3xi32>
+        %z = memref.load %c[%i, %j] : memref<4x3xi32>
+        %m = arith.muli %p, %q : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %j] : memref<4x3xi32>
+        %x1 = arith.addi %x, %one overflow<nsw> : i8
+        scf.yield %x1 : i8
+      }
+    }
+  }
+  return
+}
+)";
+
+static IndexInvariantSearchOptions indexOptions(const ParameterScope &scope) {
+  IndexInvariantSearchOptions options;
+  options.check.scope = scope;
+  return options;
+}
+
+/// The atoms of a search beyond the termination certificate's own, as "L<cut>: text".
+static std::vector<std::string> newAtoms(const IndexInvariantSearch &search) {
+  std::vector<std::string> out;
+  for (const CutInvariant &entry : search.certificate.cuts) {
+    auto own = search.inherited.find(entry.cut);
+    for (unsigned k = own == search.inherited.end() ? 0 : own->second; k < entry.atoms.size(); ++k)
+      out.push_back("L" + std::to_string(entry.cut) + ": " + formatLoopTerm(entry.atoms[k]));
+  }
+  return out;
+}
+
+static IndexInvariantSearch givenIndexInvariant(const SemanticProgram &p,
+                                                const TerminationCertificate &certificate,
+                                                const ParameterScope &scope, unsigned cut,
+                                                const std::string &text) {
+  IndexInvariantCertificate given;
+  given.origin = "given";
+  CutInvariant entry;
+  entry.cut = cut;
+  entry.atoms = conjuncts(loopTerm(p, text));
+  given.cuts.push_back(std::move(entry));
+  return findIndexInvariants(p, &certificate, &given, indexOptions(scope), z3Backend);
+}
+
+static unsigned countRecords(const std::vector<ObligationRecord> &records, const std::string &id,
+                             const std::string &result) {
+  unsigned n = 0;
+  for (const ObligationRecord &record : records)
+    n += record.id == id && record.result == result;
+  return n;
+}
+
+static void testIndexInvariants() {
+  Module m(indexPrograms);
+  SemanticProgram p = m.import("gemm_x", 8);
+  CHECK(p.isSupported());
+  ParameterScope scope = scopeOf(p, {{0, 1, 3}, {1, 1, 4}, {2, 0, 5}});
+  auto certificate = certify(p, scope);
+  CHECK(certificate.has_value());
+  if (!certificate)
+    return;
+  SynthesisOptions synthesis = synthesisOptions(scope);
+
+  // What the coordinate checker says without help: the family I = i, J = j, K = k passes
+  // the finite tier, and V1f (equal (P, I, K), another A address) has a model, because the
+  // termination certificate's invariant at the k header does not relate x to k.
+  SynthesisResult before = synthesizeProgram(p, &*certificate, synthesis, z3Backend);
+  CHECK(!before.groups.empty() && !before.groups[0].candidates.empty());
+  if (before.groups.empty() || before.groups[0].candidates.empty())
+    return;
+  const VerifiedCandidate &old = before.groups[0].candidates[0];
+  CHECK(old.finite.tier() == EvidenceTier::ScopeEnumerated);
+  CHECK(old.symbolic.tier() == EvidenceTier::Proposed);
+  CHECK(old.symbolic.reason().find("V1f") != std::string::npos);
+
+  // The search: x == x0 + k at the k header, and nothing else.
+  IndexInvariantSearchOptions options = indexOptions(scope);
+  IndexInvariantSearch found = findIndexInvariants(p, &*certificate, nullptr, options, z3Backend);
+  CHECK(found.status == "INDUCTIVE");
+  CHECK(!found.given);
+  CHECK(newAtoms(found) == std::vector<std::string>{"L5: (s6 == (p2 + s5))"});
+  // One query per path into a cut with atoms: the entry into the nest, the entries into
+  // the j and k loops, the k back edge and the two exits back to an outer header.
+  CHECK(countRecords(found.check.records, "IDX-init", "unsat") == 1);
+  CHECK(countRecords(found.check.records, "IDX-step", "unsat") == 5);
+  CHECK(found.check.records.size() == 6 && found.check.queries == 6);
+  // The proof ran the program nowhere; the candidate search's runs are counted apart.
+  CHECK(found.check.confirmationRuns == 0);
+  CHECK(found.samples.runs > 0 && found.samples.runs == found.samples.returned);
+  CHECK(found.strengthened.has_value());
+  if (!found.strengthened)
+    return;
+
+  // The GEMM index checker consumes it: the same family, handed the strengthened
+  // certificate (which it checks again), now discharges V1f and V1g and reaches the
+  // symbolic tier.
+  SynthesisResult after = synthesizeProgram(p, &*found.strengthened, synthesis, z3Backend);
+  CHECK(!after.groups.empty() && !after.groups[0].candidates.empty());
+  if (after.groups.empty() || after.groups[0].candidates.empty())
+    return;
+  const VerifiedCandidate &now = after.groups[0].candidates[0];
+  CHECK(now.family.axes == old.family.axes);
+  CHECK(now.symbolic.tier() == EvidenceTier::SymbolicExact);
+  for (const char *id : {"V1h", "V1f", "V1g"}) {
+    bool any = false, every = true;
+    for (const ObligationRecord &record : now.symbolic.records())
+      if (record.id == id) {
+        any = true;
+        every = every && record.discharged;
+      }
+    CHECK(any && every);
+  }
+  const SiteGroup &group = after.enumeration.groups[0];
+  const EnumerationOrder *order = now.order ? &*now.order : nullptr;
+
+  // An invariant that is not inductive reaches no checker through any door. Conjoined
+  // into the certificate by hand, the consumer's own certificate check refuses it.
+  for (const char *text : {"s6 == s5 + p2 + 1", "s6 == p2", "s6 <u 9"}) {
+    std::map<unsigned, Term> extra{{5u, loopTerm(p, text)}};
+    TerminationCertificate forged = strengthenCertificate(p, *certificate, extra);
+    CheckedFamily refused =
+        checkFamilySymbolic(p, &forged, group, now.family, order, symbolicOptions(scope), z3Backend);
+    CHECK(refused.status() == FamilyStatus::Unknown && refused.tier() == EvidenceTier::Proposed);
+    CHECK(refused.reason().find("the certificate was not accepted") != std::string::npos);
+  }
+  {
+    // A cut the certificate does not have: nothing is placed.
+    std::map<unsigned, Term> extra{{4u, loopTerm(p, "s6 == s5 + p2")}};
+    TerminationCertificate same = strengthenCertificate(p, *certificate, extra);
+    CHECK(same.invariants == certificate->invariants);
+  }
+
+  // The index relations at the MAC site: every subscript as a term over the coordinates.
+  std::vector<IndexRelation> claims = proposeIndexRelations(p, found, group, now.family);
+  CHECK(claims.size() == 6);
+  IndexProofOptions check = options.check;
+  check.failFast = false;
+  CheckedIndexProof proof =
+      checkIndexProof(p, found.cuts, found.certificate, claims, &now.family, check, z3Backend);
+  CHECK(proof.invariant == IndexInvariantVerdict::Inductive);
+  CHECK(proof.relations.size() == claims.size());
+  bool rewritten = false;
+  for (const CheckedIndexRelation &relation : proof.relations) {
+    CHECK(relation.verdict == IndexRelationVerdict::Proved);
+    CHECK(relation.overCoordinates && *relation.overCoordinates);
+    CHECK(relation.arrivals == 1);
+    if (relation.claim.operand == 0 && relation.claim.dimension == 1) {
+      rewritten = true;
+      CHECK(formatLoopTerm(relation.claim.relation) == "(p2 + s5)");
+    }
+  }
+  CHECK(rewritten);
+  CHECK(countRecords(proof.records, "IDX-use", "unsat") == 6);
+  CHECK(proof.confirmationRuns == 0);
+
+  // Claims the checker must not prove: a wrong relation is refuted by a run of the
+  // program (which the test replays), a relation that reads x is true but is no
+  // function of the coordinates, and malformed claims get no verdict.
+  std::vector<IndexRelation> odd(4);
+  odd[0].operand = 0, odd[0].dimension = 1, odd[0].relation = loopTerm(p, "s5 + p2 + 1");
+  odd[1].operand = 0, odd[1].dimension = 1, odd[1].relation = loopTerm(p, "s6");
+  odd[2].site = 7, odd[2].relation = loopTerm(p, "s3");
+  odd[3].operand = 1, odd[3].dimension = 1, odd[3].relation = loopTerm(p, "s4 == s4");
+  CheckedIndexProof judged =
+      checkIndexProof(p, found.cuts, found.certificate, odd, &now.family, check, z3Backend);
+  CHECK(judged.relations.size() == 4);
+  if (judged.relations.size() == 4) {
+    const CheckedIndexRelation &wrong = judged.relations[0];
+    CHECK(wrong.verdict == IndexRelationVerdict::Refuted && wrong.witness.has_value());
+    if (wrong.witness) {
+      CHECK(parametersInScope(scope, wrong.witness->parameters));
+      auto run = eventStates(p, wrong.witness->parameters, 0, EnumerationLimits());
+      CHECK(run && run->run.status == RunStatus::Returned);
+      if (run && wrong.witness->event < run->run.events.size()) {
+        CHECK(run->run.events[wrong.witness->event].f[1] == wrong.witness->index);
+        CHECK(wrong.witness->index != wrong.witness->claimed);
+      }
+    }
+    CHECK(judged.confirmationRuns >= 1);
+    CHECK(judged.relations[1].verdict == IndexRelationVerdict::Proved);
+    CHECK(judged.relations[1].overCoordinates && !*judged.relations[1].overCoordinates);
+    CHECK(judged.relations[2].verdict == IndexRelationVerdict::Unknown);
+    CHECK(judged.relations[3].verdict == IndexRelationVerdict::Unknown);
+    CHECK(judged.relations[3].reason.find("another width") != std::string::npos);
+  }
+
+  // A model of IDX-use at a state no run reaches refutes nothing. The true relation,
+  // judged under no invariant at all, has such a model: the run from its parameters
+  // returns with the relation true at every event, so the answer is "not proved".
+  {
+    IndexInvariantCertificate bare;
+    std::vector<IndexRelation> one(1);
+    one[0].operand = 0, one[0].dimension = 1, one[0].relation = loopTerm(p, "p2 + s5");
+    CheckedIndexProof weak =
+        checkIndexProof(p, found.cuts, bare, one, &now.family, check, z3Backend);
+    CHECK(weak.invariant == IndexInvariantVerdict::Inductive);
+    CHECK(weak.relations.size() == 1);
+    if (weak.relations.size() == 1) {
+      CHECK(weak.relations[0].verdict == IndexRelationVerdict::Unknown);
+      CHECK(!weak.relations[0].witness.has_value());
+      CHECK(!weak.relations[0].unconfirmedModel.empty());
+    }
+    CHECK(weak.confirmationRuns == 1);
+  }
+  // The certificate checker has the last word on what is handed on: when it does not
+  // decide its own O4 for the strengthened certificate, nothing is handed on, whatever
+  // IDX-init and IDX-step said.
+  {
+    Undecided o4("O4");
+    IndexInvariantSearch unaccepted = findIndexInvariants(p, &*certificate, nullptr, options, o4);
+    CHECK(unaccepted.status == "INDUCTIVE");
+    CHECK(!unaccepted.strengthened.has_value());
+    CHECK(unaccepted.certificateNote.find("does not accept") != std::string::npos);
+  }
+
+  // Given certificates, the debugging comparison: reported as given, checked with no
+  // search and no sample.
+  IndexInvariantSearch right = givenIndexInvariant(p, *certificate, scope, 5, "s6 == s5 + p2");
+  CHECK(right.status == "INDUCTIVE" && right.given && right.strengthened.has_value());
+  CHECK(right.samples.runs == 0 && right.levels.empty());
+  // Wrong by one: false already where the k loop is entered.
+  IndexInvariantSearch offset = givenIndexInvariant(p, *certificate, scope, 5, "s6 == s5 + p2 + 1");
+  CHECK(offset.status == "NOT_INDUCTIVE" && !offset.strengthened);
+  CHECK(offset.check.falsifiedBy == "IDX-step" && offset.check.falsifiedCut == 5);
+  CHECK(offset.check.invariantReason.find("L3 -0-> L4 -0-> L5") != std::string::npos);
+  // True on entry, lost by the first iteration.
+  IndexInvariantSearch stale = givenIndexInvariant(p, *certificate, scope, 5, "s6 == p2");
+  CHECK(stale.status == "NOT_INDUCTIVE" && !stale.strengthened);
+  CHECK(stale.check.invariantReason.find("L5 -0-> L6 -0-> L5") != std::string::npos);
+  // False at an initial state: the model's parameters are a point of the scope.
+  IndexInvariantSearch initial = givenIndexInvariant(p, *certificate, scope, 1, "s3 == 1");
+  CHECK(initial.status == "NOT_INDUCTIVE" && initial.check.falsifiedBy == "IDX-init");
+  CHECK(!initial.check.initialParameters.empty() &&
+        parametersInScope(scope, initial.check.initialParameters));
+  // A relation checked under a certificate that is not inductive gets no verdict at all.
+  CheckedIndexProof under =
+      checkIndexProof(p, found.cuts, offset.certificate, claims, &now.family, check, z3Backend);
+  CHECK(under.invariant == IndexInvariantVerdict::NotInductive && under.relations.empty());
+  // Not a cut, not a condition, not a cut set, no certificate: no verdict.
+  CHECK(givenIndexInvariant(p, *certificate, scope, 4, "s6 == s5 + p2").status == "UNKNOWN");
+  {
+    IndexInvariantCertificate value;
+    CutInvariant entry;
+    entry.cut = 5;
+    entry.atoms.push_back(loopTerm(p, "s6 + s5"));
+    value.cuts.push_back(entry);
+    IndexInvariantSearch refused = findIndexInvariants(p, &*certificate, &value, options, z3Backend);
+    CHECK(refused.status == "UNKNOWN" && !refused.strengthened);
+    CHECK(refused.reason.find("is not a condition") != std::string::npos);
+    llvm::SmallVector<unsigned> two{1, 3};
+    CheckedIndexProof open = checkIndexProof(p, two, right.certificate, {}, nullptr, check, z3Backend);
+    CHECK(open.invariant == IndexInvariantVerdict::Unknown);
+    CHECK(open.invariantReason.find("no cut set") != std::string::npos);
+    IndexInvariantSearch none = findIndexInvariants(p, nullptr, nullptr, options, z3Backend);
+    CHECK(none.status == "UNKNOWN" && !none.strengthened);
+  }
+  // An entry condition on the parameters: x == k needs x0 == 0, which the scope may or
+  // may not give.
+  CHECK(givenIndexInvariant(p, *certificate, scope, 5, "s6 == s5").status == "NOT_INDUCTIVE");
+  {
+    ParameterScope zero = scopeOf(p, {{0, 1, 3}, {1, 1, 4}, {2, 0, 0}});
+    auto atZero = certify(p, zero);
+    CHECK(atZero.has_value());
+    if (atZero)
+      CHECK(givenIndexInvariant(p, *atZero, zero, 5, "s6 == s5").status == "INDUCTIVE");
+  }
+
+  // A solver that does not decide, or claims a model it cannot show, proves nothing.
+  {
+    UnknownBackend unknown;
+    IndexInvariantSearch undecided = findIndexInvariants(p, &*certificate, nullptr, options, unknown);
+    CHECK(undecided.status != "INDUCTIVE" && !undecided.strengthened);
+    CheckedIndexProof direct =
+        checkIndexProof(p, found.cuts, found.certificate, claims, &now.family, check, unknown);
+    CHECK(direct.invariant == IndexInvariantVerdict::Unknown && direct.relations.empty());
+    SatBackend sat;
+    IndexInvariantSearch modelless = findIndexInvariants(p, &*certificate, nullptr, options, sat);
+    CHECK(modelless.status != "INDUCTIVE" && !modelless.strengthened);
+    // IDX-use undecided: the invariant stands, the relations do not.
+    Undecided use("IDX-use");
+    CheckedIndexProof partial =
+        checkIndexProof(p, found.cuts, found.certificate, claims, &now.family, check, use);
+    CHECK(partial.invariant == IndexInvariantVerdict::Inductive);
+    for (const CheckedIndexRelation &relation : partial.relations)
+      CHECK(relation.verdict == IndexRelationVerdict::Unknown);
+    // IDX-step undecided as a conjunction: decided atom by atom, and still inductive.
+    Undecided step("IDX-step");
+    CheckedIndexProof split =
+        checkIndexProof(p, found.cuts, found.certificate, {}, nullptr, check, step);
+    CHECK(split.invariant == IndexInvariantVerdict::Inductive);
+    CHECK(split.queries > 6);
+    // And undecided atom by atom as well: no verdict.
+    Undecided both("IDX-step", /*atoms=*/true);
+    CheckedIndexProof neither =
+        checkIndexProof(p, found.cuts, found.certificate, {}, nullptr, check, both);
+    CHECK(neither.invariant == IndexInvariantVerdict::Unknown);
+  }
+
+  // A sample is a sample: one point offers relations that only hold there. They are
+  // falsified at initial states, the models become runs, and the same atom is proved.
+  {
+    IndexInvariantSearchOptions thin = options;
+    thin.samplePoints = 1;
+    IndexInvariantSearch refined = findIndexInvariants(p, &*certificate, nullptr, thin, z3Backend);
+    CHECK(refined.status == "INDUCTIVE" && refined.refinements > 0);
+    CHECK(newAtoms(refined) == std::vector<std::string>{"L5: (s6 == (p2 + s5))"});
+    CHECK(!refined.levels.empty() && refined.levels[0].offered > refined.levels[0].kept);
+    thin.maxRefinements = 0;
+    IndexInvariantSearch starved = findIndexInvariants(p, &*certificate, nullptr, thin, z3Backend);
+    // Whatever is kept is proved; nothing unproved is ever handed on.
+    CHECK(starved.status == "INDUCTIVE" || starved.status == "NOTHING_FOUND");
+    CHECK(starved.check.invariant == IndexInvariantVerdict::Inductive);
+  }
+
+  // The sampler: every cut, and the proved atom true at every sampled row.
+  {
+    bool exhaustive = false;
+    auto points = loopPoints(p, scope, 12, exhaustive);
+    CutSamples samples = sampleCutStates(p, certificate->cuts, points, 0, EnumerationLimits(), 64);
+    CHECK(samples.cuts.size() == 3 && samples.runs == points.size());
+    CHECK(samples.returned == samples.runs);
+    for (const CutSamples::Cut &cut : samples.cuts) {
+      CHECK(!cut.rows.empty() && cut.rows.size() <= 64 && cut.arrivals >= cut.rows.size());
+      if (cut.cut != 5)
+        continue;
+      auto k = std::find(cut.variables.begin(), cut.variables.end(), 5u);
+      auto x = std::find(cut.variables.begin(), cut.variables.end(), 6u);
+      CHECK(k != cut.variables.end() && x != cut.variables.end());
+      if (k == cut.variables.end() || x == cut.variables.end())
+        continue;
+      size_t nv = cut.variables.size();
+      for (const auto &row : cut.rows)
+        CHECK(row[x - cut.variables.begin()] == row[2 * nv + 2] + row[k - cut.variables.begin()]);
+    }
+  }
+
+  // The entry condition of the inner loop. When x is carried through the j loop and not
+  // reset, x == x0 + k fails on the path that enters the k loop; what the search finds
+  // is the relation that does hold there, x == xj + k.
+  {
+    SemanticProgram carried = m.import("carried", 8);
+    ParameterScope small = scopeOf(carried, {{0, 1, 2}, {1, 1, 2}, {2, 0, 2}});
+    auto proof = certify(carried, small);
+    CHECK(proof.has_value());
+    if (proof) {
+      IndexInvariantSearch entry = givenIndexInvariant(carried, *proof, small, 5, "s7 == s6 + p2");
+      CHECK(entry.status == "NOT_INDUCTIVE" && !entry.strengthened);
+      CHECK(entry.check.falsifiedBy == "IDX-step");
+      CHECK(entry.check.invariantReason.find("L3 -0-> L4 -0-> L5") != std::string::npos);
+      IndexInvariantSearch searched =
+          findIndexInvariants(carried, &*proof, nullptr, indexOptions(small), z3Backend);
+      CHECK(newAtoms(searched) == std::vector<std::string>{"L5: (s7 == (s5 + s6))"});
+    }
+  }
+
+  // A strength-reduced GEMM over linearized arrays: every subscript is a recurrence (the
+  // row start ra steps by kk per i, x by 1 from ra, y by m from j, the output row rc by
+  // m per i). Degree 1 finds x == ra + k and is not enough: the C address needs
+  // rc == i*m, which is degree 2 and lives at the outer headers. With both levels each
+  // subscript is proved to be a term over (I, J, K) and the family reaches the symbolic
+  // tier; without the invariants it stops at V1h.
+  {
+    SemanticProgram bump = m.import("bump", 8);
+    ParameterScope cube = scopeOf(bump, {{0, 1, 3}, {1, 1, 3}, {2, 1, 3}});
+    auto proof = certify(bump, cube);
+    CHECK(proof.has_value());
+    if (proof) {
+      SynthesisOptions one = synthesisOptions(cube);
+      one.synthesis.maxCandidates = 1;
+      IndexInvariantSearch linear =
+          findIndexInvariants(bump, &*proof, nullptr, indexOptions(cube), z3Backend);
+      CHECK(newAtoms(linear) ==
+            (std::vector<std::string>{"L5: (s6 == (s4 + s5))", "L5: (s8 == (s3 + s7))"}));
+      IndexInvariantSearchOptions two = indexOptions(cube);
+      two.degrees = {1, 2};
+      IndexInvariantSearch quadratic = findIndexInvariants(bump, &*proof, nullptr, two, z3Backend);
+      CHECK(quadratic.status == "INDUCTIVE" && quadratic.levels.size() == 2);
+      std::vector<std::string> atoms = newAtoms(quadratic);
+      for (const char *expected : {"L1: (s3 == (p2 * s2))", "L1: (s4 == (p1 * s2))",
+                                   "L5: (s8 == (s3 + s7))", "L5: (s9 == ((p1 * s7) + s5))"})
+        CHECK(llvm::is_contained(atoms, std::string(expected)));
+      CHECK(quadratic.strengthened.has_value());
+      SynthesisResult plain = synthesizeProgram(bump, &*proof, one, z3Backend);
+      CHECK(!plain.groups.empty() && !plain.groups[0].candidates.empty() &&
+            plain.groups[0].candidates[0].symbolic.reason().find("V1h") != std::string::npos);
+      if (quadratic.strengthened) {
+        SynthesisResult helped = synthesizeProgram(bump, &*quadratic.strengthened, one, z3Backend);
+        CHECK(!helped.groups.empty() && !helped.groups[0].candidates.empty());
+        if (!helped.groups.empty() && !helped.groups[0].candidates.empty()) {
+          const VerifiedCandidate &first = helped.groups[0].candidates[0];
+          CHECK(first.symbolic.tier() == EvidenceTier::SymbolicExact);
+          std::vector<IndexRelation> views =
+              proposeIndexRelations(bump, quadratic, helped.enumeration.groups[0], first.family);
+          CHECK(views.size() == 3);
+          CheckedIndexProof viewsProof = checkIndexProof(bump, quadratic.cuts, quadratic.certificate,
+                                                         views, &first.family, check, z3Backend);
+          for (const CheckedIndexRelation &relation : viewsProof.relations)
+            CHECK(relation.verdict == IndexRelationVerdict::Proved && relation.overCoordinates &&
+                  *relation.overCoordinates);
+          std::vector<std::string> texts;
+          for (const IndexRelation &view : views)
+            texts.push_back(formatLoopTerm(view.relation));
+          CHECK(texts == (std::vector<std::string>{"((s2 * p2) + s7)", "(s5 + (p1 * s7))",
+                                                   "((s2 * p1) + s5)"}));
+        }
+      }
+    }
+  }
+
+  // Width and overflow. x is carried at 8 bits beside a 16-bit counter and wraps. The
+  // relation that holds through the wrap is found and proved; the one that reads x as an
+  // integer is refused once the scope lets x wrap, and proved when it does not.
+  {
+    SemanticProgram narrow = m.import("narrow", 16);
+    ParameterScope wide = scopeOf(narrow, {{0, 1, 2}, {1, 1, 300}, {2, 0, 100}});
+    auto proof = certify(narrow, wide);
+    CHECK(proof.has_value());
+    if (proof) {
+      IndexInvariantSearch wrap =
+          findIndexInvariants(narrow, &*proof, nullptr, indexOptions(wide), z3Backend);
+      CHECK(newAtoms(wrap) == std::vector<std::string>{"L5: (s7 == (p2 + trunc8(s6)))"});
+      IndexInvariantSearchOptions same = indexOptions(wide);
+      same.truncations = false;
+      CHECK(findIndexInvariants(narrow, &*proof, nullptr, same, z3Backend).status == "NOTHING_FOUND");
+      CHECK(givenIndexInvariant(narrow, *proof, wide, 5, "zext16(s7) == s6 + zext16(p2)").status ==
+            "NOT_INDUCTIVE");
+      // The proof asks as many queries for K up to 300 as for K up to 4.
+      ParameterScope four = scopeOf(narrow, {{0, 1, 2}, {1, 1, 4}, {2, 0, 100}});
+      auto short_ = certify(narrow, four);
+      CHECK(short_.has_value());
+      if (short_) {
+        IndexInvariantSearch small =
+            findIndexInvariants(narrow, &*short_, nullptr, indexOptions(four), z3Backend);
+        CHECK(small.status == "INDUCTIVE" && small.check.queries == wrap.check.queries);
+        CHECK(wrap.check.queries == 6 && wrap.check.confirmationRuns == 0);
+      }
+    }
+    ParameterScope bounded = scopeOf(narrow, {{0, 1, 2}, {1, 1, 100}, {2, 0, 100}});
+    auto within = certify(narrow, bounded);
+    CHECK(within.has_value());
+    if (within)
+      CHECK(givenIndexInvariant(narrow, *within, bounded, 5, "zext16(s7) == s6 + zext16(p2)").status ==
+            "INDUCTIVE");
+
+    // With nsw on the 8-bit increment, "x is not poison" is kept exactly when the scope
+    // keeps x below the signed overflow.
+    SemanticProgram nsw = m.import("narrow_nsw", 16);
+    ParameterScope tight = scopeOf(nsw, {{0, 1, 2}, {1, 1, 20}, {2, 0, 100}});
+    auto safe = certify(nsw, tight);
+    CHECK(safe.has_value());
+    if (safe)
+      CHECK(newAtoms(findIndexInvariants(nsw, &*safe, nullptr, indexOptions(tight), z3Backend)) ==
+            (std::vector<std::string>{"L5: (s7 == (p2 + trunc8(s6)))", "L5: !sp7"}));
+    ParameterScope loose = scopeOf(nsw, {{0, 1, 2}, {1, 1, 300}, {2, 0, 100}});
+    auto unsafe = certify(nsw, loose);
+    CHECK(unsafe.has_value());
+    if (unsafe) {
+      IndexInvariantSearch dropped =
+          findIndexInvariants(nsw, &*unsafe, nullptr, indexOptions(loose), z3Backend);
+      CHECK(newAtoms(dropped) == std::vector<std::string>{"L5: (s7 == (p2 + trunc8(s6)))"});
+      CHECK(!dropped.levels.empty() && dropped.levels[0].offered == 2 && dropped.levels[0].kept == 1);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   mlir::MLIRContext local;
   configure(local);
@@ -4509,6 +5079,7 @@ int main(int argc, char **argv) {
       else if (name == "clauses") testClauses();
       else if (name == "invariants") testInvariants();
       else if (name == "nullspace") testInvariantNullSpace();
+      else if (name == "indexinv") testIndexInvariants();
       else { fprintf(stderr, "unknown test %s\n", argv[n]); return 2; }
     }
     printf("%d checks, %d failures\n", checks, failures);
@@ -4536,6 +5107,7 @@ int main(int argc, char **argv) {
   testSearch();
   testInvariants();
   testInvariantNullSpace();
+  testIndexInvariants();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

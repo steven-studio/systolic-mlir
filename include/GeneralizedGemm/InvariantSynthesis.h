@@ -114,6 +114,18 @@ struct NullSpaceStats {
 std::vector<Term> nullSpaceEqualities(const SemanticProgram &program, const InvariantLoop &loop,
                                       llvm::ArrayRef<std::vector<llvm::APInt>> rows,
                                       unsigned degree, size_t maxColumns, NullSpaceStats &stats);
+/// The same over explicit state variables and parameters (IndexInvariantSynthesis.h):
+/// a row holds the variables' values, then their poison bits, then the parameters'.
+/// With `truncations`, the leaves of each width also include every wider variable and
+/// parameter truncated to it, its sampled value read as a signed integer of the
+/// narrower width: candidates such as x8 == trunc8(k) + x0, which hold modulo 2^8
+/// through a wrap of x8.
+std::vector<Term> nullSpaceEqualities(const SemanticProgram &program,
+                                      llvm::ArrayRef<unsigned> variables,
+                                      llvm::ArrayRef<unsigned> parameters,
+                                      llvm::ArrayRef<std::vector<llvm::APInt>> rows,
+                                      unsigned degree, size_t maxColumns, NullSpaceStats &stats,
+                                      bool truncations = false);
 
 struct LoopInvariantSearch {
   InvariantLoop loop;

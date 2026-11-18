@@ -168,6 +168,11 @@ DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCer
     gatherIdentities(program, request, backend, out);
     request.proposal.identities = out.identities;
   }
+  // Section 14: identities from proved index invariants, after the closed forms' own
+  // (the first identity of a variable is the one applied).
+  out.indexIdentities = request.indexIdentities;
+  request.proposal.identities.insert(request.proposal.identities.end(),
+                                     request.indexIdentities.begin(), request.indexIdentities.end());
   for (const GroupSynthesis &found : search.groups) {
     GroupDomain group;
     group.group = found.group;
@@ -685,7 +690,7 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
                                       {"float", factJSON(v.floatReorder())}};
       entry["transformation"] = v.transformation().name();
       entry["authorizes_lowering"] = false;
-      if (!result.identities.empty() || result.closedForms) {
+      if (!result.identities.empty() || result.closedForms || !result.indexIdentities.empty()) {
         // Phase 4 (I3): the three views as proposed, whether each is affine, and a
         // summary that keeps three questions apart: is the decomposition verified,
         // are the views proved and affine, and would Definition 4.5 (V) admit a
@@ -866,6 +871,18 @@ std::string toJSON(const SemanticProgram &program, const DomainResult &result, b
     out["identity_notes"] = result.identityReason;
     auto parsed = json::parse(closedFormsJSON(program, *result.closedForms));
     out["closed_forms"] = parsed ? std::move(*parsed) : json::Value("unparsable");
+  }
+  // Section 14: printed only when index identities were handed over.
+  if (!result.indexIdentities.empty()) {
+    json::Array identities;
+    for (const StateIdentity &identity : result.indexIdentities)
+      identities.push_back(json::Object{{"state", (int64_t)identity.state},
+                                        {"term", termJSON(identity.term)},
+                                        {"text", formatTerm(identity.term, 12)},
+                                        {"affine", affineOverLevels(identity.term)},
+                                        {"cut", (int64_t)identity.cut},
+                                        {"origin", identity.origin}});
+    out["index_identities"] = std::move(identities);
   }
   // G5b-M4a: printed only when sets were asked for, so that no other output changes.
   if (!result.sets.empty()) {
