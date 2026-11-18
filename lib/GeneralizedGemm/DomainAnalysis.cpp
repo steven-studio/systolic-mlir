@@ -125,6 +125,27 @@ void gatherIdentities(const SemanticProgram &program, const DomainAnalysisReques
 
 } // namespace
 
+const TerminationCertificate *handIndexInvariants(const SemanticProgram &program,
+                                                  const TerminationCertificate *given,
+                                                  const IndexInvariantSearch &search,
+                                                  DomainAnalysisRequest &request,
+                                                  std::vector<IndexIdentity> *handed) {
+  if (!search.strengthened)
+    return given;
+  std::vector<IndexIdentity> identities = indexIdentities(program, search);
+  for (const IndexIdentity &identity : identities) {
+    StateIdentity proposal;
+    proposal.state = identity.state;
+    proposal.term = identity.term;
+    proposal.cut = identity.cut;
+    proposal.origin = identity.origin;
+    request.indexIdentities.push_back(std::move(proposal));
+  }
+  if (handed)
+    *handed = std::move(identities);
+  return &*search.strengthened;
+}
+
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,
                             const DomainAnalysisRequest &given, SmtBackend &backend) {
   DomainResult out;

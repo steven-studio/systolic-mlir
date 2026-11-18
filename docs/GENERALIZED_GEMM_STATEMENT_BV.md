@@ -1392,11 +1392,26 @@ All on the final sources, Release unless said; logs in
   search, 1 in the truncation leaves); the 4 null-space mutants of M1, whose function
   this change touched, killed again by `nullspace`. The mutants were judged on the
   sources as they stood before the `bump` checks were added; later edits only add checks
-  and a record field. No mutant was added for the domain wiring, which the lit runs cover.
+  and a record field. The domain wiring
+  got its own test and mutants afterwards (below).
 - **Sanitizers** (Debug, ASan and UBSan, `-fno-sanitize-recover=undefined`): `indexinv`
   216 checks, 0 failures, no report (71 s, 1.1 GB); `nullspace` 35 checks, 0 failures, no
   report (24 min, 1.8 GB); the synthesis and domain reports on the acceptance case with
   `--index-invariants`, no report.
+- **Domain wiring** (added after 4f607b4). `handIndexInvariants` (`DomainAnalysis.h`) is
+  the one place where the strengthened certificate and the identities are handed to the
+  domain analysis; the domain report calls it. Section `indexwiring` of the domain unit
+  test runs the acceptance case four ways and asserts each answer (35 checks, 0
+  failures, 14 s): strengthened certificate and identity, A and B views proved at both
+  tiers; strengthened certificate alone, coordinate tier `SYMBOLIC_EXACT` and no A or B
+  view proposed; identity alone with the certificate as it was, the views proposed and
+  not proved over the scope; a wrong identity (x = x0 + k + 3), proved at no tier.
+  `domain_mutation.py` (Debug, baseline passing first, a kill only by a test's own
+  assertion): 3 of 3 killed by that section, the identities not handed to the proposer,
+  the identities not gathered from the search, and the given certificate handed on in
+  place of the strengthened one. The harness gained `--tests`, to run named sections
+  only; its default is unchanged. `phase4` and the lit files `synth_index_invariants`
+  and `dom_phase4` pass again.
 - **Not run**: the other mutation catalogues and oracles (coordinate, computation,
   domain, termination), the `holes` section of the domain unit test, and
   `check-systolic`; this change does not touch what they exercise beyond the lines the

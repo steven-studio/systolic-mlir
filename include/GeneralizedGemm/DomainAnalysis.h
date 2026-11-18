@@ -11,6 +11,7 @@
 #include "GeneralizedGemm/ClosedFormSynthesis.h"
 #include "GeneralizedGemm/DomainChecker.h"
 #include "GeneralizedGemm/DomainProposer.h"
+#include "GeneralizedGemm/IndexInvariantSynthesis.h"
 #include "GeneralizedGemm/SynthesisAnalysis.h"
 
 #include <string>
@@ -113,6 +114,20 @@ struct DomainResult {
 /// affine view; this is the syntactic test the record reports, not a proof of
 /// anything about the program.
 bool affineOverLevels(Term term);
+
+/// Section 14: the two things a search for index invariants gives the domain analysis,
+/// handed over in one place. When the search has a strengthened certificate (one the
+/// certificate checker accepted), its solved equalities are appended to
+/// request.indexIdentities (and copied to `handed`, when given) and that certificate is
+/// returned: it is the one to pass to analyzeDomains. Otherwise nothing is appended and
+/// `given` is returned. The two travel together on purpose: an identity without the
+/// invariant behind it proposes a view no checker can prove, and the invariant without
+/// the identity leaves the view unproposed.
+const TerminationCertificate *handIndexInvariants(const SemanticProgram &program,
+                                                  const TerminationCertificate *given,
+                                                  const IndexInvariantSearch &search,
+                                                  DomainAnalysisRequest &request,
+                                                  std::vector<IndexIdentity> *handed = nullptr);
 
 DomainResult analyzeDomains(const SemanticProgram &program, const TerminationCertificate *certificate,
                             const DomainAnalysisRequest &request, SmtBackend &backend);

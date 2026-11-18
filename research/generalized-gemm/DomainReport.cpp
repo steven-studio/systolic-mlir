@@ -268,18 +268,7 @@ int main(int argc, char **argv) {
         }
       }
       indexSearch = findIndexInvariants(program, handed, given ? &*given : nullptr, indexOptions, backend);
-      if (indexSearch.strengthened) {
-        handed = &*indexSearch.strengthened;
-        identities = indexIdentities(program, indexSearch);
-        for (const IndexIdentity &identity : identities) {
-          StateIdentity proposal;
-          proposal.state = identity.state;
-          proposal.term = identity.term;
-          proposal.cut = identity.cut;
-          proposal.origin = identity.origin;
-          request.indexIdentities.push_back(std::move(proposal));
-        }
-      }
+      handed = handIndexInvariants(program, handed, indexSearch, request, &identities);
     }
     DomainResult result = analyzeDomains(program, handed, request, backend);
     if (!first)

@@ -315,6 +315,10 @@ MUTANTS = [
     ("certificate never strengthened", N, "      if (certificate && entry.request && request.closedFormViews && !out.identities.empty()) {", "      if (false) {"),
     ("eligibility ignores affinity", N, "                        allAffine && v.domainSymbolic().exactOrder() && reorder;", "                        v.domainSymbolic().exactOrder() && reorder;"),
     ("products called affine", N, "      return (constantOnly(t->args[0]) && affine(t->args[1])) ||", "      return (affine(t->args[0]) && affine(t->args[1])) ||"),
+    # Section 14: how proved index invariants reach the domain analysis. Killed by `indexwiring`.
+    ("index identities not handed to the proposer", N, "  request.proposal.identities.insert(request.proposal.identities.end(),\n                                     request.indexIdentities.begin(), request.indexIdentities.end());", "  (void)request.indexIdentities;"),
+    ("index identities not gathered from the search", N, "    request.indexIdentities.push_back(std::move(proposal));", "    (void)proposal;"),
+    ("the given certificate handed on in place of the strengthened one", N, "  return &*search.strengthened;", "  return given;"),
 ]
 
 EQUIVALENT = [
@@ -492,7 +496,7 @@ class Worker:
         # G5b-M4-0: the identity section first, which kills its mutants in seconds, and the
         # identity oracle last, for a mutant that every other test lets through.
         out = [(name, [test, name]) for name in
-               ("phase4", "identity", "setdomain", "setreduction", "setreorder", "setfloat", "designed", "reviewed", "gaps",
+               ("phase4", "indexwiring", "identity", "setdomain", "setreduction", "setreorder", "setfloat", "designed", "reviewed", "gaps",
                 "multiplicity", "siblings", "segments", "adversarial", "limits", "binding", "wrapping", "catalogue", "orders")]
         out.append(("holes", [test, "holes"]))
         out.append(("programs", [sys.executable, fuzz / "domain_oracle.py", "--driver", report,
@@ -507,6 +511,14 @@ class Worker:
                                               "--no-minimum"]))
         # --first: the named tests before the others, in the order given. A kill is a kill by
         # any test, so the order changes which test is named and how long a run takes, nothing else.
+        # --tests: only the named tests, for the baseline and for every mutant alike. A run for
+        # mutants that one section is written to kill need not pay for the sweep and the oracles.
+        only = [label for label in self.args.tests.split(",") if label]
+        unknown = sorted(set(only) - {label for label, _ in out})
+        if unknown:
+            raise RuntimeError(f"--tests names no test: {unknown}")
+        if only:
+            out = [item for item in out if item[0] in only]
         first = [label for label in self.args.first.split(",") if label]
         unknown = sorted(set(first) - {label for label, _ in out})
         if unknown:
@@ -555,6 +567,7 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--first", default="", help="tests to run before the others, comma-separated, for a run "
                         "of a few mutants whose killers are known; the tests and the results are the same")
+    parser.add_argument("--tests", default="", help="run only these tests, comma-separated (default: all)")
     parser.add_argument("--results", required=True, help="a JSON-lines file, appended to")
     args = parser.parse_args()
     if args.workers > 2:

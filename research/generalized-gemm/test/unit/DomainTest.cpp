@@ -6562,6 +6562,177 @@ static void testDesignedFills() {
   }
 }
 
+// Section 14: the two channels by which proved index invariants reach the domain
+// analysis, each tested apart. x is carried by the k loop's iter_args from x0 = p2.
+static const char *indexWiringSource = R"(
+func.func @gemm_x(%a: memref<8x16xi32>, %b: memref<16x3xi32>, %c: memref<8x3xi32>,
+                  %n: index, %kk: index, %x0: index) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c3 = arith.constant 3 : index
+  scf.for %i = %c0 to %n step %c1 {
+    scf.for %j = %c0 to %c3 step %c1 {
+      %xf = scf.for %k = %c0 to %kk step %c1 iter_args(%x = %x0) -> (index) {
+        %p = memref.load %a[%i, %x] : memref<8x16xi32>
+        %q = memref.load %b[%x, %j] : memref<16x3xi32>
+        %z = memref.load %c[%i, %j] : memref<8x3xi32>
+        %m = arith.muli %p, %q : i32
+        %s = arith.addi %z, %m : i32
+        memref.store %s, %c[%i, %j] : memref<8x3xi32>
+        %x1 = arith.addi %x, %c1 : index
+        scf.yield %x1 : index
+      }
+    }
+  }
+  return
+}
+)";
+
+static void testIndexWiring() {
+  Module m(indexWiringSource);
+  SemanticProgram p = m.import("gemm_x", 8);
+  CHECK(p.isSupported());
+  ParameterScope scope;
+  scope.allParameters = false;
+  const int64_t bounds[3][2] = {{1, 3}, {1, 4}, {0, 5}};
+  for (unsigned id = 0; id < 3; ++id)
+    scope.ranges.push_back({id, APInt(8, bounds[id][0], true), APInt(8, bounds[id][1], true)});
+  SmtLimits solver; // The reports' limits: this test is about the wiring, not the budget.
+  Authorizations authorized = everyPair(p);
+  TerminationOptions termination;
+  termination.scope = scope;
+  termination.authorized = authorized;
+  termination.limits.solver = solver;
+  auto certificate = analyzeTermination(p, z3Backend, termination).certificate;
+  CHECK(certificate.has_value());
+  if (!certificate)
+    return;
+  IndexInvariantSearchOptions index;
+  index.check.scope = scope;
+  index.check.solver = solver;
+  index.termination.solver = solver;
+  index.authorized = authorized;
+  IndexInvariantSearch search = findIndexInvariants(p, &*certificate, nullptr, index, z3Backend);
+  CHECK(search.status == "INDUCTIVE" && search.strengthened.has_value());
+  if (!search.strengthened)
+    return;
+
+  auto request = [&]() {
+    DomainAnalysisRequest r;
+    r.synthesis.scope = scope;
+    r.synthesis.maxLevel = 0;
+    r.synthesis.synthesis.maxCandidates = 1;
+    r.synthesis.synthesis.solver = solver;
+    r.synthesis.termination.solver = solver;
+    r.synthesis.authorized = authorized;
+    r.domain.scope = scope;
+    r.domain.termination.solver = solver;
+    r.domain.authorized = authorized;
+    r.maxCandidates = 1;
+    return r;
+  };
+  // What one run says of the views of A (1) and B (2), and of the coordinate tier.
+  struct Answer {
+    bool ran = false, proposed[3] = {false, false, false};
+    FactStatus symbolic[3] = {FactStatus::Unknown, FactStatus::Unknown, FactStatus::Unknown};
+    FactStatus finite[3] = {FactStatus::Unknown, FactStatus::Unknown, FactStatus::Unknown};
+    EvidenceTier coordinate = EvidenceTier::Proposed;
+    size_t identities = 0;
+  };
+  auto run = [&](const TerminationCertificate *handed, const DomainAnalysisRequest &r) {
+    Answer out;
+    DomainResult result = analyzeDomains(p, handed, r, z3Backend);
+    out.identities = result.indexIdentities.size();
+    if (result.groups.size() != 1 || result.groups[0].candidates.size() != 1)
+      return out;
+    const CandidateDomain &c = result.groups[0].candidates[0];
+    out.ran = true;
+    out.coordinate = c.verdict.coordinateSymbolic().tier();
+    for (unsigned view = 0; view < 3; ++view) {
+      out.proposed[view] = c.request && !c.request->access[view].empty();
+      out.symbolic[view] = c.verdict.domainSymbolic().access()[view].status;
+      out.finite[view] = c.verdict.domainFinite().access()[view].status;
+    }
+    return out;
+  };
+
+  // 1. As the report wires it: the strengthened certificate and the identities, by
+  // handIndexInvariants. A and B get views over the levels, proved at both tiers.
+  {
+    DomainAnalysisRequest wired = request();
+    std::vector<IndexIdentity> handed;
+    const TerminationCertificate *use = handIndexInvariants(p, &*certificate, search, wired, &handed);
+    CHECK(use == &*search.strengthened);
+    CHECK(wired.indexIdentities.size() == 1 && handed.size() == 1);
+    Answer a = run(use, wired);
+    CHECK(a.ran && a.identities == 1);
+    CHECK(a.coordinate == EvidenceTier::SymbolicExact);
+    for (unsigned view : {0u, 1u, 2u}) {
+      CHECK(a.proposed[view]);
+      CHECK(a.symbolic[view] == FactStatus::Proven);
+      CHECK(a.finite[view] == FactStatus::Proven);
+    }
+  }
+  if (search.strengthened) {
+    std::vector<IndexIdentity> right = indexIdentities(p, search);
+    CHECK(right.size() == 1);
+    if (right.size() != 1)
+      return;
+    auto withIdentity = [&](Term term) {
+      DomainAnalysisRequest r = request();
+      StateIdentity identity;
+      identity.state = right[0].state;
+      identity.cut = right[0].cut;
+      identity.term = term;
+      identity.origin = "the test";
+      r.indexIdentities.push_back(identity);
+      return r;
+    };
+    // 2. The certificate channel alone: the strengthened certificate, no identity. The
+    // coordinate checker has its invariant (the tier stands), and no view of A or B is
+    // proposed, so none is proved.
+    {
+      Answer a = run(&*search.strengthened, request());
+      CHECK(a.ran && a.identities == 0);
+      CHECK(a.coordinate == EvidenceTier::SymbolicExact);
+      CHECK(a.proposed[0] && a.symbolic[0] == FactStatus::Proven);
+      for (unsigned view : {1u, 2u}) {
+        CHECK(!a.proposed[view]);
+        CHECK(a.symbolic[view] != FactStatus::Proven && a.finite[view] != FactStatus::Proven);
+      }
+    }
+    // 3. The identity channel alone: the certificate as it was, the right identity. The
+    // views are proposed, and nothing proves them over the scope: the invariant that
+    // makes x a function of k is not in the certificate the checkers are handed.
+    {
+      Answer a = run(&*certificate, withIdentity(right[0].term));
+      CHECK(a.ran && a.identities == 1);
+      CHECK(a.coordinate != EvidenceTier::SymbolicExact && a.coordinate != EvidenceTier::SymbolicValid);
+      for (unsigned view : {1u, 2u}) {
+        CHECK(a.proposed[view]);
+        CHECK(a.symbolic[view] != FactStatus::Proven);
+      }
+    }
+    // 4. A wrong identity (x = x0 + k + 3) with the strengthened certificate: proved at
+    // no tier.
+    {
+      Term wrong = p.terms->binary(TermOp::Add, right[0].term, p.terms->bv(APInt(8, 3)));
+      Answer a = run(&*search.strengthened, withIdentity(wrong));
+      CHECK(a.ran);
+      for (unsigned view : {1u, 2u})
+        CHECK(a.symbolic[view] != FactStatus::Proven && a.finite[view] != FactStatus::Proven);
+    }
+  }
+  // No strengthened certificate, nothing handed on: a search that found nothing gives
+  // back the certificate it was given and adds no identity.
+  {
+    IndexInvariantSearch none;
+    DomainAnalysisRequest untouched = request();
+    CHECK(handIndexInvariants(p, &*certificate, none, untouched) == &*certificate);
+    CHECK(untouched.indexIdentities.empty());
+  }
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   mlir::MLIRContext local;
@@ -6580,6 +6751,7 @@ int main(int argc, char **argv) {
     }
   };
   run("phase4", testPhase4Views);
+  run("indexwiring", testIndexWiring);
   run("identity", testIdentity);
   run("setdomain", testSetDomain);
   run("setreduction", testSetReduction);
