@@ -17,6 +17,8 @@ test/Systolic/Inputs, written by this script from the tool's own output and noth
   nest_records_driven_refusals.json  of test/Systolic/nest_records_driven_refusals.mlir, the same way
   nest_records_scf.json           of test/Systolic/nest_records_scf.mlir (stage 3 on scf.for), the same way
   nest_records_scf_refusals.json  of test/Systolic/nest_records_scf_refusals.mlir, the same way
+  nest_records_while.json         of test/Systolic/nest_records_while.mlir (stage 3 on scf.while), the same way
+  nest_records_while_refusals.json  of test/Systolic/nest_records_while_refusals.mlir, the same way
 
 Each file holds the tool's JSON, one function object per line. The solver's resource limit,
 not its time limit, decides every query, so the tool says the same of the same input on a
@@ -41,12 +43,15 @@ DRIVEN = "test/Systolic/nest_records_driven.mlir"
 DRIVEN_REFUSALS = "test/Systolic/nest_records_driven_refusals.mlir"
 SCF = "test/Systolic/nest_records_scf.mlir"
 SCF_REFUSALS = "test/Systolic/nest_records_scf_refusals.mlir"
+WHILE = "test/Systolic/nest_records_while.mlir"
+WHILE_REFUSALS = "test/Systolic/nest_records_while_refusals.mlir"
 INPUTS = "test/Systolic/Inputs"
 OPTIONS = ["--max-level=1", "--candidates-per-group=1", "--timeout-ms=120000", "--rlimit=20000000"]
 EVERY_PAIR = "--authorize=" + ",".join(f"roots {a} and {b} are separate" for a in range(5) for b in range(a + 1, 5))
 NAMES = ["nest_records.json", "nest_records_unauthorized.json", "nest_records_width16.json",
          "nest_records_stale.json", "nest_records_belts.json", "nest_records_driven.json",
-         "nest_records_driven_refusals.json", "nest_records_scf.json", "nest_records_scf_refusals.json"]
+         "nest_records_driven_refusals.json", "nest_records_scf.json", "nest_records_scf_refusals.json",
+         "nest_records_while.json", "nest_records_while_refusals.json"]
 
 
 def records(driver, cwd, arguments, test=TEST):
@@ -81,7 +86,9 @@ def make(driver, root, out):
                 (root, ["--index-bit-width=64", EVERY_PAIR], DRIVEN),
                 (root, ["--index-bit-width=64", EVERY_PAIR], DRIVEN_REFUSALS),
                 (root, ["--index-bit-width=64", EVERY_PAIR], SCF),
-                (root, ["--index-bit-width=64", EVERY_PAIR], SCF_REFUSALS)]
+                (root, ["--index-bit-width=64", EVERY_PAIR], SCF_REFUSALS),
+                (root, ["--index-bit-width=64", EVERY_PAIR], WHILE),
+                (root, ["--index-bit-width=64", EVERY_PAIR], WHILE_REFUSALS)]
         with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
             texts = list(pool.map(lambda job: records(driver, *job), jobs))
     for name, text in zip(NAMES, texts):

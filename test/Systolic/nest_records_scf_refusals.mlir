@@ -95,7 +95,7 @@
 // UNSIGNEDUPPER-NOT: remark:
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_scf_refusals.json transplant-parallel %S/Inputs/nest_records_scf.json scf_gemm > %t.parallel.json
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.parallel.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=PARALLEL
-// PARALLEL: remark: GEMM not lowered from its record: nest 0 of parallel: the nest's loop scf.parallel is neither affine.for nor scf.for, the loops the record's lowering takes
+// PARALLEL: remark: GEMM not lowered from its record: nest 0 of parallel: the nest's loop scf.parallel is none of affine.for, scf.for and scf.while, the loops the record's lowering takes
 // PARALLEL-NOT: remark:
 // RUN: %python %S/Inputs/edit_nest_records.py %S/Inputs/nest_records_scf_refusals.json transplant-second_write %S/Inputs/nest_records_scf.json scf_gemm > %t.second.json
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.second.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=SECOND

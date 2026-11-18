@@ -460,6 +460,142 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------
+// A counting scf.while.
+// ---------------------------------------------------------------------------------------
+
+/// What an scf.while is to the band when it is a counting loop. Its one carried value is the
+/// counter, of index type, started at the constant `lower`. Its before region holds constants,
+/// one comparison of the counter with a constant, and scf.condition handing the counter on
+/// as it is. The comparison is counter < upper (slt or ult with the counter first, sgt or ugt
+/// with the bound first), or counter != upper (ne, either way round) with lower <= upper. Its
+/// after region, whose argument is the counter the body reads, yields counter + 1, by an
+/// arith.addi of that region. Its result, the counter's last value, has no use. Such a loop
+/// runs its body once for each value from lower to upper - 1, in that order, and stops (no
+/// value of the counter leaves [lower, upper], so nothing wraps): what an scf.for with these
+/// bounds and step 1 does. (Reading a loop here does not verify it: a nest is lowered only with
+/// a verified record, and the research verifies a counter != upper loop only where the accesses
+/// bound its counter, which is why that form is recorded apart as no supported one.)
+struct CountingWhile {
+  Value counter;                  // the after region's argument
+  int64_t lower = 0, upper = 0;
+  Operation *increment = nullptr; // the arith.addi whose result is yielded
+};
+
+/// Each value an scf.while carries from one iteration to the next, said for what it is.
+std::string describeCarried(scf::WhileOp loop) {
+  Block *before = loop.getBeforeBody(), *after = loop.getAfterBody();
+  scf::ConditionOp condition = loop.getConditionOp();
+  Operation *yield = after->getTerminator();
+  std::string text;
+  llvm::raw_string_ostream os(text);
+  for (unsigned n = 0, e = loop.getInits().size(); n < e; ++n) {
+    Type type = before->getArgument(n).getType();
+    // Handed on in place: the body's argument n is the before region's argument n.
+    bool inPlace = n < condition.getArgs().size() && condition.getArgs()[n] == before->getArgument(n) &&
+                   n < after->getNumArguments() && n < yield->getNumOperands();
+    Value next = n < yield->getNumOperands() ? yield->getOperand(n) : Value();
+    os << (n ? "; " : "") << "value " << n << " (" << type << ") ";
+    if (inPlace && next == after->getArgument(n)) {
+      os << "is carried unchanged";
+    } else if (!type.isIntOrIndex()) {
+      os << "is updated by the loop: a reduction or datum held in a value, not in memory";
+    } else if (auto add = next ? next.getDefiningOp<arith::AddIOp>() : arith::AddIOp();
+               inPlace && add &&
+               ((add.getLhs() == after->getArgument(n) && getConstantIntValue(add.getRhs())) ||
+                (add.getRhs() == after->getArgument(n) && getConstantIntValue(add.getLhs())))) {
+      os << "is stepped by a constant";
+    } else {
+      os << "is updated by the loop otherwise";
+    }
+  }
+  return text;
+}
+
+/// The counting loop `loop` is, or nothing and why not.
+std::optional<CountingWhile> readCountingWhile(scf::WhileOp loop, std::string &why) {
+  auto refuse = [&](const llvm::Twine &text) -> std::optional<CountingWhile> {
+    why = ("a loop of the nest (scf.while) " + text).str();
+    return std::nullopt;
+  };
+  if (loop.getInits().empty())
+    return refuse("carries no value from one iteration to the next: it has no counter, and the record's lowering "
+                  "takes a counting loop");
+  if (loop.getInits().size() != 1)
+    return refuse("carries " + llvm::Twine(loop.getInits().size()) +
+                  " values from one iteration to the next, and the record's lowering takes a counting loop, "
+                  "which carries its counter only: " + describeCarried(loop));
+  Block *before = loop.getBeforeBody(), *after = loop.getAfterBody();
+  Value counter = before->getArgument(0);
+  if (!counter.getType().isIndex()) {
+    std::string type;
+    llvm::raw_string_ostream(type) << counter.getType();
+    return refuse("carries a value of type " + type + ", and a counting loop's counter is an index");
+  }
+  std::optional<int64_t> lower = getConstantIntValue(loop.getInits()[0]);
+  if (!lower)
+    return refuse("starts its counter at a value that is no constant: known only at run time");
+  // The before region: constants, one comparison, scf.condition.
+  scf::ConditionOp condition = loop.getConditionOp();
+  arith::CmpIOp compare;
+  for (Operation &op : before->without_terminator()) {
+    if (isa<arith::ConstantOp>(op))
+      continue;
+    auto cmp = dyn_cast<arith::CmpIOp>(op);
+    if (!cmp || compare)
+      return refuse("computes more in its before region than one comparison of its counter (" +
+                    op.getName().getStringRef() + "), and a counting loop's holds that comparison and constants");
+    compare = cmp;
+  }
+  if (!compare || condition.getCondition() != compare.getResult())
+    return refuse("does not go on by one comparison of its counter with a constant");
+  if (condition.getArgs().size() != 1 || condition.getArgs()[0] != counter)
+    return refuse("does not hand its counter to its body as it is: scf.condition forwards another value");
+  std::optional<int64_t> upper;
+  bool isUnsigned = false, isNotEqual = false;
+  arith::CmpIPredicate predicate = compare.getPredicate();
+  if (compare.getLhs() == counter &&
+      (predicate == arith::CmpIPredicate::slt || predicate == arith::CmpIPredicate::ult)) {
+    upper = getConstantIntValue(compare.getRhs());
+    isUnsigned = predicate == arith::CmpIPredicate::ult;
+  } else if (compare.getRhs() == counter &&
+             (predicate == arith::CmpIPredicate::sgt || predicate == arith::CmpIPredicate::ugt)) {
+    upper = getConstantIntValue(compare.getLhs());
+    isUnsigned = predicate == arith::CmpIPredicate::ugt;
+  } else if (predicate == arith::CmpIPredicate::ne && (compare.getLhs() == counter) != (compare.getRhs() == counter)) {
+    upper = getConstantIntValue(compare.getLhs() == counter ? compare.getRhs() : compare.getLhs());
+    isNotEqual = true;
+  } else {
+    return refuse("does not go on while its counter is below a bound: its condition is not counter < bound "
+                  "(slt or ult), bound > counter (sgt or ugt) or counter != bound (ne)");
+  }
+  if (!upper)
+    return refuse("compares its counter with a bound that is no constant: known only at run time");
+  if (isUnsigned && (*lower < 0 || *upper < 0))
+    return refuse("compares its counter with its bound unsigned, and one of them is negative");
+  if (isNotEqual && *lower > *upper)
+    return refuse("goes on while its counter differs from a bound below its start: it does not stop at the bound");
+  // The after region: its argument is the counter, and counter + 1 is yielded.
+  Value inBody = after->getArgument(0);
+  Operation *yield = after->getTerminator();
+  auto add = yield->getOperand(0).getDefiningOp<arith::AddIOp>();
+  // (An addition of the after region's argument is an operation of that region: no other can
+  // read the argument and be read by the region's scf.yield.)
+  bool plusOne = add && ((add.getLhs() == inBody && getConstantIntValue(add.getRhs()) == std::optional<int64_t>(1)) ||
+                         (add.getRhs() == inBody && getConstantIntValue(add.getLhs()) == std::optional<int64_t>(1)));
+  if (!plusOne)
+    return refuse("does not step its counter by 1: its after region yields another value than counter + 1");
+  if (!loop->use_empty())
+    return refuse("gives its counter's last value to the code after it, and the lowering would remove the loop "
+                  "that makes it");
+  CountingWhile out;
+  out.counter = inBody;
+  out.lower = *lower;
+  out.upper = *upper;
+  out.increment = add.getOperation();
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
 // The accesses of the update.
 // ---------------------------------------------------------------------------------------
 
@@ -530,28 +666,39 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
   const json::Object &record = *at.record;
 
   // ---------------------------------------------------------------------------------
-  // The band: a perfect nest of affine.for or scf.for loops, each with constant bounds, step 1
-  // and no value carried from one iteration to the next. Between two loops, integer and
-  // float constants only (an scf.for's bounds are often defined there); they compute nothing
-  // the GEMM depends on but the bounds, which are read here.
+  // The band: a perfect nest of affine.for, scf.for or counting scf.while loops, each with
+  // constant bounds and step 1; a for loop carries no value from one iteration to the next, an
+  // scf.while its counter only (readCountingWhile). Between two loops, integer and float
+  // constants only (an scf.for's or scf.while's bounds are often defined there) and, in an
+  // scf.while, the addition that steps its counter; they compute nothing the GEMM depends on
+  // but the bounds and the counters, which are read here.
   // ---------------------------------------------------------------------------------
-  // A loop that carries values from one iteration to the next (iter_args of scf.for or
-  // affine.for) holds its reduction in a value, not in memory: refused before the band is
-  // read, since it is why such a nest is no band of the kind below.
-  Operation *carrying = nullptr;
-  anchor->walk([&](LoopLikeOpInterface loop) {
-    if (!carrying && loop->getNumResults() != 0)
-      carrying = loop;
+  // What the loops of the nest carry from one iteration to the next, before the band is read,
+  // since it is why such a nest is no band of the kind below. A for loop's carried values
+  // (iter_args of scf.for or affine.for) hold its reduction in a value, not in memory: refused.
+  // An scf.while carries its counter, which the band reads; with any other number of carried
+  // values it is no counting loop, and each value is said for what it is.
+  std::string carried;
+  anchor->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!carried.empty() || !isa<LoopLikeOpInterface>(op))
+      return;
+    if (auto w = dyn_cast<scf::WhileOp>(op)) {
+      if (w.getInits().size() != 1)
+        readCountingWhile(w, carried);
+    } else if (op->getNumResults() != 0) {
+      carried = std::string("a loop of the nest (") + op->getName().getStringRef().str() +
+                ") carries values from one iteration to the next (iter_args): its reduction is held in a value, "
+                "not in memory, and the record's lowering takes reductions in memory only";
+    }
   });
-  if (carrying)
-    return refuse(std::string("a loop of the nest (") + carrying->getName().getStringRef().str() +
-                  ") carries values from one iteration to the next (iter_args): its reduction is held in a value, "
-                  "not in memory, and the record's lowering takes reductions in memory only");
+  if (!carried.empty())
+    return refuse(carried);
   struct BandLoop {
     Operation *op = nullptr;
     Value counter;
     int64_t lower = 0, upper = 0;
     Block *body = nullptr;
+    Operation *increment = nullptr; // scf.while: the addition whose result its after region yields
   };
   SmallVector<BandLoop, 3> band;
   for (Operation *op = anchor;;) {
@@ -579,9 +726,19 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       loop.lower = *lo;
       loop.upper = *hi;
       loop.body = f.getBody();
+    } else if (auto w = dyn_cast<scf::WhileOp>(op)) {
+      std::string reason;
+      std::optional<CountingWhile> counting = readCountingWhile(w, reason);
+      if (!counting)
+        return refuse(reason);
+      loop.counter = counting->counter;
+      loop.lower = counting->lower;
+      loop.upper = counting->upper;
+      loop.body = w.getAfterBody();
+      loop.increment = counting->increment;
     } else {
       return refuse(std::string("the nest's loop ") + op->getName().getStringRef().str() +
-                    " is neither affine.for nor scf.for, the loops the record's lowering takes");
+                    " is none of affine.for, scf.for and scf.while, the loops the record's lowering takes");
     }
     band.push_back(loop);
     if (band.size() > 3)
@@ -592,14 +749,16 @@ FailureOr<RecordDrivenGemm> mlir::systolic::analyzeRecordDrivenNest(const NestRe
       if (isa<LoopLikeOpInterface>(child)) {
         ++nested;
         inner = &child;
-      } else if (!isa<arith::ConstantOp>(child)) {
+      } else if (!isa<arith::ConstantOp>(child) && &child != loop.increment) {
         ++others;
       }
     }
     if (nested == 0)
       break; // the innermost loop: its body is read below
     if (nested > 1 || others != 0)
-      return refuse("the nest is no perfect band: a loop's body holds more than the next loop and constants");
+      return refuse(std::string("the nest is no perfect band: a loop's body holds more than the next loop and "
+                                "constants") +
+                    (loop.increment ? " and the step of its counter" : ""));
     op = inner;
   }
   if (band.size() != 3)

@@ -9,9 +9,15 @@
 // index width, the verified claims. What stage 2 then compared with the production recognizer
 // is compared here with the nest itself, read from its IR:
 //
-//   - the nest is a perfect band of affine.for loops, constant bounds, step 1, one per level of
+//   - the nest is a perfect band of loops with constant bounds and step 1, one per level of
 //     the record, in its order, with the record's bounds; the record's axes put I, J and K on
-//     three of them, and its extents are their trip counts;
+//     three of them, and its extents are their trip counts. A loop of the band is an
+//     affine.for, an scf.for (bounds and step arith.constant values, an unsigned comparison
+//     only of bounds that are not negative), or a counting scf.while: its one carried value is
+//     its counter, an index started at a constant; its before region holds one comparison,
+//     counter < constant, and hands the counter on as it is; its after region yields
+//     counter + 1; its result has no use. A for loop that carries values (iter_args), an
+//     scf.while that carries anything but its counter, and any other loop are refused;
 //   - the innermost body is one multiply-accumulate and pure index arithmetic: three loads,
 //     one arith.mulf of two of them, one arith.addf of the product and the third, one store of
 //     the sum to the cell the third load read; the record's element type, operations, flags

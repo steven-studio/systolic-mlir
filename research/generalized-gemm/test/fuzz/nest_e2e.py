@@ -63,21 +63,38 @@ class Failure(Exception):
 # The programs.
 
 def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, access="affine",
-            constants="inside", loops="affine", bounds_at="outside"):
+            constants="inside", loops="affine", bounds_at="outside", compare="slt", step="counter+1",
+            bound_in_before=False):
     """`access`: "affine" reads and writes with affine.load and affine.store; "memref" with
     memref.load and memref.store, each index computed by arith (a counter times its scale plus
     its constant; a flat array's index is row * columns + column). A view entry is (role,
     scale, constant), or ("perm", role, multiplier, modulus): (role * multiplier) mod modulus,
     by arith.remsi. `constants` ("inside" or "outside", memref access only): where the index
     constants are defined, in the loop body or before the nest. `loops` (memref access only):
-    "affine" for affine.for, "scf" for scf.for, whose bounds and step are arith.constant
-    values, all defined before the nest (`bounds_at` "outside") or each loop's in the body of
-    the loop around it ("inside"; the outermost loop's before the nest)."""
+    "affine" for affine.for, "scf" for scf.for, "while" for a counting scf.while (its counter
+    the one value it carries, compared with slt in the before region, forwarded by
+    scf.condition, and counter + 1 yielded at the end of the after region), or three of these,
+    one per loop from the outermost in. The bounds and step of an scf.for or scf.while are
+    arith.constant values, all defined before the nest (`bounds_at` "outside") or each loop's
+    in the body of the loop around it ("inside"; the outermost loop's before the nest). An
+    scf.while's comparison is `compare`: "slt" or "ult" (counter < bound), "sgt" or "ugt" (bound >
+    counter), "ne" (counter != bound) or "en" (bound != counter); its step is `step`,
+    "counter+1" or "1+counter"; with `bound_in_before` its bound is a constant of its before
+    region."""
     views = views or {"c": [("i", 1, 0), ("j", 1, 0)], "a": [("i", 1, 0), ("k", 1, 0)],
                       "b": [("k", 1, 0), ("j", 1, 0)]}
     return {"kind": "product", "c": c, "a": a, "b": b, "bounds": bounds, "order": order, "views": views,
             "flag": flag, "first": first, "access": access, "constants": constants, "loops": loops,
-            "bounds_at": bounds_at}
+            "bounds_at": bounds_at, "compare": compare, "step": step, "bound_in_before": bound_in_before}
+
+
+def loop_kinds(statement):
+    """The kind of each loop of a product, from the outermost in."""
+    loops = statement.get("loops", "affine")
+    kinds = [loops] * 3 if isinstance(loops, str) else list(loops)
+    if len(kinds) != 3 or any(kind not in ("affine", "scf", "while") for kind in kinds):
+        raise ValueError(f"loops: {loops}")
+    return kinds
 
 
 def move(source, target):
@@ -240,28 +257,57 @@ def mlir_function(function):
                 lines += ["  " + c for c in constants]
             else:
                 body = [pad + c for c in constants] + body
-            scf = statement.get("loops", "affine") == "scf"
+            kinds = loop_kinds(statement)
+            outside = statement.get("bounds_at", "outside") == "outside"
             def bound_constants(role):
                 low, high = bounds[role]
                 return [f"%{role}lo{number} = arith.constant {low} : index",
                         f"%{role}hi{number} = arith.constant {high} : index",
                         f"%{role}st{number} = arith.constant 1 : index"]
-            if scf and statement.get("bounds_at", "outside") == "outside":
-                for role in statement["order"]:
-                    lines += ["  " + c for c in bound_constants(role)]
+            if outside:
+                for depth, role in enumerate(statement["order"]):
+                    if kinds[depth] != "affine":
+                        lines += ["  " + c for c in bound_constants(role)]
+            closers = []
             for depth, role in enumerate(statement["order"]):
                 low, high = bounds[role]
                 indent = "  " * (depth + 1)
-                if not scf:
+                if kinds[depth] == "affine":
                     lines.append(indent + f"affine.for %{role}{number} = {low} to {high} {{")
+                    closers.append([indent + "}"])
                     continue
-                if statement.get("bounds_at", "outside") == "inside":
+                if not outside:
                     lines += [indent + c for c in bound_constants(role)]
-                lines.append(indent + f"scf.for %{role}{number} = %{role}lo{number} to %{role}hi{number} "
-                             f"step %{role}st{number} {{")
+                if kinds[depth] == "scf":
+                    lines.append(indent + f"scf.for %{role}{number} = %{role}lo{number} to %{role}hi{number} "
+                                 f"step %{role}st{number} {{")
+                    closers.append([indent + "}"])
+                    continue
+                # A counting scf.while: the counter is its one carried value; the body sees it as
+                # the after region's argument, under the name a for loop gives its counter.
+                counter, bound = f"%{role}w{number}", f"%{role}hi{number}"
+                before = []
+                if statement.get("bound_in_before"):
+                    bound = f"%{role}hb{number}"
+                    before.append(indent + f"  {bound} = arith.constant {high} : index")
+                style = statement.get("compare", "slt")
+                operands = {"slt": (counter, bound), "ult": (counter, bound), "ne": (counter, bound),
+                            "sgt": (bound, counter), "ugt": (bound, counter), "en": (bound, counter)}[style]
+                predicate = "ne" if style == "en" else style
+                lines += [indent + f"%{role}res{number} = scf.while ({counter} = %{role}lo{number}) : "
+                          f"(index) -> index {{"] + before + \
+                         [indent + f"  %{role}cmp{number} = arith.cmpi {predicate}, {operands[0]}, {operands[1]} : index",
+                          indent + f"  scf.condition(%{role}cmp{number}) {counter} : index",
+                          indent + "} do {",
+                          indent + f"^bb0(%{role}{number}: index):"]
+                stepped = (f"%{role}{number}, %{role}st{number}" if statement.get("step", "counter+1") == "counter+1"
+                           else f"%{role}st{number}, %{role}{number}")
+                closers.append([indent + f"  %{role}nx{number} = arith.addi {stepped} : index",
+                                indent + f"  scf.yield %{role}nx{number} : index",
+                                indent + "}"])
             lines += body
-            for depth in reversed(range(3)):
-                lines.append("  " * (depth + 1) + "}")
+            for close in reversed(closers):
+                lines += close
             continue
         for depth, role in enumerate(statement["order"]):
             low, high = bounds[role]
@@ -448,7 +494,8 @@ def statement_lines(text):
         if found:
             function = found.group(1)
             continue
-        found = re.match(r"  (?:affine|scf)\.for %[a-z]+(\d+) = ", line)
+        found = (re.match(r"  (?:affine|scf)\.for %[a-z]+(\d+) = ", line) or
+                 re.match(r"  %[a-z]+res(\d+) = scf\.while ", line))
         if found:
             places[(function, int(found.group(1)))] = line_number
     return places
@@ -490,7 +537,7 @@ def check_calls(specs, text, asynchronous, lowered, tabled=frozenset()):
     3) is the gathers of A, B and C, the GEMM, and the scatter of C, in that order."""
     patterns = ((r"@fpga_gemm_begin", "begin"), (r"@fpga_tile_submit", "submit"), (r"@fpga_gemm_wait", "wait"),
                 (r"@fpga_matmul_tiled_auto_scheduled", "call"), (r"materialize_in_destination", "writeback"),
-                (r"memref\.load ", "load"), (r"memref\.store ", "store"), (r"(affine|scf)\.for ", "loop"))
+                (r"memref\.load ", "load"), (r"memref\.store ", "store"), (r"(affine|scf)\.for |scf\.while ", "loop"))
     for function in specs:
         name = function["name"]
         body = re.search(rf"func\.func @{name}\(.*?\n  \}}\n", text, re.S)

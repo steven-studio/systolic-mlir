@@ -574,8 +574,10 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
   // identities applied, when they read only levels held in plain state; phase 4 adds
   // a check of each proposed dimension against the recorded indices of every
   // sampled event of every site, and, where the term fails or cannot be written over
-  // levels, the level whose values equal that dimension at every event. A view with a
-  // dimension no candidate fits is not proposed. All of it is a proposal.
+  // levels, the level whose values equal that dimension at every event. A term that
+  // reads a state that is no level (an scf.while body's counter) is tried with that
+  // state read as each level. A view with a dimension no candidate fits is not
+  // proposed. All of it is a proposal.
   std::map<unsigned, unsigned> levelOfState;
   for (unsigned m = 0; m < out.order.levels.size(); ++m)
     if (out.order.levels[m].value->op == TermOp::State)
@@ -624,6 +626,43 @@ std::optional<Fitted> fitOrder(const SemanticProgram &program, const std::vector
         });
         if (fitsEvents(view, d, mapped))
           chosen = mapped;
+      } else if (recorded && !containsOp(term, TermOp::Load) && !containsOp(term, TermOp::Shadow)) {
+        // A state that is no level, read as a level: the argument of an scf.while's after
+        // region holds the counter its before region compares, and the body's indices are
+        // written over it. Each such state (three at most) is tried as each level of its sort,
+        // and the first reading under which the form is the recorded index at every sampled
+        // event of every site is proposed. A proposal like the others: the checker proves it
+        // over the scope, or the view is not proved.
+        std::vector<unsigned> open;
+        for (unsigned id : stateSupport(term))
+          if (!levelOfState.count(id))
+            open.push_back(id);
+        const size_t count = out.order.levels.size();
+        uint64_t readings = 1;
+        for (size_t n = 0; n < open.size(); ++n)
+          readings *= count;
+        for (uint64_t r = 0; !chosen && open.size() <= 3 && r < readings; ++r) {
+          std::map<unsigned, unsigned> levelOf;
+          uint64_t rest = r;
+          bool sorts = true;
+          for (unsigned id : open) {
+            unsigned m = rest % count;
+            rest /= count;
+            levelOf[id] = m;
+            sorts = sorts && out.order.levels[m].value->sort == program.state[id].sort;
+          }
+          if (!sorts)
+            continue;
+          Term mapped = terms.substitute(term, [&](Term leaf) -> Term {
+            if (leaf->op != TermOp::State)
+              return nullptr;
+            auto found = levelOf.find(leaf->index);
+            unsigned m = found != levelOf.end() ? found->second : levelOfState[leaf->index];
+            return levelVariable(terms, m, out.order.levels[m].value->sort);
+          });
+          if (fitsEvents(view, d, mapped))
+            chosen = mapped;
+        }
       }
       for (unsigned m = 0; !chosen && recorded && m < out.order.levels.size(); ++m) {
         if (out.order.levels[m].value->sort != index[d]->sort)

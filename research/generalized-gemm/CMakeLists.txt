@@ -343,6 +343,19 @@ add_test(NAME generalized-gemm-nest-programs-scf COMMAND "${Python3_EXECUTABLE}"
   --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
   --programs 30 --fills 4 --seed 1 --jobs 4 --loops scf)
 set_tests_properties(generalized-gemm-nest-programs-scf PROPERTIES TIMEOUT 3600)
+# The same programs with every product's loops counting scf.while loops (the counter the one
+# carried value, compared in the before region, stepped in the after region), and with each
+# loop one of affine.for, scf.for and scf.while: the same complete, VERIFIED records.
+add_test(NAME generalized-gemm-nest-programs-while COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4 --loops while)
+set_tests_properties(generalized-gemm-nest-programs-while PROPERTIES TIMEOUT 3600)
+add_test(NAME generalized-gemm-nest-programs-mixed COMMAND "${Python3_EXECUTABLE}"
+  "${GG_FUZZ}/nest_oracle.py" --driver $<TARGET_FILE:generalized-gemm-nest-report>
+  --domain-driver $<TARGET_FILE:generalized-gemm-domain-report>
+  --programs 30 --fills 4 --seed 1 --jobs 4 --loops mixed)
+set_tests_properties(generalized-gemm-nest-programs-mixed PROPERTIES TIMEOUT 3600)
 
 # Stage 1: a nest's record against the production affine recognizer's report, field by
 # field. The production tool is not built here: point GG_SYSTOLIC_OPT at one built from
@@ -388,6 +401,14 @@ if(GG_SYSTOLIC_OPT AND GG_LLC)
     --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
     --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
   set_tests_properties(generalized-gemm-nest-scf-e2e PROPERTIES TIMEOUT 3600)
+  # Stage 3 on scf.while, end to end: GEMMs written with counting scf.while loops, and nests
+  # that mix them with for loops, verified by the research, lowered from their records, run,
+  # and compared with the original.
+  add_test(NAME generalized-gemm-nest-while-e2e COMMAND "${Python3_EXECUTABLE}"
+    "${GG_FUZZ}/nest_while_e2e.py" --nest-driver $<TARGET_FILE:generalized-gemm-nest-report>
+    --systolic-opt "${GG_SYSTOLIC_OPT}" --mlir-translate "${GG_MLIR_TRANSLATE}" --llc "${GG_LLC}"
+    --clang "${GG_CLANG}" --runtime "${GG_ROOT}/runtime/offload" --llvm-lib "${LLVM_LIBRARY_DIR}")
+  set_tests_properties(generalized-gemm-nest-while-e2e PROPERTIES TIMEOUT 3600)
 endif()
 
 configure_file(test/lit/lit.site.cfg.py.in lit/lit.site.cfg.py @ONLY)

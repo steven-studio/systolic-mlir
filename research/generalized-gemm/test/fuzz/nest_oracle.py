@@ -48,7 +48,12 @@ read as JSON, and what they say is recomputed from the program this file printed
   run (a nest reads cells the other wrote), the claim over both groups is not VERIFIED; with
   a shared output and no such read it is VERIFIED, and no group's own claim is, a run
   showing that one group's contributions alone are not the function. In both, each nest's
-  record is verified by itself: the shapes a whole-function claim cannot state.
+  record is verified by itself: the shapes a whole-function claim cannot state. With
+  scf.while loops (--loops while or mixed) a function of two nests may have no termination
+  certificate as a whole, and the driver then makes no claim over both groups: that is
+  counted under its own name, as no verification, and no least number of verified joint
+  claims is asked for; what is asked for, in every mode, is two nests on one output each
+  with its own complete VERIFIED record.
 
 Every driver run has a time limit and an address-space limit, and a timeout fails the run.
 """
@@ -73,11 +78,23 @@ SIZE = 6
 SOLVER = ["--timeout-ms=20000", "--rlimit=2000000", "--max-level=1", "--candidates-per-group=1"]
 ARGUMENTS = "abcde"
 FRESH = "t"  # Root 5 when the function has it.
-# How the products' loops are printed: "affine" (affine.for, affine.load and affine.store) or
+# How the products' loops are printed: "affine" (affine.for, affine.load and affine.store);
 # "scf" (scf.for whose bounds and step are arith.constant values defined before the nest,
-# memref.load and memref.store, each index computed by arith in the loop body). The programs
-# and their meaning are the same either way; fills and copies stay affine.
+# memref.load and memref.store, each index computed by arith in the loop body); "while" (the
+# same accesses, each loop a counting scf.while: it carries its counter from the lower bound,
+# compares it with the upper one in its before region, hands it to its after region, which
+# yields counter + 1); "mixed" (the same accesses, each loop affine.for, scf.for or scf.while,
+# chosen from the function's name, the statement and the depth). The programs and their meaning
+# are the same in every case; fills and copies stay affine.
 LOOPS = "affine"
+
+
+def loop_kinds(spec, number):
+    """The kind of each of a product's three loops, from the outermost in."""
+    if LOOPS != "mixed":
+        return [LOOPS] * 3
+    choice = random.Random(f"{spec['name']}:{number}")
+    return [choice.choice(["affine", "scf", "while"]) for _ in range(3)]
 ROLES = {"c": "ij", "a": "ik", "b": "kj"}
 
 
@@ -303,13 +320,15 @@ def print_function(spec):
             if statement["zeroed"] or statement["extra"]:
                 value = 0 if statement["zeroed"] else statement["extra"][1]
                 lines.append(f"  %o{number} = arith.constant {constant(value)} : {e}")
-            scf = LOOPS == "scf"
-            if scf:
-                for role in statement["order"]:
+            scf = LOOPS != "affine"  # memref accesses with indices by arith
+            kinds = loop_kinds(spec, number)
+            for depth, role in enumerate(statement["order"]):
+                if kinds[depth] != "affine":
                     low, high = statement["bounds"][role]
                     lines += [f"  %{role}lo{number} = arith.constant {low} : index",
                               f"  %{role}hi{number} = arith.constant {high} : index",
                               f"  %{role}st{number} = arith.constant 1 : index"]
+            closers = []
             for depth, role in enumerate(statement["order"]):
                 if depth == 2 and statement["zeroed"]:
                     if scf:
@@ -319,11 +338,24 @@ def print_function(spec):
                         lines.append(f"      affine.store %o{number}, %{statement['c']}"
                                      f"[{index_text(statement['views']['c'], number)}] : {memref}")
                 low, high = statement["bounds"][role]
-                if scf:
-                    lines.append("  " * (depth + 1) + f"scf.for %{role}{number} = %{role}lo{number} to "
+                indent = "  " * (depth + 1)
+                if kinds[depth] == "scf":
+                    lines.append(indent + f"scf.for %{role}{number} = %{role}lo{number} to "
                                  f"%{role}hi{number} step %{role}st{number} {{")
+                    closers.append([indent + "}"])
+                elif kinds[depth] == "while":
+                    lines += [indent + f"%{role}res{number} = scf.while (%{role}w{number} = %{role}lo{number}) : "
+                              f"(index) -> index {{",
+                              indent + f"  %{role}cmp{number} = arith.cmpi slt, %{role}w{number}, %{role}hi{number} : index",
+                              indent + f"  scf.condition(%{role}cmp{number}) %{role}w{number} : index",
+                              indent + "} do {",
+                              indent + f"^bb0(%{role}{number}: index):"]
+                    closers.append([indent + f"  %{role}nx{number} = arith.addi %{role}{number}, %{role}st{number} : index",
+                                    indent + f"  scf.yield %{role}nx{number} : index",
+                                    indent + "}"])
                 else:
-                    lines.append("  " * (depth + 1) + f"affine.for %{role}{number} = {low} to {high} {{")
+                    lines.append(indent + f"affine.for %{role}{number} = {low} to {high} {{")
+                    closers.append([indent + "}"])
             pad = "        "
             if statement["extra"]:
                 if scf:
@@ -347,14 +379,14 @@ def print_function(spec):
                 lines.append(f"{pad}%m{number} = arith.muli %x{number}, %y{number} : {e}")
                 operands = f"%z{number}, %m{number}" if statement["first"] else f"%m{number}, %z{number}"
                 lines.append(f"{pad}%s{number} = arith.addi {operands} : {e}")
-            if LOOPS == "scf":
+            if scf:
                 where = index_values(statement["views"]["c"], number, "w", pad, lines)
                 lines.append(f"{pad}memref.store %s{number}, %{statement['c']}[{where}] : {memref}")
             else:
                 lines.append(f"{pad}affine.store %s{number}, %{statement['c']}"
                              f"[{index_text(statement['views']['c'], number)}] : {memref}")
             for depth in reversed(range(3)):
-                lines.append("  " * (depth + 1) + "}")
+                lines += closers[depth]
         elif kind == "fill":
             constant = f"{statement['value']}.0" if is_float(e) else str(statement["value"])
             lines += [f"  %v{number} = arith.constant {constant} : {e}",
@@ -907,14 +939,36 @@ def check(spec, seed, driver, domain_driver, fills, counts):
                               "claim over both groups is VERIFIED")
             counts["cross read: the joint claim is not verified, each record is"] += len(complete) == 2
         elif spec["shape"] == "shared":
-            if joint != "VERIFIED":
+            # Two nests on one output, and no cell one reads that the other wrote. What the
+            # records answer for is each nest by itself: its own record, complete and VERIFIED,
+            # held above to the program's fields, to runs of its fold, and to the composition
+            # in place. That is counted here, a count of verified records and of nothing else.
+            counts[SHARED_EACH] += len(complete) == 2
+            # The claim over both groups is the whole-function driver's, a joint analysis of
+            # several loops that no record and no lowering rests on. With for loops it is
+            # VERIFIED. With scf.while loops the function as a whole may have no termination
+            # certificate, and the driver then makes no claim at all: UNKNOWN, its gate not
+            # open. (An scf.while has two variables that a loop carries, its counter and the
+            # after region's argument, and the certificate's rank needs the fact that they are
+            # equal in the body. The proposer of invariants has that fact only among its
+            # orderings of pairs of such variables, which it makes last, cuts first at its limit
+            # of 600 candidates, and makes for the first eight such variables only; two nests of
+            # three scf.while loops have twelve. One nest alone stays inside both, which is why
+            # each record is verified.) That outcome is counted under its own name. It is no
+            # verification: it is added to no count of verified claims and meets no minimum.
+            # Nothing else is let through: with an open gate the claim must be VERIFIED, as
+            # with for loops, and a claim that a run contradicts fails above in every mode.
+            unclaimed = LOOPS in ("while", "mixed") and joint == "UNKNOWN" and whole.get("gate") != "OPEN" and \
+                whole.get("termination") == "UNKNOWN"
+            if joint != "VERIFIED" and not unclaimed:
                 raise Failure(f"{name}: two nests on one output and no cross read, and the claim over both groups "
                               f"is {joint}")
-            if len(whole["groups"]) == 2 and all(differs([one]) for one in products):
+            if unclaimed:
+                counts[UNCLAIMED] += 1
+            elif len(whole["groups"]) == 2 and all(differs([one]) for one in products):
                 if any(status == "VERIFIED" for status in alone):
                     raise Failure(f"{name}: a group's own whole-function claim is VERIFIED, and a run differs")
-                counts["shared output: the joint claim is verified, no group's own is, each record is"] += \
-                    len(complete) == 2
+                counts[JOINT_VERIFIED] += len(complete) == 2
         counts["whole-function claims read"] += 1
 
 
@@ -938,10 +992,15 @@ MINIMUM = {
     "orders that a proof permits, tried": 8, "orders that a flag permits, tried": 3,
     "of them, some order changes the bits": 1,
 }
+JOINT_VERIFIED = "shared output: the joint claim is verified, no group's own is, each record is"
+SHARED_EACH = "shared output: each nest has its own complete VERIFIED record"
+UNCLAIMED = ("shared output: NO claim over both groups (UNKNOWN, the function having no termination certificate): "
+             "not a verification")
 WHOLE_MINIMUM = {
     "whole-function claims read": 3,
     "cross read: the joint claim is not verified, each record is": 1,
-    "shared output: the joint claim is verified, no group's own is, each record is": 1,
+    JOINT_VERIFIED: 1,
+    SHARED_EACH: 1,
 }
 
 
@@ -957,8 +1016,9 @@ def main():
     parser.add_argument("--no-minimum", action="store_true")
     parser.add_argument("--memory-limit-gb", type=int, default=MEMORY >> 30)
     parser.add_argument("--print", type=int, default=-1, help="print program N and stop")
-    parser.add_argument("--loops", choices=["affine", "scf"], default="affine",
-                        help="print the products' loops as affine.for or as scf.for")
+    parser.add_argument("--loops", choices=["affine", "scf", "while", "mixed"], default="affine",
+                        help="print the products' loops as affine.for, as scf.for, as counting scf.while, "
+                             "or each as one of the three")
     args = parser.parse_args()
     MEMORY = args.memory_limit_gb << 30
     LOOPS = args.loops
@@ -990,6 +1050,12 @@ def main():
         minimum = dict(MINIMUM)
         if args.domain_driver:
             minimum.update(WHOLE_MINIMUM)
+            if LOOPS in ("while", "mixed"):
+                # The claim over both groups is not required of scf.while loops (see check): no
+                # least number of verified joint claims is asked for, and none is made up from
+                # the claims that were not made. What must be seen is SHARED_EACH: two nests on
+                # one output, each verified by its own record.
+                del minimum[JOINT_VERIFIED]
         for key, least in minimum.items():
             if counts[key] < least:
                 failures.append(f"only {counts[key]} of '{key}', fewer than {least}: the check is vacuous")
