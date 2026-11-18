@@ -823,7 +823,8 @@ product written with `scf.while`, and with each loop one of the three kinds
 two nests on one output and a nest that reads what the one before wrote included.
 
 **Recorded apart: forms that are not supported.** They do not bear on the acceptance above, and
-nothing here is to be read as support.
+nothing here is to be read as support. (As this stage left them. Both are verified and lowered
+since the next one, below, which is also where limit 4 ends for small nests.)
 
 1. *Loops that go on by `counter != bound`.* The lowering's reader reads them (start <= bound).
    The research verifies one only where the accesses bound the counters as the loops do: a
@@ -927,6 +928,152 @@ neither their code nor the checks that killed them changed) and the 13 other sea
 the stage 2 and stage 3 end-to-end runs under the sanitizers (run with the plain tool); the
 research's older mutation harnesses; `systolic-cc` beyond the production lit suite;
 cosimulation and the board. Not built: the forms recorded apart and the limits above.
+
+### Stage 3 on scf.while, continued: the certificate's relations (built 2026-11-18)
+
+**Request.** The three facts that the stage before left to the invariant work are to be made by
+the termination certificate's proposer itself: `counter <= bound` for a loop that goes on while
+its counter differs from its bound, `temporary = counter + step` for a counter stepped before
+the loop inside, and the equality of an `scf.while`'s body argument with its counter, which a
+function of several `scf.while` nests needs as a whole. Research side only. Whether the added
+candidates run into the limit of 600 on the candidates, and whether a case that passed turns
+UNKNOWN, is to be watched, and the limit or the order looked at if so.
+
+**What was added** (`Proposer::invariantCandidates`, `TerminationProposers.cpp`). Three kinds of
+relation, read off the program's own paths between cuts:
+
+1. *A copy.* A state whose every change, along every path, gives it the value of one other
+   state that holds no constant: the equality of the two. The argument of an `scf.while`'s
+   after region is given the loop's counter at each iteration, and the rank of the loop needs
+   them equal in the body.
+2. *A stepped counter.* A state that some path copies into a loop-carried variable, and that a
+   path gives the sum of another state and a state or a constant: that equality. A counter
+   stepped before the loop inside is held as such a sum across that loop.
+3. *A `!=` comparison.* For a comparison `x != y` (or `x == y`) of the path conditions between
+   a state and a state, a parameter or a constant: `x <= y` and `y <= x`, signed and unsigned.
+   That a counter stays inside its bounds needs the fact that it stays at or below its bound,
+   and nothing else says so of a `!=` loop.
+
+They are candidates like the others: the refinement keeps one only where the solver shows it
+on every path into a cut, and the finished certificate is checked again by itself. No check
+changed, and no limit was raised for the candidates that existed. Each rule is narrower than
+the experiment it came from, so that a program with none of these shapes gets exactly the
+candidates it had: a copy from a state that holds a constant gets nothing (the candidates
+already hold its equality with the constant), nor does a sum that steps no counter, nor a
+comparison of computed values (the overflow check of an index's multiplication is one).
+
+**The limit of 600.** The relations are made *after* the cut at 600 and have a bound of their
+own (a quarter of the limit, 150). So the candidates made before them are made, and cut,
+exactly as they were: no case can lose a candidate it had, whatever the relations add. Placed
+before the cut instead, as in the experiment of the stage before, each relation would push one
+ordering past the limit in a program already over it. Measured with an instrumented scratch
+copy, relations off and on (`measure/` of the round's report):
+
+| Programs | Candidates made before the relations | Cut at 600 | Relations made (bound 150) | Queries of one proposer run (budget 2500) | Result |
+| --- | --- | --- | --- | --- | --- |
+| the 111 driver commands of the research lit tests as they were at `acb801a` | at most 500 | none | at most 34; 98 commands make none | largest 962 -> 344; sum 6510 -> 5596 | the output of 3 commands differs: the two nests this stage is for, and the proposer's own statistics for `term_verdicts.mlir`'s `@piecewise` (more invariants kept; UNKNOWN as before) |
+| the nest oracle's functions of two products, taken whole, with `affine.for` and with `scf.for` (12) | 506 to 526 | none | 0 | the same number in each | the same claims |
+| the same with `scf.while` (6) | 764 to 776 | 164 to 176, the same with the relations as without | 20 | 411..1012 -> 218..241 | the claim, not made before, is VERIFIED (3 shared outputs) or REFUTED (3 with a cross read), as with for loops |
+| the same with mixed loops (6) | 611 to 746 | 11 to 146, the same with the relations as without | 4 to 10 | 233..244 -> 230..246; `p10`: 1240 -> 221 | five keep their claims; `p10`'s, not made before, is VERIFIED |
+| `@ne_carried` of `term_relations.mlir` | 679 | 79 | 22 | 123 -> 124 | no "if defined" left in the verdict |
+
+Several programs were over the limit before this stage and still are; in each the cut removes
+the same number of candidates with the relations as without, and no case that passed turns
+UNKNOWN. So the limit stays at 600 and the order above it as it was. The first form of the third
+relation, which answered every `!=` comparison, also made 8 to 16 candidates in affine programs
+from the overflow check of an index's multiplication (no result differed); it was narrowed to
+comparisons between a state and a state, a parameter or a constant, and the measurements above
+are of the narrowed rule (the first ones are kept beside them).
+
+**What it gives.**
+
+- Loops that go on while the counter differs from its bound are verified from any start and in
+  arrays larger than the loops' bounds, and lowered: `@whl_ne_shifted`, `@whl_ne_bigger`
+  (`@whl_en`, from 0 in arrays of the loops' sizes, was verified before).
+- A counter stepped before the loop inside is verified and lowered: `@whl_step_first`,
+  `@whl_step_first_shifted` (mixed with an `scf.for`, bounds that do not start at 0); the step
+  a constant from before the nest or of the after region itself.
+- A function of two nests of `scf.while` loops has its termination certificate as a whole
+  (`@two_nests`, and `@whl_shared` and `@whl_chain` taken whole). For small nests the
+  whole-function driver's claim over both is then made and verified, and the nest oracle asks
+  for it again with `scf.while` and mixed loops as it does with for loops: the count of claims
+  not made is gone with the claims.
+- The stage before's two forms recorded apart are supported forms now, and its limit 4 holds
+  only as said next.
+
+**Limits.**
+
+1. Over two *larger* nests of `scf.while` loops (16 x 8 x 12 each, `@two_nests`) the
+   whole-function claim is still not made, the gate being open: the proposer of a segment's
+   guard stops ("too many patterns for a piecewise guard"); the same function written with
+   `scf.for` gets its claim. That is another part of the joint analysis, not looked into here.
+   No record and no lowering rests on a claim over several nests.
+2. Two conditions of the relations are pinned by no test, because no result depends on them:
+   that a copy has one source over all paths, and the relations' own bound of 150 (34 is the
+   most any measured program makes). Every other condition has a test that fails without it.
+3. Carried values other than the counter, the conditions and steps the lowering does not read,
+   and every other limit of the stage before stand.
+4. One sentence of a comment is out of date and was left, this stage changing research-side
+   files only: above `struct CountingWhile` in `NestRecordLowering.cpp` it still says that the
+   research verifies a `counter != upper` loop only where the accesses bound its counter.
+
+**Acceptance.** Research: `term_relations.mlir` (the termination driver on two nests of
+`scf.while` loops taken whole; the claim over two small nests on one output, made and verified;
+a counter stepped first, its step a constant from before the nest or of the after region; a
+`!=` between two loop-carried variables whose orderings the limit cut; and three programs that
+must get no relation, with the invariants they keep pinned: a for nest that holds a sum in a
+state, a state given a constant state's value, an affine index whose multiplication has an
+overflow check); `nest_while.mlir` (the records
+of the stepped counter, of `!=` from other starts and of `!=` in larger arrays: VERIFIED, where
+the stage before recorded NOT_VERIFIED); the nest oracle with `scf.while` and with mixed loops,
+under the requirement it has with for loops. Lowering, with the production tool unchanged:
+`nest_records_while.mlir` (25 functions: `@whl_ne_shifted` lowered where it was kept, and
+`@whl_ne_bigger`, `@whl_step_first`, `@whl_step_first_shifted` added, each by formulas with its
+tiles and runtime calls); `nest_records_while_refusals.mlir` (29 functions: `@step_first` is no
+refusal any more, and the record of every other nest says what it said); `nest_while_e2e.py`
+(the 25 functions x the five variants x synchronous and asynchronous lowering x two data sets,
+compared with the reference).
+
+**Validation.** On frozen states (HEAD `acb801a` and the 11 files this stage changes or adds,
+this document excepted), each phase refusing to start on another state and recording that it
+ended on the same one. The whole validation ran on `6ac41980…`. Before it, a first freeze
+(`d2729fde…`) was stopped by hand after twelve minutes, when the measurements showed the third
+relation answering overflow checks; the relation was narrowed. After it, one mutant of the
+relations was alive (an equality made for a copy from a state that holds a constant): the
+program written to pin that condition did not exercise it. The program was rewritten, in
+`term_relations.mlir` alone, and the four phases that read that file (the research lit suite,
+the comparison with the baseline, the sanitized lit commands, the mutation of the relations)
+ran again on `7debf70e…`; every binary there is the one validated before, by its hash. The
+baseline is `acb801a`: its research binaries, kept
+from the stage before, and its production tool, which this stage does not rebuild (no
+production source changes). Builds, scripts and logs are outside the repository
+(`~/work/integration-backups-20261118/gemm-invariants`), two build jobs at most. Another
+session was using the machine during the research phases (load 2 to 9); no phase failed on a
+time limit.
+
+| Check | Result |
+| --- | --- |
+| Research lit, alone | 38 of 38, on both freezes (`term_relations.mlir` and `nest_while.mlir` among them) |
+| Research CTests, all of them | 33 of 34 pass: the synthesis unit test alone (497 s, 6977 checks), the four end-to-end runs, and 28 others two at a time. `generalized-gemm-termination` fails as at the baseline, line for line: `t3_swap` UNKNOWN, the same 3 of 119442 checks |
+| Research outputs against the baseline | 120 research lit commands, baseline binaries against the new: 111 byte for byte the same, on both freezes. The 9 others: the three forms this stage verifies (`nest_while.mlir`), the five commands of `term_relations.mlir` that need the relations (its three programs that must get none are the same), and the proposer's statistics for `term_verdicts.mlir`'s `@piecewise` |
+| Records | the eleven records files equal what the research tool says today (and what the sanitized driver says); against `acb801a`, one record changes status (`@whl_ne_shifted`, NOT_VERIFIED to VERIFIED), three are new and `@step_first`'s is gone |
+| The nest oracle, 30 programs, each spelling of the loops | 0 failures each; in all four, 47 records VERIFIED, 188 nests equal to their record's fold, 120 compositions equal to the function, 3 shared outputs each nest verified by itself, and 3 joint claims verified (with `scf.while` 0, and with mixed loops 2, at the stage before) |
+| End to end, the production tool unchanged | `scf.while`: 500 function runs (25 functions), 0 failures, 406 with every bit kept, 94 within their bound, 10 lowered modules with their calls in program order. Unchanged: stage 2, 144 runs, 0 failures; stage 3, 180, 0; `scf.for`, 260, 0 |
+| Production lit, the whole suite, with the tool of `acb801a` | 197 of 199, the two known failures; the nine `nest_records` tests pass with the changed tests and records |
+| Gate mutation (the production band; its tests changed) | 38 mutants: 38 KILLED by the tests' own checks |
+| Mutation of the relations | 9 mutants, one for each condition of the three relations, for the place of the relations after the cut and for the re-making of a relation the cut removed: 9 KILLED by the checks of `term_relations.mlir` and `nest_while.mlir` (on the second freeze 8, the ninth leading to the rewritten program) |
+| ASan and UBSan, research drivers | the sanitized nest driver remade the eleven records files, each equal to the file in the tree; the sanitized drivers passed the 19 commands of `nest_while.mlir` and `term_relations.mlir`, on both freezes: no report |
+| Warnings | `TerminationProposers.cpp` with `-Wall -Wextra -Wpedantic`: none, as at HEAD |
+
+**Open, from the stages before.** The three search mutants that survived at `771b700` are as they
+were: not rerun, and no test pins them yet.
+
+**Not run.** The polynomial suites (their targets are not part of the research build's default
+and hold none of the changed source); the 104 other gate mutants and the 15 other mutants of the
+research harness; the production unit binaries and the comparison of the production tool with
+HEAD's (the tool is HEAD's); the end-to-end runs under a sanitized production tool (unchanged
+since the stage before); the research's older mutation harnesses; `systolic-cc` beyond the
+production lit suite; cosimulation and the board.
 
 ## The thesis
 

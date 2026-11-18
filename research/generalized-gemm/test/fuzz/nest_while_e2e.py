@@ -82,17 +82,24 @@ FUNCTIONS = [
      "statements": [e2e.product("c", "a", "b", BOX, compare="ult", bound_in_before=True, **WHILE)]},
     {"name": "whl_ugt", "element": "f32", "arrays": ABC,
      "statements": [e2e.product("c", "a", "b", BOX, compare="ugt", **WHILE)]},
-    # Recorded apart (APART below): loops that go on by counter != bound are no supported form.
-    # The research verifies such a loop only where the accesses bound its counters. In @whl_en
-    # (bound != counter, from 0 to the arrays' own sizes) they do: it is verified, and lowered.
-    # In @whl_ne_shifted (counter != bound from bounds that do not start at 0) they do not: the
-    # termination certificate holds no fact that such a counter stays at or below its bound, so
-    # its lower bound is not inductive, the coordinates' range is not proved, and the nest stays
-    # on the host.
+    # Loops that go on while the counter differs from its bound: bound != counter from 0 to the
+    # arrays' own sizes; counter != bound from bounds that do not start at 0; counter != bound
+    # in arrays larger than the loops' bounds. In the first the accesses bound the counters; in
+    # the two others it is the termination certificate that holds counter <= bound, a fact its
+    # proposer makes for a != comparison.
     {"name": "whl_en", "element": "f32", "arrays": ABC,
      "statements": [e2e.product("c", "a", "b", BOX, compare="en", **WHILE)]},
     {"name": "whl_ne_shifted", "element": "f32", "arrays": SHIFTED_ABC,
      "statements": [e2e.product("c", "a", "b", SHIFTED, compare="ne", **WHILE)]},
+    {"name": "whl_ne_bigger", "element": "f32", "arrays": SHIFTED_ABC,
+     "statements": [e2e.product("c", "a", "b", BOX, compare="ne", **WHILE)]},
+    # Each counter stepped first: the addition is the first operation of the after region, and
+    # counter + 1 is held across the loop inside. Pure scf.while from 0, and from other starts
+    # with an scf.for between two scf.while loops.
+    {"name": "whl_step_first", "element": "f32", "arrays": ABC,
+     "statements": [e2e.product("c", "a", "b", BOX, step_at="first", **WHILE)]},
+    {"name": "whl_step_first_shifted", "element": "f32", "arrays": SHIFTED_ABC,
+     "statements": [e2e.product("c", "a", "b", SHIFTED, step_at="first", **mixed("while", "scf", "while"))]},
     # Bounds that do not start at 0: I from 2, J from 1, K from 3; pure while, and mixed.
     {"name": "whl_shifted", "element": "f32", "arrays": SHIFTED_ABC,
      "statements": [e2e.product("c", "a", "b", SHIFTED, **WHILE)]},
@@ -139,11 +146,9 @@ FUNCTIONS = [
      "statements": [e2e.product("c", "a", "b", BOX, flag=False, **WHILE)]},
 ]
 TABLED = {("whl_tables_flat", 0), ("whl_tables_perm", 0)}
-# Not lowered with verified records either: the research verifies no counter != bound nest
-# from a start other than 0, and the floating-point policy keeps a strict accumulation.
-KEPT = {("whl_ne_shifted", 0), ("whl_strict", 0)}
-# The functions that are no part of the supported scope: counter != bound.
-APART = ("whl_en", "whl_ne_shifted")
+# Not lowered with verified records either: the floating-point policy keeps a strict
+# accumulation on the host.
+KEPT = {("whl_strict", 0)}
 
 
 def functions(stale=False):
@@ -204,9 +209,6 @@ def main():
             shutil.rmtree(work, ignore_errors=True)
     for key in sorted(counts):
         print(f"{counts[key]:6d}  {key}")
-    names = [f["name"] for f in FUNCTIONS]
-    print(f"{len(names) - len(APART):6d}  functions of the supported scope")
-    print(f"{len(APART):6d}  functions recorded apart, counter != bound ({', '.join(APART)}), run and compared like the others")
     for failure in failures:
         print("FAIL:", failure, file=sys.stderr)
     print(f"{len(failures)} failures")

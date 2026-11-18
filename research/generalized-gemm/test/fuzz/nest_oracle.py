@@ -48,12 +48,9 @@ read as JSON, and what they say is recomputed from the program this file printed
   run (a nest reads cells the other wrote), the claim over both groups is not VERIFIED; with
   a shared output and no such read it is VERIFIED, and no group's own claim is, a run
   showing that one group's contributions alone are not the function. In both, each nest's
-  record is verified by itself: the shapes a whole-function claim cannot state. With
-  scf.while loops (--loops while or mixed) a function of two nests may have no termination
-  certificate as a whole, and the driver then makes no claim over both groups: that is
-  counted under its own name, as no verification, and no least number of verified joint
-  claims is asked for; what is asked for, in every mode, is two nests on one output each
-  with its own complete VERIFIED record.
+  record is verified by itself: the shapes a whole-function claim cannot state. Two nests
+  on one output, each with its own complete VERIFIED record, are counted by themselves, and
+  must be seen at least once: that count is of verified records, whatever the joint claim.
 
 Every driver run has a time limit and an address-space limit, and a timeout fails the run.
 """
@@ -945,27 +942,13 @@ def check(spec, seed, driver, domain_driver, fills, counts):
             # in place. That is counted here, a count of verified records and of nothing else.
             counts[SHARED_EACH] += len(complete) == 2
             # The claim over both groups is the whole-function driver's, a joint analysis of
-            # several loops that no record and no lowering rests on. With for loops it is
-            # VERIFIED. With scf.while loops the function as a whole may have no termination
-            # certificate, and the driver then makes no claim at all: UNKNOWN, its gate not
-            # open. (An scf.while has two variables that a loop carries, its counter and the
-            # after region's argument, and the certificate's rank needs the fact that they are
-            # equal in the body. The proposer of invariants has that fact only among its
-            # orderings of pairs of such variables, which it makes last, cuts first at its limit
-            # of 600 candidates, and makes for the first eight such variables only; two nests of
-            # three scf.while loops have twelve. One nest alone stays inside both, which is why
-            # each record is verified.) That outcome is counted under its own name. It is no
-            # verification: it is added to no count of verified claims and meets no minimum.
-            # Nothing else is let through: with an open gate the claim must be VERIFIED, as
-            # with for loops, and a claim that a run contradicts fails above in every mode.
-            unclaimed = LOOPS in ("while", "mixed") and joint == "UNKNOWN" and whole.get("gate") != "OPEN" and \
-                whole.get("termination") == "UNKNOWN"
-            if joint != "VERIFIED" and not unclaimed:
+            # several loops that no record and no lowering rests on. It is VERIFIED whatever the
+            # loops are written with; a claim that is not made (UNKNOWN) fails here, and so does
+            # one that a run contradicts, above.
+            if joint != "VERIFIED":
                 raise Failure(f"{name}: two nests on one output and no cross read, and the claim over both groups "
                               f"is {joint}")
-            if unclaimed:
-                counts[UNCLAIMED] += 1
-            elif len(whole["groups"]) == 2 and all(differs([one]) for one in products):
+            if len(whole["groups"]) == 2 and all(differs([one]) for one in products):
                 if any(status == "VERIFIED" for status in alone):
                     raise Failure(f"{name}: a group's own whole-function claim is VERIFIED, and a run differs")
                 counts[JOINT_VERIFIED] += len(complete) == 2
@@ -994,8 +977,6 @@ MINIMUM = {
 }
 JOINT_VERIFIED = "shared output: the joint claim is verified, no group's own is, each record is"
 SHARED_EACH = "shared output: each nest has its own complete VERIFIED record"
-UNCLAIMED = ("shared output: NO claim over both groups (UNKNOWN, the function having no termination certificate): "
-             "not a verification")
 WHOLE_MINIMUM = {
     "whole-function claims read": 3,
     "cross read: the joint claim is not verified, each record is": 1,
@@ -1050,12 +1031,6 @@ def main():
         minimum = dict(MINIMUM)
         if args.domain_driver:
             minimum.update(WHOLE_MINIMUM)
-            if LOOPS in ("while", "mixed"):
-                # The claim over both groups is not required of scf.while loops (see check): no
-                # least number of verified joint claims is asked for, and none is made up from
-                # the claims that were not made. What must be seen is SHARED_EACH: two nests on
-                # one output, each verified by its own record.
-                del minimum[JOINT_VERIFIED]
         for key, least in minimum.items():
             if counts[key] < least:
                 failures.append(f"only {counts[key]} of '{key}', fewer than {least}: the check is vacuous")

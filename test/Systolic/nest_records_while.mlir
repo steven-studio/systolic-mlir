@@ -16,20 +16,19 @@
 // takes for loops (Systolic/NestRecordLowering.h): by the record's closed forms of the views,
 // each checked against the nest's own index arithmetic, or, where the research has no affine
 // closed form, by tables of the nest's addresses. The first three functions are one GEMM written
-// with scf.while, with scf.for and with affine.for. Two nests stay as written: @whl_strict by
-// the floating-point policy, and @whl_ne_shifted. Loops that go on by counter != bound are no
-// supported form and are recorded apart: the research verifies @whl_en, whose accesses bound
-// its counters, and it is lowered; it does not verify @whl_ne_shifted, which stays.
+// with scf.while, with scf.for and with affine.for. Loops that go on while the counter differs
+// from its bound (!=), from 0 or not and in arrays of the loops' sizes or larger, and loops that
+// step their counter before the loop inside, are lowered as the others are: the research's
+// termination certificate holds the facts they need (the relations its proposer makes). One
+// nest stays as written: @whl_strict, by the floating-point policy.
 // Inputs/nest_records_while.json is what generalized-gemm-nest-report says of this file (every
 // pair of roots authorized, 64-bit index), written and checked by
 // research/generalized-gemm/test/fuzz/nest_gate_records.py. The functions are
 // nest_while_e2e.py's, which runs them and compares every result with the original program's;
-// nest_records_while_refusals.mlir has the refusals. The two functions whose loops go on by
-// != are recorded apart in the scope document: they are no supported form.
+// nest_records_while_refusals.mlir has the refusals.
 //
-// Nest by nest in program order: formulas, tables, the nest the research does not verify
-// and the refusal of the floating-point policy. Nothing is lowered by the production
-// recognizer here.
+// Nest by nest in program order: formulas, tables, and the refusal of the floating-point
+// policy. Nothing is lowered by the production recognizer here.
 // REMARK-NOT: affine GEMM
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_gemm lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_twin_scf lowered from its record as 5 exact region(s) (formulas:
@@ -42,7 +41,10 @@
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_ult_before lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_ugt lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_en lowered from its record as 5 exact region(s) (formulas:
-// REMARK: remark: GEMM not lowered from its record: nest 0 of whl_ne_shifted: the record's status is NOT_VERIFIED: no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)
+// REMARK: remark: GEMM 16x8x12 of nest 0 of whl_ne_shifted lowered from its record as 5 exact region(s) (formulas:
+// REMARK: remark: GEMM 16x8x12 of nest 0 of whl_ne_bigger lowered from its record as 5 exact region(s) (formulas:
+// REMARK: remark: GEMM 16x8x12 of nest 0 of whl_step_first lowered from its record as 5 exact region(s) (formulas:
+// REMARK: remark: GEMM 16x8x12 of nest 0 of whl_step_first_shifted lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_shifted lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_shifted_mixed lowered from its record as 5 exact region(s) (formulas:
 // REMARK: remark: GEMM 16x8x12 of nest 0 of whl_transposed lowered from its record as 5 exact region(s) (formulas:
@@ -107,8 +109,29 @@
 // TILES-NOT: {{scf\.while|scf\.for|affine\.for}}
 // TILES: return
 // TILES-LABEL: func.func @whl_ne_shifted(
-// TILES-NOT: systolic.matmul_tile
-// TILES: scf.while
+// TILES: memref.subview %arg0[2, 3] [16, 12] [1, 1]
+// TILES: memref.subview %arg1[3, 1] [12, 8] [1, 1]
+// TILES: memref.subview %arg2[2, 1] [16, 8] [1, 1]
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for}}
+// TILES: return
+// TILES-LABEL: func.func @whl_ne_bigger(
+// TILES: memref.subview %arg0[0, 0] [16, 12] [1, 1]
+// TILES: memref.subview %arg1[0, 0] [12, 8] [1, 1]
+// TILES: memref.subview %arg2[0, 0] [16, 8] [1, 1]
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for}}
+// TILES: return
+// TILES-LABEL: func.func @whl_step_first(
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for}}
+// TILES: return
+// TILES-LABEL: func.func @whl_step_first_shifted(
+// TILES: memref.subview %arg0[2, 3] [16, 12] [1, 1]
+// TILES: memref.subview %arg1[3, 1] [12, 8] [1, 1]
+// TILES: memref.subview %arg2[2, 1] [16, 8] [1, 1]
+// TILES-COUNT-5: systolic.matmul_tile
+// TILES-NOT: {{scf\.while|scf\.for|affine\.for}}
 // TILES: return
 // TILES-LABEL: func.func @whl_shifted(
 // TILES: memref.subview %arg0[2, 3] [16, 12] [1, 1]
@@ -182,6 +205,15 @@
 // ASYNC: llvm.call @fpga_gemm_begin
 // ASYNC-COUNT-5: llvm.call @fpga_tile_submit
 // ASYNC: llvm.call @fpga_gemm_wait
+// ASYNC-LABEL: func.func @whl_ne_shifted(
+// ASYNC: llvm.call @fpga_gemm_begin
+// ASYNC-COUNT-5: llvm.call @fpga_tile_submit
+// ASYNC: llvm.call @fpga_gemm_wait
+// ASYNC-LABEL: func.func @whl_step_first(
+// ASYNC: llvm.call @fpga_gemm_begin
+// ASYNC-COUNT-5: llvm.call @fpga_tile_submit
+// ASYNC: llvm.call @fpga_gemm_wait
+// ASYNC-NEXT: bufferization.materialize_in_destination {{.*}} in restrict writable %arg2
 // ASYNC-LABEL: func.func @whl_tables_perm(
 // ASYNC: %[[PC:.*]] = memref.reinterpret_cast %arg2 to offset: [0], sizes: [128], strides: [1]
 // ASYNC-NEXT: %[[PM:.*]] = memref.alloc() : memref<16x8xf32>
@@ -206,6 +238,10 @@
 // ASYNC: scf.while
 //
 // SYNC-LABEL: func.func @whl_gemm(
+// SYNC-COUNT-5: llvm.call @fpga_matmul_tiled_auto_scheduled
+// SYNC-LABEL: func.func @whl_ne_bigger(
+// SYNC-COUNT-5: llvm.call @fpga_matmul_tiled_auto_scheduled
+// SYNC-LABEL: func.func @whl_step_first_shifted(
 // SYNC-COUNT-5: llvm.call @fpga_matmul_tiled_auto_scheduled
 // SYNC-LABEL: func.func @whl_tables_flat(
 // SYNC: affine.for
@@ -660,6 +696,126 @@ func.func @whl_ne_shifted(%a: memref<18x15xf32>, %b: memref<15x9xf32>, %c: memre
       scf.yield %jnx0 : index
     }
     %inx0 = arith.addi %i0, %ist0 : index
+    scf.yield %inx0 : index
+  }
+  return
+}
+func.func @whl_ne_bigger(%a: memref<18x15xf32>, %b: memref<15x9xf32>, %c: memref<18x9xf32> {llvm.noalias}) {
+  %ilo0 = arith.constant 0 : index
+  %ihi0 = arith.constant 16 : index
+  %ist0 = arith.constant 1 : index
+  %jlo0 = arith.constant 0 : index
+  %jhi0 = arith.constant 8 : index
+  %jst0 = arith.constant 1 : index
+  %klo0 = arith.constant 0 : index
+  %khi0 = arith.constant 12 : index
+  %kst0 = arith.constant 1 : index
+  %ires0 = scf.while (%iw0 = %ilo0) : (index) -> index {
+    %icmp0 = arith.cmpi ne, %iw0, %ihi0 : index
+    scf.condition(%icmp0) %iw0 : index
+  } do {
+  ^bb0(%i0: index):
+    %jres0 = scf.while (%jw0 = %jlo0) : (index) -> index {
+      %jcmp0 = arith.cmpi ne, %jw0, %jhi0 : index
+      scf.condition(%jcmp0) %jw0 : index
+    } do {
+    ^bb0(%j0: index):
+      %kres0 = scf.while (%kw0 = %klo0) : (index) -> index {
+        %kcmp0 = arith.cmpi ne, %kw0, %khi0 : index
+        scf.condition(%kcmp0) %kw0 : index
+      } do {
+      ^bb0(%k0: index):
+        %z0 = memref.load %c[%i0, %j0] : memref<18x9xf32>
+        %x0 = memref.load %a[%i0, %k0] : memref<18x15xf32>
+        %y0 = memref.load %b[%k0, %j0] : memref<15x9xf32>
+        %m0 = arith.mulf %x0, %y0 : f32
+        %s0 = arith.addf %z0, %m0 fastmath<reassoc> : f32
+        memref.store %s0, %c[%i0, %j0] : memref<18x9xf32>
+        %knx0 = arith.addi %k0, %kst0 : index
+        scf.yield %knx0 : index
+      }
+      %jnx0 = arith.addi %j0, %jst0 : index
+      scf.yield %jnx0 : index
+    }
+    %inx0 = arith.addi %i0, %ist0 : index
+    scf.yield %inx0 : index
+  }
+  return
+}
+func.func @whl_step_first(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
+  %ilo0 = arith.constant 0 : index
+  %ihi0 = arith.constant 16 : index
+  %ist0 = arith.constant 1 : index
+  %jlo0 = arith.constant 0 : index
+  %jhi0 = arith.constant 8 : index
+  %jst0 = arith.constant 1 : index
+  %klo0 = arith.constant 0 : index
+  %khi0 = arith.constant 12 : index
+  %kst0 = arith.constant 1 : index
+  %ires0 = scf.while (%iw0 = %ilo0) : (index) -> index {
+    %icmp0 = arith.cmpi slt, %iw0, %ihi0 : index
+    scf.condition(%icmp0) %iw0 : index
+  } do {
+  ^bb0(%i0: index):
+    %inx0 = arith.addi %i0, %ist0 : index
+    %jres0 = scf.while (%jw0 = %jlo0) : (index) -> index {
+      %jcmp0 = arith.cmpi slt, %jw0, %jhi0 : index
+      scf.condition(%jcmp0) %jw0 : index
+    } do {
+    ^bb0(%j0: index):
+      %jnx0 = arith.addi %j0, %jst0 : index
+      %kres0 = scf.while (%kw0 = %klo0) : (index) -> index {
+        %kcmp0 = arith.cmpi slt, %kw0, %khi0 : index
+        scf.condition(%kcmp0) %kw0 : index
+      } do {
+      ^bb0(%k0: index):
+        %knx0 = arith.addi %k0, %kst0 : index
+        %z0 = memref.load %c[%i0, %j0] : memref<16x8xf32>
+        %x0 = memref.load %a[%i0, %k0] : memref<16x12xf32>
+        %y0 = memref.load %b[%k0, %j0] : memref<12x8xf32>
+        %m0 = arith.mulf %x0, %y0 : f32
+        %s0 = arith.addf %z0, %m0 fastmath<reassoc> : f32
+        memref.store %s0, %c[%i0, %j0] : memref<16x8xf32>
+        scf.yield %knx0 : index
+      }
+      scf.yield %jnx0 : index
+    }
+    scf.yield %inx0 : index
+  }
+  return
+}
+func.func @whl_step_first_shifted(%a: memref<18x15xf32>, %b: memref<15x9xf32>, %c: memref<18x9xf32> {llvm.noalias}) {
+  %ilo0 = arith.constant 2 : index
+  %ihi0 = arith.constant 18 : index
+  %ist0 = arith.constant 1 : index
+  %jlo0 = arith.constant 1 : index
+  %jhi0 = arith.constant 9 : index
+  %jst0 = arith.constant 1 : index
+  %klo0 = arith.constant 3 : index
+  %khi0 = arith.constant 15 : index
+  %kst0 = arith.constant 1 : index
+  %ires0 = scf.while (%iw0 = %ilo0) : (index) -> index {
+    %icmp0 = arith.cmpi slt, %iw0, %ihi0 : index
+    scf.condition(%icmp0) %iw0 : index
+  } do {
+  ^bb0(%i0: index):
+    %inx0 = arith.addi %i0, %ist0 : index
+    scf.for %j0 = %jlo0 to %jhi0 step %jst0 {
+      %kres0 = scf.while (%kw0 = %klo0) : (index) -> index {
+        %kcmp0 = arith.cmpi slt, %kw0, %khi0 : index
+        scf.condition(%kcmp0) %kw0 : index
+      } do {
+      ^bb0(%k0: index):
+        %knx0 = arith.addi %k0, %kst0 : index
+        %z0 = memref.load %c[%i0, %j0] : memref<18x9xf32>
+        %x0 = memref.load %a[%i0, %k0] : memref<18x15xf32>
+        %y0 = memref.load %b[%k0, %j0] : memref<15x9xf32>
+        %m0 = arith.mulf %x0, %y0 : f32
+        %s0 = arith.addf %z0, %m0 fastmath<reassoc> : f32
+        memref.store %s0, %c[%i0, %j0] : memref<18x9xf32>
+        scf.yield %knx0 : index
+      }
+    }
     scf.yield %inx0 : index
   }
   return

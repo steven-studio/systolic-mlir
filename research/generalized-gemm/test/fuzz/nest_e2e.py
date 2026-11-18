@@ -64,7 +64,7 @@ class Failure(Exception):
 
 def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, access="affine",
             constants="inside", loops="affine", bounds_at="outside", compare="slt", step="counter+1",
-            bound_in_before=False):
+            bound_in_before=False, step_at="end"):
     """`access`: "affine" reads and writes with affine.load and affine.store; "memref" with
     memref.load and memref.store, each index computed by arith (a counter times its scale plus
     its constant; a flat array's index is row * columns + column). A view entry is (role,
@@ -80,12 +80,14 @@ def product(c, a, b, bounds, order="ijk", views=None, flag=True, first=True, acc
     scf.while's comparison is `compare`: "slt" or "ult" (counter < bound), "sgt" or "ugt" (bound >
     counter), "ne" (counter != bound) or "en" (bound != counter); its step is `step`,
     "counter+1" or "1+counter"; with `bound_in_before` its bound is a constant of its before
-    region."""
+    region; with `step_at` "first" the addition that steps its counter is the first operation of
+    its after region, before the loop inside it, instead of the last ("end")."""
     views = views or {"c": [("i", 1, 0), ("j", 1, 0)], "a": [("i", 1, 0), ("k", 1, 0)],
                       "b": [("k", 1, 0), ("j", 1, 0)]}
     return {"kind": "product", "c": c, "a": a, "b": b, "bounds": bounds, "order": order, "views": views,
             "flag": flag, "first": first, "access": access, "constants": constants, "loops": loops,
-            "bounds_at": bounds_at, "compare": compare, "step": step, "bound_in_before": bound_in_before}
+            "bounds_at": bounds_at, "compare": compare, "step": step, "bound_in_before": bound_in_before,
+            "step_at": step_at}
 
 
 def loop_kinds(statement):
@@ -302,9 +304,12 @@ def mlir_function(function):
                           indent + f"^bb0(%{role}{number}: index):"]
                 stepped = (f"%{role}{number}, %{role}st{number}" if statement.get("step", "counter+1") == "counter+1"
                            else f"%{role}st{number}, %{role}{number}")
-                closers.append([indent + f"  %{role}nx{number} = arith.addi {stepped} : index",
-                                indent + f"  scf.yield %{role}nx{number} : index",
-                                indent + "}"])
+                increment = indent + f"  %{role}nx{number} = arith.addi {stepped} : index"
+                if statement.get("step_at", "end") == "first":
+                    lines.append(increment)
+                    closers.append([indent + f"  scf.yield %{role}nx{number} : index", indent + "}"])
+                else:
+                    closers.append([increment, indent + f"  scf.yield %{role}nx{number} : index", indent + "}"])
             lines += body
             for close in reversed(closers):
                 lines += close

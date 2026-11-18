@@ -2,10 +2,11 @@
 """Mutation test of the research changes for scf.for and scf.while nests
 (docs/GENERALIZED_GEMM_SCOPE.md, stage 3 on scf.for and on scf.while): GrammarSpec::exactLeaves
 in CoordinateGrammar.cpp and the search that turns it on in SynthesisAnalysis.cpp, the
-proposer of the termination certificate's lower bounds in TerminationProposers.cpp, and the
-proposer of the views in DomainProposer.cpp, which reads an scf.while body's counter as its
-level. Each mutant weakens one thing, the unmodified tree must pass first, and every result is
-one of:
+proposer of the termination certificate's lower bounds in TerminationProposers.cpp and the
+relations it makes from the program's own paths (a state given another state's value, a stepped
+counter's sum, the orderings of a != comparison), and the proposer of the views in
+DomainProposer.cpp, which reads an scf.while body's counter as its level. Each mutant weakens
+one thing, the unmodified tree must pass first, and every result is one of:
 
   KILLED          a test failed by its own check (FileCheck), and nothing crashed.
   SURVIVED        every test ran to the end and passed.
@@ -13,7 +14,8 @@ one of:
   HARNESS_ERROR   a stale pattern, a mutant that does not build, a crash, a timeout.
 
 Only KILLED and EQUIVALENT let a run pass. The tests are the research lit files that run a
-driver holding the grammar (the coordinate search): nest_*, synth_*, dom_*, comp_*. They are run
+driver holding the grammar (the coordinate search): nest_*, synth_*, dom_*, comp_*, and
+term_relations.mlir, the termination driver on the relations. They are run
 from a copy of the tree in --scratch, built with --jobs jobs (two by default); the tree itself is
 never changed.
 Results are appended to --results as they finish.
@@ -68,6 +70,34 @@ MUTANTS = [
     ("a reading of such a state taken without the events", D,
      "          if (fitsEvents(view, d, mapped))\n            chosen = mapped;\n",
      "          if (true)\n            chosen = mapped;\n"),
+    # The relations of the termination certificate's proposer, made after the cut.
+    ("no equality made for a state given another state's value", T,
+     "    if (single && source && source->sort == program.state[id].sort && !constantOf.count(source->index))\n",
+     "    if (false)\n"),
+    ("an equality made for a state given a constant state's value", T,
+     "    if (single && source && source->sort == program.state[id].sort && !constantOf.count(source->index))\n",
+     "    if (single && source && source->sort == program.state[id].sort)\n"),
+    ("no equality made for a stepped counter's sum", T,
+     "      if ((other(left) && (other(right) || right->op == TermOp::Const)) ||\n"
+     "          (left->op == TermOp::Const && other(right)))\n",
+     "      if (false)\n"),
+    ("no equality made for the sum of a counter and a constant", T,
+     "      if ((other(left) && (other(right) || right->op == TermOp::Const)) ||\n",
+     "      if ((other(left) && other(right)) ||\n"),
+    ("a sum's equality made for a state that steps no counter", T,
+     "      if (!value || !stepped.count(id) || program.state[id].sort.kind != Sort::BV || value->op != TermOp::Add ||\n",
+     "      if (!value || program.state[id].sort.kind != Sort::BV || value->op != TermOp::Add ||\n"),
+    ("no ordering made for a != comparison", T,
+     "    if (predicate != Predicate::Ne && predicate != Predicate::Eq)\n      continue;\n",
+     "    if (true)\n      continue;\n"),
+    ("an ordering made for a != comparison of computed values", T,
+     "    if (!leaf(x) || !leaf(y) || (x->op != TermOp::State && y->op != TermOp::State))\n      continue;\n",
+     "    if (false)\n      continue;\n"),
+    ("the relations held to the limit of the candidates made before them", T,
+     "    if (out.size() - made + 2 <= room)\n",
+     "    if (out.size() + 2 <= in.limits.maxInvariantCandidates)\n"),
+    ("a relation that equals a candidate the limit cut not made again", T,
+     "  unique.clear();\n  unique.insert(out.begin(), out.end());\n", "  (void)0;\n"),
 ]
 
 EQUIVALENT = [
@@ -90,7 +120,7 @@ CRASH = ("Stack dump", "PLEASE submit a bug report", "Segmentation fault", "core
 TOOLS = ["generalized-gemm-nest-report", "generalized-gemm-synthesis-report", "generalized-gemm-domain-report",
          "generalized-gemm-computation-report", "generalized-gemm-report", "generalized-gemm-termination-report",
          "generalized-gemm-coordinate-report"]
-FILTER = "nest_|synth_|dom_|comp_"
+FILTER = "nest_|synth_|dom_|comp_|term_relations"
 SECONDS = 3600
 
 

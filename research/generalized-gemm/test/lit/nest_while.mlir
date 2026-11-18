@@ -86,14 +86,26 @@
 // OFFSETS: "statement": 9,
 // OFFSETS-NEXT: "status": "VERIFIED"
 //
-// Not verified today: the middle loop steps its counter before the inner loop, so counter + 1 is
-// a temporary held across the inner loop, and the termination certificate has no invariant
-// that ties it to the counter (temporary = counter + step). (A limit of the certificate's
-// proposer, recorded here as it is.)
+// The middle loop steps its counter before the inner loop, so counter + 1 is a temporary held
+// across the inner loop. The termination certificate's proposer makes the equality of such a
+// temporary with the sum it was given (term_relations.mlir), which ties it to the counter.
 // RUN: %nestreport %s --function=while_step_first --index-bit-width=64 --max-level=1 --candidates-per-group=1 --rlimit=20000000 --timeout-ms=120000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" | FileCheck %s --check-prefix=STEPFIRST
-// STEPFIRST: "no claim was made about the nest: the gate is UNKNOWN (no termination certificate)"
+// STEPFIRST: "axis": "I",
+// STEPFIRST: "lower": 0,
+// STEPFIRST: "upper": 16,
+// STEPFIRST: "axis": "J",
+// STEPFIRST: "lower": 0,
+// STEPFIRST: "upper": 8,
+// STEPFIRST: "axis": "K",
+// STEPFIRST: "lower": 0,
+// STEPFIRST: "upper": 12,
+// STEPFIRST: "theorem13": {
+// STEPFIRST: "status": "VERIFIED",
+// STEPFIRST-NEXT: "tier": "SYMBOLIC"
+// STEPFIRST: "loop": "scf.while",
+// STEPFIRST: "refusals": [],
 // STEPFIRST: "statement": 5,
-// STEPFIRST-NEXT: "status": "NOT_VERIFIED"
+// STEPFIRST-NEXT: "status": "VERIFIED"
 //
 // The outer loop's result, its counter's last value, is stored after the nest: no faithful copy.
 // RUN: %nestreport %s --function=while_result_used --index-bit-width=64 --max-level=1 --candidates-per-group=1 --rlimit=20000000 --timeout-ms=120000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" | FileCheck %s --check-prefix=RESULT
@@ -113,10 +125,8 @@
 // NOSTEP: "statement": 5,
 // NOSTEP-NEXT: "status": "NOT_VERIFIED"
 //
-// Loops that go on by != are no supported form of the lowering (the scope document records them
-// apart); the next two say what the research makes of them today.
-// counter != bound, from 0 to the arrays' sizes: the loop's own condition gives no upper bound of
-// the counter, and the accesses do (one outside its array stops the run), so the range is proved.
+// Loops that go on while the counter differs from its bound. From 0 to the arrays' sizes the
+// accesses bound the counter (one outside its array stops the run), and the range is proved.
 // RUN: %nestreport %s --function=while_ne --index-bit-width=64 --max-level=1 --candidates-per-group=1 --rlimit=20000000 --timeout-ms=120000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" | FileCheck %s --check-prefix=NE
 // NE: "axis": "I",
 // NE: "lower": 0,
@@ -135,15 +145,44 @@
 // NE: "statement": 9,
 // NE-NEXT: "status": "VERIFIED"
 //
-// Not verified today: counter != bound from bounds that do not start at 0 (or in arrays larger
-// than the bounds). The accesses bound the counters by the arrays' sizes and by 0; that a counter
-// stays at or above its start needs the fact that it stays at or below its bound (or it could
-// wrap), and the termination certificate has no such invariant for a != loop. (A limit of the
-// certificate's proposer, recorded here as it is.)
+// From bounds that do not start at 0, and in arrays larger than the bounds, the accesses do not
+// say that a counter stays in its bounds: that it stays at or above its start needs the fact
+// that it stays at or below its bound, or it could wrap. The termination certificate's proposer
+// makes that fact for a != comparison of the path conditions, and the certificate keeps it.
 // RUN: %nestreport %s --function=while_ne_shifted --index-bit-width=64 --max-level=1 --candidates-per-group=1 --rlimit=20000000 --timeout-ms=120000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" | FileCheck %s --check-prefix=NESHIFTED
-// NESHIFTED: "no candidate for the nest: the search is UNKNOWN (no candidate was verified within the limits)"
+// NESHIFTED: "axis": "I",
+// NESHIFTED: "lower": 2,
+// NESHIFTED: "upper": 18,
+// NESHIFTED: "axis": "J",
+// NESHIFTED: "lower": 1,
+// NESHIFTED: "upper": 9,
+// NESHIFTED: "axis": "K",
+// NESHIFTED: "lower": 3,
+// NESHIFTED: "upper": 15,
+// NESHIFTED: "theorem13": {
+// NESHIFTED: "status": "VERIFIED",
+// NESHIFTED-NEXT: "tier": "SYMBOLIC"
+// NESHIFTED: "loop": "scf.while",
+// NESHIFTED: "refusals": [],
 // NESHIFTED: "statement": 9,
-// NESHIFTED-NEXT: "status": "NOT_VERIFIED"
+// NESHIFTED-NEXT: "status": "VERIFIED"
+// RUN: %nestreport %s --function=while_ne_bigger --index-bit-width=64 --max-level=1 --candidates-per-group=1 --rlimit=20000000 --timeout-ms=120000 --authorize="roots 0 and 1 are separate,roots 0 and 2 are separate,roots 0 and 3 are separate,roots 1 and 2 are separate,roots 1 and 3 are separate,roots 2 and 3 are separate" | FileCheck %s --check-prefix=NEBIGGER
+// NEBIGGER: "axis": "I",
+// NEBIGGER: "lower": 0,
+// NEBIGGER: "upper": 16,
+// NEBIGGER: "axis": "J",
+// NEBIGGER: "lower": 0,
+// NEBIGGER: "upper": 8,
+// NEBIGGER: "axis": "K",
+// NEBIGGER: "lower": 0,
+// NEBIGGER: "upper": 12,
+// NEBIGGER: "theorem13": {
+// NEBIGGER: "status": "VERIFIED",
+// NEBIGGER-NEXT: "tier": "SYMBOLIC"
+// NEBIGGER: "loop": "scf.while",
+// NEBIGGER: "refusals": [],
+// NEBIGGER: "statement": 9,
+// NEBIGGER-NEXT: "status": "VERIFIED"
 func.func @while_gemm(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
   %ilo0 = arith.constant 0 : index
   %ihi0 = arith.constant 16 : index
@@ -516,6 +555,48 @@ func.func @while_ne_shifted(%a: memref<18x15xf32>, %b: memref<15x9xf32>, %c: mem
   %jst0 = arith.constant 1 : index
   %klo0 = arith.constant 3 : index
   %khi0 = arith.constant 15 : index
+  %kst0 = arith.constant 1 : index
+  %ires0 = scf.while (%iw0 = %ilo0) : (index) -> index {
+    %icmp0 = arith.cmpi ne, %iw0, %ihi0 : index
+    scf.condition(%icmp0) %iw0 : index
+  } do {
+  ^bb0(%i0: index):
+    %jres0 = scf.while (%jw0 = %jlo0) : (index) -> index {
+      %jcmp0 = arith.cmpi ne, %jw0, %jhi0 : index
+      scf.condition(%jcmp0) %jw0 : index
+    } do {
+    ^bb0(%j0: index):
+      %kres0 = scf.while (%kw0 = %klo0) : (index) -> index {
+        %kcmp0 = arith.cmpi ne, %kw0, %khi0 : index
+        scf.condition(%kcmp0) %kw0 : index
+      } do {
+      ^bb0(%k0: index):
+        %z0 = memref.load %c[%i0, %j0] : memref<18x9xf32>
+        %x0 = memref.load %a[%i0, %k0] : memref<18x15xf32>
+        %y0 = memref.load %b[%k0, %j0] : memref<15x9xf32>
+        %m0 = arith.mulf %x0, %y0 : f32
+        %s0 = arith.addf %z0, %m0 fastmath<reassoc> : f32
+        memref.store %s0, %c[%i0, %j0] : memref<18x9xf32>
+        %knx0 = arith.addi %k0, %kst0 : index
+        scf.yield %knx0 : index
+      }
+      %jnx0 = arith.addi %j0, %jst0 : index
+      scf.yield %jnx0 : index
+    }
+    %inx0 = arith.addi %i0, %ist0 : index
+    scf.yield %inx0 : index
+  }
+  return
+}
+func.func @while_ne_bigger(%a: memref<18x15xf32>, %b: memref<15x9xf32>, %c: memref<18x9xf32> {llvm.noalias}) {
+  %ilo0 = arith.constant 0 : index
+  %ihi0 = arith.constant 16 : index
+  %ist0 = arith.constant 1 : index
+  %jlo0 = arith.constant 0 : index
+  %jhi0 = arith.constant 8 : index
+  %jst0 = arith.constant 1 : index
+  %klo0 = arith.constant 0 : index
+  %khi0 = arith.constant 12 : index
   %kst0 = arith.constant 1 : index
   %ires0 = scf.while (%iw0 = %ilo0) : (index) -> index {
     %icmp0 = arith.cmpi ne, %iw0, %ihi0 : index

@@ -235,6 +235,83 @@ std::vector<Term> Proposer::invariantCandidates(unsigned cut) {
     }
   if (out.size() > in.limits.maxInvariantCandidates)
     out.resize(in.limits.maxInvariantCandidates);
+
+  // Relations that the program's own paths state. They are made after the cut above and have a
+  // bound of their own, a quarter of the limit: every candidate made before them is made, and
+  // cut, exactly as it was without them, so a search that found its facts above still has them
+  // all. Like every candidate they are guesses: refine keeps one only where the solver shows
+  // it on every path into a cut, and the certificate made of them is checked again by itself.
+  //   1. A state whose every change, along every path, gives it the value of one other state
+  //      that is no constant: their equality. The argument of an scf.while's after region is
+  //      given the loop's counter at each iteration, and the rank of the loop needs the two
+  //      equal in the body. (The orderings above say so of the first eight loop-carried
+  //      variables, where the limit leaves them room; an scf.while has two such variables a
+  //      loop, a function of two nests of three has twelve, and the limit cuts orderings first.)
+  //   2. A state that some path copies into a loop-carried variable, and that a path gives the
+  //      sum of another state and a state or a constant: that equality. A counter stepped
+  //      before the inner loop is held as such a sum across that loop.
+  //   3. For a comparison x != y, or x == y, of the path conditions, between a state and a
+  //      state, a parameter or a constant: x <= y and y <= x, signed and unsigned. A loop that
+  //      goes on while its counter differs from its bound stays in its bounds only if the
+  //      counter stays at or below the bound, and nothing above says so. (A comparison of
+  //      computed values, as the overflow check of an index's addition is, gets none.)
+  unique.clear();
+  unique.insert(out.begin(), out.end());
+  const size_t made = out.size(), room = in.limits.maxInvariantCandidates / 4;
+  auto relation = [&](Term fact) {
+    if (out.size() - made + 2 <= room)
+      addFact(fact);
+  };
+  for (unsigned id = 0; id < program.state.size(); ++id) {
+    if (program.state[id].sort.kind != Sort::BV)
+      continue;
+    Term source = nullptr;
+    bool single = true;
+    for (const CutPath &path : in.set.paths) {
+      Term value = path.state[id];
+      if (!value || (value->op == TermOp::State && value->index == id))
+        continue; // not changed along this path
+      if (value->op != TermOp::State || (source && value != source)) {
+        single = false;
+        break;
+      }
+      source = value;
+    }
+    if (single && source && source->sort == program.state[id].sort && !constantOf.count(source->index))
+      relation(terms.icmp(Predicate::Eq, stateTerm(id), source));
+  }
+  llvm::DenseSet<unsigned> stepped; // states that some path copies into a loop-carried variable
+  for (const CutPath &path : in.set.paths)
+    for (unsigned id = 0; id < program.state.size(); ++id) {
+      Term value = path.state[id];
+      if (value && program.state[id].loopCarried && value->op == TermOp::State && value->index != id)
+        stepped.insert(value->index);
+    }
+  for (const CutPath &path : in.set.paths)
+    for (unsigned id = 0; id < program.state.size(); ++id) {
+      Term value = path.state[id];
+      if (!value || !stepped.count(id) || program.state[id].sort.kind != Sort::BV || value->op != TermOp::Add ||
+          value->args.size() != 2)
+        continue;
+      auto other = [&](Term t) { return t->op == TermOp::State && t->index != id; };
+      Term left = value->args[0], right = value->args[1];
+      if ((other(left) && (other(right) || right->op == TermOp::Const)) ||
+          (left->op == TermOp::Const && other(right)))
+        relation(terms.icmp(Predicate::Eq, stateTerm(id), value));
+    }
+  auto leaf = [](Term t) { return t->op == TermOp::State || t->op == TermOp::Param || t->op == TermOp::Const; };
+  for (Term atom : atoms) {
+    Predicate predicate = static_cast<Predicate>(atom->aux);
+    if (predicate != Predicate::Ne && predicate != Predicate::Eq)
+      continue;
+    Term x = atom->args[0], y = atom->args[1];
+    if (!leaf(x) || !leaf(y) || (x->op != TermOp::State && y->op != TermOp::State))
+      continue;
+    relation(terms.icmp(Predicate::Sle, x, y));
+    relation(terms.icmp(Predicate::Sle, y, x));
+    relation(terms.icmp(Predicate::Ule, x, y));
+    relation(terms.icmp(Predicate::Ule, y, x));
+  }
   return out;
 }
 

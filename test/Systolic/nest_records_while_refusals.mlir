@@ -14,7 +14,6 @@
 // nests the research verifies and the lowering does not read as counting loops: arithmetic in
 // the before region, a second carried induction, a carried invariant, a counter of type i64.
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_while_refusals.json record-driven=true report=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=HONEST
-// HONEST: remark: GEMM not lowered from its record: nest 0 of step_first: the record's status is NOT_VERIFIED: no claim was made about the nest: the gate is UNKNOWN (no termination certificate)
 // HONEST: remark: GEMM not lowered from its record: nest 0 of no_step: the record's status is NOT_VERIFIED: no claim was made about the nest: the gate is UNKNOWN (no termination certificate)
 // HONEST: remark: GEMM not lowered from its record: nest 0 of always: the record's status is NOT_VERIFIED
 // HONEST: remark: GEMM not lowered from its record: nest 0 of compares_other: the record's status is NOT_VERIFIED
@@ -48,10 +47,6 @@
 //
 // Every nest stays as written: no tile is made, and each scf.while is still there.
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%S/Inputs/nest_records_while_refusals.json record-driven=true" | FileCheck %s --check-prefix=KEPT --implicit-check-not=systolic.matmul_tile
-// KEPT-LABEL: func.func @step_first(
-// KEPT: scf.while
-// KEPT: scf.while
-// KEPT: scf.while
 // KEPT-LABEL: func.func @no_step(
 // KEPT: scf.while
 // KEPT: scf.while
@@ -262,46 +257,6 @@
 // RUN: systolic-opt %s --systolic-declare-fpga-fleet --affine-matmul-to-systolic="nest-records=%t.nocarried.json record-driven=true" -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOCARRIED
 // NOCARRIED: remark: GEMM not lowered from its record: nest 0 of no_carried: a loop of the nest (scf.while) carries no value from one iteration to the next: it has no counter, and the record's lowering takes a counting loop
 // NOCARRIED-NOT: remark:
-// The middle loop steps its counter before the inner loop: counter + 1 is held across that loop, and
-// the research has no termination certificate for it. The lowering would read the loop.
-func.func @step_first(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
-  %c0 = arith.constant 0 : index
-  %c1 = arith.constant 1 : index
-  %c8 = arith.constant 8 : index
-  %c12 = arith.constant 12 : index
-  %c16 = arith.constant 16 : index
-  %ri = scf.while (%i = %c0) : (index) -> index {
-    %ci = arith.cmpi slt, %i, %c16 : index
-    scf.condition(%ci) %i : index
-  } do {
-  ^bb0(%ib: index):
-    %rj = scf.while (%j = %c0) : (index) -> index {
-      %cj = arith.cmpi slt, %j, %c8 : index
-      scf.condition(%cj) %j : index
-    } do {
-    ^bb0(%jb: index):
-      %jn = arith.addi %jb, %c1 : index
-      %rk = scf.while (%k = %c0) : (index) -> index {
-        %ck = arith.cmpi slt, %k, %c12 : index
-        scf.condition(%ck) %k : index
-      } do {
-      ^bb0(%kb: index):
-        %z = memref.load %c[%ib, %jb] : memref<16x8xf32>
-        %x = memref.load %a[%ib, %kb] : memref<16x12xf32>
-        %y = memref.load %b[%kb, %jb] : memref<12x8xf32>
-        %m = arith.mulf %x, %y : f32
-        %s = arith.addf %z, %m fastmath<reassoc> : f32
-        memref.store %s, %c[%ib, %jb] : memref<16x8xf32>
-        %kn = arith.addi %kb, %c1 : index
-        scf.yield %kn : index
-      }
-      scf.yield %jn : index
-    }
-    %in = arith.addi %ib, %c1 : index
-    scf.yield %in : index
-  }
-  return
-}
 // The inner loop yields its counter unchanged: it never ends.
 func.func @no_step(%a: memref<16x12xf32>, %b: memref<12x8xf32>, %c: memref<16x8xf32> {llvm.noalias}) {
   %c0 = arith.constant 0 : index
