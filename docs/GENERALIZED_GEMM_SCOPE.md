@@ -1013,9 +1013,11 @@ are of the narrowed rule (the first ones are kept beside them).
    most any measured program makes). Every other condition has a test that fails without it.
 3. Carried values other than the counter, the conditions and steps the lowering does not read,
    and every other limit of the stage before stand.
-4. One sentence of a comment is out of date and was left, this stage changing research-side
-   files only: above `struct CountingWhile` in `NestRecordLowering.cpp` it still says that the
-   research verifies a `counter != upper` loop only where the accesses bound its counter.
+4. One sentence of a comment was left out of date by this stage, which changed research-side
+   files only: above `struct CountingWhile` in `NestRecordLowering.cpp` it said that the
+   research verifies a `counter != upper` loop only where the accesses bound its counter. It
+   is corrected in the commit after this stage's; the production tool built from the corrected
+   source is byte for byte the tool validated here.
 
 **Acceptance.** Research: `term_relations.mlir` (the termination driver on two nests of
 `scf.while` loops taken whole; the claim over two small nests on one output, made and verified;

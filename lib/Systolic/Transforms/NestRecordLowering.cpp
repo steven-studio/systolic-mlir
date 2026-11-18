@@ -473,8 +473,8 @@ private:
 /// runs its body once for each value from lower to upper - 1, in that order, and stops (no
 /// value of the counter leaves [lower, upper], so nothing wraps): what an scf.for with these
 /// bounds and step 1 does. (Reading a loop here does not verify it: a nest is lowered only with
-/// a verified record, and the research verifies a counter != upper loop only where the accesses
-/// bound its counter, which is why that form is recorded apart as no supported one.)
+/// a verified record. For a counter != upper loop the research's termination certificate holds
+/// counter <= upper, which its proposer makes for such a comparison.)
 struct CountingWhile {
   Value counter;                  // the after region's argument
   int64_t lower = 0, upper = 0;
