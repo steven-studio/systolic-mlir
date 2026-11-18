@@ -1160,6 +1160,56 @@ fourteen records files, the three made without the search among them, are what t
 tool says, unchanged. The lowering does not read that block, and no test's expectation
 changes.
 
+**Validation.** On one frozen state: the merge commit `031d267`, its worktree clean, each phase
+refusing to start on another state and recording that it ended on the same one. The baselines
+are the two parents: `075c047` built from a git archive, `d3f3337` from the builds of the
+sections above. Builds, scripts and logs are outside the repository
+(`~/work/integration-backups-20261118/gemm-integration`), two build jobs at most, never two
+builds at once. Another session was using the machine (load 1 to 7 in the research phases,
+which ran one after another); no phase failed on a time limit.
+
+`systolic-opt` and `systolic-translate` built from the merged tree are, byte for byte, the ones
+built from `075c047`.
+
+| Check | Result |
+| --- | --- |
+| Production lit, the whole suite | 200 of 202: the two known failures (`Systolic/general_affine_domains.mlir`, `SystolicCC/general_affine.c`), their output the same as at `075c047` line for line; the twelve `nest_records` files pass |
+| The merged tool against each parent's, every `systolic-opt` command of the tests | against `075c047`: 396 commands the same, none different (54 more differ only in the addresses of values, as two runs of one tool do). Against `d3f3337`: the 262 commands without `record-driven` the same; of those with it, 105 the same and 3 different, all in `nest_records_while_refusals.mlir` and all the other line's (`@second_induction` lowered, two messages reworded); the three files of carried subscripts are new to that parent |
+| Production unit binaries that link the pass | both pass, the same output as at `075c047` |
+| End to end: lowered, linked, run and compared with the original program | stage 2: 144 function runs; stage 3: 180; `scf.for`: 260; `scf.while`: 500 (25 functions, the counter stepped first and `!=` among them); carried subscripts: 336 (14 functions, `car_plain`, the counter as the second carried value and an index stepped before it is read among them). 0 failures in each; every run with the announced device invocations, every lowered module with its calls in program order; 1148 runs with every bit kept, 272 within their bound |
+| Records | the sixteen records files equal what the merged research tool says |
+| Research lit, alone | 40 of 40 |
+| Research CTests | 36 of 37 pass under their limits: the five end-to-end runs, the lit suite, the records, 28 others two at a time, and the synthesis unit test in a Release build (7337 checks, 604 s; at `075c047` the same count, 600 s). `generalized-gemm-termination` fails as at both parents, line for line: `t3_swap` UNKNOWN, the same 3 of 119442 checks |
+| The synthesis unit test in a Debug build | not a result under CTest: its sections of the index-invariant line need more than the 900 s limit there (set with a Release build). Run to its end with no limit: 7337 checks, 0 failures, 1364 s; at `075c047` 7337 checks, 0 failures, 1363 s |
+| The nest oracle, 30 programs, each spelling of the loops | 0 failures each; in all four, 47 records VERIFIED, 3 shared outputs each nest verified by itself, 3 joint claims verified |
+| Invariants into a nest's record | the nest unit test 917 checks, the domain unit test 1580, their sections `indexinvariants` and `indexwiring` among them; the two invariant oracles; `synth_index_invariants.mlir` and `synth_invariants.mlir`: all pass |
+| Research outputs against both parents | 138 research lit commands, each run with the drivers of `d3f3337`, of `075c047` and of the merged tree: 114 the same from all three; 9 as `d3f3337` gives them (the nine of the relations); 15 as `075c047` gives them (commands of the two files that this line's drivers do not know); none that neither parent gives |
+| Gate mutation: the band, the carried indices, the levels | 68 mutants, 68 KILLED, each by a test's own FileCheck (61 by an expected line that is absent, 7 by a remark that never came); none by a crash or a time limit |
+| Mutation of the index-invariant checker and search | 21 mutants, 21 KILLED, each by failed checks of the unit section `indexinv`, which passes unmutated (216 checks); judged outside the catalogue's own harness, which counts a crash or a timeout as a kill |
+| Mutation of the relations | 9 mutants, 9 KILLED by the checks of `term_relations.mlir` and `nest_while.mlir` |
+| Mutation of the wiring of index invariants into a nest's record | 7 mutants, 7 KILLED by failed checks of the unit sections written for them: 3 of the domain catalogue (the identities not handed to the proposer, not gathered from the search; the certificate handed on unstrengthened) by `indexwiring`, 4 of the nest catalogue (the search never run; the certificate handed on as it was, or without the identities; copies given no identity) by `indexinvariants` |
+| ASan and UBSan | the sanitized `systolic-opt`: the twelve `nest_records` files, and the `scf.while`, carried and `scf.for` end-to-end runs (500, 336 and 260 function runs), 0 failures. The sanitized research drivers: the sixteen records files remade, each equal to the file in the tree, and the 37 commands of `nest_while.mlir`, `term_relations.mlir`, `synth_index_invariants.mlir` and `synth_invariants.mlir` pass. No report |
+| Warnings | the merged builds have the warnings of `075c047`'s builds and no other (production 47, research 1 in Debug and 3 in Release) |
+
+Two phases were started twice, by faults of the validation's own scripts and not of a test: the
+sanitizers first started sixteen sanitized drivers at once and were stopped (three at a time
+after that), and their last part replaced `%s` before the drivers' names, so sixteen commands
+named no program and were run again, with the rest, by a corrected script.
+
+**Known failures, as before the merge.** The two production lit tests and
+`generalized-gemm-termination`, each the same at both parents. No other test fails, and none
+that passed at a parent fails here.
+
+**Open, from the stages before.** The three search mutants that survived at `771b700`; the
+pattern of one older domain mutant (`views proposed without the sample check`), which occurs
+twice in `DomainProposer.cpp` since `acb801a` at both parents; the joint claim over two larger
+`scf.while` nests, which is not made.
+
+**Not run.** The polynomial suites (no source of theirs is changed by either line); the 98
+other gate mutants, the 15 other mutants of the search harness, and the older research
+catalogues but for the mutants named above; sanitized unit binaries; `systolic-cc` beyond the
+production lit suite; cosimulation and the board.
+
 ## The thesis
 
 The thesis text of 2026-11-06 (465 pages) makes no claim about merging loops: Definition 4.5
