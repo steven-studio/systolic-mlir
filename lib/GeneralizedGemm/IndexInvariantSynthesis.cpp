@@ -776,6 +776,41 @@ std::vector<IndexIdentity> indexIdentities(const SemanticProgram &program,
       }
     }
   }
+  if (out.empty())
+    return out;
+  // Copies. A state variable whose every assignment is one and the same other variable
+  // (the arguments of an scf.while's body are its header's) is, where it was just copied,
+  // that variable: with an identity when the source has one, else the source itself. A
+  // subscript written over the copy can then be proposed as a view over the levels. A
+  // proposal like the rest: it is true only where the source has not moved since, and the
+  // domain checker proves each view at the events or does not.
+  std::map<unsigned, Term> solved;
+  std::map<unsigned, unsigned> cutOf;
+  for (const IndexIdentity &identity : out) {
+    solved.try_emplace(identity.state, identity.term);
+    cutOf.try_emplace(identity.state, identity.cut);
+  }
+  std::map<unsigned, Term> source;
+  std::set<unsigned> several;
+  for (const Transition &transition : program.transitions)
+    for (const auto &[id, term] : transition.assignments) {
+      auto [slot, fresh] = source.try_emplace(id, term);
+      if (!fresh && slot->second != term)
+        several.insert(id);
+    }
+  for (const auto &[id, term] : source) {
+    if (several.count(id) || solved.count(id) || term->op != TermOp::State || term->index == id ||
+        term->sort != program.state[id].sort || program.state[id].sort.kind != Sort::BV)
+      continue;
+    auto known = solved.find(term->index);
+    IndexIdentity identity;
+    identity.state = id;
+    identity.cut = known == solved.end() ? out.front().cut : cutOf[term->index];
+    identity.term = known == solved.end() ? term : known->second;
+    identity.origin = "s" + std::to_string(id) + " is a copy of s" + std::to_string(term->index) +
+                      (known == solved.end() ? std::string() : ", which an index invariant solves");
+    out.push_back(std::move(identity));
+  }
   return out;
 }
 

@@ -1450,3 +1450,51 @@ Not supported, by name:
   the proposer and reports the views the domain checker proved.
 - Everything Sections 13.7 and the earlier phases list about solver answers applies: a
   timeout or an unknown leaves `UNKNOWN`.
+
+### 14.8 In a nest's record (integration branch, 2026-11-18)
+
+On `integrate/index-invariants-into-nest-records`: this line merged with the lowering
+line's committed 771b700 (nest records, `docs/GENERALIZED_GEMM_SCOPE.md`), and nothing of
+its uncommitted scf.while work.
+
+`analyzeNest` (`NestRecord.cpp`) runs `findIndexInvariants` between the termination and
+the domain analysis when `NestAnalysisOptions::indexInvariants` is set
+(`--index-invariants` on `generalized-gemm-nest-report`; off by default), and hands the
+result on with `handIndexInvariants`. The record gains `index_invariants` (status, the
+invariants, the identities, whether the certificate checker accepted the strengthened
+certificate), printed only when asked. The record's status is still read off the checkers.
+
+The arguments of an `scf.while` body are copies of its header's. `indexIdentities` adds,
+for a state variable whose every assignment is one other variable, "copy = the source's
+solution" (or the source itself): a proposal, from which the proposer writes a view of a
+subscript that reads the body's argument. `DomainProposer.cpp` is not changed.
+
+Records, 2x3x3 f32 nests with `reassoc`, index width 16 (unit section `indexinvariants`):
+
+| Nest | Without | With `indexInvariants` |
+| --- | --- | --- |
+| x by `iter_args` from the constant 1 | `VERIFIED_NOT_MAPPED`: coordinates not verified over the scope, no closed form of A or B | `VERIFIED`, A = [I, K + 1], B = [K + 1, J], no refusal |
+| x a second carried value of an `scf.while` | `VERIFIED_NOT_MAPPED` | `VERIFIED`, the same views |
+| plain GEMM | `VERIFIED` | `VERIFIED`; nothing found, nothing handed on, same refusals and assumptions |
+| x from a function argument (scope [0, 1]) | | invariant proved; `VERIFIED_NOT_MAPPED`: "reads a parameter, and a symbolic offset is not mapped" |
+| x carried through the j loop | not mapped | not mapped |
+
+The binding (stage 2) already covers the recurrence: changing the start or the step gives
+another binding (checked in the same section), so `NestBinding` and `NestRecordGate` are
+unchanged.
+
+Validation: nest unit test 917 checks, 0 failures (231 s), of which `indexinvariants` 78
+checks; lit `nest_*` and `synth_index_invariants` 8 of 8; `indexwiring` 35 and `indexinv`
+216 checks again, 0 failures. `nest_mutation.py` (Debug, a kill only by an assertion): 4 of
+4 killed by `indexinvariants`: the search never run, the certificate handed on as it was,
+the certificate handed on without the identities, copies given no identity. The harness
+gained `--build-jobs` and `--tests`; defaults unchanged. Not run: the nest oracle, the
+nest e2e and gate harnesses (they need the production build, and the lowering is not
+changed), and the other catalogues.
+
+**A verified record is not a lowering.** The lowering (`NestRecordLowering.cpp`) refuses
+both shapes: a loop that carries values, and an `scf.while` that carries more than its
+counter. Reading a carried index as start + step * counter from the IR, and comparing
+that with the record's view, is the remaining wiring; it sits in the band reader the
+other line is changing, and waits for that. Plan and acceptance programs:
+`~/work/semgus-invariant-validation/gemm-index/integration/WIRING_PLAN.md`.
